@@ -1,6 +1,8 @@
 mod stubs_enum;
 
-use fortress_rollback::{GgrsError, PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket};
+use fortress_rollback::{
+    GgrsError, PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket,
+};
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use stubs_enum::{EnumInput, GameStubEnum, StubEnumConfig};
