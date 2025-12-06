@@ -1,6 +1,6 @@
 mod stubs_enum;
 
-use ggrs::{GgrsError, SessionBuilder};
+use fortress_rollback::{GgrsError, SessionBuilder};
 
 #[test]
 fn test_enum_advance_frames_with_delayed_input() -> Result<(), GgrsError> {

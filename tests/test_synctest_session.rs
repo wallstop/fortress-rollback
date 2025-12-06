@@ -1,7 +1,7 @@
 mod stubs;
 mod stubs_enum;
 
-use ggrs::{GgrsError, GgrsRequest, SessionBuilder};
+use fortress_rollback::{GgrsError, GgrsRequest, SessionBuilder};
 use stubs::{StubConfig, StubInput};
 
 #[test]

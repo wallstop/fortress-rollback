@@ -4,7 +4,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 
-use ggrs::{Config, Frame, GameStateCell, GgrsRequest, InputStatus};
+use fortress_rollback::{Config, Frame, GameStateCell, GgrsRequest, InputStatus};
 
 fn calculate_hash<T: Hash>(t: &T) -> u64 {
     let mut s = DefaultHasher::new();

@@ -12,7 +12,7 @@ use crate::{
 use tracing::{debug, trace, warn};
 
 use std::collections::vec_deque::Drain;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::convert::TryInto;
 
@@ -24,9 +24,9 @@ pub(crate) struct PlayerRegistry<T>
 where
     T: Config,
 {
-    pub(crate) handles: HashMap<PlayerHandle, PlayerType<T::Address>>,
-    pub(crate) remotes: HashMap<T::Address, UdpProtocol<T>>,
-    pub(crate) spectators: HashMap<T::Address, UdpProtocol<T>>,
+    pub(crate) handles: BTreeMap<PlayerHandle, PlayerType<T::Address>>,
+    pub(crate) remotes: BTreeMap<T::Address, UdpProtocol<T>>,
+    pub(crate) spectators: BTreeMap<T::Address, UdpProtocol<T>>,
 }
 
 impl<T> std::fmt::Debug for PlayerRegistry<T>
@@ -45,9 +45,9 @@ where
 impl<T: Config> PlayerRegistry<T> {
     pub(crate) fn new() -> Self {
         Self {
-            handles: HashMap::new(),
-            remotes: HashMap::new(),
-            spectators: HashMap::new(),
+            handles: BTreeMap::new(),
+            remotes: BTreeMap::new(),
+            spectators: BTreeMap::new(),
         }
     }
 
@@ -150,12 +150,12 @@ where
     /// Contains all events to be forwarded to the user.
     event_queue: VecDeque<GgrsEvent<T>>,
     /// Contains all local inputs not yet sent into the system. This should have inputs for every local player before calling advance_frame
-    local_inputs: HashMap<PlayerHandle, PlayerInput<T::Input>>,
+    local_inputs: BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
 
     /// With desync detection, the session will compare checksums for all peers to detect discrepancies / desyncs between peers
     desync_detection: DesyncDetection,
     /// Desync detection over the network
-    local_checksum_history: HashMap<Frame, u128>,
+    local_checksum_history: BTreeMap<Frame, u128>,
     /// The last frame we sent a checksum for
     last_sent_checksum_frame: Frame,
 }
@@ -220,9 +220,9 @@ impl<T: Config> P2PSession<T> {
             disconnect_frame: NULL_FRAME,
             player_reg: players,
             event_queue: VecDeque::new(),
-            local_inputs: HashMap::new(),
+            local_inputs: BTreeMap::new(),
             desync_detection,
-            local_checksum_history: HashMap::new(),
+            local_checksum_history: BTreeMap::new(),
             last_sent_checksum_frame: NULL_FRAME,
         }
     }
@@ -585,7 +585,7 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// Returns all events that happened since last queried for events. If the number of stored events exceeds `MAX_EVENT_QUEUE_SIZE`, the oldest events will be discarded.
-    pub fn events(&mut self) -> Drain<GgrsEvent<T>> {
+    pub fn events(&mut self) -> Drain<'_, GgrsEvent<T>> {
         self.event_queue.drain(..)
     }
 
@@ -765,7 +765,7 @@ impl<T: Config> P2PSession<T> {
                 .confirmed_inputs(self.next_spectator_frame, &self.local_connect_status);
             assert_eq!(inputs.len(), self.num_players);
 
-            let mut input_map = HashMap::new();
+            let mut input_map = BTreeMap::new();
             for (handle, input) in inputs.iter_mut().enumerate() {
                 assert!(input.frame == NULL_FRAME || input.frame == self.next_spectator_frame);
                 input_map.insert(handle, *input);

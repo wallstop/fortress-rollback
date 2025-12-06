@@ -4,7 +4,35 @@ In this document, all remarkable changes are listed. Not mentioned are smaller c
 
 ## Unreleased
 
-- Nothing here yet...
+### Breaking Changes
+
+- **[REBRAND]** Crate renamed to `fortress-rollback` (import as `fortress_rollback`)
+  - Previous crate name: `ggrs`
+  - Migration: update `Cargo.toml` dependencies and Rust imports to `fortress_rollback`
+- **[DETERMINISM]** `Config::Address` now requires `Ord` + `PartialOrd` trait bounds
+  - **Rationale:** Enables complete determinism by replacing all `HashMap` with `BTreeMap`
+  - **Impact:** Most common address types (`SocketAddr`, `String`, etc.) already implement `Ord`
+  - **Migration:** For custom address types, add `#[derive(PartialOrd, Ord)]` to your type
+  - Example:
+    ```rust
+    // Before:
+    #[derive(Clone, PartialEq, Eq, Hash, Debug)]
+    struct MyAddress { /* ... */ }
+    
+    // After:
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+    struct MyAddress { /* ... */ }
+    ```
+
+### Improvements
+
+- **[DETERMINISM]** Replaced all `HashMap` with `BTreeMap` for guaranteed iteration order
+  - Eliminates non-deterministic iteration in all code paths
+  - Affects: player inputs, checksums, network endpoints, all frame-based collections
+  - Ensures consistent behavior across platforms and runs
+  - All collection iteration now has predictable, sorted ordering
+- Added 5 new determinism tests to verify iteration order consistency
+- **[TESTING]** Test suite expanded from 32 to 37 tests (15 unit + 17 integration + 5 determinism)
 
 ## 0.11.0
 

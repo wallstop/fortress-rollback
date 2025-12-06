@@ -1,7 +1,7 @@
 mod ex_game;
 
 use ex_game::{GGRSConfig, Game};
-use ggrs::{GgrsError, GgrsEvent, SessionBuilder, SessionState, UdpNonBlockingSocket};
+use fortress_rollback::{GgrsError, GgrsEvent, SessionBuilder, SessionState, UdpNonBlockingSocket};
 use instant::{Duration, Instant};
 use macroquad::prelude::*;
 use std::net::SocketAddr;

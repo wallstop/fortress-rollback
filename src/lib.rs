@@ -1,7 +1,7 @@
-//! # GGRS
-//! GGRS (good game rollback system) is a reimagination of the GGPO network SDK written in 100% safe Rust 🦀.
-//! The callback-style API from the original library has been replaced with a much saner, simpler control flow.
-//! Instead of registering callback functions, GGRS returns a list of requests for the user to fulfill.
+//! # Fortress Rollback (formerly GGRS)
+//! Fortress Rollback is a fortified, verified reimagination of the GGPO network SDK written in 100% safe Rust.
+//! The callback-style API from the original library has been replaced with a simple request-driven control flow.
+//! Instead of registering callback functions, Fortress Rollback (previously GGRS) returns a list of requests for the user to fulfill.
 
 #![forbid(unsafe_code)] // let us try
 #![deny(missing_docs)]
@@ -71,10 +71,10 @@ pub enum DesyncDetection {
 /// - remote players, who play on other devices and
 /// - spectators, who are remote players that do not contribute to the game input.
 /// Both [`PlayerType::Remote`] and [`PlayerType::Spectator`] have a socket address associated with them.
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PlayerType<A>
 where
-    A: Clone + PartialEq + Eq + Hash,
+    A: Clone + PartialEq + Eq + PartialOrd + Ord + Hash,
 {
     /// This player plays on the local device.
     Local,
@@ -84,7 +84,7 @@ where
     Spectator(A),
 }
 
-impl<A: Clone + PartialEq + Eq + Hash> Default for PlayerType<A> {
+impl<A: Clone + PartialEq + Eq + PartialOrd + Ord + Hash> Default for PlayerType<A> {
     fn default() -> Self {
         Self::Local
     }
@@ -214,13 +214,13 @@ pub trait Config: 'static + Send + Sync {
     type State: Clone + Send + Sync;
 
     /// The address type which identifies the remote clients
-    type Address: Clone + PartialEq + Eq + Hash + Send + Sync + Debug;
+    type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Send + Sync + Debug;
 }
 
-/// This [`NonBlockingSocket`] trait is used when you want to use GGRS with your own socket.
+/// This [`NonBlockingSocket`] trait is used when you want to use Fortress Rollback with your own socket.
 /// However you wish to send and receive messages, it should be implemented through these two methods.
 /// Messages should be sent in an UDP-like fashion, unordered and unreliable.
-/// GGRS has an internal protocol on top of this to make sure all important information is sent and received.
+/// Fortress Rollback has an internal protocol on top of this to make sure all important information is sent and received.
 #[cfg(feature = "sync-send")]
 pub trait NonBlockingSocket<A>: Send + Sync
 where
@@ -248,13 +248,13 @@ pub trait Config: 'static {
     type State;
 
     /// The address type which identifies the remote clients
-    type Address: Clone + PartialEq + Eq + Hash + Debug;
+    type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Debug;
 }
 
-/// This [`NonBlockingSocket`] trait is used when you want to use GGRS with your own socket.
+/// This [`NonBlockingSocket`] trait is used when you want to use Fortress Rollback with your own socket.
 /// However you wish to send and receive messages, it should be implemented through these two methods.
 /// Messages should be sent in an UDP-like fashion, unordered and unreliable.
-/// GGRS has an internal protocol on top of this to make sure all important information is sent and received.
+/// Fortress Rollback has an internal protocol on top of this to make sure all important information is sent and received.
 #[cfg(not(feature = "sync-send"))]
 pub trait NonBlockingSocket<A>
 where
