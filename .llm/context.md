@@ -1,8 +1,8 @@
-# GGRS - Good Game Rollback System
+# Fortress Rollback (formerly GGRS)
 
 ## Project Overview
 
-GGRS is a reimagination of the GGPO (Good Game Peace Out) network SDK, written in 100% safe Rust. It provides peer-to-peer rollback networking capabilities for games, enabling deterministic multiplayer experiences with low-latency input prediction and rollback mechanics.
+Fortress Rollback is the correctness-first fork of GGRS, a reimagination of the GGPO (Good Game Peace Out) network SDK, written in 100% safe Rust. It provides peer-to-peer rollback networking capabilities for games, enabling deterministic multiplayer experiences with low-latency input prediction and rollback mechanics.
 
 ### Key Features
 - **100% Safe Rust**: No unsafe code, leveraging Rust's memory safety guarantees
@@ -191,7 +191,7 @@ When contributing, ensure:
 
 - [Original GGPO SDK](https://www.ggpo.net/)
 - [GGPO Developers Discord](https://discord.com/invite/8FKKhCRCCE)
-- [Bevy GGRS Plugin](https://github.com/gschup/bevy_ggrs)
+- [Bevy GGRS Plugin](https://github.com/gschup/bevy_ggrs) (compatible, points to original GGRS lineage)
 - [TLA+ Resources](https://lamport.azurewebsites.net/tla/tla.html)
 - [Z3 Theorem Prover](https://github.com/Z3Prover/z3)
 

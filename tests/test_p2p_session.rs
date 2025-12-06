@@ -1,6 +1,6 @@
 mod stubs;
 
-use ggrs::{
+use fortress_rollback::{
     DesyncDetection, GgrsError, GgrsEvent, PlayerType, SessionBuilder, SessionState,
     UdpNonBlockingSocket,
 };

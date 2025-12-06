@@ -1,7 +1,7 @@
 mod ex_game;
 
 use ex_game::Game;
-use ggrs::SessionBuilder;
+use fortress_rollback::SessionBuilder;
 use instant::{Duration, Instant};
 use macroquad::prelude::*;
 use structopt::StructOpt;

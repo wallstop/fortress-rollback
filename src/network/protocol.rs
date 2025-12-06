@@ -12,7 +12,7 @@ use tracing::trace;
 
 use instant::{Duration, Instant};
 use std::collections::vec_deque::Drain;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::ops::Add;
 
@@ -65,7 +65,7 @@ impl InputBytes {
 
     fn from_inputs<T: Config>(
         num_players: usize,
-        inputs: &HashMap<PlayerHandle, PlayerInput<T::Input>>,
+        inputs: &BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
     ) -> Self {
         let mut bytes = Vec::new();
         let mut frame = NULL_FRAME;
@@ -165,7 +165,7 @@ where
     pending_output: VecDeque<InputBytes>,
     last_acked_input: InputBytes,
     max_prediction: usize,
-    recv_inputs: HashMap<Frame, InputBytes>,
+    recv_inputs: BTreeMap<Frame, InputBytes>,
 
     // time sync
     time_sync_layer: TimeSync,
@@ -181,7 +181,7 @@ where
     last_recv_time: Instant,
 
     // debug desync
-    pub(crate) pending_checksums: HashMap<Frame, u128>,
+    pub(crate) pending_checksums: BTreeMap<Frame, u128>,
     desync_detection: DesyncDetection,
 }
 
@@ -218,7 +218,7 @@ impl<T: Config> UdpProtocol<T> {
         }
 
         // received input history
-        let mut recv_inputs = HashMap::new();
+        let mut recv_inputs = BTreeMap::new();
         recv_inputs.insert(NULL_FRAME, InputBytes::zeroed::<T>(recv_player_num));
 
         Self {
@@ -268,7 +268,7 @@ impl<T: Config> UdpProtocol<T> {
             last_recv_time: Instant::now(),
 
             // debug desync
-            pending_checksums: HashMap::new(),
+            pending_checksums: BTreeMap::new(),
             desync_detection,
         }
     }
@@ -456,7 +456,7 @@ impl<T: Config> UdpProtocol<T> {
 
     pub(crate) fn send_input(
         &mut self,
-        inputs: &HashMap<PlayerHandle, PlayerInput<T::Input>>,
+        inputs: &BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
         connect_status: &[ConnectionStatus],
     ) {
         if self.state != ProtocolState::Running {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::error::GgrsError;
 use crate::frame_info::PlayerInput;
@@ -17,8 +17,8 @@ where
     check_distance: usize,
     sync_layer: SyncLayer<T>,
     dummy_connect_status: Vec<ConnectionStatus>,
-    checksum_history: HashMap<Frame, Option<u128>>,
-    local_inputs: HashMap<PlayerHandle, PlayerInput<T::Input>>,
+    checksum_history: BTreeMap<Frame, Option<u128>>,
+    local_inputs: BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
 }
 
 impl<T: Config> SyncTestSession<T> {
@@ -44,8 +44,8 @@ impl<T: Config> SyncTestSession<T> {
             check_distance,
             sync_layer,
             dummy_connect_status,
-            checksum_history: HashMap::new(),
-            local_inputs: HashMap::new(),
+            checksum_history: BTreeMap::new(),
+            local_inputs: BTreeMap::new(),
         }
     }
 

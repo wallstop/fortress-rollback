@@ -1,10 +1,12 @@
-name: Rust
+name: Fortress Rollback CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev/**]
   pull_request:
-    branches: [main]
+    branches: [main, dev/**]
+  workflow_dispatch:
+
 
 env:
   CARGO_TERM_COLOR: always
@@ -38,3 +40,12 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Check wasm
         run: cargo check --target wasm32-unknown-unknown --features wasm-bindgen
+
+  package-dry-run:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v3
+      - name: Ensure crate is publishable (dry-run)
+        run: cargo publish --dry-run

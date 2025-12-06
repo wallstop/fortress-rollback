@@ -32,15 +32,15 @@ impl<T> GameStateCell<T> {
     /// # Example usage
     ///
     /// ```
-    /// # use ggrs::{Frame, GameStateCell};
-    /// // Setup normally performed by GGRS behind the scenes
+    /// # use fortress_rollback::{Frame, GameStateCell};
+    /// // Setup normally performed by Fortress Rollback behind the scenes
     /// let mut cell = GameStateCell::<MyGameState>::default();
     /// let frame_num: Frame = 0;
     ///
     /// // The state of our example game will be just a String, and our game state isn't Clone
     /// struct MyGameState { player_name: String };
     ///
-    /// // Setup you do when GGRS requests you to save game state
+    /// // Setup you do when Fortress Rollback requests you to save game state
     /// {
     ///     let game_state = MyGameState { player_name: "alex".to_owned() };
     ///     let checksum = None;

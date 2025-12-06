@@ -1,23 +1,26 @@
-# [![GGRS LOGO](./ggrs_logo.png)](https://github.com/gschup/ggrs)
+# [![Fortress Rollback Logo](./ggrs_logo.png)](https://github.com/wallstop/fortress-rollback)
 
-[![crates.io](https://img.shields.io/crates/v/ggrs?style=for-the-badge)](https://crates.io/crates/ggrs)
-![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/gschup/ggrs/rust.yml?branch=main&style=for-the-badge)
+[![crates.io](https://img.shields.io/crates/v/fortress-rollback?style=for-the-badge)](https://crates.io/crates/fortress-rollback)
+[![CI](https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/rust.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/wallstop/fortress-rollback/actions/workflows/rust.yml)
+[![Publish](https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/publish.yml?branch=main&style=for-the-badge&label=Publish)](https://github.com/wallstop/fortress-rollback/actions/workflows/publish.yml)
 
 ## P2P Rollback Networking in Rust
 
-GGRS (good game rollback system) is a reimagination of the [GGPO network SDK](https://www.ggpo.net/) written in 100% safe [Rust 🦀](https://www.rust-lang.org/). The callback-style API from the original library has been replaced with a much saner, simpler control flow. Instead of registering callback functions, GGRS returns a list of requests for the user to fulfill.
+Fortress Rollback (formerly GGRS, the good game rollback system) is a fortified, correctness-first port of the original [ggrs crate](https://github.com/gschup/ggrs) and reimagination of the [GGPO network SDK](https://www.ggpo.net/), written in 100% safe [Rust 🦀](https://www.rust-lang.org/). The callback-style API from the original library has been replaced with a simple, request-driven control flow: instead of registering callback functions, Fortress Rollback returns a list of requests for the user to fulfill.
+
+> crates.io publication is being prepared. Until the first release is live, depend on the git repository: `fortress-rollback = { git = "https://github.com/wallstop/fortress-rollback", branch = "main" }`.
 
 If you are interested in integrating rollback networking into your game or just want to chat with other rollback developers (not limited to Rust), check out the [GGPO Developers Discord](https://discord.com/invite/8FKKhCRCCE)!
 
 ## Live Demonstrations
 
-GGRS has two demo apps you can try in the browser! One written with [macroquad](https://github.com/not-fl3/macroquad), the other written with [bevy](https://bevyengine.org/). Both use [matchbox](https://github.com/johanhelsing/matchbox). Try it out with a friend! Just click the link and match with another player! (You can also open the link in two separate windows to play against yourself)
+Fortress Rollback currently ships with the same demos you may know from GGRS. One is written with [macroquad](https://github.com/not-fl3/macroquad), the other with [bevy](https://bevyengine.org/). Both use [matchbox](https://github.com/johanhelsing/matchbox). Try it out with a friend! Just click the link and match with another player! (You can also open the link in two separate windows to play against yourself)
 
 🚧 MATCHMAKING CURRENTLY OFFLINE! 🚧
 - [Bevy Demo](https://gschup.github.io/bevy_ggrs_demo/) ([Repository](https://github.com/gschup/bevy_ggrs_demo))
 - [Macroquad Demo](https://gschup.github.io/ggrs_demo/) ([Repository](https://github.com/gschup/ggrs_demo))
 
-## Projects using GGRS
+## Projects using Fortress Rollback (formerly GGRS)
 
 - [Jumpy](https://github.com/fishfolk/jumpy)
 - [Gamercade](https://gamercade.io/)
@@ -27,25 +30,29 @@ GGRS has two demo apps you can try in the browser! One written with [macroquad](
 
 ## Getting Started
 
-To get started with GGRS, check out the following resources:
+To get started with Fortress Rollback, check out the following resources:
 
-- [Wiki](https://github.com/gschup/ggrs/wiki)
+- [Wiki](https://github.com/wallstop/fortress-rollback/wiki)
 - [Examples](./examples/)
-- [Documentation](https://docs.rs/ggrs/newest/ggrs/)
+- [Documentation](https://docs.rs/fortress-rollback/newest/fortress_rollback/)
 
 ## Development Status
 
-GGRS is in an early stage, but the main functionality for multiple players and spectators should be quite stable. See the Changelog for the latest changes, even those yet unreleased on crates.io! If you want to contribute, check out existing issues, as well as the contribution guide!
+Fortress Rollback is in an early stage, but the main functionality for multiple players and spectators should be quite stable. See the Changelog for the latest changes, even those yet unreleased on crates.io! If you want to contribute, check out existing issues, as well as the contribution guide!
 
 - [Changelog](./CHANGELOG.md)
-- [Issues](https://github.com/gschup/ggrs/issues)
+- [Issues](https://github.com/wallstop/fortress-rollback/issues)
 - [Contribution Guide](./CONTRIBUTING.md)
+
+## Migration from ggrs
+
+Moving from the original `ggrs` crate? See the step-by-step guide in [MIGRATION.md](./MIGRATION.md). It covers the crate rename (`fortress-rollback`), the new `Config::Address` `Ord` bound, and import changes (`fortress_rollback`).
 
 ## Useful Links
 
 ### Bevy Plugin
 
-The authors of GGRS are also maintaining a [bevy](https://bevyengine.org/) plugin. Check it out:
+The authors of the original GGRS are maintaining a [bevy](https://bevyengine.org/) plugin. Check it out:
 
 - [Bevy GGRS](https://github.com/gschup/bevy_ggrs)
 
@@ -58,7 +65,7 @@ The matchbox sockets are compatible with GGRS through a feature flag:
 
 ### Godot Wrapper
 
-[Godot](https://godotengine.org/) is a popular open-source game engine. marcello505 is developing a wrapper for GGRS.
+[Godot](https://godotengine.org/) is a popular open-source game engine. marcello505 is developing a wrapper for GGRS/Fortress Rollback.
 Find the repository here:
 
 - [Godot GGRS Wrapper](https://github.com/marcello505/godot-ggrs-wrapper)
@@ -71,7 +78,7 @@ Also take a look at the awesome backroll project, a completely async rollback li
 
 ## Licensing
 
-GGRS is dual-licensed under either
+Fortress Rollback is dual-licensed under either
 
 - [MIT License](./LICENSE-MIT): Also available [online](http://opensource.org/licenses/MIT)
 - [Apache License, Version 2.0](./LICENSE-APACHE): Also available [online](http://www.apache.org/licenses/LICENSE-2.0)

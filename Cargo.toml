@@ -1,12 +1,12 @@
 [package]
-name = "ggrs"
+name = "fortress-rollback"
 version = "0.11.1"
 authors = ["Georg Schuppe <georg.schuppe@gmail.com>"]
 edition = "2021"
-description = "GGRS is a reimagination of GGPO, enabling P2P rollback networking in Rust. Rollback to the future!"
+description = "Fortress Rollback (formerly GGRS) is a fortified, verified P2P rollback networking library for Rust."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/gschup/ggrs"
+repository = "https://github.com/wallstop/fortress-rollback"
 keywords = ["gamedev", "networking", "ggpo", "rollback"]
 categories = ["network-programming", "game-development"]
 
