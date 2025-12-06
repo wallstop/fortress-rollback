@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use fortress_rollback::{
-    Config, Frame, GameStateCell, GgrsRequest, InputStatus, PlayerHandle, NULL_FRAME,
+    Config, Frame, GameStateCell, GgrsRequest, InputStatus, NULL_FRAME, PlayerHandle,
 };
 use macroquad::prelude::*;
 use serde::{Deserialize, Serialize};

@@ -6,7 +6,7 @@ use crate::network::messages::{
 };
 use crate::time_sync::TimeSync;
 use crate::{
-    Config, DesyncDetection, Frame, GgrsError, NonBlockingSocket, PlayerHandle, NULL_FRAME,
+    Config, DesyncDetection, Frame, GgrsError, NULL_FRAME, NonBlockingSocket, PlayerHandle,
 };
 use tracing::trace;
 

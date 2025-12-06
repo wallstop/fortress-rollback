@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::frame_info::{GameState, PlayerInput};
 use crate::input_queue::InputQueue;
 use crate::network::messages::ConnectionStatus;
-use crate::{Config, Frame, GgrsRequest, InputStatus, PlayerHandle, NULL_FRAME};
+use crate::{Config, Frame, GgrsRequest, InputStatus, NULL_FRAME, PlayerHandle};
 
 /// An [`Arc<Mutex>`] that you can [`save()`]/[`load()`] a `T` to/from. These will be handed to the user as part of a [`GgrsRequest`].
 ///
