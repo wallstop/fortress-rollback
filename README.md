@@ -1,12 +1,10 @@
-# [![Fortress Rollback Logo](./ggrs_logo.png)](https://github.com/wallstop/fortress-rollback)
-
 [![crates.io](https://img.shields.io/crates/v/fortress-rollback?style=for-the-badge)](https://crates.io/crates/fortress-rollback)
 [![CI](https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/rust.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/wallstop/fortress-rollback/actions/workflows/rust.yml)
 [![Publish](https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/publish.yml?branch=main&style=for-the-badge&label=Publish)](https://github.com/wallstop/fortress-rollback/actions/workflows/publish.yml)
 
 ## P2P Rollback Networking in Rust
 
-Fortress Rollback (formerly GGRS, the good game rollback system) is a fortified, correctness-first port of the original [ggrs crate](https://github.com/gschup/ggrs) and reimagination of the [GGPO network SDK](https://www.ggpo.net/), written in 100% safe [Rust 🦀](https://www.rust-lang.org/). The callback-style API from the original library has been replaced with a simple, request-driven control flow: instead of registering callback functions, Fortress Rollback returns a list of requests for the user to fulfill.
+Fortress Rollback (forked from GGRS, the good game rollback system) is a fortified, correctness-first port of the original [ggrs crate](https://github.com/gschup/ggrs) and reimagination of the [GGPO network SDK](https://www.ggpo.net/), written in 100% safe [Rust 🦀](https://www.rust-lang.org/). The callback-style API from the original library has been replaced with a simple, request-driven control flow: instead of registering callback functions, Fortress Rollback returns a list of requests for the user to fulfill.
 
 > crates.io publication is being prepared. Until the first release is live, depend on the git repository: `fortress-rollback = { git = "https://github.com/wallstop/fortress-rollback", branch = "main" }`.
 
