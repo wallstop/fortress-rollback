@@ -5,7 +5,7 @@ use std::{
 
 use tracing::warn;
 
-use crate::{network::messages::Message, NonBlockingSocket};
+use crate::{NonBlockingSocket, network::messages::Message};
 
 const RECV_BUFFER_SIZE: usize = 4096;
 /// A packet larger than this may be fragmented, so ideally we wouldn't send packets larger than

@@ -1,19 +1,19 @@
+use crate::DesyncDetection;
 use crate::error::GgrsError;
 use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::network::network_stats::NetworkStats;
-use crate::network::protocol::{UdpProtocol, MAX_CHECKSUM_HISTORY_SIZE};
+use crate::network::protocol::{MAX_CHECKSUM_HISTORY_SIZE, UdpProtocol};
 use crate::sync_layer::SyncLayer;
-use crate::DesyncDetection;
 use crate::{
-    network::protocol::Event, Config, Frame, GgrsEvent, GgrsRequest, NonBlockingSocket,
-    PlayerHandle, PlayerType, SessionState, NULL_FRAME,
+    Config, Frame, GgrsEvent, GgrsRequest, NULL_FRAME, NonBlockingSocket, PlayerHandle, PlayerType,
+    SessionState, network::protocol::Event,
 };
 use tracing::{debug, trace, warn};
 
-use std::collections::vec_deque::Drain;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::collections::vec_deque::Drain;
 use std::convert::TryInto;
 
 const RECOMMENDATION_INTERVAL: Frame = 60;

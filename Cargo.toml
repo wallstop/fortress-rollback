@@ -1,8 +1,8 @@
 [package]
 name = "fortress-rollback"
-version = "0.1"
+version = "0.1.0"
 authors = ["wallstop <wallstop@wallstopstudios.com>"]
-edition = "2025"
+edition = "2024"
 description = "Fortress Rollback (formerly GGRS) is a fortified, verified P2P rollback networking library for Rust."
 license = "MIT OR Apache-2.0"
 readme = "README.md"

@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use instant::Duration;
 
 use crate::{
-    network::protocol::UdpProtocol, sessions::p2p_session::PlayerRegistry, Config, DesyncDetection,
-    GgrsError, NonBlockingSocket, P2PSession, PlayerHandle, PlayerType, SpectatorSession,
-    SyncTestSession,
+    Config, DesyncDetection, GgrsError, NonBlockingSocket, P2PSession, PlayerHandle, PlayerType,
+    SpectatorSession, SyncTestSession, network::protocol::UdpProtocol,
+    sessions::p2p_session::PlayerRegistry,
 };
 
 use super::p2p_spectator_session::SPECTATOR_BUFFER_SIZE;

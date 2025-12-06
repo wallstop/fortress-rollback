@@ -1,4 +1,4 @@
-use rand::{prelude::ThreadRng, thread_rng, Rng};
+use rand::{Rng, prelude::ThreadRng, thread_rng};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -92,7 +92,7 @@ impl RandomChecksumGameStub {
     fn save_game_state(&mut self, cell: GameStateCell<StateStub>, frame: Frame) {
         assert_eq!(self.gs.frame, frame);
 
-        let random_checksum: u128 = self.rng.gen();
+        let random_checksum: u128 = self.rng.r#gen();
         cell.save(frame, Some(self.gs), Some(random_checksum));
     }
 

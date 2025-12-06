@@ -6,9 +6,11 @@ use stubs::{StubConfig, StubInput};
 
 #[test]
 fn test_create_session() {
-    assert!(SessionBuilder::<StubConfig>::new()
-        .start_synctest_session()
-        .is_ok());
+    assert!(
+        SessionBuilder::<StubConfig>::new()
+            .start_synctest_session()
+            .is_ok()
+    );
 }
 
 #[test]

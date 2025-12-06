@@ -1,14 +1,14 @@
-use std::collections::{vec_deque::Drain, VecDeque};
+use std::collections::{VecDeque, vec_deque::Drain};
 
 use crate::{
+    Config, Frame, GgrsError, GgrsEvent, GgrsRequest, InputStatus, NULL_FRAME, NetworkStats,
+    NonBlockingSocket, SessionState,
     frame_info::PlayerInput,
     network::{
         messages::ConnectionStatus,
         protocol::{Event, UdpProtocol},
     },
     sessions::builder::MAX_EVENT_QUEUE_SIZE,
-    Config, Frame, GgrsError, GgrsEvent, GgrsRequest, InputStatus, NetworkStats, NonBlockingSocket,
-    SessionState, NULL_FRAME,
 };
 
 // The amount of frames the spectator advances in a single step if not too far behind
