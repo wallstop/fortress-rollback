@@ -7,6 +7,7 @@ struct TestInput {
     inp: u8,
 }
 
+#[allow(dead_code)]
 #[derive(Default, Clone)]
 struct TestGameState {
     frame: i32,

@@ -1,7 +1,9 @@
 mod ex_game;
 
 use ex_game::{GGRSConfig, Game};
-use fortress_rollback::{PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket};
+use fortress_rollback::{
+    DesyncDetection, PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket,
+};
 use instant::{Duration, Instant};
 use macroquad::prelude::*;
 use std::net::SocketAddr;
@@ -52,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sess_build = SessionBuilder::<GGRSConfig>::new()
         .with_num_players(num_players)
         // (optional) exchange and validate state checksums
-        .with_desync_detection_mode(ggrs::DesyncDetection::On { interval: 100 })
+        .with_desync_detection_mode(DesyncDetection::On { interval: 100 })
         // (optional) set expected update frequency
         .with_fps(FPS as usize)?
         // (optional) customize prediction window, which is how many frames ahead GGRS predicts.

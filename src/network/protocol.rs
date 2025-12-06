@@ -356,7 +356,7 @@ impl<T: Config> UdpProtocol<T> {
         self.peer_addr.clone()
     }
 
-    pub(crate) fn poll(&mut self, connect_status: &[ConnectionStatus]) -> Drain<Event<T>> {
+    pub(crate) fn poll(&mut self, connect_status: &[ConnectionStatus]) -> Drain<'_, Event<T>> {
         let now = Instant::now();
         match self.state {
             ProtocolState::Synchronizing => {

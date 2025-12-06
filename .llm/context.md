@@ -179,13 +179,14 @@ Configurable input delay provides a buffer against network jitter, trading laten
 ## Contributing to This Fork
 
 When contributing, ensure:
-1. Tests accompany all changes
-2. Documentation is updated
-3. Code passes all lints and checks
-4. Performance impact is measured
-5. Formal verification is maintained/extended where applicable
-6. Examples demonstrate new features
-7. CHANGELOG is updated
+1. After every major change, run `cargo fmt`, `cargo clippy --all-targets --all-features`, and `cargo test`, and fix all resulting issues
+2. Tests accompany all changes
+3. Documentation is updated
+4. Code passes all lints and checks
+5. Performance impact is measured
+6. Formal verification is maintained/extended where applicable
+7. Examples demonstrate new features
+8. CHANGELOG is updated
 
 ## Related Resources
 

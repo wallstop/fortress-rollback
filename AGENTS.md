@@ -248,6 +248,7 @@ for request in session.events() {
 ## Quality Gates
 
 Before suggesting code, verify:
+- ✅ After every major change, run `cargo fmt`, `cargo clippy --all-targets --all-features`, and `cargo test`; fix all resulting issues before proceeding
 - ✅ Compiles without warnings
 - ✅ All tests pass
 - ✅ Documentation is complete
