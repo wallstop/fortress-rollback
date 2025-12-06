@@ -1,6 +1,6 @@
 # Contribution Guidelines
 
-First and foremost: Thank you for showing interest in contributing to Fortress Rollback (formerly GGRS)! Make sure to read the [Code of Conduct](./CODE_OF_CONDUCT.md).
+First and foremost: Thank you for showing interest in contributing to Fortress Rollback (a fork of GGRS)! Make sure to read the [Code of Conduct](./CODE_OF_CONDUCT.md).
 If you have a cool example or showcase of Fortress Rollback in use, let me know so your project can be highlighted!
 
 ## Create an issue

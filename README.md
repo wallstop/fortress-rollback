@@ -4,7 +4,7 @@
 
 ## P2P Rollback Networking in Rust
 
-Fortress Rollback (forked from GGRS, the good game rollback system) is a fortified, correctness-first port of the original [ggrs crate](https://github.com/gschup/ggrs) and reimagination of the [GGPO network SDK](https://www.ggpo.net/), written in 100% safe [Rust 🦀](https://www.rust-lang.org/). The callback-style API from the original library has been replaced with a simple, request-driven control flow: instead of registering callback functions, Fortress Rollback returns a list of requests for the user to fulfill.
+Fortress Rollback (a fork of GGRS, the good game rollback system) is a fortified, correctness-first port of the original [ggrs crate](https://github.com/gschup/ggrs) and reimagination of the [GGPO network SDK](https://www.ggpo.net/), written in 100% safe [Rust 🦀](https://www.rust-lang.org/). The callback-style API from the original library has been replaced with a simple, request-driven control flow: instead of registering callback functions, Fortress Rollback returns a list of requests for the user to fulfill.
 
 > crates.io publication is being prepared. Until the first release is live, depend on the git repository: `fortress-rollback = { git = "https://github.com/wallstop/fortress-rollback", branch = "main" }`.
 
@@ -18,14 +18,6 @@ Fortress Rollback currently ships with the same demos you may know from GGRS. On
 - [Bevy Demo](https://gschup.github.io/bevy_ggrs_demo/) ([Repository](https://github.com/gschup/bevy_ggrs_demo))
 - [Macroquad Demo](https://gschup.github.io/ggrs_demo/) ([Repository](https://github.com/gschup/ggrs_demo))
 
-## Projects using Fortress Rollback (formerly GGRS)
-
-- [Jumpy](https://github.com/fishfolk/jumpy)
-- [Gamercade](https://gamercade.io/)
-- [NES-bundler](https://github.com/tedsteen/nes-bundler)
-- [Girls with Swords](https://github.com/trian-gles/Girls-with-swords-GGRS) ([gameplay footage](https://youtu.be/TFJSpAqXtiI))
-- [NieR Automata: Online](https://git.yasupa.de/jasper3108/NAMS-mp) ([Youtube](https://www.youtube.com/@nieronline))
-
 ## Getting Started
 
 To get started with Fortress Rollback, check out the following resources:
@@ -36,7 +28,7 @@ To get started with Fortress Rollback, check out the following resources:
 
 ## Development Status
 
-Fortress Rollback is in an early stage, but the main functionality for multiple players and spectators should be quite stable. See the Changelog for the latest changes, even those yet unreleased on crates.io! If you want to contribute, check out existing issues, as well as the contribution guide!
+Alpha / experimental only.
 
 - [Changelog](./CHANGELOG.md)
 - [Issues](https://github.com/wallstop/fortress-rollback/issues)
