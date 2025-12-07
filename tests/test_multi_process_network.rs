@@ -664,3 +664,431 @@ fn test_stress_long_session_with_loss() {
         result1.rollbacks, result2.rollbacks
     );
 }
+
+// =============================================================================
+// Additional Chaos Tests
+// =============================================================================
+
+/// Test with high jitter (variable latency).
+#[test]
+#[serial]
+fn test_high_jitter_50ms() {
+    let peer1_config = PeerConfig {
+        local_port: 10019,
+        player_index: 0,
+        peer_addr: "127.0.0.1:10020".to_string(),
+        frames: 100,
+        latency_ms: 30,
+        jitter_ms: 50, // High jitter
+        seed: Some(42),
+        timeout_secs: 90,
+        ..Default::default()
+    };
+
+    let peer2_config = PeerConfig {
+        local_port: 10020,
+        player_index: 1,
+        peer_addr: "127.0.0.1:10019".to_string(),
+        frames: 100,
+        latency_ms: 30,
+        jitter_ms: 50,
+        seed: Some(43),
+        timeout_secs: 90,
+        ..Default::default()
+    };
+
+    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+
+    assert!(
+        result1.success,
+        "Peer 1 failed with high jitter: {:?}",
+        result1.error
+    );
+    assert!(
+        result2.success,
+        "Peer 2 failed with high jitter: {:?}",
+        result2.error
+    );
+
+    // Verify determinism
+    assert_eq!(
+        result1.final_value, result2.final_value,
+        "Desync with high jitter! peer1={}, peer2={}",
+        result1.final_value, result2.final_value
+    );
+    assert_eq!(result1.checksum, result2.checksum);
+}
+
+/// Test with combined loss, latency, and jitter - simulating mobile network.
+#[test]
+#[serial]
+fn test_mobile_network_simulation() {
+    let peer1_config = PeerConfig {
+        local_port: 10021,
+        player_index: 0,
+        peer_addr: "127.0.0.1:10022".to_string(),
+        frames: 100,
+        packet_loss: 0.12, // Mobile often has higher loss
+        latency_ms: 60,    // Typical mobile latency
+        jitter_ms: 40,     // High jitter on mobile
+        seed: Some(42),
+        timeout_secs: 120,
+        ..Default::default()
+    };
+
+    let peer2_config = PeerConfig {
+        local_port: 10022,
+        player_index: 1,
+        peer_addr: "127.0.0.1:10021".to_string(),
+        frames: 100,
+        packet_loss: 0.12,
+        latency_ms: 60,
+        jitter_ms: 40,
+        seed: Some(43),
+        timeout_secs: 120,
+        ..Default::default()
+    };
+
+    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+
+    assert!(
+        result1.success,
+        "Peer 1 failed mobile simulation: {:?}",
+        result1.error
+    );
+    assert!(
+        result2.success,
+        "Peer 2 failed mobile simulation: {:?}",
+        result2.error
+    );
+
+    // Verify determinism
+    assert_eq!(
+        result1.final_value, result2.final_value,
+        "Desync in mobile simulation! peer1={}, peer2={}",
+        result1.final_value, result2.final_value
+    );
+    assert_eq!(result1.checksum, result2.checksum);
+
+    println!(
+        "Mobile simulation - Rollbacks: peer1={}, peer2={}",
+        result1.rollbacks, result2.rollbacks
+    );
+}
+
+/// Test heavily asymmetric conditions - one peer on great network, one on terrible.
+#[test]
+#[serial]
+fn test_heavily_asymmetric_network() {
+    // Peer 1 has terrible network conditions
+    let peer1_config = PeerConfig {
+        local_port: 10023,
+        player_index: 0,
+        peer_addr: "127.0.0.1:10024".to_string(),
+        frames: 100,
+        packet_loss: 0.25, // 25% loss!
+        latency_ms: 100,   // 100ms latency
+        jitter_ms: 40,
+        seed: Some(42),
+        timeout_secs: 180,
+        ..Default::default()
+    };
+
+    // Peer 2 has excellent network
+    let peer2_config = PeerConfig {
+        local_port: 10024,
+        player_index: 1,
+        peer_addr: "127.0.0.1:10023".to_string(),
+        frames: 100,
+        packet_loss: 0.01, // 1% loss
+        latency_ms: 5,     // 5ms latency
+        jitter_ms: 2,
+        seed: Some(43),
+        timeout_secs: 180,
+        ..Default::default()
+    };
+
+    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+
+    assert!(
+        result1.success,
+        "Peer 1 (terrible network) failed: {:?}",
+        result1.error
+    );
+    assert!(
+        result2.success,
+        "Peer 2 (excellent network) failed: {:?}",
+        result2.error
+    );
+
+    // Verify determinism despite massive asymmetry
+    assert_eq!(
+        result1.final_value, result2.final_value,
+        "Desync with heavy asymmetry! peer1={}, peer2={}",
+        result1.final_value, result2.final_value
+    );
+    assert_eq!(result1.checksum, result2.checksum);
+
+    println!(
+        "Asymmetric test - Rollbacks: bad_peer={}, good_peer={}",
+        result1.rollbacks, result2.rollbacks
+    );
+}
+
+/// Test with higher input delay (4 frames).
+#[test]
+#[serial]
+fn test_higher_input_delay() {
+    let peer1_config = PeerConfig {
+        local_port: 10025,
+        player_index: 0,
+        peer_addr: "127.0.0.1:10026".to_string(),
+        frames: 100,
+        packet_loss: 0.05,
+        latency_ms: 20,
+        input_delay: 4, // Higher input delay
+        seed: Some(42),
+        timeout_secs: 60,
+        ..Default::default()
+    };
+
+    let peer2_config = PeerConfig {
+        local_port: 10026,
+        player_index: 1,
+        peer_addr: "127.0.0.1:10025".to_string(),
+        frames: 100,
+        packet_loss: 0.05,
+        latency_ms: 20,
+        input_delay: 4,
+        seed: Some(43),
+        timeout_secs: 60,
+        ..Default::default()
+    };
+
+    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+
+    assert!(
+        result1.success,
+        "Peer 1 failed with input delay 4: {:?}",
+        result1.error
+    );
+    assert!(
+        result2.success,
+        "Peer 2 failed with input delay 4: {:?}",
+        result2.error
+    );
+
+    // Verify determinism
+    assert_eq!(
+        result1.final_value, result2.final_value,
+        "Desync with input delay 4! peer1={}, peer2={}",
+        result1.final_value, result2.final_value
+    );
+    assert_eq!(result1.checksum, result2.checksum);
+}
+
+/// Test with zero latency but high packet loss.
+#[test]
+#[serial]
+fn test_zero_latency_high_loss() {
+    let peer1_config = PeerConfig {
+        local_port: 10027,
+        player_index: 0,
+        peer_addr: "127.0.0.1:10028".to_string(),
+        frames: 100,
+        packet_loss: 0.20, // 20% loss but no latency
+        latency_ms: 0,
+        seed: Some(42),
+        timeout_secs: 90,
+        ..Default::default()
+    };
+
+    let peer2_config = PeerConfig {
+        local_port: 10028,
+        player_index: 1,
+        peer_addr: "127.0.0.1:10027".to_string(),
+        frames: 100,
+        packet_loss: 0.20,
+        latency_ms: 0,
+        seed: Some(43),
+        timeout_secs: 90,
+        ..Default::default()
+    };
+
+    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+
+    assert!(
+        result1.success,
+        "Peer 1 failed with zero latency + loss: {:?}",
+        result1.error
+    );
+    assert!(
+        result2.success,
+        "Peer 2 failed with zero latency + loss: {:?}",
+        result2.error
+    );
+
+    // Verify determinism
+    assert_eq!(
+        result1.final_value, result2.final_value,
+        "Desync with zero latency + loss! peer1={}, peer2={}",
+        result1.final_value, result2.final_value
+    );
+    assert_eq!(result1.checksum, result2.checksum);
+}
+
+/// Test medium-length session (300 frames) with moderate conditions.
+#[test]
+#[serial]
+fn test_medium_session_300_frames() {
+    let peer1_config = PeerConfig {
+        local_port: 10029,
+        player_index: 0,
+        peer_addr: "127.0.0.1:10030".to_string(),
+        frames: 300,
+        packet_loss: 0.08,
+        latency_ms: 35,
+        jitter_ms: 15,
+        seed: Some(42),
+        timeout_secs: 120,
+        ..Default::default()
+    };
+
+    let peer2_config = PeerConfig {
+        local_port: 10030,
+        player_index: 1,
+        peer_addr: "127.0.0.1:10029".to_string(),
+        frames: 300,
+        packet_loss: 0.08,
+        latency_ms: 35,
+        jitter_ms: 15,
+        seed: Some(43),
+        timeout_secs: 120,
+        ..Default::default()
+    };
+
+    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+
+    assert!(
+        result1.success,
+        "Peer 1 failed 300 frame session: {:?}",
+        result1.error
+    );
+    assert!(
+        result2.success,
+        "Peer 2 failed 300 frame session: {:?}",
+        result2.error
+    );
+    assert!(
+        result1.final_frame >= 300,
+        "Peer 1 didn't reach 300 frames: {}",
+        result1.final_frame
+    );
+    assert!(
+        result2.final_frame >= 300,
+        "Peer 2 didn't reach 300 frames: {}",
+        result2.final_frame
+    );
+
+    // For sessions >128 frames, use final_value for determinism check
+    assert_eq!(
+        result1.final_value, result2.final_value,
+        "Desync in 300 frame session! peer1={}, peer2={}",
+        result1.final_value, result2.final_value
+    );
+}
+
+/// Stress test with very long session (2000 frames) - ignored by default.
+#[test]
+#[serial]
+#[ignore] // Takes a long time, run with --ignored
+fn test_stress_very_long_session() {
+    let peer1_config = PeerConfig {
+        local_port: 10031,
+        player_index: 0,
+        peer_addr: "127.0.0.1:10032".to_string(),
+        frames: 2000,
+        packet_loss: 0.03,
+        latency_ms: 20,
+        seed: Some(42),
+        timeout_secs: 300, // 5 minutes
+        ..Default::default()
+    };
+
+    let peer2_config = PeerConfig {
+        local_port: 10032,
+        player_index: 1,
+        peer_addr: "127.0.0.1:10031".to_string(),
+        frames: 2000,
+        packet_loss: 0.03,
+        latency_ms: 20,
+        seed: Some(43),
+        timeout_secs: 300,
+        ..Default::default()
+    };
+
+    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+
+    assert!(
+        result1.success,
+        "Peer 1 failed 2000 frame stress: {:?}",
+        result1.error
+    );
+    assert!(
+        result2.success,
+        "Peer 2 failed 2000 frame stress: {:?}",
+        result2.error
+    );
+
+    assert_eq!(
+        result1.final_value, result2.final_value,
+        "Desync in 2000 frame session!"
+    );
+
+    println!(
+        "2000 frame stress complete - Rollbacks: peer1={}, peer2={}",
+        result1.rollbacks, result2.rollbacks
+    );
+}
+
+/// Test with different random seeds to validate determinism is seed-independent.
+#[test]
+#[serial]
+fn test_determinism_different_seeds() {
+    // Same network conditions but different chaos seeds
+    let peer1_config = PeerConfig {
+        local_port: 10033,
+        player_index: 0,
+        peer_addr: "127.0.0.1:10034".to_string(),
+        frames: 100,
+        packet_loss: 0.10,
+        latency_ms: 30,
+        seed: Some(12345), // Different seed
+        timeout_secs: 90,
+        ..Default::default()
+    };
+
+    let peer2_config = PeerConfig {
+        local_port: 10034,
+        player_index: 1,
+        peer_addr: "127.0.0.1:10033".to_string(),
+        frames: 100,
+        packet_loss: 0.10,
+        latency_ms: 30,
+        seed: Some(67890), // Different seed
+        timeout_secs: 90,
+        ..Default::default()
+    };
+
+    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+
+    assert!(result1.success, "Peer 1 failed: {:?}", result1.error);
+    assert!(result2.success, "Peer 2 failed: {:?}", result2.error);
+
+    // Even with different chaos patterns, final state must match
+    assert_eq!(
+        result1.final_value, result2.final_value,
+        "Desync with different seeds! Game logic must be deterministic regardless of network chaos patterns"
+    );
+    assert_eq!(result1.checksum, result2.checksum);
+}

@@ -1536,3 +1536,949 @@ fn test_burst_loss_with_jitter() -> Result<(), FortressError> {
 
     Ok(())
 }
+
+// =============================================================================
+// Advanced Chaos Engineering Tests (Edge Cases)
+// =============================================================================
+
+/// Test asymmetric receive loss: one peer has higher receive loss.
+/// This simulates network asymmetry where one direction is worse.
+/// Note: We test with asymmetric loss (one side loses more) but both
+/// sides can still complete synchronization.
+#[test]
+#[serial]
+fn test_one_way_send_only_loss() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9041);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9042);
+
+    // Peer 1 has higher receive loss (simulates bad incoming connection)
+    let config1 = ChaosConfig::builder()
+        .send_loss_rate(0.02)
+        .receive_loss_rate(0.15) // 15% receive loss
+        .latency_ms(20)
+        .seed(42)
+        .build();
+
+    // Peer 2 has normal operation
+    let config2 = ChaosConfig::builder()
+        .send_loss_rate(0.02)
+        .receive_loss_rate(0.02)
+        .latency_ms(20)
+        .seed(43)
+        .build();
+
+    let socket1 = create_chaos_socket(9041, config1);
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9042, config2);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Synchronize with extended time due to asymmetric loss
+    for _ in 0..300 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(50));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize with one-way receive loss"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize with one-way receive loss"
+    );
+
+    // Advance frames
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for i in 0..30 {
+        for _ in 0..5 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+        std::thread::sleep(Duration::from_millis(30));
+
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+
+        let requests1 = sess1.advance_frame().unwrap();
+        let requests2 = sess2.advance_frame().unwrap();
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+
+    assert!(
+        stub1.gs.frame > 0,
+        "Should advance frames with one-way receive loss"
+    );
+
+    Ok(())
+}
+
+/// Test asymmetric send loss: one peer has higher send loss.
+/// This simulates network asymmetry where outgoing packets drop more.
+/// Note: We test with asymmetric loss (one side loses more) but both
+/// sides can still complete synchronization.
+#[test]
+#[serial]
+fn test_one_way_receive_only_loss() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9043);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9044);
+
+    // Peer 1 has higher send loss (simulates bad outgoing connection)
+    let config1 = ChaosConfig::builder()
+        .send_loss_rate(0.15) // 15% send loss
+        .receive_loss_rate(0.02)
+        .latency_ms(20)
+        .seed(42)
+        .build();
+
+    // Peer 2 has normal operation
+    let config2 = ChaosConfig::builder()
+        .send_loss_rate(0.02)
+        .receive_loss_rate(0.02)
+        .latency_ms(20)
+        .seed(43)
+        .build();
+
+    let socket1 = create_chaos_socket(9043, config1);
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9044, config2);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Synchronize with extended time
+    for _ in 0..300 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(50));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize with one-way send loss"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize with one-way send loss"
+    );
+
+    // Advance frames
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for i in 0..30 {
+        for _ in 0..5 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+        std::thread::sleep(Duration::from_millis(30));
+
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+
+        let requests1 = sess1.advance_frame().unwrap();
+        let requests2 = sess2.advance_frame().unwrap();
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+
+    assert!(
+        stub1.gs.frame > 0,
+        "Should advance frames with one-way send loss"
+    );
+
+    Ok(())
+}
+
+/// Test heavy packet duplication - network equipment sometimes duplicates packets.
+#[test]
+#[serial]
+fn test_heavy_packet_duplication() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9045);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9046);
+
+    // 20% packet duplication rate
+    let chaos_config = ChaosConfig::builder()
+        .duplication_rate(0.20)
+        .latency_ms(20)
+        .seed(42)
+        .build();
+
+    let socket1 = create_chaos_socket(9045, chaos_config.clone());
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9046, chaos_config);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Synchronize
+    for _ in 0..100 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(30));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize with packet duplication"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize with packet duplication"
+    );
+
+    // Advance frames - duplicated packets should be handled gracefully
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for i in 0..40 {
+        for _ in 0..3 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+        std::thread::sleep(Duration::from_millis(15));
+
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+
+        let requests1 = sess1.advance_frame().unwrap();
+        let requests2 = sess2.advance_frame().unwrap();
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+
+    assert!(
+        stub1.gs.frame >= 30,
+        "Should advance frames with duplication"
+    );
+
+    Ok(())
+}
+
+/// Test packet reordering - packets arrive out of sequence.
+#[test]
+#[serial]
+fn test_packet_reordering() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9047);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9048);
+
+    // Buffer 4 packets, 30% chance of reordering within buffer
+    let chaos_config = ChaosConfig::builder()
+        .reorder_buffer_size(4)
+        .reorder_rate(0.30)
+        .latency_ms(30)
+        .seed(42)
+        .build();
+
+    let socket1 = create_chaos_socket(9047, chaos_config.clone());
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9048, chaos_config);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Synchronize
+    for _ in 0..150 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(40));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize with reordering"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize with reordering"
+    );
+
+    // Advance frames - reordered packets should be handled
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for i in 0..40 {
+        for _ in 0..4 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+
+        let requests1 = sess1.advance_frame().unwrap();
+        let requests2 = sess2.advance_frame().unwrap();
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+
+    assert!(
+        stub1.gs.frame >= 30,
+        "Should advance frames with reordering"
+    );
+
+    Ok(())
+}
+
+/// Test extreme combined conditions: all chaos features active.
+#[test]
+#[serial]
+fn test_extreme_chaos_combined() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9049);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9050);
+
+    // Everything enabled but at moderate levels
+    let chaos_config = ChaosConfig::builder()
+        .latency_ms(60)
+        .jitter_ms(30)
+        .packet_loss_rate(0.08)
+        .duplication_rate(0.05)
+        .reorder_buffer_size(3)
+        .reorder_rate(0.15)
+        .burst_loss(0.02, 2)
+        .seed(42)
+        .build();
+
+    let socket1 = create_chaos_socket(9049, chaos_config.clone());
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9050, chaos_config);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Synchronize - needs long time with all chaos combined
+    for _ in 0..400 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(50));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize with extreme chaos"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize with extreme chaos"
+    );
+
+    // Advance frames
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for i in 0..30 {
+        for _ in 0..6 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+        std::thread::sleep(Duration::from_millis(35));
+
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+
+        let requests1 = sess1.advance_frame().unwrap();
+        let requests2 = sess2.advance_frame().unwrap();
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+
+    assert!(
+        stub1.gs.frame > 0,
+        "Should advance frames with extreme chaos"
+    );
+
+    Ok(())
+}
+
+/// Test with varying prediction window sizes under network conditions.
+#[test]
+#[serial]
+fn test_large_prediction_window_with_latency() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9051);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9052);
+
+    let chaos_config = ChaosConfig::builder()
+        .latency_ms(80)
+        .jitter_ms(20)
+        .seed(42)
+        .build();
+
+    // Use larger prediction window (16 frames instead of default 8)
+    let socket1 = create_chaos_socket(9051, chaos_config.clone());
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_max_prediction_window(16)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9052, chaos_config);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_max_prediction_window(16)
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Synchronize
+    for _ in 0..200 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(40));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize with large prediction window"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize with large prediction window"
+    );
+
+    // Advance frames
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for i in 0..50 {
+        for _ in 0..4 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+        std::thread::sleep(Duration::from_millis(30));
+
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+
+        let requests1 = sess1.advance_frame().unwrap();
+        let requests2 = sess2.advance_frame().unwrap();
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+
+    assert!(
+        stub1.gs.frame >= 40,
+        "Should advance frames with large prediction window"
+    );
+
+    Ok(())
+}
+
+/// Test with higher input delay under packet loss.
+#[test]
+#[serial]
+fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9053);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9054);
+
+    let chaos_config = ChaosConfig::builder()
+        .packet_loss_rate(0.10)
+        .latency_ms(30)
+        .seed(42)
+        .build();
+
+    // Use input delay of 3 frames
+    let socket1 = create_chaos_socket(9053, chaos_config.clone());
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_input_delay(3)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9054, chaos_config);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_input_delay(3)
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Synchronize
+    for _ in 0..150 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(50));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize with input delay + loss"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize with input delay + loss"
+    );
+
+    // Advance frames
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for i in 0..40 {
+        for _ in 0..4 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+
+        let requests1 = sess1.advance_frame().unwrap();
+        let requests2 = sess2.advance_frame().unwrap();
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+
+    assert!(
+        stub1.gs.frame > 0,
+        "Should advance frames with input delay + loss"
+    );
+
+    Ok(())
+}
+
+/// Test sparse saving mode under challenging network conditions.
+#[test]
+#[serial]
+fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9055);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9056);
+
+    let chaos_config = ChaosConfig::builder()
+        .latency_ms(40)
+        .jitter_ms(15)
+        .packet_loss_rate(0.05)
+        .seed(42)
+        .build();
+
+    // Enable sparse saving mode
+    let socket1 = create_chaos_socket(9055, chaos_config.clone());
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_sparse_saving_mode(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9056, chaos_config);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_sparse_saving_mode(true)
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Synchronize
+    for _ in 0..150 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(50));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize with sparse saving"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize with sparse saving"
+    );
+
+    // Advance frames
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for i in 0..50 {
+        for _ in 0..4 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+
+        let requests1 = sess1.advance_frame().unwrap();
+        let requests2 = sess2.advance_frame().unwrap();
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+
+    assert!(
+        stub1.gs.frame >= 40,
+        "Should advance frames with sparse saving + chaos"
+    );
+
+    Ok(())
+}
+
+/// Test rapid connect/disconnect cycles to stress connection handling.
+/// Simulates network flapping.
+#[test]
+#[serial]
+fn test_network_flapping_simulation() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9057);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9058);
+
+    // Simulate flapping with burst loss
+    let chaos_config = ChaosConfig::builder()
+        .latency_ms(25)
+        .burst_loss(0.15, 8) // 15% chance of dropping 8 consecutive packets
+        .seed(42)
+        .build();
+
+    let socket1 = create_chaos_socket(9057, chaos_config.clone());
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9058, chaos_config);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Synchronize with extra tolerance for bursts
+    for _ in 0..400 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(40));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize under flapping"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize under flapping"
+    );
+
+    // Advance frames
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for i in 0..30 {
+        for _ in 0..6 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+        std::thread::sleep(Duration::from_millis(30));
+
+        let _ = sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i });
+        let _ = sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: i });
+
+        if let Ok(requests1) = sess1.advance_frame() {
+            stub1.handle_requests(requests1);
+        }
+        if let Ok(requests2) = sess2.advance_frame() {
+            stub2.handle_requests(requests2);
+        }
+    }
+
+    // At least some frames should advance
+    assert!(stub1.gs.frame > 0, "Should make progress under flapping");
+
+    Ok(())
+}
+
+/// Test with extreme jitter (very variable latency).
+#[test]
+#[serial]
+fn test_extreme_jitter() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9059);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9060);
+
+    // Base latency 50ms, jitter ±50ms (0-100ms effective)
+    let chaos_config = ChaosConfig::builder()
+        .latency_ms(50)
+        .jitter_ms(50)
+        .seed(42)
+        .build();
+
+    let socket1 = create_chaos_socket(9059, chaos_config.clone());
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9060, chaos_config);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Synchronize
+    for _ in 0..200 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(60));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize with extreme jitter"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize with extreme jitter"
+    );
+
+    // Advance frames
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for i in 0..40 {
+        for _ in 0..4 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+        std::thread::sleep(Duration::from_millis(30));
+
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+
+        let requests1 = sess1.advance_frame().unwrap();
+        let requests2 = sess2.advance_frame().unwrap();
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+
+    assert!(
+        stub1.gs.frame >= 30,
+        "Should advance frames with extreme jitter"
+    );
+
+    Ok(())
+}
+
+/// Test with "terrible network" preset - validates the preset works.
+#[test]
+#[serial]
+fn test_terrible_network_preset() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9061);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9062);
+
+    // Use the preset
+    let chaos_config = ChaosConfig::terrible_network();
+
+    let socket1 = create_chaos_socket(9061, chaos_config.clone());
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9062, chaos_config);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Synchronize - terrible network needs lots of time
+    for _ in 0..500 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(60));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize with terrible network"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize with terrible network"
+    );
+
+    // Advance frames
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for i in 0..25 {
+        for _ in 0..8 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+        std::thread::sleep(Duration::from_millis(50));
+
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+
+        let requests1 = sess1.advance_frame().unwrap();
+        let requests2 = sess2.advance_frame().unwrap();
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+
+    assert!(
+        stub1.gs.frame > 0,
+        "Should advance frames with terrible network"
+    );
+
+    Ok(())
+}
