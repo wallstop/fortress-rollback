@@ -1,14 +1,16 @@
 use std::collections::{VecDeque, vec_deque::Drain};
+use std::sync::Arc;
 
 use crate::{
-    Config, Frame, GgrsError, GgrsEvent, GgrsRequest, InputStatus, NULL_FRAME, NetworkStats,
-    NonBlockingSocket, SessionState,
+    Config, FortressError, FortressEvent, FortressRequest, Frame, InputStatus,
+    NetworkStats, NonBlockingSocket, PlayerHandle, SessionState,
     frame_info::PlayerInput,
     network::{
         messages::ConnectionStatus,
         protocol::{Event, UdpProtocol},
     },
     sessions::builder::MAX_EVENT_QUEUE_SIZE,
+    telemetry::ViolationObserver,
 };
 
 // The amount of frames the spectator advances in a single step if not too far behind
@@ -29,11 +31,13 @@ where
     host_connect_status: Vec<ConnectionStatus>,
     socket: Box<dyn NonBlockingSocket<T::Address>>,
     host: UdpProtocol<T>,
-    event_queue: VecDeque<GgrsEvent<T>>,
+    event_queue: VecDeque<FortressEvent<T>>,
     current_frame: Frame,
     last_recv_frame: Frame,
     max_frames_behind: usize,
     catchup_speed: usize,
+    /// Optional observer for specification violations.
+    violation_observer: Option<Arc<dyn ViolationObserver>>,
 }
 
 impl<T: Config> SpectatorSession<T> {
@@ -46,6 +50,7 @@ impl<T: Config> SpectatorSession<T> {
         host: UdpProtocol<T>,
         max_frames_behind: usize,
         catchup_speed: usize,
+        violation_observer: Option<Arc<dyn ViolationObserver>>,
     ) -> Self {
         // host connection status
         let mut host_connect_status = Vec::new();
@@ -57,17 +62,18 @@ impl<T: Config> SpectatorSession<T> {
             state: SessionState::Synchronizing,
             num_players,
             inputs: vec![
-                vec![PlayerInput::blank_input(NULL_FRAME); num_players];
+                vec![PlayerInput::blank_input(Frame::NULL); num_players];
                 SPECTATOR_BUFFER_SIZE
             ],
             host_connect_status,
             socket,
             host,
             event_queue: VecDeque::new(),
-            current_frame: NULL_FRAME,
-            last_recv_frame: NULL_FRAME,
+            current_frame: Frame::NULL,
+            last_recv_frame: Frame::NULL,
             max_frames_behind,
             catchup_speed,
+            violation_observer,
         }
     }
 
@@ -87,31 +93,42 @@ impl<T: Config> SpectatorSession<T> {
     /// # Errors
     /// - Returns [`NotSynchronized`] if the session is not connected to other clients yet.
     ///
-    /// [`NotSynchronized`]: GgrsError::NotSynchronized
-    pub fn network_stats(&self) -> Result<NetworkStats, GgrsError> {
+    /// [`NotSynchronized`]: FortressError::NotSynchronized
+    pub fn network_stats(&self) -> Result<NetworkStats, FortressError> {
         self.host.network_stats()
     }
 
     /// Returns all events that happened since last queried for events. If the number of stored events exceeds `MAX_EVENT_QUEUE_SIZE`, the oldest events will be discarded.
-    pub fn events(&mut self) -> Drain<'_, GgrsEvent<T>> {
+    pub fn events(&mut self) -> Drain<'_, FortressEvent<T>> {
         self.event_queue.drain(..)
     }
 
-    /// You should call this to notify GGRS that you are ready to advance your gamestate by a single frame.
-    /// Returns an order-sensitive [`Vec<GgrsRequest>`]. You should fulfill all requests in the exact order they are provided.
+    /// Returns a reference to the violation observer, if one was configured.
+    ///
+    /// This allows checking for violations that occurred during session operations
+    /// when using a [`CollectingObserver`] or similar.
+    ///
+    /// [`CollectingObserver`]: crate::telemetry::CollectingObserver
+    pub fn violation_observer(&self) -> Option<&Arc<dyn ViolationObserver>> {
+        self.violation_observer.as_ref()
+    }
+
+    /// You should call this to notify Fortress Rollback that you are ready to advance your gamestate by a single frame.
+    /// Returns an order-sensitive [`Vec<FortressRequest>`]. You should fulfill all requests in the exact order they are provided.
     /// Failure to do so will cause panics later.
+    ///
     /// # Errors
     /// - Returns [`NotSynchronized`] if the session is not yet ready to accept input.
-    /// In this case, you either need to start the session or wait for synchronization between clients.
+    ///   In this case, you either need to start the session or wait for synchronization between clients.
     ///
-    /// [`Vec<GgrsRequest>`]: GgrsRequest
-    /// [`NotSynchronized`]: GgrsError::NotSynchronized
-    pub fn advance_frame(&mut self) -> Result<Vec<GgrsRequest<T>>, GgrsError> {
+    /// [`Vec<FortressRequest>`]: FortressRequest
+    /// [`NotSynchronized`]: FortressError::NotSynchronized
+    pub fn advance_frame(&mut self) -> Result<Vec<FortressRequest<T>>, FortressError> {
         // receive info from host, trigger events and send messages
         self.poll_remote_clients();
 
         if self.state != SessionState::Running {
-            return Err(GgrsError::NotSynchronized);
+            return Err(FortressError::NotSynchronized);
         }
 
         let mut requests = Vec::new();
@@ -127,7 +144,7 @@ impl<T: Config> SpectatorSession<T> {
             let frame_to_grab = self.current_frame + 1;
             let synced_inputs = self.inputs_at_frame(frame_to_grab)?;
 
-            requests.push(GgrsRequest::AdvanceFrame {
+            requests.push(FortressRequest::AdvanceFrame {
                 inputs: synced_inputs,
             });
 
@@ -139,7 +156,7 @@ impl<T: Config> SpectatorSession<T> {
     }
 
     /// Receive UDP packages, distribute them to corresponding UDP endpoints, handle all occurring events and send all outgoing UDP packages.
-    /// Should be called periodically by your application to give GGRS a chance to do internal work like packet transmissions.
+    /// Should be called periodically by your application to give Fortress Rollback a chance to do internal work like packet transmissions.
     pub fn poll_remote_clients(&mut self) {
         // Get all udp packets and distribute them to associated endpoints.
         // The endpoints will handle their packets, which will trigger both events and UPD replies.
@@ -178,17 +195,17 @@ impl<T: Config> SpectatorSession<T> {
     fn inputs_at_frame(
         &self,
         frame_to_grab: Frame,
-    ) -> Result<Vec<(T::Input, InputStatus)>, GgrsError> {
-        let player_inputs = &self.inputs[frame_to_grab as usize % SPECTATOR_BUFFER_SIZE];
+    ) -> Result<Vec<(T::Input, InputStatus)>, FortressError> {
+        let player_inputs = &self.inputs[frame_to_grab.as_i32() as usize % SPECTATOR_BUFFER_SIZE];
 
         // We haven't received the input from the host yet. Wait.
         if player_inputs[0].frame < frame_to_grab {
-            return Err(GgrsError::PredictionThreshold);
+            return Err(FortressError::PredictionThreshold);
         }
 
         // The host is more than [`SPECTATOR_BUFFER_SIZE`] frames ahead of the spectator. The input we need is gone forever.
         if player_inputs[0].frame > frame_to_grab {
-            return Err(GgrsError::SpectatorTooFarBehind);
+            return Err(FortressError::SpectatorTooFarBehind);
         }
 
         Ok(player_inputs
@@ -211,33 +228,36 @@ impl<T: Config> SpectatorSession<T> {
             // forward to user
             Event::Synchronizing { total, count } => {
                 self.event_queue
-                    .push_back(GgrsEvent::Synchronizing { addr, total, count });
+                    .push_back(FortressEvent::Synchronizing { addr, total, count });
             }
             // forward to user
             Event::NetworkInterrupted { disconnect_timeout } => {
-                self.event_queue.push_back(GgrsEvent::NetworkInterrupted {
-                    addr,
-                    disconnect_timeout,
-                });
+                self.event_queue
+                    .push_back(FortressEvent::NetworkInterrupted {
+                        addr,
+                        disconnect_timeout,
+                    });
             }
             // forward to user
             Event::NetworkResumed => {
                 self.event_queue
-                    .push_back(GgrsEvent::NetworkResumed { addr });
+                    .push_back(FortressEvent::NetworkResumed { addr });
             }
             // synced with the host, then forward to user
             Event::Synchronized => {
                 self.state = SessionState::Running;
-                self.event_queue.push_back(GgrsEvent::Synchronized { addr });
+                self.event_queue
+                    .push_back(FortressEvent::Synchronized { addr });
             }
             // disconnect the player, then forward to user
             Event::Disconnected => {
-                self.event_queue.push_back(GgrsEvent::Disconnected { addr });
+                self.event_queue
+                    .push_back(FortressEvent::Disconnected { addr });
             }
             // add the input and all associated information
             Event::Input { input, player } => {
                 // save the input
-                self.inputs[input.frame as usize % SPECTATOR_BUFFER_SIZE][player] = input;
+                self.inputs[input.frame.as_i32() as usize % SPECTATOR_BUFFER_SIZE][player.as_usize()] = input;
                 assert!(input.frame >= self.last_recv_frame);
                 self.last_recv_frame = input.frame;
 
@@ -246,7 +266,7 @@ impl<T: Config> SpectatorSession<T> {
 
                 // update the host connection status
                 for i in 0..self.num_players {
-                    self.host_connect_status[i] = self.host.peer_connect_status(i);
+                    self.host_connect_status[i] = self.host.peer_connect_status(PlayerHandle::new(i));
                 }
             }
         }

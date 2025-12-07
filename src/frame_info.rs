@@ -1,4 +1,4 @@
-use crate::{Frame, NULL_FRAME};
+use crate::Frame;
 
 /// Represents the game state of your game for a single frame. The `data` holds the game state, `frame` indicates the associated frame number
 /// and `checksum` can additionally be provided for use during a `SyncTestSession`.
@@ -15,7 +15,7 @@ pub(crate) struct GameState<S> {
 impl<S> Default for GameState<S> {
     fn default() -> Self {
         Self {
-            frame: NULL_FRAME,
+            frame: Frame::NULL,
             data: None,
             checksum: None,
         }
@@ -29,7 +29,7 @@ pub(crate) struct PlayerInput<I>
 where
     I: Copy + Clone + PartialEq,
 {
-    /// The frame to which this info belongs to. -1/[`NULL_FRAME`] represents an invalid frame
+    /// The frame to which this info belongs to. [`Frame::NULL`] represents an invalid frame
     pub frame: Frame,
     /// The input struct given by the user
     pub input: I,
@@ -68,22 +68,22 @@ mod game_input_tests {
 
     #[test]
     fn test_input_equality() {
-        let input1 = PlayerInput::new(0, TestInput { inp: 5 });
-        let input2 = PlayerInput::new(0, TestInput { inp: 5 });
+        let input1 = PlayerInput::new(Frame::new(0), TestInput { inp: 5 });
+        let input2 = PlayerInput::new(Frame::new(0), TestInput { inp: 5 });
         assert!(input1.equal(&input2, false));
     }
 
     #[test]
     fn test_input_equality_input_only() {
-        let input1 = PlayerInput::new(0, TestInput { inp: 5 });
-        let input2 = PlayerInput::new(5, TestInput { inp: 5 });
+        let input1 = PlayerInput::new(Frame::new(0), TestInput { inp: 5 });
+        let input2 = PlayerInput::new(Frame::new(5), TestInput { inp: 5 });
         assert!(input1.equal(&input2, true)); // different frames, but does not matter
     }
 
     #[test]
     fn test_input_equality_fail() {
-        let input1 = PlayerInput::new(0, TestInput { inp: 5 });
-        let input2 = PlayerInput::new(0, TestInput { inp: 7 });
+        let input1 = PlayerInput::new(Frame::new(0), TestInput { inp: 5 });
+        let input2 = PlayerInput::new(Frame::new(0), TestInput { inp: 7 });
         assert!(!input1.equal(&input2, false)); // different bits
     }
 }

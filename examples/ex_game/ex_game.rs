@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use fortress_rollback::{
-    Config, Frame, GameStateCell, GgrsRequest, InputStatus, NULL_FRAME, PlayerHandle,
+    Config, FortressRequest, Frame, GameStateCell, InputStatus, PlayerHandle,
 };
 use macroquad::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -30,10 +30,10 @@ pub struct Input {
     pub inp: u8,
 }
 
-/// `GGRSConfig` holds all type parameters for GGRS Sessions
+/// `FortressConfig` holds all type parameters for Fortress Rollback sessions
 #[derive(Debug)]
-pub struct GGRSConfig;
-impl Config for GGRSConfig {
+pub struct FortressConfig;
+impl Config for FortressConfig {
     type Input = Input;
     type State = State;
     type Address = SocketAddr;
@@ -52,7 +52,7 @@ fn fletcher16(data: &[u8]) -> u16 {
     (sum2 << 8) | sum1
 }
 
-// BoxGame will handle rendering, gamestate, inputs and GgrsRequests
+// BoxGame will handle rendering, gamestate, inputs and Fortress Rollback requests
 pub struct Game {
     num_players: usize,
     game_state: State,
@@ -68,30 +68,34 @@ impl Game {
             num_players,
             game_state: State::new(num_players),
             local_handles: Vec::new(),
-            last_checksum: (NULL_FRAME, 0),
-            periodic_checksum: (NULL_FRAME, 0),
+            last_checksum: (Frame::NULL, 0),
+            periodic_checksum: (Frame::NULL, 0),
         }
     }
 
     // for each request, call the appropriate function
-    pub fn handle_requests(&mut self, requests: Vec<GgrsRequest<GGRSConfig>>, in_lockstep: bool) {
+    pub fn handle_requests(
+        &mut self,
+        requests: Vec<FortressRequest<FortressConfig>>,
+        in_lockstep: bool,
+    ) {
         for request in requests {
             match request {
-                GgrsRequest::LoadGameState { cell, .. } => {
+                FortressRequest::LoadGameState { cell, .. } => {
                     if in_lockstep {
                         unreachable!("Should never get a load request if running in lockstep")
                     } else {
                         self.load_game_state(cell)
                     }
                 }
-                GgrsRequest::SaveGameState { cell, frame } => {
+                FortressRequest::SaveGameState { cell, frame } => {
                     if in_lockstep {
                         unreachable!("Should never get a save request if running in lockstep")
                     } else {
                         self.save_game_state(cell, frame)
                     }
                 }
-                GgrsRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
+                FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
             }
         }
     }
@@ -99,7 +103,7 @@ impl Game {
     // save current gamestate, create a checksum
     // creating a checksum here is only relevant for SyncTestSessions
     fn save_game_state(&mut self, cell: GameStateCell<State>, frame: Frame) {
-        assert_eq!(self.game_state.frame, frame);
+        assert_eq!(self.game_state.frame, frame.as_i32());
         let buffer = bincode::serialize(&self.game_state).unwrap();
         let checksum = fletcher16(&buffer) as u128;
         cell.save(frame, Some(self.game_state.clone()), Some(checksum));
@@ -118,9 +122,9 @@ impl Game {
         // it is very inefficient to serialize the gamestate here just for the checksum
         let buffer = bincode::serialize(&self.game_state).unwrap();
         let checksum = fletcher16(&buffer) as u64;
-        self.last_checksum = (self.game_state.frame, checksum);
+        self.last_checksum = (Frame::new(self.game_state.frame), checksum);
         if self.game_state.frame % CHECKSUM_PERIOD == 0 {
-            self.periodic_checksum = (self.game_state.frame, checksum);
+            self.periodic_checksum = (Frame::new(self.game_state.frame), checksum);
         }
     }
 
@@ -186,7 +190,7 @@ impl Game {
         // manually teleport the player to the center of the screen, but not through a proper input
         // this will create a forced desync (unless player one is already at the center)
         if is_key_pressed(KeyCode::Space) {
-            self.game_state.positions[handle] = (WINDOW_WIDTH * 0.5, WINDOW_HEIGHT * 0.5);
+            self.game_state.positions[handle.as_usize()] = (WINDOW_WIDTH * 0.5, WINDOW_HEIGHT * 0.5);
         }
 
         let mut inp: u8 = 0;

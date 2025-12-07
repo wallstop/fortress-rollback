@@ -71,7 +71,7 @@ pub fn add_local_input(
     &mut self,
     player_handle: PlayerHandle,
     input: u64,
-) -> Result<(), GgrsError> {
+) -> Result<(), FortressError> {
     // Implementation
 }
 ```

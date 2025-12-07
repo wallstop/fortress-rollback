@@ -1,7 +1,7 @@
 mod stubs;
 
 use fortress_rollback::{
-    GgrsError, PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket,
+    FortressError, PlayerHandle, PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -18,15 +18,15 @@ fn test_start_session() {
 
 #[test]
 #[serial]
-fn test_synchronize_with_host() -> Result<(), GgrsError> {
+fn test_synchronize_with_host() -> Result<(), FortressError> {
     let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7777);
     let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8888);
 
     let socket1 = UdpNonBlockingSocket::bind_to_port(7777).unwrap();
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(1)
-        .add_player(PlayerType::Local, 0)?
-        .add_player(PlayerType::Spectator(spec_addr), 2)?
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
         .start_p2p_session(socket1)?;
 
     let socket2 = UdpNonBlockingSocket::bind_to_port(8888).unwrap();

@@ -41,6 +41,23 @@ jobs:
       - name: Check wasm
         run: cargo check --target wasm32-unknown-unknown --features wasm-bindgen
 
+  miri:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install nightly with Miri
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: miri
+      - name: Setup Miri
+        run: cargo miri setup
+      - name: Run Miri tests (library)
+        run: cargo miri test --lib -- --skip property_tests
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+
   package-dry-run:
     runs-on: ubuntu-latest
     needs: build

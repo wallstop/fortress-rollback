@@ -1,8 +1,8 @@
 mod ex_game;
 
-use ex_game::{GGRSConfig, Game};
+use ex_game::{FortressConfig, Game};
 use fortress_rollback::{
-    DesyncDetection, PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket,
+    DesyncDetection, PlayerHandle, PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket,
 };
 use instant::{Duration, Instant};
 use macroquad::prelude::*;
@@ -35,7 +35,7 @@ struct Opt {
 
 #[macroquad::main(window_conf)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // configure logging: output ggrs and example game logs to standard out
+    // configure logging: output Fortress Rollback and example game logs to standard out
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_max_level(tracing::Level::DEBUG)
@@ -50,42 +50,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let num_players = opt.players.len();
     assert!(num_players > 0);
 
-    // create a GGRS session
-    let mut sess_build = SessionBuilder::<GGRSConfig>::new()
+    // create a Fortress Rollback session
+    let mut sess_build = SessionBuilder::<FortressConfig>::new()
         .with_num_players(num_players)
         // (optional) exchange and validate state checksums
         .with_desync_detection_mode(DesyncDetection::On { interval: 100 })
         // (optional) set expected update frequency
         .with_fps(FPS as usize)?
-        // (optional) customize prediction window, which is how many frames ahead GGRS predicts.
+        // (optional) customize prediction window, which is how many frames ahead Fortress Rollback predicts.
         // Or set the prediction window to 0 to use lockstep netcode instead (i.e. no rollbacks).
         .with_max_prediction_window(8)
         // (optional) set input delay for the local player
         .with_input_delay(2)
-        // (optional) by default, GGRS will ask you to save the game state every frame. If your
+        // (optional) by default, Fortress Rollback will ask you to save the game state every frame. If your
         // saving of game state takes much longer than advancing the game state N times, you can
         // improve performance by turning sparse saving mode on (N == average number of predictions
-        // GGRS must make, which is determined by prediction window, FPS and latency to clients).
+        // Fortress Rollback must make, which is determined by prediction window, FPS and latency to clients).
         .with_sparse_saving_mode(false);
 
     // add players
     for (i, player_addr) in opt.players.iter().enumerate() {
         // local player
         if player_addr == "localhost" {
-            sess_build = sess_build.add_player(PlayerType::Local, i)?;
+            sess_build = sess_build.add_player(PlayerType::Local, PlayerHandle::new(i))?;
         } else {
             // remote players
             let remote_addr: SocketAddr = player_addr.parse()?;
-            sess_build = sess_build.add_player(PlayerType::Remote(remote_addr), i)?;
+            sess_build = sess_build.add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(i))?;
         }
     }
 
     // optionally, add spectators
     for (i, spec_addr) in opt.spectators.iter().enumerate() {
-        sess_build = sess_build.add_player(PlayerType::Spectator(*spec_addr), num_players + i)?;
+        sess_build = sess_build.add_player(PlayerType::Spectator(*spec_addr), PlayerHandle::new(num_players + i))?;
     }
 
-    // start the GGRS session
+    // start the Fortress Rollback session
     let socket = UdpNonBlockingSocket::bind_to_port(opt.local_port)?;
     let mut sess = sess_build.start_p2p_session(socket)?;
 
@@ -101,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // communicate, receive and send packets
         sess.poll_remote_clients();
 
-        // print GGRS events
+        // print Fortress Rollback events
         for event in sess.events() {
             info!("Event: {:?}", event);
         }

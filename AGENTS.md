@@ -63,7 +63,7 @@ GGRS is a Rust implementation of GGPO rollback networking. This fork focuses on:
 /// let result = function(arg1, arg2)?;
 /// assert_eq!(result, expected);
 /// ```
-pub fn function(param1: Type1, param2: Type2) -> Result<ReturnType, GgrsError> {
+pub fn function(param1: Type1, param2: Type2) -> Result<ReturnType, FortressError> {
     // Implementation
 }
 ```
@@ -129,8 +129,8 @@ fn descriptive_test_name_explaining_scenario() {
 - Time synchronization between peers
 
 ### Error Handling
-- `GgrsError` enum with variants for all error cases
-- `Result<T, GgrsError>` return types
+- `FortressError` enum with variants for all error cases
+- `Result<T, FortressError>` return types
 - Context-rich error messages
 - Recovery suggestions where applicable
 

@@ -5,6 +5,7 @@ Fortress Rollback is the correctness-first, verified fork of the original `ggrs`
 ## TL;DR
 - Update your dependency to `fortress-rollback` and change Rust imports to `fortress_rollback`.
 - Ensure your `Config::Address` type implements `Ord` + `PartialOrd` (in addition to `Clone + Eq + Hash`).
+- Rename types: `GgrsError` → `FortressError`, `GgrsEvent` → `FortressEvent`, `GgrsRequest` → `FortressRequest`.
 - All examples/tests now import `fortress_rollback`; mirror that pattern in your code.
 
 ## Dependency Changes
@@ -31,6 +32,40 @@ fortress-rollback = { path = "../fortress-rollback" }
 + use fortress_rollback::{SessionBuilder, P2PSession};
 ```
 
+## Type Renames (Breaking Change)
+All `Ggrs*` types have been renamed to `Fortress*` for consistency:
+
+```rust
+// Before
+use ggrs::{GgrsError, GgrsEvent, GgrsRequest};
+
+// After
+use fortress_rollback::{FortressError, FortressEvent, FortressRequest};
+```
+
+| Old Name       | New Name           |
+|----------------|--------------------|
+| `GgrsError`    | `FortressError`    |
+| `GgrsEvent<T>` | `FortressEvent<T>` |
+| `GgrsRequest<T>` | `FortressRequest<T>` |
+
+Update your pattern matching accordingly:
+```rust
+// Before
+match request {
+    GgrsRequest::SaveGameState { cell, frame } => { ... }
+    GgrsRequest::LoadGameState { cell, frame } => { ... }
+    GgrsRequest::AdvanceFrame { inputs } => { ... }
+}
+
+// After
+match request {
+    FortressRequest::SaveGameState { cell, frame } => { ... }
+    FortressRequest::LoadGameState { cell, frame } => { ... }
+    FortressRequest::AdvanceFrame { inputs } => { ... }
+}
+```
+
 ## Address Trait Bounds (Breaking Change)
 `Config::Address` now requires `Ord` + `PartialOrd` so deterministic collections can be used internally.
 Most standard address types already satisfy this. For custom types, derive the traits:
@@ -53,6 +88,7 @@ Feature flags remain the same (`sync-send`, `wasm-bindgen`). Enable them as befo
 - Deterministic maps (no `HashMap` iteration order issues)
 - Correctness-first positioning with ongoing formal verification work
 - Documentation and branding aligned with the new name
+- Consistent naming with `Fortress*` prefix on all public types
 
 ## Reporting Issues
 Please file new issues on the Fortress Rollback repo: https://github.com/wallstop/fortress-rollback/issues

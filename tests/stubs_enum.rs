@@ -2,7 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 
-use fortress_rollback::{Config, Frame, GameStateCell, GgrsRequest, InputStatus};
+use fortress_rollback::{Config, FortressRequest, Frame, GameStateCell, InputStatus};
 use serde::{Deserialize, Serialize};
 
 fn calculate_hash<T: Hash>(t: &T) -> u64 {
@@ -41,18 +41,18 @@ impl GameStubEnum {
     }
 
     #[allow(dead_code)]
-    pub fn handle_requests(&mut self, requests: Vec<GgrsRequest<StubEnumConfig>>) {
+    pub fn handle_requests(&mut self, requests: Vec<FortressRequest<StubEnumConfig>>) {
         for request in requests {
             match request {
-                GgrsRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
-                GgrsRequest::SaveGameState { cell, frame } => self.save_game_state(cell, frame),
-                GgrsRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
+                FortressRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
+                FortressRequest::SaveGameState { cell, frame } => self.save_game_state(cell, frame),
+                FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
             }
         }
     }
 
     fn save_game_state(&mut self, cell: GameStateCell<StateStubEnum>, frame: Frame) {
-        assert_eq!(self.gs.frame, frame);
+        assert_eq!(self.gs.frame, frame.as_i32());
         let checksum = calculate_hash(&self.gs);
         cell.save(frame, Some(self.gs), Some(checksum as u128));
     }

@@ -3,8 +3,8 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
 };
 
-use tracing::warn;
-
+use crate::report_violation;
+use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::{NonBlockingSocket, network::messages::Message};
 
 const RECV_BUFFER_SIZE: usize = 4096;
@@ -13,7 +13,7 @@ const RECV_BUFFER_SIZE: usize = 4096;
 /// Source: https://stackoverflow.com/a/35697810/775982
 const IDEAL_MAX_UDP_PACKET_SIZE: usize = 508;
 
-/// A simple non-blocking UDP socket tu use with GGRS Sessions. Listens to 0.0.0.0 on a given port.
+/// A simple non-blocking UDP socket to use with Fortress Rollback Sessions. Listens to 0.0.0.0 on a given port.
 #[derive(Debug)]
 pub struct UdpNonBlockingSocket {
     socket: UdpSocket,
@@ -44,17 +44,19 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
         // And if there's a large packet that's being sent, it's basically guaranteed that it's
         // because consuming code has submitted an input struct that is too large (and/or too large
         // a prediction window on too poor a connection, and/or the input struct did not delta
-        // encode well). So we should let the user of ggrs know about that, so they can fix it by
+        // encode well). So we should let the user of fortress-rollback know about that, so they can fix it by
         // reducing the size of their input struct.
         //
         // On the other hand, the occaisional large packet is kind of harmless - whether it gets
         // fragmented or not, the odds are that it will get through unless the connection is truly
         // horrible. So, we'll just log a warning.
         if buf.len() > IDEAL_MAX_UDP_PACKET_SIZE {
-            warn!(
-                "Sending UDP packet of size {} bytes, which is \
-                larger than ideal ({IDEAL_MAX_UDP_PACKET_SIZE})",
-                buf.len()
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "Sending UDP packet of size {} bytes, which is larger than ideal ({})",
+                buf.len(),
+                IDEAL_MAX_UDP_PACKET_SIZE
             );
         }
 

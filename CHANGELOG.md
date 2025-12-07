@@ -9,6 +9,11 @@ In this document, all remarkable changes are listed. Not mentioned are smaller c
 - **[REBRAND]** Crate renamed to `fortress-rollback` (import as `fortress_rollback`)
   - Previous crate name: `ggrs`
   - Migration: update `Cargo.toml` dependencies and Rust imports to `fortress_rollback`
+- **[REBRAND]** All `Ggrs*` types renamed to `Fortress*` for naming consistency
+  - `GgrsError` → `FortressError`
+  - `GgrsEvent<T>` → `FortressEvent<T>`
+  - `GgrsRequest<T>` → `FortressRequest<T>`
+  - **Migration:** Update your imports and pattern matching accordingly
 - **[DETERMINISM]** `Config::Address` now requires `Ord` + `PartialOrd` trait bounds
   - **Rationale:** Enables complete determinism by replacing all `HashMap` with `BTreeMap`
   - **Impact:** Most common address types (`SocketAddr`, `String`, etc.) already implement `Ord`
@@ -33,6 +38,8 @@ In this document, all remarkable changes are listed. Not mentioned are smaller c
   - All collection iteration now has predictable, sorted ordering
 - Added 5 new determinism tests to verify iteration order consistency
 - **[TESTING]** Test suite expanded from 32 to 37 tests (15 unit + 17 integration + 5 determinism)
+- **[SAFETY]** `InputQueue::confirmed_input` now returns `Result` instead of panicking; spectator confirmed-input path bubbles `FortressError` on missing data.
+- **[DOCUMENTATION]** All doc comments updated to reference "Fortress Rollback" consistently
 
 ## 0.11.0
 
@@ -62,7 +69,7 @@ In this document, all remarkable changes are listed. Not mentioned are smaller c
 ## 0.10.0
 
 - Rename types with GGRS prefix to match rust naming conventions
-- Removed deprecated `GgrsError` variants
+- Removed deprecated `FortressError` variants
 - `GameStateCell` now implements debug.
 - fixed a bug where checksums of unconfirmed frames were compared during desync detection.
 - You can now trigger a desync manually in the example game by pressing SPACE.
@@ -174,8 +181,8 @@ In this document, all remarkable changes are listed. Not mentioned are smaller c
 
 ## 0.3.0
 
-- `GgrsError::InvalidRequest` now has an added `info` field to explain the problem in more detail
-- removed unused `GgrsError::GeneralFailure`
+- `FortressError::InvalidRequest` now has an added `info` field to explain the problem in more detail
+- removed unused `FortressError::GeneralFailure`
 - removed multiple methods in `SyncTestSession`, as they didn't fulfill any meaningful purpose
 - removed unused sequence number from message header, fixing related issues
 - fixed an issue where out-of-order packets would cause a crash

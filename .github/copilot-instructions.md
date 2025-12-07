@@ -44,18 +44,18 @@ This is a **fork** of GGRS (Good Game Rollback System) focused on:
 /// Advances the session by one frame, processing inputs and handling rollback.
 ///
 /// # Errors
-/// Returns `GgrsError::NotSynchronized` if session is still synchronizing.
+/// Returns `FortressError::NotSynchronized` if session is still synchronizing.
 ///
 /// # Examples
 /// ```
 /// session.advance_frame()?;
 /// ```
-pub fn advance_frame(&mut self) -> Result<(), GgrsError> {
+pub fn advance_frame(&mut self) -> Result<(), FortressError> {
     // Implementation
 }
 
 // ❌ DON'T: Undocumented public APIs
-pub fn advance_frame(&mut self) -> Result<(), GgrsError> {
+pub fn advance_frame(&mut self) -> Result<(), FortressError> {
     // Implementation
 }
 ```

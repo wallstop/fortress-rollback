@@ -81,21 +81,21 @@ fn test_synctest_input_iteration_determinism() {
         for _frame in 0..10 {
             // Add inputs for all players
             for player in 0..NUM_PLAYERS {
-                sess.add_local_input(player, TestInput { inp: player as u8 })
+                sess.add_local_input(PlayerHandle::new(player), TestInput { inp: player as u8 })
                     .unwrap();
             }
 
             // Process requests
             for request in sess.advance_frame().unwrap() {
                 match request {
-                    GgrsRequest::SaveGameState { cell, frame } => {
+                    FortressRequest::SaveGameState { cell, frame } => {
                         let state = TestGameState {
-                            frame,
+                            frame: frame.as_i32(),
                             input_history: vec![],
                         };
                         cell.save(frame, Some(state), None);
                     }
-                    GgrsRequest::AdvanceFrame { .. } => {
+                    FortressRequest::AdvanceFrame { .. } => {
                         frames_advanced += 1;
                     }
                     _ => {}
@@ -129,21 +129,21 @@ fn test_checksum_history_determinism() {
     let mut checksums = Vec::new();
 
     for _ in 0..20 {
-        sess.add_local_input(0, TestInput { inp: 1 }).unwrap();
-        sess.add_local_input(1, TestInput { inp: 2 }).unwrap();
+        sess.add_local_input(PlayerHandle::new(0), TestInput { inp: 1 }).unwrap();
+        sess.add_local_input(PlayerHandle::new(1), TestInput { inp: 2 }).unwrap();
 
         let requests = sess.advance_frame().unwrap();
 
         for request in requests {
-            if let GgrsRequest::SaveGameState { cell, frame } = request {
+            if let FortressRequest::SaveGameState { cell, frame } = request {
                 // Simulate providing a checksum
                 let state = TestGameState {
-                    frame,
+                    frame: frame.as_i32(),
                     input_history: vec![1, 2],
                 };
                 cell.save(frame, Some(state), Some(42));
                 checksums.push(frame);
-            } else if let GgrsRequest::AdvanceFrame { .. } = request {
+            } else if let FortressRequest::AdvanceFrame { .. } = request {
                 // Process frame
             }
         }
@@ -168,12 +168,12 @@ fn test_p2p_player_handles_determinism() {
         .with_input_delay(2);
 
     // Add players in specific order
-    sess_builder = sess_builder.add_player(PlayerType::Local, 0).unwrap();
+    sess_builder = sess_builder.add_player(PlayerType::Local, PlayerHandle::new(0)).unwrap();
     sess_builder = sess_builder
-        .add_player(PlayerType::Remote(addr1), 1)
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(1))
         .unwrap();
     sess_builder = sess_builder
-        .add_player(PlayerType::Remote(addr2), 2)
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(2))
         .unwrap();
 
     let socket = DummySocket;

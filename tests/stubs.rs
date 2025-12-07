@@ -4,7 +4,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 
-use fortress_rollback::{Config, Frame, GameStateCell, GgrsRequest, InputStatus};
+use fortress_rollback::{Config, FortressRequest, Frame, GameStateCell, InputStatus};
 
 fn calculate_hash<T: Hash>(t: &T) -> u64 {
     let mut s = DefaultHasher::new();
@@ -39,18 +39,18 @@ impl GameStub {
     }
 
     #[allow(dead_code)]
-    pub fn handle_requests(&mut self, requests: Vec<GgrsRequest<StubConfig>>) {
+    pub fn handle_requests(&mut self, requests: Vec<FortressRequest<StubConfig>>) {
         for request in requests {
             match request {
-                GgrsRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
-                GgrsRequest::SaveGameState { cell, frame } => self.save_game_state(cell, frame),
-                GgrsRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
+                FortressRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
+                FortressRequest::SaveGameState { cell, frame } => self.save_game_state(cell, frame),
+                FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
             }
         }
     }
 
     fn save_game_state(&mut self, cell: GameStateCell<StateStub>, frame: Frame) {
-        assert_eq!(self.gs.frame, frame);
+        assert_eq!(self.gs.frame, frame.as_i32());
         let checksum = calculate_hash(&self.gs);
         cell.save(frame, Some(self.gs), Some(checksum as u128));
     }
@@ -79,18 +79,18 @@ impl RandomChecksumGameStub {
     }
 
     #[allow(dead_code)]
-    pub fn handle_requests(&mut self, requests: Vec<GgrsRequest<StubConfig>>) {
+    pub fn handle_requests(&mut self, requests: Vec<FortressRequest<StubConfig>>) {
         for request in requests {
             match request {
-                GgrsRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
-                GgrsRequest::SaveGameState { cell, frame } => self.save_game_state(cell, frame),
-                GgrsRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
+                FortressRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
+                FortressRequest::SaveGameState { cell, frame } => self.save_game_state(cell, frame),
+                FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
             }
         }
     }
 
     fn save_game_state(&mut self, cell: GameStateCell<StateStub>, frame: Frame) {
-        assert_eq!(self.gs.frame, frame);
+        assert_eq!(self.gs.frame, frame.as_i32());
 
         let random_checksum: u128 = self.rng.r#gen();
         cell.save(frame, Some(self.gs), Some(random_checksum));
@@ -113,10 +113,10 @@ pub struct StateStub {
 
 impl StateStub {
     fn advance_frame(&mut self, inputs: Vec<(StubInput, InputStatus)>) {
-        let p0_inputs = inputs[0].0.inp;
-        let p1_inputs = inputs[1].0.inp;
+        // Sum all player inputs for deterministic state update
+        let total_inputs: u32 = inputs.iter().map(|(input, _)| input.inp).sum();
 
-        if (p0_inputs + p1_inputs) % 2 == 0 {
+        if total_inputs % 2 == 0 {
             self.state += 2;
         } else {
             self.state -= 1;

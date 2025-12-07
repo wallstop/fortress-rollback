@@ -9,7 +9,7 @@
 //#![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 use std::{fmt::Debug, hash::Hash};
 
-pub use error::GgrsError;
+pub use error::FortressError;
 pub use network::messages::Message;
 pub use network::network_stats::NetworkStats;
 pub use network::udp_socket::UdpNonBlockingSocket;
@@ -24,6 +24,7 @@ pub(crate) mod error;
 pub(crate) mod frame_info;
 pub(crate) mod input_queue;
 pub(crate) mod sync_layer;
+pub mod telemetry;
 pub(crate) mod time_sync;
 pub(crate) mod sessions {
     pub(crate) mod builder;
@@ -45,10 +46,346 @@ pub(crate) mod network {
 
 /// Internally, -1 represents no frame / invalid frame.
 pub const NULL_FRAME: i32 = -1;
-/// A frame is a single step of execution.
-pub type Frame = i32;
-/// Each player is identified by a player handle.
-pub type PlayerHandle = usize;
+
+/// A frame is a single step of game execution.
+///
+/// Frames are the fundamental unit of time in rollback networking. Each frame
+/// represents one discrete step of game simulation. Frame numbers start at 0
+/// and increment sequentially.
+///
+/// The special value [`NULL_FRAME`] (-1) represents "no frame" or "uninitialized".
+///
+/// # Type Safety
+///
+/// `Frame` is a newtype wrapper around `i32` that provides:
+/// - Clear semantic meaning (frames vs arbitrary integers)
+/// - Helper methods like [`is_null()`](Frame::is_null) and [`is_valid()`](Frame::is_valid)
+/// - Arithmetic operations for frame calculations
+/// - Compile-time prevention of accidentally mixing frames with other integers
+///
+/// # Examples
+///
+/// ```
+/// use fortress_rollback::{Frame, NULL_FRAME};
+///
+/// // Creating frames
+/// let frame = Frame::new(0);
+/// let null_frame = Frame::NULL;
+///
+/// // Checking validity
+/// assert!(frame.is_valid());
+/// assert!(null_frame.is_null());
+///
+/// // Frame arithmetic
+/// let next_frame = frame + 1;
+/// assert_eq!(next_frame.as_i32(), 1);
+///
+/// // Comparison
+/// assert!(next_frame > frame);
+/// ```
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default,
+    serde::Serialize, serde::Deserialize,
+)]
+pub struct Frame(i32);
+
+impl Frame {
+    /// The null frame constant, representing "no frame" or "uninitialized".
+    ///
+    /// This is equivalent to [`NULL_FRAME`] (-1).
+    pub const NULL: Frame = Frame(NULL_FRAME);
+
+    /// Creates a new `Frame` from an `i32` value.
+    ///
+    /// Note: This does not validate the frame number. Use [`Frame::is_valid()`]
+    /// to check if the frame represents a valid (non-negative) frame number.
+    #[inline]
+    pub const fn new(frame: i32) -> Self {
+        Frame(frame)
+    }
+
+    /// Returns the underlying `i32` value.
+    #[inline]
+    pub const fn as_i32(self) -> i32 {
+        self.0
+    }
+
+    /// Returns `true` if this frame is the null frame (equivalent to [`NULL_FRAME`]).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// assert!(Frame::NULL.is_null());
+    /// assert!(!Frame::new(0).is_null());
+    /// ```
+    #[inline]
+    pub const fn is_null(self) -> bool {
+        self.0 == NULL_FRAME
+    }
+
+    /// Returns `true` if this frame is valid (non-negative).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// assert!(Frame::new(0).is_valid());
+    /// assert!(Frame::new(100).is_valid());
+    /// assert!(!Frame::NULL.is_valid());
+    /// assert!(!Frame::new(-5).is_valid());
+    /// ```
+    #[inline]
+    pub const fn is_valid(self) -> bool {
+        self.0 >= 0
+    }
+
+    /// Returns `Some(self)` if the frame is valid, or `None` if it's null or negative.
+    ///
+    /// This is useful for handling the null/valid frame pattern with Option.
+    #[inline]
+    pub const fn to_option(self) -> Option<Frame> {
+        if self.is_valid() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
+    /// Creates a Frame from an Option, using NULL for None.
+    #[inline]
+    pub const fn from_option(opt: Option<Frame>) -> Frame {
+        match opt {
+            Some(f) => f,
+            None => Frame::NULL,
+        }
+    }
+}
+
+impl std::fmt::Display for Frame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_null() {
+            write!(f, "NULL_FRAME")
+        } else {
+            write!(f, "{}", self.0)
+        }
+    }
+}
+
+// Arithmetic operations
+
+impl std::ops::Add<i32> for Frame {
+    type Output = Frame;
+
+    #[inline]
+    fn add(self, rhs: i32) -> Self::Output {
+        Frame(self.0 + rhs)
+    }
+}
+
+impl std::ops::Add<Frame> for Frame {
+    type Output = Frame;
+
+    #[inline]
+    fn add(self, rhs: Frame) -> Self::Output {
+        Frame(self.0 + rhs.0)
+    }
+}
+
+impl std::ops::AddAssign<i32> for Frame {
+    #[inline]
+    fn add_assign(&mut self, rhs: i32) {
+        self.0 += rhs;
+    }
+}
+
+impl std::ops::Sub<i32> for Frame {
+    type Output = Frame;
+
+    #[inline]
+    fn sub(self, rhs: i32) -> Self::Output {
+        Frame(self.0 - rhs)
+    }
+}
+
+impl std::ops::Sub<Frame> for Frame {
+    type Output = i32;
+
+    #[inline]
+    fn sub(self, rhs: Frame) -> Self::Output {
+        self.0 - rhs.0
+    }
+}
+
+impl std::ops::SubAssign<i32> for Frame {
+    #[inline]
+    fn sub_assign(&mut self, rhs: i32) {
+        self.0 -= rhs;
+    }
+}
+
+impl std::ops::Rem<i32> for Frame {
+    type Output = i32;
+
+    #[inline]
+    fn rem(self, rhs: i32) -> Self::Output {
+        self.0 % rhs
+    }
+}
+
+// Conversion traits for backwards compatibility
+
+impl From<i32> for Frame {
+    #[inline]
+    fn from(value: i32) -> Self {
+        Frame(value)
+    }
+}
+
+impl From<Frame> for i32 {
+    #[inline]
+    fn from(frame: Frame) -> Self {
+        frame.0
+    }
+}
+
+impl From<usize> for Frame {
+    #[inline]
+    fn from(value: usize) -> Self {
+        Frame(value as i32)
+    }
+}
+
+// Comparison with i32 for convenience
+
+impl PartialEq<i32> for Frame {
+    #[inline]
+    fn eq(&self, other: &i32) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialOrd<i32> for Frame {
+    #[inline]
+    fn partial_cmp(&self, other: &i32) -> Option<std::cmp::Ordering> {
+        self.0.partial_cmp(other)
+    }
+}
+
+/// A unique identifier for a player or spectator in a session.
+///
+/// Player handles are the primary way to reference participants in a Fortress Rollback
+/// session. Each player or spectator is assigned a unique handle when added to the session.
+///
+/// # Handle Ranges
+///
+/// - **Players**: Handles `0` through `num_players - 1` are reserved for active players
+/// - **Spectators**: Handles `num_players` and above are used for spectators
+///
+/// # Type Safety
+///
+/// `PlayerHandle` is a newtype wrapper around `usize` that provides:
+/// - Clear semantic meaning (player identifiers vs arbitrary integers)
+/// - Helper methods like [`is_spectator_for()`](PlayerHandle::is_spectator_for)
+/// - Compile-time prevention of accidentally mixing handles with other integers
+///
+/// # Examples
+///
+/// ```
+/// use fortress_rollback::PlayerHandle;
+///
+/// // Creating handles
+/// let player = PlayerHandle::new(0);
+/// let spectator = PlayerHandle::new(2); // In a 2-player game
+///
+/// // Checking if a handle is for a spectator
+/// assert!(!player.is_spectator_for(2));
+/// assert!(spectator.is_spectator_for(2));
+///
+/// // Getting the raw value
+/// assert_eq!(player.as_usize(), 0);
+/// ```
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default,
+    serde::Serialize, serde::Deserialize,
+)]
+pub struct PlayerHandle(usize);
+
+impl PlayerHandle {
+    /// Creates a new `PlayerHandle` from a `usize` value.
+    ///
+    /// Note: This does not validate the handle against a specific session.
+    /// Use [`is_valid_player_for()`](Self::is_valid_player_for) or
+    /// [`is_spectator_for()`](Self::is_spectator_for) to check validity.
+    #[inline]
+    pub const fn new(handle: usize) -> Self {
+        PlayerHandle(handle)
+    }
+
+    /// Returns the underlying `usize` value.
+    #[inline]
+    pub const fn as_usize(self) -> usize {
+        self.0
+    }
+
+    /// Returns `true` if this handle refers to a valid player (not spectator)
+    /// for a session with the given number of players.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::PlayerHandle;
+    ///
+    /// let handle = PlayerHandle::new(1);
+    /// assert!(handle.is_valid_player_for(2));  // Valid for 2-player session
+    /// assert!(!handle.is_valid_player_for(1)); // Invalid for 1-player session
+    /// ```
+    #[inline]
+    pub const fn is_valid_player_for(self, num_players: usize) -> bool {
+        self.0 < num_players
+    }
+
+    /// Returns `true` if this handle refers to a spectator
+    /// for a session with the given number of players.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::PlayerHandle;
+    ///
+    /// let handle = PlayerHandle::new(2);
+    /// assert!(handle.is_spectator_for(2));  // Spectator in 2-player session
+    /// assert!(!handle.is_spectator_for(3)); // Player in 3-player session
+    /// ```
+    #[inline]
+    pub const fn is_spectator_for(self, num_players: usize) -> bool {
+        self.0 >= num_players
+    }
+}
+
+impl std::fmt::Display for PlayerHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// Conversion traits for backwards compatibility
+
+impl From<usize> for PlayerHandle {
+    #[inline]
+    fn from(value: usize) -> Self {
+        PlayerHandle(value)
+    }
+}
+
+impl From<PlayerHandle> for usize {
+    #[inline]
+    fn from(handle: PlayerHandle) -> Self {
+        handle.0
+    }
+}
 
 // #############
 // #   ENUMS   #
@@ -66,28 +403,24 @@ pub enum DesyncDetection {
     Off,
 }
 
-/// Defines the three types of players that GGRS considers:
+/// Defines the three types of players that Fortress Rollback considers:
 /// - local players, who play on the local device,
 /// - remote players, who play on other devices and
 /// - spectators, who are remote players that do not contribute to the game input.
+///
 /// Both [`PlayerType::Remote`] and [`PlayerType::Spectator`] have a socket address associated with them.
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Default, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PlayerType<A>
 where
     A: Clone + PartialEq + Eq + PartialOrd + Ord + Hash,
 {
     /// This player plays on the local device.
+    #[default]
     Local,
     /// This player plays on a remote device identified by the socket address.
     Remote(A),
     /// This player spectates on a remote device identified by the socket address. They do not contribute to the game input.
     Spectator(A),
-}
-
-impl<A: Clone + PartialEq + Eq + PartialOrd + Ord + Hash> Default for PlayerType<A> {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 /// A session is always in one of these states. You can query the current state of a session via [`current_state`].
@@ -114,7 +447,7 @@ pub enum InputStatus {
 
 /// Notifications that you can receive from the session. Handling them is up to the user.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum GgrsEvent<T>
+pub enum FortressEvent<T>
 where
     T: Config,
 {
@@ -144,17 +477,17 @@ where
         /// The client will be disconnected in this amount of ms.
         disconnect_timeout: u128,
     },
-    /// Sent only after a [`GgrsEvent::NetworkInterrupted`] event, if communication with that player has resumed.
+    /// Sent only after a [`FortressEvent::NetworkInterrupted`] event, if communication with that player has resumed.
     NetworkResumed {
         /// The address of the endpoint.
         addr: T::Address,
     },
-    /// Sent out if GGRS recommends skipping a few frames to let clients catch up. If you receive this, consider waiting `skip_frames` number of frames.
+    /// Sent out if Fortress Rollback recommends skipping a few frames to let clients catch up. If you receive this, consider waiting `skip_frames` number of frames.
     WaitRecommendation {
         /// Amount of frames recommended to be skipped in order to let other clients catch up.
         skip_frames: u32,
     },
-    /// Sent whenever GGRS locally detected a discrepancy between local and remote checksums
+    /// Sent whenever Fortress Rollback locally detected a discrepancy between local and remote checksums
     DesyncDetected {
         /// Frame of the checksums
         frame: Frame,
@@ -168,7 +501,7 @@ where
 }
 
 /// Requests that you can receive from the session. Handling them is mandatory.
-pub enum GgrsRequest<T>
+pub enum FortressRequest<T>
 where
     T: Config,
 {

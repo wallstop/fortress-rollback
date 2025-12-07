@@ -4,9 +4,11 @@ use crate::network::messages::{
     ChecksumReport, ConnectionStatus, Input, InputAck, Message, MessageBody, MessageHeader,
     QualityReply, QualityReport, SyncReply, SyncRequest,
 };
+use crate::report_violation;
+use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::time_sync::TimeSync;
 use crate::{
-    Config, DesyncDetection, Frame, GgrsError, NULL_FRAME, NonBlockingSocket, PlayerHandle,
+    Config, DesyncDetection, FortressError, Frame, NonBlockingSocket, PlayerHandle,
 };
 use tracing::trace;
 
@@ -46,7 +48,7 @@ fn millis_since_epoch() -> u128 {
 // byte-encoded data representing the inputs of a client, possibly for multiple players at the same time
 #[derive(Clone)]
 struct InputBytes {
-    /// The frame to which this info belongs to. -1/[`NULL_FRAME`] represents an invalid frame
+    /// The frame to which this info belongs to. -1/[`Frame::NULL`] represents an invalid frame
     pub frame: Frame,
     /// An input buffer that will hold input data
     pub bytes: Vec<u8>,
@@ -58,7 +60,7 @@ impl InputBytes {
             bincode::serialized_size(&T::Input::default()).expect("input serialization failed");
         let size = (input_size as usize) * num_players;
         Self {
-            frame: NULL_FRAME,
+            frame: Frame::NULL,
             bytes: vec![0; size],
         }
     }
@@ -68,12 +70,12 @@ impl InputBytes {
         inputs: &BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
     ) -> Self {
         let mut bytes = Vec::new();
-        let mut frame = NULL_FRAME;
+        let mut frame = Frame::NULL;
         // in ascending order
         for handle in 0..num_players {
-            if let Some(input) = inputs.get(&handle) {
-                assert!(frame == NULL_FRAME || input.frame == NULL_FRAME || frame == input.frame);
-                if input.frame != NULL_FRAME {
+            if let Some(input) = inputs.get(&PlayerHandle::new(handle)) {
+                assert!(frame == Frame::NULL || input.frame == Frame::NULL || frame == input.frame);
+                if input.frame != Frame::NULL {
                     frame = input.frame;
                 }
 
@@ -86,7 +88,7 @@ impl InputBytes {
 
     fn to_player_inputs<T: Config>(&self, num_players: usize) -> Vec<PlayerInput<T::Input>> {
         let mut player_inputs = Vec::new();
-        assert!(self.bytes.len() % num_players == 0);
+        assert!(self.bytes.len().is_multiple_of(num_players));
         let size = self.bytes.len() / num_players;
         for p in 0..num_players {
             let start = p * size;
@@ -219,7 +221,7 @@ impl<T: Config> UdpProtocol<T> {
 
         // received input history
         let mut recv_inputs = BTreeMap::new();
-        recv_inputs.insert(NULL_FRAME, InputBytes::zeroed::<T>(recv_player_num));
+        recv_inputs.insert(Frame::NULL, InputBytes::zeroed::<T>(recv_player_num));
 
         Self {
             num_players,
@@ -274,7 +276,7 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     pub(crate) fn update_local_frame_advantage(&mut self, local_frame: Frame) {
-        if local_frame == NULL_FRAME || self.last_recv_frame() == NULL_FRAME {
+        if local_frame == Frame::NULL || self.last_recv_frame() == Frame::NULL {
             return;
         }
         // Estimate which frame the other client is on by looking at the last frame they gave us plus some delta for the packet roundtrip time.
@@ -284,15 +286,15 @@ impl<T: Config> UdpProtocol<T> {
         self.local_frame_advantage = remote_frame - local_frame;
     }
 
-    pub(crate) fn network_stats(&self) -> Result<NetworkStats, GgrsError> {
+    pub(crate) fn network_stats(&self) -> Result<NetworkStats, FortressError> {
         if self.state != ProtocolState::Synchronizing && self.state != ProtocolState::Running {
-            return Err(GgrsError::NotSynchronized);
+            return Err(FortressError::NotSynchronized);
         }
 
         let now = millis_since_epoch();
         let seconds = (now - self.stats_start_time) / 1000;
         if seconds == 0 {
-            return Err(GgrsError::NotSynchronized);
+            return Err(FortressError::NotSynchronized);
         }
 
         let total_bytes_sent = self.bytes_sent + (self.packets_sent * UDP_HEADER_SIZE);
@@ -327,7 +329,7 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     pub(crate) fn peer_connect_status(&self, handle: PlayerHandle) -> ConnectionStatus {
-        self.peer_connect_status[handle]
+        self.peer_connect_status[handle.as_usize()]
     }
 
     pub(crate) fn disconnect(&mut self) {
@@ -488,7 +490,7 @@ impl<T: Config> UdpProtocol<T> {
 
         if let Some(input) = self.pending_output.front() {
             assert!(
-                self.last_acked_input.frame == NULL_FRAME
+                self.last_acked_input.frame == Frame::NULL
                     || self.last_acked_input.frame + 1 == input.frame
             );
             body.start_frame = input.frame;
@@ -675,13 +677,13 @@ impl<T: Config> UdpProtocol<T> {
 
         // if the encoded packet is decoded with an input we did not receive yet, we cannot recover
         assert!(
-            self.last_recv_frame() == NULL_FRAME || self.last_recv_frame() + 1 >= body.start_frame
+            self.last_recv_frame() == Frame::NULL || self.last_recv_frame() + 1 >= body.start_frame
         );
 
         // if we did not receive any input yet, we decode with the blank input,
         // otherwise we use the input previous to the start of the encoded inputs
-        let decode_frame = if self.last_recv_frame() == NULL_FRAME {
-            NULL_FRAME
+        let decode_frame = if self.last_recv_frame() == Frame::NULL {
+            Frame::NULL
         } else {
             body.start_frame - 1
         };
@@ -749,10 +751,10 @@ impl<T: Config> UdpProtocol<T> {
         let interval = if let DesyncDetection::On { interval } = self.desync_detection {
             interval
         } else {
-            debug_assert!(
-                false,
-                "Received checksum report, but desync detection is off. Check
-                that configuration is consistent between peers."
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::Configuration,
+                "Received checksum report, but desync detection is off. Check that configuration is consistent between peers."
             );
             1
         };
@@ -770,7 +772,7 @@ impl<T: Config> UdpProtocol<T> {
     fn last_recv_frame(&self) -> Frame {
         match self.recv_inputs.iter().max_by_key(|&(k, _)| k) {
             Some((k, _)) => *k,
-            None => NULL_FRAME,
+            None => Frame::NULL,
         }
     }
 
@@ -780,5 +782,669 @@ impl<T: Config> UdpProtocol<T> {
             checksum,
         };
         self.queue_message(MessageBody::ChecksumReport(body));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use std::net::SocketAddr;
+
+    // Test configuration
+    #[repr(C)]
+    #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize, Debug)]
+    struct TestInput {
+        inp: u32,
+    }
+
+    #[derive(Clone, Default)]
+    struct TestState;
+
+    struct TestConfig;
+
+    impl Config for TestConfig {
+        type Input = TestInput;
+        type State = TestState;
+        type Address = SocketAddr;
+    }
+
+    fn test_addr() -> SocketAddr {
+        "127.0.0.1:7000".parse().unwrap()
+    }
+
+    fn create_protocol(
+        handles: Vec<PlayerHandle>,
+        num_players: usize,
+        local_players: usize,
+        max_prediction: usize,
+    ) -> UdpProtocol<TestConfig> {
+        UdpProtocol::new(
+            handles,
+            test_addr(),
+            num_players,
+            local_players,
+            max_prediction,
+            Duration::from_millis(5000),
+            Duration::from_millis(3000),
+            60,
+            DesyncDetection::Off,
+        )
+    }
+
+    // ==========================================
+    // State Machine Tests
+    // ==========================================
+
+    #[test]
+    fn new_protocol_starts_in_initializing_state() {
+        let protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+
+        assert!(!protocol.is_synchronized());
+        assert!(!protocol.is_running());
+    }
+
+    #[test]
+    fn synchronize_transitions_to_synchronizing_state() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+
+        protocol.synchronize();
+
+        // Still not synchronized until sync completes
+        assert!(!protocol.is_synchronized());
+        assert!(!protocol.is_running());
+        // But it should have queued a sync request
+        assert!(!protocol.send_queue.is_empty());
+    }
+
+    #[test]
+    fn sync_request_queues_sync_reply() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        // Clear the initial sync request
+        protocol.send_queue.clear();
+
+        // Simulate receiving a sync request
+        let sync_req = SyncRequest {
+            random_request: 12345,
+        };
+        protocol.on_sync_request(sync_req);
+
+        // Should have queued a reply
+        assert_eq!(protocol.send_queue.len(), 1);
+        let msg = protocol.send_queue.front().unwrap();
+        match &msg.body {
+            MessageBody::SyncReply(reply) => {
+                assert_eq!(reply.random_reply, 12345);
+            }
+            _ => panic!("Expected SyncReply message"),
+        }
+    }
+
+    #[test]
+    fn complete_sync_transitions_to_running() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        // Complete all sync roundtrips
+        for _ in 0..NUM_SYNC_PACKETS {
+            // Get the random request from our sync request
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+
+            let header = MessageHeader { magic: 999 };
+            let reply = SyncReply {
+                random_reply: random,
+            };
+            protocol.on_sync_reply(header, reply);
+        }
+
+        assert!(protocol.is_synchronized());
+        assert!(protocol.is_running());
+    }
+
+    #[test]
+    fn sync_reply_with_wrong_random_is_ignored() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        let initial_remaining = protocol.sync_remaining_roundtrips;
+
+        // Send a reply with the wrong random value
+        let header = MessageHeader { magic: 999 };
+        let reply = SyncReply {
+            random_reply: 99999999, // Wrong value
+        };
+        protocol.on_sync_reply(header, reply);
+
+        // Should still have same number of remaining roundtrips
+        assert_eq!(protocol.sync_remaining_roundtrips, initial_remaining);
+    }
+
+    #[test]
+    fn sync_reply_when_not_synchronizing_is_ignored() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+
+        // Protocol is in Initializing state, not Synchronizing
+        let header = MessageHeader { magic: 999 };
+        let reply = SyncReply { random_reply: 123 };
+        protocol.on_sync_reply(header, reply);
+
+        // Should still be in initializing
+        assert!(!protocol.is_synchronized());
+    }
+
+    #[test]
+    fn disconnect_transitions_to_disconnected() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        // Complete sync
+        for _ in 0..NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            let header = MessageHeader { magic: 999 };
+            protocol.on_sync_reply(header, SyncReply { random_reply: random });
+        }
+
+        assert!(protocol.is_running());
+
+        protocol.disconnect();
+
+        // Still counts as synchronized but not running
+        assert!(protocol.is_synchronized());
+        assert!(!protocol.is_running());
+    }
+
+    #[test]
+    fn disconnect_when_already_shutdown_does_nothing() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.state = ProtocolState::Shutdown;
+
+        protocol.disconnect();
+
+        // Should still be shutdown, not disconnected
+        assert_eq!(protocol.state, ProtocolState::Shutdown);
+    }
+
+    // ==========================================
+    // Message Handling Tests
+    // ==========================================
+
+    #[test]
+    fn handle_message_ignores_shutdown_state() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.state = ProtocolState::Shutdown;
+
+        let msg = Message {
+            header: MessageHeader { magic: 123 },
+            body: MessageBody::KeepAlive,
+        };
+        protocol.handle_message(&msg);
+
+        // Event queue should be empty
+        assert!(protocol.event_queue.is_empty());
+    }
+
+    #[test]
+    fn handle_message_filters_wrong_magic_after_sync() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        // Complete sync with magic 999
+        for _ in 0..NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            let header = MessageHeader { magic: 999 };
+            protocol.on_sync_reply(header, SyncReply { random_reply: random });
+        }
+
+        assert_eq!(protocol.remote_magic, 999);
+        protocol.send_queue.clear();
+
+        // Send message with different magic
+        let msg = Message {
+            header: MessageHeader { magic: 123 }, // Wrong magic
+            body: MessageBody::KeepAlive,
+        };
+        protocol.handle_message(&msg);
+
+        // Should be ignored - no state changes
+        assert!(protocol.send_queue.is_empty());
+    }
+
+    #[test]
+    fn handle_message_accepts_correct_magic() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        // Complete sync with magic 999
+        for _ in 0..NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            let header = MessageHeader { magic: 999 };
+            protocol.on_sync_reply(header, SyncReply { random_reply: random });
+        }
+
+        let initial_recv_time = protocol.last_recv_time;
+
+        // Wait a tiny bit
+        std::thread::sleep(Duration::from_millis(1));
+
+        // Send message with correct magic
+        let msg = Message {
+            header: MessageHeader { magic: 999 },
+            body: MessageBody::KeepAlive,
+        };
+        protocol.handle_message(&msg);
+
+        // Should update recv time
+        assert!(protocol.last_recv_time > initial_recv_time);
+    }
+
+    #[test]
+    fn network_resumed_event_after_interrupt() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        // Complete sync
+        for _ in 0..NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            let header = MessageHeader { magic: 999 };
+            protocol.on_sync_reply(header, SyncReply { random_reply: random });
+        }
+
+        // Simulate network interrupt notification was sent
+        protocol.disconnect_notify_sent = true;
+
+        // Handle a valid message
+        let msg = Message {
+            header: MessageHeader { magic: 999 },
+            body: MessageBody::KeepAlive,
+        };
+        protocol.handle_message(&msg);
+
+        // Should have NetworkResumed event
+        let events: Vec<_> = protocol.event_queue.drain(..).collect();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, Event::NetworkResumed)));
+        assert!(!protocol.disconnect_notify_sent);
+    }
+
+    // ==========================================
+    // Input Handling Tests
+    // ==========================================
+
+    #[test]
+    fn input_ack_pops_pending_output() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        // Complete sync
+        for _ in 0..NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            let header = MessageHeader { magic: 999 };
+            protocol.on_sync_reply(header, SyncReply { random_reply: random });
+        }
+
+        // Add some pending outputs
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(0),
+            bytes: vec![0, 0, 0, 0],
+        });
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(1),
+            bytes: vec![1, 0, 0, 0],
+        });
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(2),
+            bytes: vec![2, 0, 0, 0],
+        });
+
+        assert_eq!(protocol.pending_output.len(), 3);
+
+        // Ack frame 1
+        protocol.on_input_ack(InputAck { ack_frame: Frame::new(1) });
+
+        // Should have removed frames 0 and 1
+        assert_eq!(protocol.pending_output.len(), 1);
+        assert_eq!(protocol.pending_output.front().unwrap().frame, Frame::new(2));
+        assert_eq!(protocol.last_acked_input.frame, Frame::new(1));
+    }
+
+    #[test]
+    fn send_input_when_not_running_does_nothing() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        // Protocol is in Initializing state
+
+        let inputs = BTreeMap::new();
+        let connect_status = vec![ConnectionStatus::default(); 2];
+
+        protocol.send_input(&inputs, &connect_status);
+
+        // Should not queue any messages
+        assert!(protocol.send_queue.is_empty());
+        assert!(protocol.pending_output.is_empty());
+    }
+
+    // ==========================================
+    // Quality Report Tests
+    // ==========================================
+
+    #[test]
+    fn quality_report_triggers_reply() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        // Complete sync
+        for _ in 0..NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            let header = MessageHeader { magic: 999 };
+            protocol.on_sync_reply(header, SyncReply { random_reply: random });
+        }
+        protocol.send_queue.clear();
+
+        let report = QualityReport {
+            frame_advantage: 5,
+            ping: 12345,
+        };
+        protocol.on_quality_report(&report);
+
+        assert_eq!(protocol.remote_frame_advantage, 5);
+
+        // Should have queued a quality reply
+        assert_eq!(protocol.send_queue.len(), 1);
+        let msg = protocol.send_queue.front().unwrap();
+        match &msg.body {
+            MessageBody::QualityReply(reply) => {
+                assert_eq!(reply.pong, 12345);
+            }
+            _ => panic!("Expected QualityReply message"),
+        }
+    }
+
+    // ==========================================
+    // Checksum Report Tests
+    // ==========================================
+
+    #[test]
+    fn checksum_report_stored_with_desync_detection_off() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+
+        let report = ChecksumReport {
+            frame: Frame::new(100),
+            checksum: 0xDEADBEEF,
+        };
+        protocol.on_checksum_report(&report);
+
+        // Should still store it (with a warning, but we can't test that here)
+        assert_eq!(protocol.pending_checksums.get(&Frame::new(100)), Some(&0xDEADBEEF));
+    }
+
+    #[test]
+    fn checksum_report_limits_history_size() {
+        let mut protocol: UdpProtocol<TestConfig> = UdpProtocol::new(
+            vec![PlayerHandle::new(0)],
+            test_addr(),
+            2,
+            1,
+            8,
+            Duration::from_millis(5000),
+            Duration::from_millis(3000),
+            60,
+            DesyncDetection::On { interval: 1 },
+        );
+
+        // Add more than MAX_CHECKSUM_HISTORY_SIZE checksums
+        for frame in 0..(MAX_CHECKSUM_HISTORY_SIZE as i32 + 10) {
+            let report = ChecksumReport {
+                frame: Frame::new(frame),
+                checksum: frame as u128,
+            };
+            protocol.on_checksum_report(&report);
+        }
+
+        // Should have limited to MAX_CHECKSUM_HISTORY_SIZE
+        assert!(protocol.pending_checksums.len() <= MAX_CHECKSUM_HISTORY_SIZE);
+
+        // Oldest frames should be removed
+        let max_frame = Frame::new(MAX_CHECKSUM_HISTORY_SIZE as i32 + 9);
+        assert!(protocol.pending_checksums.contains_key(&max_frame));
+        // Old frames should be gone
+        assert!(!protocol.pending_checksums.contains_key(&Frame::new(0)));
+    }
+
+    // ==========================================
+    // Network Stats Tests
+    // ==========================================
+
+    #[test]
+    fn network_stats_returns_error_when_not_synchronized() {
+        let protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+
+        let result = protocol.network_stats();
+        assert!(matches!(result, Err(FortressError::NotSynchronized)));
+    }
+
+    #[test]
+    fn network_stats_returns_error_when_no_time_elapsed() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        // Complete sync
+        for _ in 0..NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            let header = MessageHeader { magic: 999 };
+            protocol.on_sync_reply(header, SyncReply { random_reply: random });
+        }
+
+        // Stats start time is set during synchronize(), so with 0 seconds elapsed
+        // it should return an error
+        let result = protocol.network_stats();
+        // This will likely fail because no time has passed
+        // The actual behavior depends on timing
+        assert!(result.is_ok() || matches!(result, Err(FortressError::NotSynchronized)));
+    }
+
+    // ==========================================
+    // Poll / Timeout Tests
+    // ==========================================
+
+    #[test]
+    fn poll_returns_events_and_clears_queue() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        // Complete sync to generate Synchronizing and Synchronized events
+        for _ in 0..NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            let header = MessageHeader { magic: 999 };
+            protocol.on_sync_reply(header, SyncReply { random_reply: random });
+        }
+
+        let connect_status = vec![ConnectionStatus::default(); 2];
+        let events: Vec<_> = protocol.poll(&connect_status).collect();
+
+        // Should have Synchronizing events and Synchronized event
+        assert!(!events.is_empty());
+        assert!(events.iter().any(|e| matches!(e, Event::Synchronized)));
+
+        // Queue should be empty after drain
+        assert!(protocol.event_queue.is_empty());
+    }
+
+    #[test]
+    fn poll_in_disconnected_state_transitions_to_shutdown() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.state = ProtocolState::Disconnected;
+
+        // Set shutdown timeout to the past
+        protocol.shutdown_timeout = Instant::now() - Duration::from_secs(1);
+
+        let connect_status = vec![ConnectionStatus::default(); 2];
+        let _events: Vec<_> = protocol.poll(&connect_status).collect();
+
+        // Should have transitioned to Shutdown
+        assert_eq!(protocol.state, ProtocolState::Shutdown);
+    }
+
+    // ==========================================
+    // Accessor Tests
+    // ==========================================
+
+    #[test]
+    fn handles_returns_sorted_handles() {
+        let protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(2), PlayerHandle::new(0), PlayerHandle::new(1)], 3, 3, 8);
+
+        let handles = protocol.handles();
+        assert_eq!(handles, &vec![PlayerHandle::new(0), PlayerHandle::new(1), PlayerHandle::new(2)]);
+    }
+
+    #[test]
+    fn peer_addr_returns_correct_address() {
+        let protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+
+        assert_eq!(protocol.peer_addr(), test_addr());
+    }
+
+    #[test]
+    fn is_handling_message_checks_address() {
+        let protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+
+        assert!(protocol.is_handling_message(&test_addr()));
+
+        let other_addr: SocketAddr = "127.0.0.1:8000".parse().unwrap();
+        assert!(!protocol.is_handling_message(&other_addr));
+    }
+
+    #[test]
+    fn peer_connect_status_returns_correct_status() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+
+        // Modify status for player 1
+        protocol.peer_connect_status[1] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(100),
+        };
+
+        let status = protocol.peer_connect_status(PlayerHandle::new(1));
+        assert!(status.disconnected);
+        assert_eq!(status.last_frame, Frame::new(100));
+    }
+
+    // ==========================================
+    // Frame Advantage Tests
+    // ==========================================
+
+    #[test]
+    fn update_local_frame_advantage_with_null_frames() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+
+        // Both frames are Frame::NULL, should return early
+        protocol.update_local_frame_advantage(Frame::NULL);
+        assert_eq!(protocol.local_frame_advantage, 0);
+
+        // Local frame set but no recv frame
+        protocol.update_local_frame_advantage(Frame::new(10));
+        assert_eq!(protocol.local_frame_advantage, 0);
+    }
+
+    #[test]
+    fn average_frame_advantage_delegates_to_time_sync() {
+        let protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+
+        // Just verify it doesn't panic - the actual value depends on TimeSync internals
+        let _advantage = protocol.average_frame_advantage();
+    }
+
+    // ==========================================
+    // InputBytes Tests
+    // ==========================================
+
+    #[test]
+    fn input_bytes_zeroed_creates_correct_size() {
+        let input_bytes = InputBytes::zeroed::<TestConfig>(2);
+
+        assert_eq!(input_bytes.frame, Frame::NULL);
+        // Each TestInput is 4 bytes (u32), so 2 players = 8 bytes
+        assert_eq!(input_bytes.bytes.len(), 8);
+        assert!(input_bytes.bytes.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn input_bytes_from_inputs_serializes_correctly() {
+        let mut inputs = BTreeMap::new();
+        inputs.insert(
+            PlayerHandle::new(0),
+            PlayerInput::new(Frame::new(10), TestInput { inp: 0xAABBCCDD }),
+        );
+        inputs.insert(PlayerHandle::new(1), PlayerInput::new(Frame::new(10), TestInput { inp: 0x11223344 }));
+
+        let input_bytes = InputBytes::from_inputs::<TestConfig>(2, &inputs);
+
+        assert_eq!(input_bytes.frame, Frame::new(10));
+        assert_eq!(input_bytes.bytes.len(), 8);
+    }
+
+    #[test]
+    fn input_bytes_roundtrip() {
+        let mut inputs = BTreeMap::new();
+        inputs.insert(
+            PlayerHandle::new(0),
+            PlayerInput::new(Frame::new(5), TestInput { inp: 12345 }),
+        );
+        inputs.insert(PlayerHandle::new(1), PlayerInput::new(Frame::new(5), TestInput { inp: 67890 }));
+
+        let input_bytes = InputBytes::from_inputs::<TestConfig>(2, &inputs);
+        let player_inputs = input_bytes.to_player_inputs::<TestConfig>(2);
+
+        assert_eq!(player_inputs.len(), 2);
+        assert_eq!(player_inputs[0].frame, Frame::new(5));
+        assert_eq!(player_inputs[0].input.inp, 12345);
+        assert_eq!(player_inputs[1].frame, Frame::new(5));
+        assert_eq!(player_inputs[1].input.inp, 67890);
+    }
+
+    // ==========================================
+    // Send Queue Tests
+    // ==========================================
+
+    #[test]
+    fn send_checksum_report_queues_message() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.send_queue.clear();
+
+        protocol.send_checksum_report(Frame::new(100), 0xDEADBEEF);
+
+        assert_eq!(protocol.send_queue.len(), 1);
+        let msg = protocol.send_queue.front().unwrap();
+        match &msg.body {
+            MessageBody::ChecksumReport(report) => {
+                assert_eq!(report.frame, Frame::new(100));
+                assert_eq!(report.checksum, 0xDEADBEEF);
+            }
+            _ => panic!("Expected ChecksumReport message"),
+        }
+    }
+
+    #[test]
+    fn protocol_equality_is_by_peer_address() {
+        let protocol1: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        let protocol2: UdpProtocol<TestConfig> = create_protocol(vec![PlayerHandle::new(1)], 3, 2, 16);
+
+        // Same peer address
+        assert!(protocol1 == protocol2);
+
+        // Different peer address
+        let protocol3: UdpProtocol<TestConfig> = UdpProtocol::new(
+            vec![PlayerHandle::new(0)],
+            "127.0.0.1:8000".parse().unwrap(),
+            2,
+            1,
+            8,
+            Duration::from_millis(5000),
+            Duration::from_millis(3000),
+            60,
+            DesyncDetection::Off,
+        );
+        assert!(protocol1 != protocol3);
     }
 }

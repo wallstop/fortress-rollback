@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use instant::Duration;
 
 use crate::{
-    Config, DesyncDetection, GgrsError, NonBlockingSocket, P2PSession, PlayerHandle, PlayerType,
-    SpectatorSession, SyncTestSession, network::protocol::UdpProtocol,
+    Config, DesyncDetection, FortressError, NonBlockingSocket, P2PSession, PlayerHandle,
+    PlayerType, SpectatorSession, SyncTestSession, network::protocol::UdpProtocol,
     sessions::p2p_session::PlayerRegistry,
+    telemetry::ViolationObserver,
 };
 
 use super::p2p_spectator_session::SPECTATOR_BUFFER_SIZE;
@@ -26,9 +28,8 @@ const DEFAULT_CATCHUP_SPEED: usize = 1;
 // The amount of events a spectator can buffer; should never be an issue if the user polls the events at every step
 pub(crate) const MAX_EVENT_QUEUE_SIZE: usize = 100;
 
-/// The [`SessionBuilder`] builds all GGRS Sessions. After setting all appropriate values, use `SessionBuilder::start_yxz_session(...)`
+/// The [`SessionBuilder`] builds all Fortress Rollback Sessions. After setting all appropriate values, use `SessionBuilder::start_yxz_session(...)`
 /// to consume the builder and create a Session of desired type.
-#[derive(Debug)]
 pub struct SessionBuilder<T>
 where
     T: Config,
@@ -49,6 +50,29 @@ where
     check_dist: usize,
     max_frames_behind: usize,
     catchup_speed: usize,
+    /// Optional observer for specification violations.
+    violation_observer: Option<Arc<dyn ViolationObserver>>,
+}
+
+impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionBuilder")
+            .field("num_players", &self.num_players)
+            .field("local_players", &self.local_players)
+            .field("max_prediction", &self.max_prediction)
+            .field("fps", &self.fps)
+            .field("sparse_saving", &self.sparse_saving)
+            .field("desync_detection", &self.desync_detection)
+            .field("disconnect_timeout", &self.disconnect_timeout)
+            .field("disconnect_notify_start", &self.disconnect_notify_start)
+            .field("player_reg", &self.player_reg)
+            .field("input_delay", &self.input_delay)
+            .field("check_dist", &self.check_dist)
+            .field("max_frames_behind", &self.max_frames_behind)
+            .field("catchup_speed", &self.catchup_speed)
+            .field("has_violation_observer", &self.violation_observer.is_some())
+            .finish()
+    }
 }
 
 impl<T: Config> Default for SessionBuilder<T> {
@@ -74,6 +98,7 @@ impl<T: Config> SessionBuilder<T> {
             check_dist: DEFAULT_CHECK_DISTANCE,
             max_frames_behind: DEFAULT_MAX_FRAMES_BEHIND,
             catchup_speed: DEFAULT_CATCHUP_SPEED,
+            violation_observer: None,
         }
     }
 
@@ -85,16 +110,16 @@ impl<T: Config> SessionBuilder<T> {
     /// - Returns [`InvalidRequest`] if a player with that handle has been added before
     /// - Returns [`InvalidRequest`] if the handle is invalid for the given [`PlayerType`]
     ///
-    /// [`InvalidRequest`]: GgrsError::InvalidRequest
+    /// [`InvalidRequest`]: FortressError::InvalidRequest
     /// [`num_players`]: Self#structfield.num_players
     pub fn add_player(
         mut self,
         player_type: PlayerType<T::Address>,
         player_handle: PlayerHandle,
-    ) -> Result<Self, GgrsError> {
+    ) -> Result<Self, FortressError> {
         // check if the player handle is already in use
         if self.player_reg.handles.contains_key(&player_handle) {
-            return Err(GgrsError::InvalidRequest {
+            return Err(FortressError::InvalidRequest {
                 info: "Player handle already in use.".to_owned(),
             });
         }
@@ -102,22 +127,22 @@ impl<T: Config> SessionBuilder<T> {
         match player_type {
             PlayerType::Local => {
                 self.local_players += 1;
-                if player_handle >= self.num_players {
-                    return Err(GgrsError::InvalidRequest {
+                if !player_handle.is_valid_player_for(self.num_players) {
+                    return Err(FortressError::InvalidRequest {
                         info: "The player handle you provided is invalid. For a local player, the handle should be between 0 and num_players".to_owned(),
                     });
                 }
             }
             PlayerType::Remote(_) => {
-                if player_handle >= self.num_players {
-                    return Err(GgrsError::InvalidRequest {
+                if !player_handle.is_valid_player_for(self.num_players) {
+                    return Err(FortressError::InvalidRequest {
                         info: "The player handle you provided is invalid. For a remote player, the handle should be between 0 and num_players".to_owned(),
                     });
                 }
             }
             PlayerType::Spectator(_) => {
-                if player_handle < self.num_players {
-                    return Err(GgrsError::InvalidRequest {
+                if !player_handle.is_spectator_for(self.num_players) {
+                    return Err(FortressError::InvalidRequest {
                         info: "The player handle you provided is invalid. For a spectator, the handle should be num_players or higher".to_owned(),
                     });
                 }
@@ -131,14 +156,14 @@ impl<T: Config> SessionBuilder<T> {
     ///
     /// ## Lockstep mode
     ///
-    /// As a special case, if you set this to 0, GGRS will run in lockstep mode:
-    /// * ggrs will only request that you advance the gamestate if the current frame has inputs
+    /// As a special case, if you set this to 0, Fortress Rollback will run in lockstep mode:
+    /// * Fortress Rollback will only request that you advance the gamestate if the current frame has inputs
     ///   confirmed from all other clients.
-    /// * ggrs will never request you to save or roll back the gamestate.
+    /// * Fortress Rollback will never request you to save or roll back the gamestate.
     ///
-    /// Lockstep mode can significantly reduce the (GGRS) framerate of your game, but may be
-    /// appropriate for games where a GGRS frame does not correspond to a rendered frame, such as a
-    /// game where GGRS frames are only advanced once a second; with input delay set to zero, the
+    /// Lockstep mode can significantly reduce the (Fortress Rollback) framerate of your game, but may be
+    /// appropriate for games where a Fortress Rollback frame does not correspond to a rendered frame, such as a
+    /// game where Fortress Rollback frames are only advanced once a second; with input delay set to zero, the
     /// framerate impact is approximately equivalent to taking the highest latency client and adding
     /// its latency to the current time to tick a frame.
     pub fn with_max_prediction_window(mut self, window: usize) -> Self {
@@ -146,7 +171,7 @@ impl<T: Config> SessionBuilder<T> {
         self
     }
 
-    /// Change the amount of frames GGRS will delay the inputs for local players.
+    /// Change the amount of frames Fortress Rollback will delay the inputs for local players.
     pub fn with_input_delay(mut self, delay: usize) -> Self {
         self.input_delay = delay;
         self
@@ -191,10 +216,10 @@ impl<T: Config> SessionBuilder<T> {
     /// # Errors
     /// - Returns [`InvalidRequest`] if the fps is 0
     ///
-    /// [`InvalidRequest`]: GgrsError::InvalidRequest
-    pub fn with_fps(mut self, fps: usize) -> Result<Self, GgrsError> {
+    /// [`InvalidRequest`]: FortressError::InvalidRequest
+    pub fn with_fps(mut self, fps: usize) -> Result<Self, FortressError> {
         if fps == 0 {
-            return Err(GgrsError::InvalidRequest {
+            return Err(FortressError::InvalidRequest {
                 info: "FPS should be higher than 0.".to_owned(),
             });
         }
@@ -211,15 +236,18 @@ impl<T: Config> SessionBuilder<T> {
     /// Sets the maximum frames behind. If the spectator is more than this amount of frames behind the received inputs,
     /// it will catch up with `catchup_speed` amount of frames per step.
     ///
-    pub fn with_max_frames_behind(mut self, max_frames_behind: usize) -> Result<Self, GgrsError> {
+    pub fn with_max_frames_behind(
+        mut self,
+        max_frames_behind: usize,
+    ) -> Result<Self, FortressError> {
         if max_frames_behind < 1 {
-            return Err(GgrsError::InvalidRequest {
+            return Err(FortressError::InvalidRequest {
                 info: "Max frames behind cannot be smaller than 1.".to_owned(),
             });
         }
 
         if max_frames_behind >= SPECTATOR_BUFFER_SIZE {
-            return Err(GgrsError::InvalidRequest {
+            return Err(FortressError::InvalidRequest {
                 info: "Max frames behind cannot be larger or equal than the Spectator buffer size (60)"
                     .to_owned(),
             });
@@ -230,15 +258,15 @@ impl<T: Config> SessionBuilder<T> {
 
     /// Sets the catchup speed. Per default, this is set to 1, so the spectator never catches up.
     /// If you want the spectator to catch up to the host if `max_frames_behind` is surpassed, set this to a value higher than 1.
-    pub fn with_catchup_speed(mut self, catchup_speed: usize) -> Result<Self, GgrsError> {
+    pub fn with_catchup_speed(mut self, catchup_speed: usize) -> Result<Self, FortressError> {
         if catchup_speed < 1 {
-            return Err(GgrsError::InvalidRequest {
+            return Err(FortressError::InvalidRequest {
                 info: "Catchup speed cannot be smaller than 1.".to_owned(),
             });
         }
 
         if catchup_speed >= self.max_frames_behind {
-            return Err(GgrsError::InvalidRequest {
+            return Err(FortressError::InvalidRequest {
                 info: "Catchup speed cannot be larger or equal than the allowed maximum frames behind host"
                     .to_owned(),
             });
@@ -247,19 +275,52 @@ impl<T: Config> SessionBuilder<T> {
         Ok(self)
     }
 
+    /// Sets a custom observer for specification violations.
+    ///
+    /// When a violation occurs during session operation (e.g., frame sync issues,
+    /// input queue anomalies, checksum mismatches), it will be reported to this observer.
+    /// This enables programmatic monitoring, custom logging, or test assertions.
+    ///
+    /// If no observer is set, violations are logged via the `tracing` crate by default.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, telemetry::CollectingObserver};
+    /// use std::sync::Arc;
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// let observer = Arc::new(CollectingObserver::new());
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_violation_observer(observer.clone());
+    ///
+    /// // After session operations, check for violations
+    /// // assert!(observer.violations().is_empty());
+    /// ```
+    pub fn with_violation_observer(mut self, observer: Arc<dyn ViolationObserver>) -> Self {
+        self.violation_observer = Some(observer);
+        self
+    }
+
     /// Consumes the builder to construct a [`P2PSession`] and starts synchronization of endpoints.
     /// # Errors
     /// - Returns [`InvalidRequest`] if insufficient players have been registered.
     ///
-    /// [`InvalidRequest`]: GgrsError::InvalidRequest
+    /// [`InvalidRequest`]: FortressError::InvalidRequest
     pub fn start_p2p_session(
         mut self,
         socket: impl NonBlockingSocket<T::Address> + 'static,
-    ) -> Result<P2PSession<T>, GgrsError> {
+    ) -> Result<P2PSession<T>, FortressError> {
         // check if all players are added
         for player_handle in 0..self.num_players {
-            if !self.player_reg.handles.contains_key(&player_handle) {
-                return Err(GgrsError::InvalidRequest{
+            let handle = PlayerHandle::new(player_handle);
+            if !self.player_reg.handles.contains_key(&handle) {
+                return Err(FortressError::InvalidRequest{
                     info: "Not enough players have been added. Keep registering players up to the defined player number.".to_owned(),
                 });
             }
@@ -304,6 +365,7 @@ impl<T: Config> SessionBuilder<T> {
             self.sparse_saving,
             self.desync_detection,
             self.input_delay,
+            self.violation_observer,
         ))
     }
 
@@ -318,7 +380,7 @@ impl<T: Config> SessionBuilder<T> {
     ) -> SpectatorSession<T> {
         // create host endpoint
         let mut host = UdpProtocol::new(
-            (0..self.num_players).collect(),
+            (0..self.num_players).map(PlayerHandle::new).collect(),
             host_addr,
             self.num_players,
             1, //should not matter since the spectator is never sending
@@ -335,18 +397,19 @@ impl<T: Config> SessionBuilder<T> {
             host,
             self.max_frames_behind,
             self.catchup_speed,
+            self.violation_observer,
         )
     }
 
-    /// Consumes the builder to construct a new [`SyncTestSession`]. During a [`SyncTestSession`], GGRS will simulate a rollback every frame
+    /// Consumes the builder to construct a new [`SyncTestSession`]. During a [`SyncTestSession`], Fortress Rollback will simulate a rollback every frame
     /// and resimulate the last n states, where n is the given `check_distance`.
     /// The resimulated checksums will be compared with the original checksums and report if there was a mismatch.
     /// Due to the decentralized nature of saving and loading gamestates, checksum comparisons can only be made if `check_distance` is 2 or higher.
     /// This is a great way to test if your system runs deterministically.
     /// After creating the session, add a local player, set input delay for them and then start the session.
-    pub fn start_synctest_session(self) -> Result<SyncTestSession<T>, GgrsError> {
+    pub fn start_synctest_session(self) -> Result<SyncTestSession<T>, FortressError> {
         if self.check_dist >= self.max_prediction {
-            return Err(GgrsError::InvalidRequest {
+            return Err(FortressError::InvalidRequest {
                 info: "Check distance too big.".to_owned(),
             });
         }
@@ -355,6 +418,7 @@ impl<T: Config> SessionBuilder<T> {
             self.max_prediction,
             self.check_dist,
             self.input_delay,
+            self.violation_observer,
         ))
     }
 

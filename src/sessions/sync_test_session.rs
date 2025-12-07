@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use crate::error::GgrsError;
+use crate::error::FortressError;
 use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
+use crate::report_violation;
 use crate::sync_layer::SyncLayer;
-use crate::{Config, Frame, GgrsRequest, PlayerHandle};
+use crate::telemetry::{ViolationKind, ViolationObserver, ViolationSeverity};
+use crate::{Config, FortressRequest, Frame, PlayerHandle};
 
-/// During a [`SyncTestSession`], GGRS will simulate a rollback every frame and resimulate the last n states, where n is the given check distance.
+/// During a [`SyncTestSession`], Fortress Rollback will simulate a rollback every frame and resimulate the last n states, where n is the given check distance.
 /// The resimulated checksums will be compared with the original checksums and report if there was a mismatch.
 pub struct SyncTestSession<T>
 where
@@ -19,6 +22,8 @@ where
     dummy_connect_status: Vec<ConnectionStatus>,
     checksum_history: BTreeMap<Frame, Option<u128>>,
     local_inputs: BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
+    /// Optional observer for specification violations.
+    violation_observer: Option<Arc<dyn ViolationObserver>>,
 }
 
 impl<T: Config> SyncTestSession<T> {
@@ -27,6 +32,7 @@ impl<T: Config> SyncTestSession<T> {
         max_prediction: usize,
         check_distance: usize,
         input_delay: usize,
+        violation_observer: Option<Arc<dyn ViolationObserver>>,
     ) -> Self {
         let mut dummy_connect_status = Vec::new();
         for _ in 0..num_players {
@@ -35,7 +41,10 @@ impl<T: Config> SyncTestSession<T> {
 
         let mut sync_layer = SyncLayer::new(num_players, max_prediction);
         for i in 0..num_players {
-            sync_layer.set_frame_delay(i, input_delay);
+            // This should never fail during construction as player handles are sequential and valid
+            sync_layer
+                .set_frame_delay(PlayerHandle::new(i), input_delay)
+                .expect("Internal error: invalid player handle during session construction");
         }
 
         Self {
@@ -46,6 +55,7 @@ impl<T: Config> SyncTestSession<T> {
             dummy_connect_status,
             checksum_history: BTreeMap::new(),
             local_inputs: BTreeMap::new(),
+            violation_observer,
         }
     }
 
@@ -57,14 +67,14 @@ impl<T: Config> SyncTestSession<T> {
     /// - Returns [`InvalidRequest`] when the given handle is not valid (i.e. not between 0 and num_players).
     ///
     /// [`advance_frame()`]: Self#method.advance_frame
-    /// [`InvalidRequest`]: GgrsError::InvalidRequest
+    /// [`InvalidRequest`]: FortressError::InvalidRequest
     pub fn add_local_input(
         &mut self,
         player_handle: PlayerHandle,
         input: T::Input,
-    ) -> Result<(), GgrsError> {
-        if player_handle >= self.num_players {
-            return Err(GgrsError::InvalidRequest {
+    ) -> Result<(), FortressError> {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            return Err(FortressError::InvalidRequest {
                 info: "The player handle you provided is not valid.".to_owned(),
             });
         }
@@ -74,28 +84,29 @@ impl<T: Config> SyncTestSession<T> {
     }
 
     /// In a sync test, this will advance the state by a single frame and afterwards rollback `check_distance` amount of frames,
-    /// resimulate and compare checksums with the original states. Returns an order-sensitive [`Vec<GgrsRequest>`].
+    /// resimulate and compare checksums with the original states. Returns an order-sensitive [`Vec<FortressRequest>`].
     /// You should fulfill all requests in the exact order they are provided. Failure to do so will cause panics later.
     ///
     /// # Errors
     /// - Returns [`MismatchedChecksum`] if checksums don't match after resimulation.
     ///
-    /// [`Vec<GgrsRequest>`]: GgrsRequest
-    /// [`MismatchedChecksum`]: GgrsError::MismatchedChecksum
-    pub fn advance_frame(&mut self) -> Result<Vec<GgrsRequest<T>>, GgrsError> {
+    /// [`Vec<FortressRequest>`]: FortressRequest
+    /// [`MismatchedChecksum`]: FortressError::MismatchedChecksum
+    pub fn advance_frame(&mut self) -> Result<Vec<FortressRequest<T>>, FortressError> {
         let mut requests = Vec::new();
 
         // if we advanced far enough into the game do comparisons and rollbacks
         let current_frame = self.sync_layer.current_frame();
-        if self.check_distance > 0 && current_frame > self.check_distance as i32 {
+        if self.check_distance > 0 && current_frame.as_i32() > self.check_distance as i32 {
             // compare checksums of older frames to our checksum history (where only the first version of any checksum is recorded)
-            let oldest_frame_to_check = current_frame - self.check_distance as Frame;
-            let mismatched_frames: Vec<_> = (oldest_frame_to_check..=current_frame)
-                .filter(|frame_to_check| !self.checksums_consistent(*frame_to_check))
+            let oldest_frame_to_check = current_frame.as_i32() - self.check_distance as i32;
+            let mismatched_frames: Vec<_> = (oldest_frame_to_check..=current_frame.as_i32())
+                .filter(|&frame_to_check| !self.checksums_consistent(Frame::new(frame_to_check)))
+                .map(Frame::new)
                 .collect();
 
             if !mismatched_frames.is_empty() {
-                return Err(GgrsError::MismatchedChecksum {
+                return Err(FortressError::MismatchedChecksum {
                     current_frame,
                     mismatched_frames,
                 });
@@ -103,12 +114,12 @@ impl<T: Config> SyncTestSession<T> {
 
             // simulate rollbacks according to the check_distance
             let frame_to = self.sync_layer.current_frame() - self.check_distance as i32;
-            self.adjust_gamestate(frame_to, &mut requests);
+            self.adjust_gamestate(frame_to, &mut requests)?;
         }
 
         // we require inputs for all players
         if self.num_players != self.local_inputs.len() {
-            return Err(GgrsError::InvalidRequest {
+            return Err(FortressError::InvalidRequest {
                 info: "Missing local input while calling advance_frame().".to_owned(),
             });
         }
@@ -132,7 +143,7 @@ impl<T: Config> SyncTestSession<T> {
             .synchronized_inputs(&self.dummy_connect_status);
 
         // advance the frame
-        requests.push(GgrsRequest::AdvanceFrame { inputs });
+        requests.push(FortressRequest::AdvanceFrame { inputs });
         self.sync_layer.advance_frame();
 
         // since this is a sync test, we "cheat" by setting the last confirmed state to the (current state - check_distance), so the sync layer won't complain about missing
@@ -169,6 +180,16 @@ impl<T: Config> SyncTestSession<T> {
         self.check_distance
     }
 
+    /// Returns a reference to the violation observer, if one was configured.
+    ///
+    /// This allows checking for violations that occurred during session operations
+    /// when using a [`CollectingObserver`] or similar.
+    ///
+    /// [`CollectingObserver`]: crate::telemetry::CollectingObserver
+    pub fn violation_observer(&self) -> Option<&Arc<dyn ViolationObserver>> {
+        self.violation_observer.as_ref()
+    }
+
     /// Updates the `checksum_history` and checks if the checksum is identical if it already has been recorded once
     fn checksums_consistent(&mut self, frame_to_check: Frame) -> bool {
         // remove entries older than the `check_distance`
@@ -189,14 +210,27 @@ impl<T: Config> SyncTestSession<T> {
         }
     }
 
-    fn adjust_gamestate(&mut self, frame_to: Frame, requests: &mut Vec<GgrsRequest<T>>) {
+    fn adjust_gamestate(
+        &mut self,
+        frame_to: Frame,
+        requests: &mut Vec<FortressRequest<T>>,
+    ) -> Result<(), FortressError> {
         let start_frame = self.sync_layer.current_frame();
         let count = start_frame - frame_to;
 
         // rollback to the first incorrect state
-        requests.push(self.sync_layer.load_frame(frame_to));
+        requests.push(self.sync_layer.load_frame(frame_to)?);
         self.sync_layer.reset_prediction();
-        assert_eq!(self.sync_layer.current_frame(), frame_to);
+        let actual_frame = self.sync_layer.current_frame();
+        if actual_frame != frame_to {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::FrameSync,
+                "current frame mismatch after load: expected={}, actual={}",
+                frame_to,
+                actual_frame
+            );
+        }
 
         // step forward to the previous current state
         for i in 0..count {
@@ -211,8 +245,18 @@ impl<T: Config> SyncTestSession<T> {
             // then advance
             self.sync_layer.advance_frame();
 
-            requests.push(GgrsRequest::AdvanceFrame { inputs });
+            requests.push(FortressRequest::AdvanceFrame { inputs });
         }
-        assert_eq!(self.sync_layer.current_frame(), start_frame);
+        let final_frame = self.sync_layer.current_frame();
+        if final_frame != start_frame {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::FrameSync,
+                "current frame mismatch after resimulation: expected={}, actual={}",
+                start_frame,
+                final_frame
+            );
+        }
+        Ok(())
     }
 }

@@ -132,7 +132,7 @@ This fork aims to elevate GGRS to production-grade quality through rigorous veri
 - Use appropriate data structures for access patterns
 
 ### Error Handling
-- Use `Result<T, GgrsError>` for fallible operations
+- Use `Result<T, FortressError>` for fallible operations
 - Provide context-rich error messages
 - Include recovery suggestions where applicable
 - Document error conditions in rustdoc

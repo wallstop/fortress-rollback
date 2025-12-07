@@ -1,7 +1,7 @@
 mod stubs_enum;
 
 use fortress_rollback::{
-    GgrsError, PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket,
+    FortressError, PlayerHandle, PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -9,20 +9,20 @@ use stubs_enum::{EnumInput, GameStubEnum, StubEnumConfig};
 
 #[test]
 #[serial]
-fn test_advance_frame_p2p_sessions_enum() -> Result<(), GgrsError> {
+fn test_advance_frame_p2p_sessions_enum() -> Result<(), FortressError> {
     let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7777);
     let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8888);
 
     let socket1 = UdpNonBlockingSocket::bind_to_port(7777).unwrap();
     let mut sess1 = SessionBuilder::<StubEnumConfig>::new()
-        .add_player(PlayerType::Local, 0)?
-        .add_player(PlayerType::Remote(addr2), 1)?
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
     let socket2 = UdpNonBlockingSocket::bind_to_port(8888).unwrap();
     let mut sess2 = SessionBuilder::<StubEnumConfig>::new()
-        .add_player(PlayerType::Remote(addr1), 0)?
-        .add_player(PlayerType::Local, 1)?
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
     assert!(sess1.current_state() == SessionState::Synchronizing);
@@ -45,7 +45,7 @@ fn test_advance_frame_p2p_sessions_enum() -> Result<(), GgrsError> {
 
         sess1
             .add_local_input(
-                0,
+                PlayerHandle::new(0),
                 if i % 2 == 0 {
                     EnumInput::Val1
                 } else {
@@ -57,7 +57,7 @@ fn test_advance_frame_p2p_sessions_enum() -> Result<(), GgrsError> {
         stub1.handle_requests(requests1);
         sess2
             .add_local_input(
-                1,
+                PlayerHandle::new(1),
                 if i % 3 == 0 {
                     EnumInput::Val1
                 } else {

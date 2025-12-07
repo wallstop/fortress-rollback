@@ -1,22 +1,25 @@
 use crate::DesyncDetection;
-use crate::error::GgrsError;
+use crate::error::FortressError;
 use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::network::network_stats::NetworkStats;
 use crate::network::protocol::{MAX_CHECKSUM_HISTORY_SIZE, UdpProtocol};
+use crate::report_violation;
 use crate::sync_layer::SyncLayer;
+use crate::telemetry::{ViolationKind, ViolationObserver, ViolationSeverity};
 use crate::{
-    Config, Frame, GgrsEvent, GgrsRequest, NULL_FRAME, NonBlockingSocket, PlayerHandle, PlayerType,
-    SessionState, network::protocol::Event,
+    Config, FortressEvent, FortressRequest, Frame, NonBlockingSocket, PlayerHandle,
+    PlayerType, SessionState, network::protocol::Event,
 };
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::collections::vec_deque::Drain;
 use std::convert::TryInto;
+use std::sync::Arc;
 
-const RECOMMENDATION_INTERVAL: Frame = 60;
+const RECOMMENDATION_INTERVAL: Frame = Frame::new(60);
 const MIN_RECOMMENDATION: u32 = 3;
 const MAX_EVENT_QUEUE_SIZE: usize = 100;
 
@@ -120,7 +123,7 @@ where
 {
     /// The number of players of the session.
     num_players: usize,
-    /// The maximum number of frames GGRS will roll back. Every gamestate older than this is guaranteed to be correct.
+    /// The maximum number of frames Fortress Rollback will roll back. Every gamestate older than this is guaranteed to be correct.
     max_prediction: usize,
     /// The sync layer handles player input queues and provides predictions.
     sync_layer: SyncLayer<T>,
@@ -142,13 +145,13 @@ where
 
     /// notes which inputs have already been sent to the spectators
     next_spectator_frame: Frame,
-    /// The soonest frame on which the session can send a [`GgrsEvent::WaitRecommendation`] again.
+    /// The soonest frame on which the session can send a [`FortressEvent::WaitRecommendation`] again.
     next_recommended_sleep: Frame,
     /// How many frames we estimate we are ahead of every remote client
     frames_ahead: i32,
 
     /// Contains all events to be forwarded to the user.
-    event_queue: VecDeque<GgrsEvent<T>>,
+    event_queue: VecDeque<FortressEvent<T>>,
     /// Contains all local inputs not yet sent into the system. This should have inputs for every local player before calling advance_frame
     local_inputs: BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
 
@@ -158,6 +161,8 @@ where
     local_checksum_history: BTreeMap<Frame, u128>,
     /// The last frame we sent a checksum for
     last_sent_checksum_frame: Frame,
+    /// Optional observer for specification violations.
+    violation_observer: Option<Arc<dyn ViolationObserver>>,
 }
 
 impl<T: Config> P2PSession<T> {
@@ -171,6 +176,7 @@ impl<T: Config> P2PSession<T> {
         sparse_saving: bool,
         desync_detection: DesyncDetection,
         input_delay: usize,
+        violation_observer: Option<Arc<dyn ViolationObserver>>,
     ) -> Self {
         // local connection status
         let mut local_connect_status = Vec::new();
@@ -182,7 +188,10 @@ impl<T: Config> P2PSession<T> {
         let mut sync_layer = SyncLayer::new(num_players, max_prediction);
         for (player_handle, player_type) in players.handles.iter() {
             if let PlayerType::Local = player_type {
-                sync_layer.set_frame_delay(*player_handle, input_delay);
+                // This should never fail during construction as player handles are validated
+                sync_layer
+                    .set_frame_delay(*player_handle, input_delay)
+                    .expect("Internal error: invalid player handle during session construction");
             }
         }
 
@@ -197,9 +206,10 @@ impl<T: Config> P2PSession<T> {
             // in lockstep mode, saving will never happen, but we use the last saved frame to mark
             // control marking frames confirmed, so we need to turn off sparse saving to ensure that
             // frames are marked as confirmed - otherwise we will never advance the game state.
-            warn!(
-                "Sparse saving setting is ignored because lockstep mode is on \
-                (max_prediction set to 0), so no saving will take place"
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::Configuration,
+                "Sparse saving setting is ignored because lockstep mode is on (max_prediction set to 0), so no saving will take place"
             );
             false
         } else {
@@ -213,17 +223,18 @@ impl<T: Config> P2PSession<T> {
             sparse_saving,
             socket,
             local_connect_status,
-            next_recommended_sleep: 0,
-            next_spectator_frame: 0,
+            next_recommended_sleep: Frame::new(0),
+            next_spectator_frame: Frame::new(0),
             frames_ahead: 0,
             sync_layer,
-            disconnect_frame: NULL_FRAME,
+            disconnect_frame: Frame::NULL,
             player_reg: players,
             event_queue: VecDeque::new(),
             local_inputs: BTreeMap::new(),
             desync_detection,
             local_checksum_history: BTreeMap::new(),
-            last_sent_checksum_frame: NULL_FRAME,
+            last_sent_checksum_frame: Frame::NULL,
+            violation_observer,
         }
     }
 
@@ -234,19 +245,19 @@ impl<T: Config> P2PSession<T> {
     /// - Returns [`InvalidRequest`] when the given handle does not refer to a local player.
     ///
     /// [`advance_frame()`]: Self#method.advance_frame
-    /// [`InvalidRequest`]: GgrsError::InvalidRequest
+    /// [`InvalidRequest`]: FortressError::InvalidRequest
     pub fn add_local_input(
         &mut self,
         player_handle: PlayerHandle,
         input: T::Input,
-    ) -> Result<(), GgrsError> {
+    ) -> Result<(), FortressError> {
         // make sure the input is for a registered local player
         if !self
             .player_reg
             .local_player_handles()
             .contains(&player_handle)
         {
-            return Err(GgrsError::InvalidRequest {
+            return Err(FortressError::InvalidRequest {
                 info: "The player handle you provided is not referring to a local player."
                     .to_owned(),
             });
@@ -256,31 +267,31 @@ impl<T: Config> P2PSession<T> {
         Ok(())
     }
 
-    /// You should call this to notify GGRS that you are ready to advance your gamestate by a single frame.
-    /// Returns an order-sensitive [`Vec<GgrsRequest>`]. You should fulfill all requests in the exact order they are provided.
+    /// You should call this to notify Fortress Rollback that you are ready to advance your gamestate by a single frame.
+    /// Returns an order-sensitive [`Vec<FortressRequest>`]. You should fulfill all requests in the exact order they are provided.
     /// Failure to do so will cause panics later.
     ///
     /// # Errors
     /// - Returns [`InvalidRequest`] if the provided player handle refers to a remote player.
     /// - Returns [`NotSynchronized`] if the session is not yet ready to accept input. In this case, you either need to start the session or wait for synchronization between clients.
     ///
-    /// [`Vec<GgrsRequest>`]: GgrsRequest
-    /// [`InvalidRequest`]: GgrsError::InvalidRequest
-    /// [`NotSynchronized`]: GgrsError::NotSynchronized
-    pub fn advance_frame(&mut self) -> Result<Vec<GgrsRequest<T>>, GgrsError> {
+    /// [`Vec<FortressRequest>`]: FortressRequest
+    /// [`InvalidRequest`]: FortressError::InvalidRequest
+    /// [`NotSynchronized`]: FortressError::NotSynchronized
+    pub fn advance_frame(&mut self) -> Result<Vec<FortressRequest<T>>, FortressError> {
         // receive info from remote players, trigger events and send messages
         self.poll_remote_clients();
 
         // session is not running and synchronized
         if self.state != SessionState::Running {
             trace!("Session not synchronized; returning error");
-            return Err(GgrsError::NotSynchronized);
+            return Err(FortressError::NotSynchronized);
         }
 
         // check if input for all local players is queued
         for handle in self.player_reg.local_player_handles() {
             if !self.local_inputs.contains_key(&handle) {
-                return Err(GgrsError::InvalidRequest {
+                return Err(FortressError::InvalidRequest {
                     info: format!(
                         "Missing local input for handle {handle} while calling advance_frame()."
                     ),
@@ -334,15 +345,15 @@ impl<T: Config> P2PSession<T> {
                 .sync_layer
                 .check_simulation_consistency(self.disconnect_frame);
             // if we have an incorrect frame, then we need to rollback
-            if first_incorrect != NULL_FRAME {
-                self.adjust_gamestate(first_incorrect, confirmed_frame, &mut requests);
-                self.disconnect_frame = NULL_FRAME;
+            if first_incorrect != Frame::NULL {
+                self.adjust_gamestate(first_incorrect, confirmed_frame, &mut requests)?;
+                self.disconnect_frame = Frame::NULL;
             }
 
             // request gamestate save of current frame
             let last_saved = self.sync_layer.last_saved_frame();
             if self.sparse_saving {
-                self.check_last_saved_state(last_saved, confirmed_frame, &mut requests);
+                self.check_last_saved_state(last_saved, confirmed_frame, &mut requests)?;
             } else {
                 // without sparse saving, always save the current frame after correcting and rollbacking
                 requests.push(self.sync_layer.save_current_state());
@@ -354,7 +365,7 @@ impl<T: Config> P2PSession<T> {
          */
 
         // send confirmed inputs to spectators before throwing them away
-        self.send_confirmed_inputs_to_spectators(confirmed_frame);
+        self.send_confirmed_inputs_to_spectators(confirmed_frame)?;
 
         // set the last confirmed frame and discard all saved inputs before that frame
         self.sync_layer
@@ -373,22 +384,25 @@ impl<T: Config> P2PSession<T> {
 
         // register local inputs in the system and send them
         for handle in self.player_reg.local_player_handles() {
-            // we have checked that these all exist
-            let player_input = self
-                .local_inputs
-                .get_mut(&handle)
-                .expect("Missing local input while calling advance_frame().");
+            // we have checked that these all exist above, but return error for safety
+            let player_input =
+                self.local_inputs
+                    .get_mut(&handle)
+                    .ok_or_else(|| FortressError::MissingInput {
+                        player_handle: handle,
+                        frame: self.sync_layer.current_frame(),
+                    })?;
             // send the input into the sync layer
             let actual_frame = self.sync_layer.add_local_input(handle, *player_input);
             player_input.frame = actual_frame;
             // if the input has not been dropped
-            if actual_frame != NULL_FRAME {
-                self.local_connect_status[handle].last_frame = actual_frame;
+            if actual_frame != Frame::NULL {
+                self.local_connect_status[handle.as_usize()].last_frame = actual_frame;
             }
         }
 
         // if the local inputs have not been dropped by the sync layer, send to all remote clients
-        if !self.local_inputs.values().any(|&i| i.frame == NULL_FRAME) {
+        if !self.local_inputs.values().any(|&i| i.frame == Frame::NULL) {
             for endpoint in self.player_reg.remotes.values_mut() {
                 endpoint.send_input(&self.local_inputs, &self.local_connect_status);
                 endpoint.send_all_messages(&mut self.socket);
@@ -405,9 +419,9 @@ impl<T: Config> P2PSession<T> {
             self.sync_layer.last_confirmed_frame() == self.sync_layer.current_frame()
         } else {
             // rollback mode: advance as long as we aren't past our prediction window
-            let frames_ahead = if self.sync_layer.last_confirmed_frame() == NULL_FRAME {
+            let frames_ahead = if self.sync_layer.last_confirmed_frame().is_null() {
                 // we haven't had any frames confirmed, so all frames we've advanced are "ahead"
-                self.sync_layer.current_frame()
+                self.sync_layer.current_frame().as_i32()
             } else {
                 // we're not at the first frame, so we have to subtract the last confirmed frame
                 self.sync_layer.current_frame() - self.sync_layer.last_confirmed_frame()
@@ -423,7 +437,7 @@ impl<T: Config> P2PSession<T> {
             self.sync_layer.advance_frame();
             // clear the local inputs after advancing the frame to allow new inputs to be ingested
             self.local_inputs.clear();
-            requests.push(GgrsRequest::AdvanceFrame { inputs });
+            requests.push(FortressRequest::AdvanceFrame { inputs });
         } else {
             debug!(
                 "Prediction Threshold reached. Skipping on frame {}",
@@ -434,8 +448,8 @@ impl<T: Config> P2PSession<T> {
         Ok(requests)
     }
 
-    /// Should be called periodically by your application to give GGRS a chance to do internal work.
-    /// GGRS will receive packets, distribute them to corresponding endpoints, handle all occurring events and send all outgoing packets.
+    /// Should be called periodically by your application to give Fortress Rollback a chance to do internal work.
+    /// Fortress Rollback will receive packets, distribute them to corresponding endpoints, handle all occurring events and send all outgoing packets.
     pub fn poll_remote_clients(&mut self) {
         // Get all packets and distribute them to associated endpoints.
         // The endpoints will handle their packets, which will trigger both events and UPD replies.
@@ -490,30 +504,30 @@ impl<T: Config> P2PSession<T> {
     /// # Errors
     /// - Returns [`InvalidRequest`] if you try to disconnect a local player or the provided handle is invalid.
     ///
-    /// [`InvalidRequest`]: GgrsError::InvalidRequest
-    pub fn disconnect_player(&mut self, player_handle: PlayerHandle) -> Result<(), GgrsError> {
+    /// [`InvalidRequest`]: FortressError::InvalidRequest
+    pub fn disconnect_player(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError> {
         match self.player_reg.handles.get(&player_handle) {
             // the local player cannot be disconnected
-            None => Err(GgrsError::InvalidRequest {
+            None => Err(FortressError::InvalidRequest {
                 info: "Invalid Player Handle.".to_owned(),
             }),
-            Some(PlayerType::Local) => Err(GgrsError::InvalidRequest {
+            Some(PlayerType::Local) => Err(FortressError::InvalidRequest {
                 info: "Local Player cannot be disconnected.".to_owned(),
             }),
             // a remote player can only be disconnected if not already disconnected, since there is some additional logic attached
             Some(PlayerType::Remote(_)) => {
-                if !self.local_connect_status[player_handle].disconnected {
-                    let last_frame = self.local_connect_status[player_handle].last_frame;
+                if !self.local_connect_status[player_handle.as_usize()].disconnected {
+                    let last_frame = self.local_connect_status[player_handle.as_usize()].last_frame;
                     self.disconnect_player_at_frame(player_handle, last_frame);
                     return Ok(());
                 }
-                Err(GgrsError::InvalidRequest {
+                Err(FortressError::InvalidRequest {
                     info: "Player already disconnected.".to_owned(),
                 })
             }
             // disconnecting spectators is simpler
             Some(PlayerType::Spectator(_)) => {
-                self.disconnect_player_at_frame(player_handle, NULL_FRAME);
+                self.disconnect_player_at_frame(player_handle, Frame::NULL);
                 Ok(())
             }
         }
@@ -524,9 +538,12 @@ impl<T: Config> P2PSession<T> {
     /// - Returns [`InvalidRequest`] if the handle not referring to a remote player or spectator.
     /// - Returns [`NotSynchronized`] if the session is not connected to other clients yet.
     ///
-    /// [`InvalidRequest`]: GgrsError::InvalidRequest
-    /// [`NotSynchronized`]: GgrsError::NotSynchronized
-    pub fn network_stats(&self, player_handle: PlayerHandle) -> Result<NetworkStats, GgrsError> {
+    /// [`InvalidRequest`]: FortressError::InvalidRequest
+    /// [`NotSynchronized`]: FortressError::NotSynchronized
+    pub fn network_stats(
+        &self,
+        player_handle: PlayerHandle,
+    ) -> Result<NetworkStats, FortressError> {
         match self.player_reg.handles.get(&player_handle) {
             Some(PlayerType::Remote(addr)) => self
                 .player_reg
@@ -540,7 +557,7 @@ impl<T: Config> P2PSession<T> {
                 .get(addr)
                 .expect("Endpoint should exist for any registered player")
                 .network_stats(),
-            _ => Err(GgrsError::InvalidRequest {
+            _ => Err(FortressError::InvalidRequest {
                 info: "Given player handle not referring to a remote player or spectator"
                     .to_owned(),
             }),
@@ -549,7 +566,7 @@ impl<T: Config> P2PSession<T> {
 
     /// Returns the highest confirmed frame. We have received all input for this frame and it is thus correct.
     pub fn confirmed_frame(&self) -> Frame {
-        let mut confirmed_frame = i32::MAX;
+        let mut confirmed_frame = Frame::new(i32::MAX);
 
         for con_stat in &self.local_connect_status {
             if !con_stat.disconnected {
@@ -557,7 +574,15 @@ impl<T: Config> P2PSession<T> {
             }
         }
 
-        assert!(confirmed_frame < i32::MAX);
+        // If all players are disconnected, this should not happen in a running session
+        if confirmed_frame.as_i32() == i32::MAX {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "No connected players found when computing confirmed_frame - returning 0 as fallback"
+            );
+            return Frame::new(0);
+        }
         confirmed_frame
     }
 
@@ -585,7 +610,7 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// Returns all events that happened since last queried for events. If the number of stored events exceeds `MAX_EVENT_QUEUE_SIZE`, the oldest events will be discarded.
-    pub fn events(&mut self) -> Drain<'_, GgrsEvent<T>> {
+    pub fn events(&mut self) -> Drain<'_, FortressEvent<T>> {
         self.event_queue.drain(..)
     }
 
@@ -629,24 +654,42 @@ impl<T: Config> P2PSession<T> {
         self.desync_detection
     }
 
+    /// Returns a reference to the violation observer, if one was configured.
+    ///
+    /// This allows checking for violations that occurred during session operations
+    /// when using a [`CollectingObserver`] or similar.
+    ///
+    /// [`CollectingObserver`]: crate::telemetry::CollectingObserver
+    pub fn violation_observer(&self) -> Option<&Arc<dyn ViolationObserver>> {
+        self.violation_observer.as_ref()
+    }
+
     fn disconnect_player_at_frame(&mut self, player_handle: PlayerHandle, last_frame: Frame) {
         // disconnect the remote player
-        match self
-            .player_reg
-            .handles
-            .get(&player_handle)
-            .expect("Invalid player handle")
-        {
+        let Some(player_type) = self.player_reg.handles.get(&player_handle) else {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::InternalError,
+                "Invalid player handle {} in disconnect_player_at_frame - ignoring",
+                player_handle
+            );
+            return;
+        };
+
+        match player_type {
             PlayerType::Remote(addr) => {
-                let endpoint = self
-                    .player_reg
-                    .remotes
-                    .get_mut(addr)
-                    .expect("There should be no address without registered endpoint");
+                let Some(endpoint) = self.player_reg.remotes.get_mut(addr) else {
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::InternalError,
+                        "No endpoint found for remote address in disconnect_player_at_frame - ignoring"
+                    );
+                    return;
+                };
 
                 // mark the affected players as disconnected
                 for &handle in endpoint.handles() {
-                    self.local_connect_status[handle].disconnected = true;
+                    self.local_connect_status[handle.as_usize()].disconnected = true;
                 }
                 endpoint.disconnect();
 
@@ -657,11 +700,14 @@ impl<T: Config> P2PSession<T> {
                 }
             }
             PlayerType::Spectator(addr) => {
-                let endpoint = self
-                    .player_reg
-                    .spectators
-                    .get_mut(addr)
-                    .expect("There should be no address without registered endpoint");
+                let Some(endpoint) = self.player_reg.spectators.get_mut(addr) else {
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::InternalError,
+                        "No endpoint found for spectator address in disconnect_player_at_frame - ignoring"
+                    );
+                    return;
+                };
                 endpoint.disconnect();
             }
             PlayerType::Local => (),
@@ -695,12 +741,15 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// Roll back to `min_confirmed` frame and resimulate the game with most up-to-date input data.
+    ///
+    /// # Errors
+    /// Returns `FortressError::InvalidFrame` if the frame to load is invalid.
     fn adjust_gamestate(
         &mut self,
         first_incorrect: Frame,
         min_confirmed: Frame,
-        requests: &mut Vec<GgrsRequest<T>>,
-    ) {
+        requests: &mut Vec<FortressRequest<T>>,
+    ) -> Result<(), FortressError> {
         let current_frame = self.sync_layer.current_frame();
         // determine the frame to load
         let frame_to_load = if self.sparse_saving {
@@ -712,7 +761,15 @@ impl<T: Config> P2PSession<T> {
         };
 
         // we should always load a frame that is before or exactly the first incorrect frame
-        assert!(frame_to_load <= first_incorrect);
+        if frame_to_load > first_incorrect {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::FrameSync,
+                "frame_to_load {} > first_incorrect {} - this indicates a bug",
+                frame_to_load,
+                first_incorrect
+            );
+        }
         let count = current_frame - frame_to_load;
 
         // request to load that frame
@@ -720,10 +777,19 @@ impl<T: Config> P2PSession<T> {
             "Pushing request to load frame {} (current frame {})",
             frame_to_load, current_frame
         );
-        requests.push(self.sync_layer.load_frame(frame_to_load));
+        requests.push(self.sync_layer.load_frame(frame_to_load)?);
 
         // we are now at the desired frame
-        assert_eq!(self.sync_layer.current_frame(), frame_to_load);
+        let actual_frame = self.sync_layer.current_frame();
+        if actual_frame != frame_to_load {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::FrameSync,
+                "current frame mismatch after load: expected={}, actual={}",
+                frame_to_load,
+                actual_frame
+            );
+        }
         self.sync_layer.reset_prediction();
 
         // step forward to the previous current state, but with updated inputs
@@ -747,28 +813,41 @@ impl<T: Config> P2PSession<T> {
 
             // advance the frame
             self.sync_layer.advance_frame();
-            requests.push(GgrsRequest::AdvanceFrame { inputs });
+            requests.push(FortressRequest::AdvanceFrame { inputs });
         }
         // after all this, we should have arrived at the same frame where we started
-        assert_eq!(self.sync_layer.current_frame(), current_frame);
+        let final_frame = self.sync_layer.current_frame();
+        if final_frame != current_frame {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::FrameSync,
+                "current frame mismatch after resimulation: expected={}, actual={}",
+                current_frame,
+                final_frame
+            );
+        }
+        Ok(())
     }
 
     /// For each spectator, send all confirmed input up until the minimum confirmed frame.
-    fn send_confirmed_inputs_to_spectators(&mut self, confirmed_frame: Frame) {
+    fn send_confirmed_inputs_to_spectators(
+        &mut self,
+        confirmed_frame: Frame,
+    ) -> Result<(), FortressError> {
         if self.num_spectators() == 0 {
-            return;
+            return Ok(());
         }
 
         while self.next_spectator_frame <= confirmed_frame {
             let mut inputs = self
                 .sync_layer
-                .confirmed_inputs(self.next_spectator_frame, &self.local_connect_status);
+                .confirmed_inputs(self.next_spectator_frame, &self.local_connect_status)?;
             assert_eq!(inputs.len(), self.num_players);
 
             let mut input_map = BTreeMap::new();
             for (handle, input) in inputs.iter_mut().enumerate() {
-                assert!(input.frame == NULL_FRAME || input.frame == self.next_spectator_frame);
-                input_map.insert(handle, *input);
+                assert!(input.frame == Frame::NULL || input.frame == self.next_spectator_frame);
+                input_map.insert(PlayerHandle::new(handle), *input);
             }
 
             // send it to all spectators
@@ -781,14 +860,17 @@ impl<T: Config> P2PSession<T> {
             // onto the next frame
             self.next_spectator_frame += 1;
         }
+
+        Ok(())
     }
 
     /// Check if players are registered as disconnected for earlier frames on other remote players in comparison to our local assumption.
     /// Disconnect players that are disconnected for other players and update the frame they disconnected
     fn update_player_disconnects(&mut self) {
-        for handle in 0..self.num_players {
+        for handle_idx in 0..self.num_players {
+            let handle = PlayerHandle::new(handle_idx);
             let mut queue_connected = true;
-            let mut queue_min_confirmed = i32::MAX;
+            let mut queue_min_confirmed = Frame::new(i32::MAX);
 
             // check all player connection status for every remote player
             for endpoint in self.player_reg.remotes.values() {
@@ -804,8 +886,8 @@ impl<T: Config> P2PSession<T> {
             }
 
             // check our local info for that player
-            let local_connected = !self.local_connect_status[handle].disconnected;
-            let local_min_confirmed = self.local_connect_status[handle].last_frame;
+            let local_connected = !self.local_connect_status[handle_idx].disconnected;
+            let local_min_confirmed = self.local_connect_status[handle_idx].last_frame;
 
             if local_connected {
                 queue_min_confirmed = std::cmp::min(queue_min_confirmed, local_min_confirmed);
@@ -816,7 +898,7 @@ impl<T: Config> P2PSession<T> {
                 // If so, we need to re-adjust. This can happen when we e.g. detect our own disconnect at frame n
                 // and later receive a disconnect notification for frame n-1.
                 if local_connected || local_min_confirmed > queue_min_confirmed {
-                    self.disconnect_player_at_frame(handle as PlayerHandle, queue_min_confirmed);
+                    self.disconnect_player_at_frame(handle, queue_min_confirmed);
                 }
             }
         }
@@ -827,7 +909,7 @@ impl<T: Config> P2PSession<T> {
         let mut interval = i32::MIN;
         for endpoint in self.player_reg.remotes.values() {
             for &handle in endpoint.handles() {
-                if !self.local_connect_status[handle].disconnected {
+                if !self.local_connect_status[handle.as_usize()].disconnected {
                     interval = std::cmp::max(interval, endpoint.average_frame_advantage());
                 }
             }
@@ -847,12 +929,13 @@ impl<T: Config> P2PSession<T> {
             && self.frames_ahead >= MIN_RECOMMENDATION as i32
         {
             self.next_recommended_sleep = self.sync_layer.current_frame() + RECOMMENDATION_INTERVAL;
-            self.event_queue.push_back(GgrsEvent::WaitRecommendation {
-                skip_frames: self
-                    .frames_ahead
-                    .try_into()
-                    .expect("frames ahead is negative despite being positive."),
-            });
+            self.event_queue
+                .push_back(FortressEvent::WaitRecommendation {
+                    skip_frames: self
+                        .frames_ahead
+                        .try_into()
+                        .expect("frames ahead is negative despite being positive."),
+                });
         }
     }
 
@@ -860,8 +943,8 @@ impl<T: Config> P2PSession<T> {
         &mut self,
         last_saved: Frame,
         confirmed_frame: Frame,
-        requests: &mut Vec<GgrsRequest<T>>,
-    ) {
+        requests: &mut Vec<FortressRequest<T>>,
+    ) -> Result<(), FortressError> {
         // in sparse saving mode, we need to make sure not to lose the last saved frame
         if self.sync_layer.current_frame() - last_saved >= self.max_prediction as i32 {
             // check if the current frame is confirmed, otherwise we need to roll back
@@ -870,16 +953,25 @@ impl<T: Config> P2PSession<T> {
                 requests.push(self.sync_layer.save_current_state());
             } else {
                 // roll back to the last saved state, resimulate and save on the way
-                self.adjust_gamestate(last_saved, confirmed_frame, requests);
+                self.adjust_gamestate(last_saved, confirmed_frame, requests)?;
             }
 
             // after all this, we should have saved the confirmed state
-            assert!(
-                confirmed_frame == NULL_FRAME
-                    || self.sync_layer.last_saved_frame()
-                        == std::cmp::min(confirmed_frame, self.sync_layer.current_frame())
-            );
+            let expected_saved_frame =
+                std::cmp::min(confirmed_frame, self.sync_layer.current_frame());
+            if confirmed_frame != Frame::NULL
+                && self.sync_layer.last_saved_frame() != expected_saved_frame
+            {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::StateManagement,
+                    "last_saved_frame mismatch after check_last_saved_state: expected={}, actual={}",
+                    expected_saved_frame,
+                    self.sync_layer.last_saved_frame()
+                );
+            }
         }
+        Ok(())
     }
 
     /// Handle events received from the UDP endpoints. Most events are being forwarded to the user for notification, but some require action.
@@ -893,52 +985,55 @@ impl<T: Config> P2PSession<T> {
             // forward to user
             Event::Synchronizing { total, count } => {
                 self.event_queue
-                    .push_back(GgrsEvent::Synchronizing { addr, total, count });
+                    .push_back(FortressEvent::Synchronizing { addr, total, count });
             }
             // forward to user
             Event::NetworkInterrupted { disconnect_timeout } => {
-                self.event_queue.push_back(GgrsEvent::NetworkInterrupted {
-                    addr,
-                    disconnect_timeout,
-                });
+                self.event_queue
+                    .push_back(FortressEvent::NetworkInterrupted {
+                        addr,
+                        disconnect_timeout,
+                    });
             }
             // forward to user
             Event::NetworkResumed => {
                 self.event_queue
-                    .push_back(GgrsEvent::NetworkResumed { addr });
+                    .push_back(FortressEvent::NetworkResumed { addr });
             }
             // check if all remotes are synced, then forward to user
             Event::Synchronized => {
                 self.check_initial_sync();
-                self.event_queue.push_back(GgrsEvent::Synchronized { addr });
+                self.event_queue
+                    .push_back(FortressEvent::Synchronized { addr });
             }
             // disconnect the player, then forward to user
             Event::Disconnected => {
                 for handle in player_handles {
-                    let last_frame = if handle < self.num_players as PlayerHandle {
-                        self.local_connect_status[handle].last_frame
+                    let last_frame = if handle.is_valid_player_for(self.num_players) {
+                        self.local_connect_status[handle.as_usize()].last_frame
                     } else {
-                        NULL_FRAME // spectator
+                        Frame::NULL // spectator
                     };
 
                     self.disconnect_player_at_frame(handle, last_frame);
                 }
 
-                self.event_queue.push_back(GgrsEvent::Disconnected { addr });
+                self.event_queue
+                    .push_back(FortressEvent::Disconnected { addr });
             }
             // add the input and all associated information
             Event::Input { input, player } => {
                 // input only comes from remote players, not spectators
-                assert!(player < self.num_players as PlayerHandle);
-                if !self.local_connect_status[player].disconnected {
+                assert!(player.is_valid_player_for(self.num_players));
+                if !self.local_connect_status[player.as_usize()].disconnected {
                     // check if the input comes in the correct sequence
-                    let current_remote_frame = self.local_connect_status[player].last_frame;
+                    let current_remote_frame = self.local_connect_status[player.as_usize()].last_frame;
                     assert!(
-                        current_remote_frame == NULL_FRAME
+                        current_remote_frame == Frame::NULL
                             || current_remote_frame + 1 == input.frame
                     );
                     // update our info
-                    self.local_connect_status[player].last_frame = input.frame;
+                    self.local_connect_status[player.as_usize()].last_frame = input.frame;
                     // add the remote input
                     self.sync_layer.add_remote_input(player, input);
                 }
@@ -966,7 +1061,7 @@ impl<T: Config> P2PSession<T> {
                             self.local_checksum_history.get(&remote_frame)
                         {
                             if local_checksum != remote_checksum {
-                                self.event_queue.push_back(GgrsEvent::DesyncDetected {
+                                self.event_queue.push_back(FortressEvent::DesyncDetected {
                                     frame: remote_frame,
                                     local_checksum,
                                     remote_checksum,
@@ -989,8 +1084,8 @@ impl<T: Config> P2PSession<T> {
     fn check_checksum_send_interval(&mut self) {
         match self.desync_detection {
             DesyncDetection::On { interval } => {
-                let frame_to_send = if self.last_sent_checksum_frame == NULL_FRAME {
-                    interval as i32
+                let frame_to_send = if self.last_sent_checksum_frame.is_null() {
+                    Frame::new(interval as i32)
                 } else {
                     self.last_sent_checksum_frame + interval as i32
                 };
@@ -998,10 +1093,18 @@ impl<T: Config> P2PSession<T> {
                 if frame_to_send <= self.sync_layer.last_confirmed_frame()
                     && frame_to_send <= self.sync_layer.last_saved_frame()
                 {
-                    let cell = self
-                        .sync_layer
-                        .saved_state_by_frame(frame_to_send)
-                        .unwrap_or_else(|| panic!("cell not found!: frame {frame_to_send}"));
+                    let Some(cell) = self.sync_layer.saved_state_by_frame(frame_to_send) else {
+                        // This shouldn't happen if frame is within confirmed and saved range
+                        report_violation!(
+                            ViolationSeverity::Warning,
+                            ViolationKind::StateManagement,
+                            "Cell not found for frame {} in check_checksum_send_interval (confirmed={}, saved={}) - skipping checksum",
+                            frame_to_send,
+                            self.sync_layer.last_confirmed_frame(),
+                            self.sync_layer.last_saved_frame()
+                        );
+                        return;
+                    };
 
                     if let Some(checksum) = cell.checksum() {
                         for remote in self.player_reg.remotes.values_mut() {
