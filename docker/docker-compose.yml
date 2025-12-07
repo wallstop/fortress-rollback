@@ -1,0 +1,89 @@
+# Docker Compose for Fortress Rollback network testing
+#
+# This defines a two-peer P2P test setup with configurable network conditions.
+#
+# Usage:
+#   # Build the image first
+#   docker compose -f docker/docker-compose.yml build
+#
+#   # Run basic test (no network chaos)
+#   docker compose -f docker/docker-compose.yml up --abort-on-container-exit
+#
+#   # Run with network conditions (override via environment)
+#   NETEM_DELAY=50ms NETEM_LOSS=5% docker compose -f docker/docker-compose.yml up --abort-on-container-exit
+
+services:
+  peer1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: fortress-peer1
+    cap_add:
+      - NET_ADMIN  # Required for tc/netem
+    networks:
+      testnet:
+        ipv4_address: 172.28.0.10
+    environment:
+      - NETEM_DELAY=${NETEM_DELAY:-}
+      - NETEM_JITTER=${NETEM_JITTER:-}
+      - NETEM_LOSS=${NETEM_LOSS:-}
+      - NETEM_DUPLICATE=${NETEM_DUPLICATE:-}
+      - NETEM_REORDER=${NETEM_REORDER:-}
+      - PEER1_NETEM_DELAY=${PEER1_NETEM_DELAY:-}
+      - PEER1_NETEM_LOSS=${PEER1_NETEM_LOSS:-}
+      - DEBUG=${DEBUG:-0}
+    command:
+      - "--local-port"
+      - "9001"
+      - "--player-index"
+      - "0"
+      - "--peer"
+      - "172.28.0.11:9001"
+      - "--frames"
+      - "${TEST_FRAMES:-100}"
+      - "--timeout"
+      - "${TEST_TIMEOUT:-60}"
+      - "--input-delay"
+      - "${INPUT_DELAY:-2}"
+    depends_on:
+      - peer2
+
+  peer2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: fortress-peer2
+    cap_add:
+      - NET_ADMIN  # Required for tc/netem
+    networks:
+      testnet:
+        ipv4_address: 172.28.0.11
+    environment:
+      - NETEM_DELAY=${NETEM_DELAY:-}
+      - NETEM_JITTER=${NETEM_JITTER:-}
+      - NETEM_LOSS=${NETEM_LOSS:-}
+      - NETEM_DUPLICATE=${NETEM_DUPLICATE:-}
+      - NETEM_REORDER=${NETEM_REORDER:-}
+      - PEER2_NETEM_DELAY=${PEER2_NETEM_DELAY:-}
+      - PEER2_NETEM_LOSS=${PEER2_NETEM_LOSS:-}
+      - DEBUG=${DEBUG:-0}
+    command:
+      - "--local-port"
+      - "9001"
+      - "--player-index"
+      - "1"
+      - "--peer"
+      - "172.28.0.10:9001"
+      - "--frames"
+      - "${TEST_FRAMES:-100}"
+      - "--timeout"
+      - "${TEST_TIMEOUT:-60}"
+      - "--input-delay"
+      - "${INPUT_DELAY:-2}"
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

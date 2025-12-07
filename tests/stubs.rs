@@ -30,6 +30,12 @@ impl Config for StubConfig {
     type Address = SocketAddr;
 }
 
+impl Default for GameStub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GameStub {
     #[allow(dead_code)]
     pub fn new() -> GameStub {
@@ -67,6 +73,12 @@ impl GameStub {
 pub struct RandomChecksumGameStub {
     pub gs: StateStub,
     rng: ThreadRng,
+}
+
+impl Default for RandomChecksumGameStub {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RandomChecksumGameStub {
@@ -112,6 +124,8 @@ pub struct StateStub {
 }
 
 impl StateStub {
+    // Note: is_multiple_of() is nightly-only, so we use modulo
+    #[allow(clippy::manual_is_multiple_of)]
     fn advance_frame(&mut self, inputs: Vec<(StubInput, InputStatus)>) {
         // Sum all player inputs for deterministic state update
         let total_inputs: u32 = inputs.iter().map(|(input, _)| input.inp).sum();

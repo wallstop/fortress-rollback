@@ -58,6 +58,49 @@ jobs:
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
 
+  # Multi-process network tests (localhost)
+  network-tests:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Build network test peer
+        run: cargo build --release --bin network_test_peer
+      - name: Run multi-process network tests
+        run: cargo test --release --test test_multi_process_network -- --test-threads=1
+        timeout-minutes: 10
+
+  # Docker-based network tests with tc/netem
+  docker-network-tests:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        run: docker compose -f docker/docker-compose.yml build
+
+      - name: Run Docker network tests (quick)
+        run: ./scripts/docker-network-tests.sh --quick
+        timeout-minutes: 15
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-network-test-results
+          path: test-results/
+          retention-days: 7
+
   package-dry-run:
     runs-on: ubuntu-latest
     needs: build

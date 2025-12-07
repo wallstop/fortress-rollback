@@ -40,8 +40,10 @@ pub(crate) fn decode(
     Ok(delta_decode(reference, &buf))
 }
 
+// Note: is_multiple_of() is nightly-only, so we use modulo
+#[allow(clippy::manual_is_multiple_of)]
 pub(crate) fn delta_decode(ref_bytes: &[u8], data: &[u8]) -> Vec<Vec<u8>> {
-    assert!(data.len().is_multiple_of(ref_bytes.len()));
+    assert!(!ref_bytes.is_empty() && data.len() % ref_bytes.len() == 0);
     let out_size = data.len() / ref_bytes.len();
     let mut output = Vec::with_capacity(out_size);
 
@@ -111,7 +113,7 @@ mod compression_tests {
     fn test_delta_encode_xor_property() {
         // XOR property: a ^ a = 0, so identical bytes should produce zeros
         let ref_bytes = vec![0xFF, 0xAA, 0x55];
-        let inputs = vec![vec![0xFF, 0xAA, 0x55]]; // identical to reference
+        let inputs = [vec![0xFF, 0xAA, 0x55]]; // identical to reference
 
         let encoded = delta_encode(&ref_bytes, inputs.iter());
 
@@ -202,7 +204,7 @@ mod property_tests {
 
             proptest::test_runner::TestRunner::default()
                 .run(&ref_strategy, |ref_bytes| {
-                    let inputs = vec![ref_bytes.clone()];
+                    let inputs = [ref_bytes.clone()];
                     let encoded = delta_encode(&ref_bytes, inputs.iter());
                     prop_assert!(encoded.iter().all(|&b| b == 0));
                     Ok(())

@@ -44,8 +44,8 @@ fn fletcher16(data: &[u8]) -> u16 {
     let mut sum1: u16 = 0;
     let mut sum2: u16 = 0;
 
-    for index in 0..data.len() {
-        sum1 = (sum1 + data[index] as u16) % 255;
+    for &byte in data {
+        sum1 = (sum1 + byte as u16) % 255;
         sum2 = (sum2 + sum1) % 255;
     }
 
@@ -167,11 +167,11 @@ impl Game {
             "Frame {}: Checksum {}",
             self.periodic_checksum.0, self.periodic_checksum.1
         );
-        let force_desync_info_str = format!("Press SPACE to trigger a desync");
+        let force_desync_info_str = "Press SPACE to trigger a desync";
         draw_text(&last_checksum_str, 20.0, 20.0, 30.0, WHITE);
         draw_text(&periodic_checksum_str, 20.0, 40.0, 30.0, WHITE);
         draw_text(
-            &force_desync_info_str,
+            force_desync_info_str,
             90.0,
             WINDOW_HEIGHT * 9.0 / 10.0,
             30.0,
@@ -274,11 +274,11 @@ impl State {
         // increase the frame counter
         self.frame += 1;
 
-        for i in 0..self.num_players {
+        for (i, (player_input, status)) in inputs.iter().enumerate().take(self.num_players) {
             // get input of that player
-            let input = match inputs[i].1 {
-                InputStatus::Confirmed => inputs[i].0.inp,
-                InputStatus::Predicted => inputs[i].0.inp,
+            let input = match status {
+                InputStatus::Confirmed => player_input.inp,
+                InputStatus::Predicted => player_input.inp,
                 InputStatus::Disconnected => 4, // disconnected players spin
             };
 

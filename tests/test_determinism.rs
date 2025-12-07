@@ -151,7 +151,7 @@ fn test_checksum_history_determinism() {
 
     // If checksums were stored in HashMap, order could vary
     // BTreeMap ensures consistent ordering by frame number
-    assert!(checksums.len() > 0);
+    assert!(!checksums.is_empty());
 }
 
 /// Test that player handles maintain deterministic iteration in P2PSession

@@ -1,0 +1,25 @@
+# Build artifacts
+target/
+test-results/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Examples (not needed for test binary)
+examples/
+
+# Other
+.github/
+.llm/

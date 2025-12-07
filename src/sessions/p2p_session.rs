@@ -168,6 +168,10 @@ where
 impl<T: Config> P2PSession<T> {
     /// Creates a new [`P2PSession`] for players who participate on the game input. After creating the session, add local and remote players,
     /// set input delay for local players and then start the session. The session will use the provided socket.
+    ///
+    /// Note: This is an internal constructor called via SessionBuilder. The many parameters are
+    /// acceptable here because users interact through the builder pattern, not this method directly.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         num_players: usize,
         max_prediction: usize,

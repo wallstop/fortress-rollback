@@ -10,6 +10,7 @@
 use std::{fmt::Debug, hash::Hash};
 
 pub use error::FortressError;
+pub use network::chaos_socket::{ChaosConfig, ChaosConfigBuilder, ChaosSocket, ChaosStats};
 pub use network::messages::Message;
 pub use network::network_stats::NetworkStats;
 pub use network::udp_socket::UdpNonBlockingSocket;
@@ -33,6 +34,7 @@ pub(crate) mod sessions {
     pub(crate) mod sync_test_session;
 }
 pub(crate) mod network {
+    pub mod chaos_socket;
     pub(crate) mod compression;
     pub(crate) mod messages;
     pub(crate) mod network_stats;
@@ -599,4 +601,230 @@ where
     /// This method should return all messages received since the last time this method was called.
     /// The pairs `(A, Message)` indicate from which address each packet was received.
     fn receive_all_messages(&mut self) -> Vec<(A, Message)>;
+}
+
+// ###################
+// # KANI PROOFS     #
+// ###################
+
+/// Kani proofs for Frame arithmetic safety (SAFE-6 from FORMAL_SPEC.md).
+///
+/// These proofs verify:
+/// - Frame addition does not overflow in typical usage
+/// - Frame subtraction produces correct results
+/// - Frame comparisons are consistent
+/// - NULL_FRAME (-1) is handled correctly
+///
+/// Note: Requires Kani verifier. Install with:
+///   cargo install --locked kani-verifier
+///   cargo kani setup
+///
+/// Run proofs with:
+///   cargo kani --tests
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Proof: Frame::new creates valid frames for non-negative inputs
+    #[kani::proof]
+    fn proof_frame_new_valid() {
+        let value: i32 = kani::any();
+        kani::assume(value >= 0);
+
+        let frame = Frame::new(value);
+        kani::assert(frame.is_valid(), "Frame::new with non-negative should be valid");
+        kani::assert(!frame.is_null(), "Frame::new with non-negative should not be null");
+        kani::assert(frame.as_i32() == value, "Frame::as_i32 should return original value");
+    }
+
+    /// Proof: Frame::NULL is consistently null
+    #[kani::proof]
+    fn proof_frame_null_consistency() {
+        let null_frame = Frame::NULL;
+        kani::assert(null_frame.is_null(), "NULL frame should be null");
+        kani::assert(!null_frame.is_valid(), "NULL frame should not be valid");
+        kani::assert(null_frame.as_i32() == NULL_FRAME, "NULL frame should equal NULL_FRAME constant");
+    }
+
+    /// Proof: Frame addition with small positive values is safe
+    ///
+    /// This proves that for frames in typical game usage (0 to 10,000,000),
+    /// adding small increments (0-1000) does not overflow.
+    #[kani::proof]
+    fn proof_frame_add_small_safe() {
+        let frame_val: i32 = kani::any();
+        let increment: i32 = kani::any();
+
+        // Typical game usage: frames 0 to 10 million, increments 0 to 1000
+        kani::assume(frame_val >= 0 && frame_val <= 10_000_000);
+        kani::assume(increment >= 0 && increment <= 1000);
+
+        let frame = Frame::new(frame_val);
+        let result = frame + increment;
+
+        kani::assert(
+            result.as_i32() == frame_val + increment,
+            "Frame addition should be correct"
+        );
+        kani::assert(result.is_valid(), "Result should be valid for typical usage");
+    }
+
+    /// Proof: Frame subtraction produces correct differences
+    #[kani::proof]
+    fn proof_frame_sub_frames_correct() {
+        let a: i32 = kani::any();
+        let b: i32 = kani::any();
+
+        kani::assume(a >= 0 && a <= 1_000_000);
+        kani::assume(b >= 0 && b <= 1_000_000);
+
+        let frame_a = Frame::new(a);
+        let frame_b = Frame::new(b);
+
+        let diff: i32 = frame_a - frame_b;
+        kani::assert(diff == a - b, "Frame subtraction should produce correct difference");
+    }
+
+    /// Proof: Frame ordering is consistent with i32 ordering
+    #[kani::proof]
+    fn proof_frame_ordering_consistent() {
+        let a: i32 = kani::any();
+        let b: i32 = kani::any();
+
+        kani::assume(a >= -1 && a <= 1_000_000);
+        kani::assume(b >= -1 && b <= 1_000_000);
+
+        let frame_a = Frame::new(a);
+        let frame_b = Frame::new(b);
+
+        // Verify ordering consistency
+        if a < b {
+            kani::assert(frame_a < frame_b, "Frame < should be consistent");
+        }
+        if a > b {
+            kani::assert(frame_a > frame_b, "Frame > should be consistent");
+        }
+        if a == b {
+            kani::assert(frame_a == frame_b, "Frame == should be consistent");
+        }
+    }
+
+    /// Proof: Frame modulo operation is correct for queue indexing
+    ///
+    /// This is critical for InputQueue circular buffer indexing (INV-5).
+    #[kani::proof]
+    fn proof_frame_modulo_for_queue() {
+        let frame_val: i32 = kani::any();
+
+        // Valid frames for queue indexing
+        kani::assume(frame_val >= 0 && frame_val <= 10_000_000);
+
+        let frame = Frame::new(frame_val);
+        let queue_len: i32 = 128; // INPUT_QUEUE_LENGTH
+
+        let index = frame % queue_len;
+
+        kani::assert(index >= 0, "Queue index should be non-negative");
+        kani::assert(index < queue_len, "Queue index should be within bounds");
+        kani::assert(index == frame_val % queue_len, "Modulo should be correct");
+    }
+
+    /// Proof: Frame::to_option correctly handles null and valid frames
+    #[kani::proof]
+    fn proof_frame_to_option() {
+        let frame_val: i32 = kani::any();
+        kani::assume(frame_val >= -1 && frame_val <= 1_000_000);
+
+        let frame = Frame::new(frame_val);
+        let opt = frame.to_option();
+
+        if frame.is_valid() {
+            kani::assert(opt.is_some(), "Valid frame should produce Some");
+            kani::assert(opt.unwrap() == frame, "Option should contain same frame");
+        } else {
+            kani::assert(opt.is_none(), "Invalid frame should produce None");
+        }
+    }
+
+    /// Proof: Frame::from_option correctly handles Some and None
+    #[kani::proof]
+    fn proof_frame_from_option() {
+        let frame_val: i32 = kani::any();
+        kani::assume(frame_val >= 0 && frame_val <= 1_000_000);
+
+        let frame = Frame::new(frame_val);
+
+        // Test with Some
+        let from_some = Frame::from_option(Some(frame));
+        kani::assert(from_some == frame, "from_option(Some) should return frame");
+
+        // Test with None
+        let from_none = Frame::from_option(None);
+        kani::assert(from_none == Frame::NULL, "from_option(None) should return NULL");
+    }
+
+    /// Proof: Frame AddAssign is consistent with Add
+    #[kani::proof]
+    fn proof_frame_add_assign_consistent() {
+        let frame_val: i32 = kani::any();
+        let increment: i32 = kani::any();
+
+        kani::assume(frame_val >= 0 && frame_val <= 1_000_000);
+        kani::assume(increment >= 0 && increment <= 1000);
+
+        let frame1 = Frame::new(frame_val);
+        let mut frame2 = Frame::new(frame_val);
+
+        let result1 = frame1 + increment;
+        frame2 += increment;
+
+        kani::assert(result1 == frame2, "AddAssign should be consistent with Add");
+    }
+
+    /// Proof: Frame SubAssign is consistent with Sub
+    #[kani::proof]
+    fn proof_frame_sub_assign_consistent() {
+        let frame_val: i32 = kani::any();
+        let decrement: i32 = kani::any();
+
+        kani::assume(frame_val >= 100 && frame_val <= 1_000_000);
+        kani::assume(decrement >= 0 && decrement <= 100);
+
+        let frame1 = Frame::new(frame_val);
+        let mut frame2 = Frame::new(frame_val);
+
+        let result1 = frame1 - decrement;
+        frame2 -= decrement;
+
+        kani::assert(result1 == frame2, "SubAssign should be consistent with Sub");
+    }
+
+    /// Proof: PlayerHandle validity check is correct
+    #[kani::proof]
+    fn proof_player_handle_validity() {
+        let handle_val: usize = kani::any();
+        let num_players: usize = kani::any();
+
+        kani::assume(handle_val < 100);
+        kani::assume(num_players > 0 && num_players <= 16);
+
+        let handle = PlayerHandle::new(handle_val);
+
+        let is_valid_player = handle.is_valid_player_for(num_players);
+        let is_spectator = handle.is_spectator_for(num_players);
+
+        // A handle is either a valid player OR a spectator, never both
+        kani::assert(
+            is_valid_player != is_spectator || handle_val >= num_players,
+            "Handle should be player XOR spectator"
+        );
+
+        if handle_val < num_players {
+            kani::assert(is_valid_player, "Handle < num_players should be valid player");
+            kani::assert(!is_spectator, "Handle < num_players should not be spectator");
+        } else {
+            kani::assert(!is_valid_player, "Handle >= num_players should not be valid player");
+            kani::assert(is_spectator, "Handle >= num_players should be spectator");
+        }
+    }
 }

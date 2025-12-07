@@ -69,8 +69,8 @@ fn test_advance_frame_p2p_sessions_enum() -> Result<(), FortressError> {
         stub2.handle_requests(requests2);
 
         // gamestate evolves
-        assert_eq!(stub1.gs.frame, i as i32 + 1);
-        assert_eq!(stub2.gs.frame, i as i32 + 1);
+        assert_eq!(stub1.gs.frame, i + 1);
+        assert_eq!(stub2.gs.frame, i + 1);
     }
 
     Ok(())

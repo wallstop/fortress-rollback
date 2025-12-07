@@ -177,10 +177,10 @@ fn test_desyncs_detected() -> Result<(), FortressError> {
     }
 
     // drain events
-    assert!(sess1.events().chain(sess2.events()).all(|e| match e {
-        FortressEvent::Synchronizing { .. } | FortressEvent::Synchronized { .. } => true,
-        _ => false,
-    }));
+    assert!(sess1.events().chain(sess2.events()).all(|e| matches!(
+        e,
+        FortressEvent::Synchronizing { .. } | FortressEvent::Synchronized { .. }
+    )));
 
     let mut stub1 = stubs::GameStub::new();
     let mut stub2 = stubs::GameStub::new();
@@ -293,10 +293,10 @@ fn test_desyncs_and_input_delay_no_panic() -> Result<(), FortressError> {
     }
 
     // drain events
-    assert!(sess1.events().chain(sess2.events()).all(|e| match e {
-        FortressEvent::Synchronizing { .. } | FortressEvent::Synchronized { .. } => true,
-        _ => false,
-    }));
+    assert!(sess1.events().chain(sess2.events()).all(|e| matches!(
+        e,
+        FortressEvent::Synchronizing { .. } | FortressEvent::Synchronized { .. }
+    )));
 
     let mut stub1 = stubs::GameStub::new();
     let mut stub2 = stubs::GameStub::new();

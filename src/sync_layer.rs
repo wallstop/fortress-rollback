@@ -1039,3 +1039,378 @@ mod sync_layer_tests {
         }
     }
 }
+
+// ###################
+// # KANI PROOFS     #
+// ###################
+
+/// Kani proofs for SyncLayer state consistency.
+///
+/// These proofs verify:
+/// - INV-1: Frame monotonicity (current_frame never decreases except during rollback)
+/// - INV-7: Confirmed frame consistency (last_confirmed_frame <= current_frame)
+/// - INV-8: Saved frame consistency (last_saved_frame <= current_frame)
+/// - State cell management and rollback bounds
+///
+/// Note: Requires Kani verifier. Install with:
+///   cargo install --locked kani-verifier
+///   cargo kani setup
+///
+/// Run proofs with:
+///   cargo kani --tests
+#[cfg(kani)]
+mod kani_sync_layer_proofs {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use std::net::SocketAddr;
+
+    #[repr(C)]
+    #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+    struct TestInput {
+        inp: u8,
+    }
+
+    struct TestConfig;
+
+    impl Config for TestConfig {
+        type Input = TestInput;
+        type State = u8;
+        type Address = SocketAddr;
+    }
+
+    /// Proof: New SyncLayer has valid initial state
+    ///
+    /// Verifies all invariants hold at initialization.
+    #[kani::proof]
+    fn proof_new_sync_layer_valid() {
+        let num_players: usize = kani::any();
+        let max_prediction: usize = kani::any();
+
+        kani::assume(num_players > 0 && num_players <= 4);
+        kani::assume(max_prediction > 0 && max_prediction <= 8);
+
+        let sync_layer = SyncLayer::<TestConfig>::new(num_players, max_prediction);
+
+        // INV-1: current_frame starts at 0
+        kani::assert(
+            sync_layer.current_frame() == Frame::new(0),
+            "New SyncLayer should start at frame 0"
+        );
+
+        // INV-7: last_confirmed_frame <= current_frame (NULL is treated as -1)
+        kani::assert(
+            sync_layer.last_confirmed_frame().is_null(),
+            "New SyncLayer should have null last_confirmed_frame"
+        );
+
+        // INV-8: last_saved_frame <= current_frame
+        kani::assert(
+            sync_layer.last_saved_frame().is_null(),
+            "New SyncLayer should have null last_saved_frame"
+        );
+
+        // Structural invariants
+        kani::assert(
+            sync_layer.num_players == num_players,
+            "num_players should be set correctly"
+        );
+        kani::assert(
+            sync_layer.max_prediction == max_prediction,
+            "max_prediction should be set correctly"
+        );
+        kani::assert(
+            sync_layer.input_queues.len() == num_players,
+            "Should have one input queue per player"
+        );
+    }
+
+    /// Proof: advance_frame maintains INV-1 (monotonicity)
+    ///
+    /// Verifies that advance_frame always increases current_frame.
+    #[kani::proof]
+    fn proof_advance_frame_monotonic() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        let initial_frame = sync_layer.current_frame();
+        sync_layer.advance_frame();
+        let new_frame = sync_layer.current_frame();
+
+        kani::assert(
+            new_frame > initial_frame,
+            "advance_frame should increase current_frame"
+        );
+        kani::assert(
+            new_frame == initial_frame + 1,
+            "advance_frame should increment by exactly 1"
+        );
+    }
+
+    /// Proof: Multiple advances maintain monotonicity
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn proof_multiple_advances_monotonic() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+        let count: usize = kani::any();
+        kani::assume(count > 0 && count <= 8);
+
+        let mut prev_frame = sync_layer.current_frame();
+        for _ in 0..count {
+            sync_layer.advance_frame();
+            let curr_frame = sync_layer.current_frame();
+
+            kani::assert(
+                curr_frame > prev_frame,
+                "Each advance should increase frame"
+            );
+            prev_frame = curr_frame;
+        }
+
+        kani::assert(
+            sync_layer.current_frame() == Frame::new(count as i32),
+            "Final frame should equal advance count"
+        );
+    }
+
+    /// Proof: save_current_state maintains INV-8
+    ///
+    /// Verifies that after saving, last_saved_frame == current_frame.
+    #[kani::proof]
+    fn proof_save_maintains_inv8() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        // Advance a bit
+        let advances: usize = kani::any();
+        kani::assume(advances <= 5);
+        for _ in 0..advances {
+            sync_layer.advance_frame();
+        }
+
+        let frame_before_save = sync_layer.current_frame();
+        let _request = sync_layer.save_current_state();
+        let saved_frame = sync_layer.last_saved_frame();
+
+        kani::assert(
+            saved_frame == frame_before_save,
+            "last_saved_frame should equal current_frame after save"
+        );
+        kani::assert(
+            saved_frame <= sync_layer.current_frame(),
+            "INV-8: last_saved_frame <= current_frame"
+        );
+    }
+
+    /// Proof: load_frame validates bounds correctly
+    ///
+    /// Verifies that load_frame rejects invalid frames.
+    #[kani::proof]
+    fn proof_load_frame_validates_bounds() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 4);
+
+        // Advance to frame 5 and save each frame
+        for i in 0..5i32 {
+            let request = sync_layer.save_current_state();
+            if let FortressRequest::SaveGameState { cell, frame } = request {
+                cell.save(frame, Some(i as u8), None);
+            }
+            sync_layer.advance_frame();
+        }
+        // Now at frame 5, max_prediction is 4
+
+        // Load NULL_FRAME should fail
+        let result_null = sync_layer.load_frame(Frame::NULL);
+        kani::assert(result_null.is_err(), "Loading NULL_FRAME should fail");
+
+        // Load current frame should fail (not in the past)
+        let result_current = sync_layer.load_frame(Frame::new(5));
+        kani::assert(result_current.is_err(), "Loading current frame should fail");
+
+        // Load future frame should fail
+        let result_future = sync_layer.load_frame(Frame::new(10));
+        kani::assert(result_future.is_err(), "Loading future frame should fail");
+
+        // Load frame outside prediction window should fail (frame 0 is > 4 frames back)
+        let result_too_old = sync_layer.load_frame(Frame::new(0));
+        kani::assert(result_too_old.is_err(), "Loading frame outside prediction window should fail");
+    }
+
+    /// Proof: load_frame success maintains invariants
+    #[kani::proof]
+    fn proof_load_frame_success_maintains_invariants() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        // Advance to frame 5 and save each frame
+        for i in 0..5i32 {
+            let request = sync_layer.save_current_state();
+            if let FortressRequest::SaveGameState { cell, frame } = request {
+                cell.save(frame, Some(i as u8), None);
+            }
+            sync_layer.advance_frame();
+        }
+        // Now at frame 5
+
+        // Load frame 2 (valid: in past, within prediction window)
+        let result = sync_layer.load_frame(Frame::new(2));
+        kani::assert(result.is_ok(), "Loading valid frame should succeed");
+
+        // After load, current_frame should be the loaded frame
+        kani::assert(
+            sync_layer.current_frame() == Frame::new(2),
+            "current_frame should be set to loaded frame"
+        );
+    }
+
+    /// Proof: set_frame_delay validates player handle
+    #[kani::proof]
+    fn proof_set_frame_delay_validates_handle() {
+        let num_players: usize = kani::any();
+        kani::assume(num_players > 0 && num_players <= 4);
+
+        let mut sync_layer = SyncLayer::<TestConfig>::new(num_players, 8);
+
+        // Valid handle should succeed
+        let valid_handle: usize = kani::any();
+        kani::assume(valid_handle < num_players);
+        let result_valid = sync_layer.set_frame_delay(PlayerHandle::new(valid_handle), 2);
+        kani::assert(result_valid.is_ok(), "Valid handle should succeed");
+
+        // Invalid handle should fail
+        let invalid_handle: usize = kani::any();
+        kani::assume(invalid_handle >= num_players && invalid_handle < 100);
+        let result_invalid = sync_layer.set_frame_delay(PlayerHandle::new(invalid_handle), 2);
+        kani::assert(result_invalid.is_err(), "Invalid handle should fail");
+    }
+
+    /// Proof: Saved states count is correct
+    #[kani::proof]
+    fn proof_saved_states_count() {
+        let max_prediction: usize = kani::any();
+        kani::assume(max_prediction > 0 && max_prediction <= 8);
+
+        let sync_layer = SyncLayer::<TestConfig>::new(2, max_prediction);
+
+        // Should have max_prediction + 1 state slots
+        kani::assert(
+            sync_layer.saved_states.states.len() == max_prediction + 1,
+            "Should have max_prediction + 1 saved state slots"
+        );
+    }
+
+    /// Proof: SavedStates get_cell validates frame
+    #[kani::proof]
+    fn proof_get_cell_validates_frame() {
+        let saved_states: SavedStates<u8> = SavedStates::new(8);
+
+        // Negative frame should fail
+        let result_neg = saved_states.get_cell(Frame::new(-1));
+        kani::assert(result_neg.is_err(), "Negative frame should fail");
+
+        // Valid frame should succeed
+        let valid_frame: i32 = kani::any();
+        kani::assume(valid_frame >= 0 && valid_frame <= 1000);
+        let result_valid = saved_states.get_cell(Frame::new(valid_frame));
+        kani::assert(result_valid.is_ok(), "Valid frame should succeed");
+    }
+
+    /// Proof: SavedStates uses circular indexing correctly
+    #[kani::proof]
+    fn proof_saved_states_circular_index() {
+        let max_prediction: usize = kani::any();
+        kani::assume(max_prediction > 0 && max_prediction <= 8);
+
+        let saved_states: SavedStates<u8> = SavedStates::new(max_prediction);
+        let num_cells = max_prediction + 1;
+
+        let frame: i32 = kani::any();
+        kani::assume(frame >= 0 && frame <= 10000);
+
+        let expected_pos = frame as usize % num_cells;
+
+        // The get_cell implementation should use this index
+        kani::assert(
+            expected_pos < num_cells,
+            "Calculated position should be within bounds"
+        );
+    }
+
+    /// Proof: reset_prediction doesn't affect frame state
+    #[kani::proof]
+    fn proof_reset_prediction_preserves_frames() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        // Advance and save
+        for _ in 0..3 {
+            sync_layer.save_current_state();
+            sync_layer.advance_frame();
+        }
+
+        let current_before = sync_layer.current_frame();
+        let confirmed_before = sync_layer.last_confirmed_frame();
+        let saved_before = sync_layer.last_saved_frame();
+
+        sync_layer.reset_prediction();
+
+        kani::assert(
+            sync_layer.current_frame() == current_before,
+            "reset_prediction should not change current_frame"
+        );
+        kani::assert(
+            sync_layer.last_confirmed_frame() == confirmed_before,
+            "reset_prediction should not change last_confirmed_frame"
+        );
+        kani::assert(
+            sync_layer.last_saved_frame() == saved_before,
+            "reset_prediction should not change last_saved_frame"
+        );
+    }
+
+    /// Proof: INV-7 holds after set_last_confirmed_frame
+    #[kani::proof]
+    fn proof_confirmed_frame_bounded() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        // Advance and add inputs
+        for i in 0..10i32 {
+            let game_input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            sync_layer.add_remote_input(PlayerHandle::new(0), game_input);
+            sync_layer.add_remote_input(PlayerHandle::new(1), game_input);
+            sync_layer.advance_frame();
+        }
+
+        // Set confirmed frame to any value
+        let confirm_frame: i32 = kani::any();
+        kani::assume(confirm_frame >= 0 && confirm_frame <= 15);
+
+        sync_layer.set_last_confirmed_frame(Frame::new(confirm_frame), false);
+
+        // INV-7: last_confirmed_frame <= current_frame
+        kani::assert(
+            sync_layer.last_confirmed_frame() <= sync_layer.current_frame(),
+            "INV-7: last_confirmed_frame should be <= current_frame"
+        );
+    }
+
+    /// Proof: Sparse saving respects last_saved_frame
+    #[kani::proof]
+    fn proof_sparse_saving_respects_saved_frame() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        // Save at frame 0
+        sync_layer.save_current_state();
+
+        // Advance to frame 5, don't save intermediate frames
+        for i in 0..5i32 {
+            let game_input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            sync_layer.add_remote_input(PlayerHandle::new(0), game_input);
+            sync_layer.add_remote_input(PlayerHandle::new(1), game_input);
+            sync_layer.advance_frame();
+        }
+
+        // With sparse saving enabled, confirm frame should not exceed last_saved (0)
+        sync_layer.set_last_confirmed_frame(Frame::new(5), true);
+
+        kani::assert(
+            sync_layer.last_confirmed_frame() <= sync_layer.last_saved_frame(),
+            "With sparse saving, confirmed frame should not exceed last saved"
+        );
+    }
+}

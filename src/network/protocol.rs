@@ -86,9 +86,11 @@ impl InputBytes {
         Self { frame, bytes }
     }
 
+    // Note: is_multiple_of() is nightly-only, so we use modulo
+    #[allow(clippy::manual_is_multiple_of)]
     fn to_player_inputs<T: Config>(&self, num_players: usize) -> Vec<PlayerInput<T::Input>> {
         let mut player_inputs = Vec::new();
-        assert!(self.bytes.len().is_multiple_of(num_players));
+        assert!(num_players > 0 && self.bytes.len() % num_players == 0);
         let size = self.bytes.len() / num_players;
         for p in 0..num_players {
             let start = p * size;
@@ -194,6 +196,11 @@ impl<T: Config> PartialEq for UdpProtocol<T> {
 }
 
 impl<T: Config> UdpProtocol<T> {
+    /// Internal constructor for UDP protocol handler.
+    ///
+    /// Note: This is an internal constructor called via SessionBuilder. The many parameters are
+    /// acceptable here because users interact through the builder pattern, not this method directly.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         mut handles: Vec<PlayerHandle>,
         peer_addr: T::Address,
