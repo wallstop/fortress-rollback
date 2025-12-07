@@ -9,7 +9,10 @@
 		"ghcr.io/devcontainers/features/python:1": {},
 		"ghcr.io/devcontainers/features/rust:1": {},
 		"ghcr.io/nikiforovall/devcontainer-features/dotnet-csharpier:1": {},
-		"ghcr.io/devcontainers-extra/features/npm-package:1": {}
+		"ghcr.io/devcontainers-extra/features/npm-package:1": {},
+		"ghcr.io/devcontainers-extra/features/apt-packages:1": {
+			"packages": "libasound2-dev,default-jre,graphviz"
+		}
 	},
 	"mounts": [
 		{
@@ -17,5 +20,6 @@
 			"target": "/usr/local/cargo",
 			"type": "volume"
 		}
-	]
+	],
+	"postCreateCommand": "bash -c 'mkdir -p /opt/tla && curl -L https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o /opt/tla/tla2tools.jar'"
 }

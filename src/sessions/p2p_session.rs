@@ -1,21 +1,21 @@
-use crate::DesyncDetection;
 use crate::error::FortressError;
 use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::network::network_stats::NetworkStats;
-use crate::network::protocol::{MAX_CHECKSUM_HISTORY_SIZE, UdpProtocol};
+use crate::network::protocol::{UdpProtocol, MAX_CHECKSUM_HISTORY_SIZE};
 use crate::report_violation;
 use crate::sync_layer::SyncLayer;
 use crate::telemetry::{ViolationKind, ViolationObserver, ViolationSeverity};
+use crate::DesyncDetection;
 use crate::{
-    Config, FortressEvent, FortressRequest, Frame, NonBlockingSocket, PlayerHandle,
-    PlayerType, SessionState, network::protocol::Event,
+    network::protocol::Event, Config, FortressEvent, FortressRequest, Frame, NonBlockingSocket,
+    PlayerHandle, PlayerType, SessionState,
 };
 use tracing::{debug, trace};
 
+use std::collections::vec_deque::Drain;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
-use std::collections::vec_deque::Drain;
 use std::convert::TryInto;
 use std::sync::Arc;
 
@@ -618,6 +618,47 @@ impl<T: Config> P2PSession<T> {
         self.event_queue.drain(..)
     }
 
+    /// Returns the confirmed inputs for all players at a specific frame.
+    ///
+    /// This is useful for computing deterministic checksums over confirmed game state.
+    /// The returned inputs are guaranteed to be the same across all peers for the same frame,
+    /// making them suitable for desync detection and verification.
+    ///
+    /// # Arguments
+    ///
+    /// * `frame` - The frame to get confirmed inputs for. Must be <= `confirmed_frame()`.
+    ///
+    /// # Returns
+    ///
+    /// A vector of inputs for each player, in player handle order (0, 1, 2, ...).
+    /// Returns an error if the frame is not confirmed yet or has been discarded.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let confirmed = session.confirmed_frame();
+    /// if confirmed.as_i32() >= 100 {
+    ///     let inputs = session.confirmed_inputs_for_frame(Frame::new(100))?;
+    ///     // These inputs are deterministic across all peers
+    ///     let checksum = compute_checksum(&inputs);
+    /// }
+    /// ```
+    pub fn confirmed_inputs_for_frame(&self, frame: Frame) -> Result<Vec<T::Input>, FortressError> {
+        if frame > self.confirmed_frame() {
+            return Err(FortressError::InvalidFrame {
+                frame,
+                reason: format!(
+                    "Frame {} is not confirmed yet (confirmed_frame = {})",
+                    frame,
+                    self.confirmed_frame()
+                ),
+            });
+        }
+        self.sync_layer
+            .confirmed_inputs(frame, &self.local_connect_status)
+            .map(|inputs| inputs.into_iter().map(|pi| pi.input).collect())
+    }
+
     /// Returns the number of players added to this session
     pub fn num_players(&self) -> usize {
         self.player_reg.num_players()
@@ -1031,7 +1072,8 @@ impl<T: Config> P2PSession<T> {
                 assert!(player.is_valid_player_for(self.num_players));
                 if !self.local_connect_status[player.as_usize()].disconnected {
                     // check if the input comes in the correct sequence
-                    let current_remote_frame = self.local_connect_status[player.as_usize()].last_frame;
+                    let current_remote_frame =
+                        self.local_connect_status[player.as_usize()].last_frame;
                     assert!(
                         current_remote_frame == Frame::NULL
                             || current_remote_frame + 1 == input.frame

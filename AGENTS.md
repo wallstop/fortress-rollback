@@ -96,10 +96,23 @@ fn descriptive_test_name_explaining_scenario() {
 
 ### Fixing a Bug
 1. Write failing test that reproduces the bug
-2. Fix the implementation
-3. Verify test passes
-4. Check for similar issues elsewhere
-5. Document the fix in CHANGELOG.md
+2. **Root cause analysis** - Understand *why* it fails before fixing
+3. Fix the implementation (not the test, unless the test is wrong)
+4. Verify test passes
+5. Check for similar issues elsewhere
+6. Document the fix in CHANGELOG.md
+
+### When Tests Fail or Are Flaky
+**CRITICAL: Always perform Root Cause Analysis (RCA)**
+
+- **Never band-aid patch**: Disabling assertions, adding arbitrary sleeps, or commenting out checks are NOT fixes
+- **Distinguish test bug vs production bug**: Is the test wrong, or is the production code wrong?
+- **Fix at the correct level**:
+  - Production bug → Fix library code
+  - Test bug → Fix test's incorrect assumptions
+  - Timing issue → Add proper synchronization (not arbitrary sleeps)
+  - Flakiness → Find and eliminate the source of non-determinism
+- **Document the fix**: Explain what was wrong and why the fix is correct
 
 ### Improving Performance
 1. Benchmark current performance

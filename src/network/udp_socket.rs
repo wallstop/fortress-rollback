@@ -5,7 +5,7 @@ use std::{
 
 use crate::report_violation;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
-use crate::{NonBlockingSocket, network::messages::Message};
+use crate::{network::messages::Message, NonBlockingSocket};
 
 const RECV_BUFFER_SIZE: usize = 4096;
 /// A packet larger than this may be fragmented, so ideally we wouldn't send packets larger than

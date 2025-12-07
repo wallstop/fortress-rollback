@@ -188,10 +188,10 @@ where
 impl<T: Config> SyncLayer<T> {
     /// Creates a new `SyncLayer` instance with given values.
     pub(crate) fn new(num_players: usize, max_prediction: usize) -> Self {
-        // initialize input_queues
+        // initialize input_queues with player indices for deterministic prediction
         let mut input_queues = Vec::new();
-        for _ in 0..num_players {
-            input_queues.push(InputQueue::new());
+        for player_index in 0..num_players {
+            input_queues.push(InputQueue::new(player_index));
         }
         Self {
             num_players,
@@ -413,9 +413,7 @@ impl<T: Config> SyncLayer<T> {
     pub(crate) fn check_simulation_consistency(&self, mut first_incorrect: Frame) -> Frame {
         for handle in 0..self.num_players {
             let incorrect = self.input_queues[handle].first_incorrect_frame();
-            if !incorrect.is_null()
-                && (first_incorrect.is_null() || incorrect < first_incorrect)
-            {
+            if !incorrect.is_null() && (first_incorrect.is_null() || incorrect < first_incorrect) {
                 first_incorrect = incorrect;
             }
         }
@@ -476,16 +474,14 @@ impl<T: Config> InvariantChecker for SyncLayer<T> {
 
         // Invariant 3: current_frame >= 0
         if self.current_frame.as_i32() < 0 {
-            return Err(InvariantViolation::new(
-                "SyncLayer",
-                "current_frame must be non-negative",
-            )
-            .with_details(format!("current_frame={}", self.current_frame)));
+            return Err(
+                InvariantViolation::new("SyncLayer", "current_frame must be non-negative")
+                    .with_details(format!("current_frame={}", self.current_frame)),
+            );
         }
 
         // Invariant 4: last_confirmed_frame <= current_frame
-        if !self.last_confirmed_frame.is_null() && self.last_confirmed_frame > self.current_frame
-        {
+        if !self.last_confirmed_frame.is_null() && self.last_confirmed_frame > self.current_frame {
             return Err(InvariantViolation::new(
                 "SyncLayer",
                 "last_confirmed_frame exceeds current_frame",
@@ -524,15 +520,14 @@ impl<T: Config> InvariantChecker for SyncLayer<T> {
         // Invariant 7: saved states count is max_prediction + 1
         let expected_states = self.max_prediction + 1;
         if self.saved_states.states.len() != expected_states {
-            return Err(InvariantViolation::new(
-                "SyncLayer",
-                "saved_states count is incorrect",
-            )
-            .with_details(format!(
-                "saved_states.len()={}, expected={}",
-                self.saved_states.states.len(),
-                expected_states
-            )));
+            return Err(
+                InvariantViolation::new("SyncLayer", "saved_states count is incorrect")
+                    .with_details(format!(
+                        "saved_states.len()={}, expected={}",
+                        self.saved_states.states.len(),
+                        expected_states
+                    )),
+            );
         }
 
         // Invariant 8: all input queues pass their invariant checks
@@ -580,8 +575,12 @@ mod sync_layer_tests {
         let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
         let p1_delay = 2;
         let p2_delay = 0;
-        sync_layer.set_frame_delay(PlayerHandle::new(0), p1_delay).unwrap();
-        sync_layer.set_frame_delay(PlayerHandle::new(1), p2_delay).unwrap();
+        sync_layer
+            .set_frame_delay(PlayerHandle::new(0), p1_delay)
+            .unwrap();
+        sync_layer
+            .set_frame_delay(PlayerHandle::new(1), p2_delay)
+            .unwrap();
 
         let mut dummy_connect_status = Vec::new();
         dummy_connect_status.push(ConnectionStatus::default());
@@ -767,6 +766,76 @@ mod sync_layer_tests {
         // Try to load frame 0 (too far back, outside prediction window of 3)
         let result = sync_layer.load_frame(Frame::new(0));
         assert!(result.is_err());
+        match result {
+            Err(FortressError::InvalidFrame { frame, reason }) => {
+                assert_eq!(frame, Frame::new(0));
+                assert!(reason.contains("prediction window"));
+            }
+            _ => panic!("Expected InvalidFrame error"),
+        }
+    }
+
+    /// Test that rollback to frame 0 works correctly when within prediction window.
+    /// This is an important edge case: frame 0 is valid and should be loadable.
+    #[test]
+    fn test_load_frame_zero_within_prediction_window() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8); // max_prediction = 8
+
+        // Save state at frame 0
+        let request = sync_layer.save_current_state();
+        if let FortressRequest::SaveGameState { cell, frame } = request {
+            assert_eq!(frame, Frame::new(0));
+            cell.save(frame, Some(42u8), Some(12345));
+        }
+
+        // Advance to frame 5 (within prediction window of 8)
+        for _ in 0..5 {
+            sync_layer.advance_frame();
+        }
+        assert_eq!(sync_layer.current_frame(), Frame::new(5));
+
+        // Load frame 0 - should succeed
+        let result = sync_layer.load_frame(Frame::new(0));
+        assert!(
+            result.is_ok(),
+            "Frame 0 should be loadable within prediction window"
+        );
+
+        match result.unwrap() {
+            FortressRequest::LoadGameState { frame, cell } => {
+                assert_eq!(frame, Frame::new(0));
+                assert_eq!(cell.frame(), Frame::new(0));
+                assert_eq!(cell.load(), Some(42u8));
+                assert_eq!(cell.checksum(), Some(12345));
+            }
+            _ => panic!("Expected LoadGameState request"),
+        }
+
+        // Current frame should now be 0
+        assert_eq!(sync_layer.current_frame(), Frame::new(0));
+    }
+
+    /// Test that frame 0 rollback fails when outside prediction window.
+    #[test]
+    fn test_load_frame_zero_outside_prediction_window() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 4); // max_prediction = 4
+
+        // Save state at frame 0
+        let request = sync_layer.save_current_state();
+        if let FortressRequest::SaveGameState { cell, frame } = request {
+            cell.save(frame, Some(42u8), None);
+        }
+
+        // Advance to frame 6 (frame 0 is now outside prediction window of 4)
+        for _ in 0..6 {
+            sync_layer.advance_frame();
+        }
+        assert_eq!(sync_layer.current_frame(), Frame::new(6));
+
+        // Load frame 0 - should fail (outside prediction window)
+        let result = sync_layer.load_frame(Frame::new(0));
+        assert!(result.is_err());
+
         match result {
             Err(FortressError::InvalidFrame { frame, reason }) => {
                 assert_eq!(frame, Frame::new(0));
@@ -1094,33 +1163,33 @@ mod kani_sync_layer_proofs {
         // INV-1: current_frame starts at 0
         kani::assert(
             sync_layer.current_frame() == Frame::new(0),
-            "New SyncLayer should start at frame 0"
+            "New SyncLayer should start at frame 0",
         );
 
         // INV-7: last_confirmed_frame <= current_frame (NULL is treated as -1)
         kani::assert(
             sync_layer.last_confirmed_frame().is_null(),
-            "New SyncLayer should have null last_confirmed_frame"
+            "New SyncLayer should have null last_confirmed_frame",
         );
 
         // INV-8: last_saved_frame <= current_frame
         kani::assert(
             sync_layer.last_saved_frame().is_null(),
-            "New SyncLayer should have null last_saved_frame"
+            "New SyncLayer should have null last_saved_frame",
         );
 
         // Structural invariants
         kani::assert(
             sync_layer.num_players == num_players,
-            "num_players should be set correctly"
+            "num_players should be set correctly",
         );
         kani::assert(
             sync_layer.max_prediction == max_prediction,
-            "max_prediction should be set correctly"
+            "max_prediction should be set correctly",
         );
         kani::assert(
             sync_layer.input_queues.len() == num_players,
-            "Should have one input queue per player"
+            "Should have one input queue per player",
         );
     }
 
@@ -1137,11 +1206,11 @@ mod kani_sync_layer_proofs {
 
         kani::assert(
             new_frame > initial_frame,
-            "advance_frame should increase current_frame"
+            "advance_frame should increase current_frame",
         );
         kani::assert(
             new_frame == initial_frame + 1,
-            "advance_frame should increment by exactly 1"
+            "advance_frame should increment by exactly 1",
         );
     }
 
@@ -1160,14 +1229,14 @@ mod kani_sync_layer_proofs {
 
             kani::assert(
                 curr_frame > prev_frame,
-                "Each advance should increase frame"
+                "Each advance should increase frame",
             );
             prev_frame = curr_frame;
         }
 
         kani::assert(
             sync_layer.current_frame() == Frame::new(count as i32),
-            "Final frame should equal advance count"
+            "Final frame should equal advance count",
         );
     }
 
@@ -1191,11 +1260,11 @@ mod kani_sync_layer_proofs {
 
         kani::assert(
             saved_frame == frame_before_save,
-            "last_saved_frame should equal current_frame after save"
+            "last_saved_frame should equal current_frame after save",
         );
         kani::assert(
             saved_frame <= sync_layer.current_frame(),
-            "INV-8: last_saved_frame <= current_frame"
+            "INV-8: last_saved_frame <= current_frame",
         );
     }
 
@@ -1230,7 +1299,10 @@ mod kani_sync_layer_proofs {
 
         // Load frame outside prediction window should fail (frame 0 is > 4 frames back)
         let result_too_old = sync_layer.load_frame(Frame::new(0));
-        kani::assert(result_too_old.is_err(), "Loading frame outside prediction window should fail");
+        kani::assert(
+            result_too_old.is_err(),
+            "Loading frame outside prediction window should fail",
+        );
     }
 
     /// Proof: load_frame success maintains invariants
@@ -1255,7 +1327,7 @@ mod kani_sync_layer_proofs {
         // After load, current_frame should be the loaded frame
         kani::assert(
             sync_layer.current_frame() == Frame::new(2),
-            "current_frame should be set to loaded frame"
+            "current_frame should be set to loaded frame",
         );
     }
 
@@ -1291,7 +1363,7 @@ mod kani_sync_layer_proofs {
         // Should have max_prediction + 1 state slots
         kani::assert(
             sync_layer.saved_states.states.len() == max_prediction + 1,
-            "Should have max_prediction + 1 saved state slots"
+            "Should have max_prediction + 1 saved state slots",
         );
     }
 
@@ -1328,7 +1400,7 @@ mod kani_sync_layer_proofs {
         // The get_cell implementation should use this index
         kani::assert(
             expected_pos < num_cells,
-            "Calculated position should be within bounds"
+            "Calculated position should be within bounds",
         );
     }
 
@@ -1351,15 +1423,15 @@ mod kani_sync_layer_proofs {
 
         kani::assert(
             sync_layer.current_frame() == current_before,
-            "reset_prediction should not change current_frame"
+            "reset_prediction should not change current_frame",
         );
         kani::assert(
             sync_layer.last_confirmed_frame() == confirmed_before,
-            "reset_prediction should not change last_confirmed_frame"
+            "reset_prediction should not change last_confirmed_frame",
         );
         kani::assert(
             sync_layer.last_saved_frame() == saved_before,
-            "reset_prediction should not change last_saved_frame"
+            "reset_prediction should not change last_saved_frame",
         );
     }
 
@@ -1385,7 +1457,7 @@ mod kani_sync_layer_proofs {
         // INV-7: last_confirmed_frame <= current_frame
         kani::assert(
             sync_layer.last_confirmed_frame() <= sync_layer.current_frame(),
-            "INV-7: last_confirmed_frame should be <= current_frame"
+            "INV-7: last_confirmed_frame should be <= current_frame",
         );
     }
 
@@ -1410,7 +1482,7 @@ mod kani_sync_layer_proofs {
 
         kani::assert(
             sync_layer.last_confirmed_frame() <= sync_layer.last_saved_frame(),
-            "With sparse saving, confirmed frame should not exceed last saved"
+            "With sparse saving, confirmed frame should not exceed last saved",
         );
     }
 }

@@ -1,15 +1,13 @@
-use rand::{Rng, prelude::ThreadRng, thread_rng};
+use rand::{prelude::ThreadRng, thread_rng, Rng};
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::net::SocketAddr;
 
+use fortress_rollback::hash::fnv1a_hash;
 use fortress_rollback::{Config, FortressRequest, Frame, GameStateCell, InputStatus};
 
 fn calculate_hash<T: Hash>(t: &T) -> u64 {
-    let mut s = DefaultHasher::new();
-    t.hash(&mut s);
-    s.finish()
+    fnv1a_hash(t)
 }
 
 pub struct GameStub {

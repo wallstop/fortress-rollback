@@ -1,8 +1,8 @@
 mod stubs;
 
 use fortress_rollback::{
-    DesyncDetection, FortressError, FortressEvent, PlayerHandle, PlayerType, SessionBuilder, SessionState,
-    UdpNonBlockingSocket,
+    DesyncDetection, FortressError, FortressEvent, PlayerHandle, PlayerType, SessionBuilder,
+    SessionState, UdpNonBlockingSocket,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -133,10 +133,14 @@ fn test_advance_frame_p2p_sessions() -> Result<(), FortressError> {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
 
-        sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i }).unwrap();
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
         let requests1 = sess1.advance_frame().unwrap();
         stub1.handle_requests(requests1);
-        sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: i }).unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
         let requests2 = sess2.advance_frame().unwrap();
         stub2.handle_requests(requests2);
 
@@ -190,8 +194,12 @@ fn test_desyncs_detected() -> Result<(), FortressError> {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
 
-        sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i }).unwrap();
-        sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: i }).unwrap();
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
 
         let requests1 = sess1.advance_frame().unwrap();
         let requests2 = sess2.advance_frame().unwrap();
@@ -204,17 +212,22 @@ fn test_desyncs_detected() -> Result<(), FortressError> {
     assert_eq!(sess1.events().len(), 0);
     assert_eq!(sess2.events().len(), 0);
 
-    // run for some more frames
+    // run for some more frames with steady inputs
     for _ in 0..100 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
 
-        // mess up state for peer 1
+        // mess up state for peer 1 BEFORE handling requests
         stub1.gs.state = 1234;
 
-        // keep input steady (to avoid loads, which would restore valid state)
-        sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: 0 }).unwrap();
-        sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: 1 }).unwrap();
+        // Use steady inputs - with RepeatLastConfirmed, after first frame predictions will match
+        // and no more rollbacks occur, allowing the corrupted state to persist.
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: 0 })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: 1 })
+            .unwrap();
 
         let requests1 = sess1.advance_frame().unwrap();
         let requests2 = sess2.advance_frame().unwrap();
@@ -306,8 +319,12 @@ fn test_desyncs_and_input_delay_no_panic() -> Result<(), FortressError> {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
 
-        sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i }).unwrap();
-        sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: i }).unwrap();
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
 
         let requests1 = sess1.advance_frame().unwrap();
         let requests2 = sess2.advance_frame().unwrap();
@@ -385,9 +402,15 @@ fn test_three_player_session() -> Result<(), FortressError> {
         sess3.poll_remote_clients();
 
         // Each player adds their local input
-        sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i }).unwrap();
-        sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: i }).unwrap();
-        sess3.add_local_input(PlayerHandle::new(2), StubInput { inp: i }).unwrap();
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+        sess3
+            .add_local_input(PlayerHandle::new(2), StubInput { inp: i })
+            .unwrap();
 
         // Advance frames
         let requests1 = sess1.advance_frame().unwrap();
@@ -485,10 +508,18 @@ fn test_four_player_session() -> Result<(), FortressError> {
         sess4.poll_remote_clients();
 
         // Each player adds their local input
-        sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i }).unwrap();
-        sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: i }).unwrap();
-        sess3.add_local_input(PlayerHandle::new(2), StubInput { inp: i }).unwrap();
-        sess4.add_local_input(PlayerHandle::new(3), StubInput { inp: i }).unwrap();
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+        sess3
+            .add_local_input(PlayerHandle::new(2), StubInput { inp: i })
+            .unwrap();
+        sess4
+            .add_local_input(PlayerHandle::new(3), StubInput { inp: i })
+            .unwrap();
 
         // Advance frames
         let requests1 = sess1.advance_frame().unwrap();

@@ -6,11 +6,9 @@ use stubs::{StubConfig, StubInput};
 
 #[test]
 fn test_create_session() {
-    assert!(
-        SessionBuilder::<StubConfig>::new()
-            .start_synctest_session()
-            .is_ok()
-    );
+    assert!(SessionBuilder::<StubConfig>::new()
+        .start_synctest_session()
+        .is_ok());
 }
 
 #[test]
@@ -96,8 +94,10 @@ fn test_advance_frames_with_random_checksums() {
         .unwrap();
 
     for i in 0..200 {
-        sess.add_local_input(PlayerHandle::new(0), StubInput { inp: i }).unwrap();
-        sess.add_local_input(PlayerHandle::new(1), StubInput { inp: i }).unwrap();
+        sess.add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess.add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
         let requests = sess.advance_frame().unwrap(); // this should give a MismatchedChecksum error
         stub.handle_requests(requests);
         assert_eq!(stub.gs.frame, i as i32 + 1);

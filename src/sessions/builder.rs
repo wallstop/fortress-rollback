@@ -4,10 +4,9 @@ use std::sync::Arc;
 use instant::Duration;
 
 use crate::{
-    Config, DesyncDetection, FortressError, NonBlockingSocket, P2PSession, PlayerHandle,
-    PlayerType, SpectatorSession, SyncTestSession, network::protocol::UdpProtocol,
-    sessions::p2p_session::PlayerRegistry,
-    telemetry::ViolationObserver,
+    network::protocol::UdpProtocol, sessions::p2p_session::PlayerRegistry,
+    telemetry::ViolationObserver, Config, DesyncDetection, FortressError, NonBlockingSocket,
+    P2PSession, PlayerHandle, PlayerType, SpectatorSession, SyncTestSession,
 };
 
 use super::p2p_spectator_session::SPECTATOR_BUFFER_SIZE;

@@ -31,6 +31,13 @@ To get started with Fortress Rollback, check out the following resources:
 
 Alpha / experimental only.
 
+### Key Improvements in Fortress Rollback
+
+- **100% Deterministic**: All collections use `BTreeMap`/`BTreeSet` for guaranteed iteration order; new `hash` module provides FNV-1a deterministic hashing
+- **Correctness-First**: 180+ tests including multi-process network tests, network resilience tests, and formal TLA+ specifications
+- **Panic-Free API**: All public APIs return `Result` types instead of panicking
+- **Enhanced Testing**: Full desync detection with confirmed input checksums via `P2PSession::confirmed_inputs_for_frame()`
+
 - [Changelog](./CHANGELOG.md)
 - [Issues](https://github.com/wallstop/fortress-rollback/issues)
 - [Contribution Guide](./CONTRIBUTING.md)

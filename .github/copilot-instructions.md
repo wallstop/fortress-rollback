@@ -85,6 +85,33 @@ fn test_rollback() {
 }
 ```
 
+### When Tests Fail or Are Flaky
+**CRITICAL: Root Cause Analysis Required**
+
+When encountering a failing or flaky test, always perform proper RCA:
+
+1. **Understand the failure** - Don't just make the test pass; understand *why* it fails
+2. **Distinguish test bug vs production bug** - Is the test wrong, or is the production code wrong?
+3. **Fix the root cause** - Apply the fix at the appropriate level:
+   - **Production bug**: Fix the library code, not the test
+   - **Test bug**: Fix the test's incorrect assumptions/logic
+   - **Timing issue**: Add proper synchronization, not arbitrary sleeps
+   - **Flakiness**: Find the source of non-determinism and eliminate it
+4. **Never band-aid patch** - Disabling assertions, adding excessive timeouts, or commenting out checks are NOT fixes
+5. **Document the fix** - Explain what was wrong and why the fix is correct
+
+```rust
+// ✅ DO: Fix root cause when test reveals production bug
+// Bad: test computes checksum over all frames, but frames get discarded
+// Good: changed to window-based computation (last 64 frames)
+
+// ❌ DON'T: Band-aid patches
+// - Commenting out assertions that fail
+// - Adding Thread::sleep(5000) to "fix" timing
+// - Catching and ignoring errors
+// - Marking tests as #[ignore]
+```
+
 ## Specific Assistance Areas
 
 ### Session Management

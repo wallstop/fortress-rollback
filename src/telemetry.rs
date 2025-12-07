@@ -1023,11 +1023,9 @@ mod tests {
 
         let frame_violations = observer.violations_of_kind(ViolationKind::FrameSync);
         assert_eq!(frame_violations.len(), 2);
-        assert!(
-            frame_violations
-                .iter()
-                .all(|v| v.kind == ViolationKind::FrameSync)
-        );
+        assert!(frame_violations
+            .iter()
+            .all(|v| v.kind == ViolationKind::FrameSync));
     }
 
     #[test]
@@ -1055,11 +1053,9 @@ mod tests {
 
         let errors_and_above = observer.violations_at_severity(ViolationSeverity::Error);
         assert_eq!(errors_and_above.len(), 2);
-        assert!(
-            errors_and_above
-                .iter()
-                .all(|v| v.severity >= ViolationSeverity::Error)
-        );
+        assert!(errors_and_above
+            .iter()
+            .all(|v| v.severity >= ViolationSeverity::Error));
     }
 
     #[test]
@@ -1210,7 +1206,8 @@ mod tests {
 
     #[test]
     fn test_report_violation_to_macro_basic() {
-        let observer: Option<Arc<dyn ViolationObserver>> = Some(Arc::new(CollectingObserver::new()));
+        let observer: Option<Arc<dyn ViolationObserver>> =
+            Some(Arc::new(CollectingObserver::new()));
         report_violation_to!(
             &observer,
             ViolationSeverity::Warning,
@@ -1222,7 +1219,8 @@ mod tests {
 
     #[test]
     fn test_report_violation_to_macro_with_format() {
-        let observer: Option<Arc<dyn ViolationObserver>> = Some(Arc::new(CollectingObserver::new()));
+        let observer: Option<Arc<dyn ViolationObserver>> =
+            Some(Arc::new(CollectingObserver::new()));
         let expected = 10;
         let actual = 15;
         report_violation_to!(
@@ -1287,8 +1285,8 @@ mod tests {
 
     #[test]
     fn test_invariant_violation_display_with_details() {
-        let violation = InvariantViolation::new("Buffer", "overflow")
-            .with_details("size=200, max=128");
+        let violation =
+            InvariantViolation::new("Buffer", "overflow").with_details("size=200, max=128");
 
         let display = violation.to_string();
         assert!(display.contains("Buffer"));

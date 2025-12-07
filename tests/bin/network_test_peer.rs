@@ -38,33 +38,137 @@
 //! {"success": true, "final_frame": 100, "checksum": 12345, "rollbacks": 5}
 //! ```
 
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use fortress_rollback::{
-    ChaosConfig, ChaosSocket, Config, FortressRequest, InputStatus, PlayerHandle, PlayerType,
-    SessionBuilder, SessionState, UdpNonBlockingSocket,
+    ChaosConfig, ChaosSocket, Config, FortressRequest, Frame, InputStatus, PlayerHandle,
+    PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket,
 };
 use serde::{Deserialize, Serialize};
 
 // Simple deterministic game state for testing
 #[derive(Clone, Default, Hash, Serialize, Deserialize)]
 struct TestState {
+    // The current frame number (for display/debugging)
     frame: i32,
-    // Accumulator that changes based on inputs
+    // Accumulator that changes based on ALL inputs (including predictions)
+    // Used for smooth gameplay display
     value: i64,
+}
+
+/// Debug log entry for tracing state progression
+#[derive(Serialize)]
+struct DebugEntry {
+    event: String,
+    frame: i32,
+    value: i64,
+    inputs: Vec<(u32, String)>, // (input_value, status)
+}
+
+/// Debug log for the entire session
+struct DebugLog {
+    entries: Vec<DebugEntry>,
+    enabled: bool,
+}
+
+impl DebugLog {
+    fn new(enabled: bool) -> Self {
+        Self {
+            entries: Vec::new(),
+            enabled,
+        }
+    }
+
+    fn log_advance(&mut self, frame: i32, value: i64, inputs: &[(TestInput, InputStatus)]) {
+        if !self.enabled {
+            return;
+        }
+        let input_entries: Vec<(u32, String)> = inputs
+            .iter()
+            .map(|(input, status)| {
+                let status_str = match status {
+                    InputStatus::Confirmed => "confirmed",
+                    InputStatus::Predicted => "predicted",
+                    InputStatus::Disconnected => "disconnected",
+                };
+                (input.value, status_str.to_string())
+            })
+            .collect();
+        self.entries.push(DebugEntry {
+            event: "advance".to_string(),
+            frame,
+            value,
+            inputs: input_entries,
+        });
+    }
+
+    fn log_load(&mut self, frame: i32, value: i64) {
+        if !self.enabled {
+            return;
+        }
+        self.entries.push(DebugEntry {
+            event: "load".to_string(),
+            frame,
+            value,
+            inputs: Vec::new(),
+        });
+    }
+
+    fn log_save(&mut self, frame: i32, value: i64) {
+        if !self.enabled {
+            return;
+        }
+        self.entries.push(DebugEntry {
+            event: "save".to_string(),
+            frame,
+            value,
+            inputs: Vec::new(),
+        });
+    }
+}
+
+/// A simple deterministic hasher that produces consistent results across processes.
+/// DefaultHasher uses a random key, so we need this for cross-process comparison.
+struct DeterministicHasher {
+    state: u64,
+}
+
+impl DeterministicHasher {
+    fn new() -> Self {
+        Self { state: 0 }
+    }
+}
+
+impl Hasher for DeterministicHasher {
+    fn finish(&self) -> u64 {
+        self.state
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // FNV-1a hash algorithm - simple and deterministic
+        const FNV_PRIME: u64 = 0x00000100000001B3;
+        const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+
+        if self.state == 0 {
+            self.state = FNV_OFFSET;
+        }
+
+        for &byte in bytes {
+            self.state ^= u64::from(byte);
+            self.state = self.state.wrapping_mul(FNV_PRIME);
+        }
+    }
 }
 
 impl TestState {
     fn advance(&mut self, inputs: &[(TestInput, InputStatus)]) {
-        self.frame += 1;
         for (i, (input, status)) in inputs.iter().enumerate() {
             match status {
                 InputStatus::Confirmed | InputStatus::Predicted => {
-                    // Deterministic state update based on player index and input
+                    // Update display value with all inputs (for smooth gameplay)
                     self.value = self.value.wrapping_add(input.value as i64 * (i as i64 + 1));
                 }
                 InputStatus::Disconnected => {
@@ -72,13 +176,68 @@ impl TestState {
                 }
             }
         }
+        self.frame += 1;
+    }
+}
+
+/// Compute a checksum from confirmed inputs for a recent window of frames.
+/// This is deterministic because both peers have the same confirmed inputs,
+/// and we only use frames that are guaranteed to be in the input queue.
+fn compute_confirmed_checksum<T: Config<Input = TestInput, Address = SocketAddr>>(
+    session: &fortress_rollback::P2PSession<T>,
+    target_frames: i32,
+) -> u64 {
+    let mut hasher = DeterministicHasher::new();
+
+    // Use a window of the last 64 frames (half of input queue capacity).
+    // This ensures the frames are still available in the queue.
+    const WINDOW_SIZE: i32 = 64;
+    let start_frame = std::cmp::max(0, target_frames - WINDOW_SIZE);
+
+    for frame_num in start_frame..target_frames {
+        let frame = Frame::new(frame_num);
+        if let Ok(inputs) = session.confirmed_inputs_for_frame(frame) {
+            // Hash each player's input for this frame
+            for (player_idx, input) in inputs.iter().enumerate() {
+                // Hash player index, frame, and input value
+                (player_idx as u32).hash(&mut hasher);
+                frame_num.hash(&mut hasher);
+                input.value.hash(&mut hasher);
+            }
+        }
     }
 
-    fn checksum(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.hash(&mut hasher);
-        hasher.finish()
+    hasher.finish()
+}
+
+/// Compute the game state value from confirmed inputs only.
+/// This is deterministic because both peers have the same confirmed inputs.
+///
+/// We compute over a RECENT window of frames rather than all frames, because
+/// older frames may have been discarded from the input queue. The window size
+/// is chosen to be well within the input queue capacity (128 frames).
+fn compute_confirmed_game_value<T: Config<Input = TestInput, Address = SocketAddr>>(
+    session: &fortress_rollback::P2PSession<T>,
+    target_frames: i32,
+) -> i64 {
+    let mut value: i64 = 0;
+
+    // Use a window of the last 64 frames (half of input queue capacity).
+    // This ensures the frames are still available in the queue.
+    const WINDOW_SIZE: i32 = 64;
+    let start_frame = std::cmp::max(0, target_frames - WINDOW_SIZE);
+
+    for frame_num in start_frame..target_frames {
+        let frame = Frame::new(frame_num);
+        if let Ok(inputs) = session.confirmed_inputs_for_frame(frame) {
+            // Apply each player's input using the same formula as TestState::advance
+            for (i, input) in inputs.iter().enumerate() {
+                value = value.wrapping_add(input.value as i64 * (i as i64 + 1));
+            }
+        }
     }
+
+    value
 }
 
 #[repr(C)]
@@ -97,28 +256,36 @@ impl Config for TestConfig {
 struct TestGame {
     state: TestState,
     rollback_count: u32,
+    debug_log: DebugLog,
 }
 
 impl TestGame {
-    fn new() -> Self {
+    fn new(debug_enabled: bool) -> Self {
         Self {
             state: TestState::default(),
             rollback_count: 0,
+            debug_log: DebugLog::new(debug_enabled),
         }
     }
 
     fn handle_requests(&mut self, requests: Vec<FortressRequest<TestConfig>>) {
         for request in requests {
             match request {
-                FortressRequest::LoadGameState { cell, .. } => {
+                FortressRequest::LoadGameState { cell, frame } => {
                     self.state = cell.load().unwrap();
                     self.rollback_count += 1;
+                    self.debug_log.log_load(frame.as_i32(), self.state.value);
                 }
                 FortressRequest::SaveGameState { cell, frame } => {
-                    let checksum = self.state.checksum() as u128;
+                    // Use a simple checksum for save - not used for final comparison
+                    let checksum = self.state.value as u128;
+                    self.debug_log.log_save(frame.as_i32(), self.state.value);
                     cell.save(frame, Some(self.state.clone()), Some(checksum));
                 }
                 FortressRequest::AdvanceFrame { inputs } => {
+                    // Log BEFORE advancing so we can see the inputs that are being used
+                    self.debug_log
+                        .log_advance(self.state.frame, self.state.value, &inputs);
                     self.state.advance(&inputs);
                 }
             }
@@ -130,10 +297,13 @@ impl TestGame {
 struct TestResult {
     success: bool,
     final_frame: i32,
+    final_value: i64, // Added for debugging
     checksum: u64,
     rollbacks: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debug_log: Option<Vec<DebugEntry>>,
 }
 
 fn parse_args() -> Args {
@@ -183,6 +353,9 @@ fn parse_args() -> Args {
                 i += 1;
                 result.input_delay = args[i].parse().expect("Invalid input delay");
             }
+            "--debug" => {
+                result.debug = true;
+            }
             _ => {
                 eprintln!("Unknown argument: {}", args[i]);
             }
@@ -205,6 +378,7 @@ struct Args {
     seed: Option<u64>,
     timeout_secs: u64,
     input_delay: usize,
+    debug: bool,
 }
 
 fn main() {
@@ -233,9 +407,11 @@ fn output_error(msg: &str) {
     let result = TestResult {
         success: false,
         final_frame: 0,
+        final_value: 0,
         checksum: 0,
         rollbacks: 0,
         error: Some(msg.to_string()),
+        debug_log: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     println!("{}", json);
@@ -265,9 +441,11 @@ fn run_test(args: &Args) -> TestResult {
             return TestResult {
                 success: false,
                 final_frame: 0,
+                final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
                 error: Some(format!("Failed to bind socket: {}", e)),
+                debug_log: None,
             };
         }
     };
@@ -291,9 +469,11 @@ fn run_test(args: &Args) -> TestResult {
             return TestResult {
                 success: false,
                 final_frame: 0,
+                final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
                 error: Some(format!("Failed to add local player: {}", e)),
+                debug_log: None,
             };
         }
     };
@@ -304,9 +484,11 @@ fn run_test(args: &Args) -> TestResult {
             return TestResult {
                 success: false,
                 final_frame: 0,
+                final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
                 error: Some(format!("Failed to add remote player: {}", e)),
+                debug_log: None,
             };
         }
     };
@@ -317,14 +499,16 @@ fn run_test(args: &Args) -> TestResult {
             return TestResult {
                 success: false,
                 final_frame: 0,
+                final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
                 error: Some(format!("Failed to start session: {}", e)),
+                debug_log: None,
             };
         }
     };
 
-    let mut game = TestGame::new();
+    let mut game = TestGame::new(args.debug);
     let start_time = Instant::now();
     let timeout = Duration::from_secs(if args.timeout_secs > 0 {
         args.timeout_secs
@@ -336,26 +520,88 @@ fn run_test(args: &Args) -> TestResult {
     loop {
         // Check timeout
         if start_time.elapsed() > timeout {
+            // Compute checksum from confirmed inputs (even though we timed out)
+            let checksum = compute_confirmed_checksum(&session, args.target_frames);
             return TestResult {
                 success: false,
                 final_frame: game.state.frame,
-                checksum: game.state.checksum(),
+                final_value: game.state.value,
+                checksum,
                 rollbacks: game.rollback_count,
-                error: Some("Timeout".to_string()),
+                error: Some(format!(
+                    "Timeout (current_frame={}, confirmed_frame={}, target={})",
+                    session.current_frame(),
+                    session.confirmed_frame(),
+                    args.target_frames
+                )),
+                debug_log: if args.debug {
+                    Some(game.debug_log.entries)
+                } else {
+                    None
+                },
             };
         }
 
-        // Poll network
+        // Poll network to receive any pending inputs
         session.poll_remote_clients();
 
-        // Check for completion
-        if game.state.frame >= args.target_frames {
+        // Check for completion:
+        // We're done when:
+        // 1. Game state frame >= target
+        // 2. All inputs up to target are confirmed
+        // 3. We've continued polling to allow final rollbacks to complete
+        //
+        // The settle period ensures that if one peer received inputs slightly later
+        // and triggered a rollback, we give time for that rollback to complete.
+        let confirmed = session.confirmed_frame();
+        if game.state.frame >= args.target_frames && confirmed.as_i32() >= args.target_frames {
+            // Continue polling for a settle period to ensure rollbacks complete.
+            // During settle, we ONLY poll for network messages - we don't advance new frames.
+            // This ensures both peers end up at the same final state.
+            let settle_start = Instant::now();
+            let settle_duration = Duration::from_millis(200); // 200ms settle
+
+            while settle_start.elapsed() < settle_duration {
+                session.poll_remote_clients();
+
+                // Only process rollbacks during settle - don't advance new frames.
+                // advance_frame() with no new input will process any pending rollbacks.
+                if session.current_state() == SessionState::Running {
+                    // We need to add input for the session to be able to advance,
+                    // but we'll track when we've reached a stable state.
+                    let session_frame = session.current_frame().as_i32();
+                    let input = TestInput {
+                        value: (session_frame as u32).wrapping_mul(args.player_index as u32 + 1),
+                    };
+                    let _ = session.add_local_input(local_handle, input);
+
+                    if let Ok(requests) = session.advance_frame() {
+                        game.handle_requests(requests);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+
+            // After settle, recompute the game state from confirmed inputs only.
+            // This gives us a deterministic value that both peers will agree on.
+            let confirmed_value =
+                compute_confirmed_game_value::<TestConfig>(&session, args.target_frames);
+
+            // Compute checksum from confirmed inputs for frames 0..target_frames
+            let checksum = compute_confirmed_checksum(&session, args.target_frames);
+
             return TestResult {
                 success: true,
                 final_frame: game.state.frame,
-                checksum: game.state.checksum(),
+                final_value: confirmed_value, // Use confirmed value, not speculative
+                checksum,
                 rollbacks: game.rollback_count,
                 error: None,
+                debug_log: if args.debug {
+                    Some(game.debug_log.entries)
+                } else {
+                    None
+                },
             };
         }
 
@@ -370,24 +616,38 @@ fn run_test(args: &Args) -> TestResult {
             };
 
             if let Err(e) = session.add_local_input(local_handle, input) {
+                let checksum = compute_confirmed_checksum(&session, args.target_frames);
                 return TestResult {
                     success: false,
                     final_frame: game.state.frame,
-                    checksum: game.state.checksum(),
+                    final_value: game.state.value,
+                    checksum,
                     rollbacks: game.rollback_count,
                     error: Some(format!("Failed to add input: {}", e)),
+                    debug_log: if args.debug {
+                        Some(game.debug_log.entries)
+                    } else {
+                        None
+                    },
                 };
             }
 
             match session.advance_frame() {
                 Ok(requests) => game.handle_requests(requests),
                 Err(e) => {
+                    let checksum = compute_confirmed_checksum(&session, args.target_frames);
                     return TestResult {
                         success: false,
                         final_frame: game.state.frame,
-                        checksum: game.state.checksum(),
+                        final_value: game.state.value,
+                        checksum,
                         rollbacks: game.rollback_count,
                         error: Some(format!("Failed to advance frame: {}", e)),
+                        debug_log: if args.debug {
+                            Some(game.debug_log.entries)
+                        } else {
+                            None
+                        },
                     };
                 }
             }

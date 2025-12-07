@@ -676,7 +676,10 @@ mod tests {
     #[test]
     fn test_packet_loss_100_percent() {
         let inner = TestSocket::default();
-        let config = ChaosConfig::builder().packet_loss_rate(1.0).seed(42).build();
+        let config = ChaosConfig::builder()
+            .packet_loss_rate(1.0)
+            .seed(42)
+            .build();
         let mut socket = ChaosSocket::new(inner, config);
 
         let addr = test_addr();
@@ -696,7 +699,10 @@ mod tests {
     #[test]
     fn test_packet_loss_partial() {
         let inner = TestSocket::default();
-        let config = ChaosConfig::builder().packet_loss_rate(0.5).seed(42).build();
+        let config = ChaosConfig::builder()
+            .packet_loss_rate(0.5)
+            .seed(42)
+            .build();
         let mut socket = ChaosSocket::new(inner, config);
 
         let addr = test_addr();
@@ -821,7 +827,10 @@ mod tests {
     fn test_deterministic_with_seed() {
         let run_test = |seed: u64| -> u64 {
             let inner = TestSocket::default();
-            let config = ChaosConfig::builder().packet_loss_rate(0.5).seed(seed).build();
+            let config = ChaosConfig::builder()
+                .packet_loss_rate(0.5)
+                .seed(seed)
+                .build();
             let mut socket = ChaosSocket::new(inner, config);
 
             let addr = test_addr();
@@ -882,10 +891,7 @@ mod tests {
         inner.to_receive.push((addr, msg.clone()));
 
         // Set up high latency (100ms)
-        let config = ChaosConfig::builder()
-            .latency_ms(100)
-            .seed(42)
-            .build();
+        let config = ChaosConfig::builder().latency_ms(100).seed(42).build();
         let mut socket = ChaosSocket::new(inner, config);
 
         // First receive - packet goes into in-flight queue
@@ -901,7 +907,11 @@ mod tests {
         // Wait for full latency - now delivered
         std::thread::sleep(Duration::from_millis(60));
         let received = socket.receive_all_messages();
-        assert_eq!(received.len(), 1, "Packet should be delivered after latency");
+        assert_eq!(
+            received.len(),
+            1,
+            "Packet should be delivered after latency"
+        );
         assert_eq!(socket.packets_in_flight(), 0, "No more packets in flight");
     }
 
@@ -921,7 +931,11 @@ mod tests {
 
         // Messages should be delivered immediately (within tiny jitter of Instant::now())
         let received = socket.receive_all_messages();
-        assert_eq!(received.len(), 5, "All packets should be delivered immediately");
+        assert_eq!(
+            received.len(),
+            5,
+            "All packets should be delivered immediately"
+        );
     }
 
     #[test]
@@ -953,10 +967,7 @@ mod tests {
     fn test_burst_loss_drops_consecutive_packets() {
         let inner = TestSocket::default();
         // 100% probability of burst, 5 packets per burst
-        let config = ChaosConfig::builder()
-            .burst_loss(1.0, 5)
-            .seed(42)
-            .build();
+        let config = ChaosConfig::builder().burst_loss(1.0, 5).seed(42).build();
         let mut socket = ChaosSocket::new(inner, config);
 
         let addr = test_addr();
@@ -978,10 +989,7 @@ mod tests {
     fn test_burst_loss_partial_probability() {
         let inner = TestSocket::default();
         // 50% probability of starting a burst, 3 packets per burst
-        let config = ChaosConfig::builder()
-            .burst_loss(0.5, 3)
-            .seed(42)
-            .build();
+        let config = ChaosConfig::builder().burst_loss(0.5, 3).seed(42).build();
         let mut socket = ChaosSocket::new(inner, config);
 
         let addr = test_addr();
@@ -1017,9 +1025,7 @@ mod tests {
 
     #[test]
     fn test_burst_loss_builder() {
-        let config = ChaosConfig::builder()
-            .burst_loss(0.2, 8)
-            .build();
+        let config = ChaosConfig::builder().burst_loss(0.2, 8).build();
 
         assert_eq!(config.burst_loss_probability, 0.2);
         assert_eq!(config.burst_loss_length, 8);
@@ -1028,10 +1034,7 @@ mod tests {
     #[test]
     fn test_burst_loss_stats_tracking() {
         let inner = TestSocket::default();
-        let config = ChaosConfig::builder()
-            .burst_loss(1.0, 3)
-            .seed(42)
-            .build();
+        let config = ChaosConfig::builder().burst_loss(1.0, 3).seed(42).build();
         let mut socket = ChaosSocket::new(inner, config);
 
         let addr = test_addr();

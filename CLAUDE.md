@@ -34,6 +34,25 @@ GGRS is a Rust implementation of GGPO rollback networking for multiplayer games.
 - Use property-based testing for complex logic
 - Ensure tests are maintainable and readable
 
+### Root Cause Analysis for Test Failures
+**CRITICAL: When tests fail or are flaky, always perform proper RCA**
+
+1. **Understand before fixing** - Don't just make the test pass; understand *why* it fails
+2. **Distinguish test bug vs production bug**:
+   - Test bug: Test has incorrect assumptions or logic
+   - Production bug: Library code has a defect
+3. **Fix at the correct level**:
+   - Production bug → Fix library code, not the test
+   - Test bug → Fix test's incorrect assumptions
+   - Timing issue → Add proper synchronization mechanisms
+   - Flakiness → Find and eliminate non-determinism source
+4. **Never band-aid patch**:
+   - ❌ Commenting out failing assertions
+   - ❌ Adding excessive `Thread::sleep()` calls
+   - ❌ Catching and ignoring errors
+   - ❌ Marking tests as `#[ignore]`
+5. **Document the fix**: Explain the root cause and why the fix is correct
+
 ### Documentation
 - Every public item needs rustdoc with examples
 - Explain the "why" behind non-obvious decisions

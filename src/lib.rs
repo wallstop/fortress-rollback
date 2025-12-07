@@ -14,15 +14,19 @@ pub use network::chaos_socket::{ChaosConfig, ChaosConfigBuilder, ChaosSocket, Ch
 pub use network::messages::Message;
 pub use network::network_stats::NetworkStats;
 pub use network::udp_socket::UdpNonBlockingSocket;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Serialize};
 pub use sessions::builder::SessionBuilder;
 pub use sessions::p2p_session::P2PSession;
 pub use sessions::p2p_spectator_session::SpectatorSession;
 pub use sessions::sync_test_session::SyncTestSession;
 pub use sync_layer::{GameStateAccessor, GameStateCell};
 
+// Re-export prediction strategies
+pub use crate::input_queue::{BlankPrediction, PredictionStrategy, RepeatLastConfirmed};
+
 pub(crate) mod error;
 pub(crate) mod frame_info;
+pub mod hash;
 pub(crate) mod input_queue;
 pub(crate) mod sync_layer;
 pub mod telemetry;
@@ -86,8 +90,17 @@ pub const NULL_FRAME: i32 = -1;
 /// assert!(next_frame > frame);
 /// ```
 #[derive(
-    Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default,
-    serde::Serialize, serde::Deserialize,
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 pub struct Frame(i32);
 
@@ -310,8 +323,17 @@ impl PartialOrd<i32> for Frame {
 /// assert_eq!(player.as_usize(), 0);
 /// ```
 #[derive(
-    Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default,
-    serde::Serialize, serde::Deserialize,
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 pub struct PlayerHandle(usize);
 
@@ -632,9 +654,18 @@ mod kani_proofs {
         kani::assume(value >= 0);
 
         let frame = Frame::new(value);
-        kani::assert(frame.is_valid(), "Frame::new with non-negative should be valid");
-        kani::assert(!frame.is_null(), "Frame::new with non-negative should not be null");
-        kani::assert(frame.as_i32() == value, "Frame::as_i32 should return original value");
+        kani::assert(
+            frame.is_valid(),
+            "Frame::new with non-negative should be valid",
+        );
+        kani::assert(
+            !frame.is_null(),
+            "Frame::new with non-negative should not be null",
+        );
+        kani::assert(
+            frame.as_i32() == value,
+            "Frame::as_i32 should return original value",
+        );
     }
 
     /// Proof: Frame::NULL is consistently null
@@ -643,7 +674,10 @@ mod kani_proofs {
         let null_frame = Frame::NULL;
         kani::assert(null_frame.is_null(), "NULL frame should be null");
         kani::assert(!null_frame.is_valid(), "NULL frame should not be valid");
-        kani::assert(null_frame.as_i32() == NULL_FRAME, "NULL frame should equal NULL_FRAME constant");
+        kani::assert(
+            null_frame.as_i32() == NULL_FRAME,
+            "NULL frame should equal NULL_FRAME constant",
+        );
     }
 
     /// Proof: Frame addition with small positive values is safe
@@ -664,9 +698,12 @@ mod kani_proofs {
 
         kani::assert(
             result.as_i32() == frame_val + increment,
-            "Frame addition should be correct"
+            "Frame addition should be correct",
         );
-        kani::assert(result.is_valid(), "Result should be valid for typical usage");
+        kani::assert(
+            result.is_valid(),
+            "Result should be valid for typical usage",
+        );
     }
 
     /// Proof: Frame subtraction produces correct differences
@@ -682,7 +719,10 @@ mod kani_proofs {
         let frame_b = Frame::new(b);
 
         let diff: i32 = frame_a - frame_b;
-        kani::assert(diff == a - b, "Frame subtraction should produce correct difference");
+        kani::assert(
+            diff == a - b,
+            "Frame subtraction should produce correct difference",
+        );
     }
 
     /// Proof: Frame ordering is consistent with i32 ordering
@@ -760,7 +800,10 @@ mod kani_proofs {
 
         // Test with None
         let from_none = Frame::from_option(None);
-        kani::assert(from_none == Frame::NULL, "from_option(None) should return NULL");
+        kani::assert(
+            from_none == Frame::NULL,
+            "from_option(None) should return NULL",
+        );
     }
 
     /// Proof: Frame AddAssign is consistent with Add
@@ -816,14 +859,23 @@ mod kani_proofs {
         // A handle is either a valid player OR a spectator, never both
         kani::assert(
             is_valid_player != is_spectator || handle_val >= num_players,
-            "Handle should be player XOR spectator"
+            "Handle should be player XOR spectator",
         );
 
         if handle_val < num_players {
-            kani::assert(is_valid_player, "Handle < num_players should be valid player");
-            kani::assert(!is_spectator, "Handle < num_players should not be spectator");
+            kani::assert(
+                is_valid_player,
+                "Handle < num_players should be valid player",
+            );
+            kani::assert(
+                !is_spectator,
+                "Handle < num_players should not be spectator",
+            );
         } else {
-            kani::assert(!is_valid_player, "Handle >= num_players should not be valid player");
+            kani::assert(
+                !is_valid_player,
+                "Handle >= num_players should not be valid player",
+            );
             kani::assert(is_spectator, "Handle >= num_players should be spectator");
         }
     }

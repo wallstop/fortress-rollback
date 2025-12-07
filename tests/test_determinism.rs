@@ -129,8 +129,10 @@ fn test_checksum_history_determinism() {
     let mut checksums = Vec::new();
 
     for _ in 0..20 {
-        sess.add_local_input(PlayerHandle::new(0), TestInput { inp: 1 }).unwrap();
-        sess.add_local_input(PlayerHandle::new(1), TestInput { inp: 2 }).unwrap();
+        sess.add_local_input(PlayerHandle::new(0), TestInput { inp: 1 })
+            .unwrap();
+        sess.add_local_input(PlayerHandle::new(1), TestInput { inp: 2 })
+            .unwrap();
 
         let requests = sess.advance_frame().unwrap();
 
@@ -168,7 +170,9 @@ fn test_p2p_player_handles_determinism() {
         .with_input_delay(2);
 
     // Add players in specific order
-    sess_builder = sess_builder.add_player(PlayerType::Local, PlayerHandle::new(0)).unwrap();
+    sess_builder = sess_builder
+        .add_player(PlayerType::Local, PlayerHandle::new(0))
+        .unwrap();
     sess_builder = sess_builder
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(1))
         .unwrap();

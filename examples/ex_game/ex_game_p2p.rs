@@ -76,13 +76,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             // remote players
             let remote_addr: SocketAddr = player_addr.parse()?;
-            sess_build = sess_build.add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(i))?;
+            sess_build =
+                sess_build.add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(i))?;
         }
     }
 
     // optionally, add spectators
     for (i, spec_addr) in opt.spectators.iter().enumerate() {
-        sess_build = sess_build.add_player(PlayerType::Spectator(*spec_addr), PlayerHandle::new(num_players + i))?;
+        sess_build = sess_build.add_player(
+            PlayerType::Spectator(*spec_addr),
+            PlayerHandle::new(num_players + i),
+        )?;
     }
 
     // start the Fortress Rollback session

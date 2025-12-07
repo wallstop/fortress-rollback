@@ -1,9 +1,7 @@
-use std::collections::{VecDeque, vec_deque::Drain};
+use std::collections::{vec_deque::Drain, VecDeque};
 use std::sync::Arc;
 
 use crate::{
-    Config, FortressError, FortressEvent, FortressRequest, Frame, InputStatus,
-    NetworkStats, NonBlockingSocket, PlayerHandle, SessionState,
     frame_info::PlayerInput,
     network::{
         messages::ConnectionStatus,
@@ -11,6 +9,8 @@ use crate::{
     },
     sessions::builder::MAX_EVENT_QUEUE_SIZE,
     telemetry::ViolationObserver,
+    Config, FortressError, FortressEvent, FortressRequest, Frame, InputStatus, NetworkStats,
+    NonBlockingSocket, PlayerHandle, SessionState,
 };
 
 // The amount of frames the spectator advances in a single step if not too far behind
@@ -257,7 +257,8 @@ impl<T: Config> SpectatorSession<T> {
             // add the input and all associated information
             Event::Input { input, player } => {
                 // save the input
-                self.inputs[input.frame.as_i32() as usize % SPECTATOR_BUFFER_SIZE][player.as_usize()] = input;
+                self.inputs[input.frame.as_i32() as usize % SPECTATOR_BUFFER_SIZE]
+                    [player.as_usize()] = input;
                 assert!(input.frame >= self.last_recv_frame);
                 self.last_recv_frame = input.frame;
 
@@ -266,7 +267,8 @@ impl<T: Config> SpectatorSession<T> {
 
                 // update the host connection status
                 for i in 0..self.num_players {
-                    self.host_connect_status[i] = self.host.peer_connect_status(PlayerHandle::new(i));
+                    self.host_connect_status[i] =
+                        self.host.peer_connect_status(PlayerHandle::new(i));
                 }
             }
         }

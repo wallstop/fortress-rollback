@@ -1,14 +1,12 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::net::SocketAddr;
 
+use fortress_rollback::hash::fnv1a_hash;
 use fortress_rollback::{Config, FortressRequest, Frame, GameStateCell, InputStatus};
 use serde::{Deserialize, Serialize};
 
 fn calculate_hash<T: Hash>(t: &T) -> u64 {
-    let mut s = DefaultHasher::new();
-    t.hash(&mut s);
-    s.finish()
+    fnv1a_hash(t)
 }
 
 pub struct GameStubEnum {

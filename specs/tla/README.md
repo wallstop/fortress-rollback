@@ -9,6 +9,7 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | `NetworkProtocol.tla` | UDP protocol state machine for peer-to-peer communication |
 | `InputQueue.tla` | Circular buffer input queue with prediction/confirmation |
 | `Rollback.tla` | Rollback mechanism for state restoration and resimulation |
+| `Concurrency.tla` | GameStateCell thread-safe state access via Arc<Mutex<T>> |
 
 ## Properties Verified
 
@@ -46,6 +47,24 @@ This directory contains TLA+ specifications for formally verifying the correctne
 **Liveness:**
 - LIVE-3: Progress guaranteed
 - LIVE-4: Rollback completes
+
+### Concurrency.tla
+
+**Safety:**
+- Mutual exclusion: At most one thread holds lock at a time
+- No data races: Only lock holder can modify cell state
+- Frame consistency: After save, cell frame matches saved frame
+- Load returns saved: Load operation returns correct data
+- Valid frame after save: Save never stores NULL_FRAME
+- Wait queue FIFO: Threads acquire lock in request order
+
+**Liveness:**
+- No deadlock: Some action always enabled
+- Operations complete: Every started operation eventually completes
+- Fair lock acquisition: Waiting threads eventually get the lock
+
+**Linearizability:**
+- Operations appear atomic (guaranteed by mutex)
 
 ## Running the Specifications
 
@@ -105,6 +124,21 @@ PROPERTY
     RollbackCompletes
 ```
 
+#### Concurrency.tla
+```
+CONSTANTS
+    THREADS = {t1, t2}      \* Two threads for basic checking
+    MAX_FRAME = 5           \* Reduced for faster checking
+    NULL_FRAME = -1
+
+INVARIANT
+    SafetyInvariant
+
+PROPERTY
+    OperationsComplete
+    FairLockAcquisition
+```
+
 ### Command Line
 
 ```bash
@@ -116,6 +150,9 @@ java -jar tla2tools.jar -config InputQueue.cfg InputQueue.tla
 
 # Check Rollback
 java -jar tla2tools.jar -config Rollback.cfg Rollback.tla
+
+# Check Concurrency
+java -jar tla2tools.jar -config Concurrency.cfg Concurrency.tla
 ```
 
 ## Relationship to Implementation
@@ -127,6 +164,7 @@ These specifications model the key algorithms from:
 | `NetworkProtocol` | `src/network/protocol.rs` (UdpProtocol) |
 | `InputQueue` | `src/input_queue.rs` (InputQueue) |
 | `Rollback` | `src/sync_layer.rs` (SyncLayer), `src/sessions/p2p_session.rs` |
+| `Concurrency` | `src/sync_layer.rs` (GameStateCell, GameStateAccessor) |
 
 ## Extending the Specifications
 

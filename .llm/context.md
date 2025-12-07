@@ -154,6 +154,20 @@ Configurable input delay provides a buffer against network jitter, trading laten
 
 ## Testing Strategy
 
+### Root Cause Analysis for Test Failures
+**CRITICAL: When tests fail or are flaky, always perform proper RCA**
+
+Before fixing a failing test:
+1. **Understand the failure** - Don't just make the test pass; understand *why* it fails
+2. **Distinguish test bug vs production bug** - Is the test wrong, or is the production code wrong?
+3. **Fix at the correct level**:
+   - Production bug → Fix library code
+   - Test bug → Fix test's incorrect assumptions
+   - Timing issue → Add proper synchronization (not arbitrary sleeps)
+   - Flakiness → Find and eliminate the source of non-determinism
+4. **Never band-aid patch**: Disabling assertions, adding excessive timeouts, or commenting out checks are NOT fixes
+5. **Document the fix**: Explain what was wrong and why the fix is correct
+
 ### Unit Tests
 - Test individual functions and methods in isolation
 - Mock network interactions and time dependencies

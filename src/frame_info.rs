@@ -23,19 +23,19 @@ impl<S> Default for GameState<S> {
 }
 
 /// Represents an input for a single player in a single frame. The associated frame is denoted with `frame`.
-/// You do not need to create this struct, but the sessions will provide a `Vec<PlayerInput>` for you during `advance_frame()`.
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub(crate) struct PlayerInput<I>
 where
     I: Copy + Clone + PartialEq,
 {
     /// The frame to which this info belongs to. [`Frame::NULL`] represents an invalid frame
-    pub frame: Frame,
+    pub(crate) frame: Frame,
     /// The input struct given by the user
-    pub input: I,
+    pub(crate) input: I,
 }
 
 impl<I: Copy + Clone + PartialEq + Default> PlayerInput<I> {
+    /// Creates a new `PlayerInput` with the given frame and input.
     pub(crate) fn new(frame: Frame, input: I) -> Self {
         Self { frame, input }
     }

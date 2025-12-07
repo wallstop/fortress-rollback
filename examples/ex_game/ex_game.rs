@@ -1,8 +1,6 @@
 use std::net::SocketAddr;
 
-use fortress_rollback::{
-    Config, FortressRequest, Frame, GameStateCell, InputStatus, PlayerHandle,
-};
+use fortress_rollback::{Config, FortressRequest, Frame, GameStateCell, InputStatus, PlayerHandle};
 use macroquad::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -190,7 +188,8 @@ impl Game {
         // manually teleport the player to the center of the screen, but not through a proper input
         // this will create a forced desync (unless player one is already at the center)
         if is_key_pressed(KeyCode::Space) {
-            self.game_state.positions[handle.as_usize()] = (WINDOW_WIDTH * 0.5, WINDOW_HEIGHT * 0.5);
+            self.game_state.positions[handle.as_usize()] =
+                (WINDOW_WIDTH * 0.5, WINDOW_HEIGHT * 0.5);
         }
 
         let mut inp: u8 = 0;

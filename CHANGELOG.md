@@ -29,6 +29,23 @@ In this document, all remarkable changes are listed. Not mentioned are smaller c
     struct MyAddress { /* ... */ }
     ```
 
+### Added
+
+- **[DETERMINISM]** New `fortress_rollback::hash` module providing deterministic hashing utilities
+  - `DeterministicHasher`: A FNV-1a based hasher for consistent cross-process checksums
+  - `fnv1a_hash`: Convenience function for computing deterministic hashes
+  - `DeterministicBuildHasher`: For use with collections requiring deterministic hashing
+  - **Rationale:** `std::collections::hash_map::DefaultHasher` uses a random seed, causing different processes to produce different hashes for identical data, which breaks checksum comparison in rollback networking.
+- **[API]** New `P2PSession::confirmed_inputs_for_frame()` method
+  - Returns confirmed inputs for all players at a specific frame
+  - Useful for computing deterministic checksums over confirmed game state
+  - Inputs are guaranteed to be the same across all peers for the same frame
+  - Returns error if frame is not yet confirmed or has been discarded
+- **[PREDICTION]** `InputQueue` now tracks player index for prediction strategy
+  - `InputQueue::new(player_index)` constructor now requires player index
+  - `PredictionStrategy::predict()` receives player index for game-specific prediction logic
+  - Enables prediction strategies that vary behavior per player
+
 ### Improvements
 
 - **[DETERMINISM]** Replaced all `HashMap` with `BTreeMap` for guaranteed iteration order
@@ -36,10 +53,31 @@ In this document, all remarkable changes are listed. Not mentioned are smaller c
   - Affects: player inputs, checksums, network endpoints, all frame-based collections
   - Ensures consistent behavior across platforms and runs
   - All collection iteration now has predictable, sorted ordering
+- **[DETERMINISM]** Replaced `HashSet` with `BTreeSet` in protocol sync request tracking
+  - `sync_random_requests` now uses `BTreeSet<u32>` instead of `HashSet<u32>`
+  - Ensures deterministic iteration when processing sync acknowledgments
+- **[DETERMINISM]** Updated test stubs to use deterministic hashing
+  - Tests now use `fnv1a_hash` instead of `DefaultHasher`
+  - Cross-process test comparisons are now reliable
 - Added 5 new determinism tests to verify iteration order consistency
-- **[TESTING]** Test suite expanded from 32 to 37 tests (15 unit + 17 integration + 5 determinism)
-- **[SAFETY]** `InputQueue::confirmed_input` now returns `Result` instead of panicking; spectator confirmed-input path bubbles `FortressError` on missing data.
+- **[TESTING]** Test suite significantly expanded:
+  - 180+ library tests
+  - 8/8 multi-process network tests now pass (BUG-001 fixed)
+  - 20/20 network resilience tests pass
+  - Comprehensive edge case tests for frame zero rollback scenarios
+- **[BUG FIX]** BUG-001 Multi-Process Rollback Desync - RESOLVED
+  - **Root Cause:** Checksum computation over all frames failed when older frames were discarded from input queue; different peers discarded at different times
+  - **Fix:** Window-based computation using last 64 frames (half of 128-frame queue capacity) ensures frames are always available for both peers
+  - All 8 multi-process tests now pass reliably with deterministic checksums
+- **[SAFETY]** `InputQueue::confirmed_input` now returns `Result` instead of panicking
+  - Spectator confirmed-input path bubbles `FortressError` on missing data
+- **[TLA+]** Added `Concurrency.tla` specification for GameStateCell thread safety
+  - Models concurrent save/load operations with mutex behavior
+  - Verifies mutual exclusion, linearizability, and deadlock freedom
 - **[DOCUMENTATION]** All doc comments updated to reference "Fortress Rollback" consistently
+- **[DOCUMENTATION]** Added comprehensive edge case and determinism analysis to PLAN.md
+- **[DOCUMENTATION]** Added Root Cause Analysis (RCA) guidelines for test failures to all agent instruction files
+- **[CODE STYLE]** Applied consistent formatting across all source files (rustfmt)
 
 ## 0.11.0
 
