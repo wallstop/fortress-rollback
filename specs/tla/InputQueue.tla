@@ -17,7 +17,7 @@
 (*   - Liveness: Predictions eventually confirmed                          *)
 (***************************************************************************)
 
-EXTENDS Naturals, Sequences, FiniteSets, TLC
+EXTENDS Integers, Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS
     QUEUE_LENGTH,           \* Size of circular buffer (128)
@@ -26,7 +26,7 @@ CONSTANTS
 
 ASSUME QUEUE_LENGTH \in Nat /\ QUEUE_LENGTH > 0
 ASSUME MAX_FRAME \in Nat /\ MAX_FRAME > 0
-ASSUME NULL_FRAME = -1
+ASSUME NULL_FRAME \notin 0..MAX_FRAME  \* Sentinel value (outside valid frame range)
 
 (***************************************************************************)
 (* Variables                                                               *)
@@ -47,8 +47,8 @@ vars == <<inputs, head, tail, length, lastAddedFrame, lastRequestedFrame,
 (***************************************************************************)
 (* Type Definitions                                                        *)
 (***************************************************************************)
-Frame == NULL_FRAME..MAX_FRAME
-InputValue == 0..255        \* Simplified input representation
+Frame == {NULL_FRAME} \union (0..MAX_FRAME)
+InputValue == 0..3          \* Simplified input representation for model checking
 BufferIndex == 0..(QUEUE_LENGTH - 1)
 
 Input == [frame: Frame, value: InputValue]
@@ -256,9 +256,16 @@ SafetyInvariant ==
 IncorrectEventuallyCleared ==
     firstIncorrectFrame # NULL_FRAME ~> firstIncorrectFrame = NULL_FRAME
 
-(***************************************************************************)
+(**************************************************************************)
+(* State Constraint for Model Checking                                     *)
+(**************************************************************************)
+StateConstraint ==
+    /\ (lastAddedFrame = NULL_FRAME \/ lastAddedFrame <= MAX_FRAME)
+    /\ length <= QUEUE_LENGTH
+
+(**************************************************************************)
 (* Theorems                                                                *)
-(***************************************************************************)
+(**************************************************************************)
 
 \* The specification maintains the safety invariant
 THEOREM Spec => []SafetyInvariant

@@ -22,3 +22,12 @@ Cargo.lock
 
 #/target
 #Cargo.lock
+
+
+specs/tla/states**
+specs/tla/*_test.cfg
+specs/**/*.bin
+specs/**/*Rollback_TTrace_*
+states/**
+*.z3-trace
+states.dot

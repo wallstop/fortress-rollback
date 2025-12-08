@@ -24,6 +24,28 @@ This is a **fork** of GGRS (Good Game Rollback System) focused on:
 - Document invariants and preconditions
 - Suggest Z3 constraints for critical safety properties
 
+**Formal Verification Philosophy:**
+- **Specs model production** - TLA+/Kani/Z3 specs must accurately represent production code
+- **When verification fails, assume production has a bug first** - investigate before relaxing specs
+- **Never "fix" specs just to make them pass** - this defeats the purpose of verification
+- **Document all spec changes** - explain what production behavior necessitates the change
+- **Invariants represent real safety properties** - only relax with strong justification
+
+**When Formal Verification or Analysis Reveals Issues:**
+After fixing any bug discovered through formal verification, code review, or other analysis:
+1. **Add comprehensive regression tests** - Cover the exact scenario that was discovered
+2. **Test related edge cases** - Look for similar issues in related code paths
+3. **Test boundary conditions** - Add tests at the edges of valid ranges
+4. **Test invariant preservation** - Ensure invariants hold across state transitions
+5. **Document the scenario** - Tests should explain what was discovered and why it matters
+
+Example test categories to add after discovering a bug:
+- Direct reproduction test for the discovered issue
+- Edge case variants (zero values, max values, boundary conditions)
+- Chained/sequential operations that might compound the issue
+- Full lifecycle tests (create-use-modify-destroy cycles)
+- Negative tests that verify detection of violations
+
 ### 3. Clear & Usable APIs
 - Favor builder patterns for complex configuration
 - Suggest type-safe interfaces over runtime validation
@@ -86,30 +108,58 @@ fn test_rollback() {
 ```
 
 ### When Tests Fail or Are Flaky
-**CRITICAL: Root Cause Analysis Required**
+**CRITICAL: Deep Root Cause Analysis Required**
 
-When encountering a failing or flaky test, always perform proper RCA:
+When encountering a failing or flaky test, always perform thorough investigation:
 
-1. **Understand the failure** - Don't just make the test pass; understand *why* it fails
-2. **Distinguish test bug vs production bug** - Is the test wrong, or is the production code wrong?
-3. **Fix the root cause** - Apply the fix at the appropriate level:
-   - **Production bug**: Fix the library code, not the test
-   - **Test bug**: Fix the test's incorrect assumptions/logic
-   - **Timing issue**: Add proper synchronization, not arbitrary sleeps
-   - **Flakiness**: Find the source of non-determinism and eliminate it
-4. **Never band-aid patch** - Disabling assertions, adding excessive timeouts, or commenting out checks are NOT fixes
-5. **Document the fix** - Explain what was wrong and why the fix is correct
+#### Investigation Process
+1. **Reproduce consistently** - Run the test multiple times, note any patterns
+2. **Understand the assertion** - What is the test actually checking? What invariant should hold?
+3. **Trace the failure path** - Add logging/debugging to understand the exact state at failure
+4. **Identify the root cause** - Keep asking "why" until you reach the fundamental issue
+5. **Verify your hypothesis** - Confirm your understanding before implementing a fix
+
+#### Distinguishing Test Bug vs Production Bug
+- **Production bug indicators**: Test expectations match documented behavior, other tests rely on same behavior, the test logic is straightforward
+- **Test bug indicators**: Test makes assumptions not guaranteed by API, test has race conditions, test uses outdated API expectations
+
+#### Providing Comprehensive Fixes
+1. **Fix at the correct level**:
+   - **Production bug**: Fix the library code AND verify fix doesn't break other tests
+   - **Test bug**: Fix test's incorrect assumptions AND document why assumption was wrong
+   - **Timing/race condition**: Add proper synchronization primitives (channels, barriers, condvars) NOT arbitrary sleeps
+   - **Flakiness**: Find and eliminate non-determinism source, add determinism checks
+2. **Consider ripple effects**: Does this fix impact other components? Are there similar issues elsewhere?
+3. **Add regression protection**: If production bug, add test that would have caught it
+4. **Update documentation**: If behavior was unclear, clarify it
+
+#### Strictly Forbidden Practices
+- ❌ Commenting out or weakening assertions that fail
+- ❌ Adding `Thread::sleep()` or arbitrary delays to "fix" timing issues
+- ❌ Catching and ignoring/swallowing errors
+- ❌ Marking tests as `#[ignore]` without documented plan to fix
+- ❌ Relaxing test tolerances without understanding why original was appropriate
+- ❌ Changing expected values to match actual without understanding root cause
+- ❌ Disabling features in tests that exist in production
 
 ```rust
 // ✅ DO: Fix root cause when test reveals production bug
-// Bad: test computes checksum over all frames, but frames get discarded
-// Good: changed to window-based computation (last 64 frames)
+// Investigation: Test checksum validation failed randomly
+// Root cause: checksums computed over all frames, but old frames get discarded
+// Fix: Changed to window-based computation (last 64 frames)
+// Verification: Test now passes consistently, added unit test for window logic
 
-// ❌ DON'T: Band-aid patches
+// ✅ DO: Fix test when test has incorrect assumptions  
+// Investigation: Test expected immediate connection, but protocol has handshake
+// Root cause: Test assumption didn't match documented async connection behavior
+// Fix: Updated test to wait for connection established event
+
+// ❌ DON'T: Band-aid patches that hide real issues
 // - Commenting out assertions that fail
 // - Adding Thread::sleep(5000) to "fix" timing
 // - Catching and ignoring errors
 // - Marking tests as #[ignore]
+// - Increasing tolerances without justification
 ```
 
 ## Specific Assistance Areas

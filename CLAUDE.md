@@ -35,23 +35,81 @@ GGRS is a Rust implementation of GGPO rollback networking for multiplayer games.
 - Ensure tests are maintainable and readable
 
 ### Root Cause Analysis for Test Failures
-**CRITICAL: When tests fail or are flaky, always perform proper RCA**
+**CRITICAL: When tests fail or are flaky, perform deep investigation and provide comprehensive fixes**
 
-1. **Understand before fixing** - Don't just make the test pass; understand *why* it fails
-2. **Distinguish test bug vs production bug**:
-   - Test bug: Test has incorrect assumptions or logic
-   - Production bug: Library code has a defect
-3. **Fix at the correct level**:
-   - Production bug → Fix library code, not the test
-   - Test bug → Fix test's incorrect assumptions
-   - Timing issue → Add proper synchronization mechanisms
-   - Flakiness → Find and eliminate non-determinism source
-4. **Never band-aid patch**:
-   - ❌ Commenting out failing assertions
-   - ❌ Adding excessive `Thread::sleep()` calls
-   - ❌ Catching and ignoring errors
-   - ❌ Marking tests as `#[ignore]`
-5. **Document the fix**: Explain the root cause and why the fix is correct
+The goal is NOT to "make the test pass" — it's to understand and fix the underlying issue properly.
+
+#### Investigation Methodology
+1. **Reproduce and characterize** - Run test multiple times; is failure consistent or intermittent? What are the failure conditions?
+2. **Understand the assertion** - What property or invariant is the test verifying? Why should it hold?
+3. **Trace the failure path** - Add logging/debugging, examine state at point of failure
+4. **Root cause analysis** - Keep asking "why" until you identify the fundamental issue
+5. **Verify hypothesis** - Confirm your understanding before implementing any fix
+6. **Assess scope** - Are there similar issues elsewhere in the codebase?
+
+#### Distinguishing Test Bug vs Production Bug
+- **Production bug indicators**:
+   - Test expectations align with documented behavior
+   - Test logic is straightforward and clearly correct
+   - Other tests or users depend on the same behavior
+- **Test bug indicators**:
+   - Test makes assumptions not guaranteed by the API
+   - Test has inherent race conditions or timing dependencies
+   - Test expectations contradict documentation
+   - Test setup is incorrect or incomplete
+
+#### Providing Comprehensive Fixes
+1. **Fix at the correct level**:
+   - Production bug → Fix library code AND verify other tests still pass AND add regression test if missing
+   - Test bug → Fix test's incorrect assumptions AND document why original assumption was wrong
+   - Timing issue → Add proper synchronization (channels, barriers, condvars) NOT arbitrary sleeps
+   - Flakiness → Find and eliminate non-determinism at its source
+2. **Consider ripple effects** - Does this fix impact other components? Run full test suite
+3. **Add regression protection** - If production bug, ensure test coverage prevents future regression
+4. **Update documentation** - If behavior was unclear, clarify in docs/comments
+5. **Document the fix** - Explain root cause and why the solution is correct
+
+#### Strictly Forbidden "Fixes"
+- ❌ Commenting out or weakening failing assertions
+- ❌ Adding `Thread::sleep()` or arbitrary delays to "fix" timing
+- ❌ Catching and ignoring errors in test code  
+- ❌ Marking tests as `#[ignore]` without documented plan to fix
+- ❌ Relaxing numeric tolerances without understanding why original was appropriate
+- ❌ Changing expected values to match actual without root cause analysis
+- ❌ Disabling test features that exist in production code
+
+### When Formal Verification or Analysis Reveals Issues
+**CRITICAL: After fixing any discovered bug, add comprehensive test coverage**
+
+After fixing a bug found through formal verification (TLA+, Kani, Z3), code review, or analysis:
+1. **Direct reproduction test** - Test the exact scenario that was discovered
+2. **Edge case variants** - Zero values, max values, boundary conditions
+3. **Chained operations** - Multiple sequential calls that might compound issues
+4. **Full lifecycle tests** - Create-use-modify-destroy cycles
+5. **Invariant preservation** - Verify invariants hold across state transitions
+6. **Negative tests** - Ensure violations are properly detected
+7. **Document in tests** - Explain what was discovered and why the test matters
+
+```rust
+// After discovering a bug, add comprehensive coverage like:
+#[test]
+fn test_exact_discovered_scenario() { /* Direct reproduction */ }
+
+#[test]
+fn test_edge_case_with_zero() { /* Boundary */ }
+
+#[test]
+fn test_edge_case_with_max() { /* Boundary */ }
+
+#[test]
+fn test_chained_operations_maintain_invariants() { /* Sequential */ }
+
+#[test]
+fn test_full_lifecycle_maintains_invariants() { /* Complete cycle */ }
+
+#[test]
+fn test_violation_detection() { /* Negative test */ }
+```
 
 ### Documentation
 - Every public item needs rustdoc with examples

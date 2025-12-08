@@ -19,7 +19,7 @@
 (*   - Liveness: Operations eventually complete                            *)
 (***************************************************************************)
 
-EXTENDS Naturals, Sequences, FiniteSets, TLC
+EXTENDS Integers, Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS
     THREADS,            \* Set of thread identifiers
@@ -28,12 +28,12 @@ CONSTANTS
 
 ASSUME THREADS # {}
 ASSUME MAX_FRAME \in Nat /\ MAX_FRAME > 0
-ASSUME NULL_FRAME = -1
+ASSUME NULL_FRAME \notin 0..MAX_FRAME  \* Sentinel value (outside valid frame range)
 
 (***************************************************************************)
 (* Type Definitions                                                        *)
 (***************************************************************************)
-Frame == NULL_FRAME..MAX_FRAME
+Frame == {NULL_FRAME} \union (0..MAX_FRAME)
 ThreadId == THREADS
 
 \* Thread states for modeling mutex behavior
@@ -328,12 +328,16 @@ WaitQueueFIFO ==
         i < j => waitQueue[i] # waitQueue[j]
 
 (***************************************************************************)
+(* Helper: Range of a sequence                                             *)
+(***************************************************************************)
+Range(s) == {s[i] : i \in 1..Len(s)}
+
+(***************************************************************************)
 (* No Double Holding: A thread cannot be both waiting and holding          *)
 (***************************************************************************)
 NoDoubleHolding ==
     \A t \in ThreadId :
         LockHeldBy(t) => t \notin Range(waitQueue)
-  WHERE Range(s) == {s[i] : i \in 1..Len(s)}
 
 (***************************************************************************)
 (* Safety Invariant: Conjunction of all safety properties                  *)
@@ -370,7 +374,6 @@ OperationsComplete ==
 FairLockAcquisition ==
     \A t \in ThreadId :
         (t \in Range(waitQueue)) ~> LockHeldBy(t)
-  WHERE Range(s) == {s[i] : i \in 1..Len(s)}
 
 (***************************************************************************)
 (* LINEARIZABILITY (Simplified)                                            *)
@@ -392,9 +395,18 @@ LinearizableHistory ==
          history[j].frame = history[i].frame) =>
             \E k \in 1..(j-1) : history[k] = history[i]
 
-(***************************************************************************)
+(**************************************************************************)
+(* State Constraint for Model Checking                                     *)
+(**************************************************************************)
+StateConstraint ==
+    /\ saveCount + loadCount <= 6
+    /\ (cellFrame = NULL_FRAME \/ cellFrame <= MAX_FRAME)
+    /\ Len(waitQueue) <= Cardinality(THREADS)
+    /\ Len(history) <= 8
+
+(**************************************************************************)
 (* THEOREMS                                                                *)
-(***************************************************************************)
+(**************************************************************************)
 (* These theorems state properties that hold for all behaviors of Spec     *)
 
 THEOREM SafetyTheorem == Spec => []SafetyInvariant

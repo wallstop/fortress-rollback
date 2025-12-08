@@ -11,11 +11,12 @@ This guide walks you through integrating Fortress Rollback into your game. By th
 5. [Handling Requests](#handling-requests)
 6. [Handling Events](#handling-events)
 7. [Determinism Requirements](#determinism-requirements)
-8. [Advanced Configuration](#advanced-configuration)
-9. [Spectator Sessions](#spectator-sessions)
-10. [Testing with SyncTest](#testing-with-synctest)
-11. [Common Patterns](#common-patterns)
-12. [Troubleshooting](#troubleshooting)
+8. [Network Requirements](#network-requirements)
+9. [Advanced Configuration](#advanced-configuration)
+10. [Spectator Sessions](#spectator-sessions)
+11. [Testing with SyncTest](#testing-with-synctest)
+12. [Common Patterns](#common-patterns)
+13. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -395,8 +396,22 @@ use fortress_rollback::FortressEvent;
 
 fn handle_event(event: FortressEvent<GameConfig>) {
     match event {
-        FortressEvent::Synchronizing { addr, total, count } => {
+        FortressEvent::Synchronizing {
+            addr,
+            total,
+            count,
+            total_requests_sent,
+            elapsed_ms,
+        } => {
             println!("Syncing with {}: {}/{}", addr, count, total);
+            // High total_requests_sent indicates packet loss during sync
+            if total_requests_sent > count * 2 {
+                println!("Warning: sync retries detected, possible packet loss");
+            }
+            // Monitor sync duration for network quality assessment
+            if elapsed_ms > 2000 {
+                println!("Warning: sync taking {}ms", elapsed_ms);
+            }
         }
 
         FortressEvent::Synchronized { addr } => {
@@ -470,6 +485,165 @@ let mut session = SessionBuilder::<GameConfig>::new()
 // Run your game loop
 // Session will rollback every frame and compare checksums
 // Mismatches indicate non-determinism!
+```
+
+---
+
+## Network Requirements
+
+Rollback networking works best under certain network conditions. Understanding these requirements helps you configure Fortress Rollback appropriately and set player expectations.
+
+### Supported Network Conditions
+
+| Condition | Supported Range | Optimal | Notes |
+|-----------|-----------------|---------|-------|
+| **Round-Trip Time (RTT)** | <200ms | <100ms | Higher RTT = more rollbacks |
+| **Packet Loss** | <15% | <5% | Above 15% causes frequent desyncs |
+| **Jitter** | <50ms | <20ms | High jitter causes prediction failures |
+| **Bandwidth** | >56 kbps | >256 kbps | Per-connection requirement |
+
+### Condition Effects
+
+**Low Latency (LAN, <20ms RTT)**
+- Minimal rollbacks
+- Very responsive gameplay
+- Use `SyncConfig::lan()` preset for faster connection
+
+**Medium Latency (Regional, 20-80ms RTT)**
+- Occasional rollbacks
+- Generally smooth gameplay
+- Default configuration works well
+
+**High Latency (Intercontinental, 80-200ms RTT)**
+- Frequent rollbacks
+- Noticeable input delay recommended (2-3 frames)
+- Use `SyncConfig::high_latency()` preset
+- Consider increasing `max_prediction_frames`
+
+**Very High Latency (>200ms RTT)**
+- May experience frequent sync failures
+- Gameplay quality significantly degraded
+- Not recommended for competitive play
+
+### Conditions to Avoid
+
+| Condition | Problem | Mitigation |
+|-----------|---------|------------|
+| Packet loss >15% | Frequent sync failures, desyncs | Use wired connection, improve network |
+| Jitter >50ms | Prediction failures, stuttering | QoS settings, reduce network congestion |
+| Asymmetric routes | One player experiences more rollbacks | Cannot mitigate at application level |
+| NAT traversal issues | Connection failures | Use STUN/TURN, port forwarding |
+| Mobile networks | High variability | WiFi recommended over cellular |
+
+### SyncConfig Presets
+
+Fortress Rollback provides configuration presets for different network scenarios:
+
+```rust
+use fortress_rollback::{SessionBuilder, SyncConfig};
+
+// Default: Balanced for typical internet connections
+let session = SessionBuilder::<GameConfig>::new()
+    .with_sync_config(SyncConfig::default())
+    // ...
+
+// LAN: Fast connection for local networks
+let session = SessionBuilder::<GameConfig>::new()
+    .with_sync_config(SyncConfig::lan())
+    // ...
+
+// High Latency: More tolerant for 100-200ms RTT connections
+let session = SessionBuilder::<GameConfig>::new()
+    .with_sync_config(SyncConfig::high_latency())
+    // ...
+
+// Lossy: More retries for 5-15% packet loss environments
+let session = SessionBuilder::<GameConfig>::new()
+    .with_sync_config(SyncConfig::lossy())
+    // ...
+```
+
+**Preset Comparison:**
+
+| Preset | Sync Packets | Retry Interval | Timeout | Best For |
+|--------|--------------|----------------|---------|----------|
+| `default()` | 5 | 200ms | None | General internet play |
+| `lan()` | 3 | 100ms | 5s | LAN parties, localhost |
+| `high_latency()` | 5 | 400ms | 10s | Intercontinental, WiFi |
+| `lossy()` | 8 | 200ms | 10s | Unstable connections |
+
+### Tuning Recommendations
+
+**For High Latency:**
+```rust
+let session = SessionBuilder::<GameConfig>::new()
+    .with_sync_config(SyncConfig::high_latency())
+    .with_input_delay(3)              // Hide latency with input delay
+    .with_max_prediction_frames(12)   // Allow more prediction
+    .with_disconnect_timeout(Duration::from_secs(5))
+    // ...
+```
+
+**For Lossy Networks:**
+```rust
+let session = SessionBuilder::<GameConfig>::new()
+    .with_sync_config(SyncConfig::lossy())
+    .with_desync_detection(DesyncDetection::On { interval: 30 })
+    // ...
+```
+
+**For LAN/Local Play:**
+```rust
+let session = SessionBuilder::<GameConfig>::new()
+    .with_sync_config(SyncConfig::lan())
+    .with_input_delay(0)              // No delay needed
+    .with_max_prediction_frames(4)    // Less prediction needed
+    // ...
+```
+
+### Network Quality Monitoring
+
+Monitor network quality using session statistics:
+
+```rust
+// Check network stats for each remote player
+for handle in session.remote_player_handles() {
+    if let Ok(stats) = session.network_stats(handle) {
+        let rtt = stats.ping;           // Round-trip time in ms
+        let pending = stats.send_queue_len;  // Pending packets
+
+        // Warn if conditions are degrading
+        if rtt > 150 {
+            println!("Warning: High latency ({}ms) with player {:?}", rtt, handle);
+        }
+
+        if pending > 10 {
+            println!("Warning: Network congestion with player {:?}", handle);
+        }
+    }
+}
+```
+
+### Sync Failure Troubleshooting
+
+If synchronization repeatedly fails:
+
+1. **Check RTT**: If >200ms, use `SyncConfig::high_latency()`
+2. **Check packet loss**: If high, use `SyncConfig::lossy()`
+3. **Check firewall/NAT**: Ensure UDP traffic is allowed
+4. **Monitor sync events**: Watch `total_requests_sent` and `elapsed_ms`
+
+```rust
+FortressEvent::Synchronizing { total_requests_sent, elapsed_ms, .. } => {
+    // High retry count indicates packet loss
+    if total_requests_sent > 15 {
+        println!("Warning: excessive sync retries, check network");
+    }
+    // Long sync time indicates high latency
+    if elapsed_ms > 3000 {
+        println!("Warning: sync taking {}ms, check connection", elapsed_ms);
+    }
+}
 ```
 
 ---

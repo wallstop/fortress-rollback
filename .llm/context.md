@@ -80,6 +80,23 @@ This fork aims to elevate GGRS to production-grade quality through rigorous veri
   - No deadlocks or race conditions
   - Network message ordering and delivery properties
 
+**Formal Verification Philosophy:**
+- **Specs model production** - TLA+/Kani/Z3 specs must accurately represent production code behavior
+- **When verification fails, assume production has a bug first** - investigate before relaxing specs
+- **Never "fix" specs just to make them pass** - this defeats the purpose of verification
+- **Document all spec changes** - explain what production behavior necessitates the change
+- **Invariants represent real safety properties** - only relax with strong justification
+
+**When Formal Verification or Analysis Reveals Issues:**
+After fixing any bug discovered through formal verification, code review, or other analysis, add comprehensive test coverage:
+1. **Direct reproduction test** - Cover the exact scenario that was discovered
+2. **Edge case variants** - Zero values, max values, boundary conditions
+3. **Chained operations** - Multiple sequential calls that might compound issues
+4. **Full lifecycle tests** - Create-use-modify-destroy cycles  
+5. **Invariant preservation** - Verify invariants hold across all state transitions
+6. **Negative tests** - Ensure violations are properly detected
+7. **Document in tests** - Explain what was discovered and why the test matters
+
 #### 3. Enhanced Usability
 - **Clear API Design**: Intuitive, hard-to-misuse interfaces
 - **Comprehensive Documentation**: Detailed explanations, examples, and guides
@@ -155,18 +172,48 @@ Configurable input delay provides a buffer against network jitter, trading laten
 ## Testing Strategy
 
 ### Root Cause Analysis for Test Failures
-**CRITICAL: When tests fail or are flaky, always perform proper RCA**
+**CRITICAL: When tests fail or are flaky, always perform deep investigation**
 
-Before fixing a failing test:
-1. **Understand the failure** - Don't just make the test pass; understand *why* it fails
-2. **Distinguish test bug vs production bug** - Is the test wrong, or is the production code wrong?
-3. **Fix at the correct level**:
-   - Production bug → Fix library code
-   - Test bug → Fix test's incorrect assumptions
-   - Timing issue → Add proper synchronization (not arbitrary sleeps)
-   - Flakiness → Find and eliminate the source of non-determinism
-4. **Never band-aid patch**: Disabling assertions, adding excessive timeouts, or commenting out checks are NOT fixes
-5. **Document the fix**: Explain what was wrong and why the fix is correct
+The goal is NOT to "make the test pass" — it's to understand and fix the underlying issue, whether in production code or the test itself.
+
+#### Investigation Methodology
+1. **Reproduce and characterize** - Run test multiple times; is it consistent or flaky? Under what conditions does it fail?
+2. **Understand the assertion** - What property is the test verifying? Why should this property hold?
+3. **Trace execution** - Add logging, use debugger, examine state at failure point
+4. **Form hypothesis** - What could cause this specific failure mode?
+5. **Verify hypothesis** - Confirm understanding before implementing fix
+6. **Consider scope** - Are there similar issues elsewhere in the codebase?
+
+#### Determining Fix Location
+- **Production bug indicators**: 
+  - Test expectations align with documented/intended behavior
+  - Multiple tests or users depend on the same behavior
+  - The test logic is simple and clearly correct
+- **Test bug indicators**:
+  - Test makes assumptions not guaranteed by the API contract
+  - Test has inherent race conditions or timing dependencies  
+  - Test uses mocking incorrectly or has setup errors
+  - Test expectations contradict documentation
+
+#### Comprehensive Fix Requirements
+1. **Fix at the correct level**:
+   - Production bug → Fix library code, add regression test if needed
+   - Test bug → Fix test assumptions, document why original assumption was wrong
+   - Timing issue → Use proper synchronization (channels, events, barriers) not sleeps
+   - Flakiness → Eliminate non-determinism at its source
+2. **Assess impact**: Does this fix affect other components? Run full test suite
+3. **Add protection**: If production bug, ensure test coverage prevents regression
+4. **Update docs**: If behavior was ambiguous, clarify documentation
+5. **Document the fix**: Explain root cause and why the solution is correct
+
+#### Strictly Forbidden "Fixes"
+- ❌ Commenting out or weakening failing assertions
+- ❌ Adding `Thread::sleep()` or arbitrary delays
+- ❌ Catching and ignoring/swallowing errors in tests
+- ❌ Marking tests as `#[ignore]` without a fix plan
+- ❌ Relaxing numeric tolerances without justification
+- ❌ Changing expected values to match actual without understanding why
+- ❌ Disabling test features that exist in production code
 
 ### Unit Tests
 - Test individual functions and methods in isolation

@@ -4,12 +4,379 @@ use std::sync::Arc;
 use instant::Duration;
 
 use crate::{
-    network::protocol::UdpProtocol, sessions::p2p_session::PlayerRegistry,
-    telemetry::ViolationObserver, Config, DesyncDetection, FortressError, NonBlockingSocket,
-    P2PSession, PlayerHandle, PlayerType, SpectatorSession, SyncTestSession,
+    input_queue::MAX_FRAME_DELAY, network::protocol::UdpProtocol,
+    sessions::p2p_session::PlayerRegistry, telemetry::ViolationObserver, time_sync::TimeSyncConfig,
+    Config, DesyncDetection, FortressError, NonBlockingSocket, P2PSession, PlayerHandle,
+    PlayerType, SpectatorSession, SyncTestSession,
 };
 
-use super::p2p_spectator_session::SPECTATOR_BUFFER_SIZE;
+/// Configuration for the synchronization protocol.
+///
+/// This struct allows fine-tuning the sync handshake behavior for different
+/// network conditions. The defaults work well for typical networks with <15%
+/// packet loss and <100ms RTT.
+///
+/// # Example
+///
+/// ```
+/// use fortress_rollback::SyncConfig;
+/// use instant::Duration;
+///
+/// // For high-latency networks, increase retry intervals
+/// let high_latency_config = SyncConfig {
+///     sync_retry_interval: Duration::from_millis(500),
+///     running_retry_interval: Duration::from_millis(500),
+///     keepalive_interval: Duration::from_millis(500),
+///     ..SyncConfig::default()
+/// };
+///
+/// // For lossy networks, increase required roundtrips
+/// let lossy_config = SyncConfig {
+///     num_sync_packets: 8,
+///     ..SyncConfig::default()
+/// };
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncConfig {
+    /// Number of successful sync roundtrips required before considering
+    /// the connection synchronized. Higher values provide more confidence
+    /// but take longer to synchronize.
+    ///
+    /// Default: 5
+    pub num_sync_packets: u32,
+
+    /// Time between sync request retries during the synchronization phase.
+    /// If a sync request doesn't receive a reply within this interval,
+    /// another request is sent.
+    ///
+    /// Default: 200ms
+    pub sync_retry_interval: Duration,
+
+    /// Maximum time to wait for synchronization to complete. If sync takes
+    /// longer than this, a `SyncTimeout` event is emitted.
+    ///
+    /// Default: `None` (no timeout)
+    pub sync_timeout: Option<Duration>,
+
+    /// Time between input retries during the running phase. If we haven't
+    /// received an ack for our inputs within this interval, resend them.
+    ///
+    /// Default: 200ms
+    pub running_retry_interval: Duration,
+
+    /// Time between keepalive packets when idle. Keepalives prevent
+    /// disconnect timeouts during periods of no input.
+    ///
+    /// Default: 200ms
+    pub keepalive_interval: Duration,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            num_sync_packets: 5,
+            sync_retry_interval: Duration::from_millis(200),
+            sync_timeout: None,
+            running_retry_interval: Duration::from_millis(200),
+            keepalive_interval: Duration::from_millis(200),
+        }
+    }
+}
+
+impl SyncConfig {
+    /// Creates a new `SyncConfig` with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Configuration preset for high-latency networks (100-200ms RTT).
+    ///
+    /// Uses longer intervals to avoid flooding the network with retries.
+    pub fn high_latency() -> Self {
+        Self {
+            num_sync_packets: 5,
+            sync_retry_interval: Duration::from_millis(400),
+            sync_timeout: Some(Duration::from_secs(10)),
+            running_retry_interval: Duration::from_millis(400),
+            keepalive_interval: Duration::from_millis(400),
+        }
+    }
+
+    /// Configuration preset for lossy networks (5-15% packet loss).
+    ///
+    /// Uses more sync packets for higher confidence and a sync timeout.
+    pub fn lossy() -> Self {
+        Self {
+            num_sync_packets: 8,
+            sync_retry_interval: Duration::from_millis(200),
+            sync_timeout: Some(Duration::from_secs(10)),
+            running_retry_interval: Duration::from_millis(200),
+            keepalive_interval: Duration::from_millis(200),
+        }
+    }
+
+    /// Configuration preset for local network / LAN play.
+    ///
+    /// Uses shorter intervals and fewer sync packets for faster connection.
+    pub fn lan() -> Self {
+        Self {
+            num_sync_packets: 3,
+            sync_retry_interval: Duration::from_millis(100),
+            sync_timeout: Some(Duration::from_secs(5)),
+            running_retry_interval: Duration::from_millis(100),
+            keepalive_interval: Duration::from_millis(100),
+        }
+    }
+}
+
+/// Configuration for network protocol behavior.
+///
+/// These settings control network timing, buffering, and telemetry thresholds.
+/// The defaults work well for most scenarios; adjust for specific requirements.
+///
+/// # Example
+///
+/// ```
+/// use fortress_rollback::ProtocolConfig;
+/// use instant::Duration;
+///
+/// // For competitive/LAN play, use faster quality reports
+/// let competitive_config = ProtocolConfig {
+///     quality_report_interval: Duration::from_millis(100),
+///     shutdown_delay: Duration::from_millis(3000),
+///     ..ProtocolConfig::default()
+/// };
+///
+/// // For debugging, use longer timeouts and lower thresholds
+/// let debug_config = ProtocolConfig {
+///     shutdown_delay: Duration::from_millis(10000),
+///     sync_retry_warning_threshold: 5,
+///     sync_duration_warning_ms: 1000,
+///     ..ProtocolConfig::default()
+/// };
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtocolConfig {
+    /// Interval between network quality reports.
+    ///
+    /// Lower values provide more responsive network stats but increase bandwidth
+    /// usage slightly. The quality report is a small packet that measures RTT.
+    ///
+    /// Default: 200ms
+    pub quality_report_interval: Duration,
+
+    /// Time to wait in Disconnected state before transitioning to Shutdown.
+    ///
+    /// This delay allows for graceful cleanup and final message delivery.
+    /// After this timeout, the protocol will no longer process messages.
+    ///
+    /// Default: 5000ms
+    pub shutdown_delay: Duration,
+
+    /// Number of checksums to retain for desync detection history.
+    ///
+    /// Higher values can detect older desyncs but use more memory.
+    /// Only relevant when desync detection is enabled.
+    ///
+    /// Default: 32
+    pub max_checksum_history: usize,
+
+    /// Maximum pending output messages before warning.
+    ///
+    /// When pending outputs exceed this limit, it indicates the peer
+    /// isn't acknowledging inputs quickly enough. This may suggest
+    /// network congestion or peer disconnection.
+    ///
+    /// Default: 128
+    pub pending_output_limit: usize,
+
+    /// Threshold for emitting sync retry warnings.
+    ///
+    /// Emits a telemetry warning when sync requests exceed this number.
+    /// With 5 required roundtrips and 200ms retry interval, this threshold
+    /// represents roughly 50% sustained packet loss over multiple retries.
+    ///
+    /// Default: 10
+    pub sync_retry_warning_threshold: u32,
+
+    /// Threshold for emitting sync duration warnings in milliseconds.
+    ///
+    /// Emits a telemetry warning when synchronization takes longer than this.
+    /// Typical sync should complete in ~1 second for good connections.
+    ///
+    /// Default: 3000ms
+    pub sync_duration_warning_ms: u128,
+}
+
+impl Default for ProtocolConfig {
+    fn default() -> Self {
+        Self {
+            quality_report_interval: Duration::from_millis(200),
+            shutdown_delay: Duration::from_millis(5000),
+            max_checksum_history: 32,
+            pending_output_limit: 128,
+            sync_retry_warning_threshold: 10,
+            sync_duration_warning_ms: 3000,
+        }
+    }
+}
+
+impl ProtocolConfig {
+    /// Creates a new `ProtocolConfig` with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Configuration preset for competitive/LAN play.
+    ///
+    /// Uses faster quality reports and shorter shutdown delay for
+    /// more responsive network stats and quicker cleanup.
+    pub fn competitive() -> Self {
+        Self {
+            quality_report_interval: Duration::from_millis(100),
+            shutdown_delay: Duration::from_millis(3000),
+            max_checksum_history: 32,
+            pending_output_limit: 128,
+            sync_retry_warning_threshold: 10,
+            sync_duration_warning_ms: 2000,
+        }
+    }
+
+    /// Configuration preset for high-latency WAN connections.
+    ///
+    /// Uses longer intervals and more tolerant thresholds to reduce
+    /// unnecessary warnings on slower connections.
+    pub fn high_latency() -> Self {
+        Self {
+            quality_report_interval: Duration::from_millis(400),
+            shutdown_delay: Duration::from_millis(10000),
+            max_checksum_history: 64,
+            pending_output_limit: 256,
+            sync_retry_warning_threshold: 20,
+            sync_duration_warning_ms: 10000,
+        }
+    }
+
+    /// Configuration preset for debugging.
+    ///
+    /// Uses longer timeouts and lower warning thresholds to make
+    /// it easier to observe telemetry events during development.
+    pub fn debug() -> Self {
+        Self {
+            quality_report_interval: Duration::from_millis(500),
+            shutdown_delay: Duration::from_millis(30000),
+            max_checksum_history: 128,
+            pending_output_limit: 64,
+            sync_retry_warning_threshold: 5,
+            sync_duration_warning_ms: 1000,
+        }
+    }
+}
+
+/// Configuration for spectator sessions.
+///
+/// These settings control spectator behavior including buffer sizes,
+/// catch-up speed, and frame lag tolerance.
+///
+/// # Example
+///
+/// ```
+/// use fortress_rollback::SpectatorConfig;
+///
+/// // For watching a fast-paced game, use larger buffer and faster catchup
+/// let fast_game_config = SpectatorConfig {
+///     buffer_size: 90,
+///     catchup_speed: 2,
+///     max_frames_behind: 15,
+/// };
+///
+/// // For spectators on slower connections
+/// let slow_connection_config = SpectatorConfig {
+///     buffer_size: 120,
+///     max_frames_behind: 20,
+///     ..SpectatorConfig::default()
+/// };
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpectatorConfig {
+    /// The number of frames of input that the spectator can buffer.
+    /// This defines how many frames of inputs from the host the spectator
+    /// can store before older inputs are overwritten.
+    ///
+    /// A larger buffer allows the spectator to tolerate more latency
+    /// or jitter, but uses more memory.
+    ///
+    /// Default: 60 (1 second at 60 FPS)
+    pub buffer_size: usize,
+
+    /// How many frames to advance per step when the spectator is behind.
+    /// When the spectator falls more than `max_frames_behind` frames behind
+    /// the host, it will advance this many frames per step to catch up.
+    ///
+    /// Higher values catch up faster but may cause visual stuttering.
+    ///
+    /// Default: 1
+    pub catchup_speed: usize,
+
+    /// The maximum number of frames the spectator can fall behind before
+    /// triggering catch-up mode. When the spectator is more than this many
+    /// frames behind the host's current frame, it will use `catchup_speed`
+    /// to advance faster.
+    ///
+    /// Default: 10
+    pub max_frames_behind: usize,
+}
+
+impl Default for SpectatorConfig {
+    fn default() -> Self {
+        Self {
+            buffer_size: 60,
+            catchup_speed: 1,
+            max_frames_behind: 10,
+        }
+    }
+}
+
+impl SpectatorConfig {
+    /// Creates a new `SpectatorConfig` with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Configuration preset for fast-paced games.
+    ///
+    /// Uses a larger buffer and faster catch-up for games where
+    /// falling behind is more noticeable.
+    pub fn fast_paced() -> Self {
+        Self {
+            buffer_size: 90,
+            catchup_speed: 2,
+            max_frames_behind: 15,
+        }
+    }
+
+    /// Configuration preset for spectators on slower connections.
+    ///
+    /// Uses a larger buffer and more tolerance for falling behind.
+    pub fn slow_connection() -> Self {
+        Self {
+            buffer_size: 120,
+            catchup_speed: 1,
+            max_frames_behind: 20,
+        }
+    }
+
+    /// Configuration preset for local viewing with minimal latency.
+    ///
+    /// Uses smaller buffer and stricter catch-up for responsive viewing.
+    pub fn local() -> Self {
+        Self {
+            buffer_size: 30,
+            catchup_speed: 2,
+            max_frames_behind: 5,
+        }
+    }
+}
 
 const DEFAULT_PLAYERS: usize = 2;
 const DEFAULT_SAVE_MODE: bool = false;
@@ -51,6 +418,14 @@ where
     catchup_speed: usize,
     /// Optional observer for specification violations.
     violation_observer: Option<Arc<dyn ViolationObserver>>,
+    /// Configuration for the synchronization protocol.
+    sync_config: SyncConfig,
+    /// Configuration for the network protocol behavior.
+    protocol_config: ProtocolConfig,
+    /// Configuration for spectator sessions.
+    spectator_config: SpectatorConfig,
+    /// Configuration for time synchronization.
+    time_sync_config: TimeSyncConfig,
 }
 
 impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
@@ -70,6 +445,10 @@ impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
             .field("max_frames_behind", &self.max_frames_behind)
             .field("catchup_speed", &self.catchup_speed)
             .field("has_violation_observer", &self.violation_observer.is_some())
+            .field("sync_config", &self.sync_config)
+            .field("protocol_config", &self.protocol_config)
+            .field("spectator_config", &self.spectator_config)
+            .field("time_sync_config", &self.time_sync_config)
             .finish()
     }
 }
@@ -98,6 +477,10 @@ impl<T: Config> SessionBuilder<T> {
             max_frames_behind: DEFAULT_MAX_FRAMES_BEHIND,
             catchup_speed: DEFAULT_CATCHUP_SPEED,
             violation_observer: None,
+            sync_config: SyncConfig::default(),
+            protocol_config: ProtocolConfig::default(),
+            spectator_config: SpectatorConfig::default(),
+            time_sync_config: TimeSyncConfig::default(),
         }
     }
 
@@ -171,7 +554,22 @@ impl<T: Config> SessionBuilder<T> {
     }
 
     /// Change the amount of frames Fortress Rollback will delay the inputs for local players.
+    ///
+    /// # Panics
+    /// Panics if `delay` exceeds `MAX_FRAME_DELAY` (127 in production). This limit ensures
+    /// the circular input buffer doesn't overflow. At 60fps, 127 frames = ~2.1 seconds,
+    /// far exceeding any practical input delay (typically 0-8 frames).
+    ///
+    /// This constraint was discovered through Kani formal verification.
     pub fn with_input_delay(mut self, delay: usize) -> Self {
+        assert!(
+            delay <= MAX_FRAME_DELAY,
+            "Input delay {} exceeds maximum allowed value of {}. \
+             At 60fps, this would be {:.1}+ seconds of delay, which is impractical for gameplay.",
+            delay,
+            MAX_FRAME_DELAY,
+            delay as f64 / 60.0
+        );
         self.input_delay = delay;
         self
     }
@@ -211,6 +609,143 @@ impl<T: Config> SessionBuilder<T> {
         self
     }
 
+    /// Sets the synchronization protocol configuration.
+    ///
+    /// This allows fine-tuning the sync handshake behavior for different network
+    /// conditions. See [`SyncConfig`] for available options and presets.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, SyncConfig};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// // Use the high-latency preset
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_sync_config(SyncConfig::high_latency());
+    ///
+    /// // Or customize individual settings
+    /// let custom_config = SyncConfig {
+    ///     num_sync_packets: 8,
+    ///     ..SyncConfig::default()
+    /// };
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_sync_config(custom_config);
+    /// ```
+    pub fn with_sync_config(mut self, sync_config: SyncConfig) -> Self {
+        self.sync_config = sync_config;
+        self
+    }
+
+    /// Sets the network protocol configuration.
+    ///
+    /// This allows fine-tuning network timing, buffering, and telemetry thresholds.
+    /// See [`ProtocolConfig`] for available options and presets.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, ProtocolConfig};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// // Use the competitive preset for LAN play
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_protocol_config(ProtocolConfig::competitive());
+    ///
+    /// // Or customize individual settings
+    /// let custom_config = ProtocolConfig {
+    ///     quality_report_interval: instant::Duration::from_millis(100),
+    ///     ..ProtocolConfig::default()
+    /// };
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_protocol_config(custom_config);
+    /// ```
+    pub fn with_protocol_config(mut self, protocol_config: ProtocolConfig) -> Self {
+        self.protocol_config = protocol_config;
+        self
+    }
+
+    /// Sets the spectator session configuration.
+    ///
+    /// This allows fine-tuning spectator behavior including buffer sizes,
+    /// catch-up speed, and frame lag tolerance.
+    /// See [`SpectatorConfig`] for available options and presets.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, SpectatorConfig};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// // Use the fast-paced preset for action games
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_spectator_config(SpectatorConfig::fast_paced());
+    ///
+    /// // Or customize individual settings
+    /// let custom_config = SpectatorConfig {
+    ///     buffer_size: 90,
+    ///     max_frames_behind: 15,
+    ///     ..SpectatorConfig::default()
+    /// };
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_spectator_config(custom_config);
+    /// ```
+    pub fn with_spectator_config(mut self, spectator_config: SpectatorConfig) -> Self {
+        self.spectator_config = spectator_config;
+        // Also update the legacy fields for backwards compatibility
+        self.max_frames_behind = spectator_config.max_frames_behind;
+        self.catchup_speed = spectator_config.catchup_speed;
+        self
+    }
+
+    /// Sets the time synchronization configuration.
+    ///
+    /// This allows fine-tuning the frame advantage averaging window size,
+    /// which affects how responsive vs stable the synchronization is.
+    /// See [`TimeSyncConfig`] for available options and presets.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, TimeSyncConfig};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// // Use the responsive preset for competitive play
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_time_sync_config(TimeSyncConfig::responsive());
+    ///
+    /// // Or customize the window size
+    /// let custom_config = TimeSyncConfig {
+    ///     window_size: 45,
+    /// };
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_time_sync_config(custom_config);
+    /// ```
+    pub fn with_time_sync_config(mut self, time_sync_config: TimeSyncConfig) -> Self {
+        self.time_sync_config = time_sync_config;
+        self
+    }
+
     /// Sets the FPS this session is used with. This influences estimations for frame synchronization between sessions.
     /// # Errors
     /// - Returns [`InvalidRequest`] if the fps is 0
@@ -235,6 +770,7 @@ impl<T: Config> SessionBuilder<T> {
     /// Sets the maximum frames behind. If the spectator is more than this amount of frames behind the received inputs,
     /// it will catch up with `catchup_speed` amount of frames per step.
     ///
+    /// Note: Prefer using [`Self::with_spectator_config`] for configuring spectator behavior.
     pub fn with_max_frames_behind(
         mut self,
         max_frames_behind: usize,
@@ -245,18 +781,23 @@ impl<T: Config> SessionBuilder<T> {
             });
         }
 
-        if max_frames_behind >= SPECTATOR_BUFFER_SIZE {
+        if max_frames_behind >= self.spectator_config.buffer_size {
             return Err(FortressError::InvalidRequest {
-                info: "Max frames behind cannot be larger or equal than the Spectator buffer size (60)"
-                    .to_owned(),
+                info: format!(
+                    "Max frames behind cannot be larger or equal than the Spectator buffer size ({})",
+                    self.spectator_config.buffer_size
+                ),
             });
         }
         self.max_frames_behind = max_frames_behind;
+        self.spectator_config.max_frames_behind = max_frames_behind;
         Ok(self)
     }
 
     /// Sets the catchup speed. Per default, this is set to 1, so the spectator never catches up.
     /// If you want the spectator to catch up to the host if `max_frames_behind` is surpassed, set this to a value higher than 1.
+    ///
+    /// Note: Prefer using [`Self::with_spectator_config`] for configuring spectator behavior.
     pub fn with_catchup_speed(mut self, catchup_speed: usize) -> Result<Self, FortressError> {
         if catchup_speed < 1 {
             return Err(FortressError::InvalidRequest {
@@ -264,13 +805,14 @@ impl<T: Config> SessionBuilder<T> {
             });
         }
 
-        if catchup_speed >= self.max_frames_behind {
+        if catchup_speed >= self.spectator_config.max_frames_behind {
             return Err(FortressError::InvalidRequest {
                 info: "Catchup speed cannot be larger or equal than the allowed maximum frames behind host"
                     .to_owned(),
             });
         }
         self.catchup_speed = catchup_speed;
+        self.spectator_config.catchup_speed = catchup_speed;
         Ok(self)
     }
 
@@ -365,6 +907,7 @@ impl<T: Config> SessionBuilder<T> {
             self.desync_detection,
             self.input_delay,
             self.violation_observer,
+            self.protocol_config,
         ))
     }
 
@@ -388,14 +931,17 @@ impl<T: Config> SessionBuilder<T> {
             self.disconnect_notify_start,
             self.fps,
             DesyncDetection::Off,
+            self.sync_config,
+            self.protocol_config,
         );
         host.synchronize();
         SpectatorSession::new(
             self.num_players,
             Box::new(socket),
             host,
-            self.max_frames_behind,
-            self.catchup_speed,
+            self.spectator_config.buffer_size,
+            self.spectator_config.max_frames_behind,
+            self.spectator_config.catchup_speed,
             self.violation_observer,
         )
     }
@@ -438,9 +984,71 @@ impl<T: Config> SessionBuilder<T> {
             self.disconnect_notify_start,
             self.fps,
             self.desync_detection,
+            self.sync_config,
+            self.protocol_config,
         );
         // start the synchronization
         endpoint.synchronize();
         endpoint
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use std::net::SocketAddr;
+
+    #[repr(C)]
+    #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+    struct TestInput {
+        inp: u8,
+    }
+
+    struct TestConfig;
+
+    impl Config for TestConfig {
+        type Input = TestInput;
+        type State = Vec<u8>;
+        type Address = SocketAddr;
+    }
+
+    // ========================================================================
+    // Input Delay Bounds Tests
+    // These tests verify the fix for a Kani-discovered edge case where
+    // frame_delay >= INPUT_QUEUE_LENGTH could cause circular buffer overflow.
+    // ========================================================================
+
+    #[test]
+    fn test_with_input_delay_accepts_zero() {
+        let builder = SessionBuilder::<TestConfig>::new().with_input_delay(0);
+        assert_eq!(builder.input_delay, 0);
+    }
+
+    #[test]
+    fn test_with_input_delay_accepts_typical_values() {
+        for delay in 1..=8 {
+            let builder = SessionBuilder::<TestConfig>::new().with_input_delay(delay);
+            assert_eq!(builder.input_delay, delay);
+        }
+    }
+
+    #[test]
+    fn test_with_input_delay_accepts_max_valid() {
+        let builder = SessionBuilder::<TestConfig>::new().with_input_delay(MAX_FRAME_DELAY);
+        assert_eq!(builder.input_delay, MAX_FRAME_DELAY);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds maximum allowed value")]
+    fn test_with_input_delay_panics_on_excessive_delay() {
+        let _builder = SessionBuilder::<TestConfig>::new().with_input_delay(MAX_FRAME_DELAY + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds maximum allowed value")]
+    fn test_with_input_delay_panics_on_queue_length() {
+        use crate::input_queue::INPUT_QUEUE_LENGTH;
+        let _builder = SessionBuilder::<TestConfig>::new().with_input_delay(INPUT_QUEUE_LENGTH);
     }
 }

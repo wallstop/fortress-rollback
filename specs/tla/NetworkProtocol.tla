@@ -90,7 +90,7 @@ Receive(p) ==
 StartSync(p, other) ==
     /\ state[p] = "Initializing"
     /\ state' = [state EXCEPT ![p] = "Synchronizing"]
-    /\ \E randomId \in 1..1000:
+    /\ \E randomId \in 1..5:
         /\ syncRequests' = [syncRequests EXCEPT ![p] = syncRequests[p] \union {randomId}]
         /\ Send([type |-> "SyncRequest", from |-> p, to |-> other, data |-> randomId])
     /\ UNCHANGED <<syncRemaining, disconnectTimer, shutdownTimer>>
@@ -136,7 +136,7 @@ HandleSyncReply(p) ==
 RetrySyncRequest(p, other) ==
     /\ state[p] = "Synchronizing"
     /\ syncRemaining[p] > 0
-    /\ \E randomId \in 1..1000:
+    /\ \E randomId \in 1..5:
         /\ randomId \notin syncRequests[p]
         /\ syncRequests' = [syncRequests EXCEPT ![p] = syncRequests[p] \union {randomId}]
         /\ Send([type |-> "SyncRequest", from |-> p, to |-> other, data |-> randomId])
@@ -260,9 +260,18 @@ EventuallySynchronized ==
 NoDeadlock ==
     (\A p \in PEERS: state[p] = "Shutdown") \/ ENABLED(Next)
 
-(***************************************************************************)
+(**************************************************************************)
+(* State Constraint for Model Checking                                     *)
+(**************************************************************************)
+StateConstraint ==
+    /\ Len(network) <= 3
+    /\ \A p \in PEERS: disconnectTimer[p] <= 3
+    /\ \A p \in PEERS: shutdownTimer[p] <= 3
+    /\ \A p \in PEERS: Cardinality(syncRequests[p]) <= 2
+
+(**************************************************************************)
 (* Invariants to Check                                                     *)
-(***************************************************************************)
+(**************************************************************************)
 Invariants ==
     /\ TypeInvariant
     /\ SyncRemainingNonNegative

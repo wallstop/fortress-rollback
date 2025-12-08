@@ -1,7 +1,7 @@
 # Fortress Rollback Improvement Plan
 
-**Version:** 2.7
-**Last Updated:** December 2025
+**Version:** 2.21
+**Last Updated:** December 8, 2025
 **Goal:** Transform Fortress Rollback into a production-grade, formally verified rollback networking library with >90% test coverage, absolute determinism guarantees, and exceptional usability.
 
 ---
@@ -11,46 +11,53 @@
 ### Metrics
 | Metric | Current | Target | Status |
 |--------|---------|--------|--------|
-| Library Tests | 180 | 100+ | ✅ Exceeded |
-| Integration Tests | 74 | 30+ | ✅ Exceeded |
+| Library Tests | 224 | 100+ | ✅ Exceeded |
+| Integration Tests | 115 | 30+ | ✅ Exceeded |
 | Est. Coverage | ~89% | >90% | 🔄 Close |
 | Clippy Warnings (lib) | 0 | 0 | ✅ Clean |
 | Panics from Public API | 0 | 0 | ✅ |
 | HashMap/HashSet Usage | 0 | 0 | ✅ |
 | DefaultHasher Usage | 0 | 0 | ✅ |
-| Miri Clean | 145/145 | All | ✅ |
-| TLA+ Specs | 4 | 4 | ✅ Complete |
+| Miri Clean | All | All | ✅ (lib tests - proptests) |
+| TLA+ Specs | 4/4 | 4 | ✅ Complete |
+| TLA+ CI Validation | 4/4 | 4/4 | ✅ All passing |
 | Kani Proofs | 35 | 3+ | ✅ Complete |
+| Kani CI Validation | 35/35 | 35/35 | ✅ All passing |
+| Kani-Found Bugs Fixed | 1 | - | ✅ frame_delay validation |
+| Z3 SMT Proofs | 18 | 5+ | ✅ Complete |
+| Z3 CI Validation | 18/18 | 18/18 | ✅ All passing |
 | Rust Edition | 2021 | - | ✅ Rust 1.75+ compatible |
 | Network Resilience Tests | 31/31 | 20 | ✅ Exceeded |
-| Multi-Process Tests | 15/17 | 8 | ✅ Exceeded (2 ignored stress tests) |
-
-### What's Complete ✅
-
-- **Phase 0: Formal Specification** - `specs/FORMAL_SPEC.md`, `specs/API_CONTRACTS.md`, `specs/DETERMINISM_MODEL.md`
-- **Phase 1: Foundation & Safety** - Project rebrand, deterministic collections, panic elimination, structured telemetry, session observers, core unit tests, property-based testing (15 tests), runtime invariant checking, paranoid mode, CI/CD pipeline
-- **Phase 1.6: Type Safety** - `Frame` newtype with arithmetic ops, `PlayerHandle` newtype with bounds checking
-- **Phase 1.7: Deterministic Hashing** - `fortress_rollback::hash` module with FNV-1a, all `HashSet` → `BTreeSet`
-- **Phase 2.1: Miri Testing** - All 145 non-proptest library tests pass under Miri
-- **Phase 2.2: Kani Formal Verification** - 35 Kani proofs covering Frame arithmetic, InputQueue bounds, SyncLayer consistency
-- **Phase 2.4: TLA+ Specifications** - 4 specs complete (NetworkProtocol, InputQueue, Rollback, Concurrency)
-- **Phase 3.1: Integration Tests** - Multi-player (3-4 players), rollback scenarios, spectator synchronization
-- **Phase 3.2: Network Resilience** - ChaosSocket fault injection, 31 network condition tests
-- **Phase 3.2b: Multi-Process Network Testing** - 17 multi-process tests with real UDP sockets
-- **Phase 4.1: Documentation** - `docs/ARCHITECTURE.md`, `docs/USER_GUIDE.md`
-- **Rust Compatibility** - Edition 2021 for Rust 1.75+ compatibility
+| Multi-Process Tests | 15/17 | 8 | ✅ Exceeded |
+| Formal Verification Scripts | 3/3 | 3 | ✅ Complete |
+| Benchmarks | 2/2 | 2 | ✅ Complete (criterion) |
 
 ### Next Priority Actions
 
 | Priority | Task | Effort | Value | Status |
 |----------|------|--------|-------|--------|
-| **HIGH** | Phase 7.2: Sync Protocol Configurability | MEDIUM | HIGH | 📋 TODO |
-| **HIGH** | Phase 7.3: Sync Telemetry & Observability | LOW | HIGH | 📋 TODO |
-| **HIGH** | Phase 4.3: Document Network Limits | LOW | HIGH | 📋 TODO |
-| **MEDIUM** | Phase 5.1: Benchmarking | MEDIUM | MEDIUM | 📋 TODO |
-| **MEDIUM** | Phase 2.5: Z3 SMT Verification | HIGH | MEDIUM | 📋 TODO |
+| **MEDIUM** | Reach >90% Test Coverage | MEDIUM | HIGH | 🔄 In Progress (~89%) |
 | **LOW** | Phase 2.3: Loom Concurrency Testing | MEDIUM | LOW | 📋 TODO |
-| **LOW** | Phase 7.1: INPUT_QUEUE_LENGTH Configurability | HIGH | LOW | 📋 Deferred |
+| **LOW** | Phase 3.3: Metamorphic Testing | MEDIUM | LOW | 📋 TODO |
+| **LOW** | Phase 5.2: Continuous Fuzzing | MEDIUM | LOW | 📋 TODO |
+| **LOW** | Phase 4.2: Advanced Examples | LOW | MEDIUM | 📋 TODO |
+
+---
+
+## Formal Verification Philosophy
+
+**Core Principle: Specifications Model Production, Not The Other Way Around**
+
+When formal verification (TLA+, Kani, Z3) finds a violation:
+
+1. **First assume the production code has a bug** - The spec is the source of truth for intended behavior
+2. **Investigate the violation trace** - Understand exactly what sequence of events causes the failure
+3. **Determine root cause:**
+   - **Production bug**: Fix the Rust implementation to match the spec
+   - **Spec bug**: The spec incorrectly models production behavior - fix the spec AND document why
+   - **Spec too strict**: The invariant is stricter than actual requirements - relax with justification
+4. **Never "fix" specs just to make them pass** - This defeats the purpose of formal verification
+5. **Document all spec changes** - Explain why the change was made and what production behavior it reflects
 
 ---
 
@@ -75,41 +82,30 @@ This project **explicitly permits breaking changes** when they:
 - [ ] Verify no deadlocks in Mutex usage
 - [ ] Test event queue concurrent push/pop
 
-#### 2.5 Z3 SMT Solver Integration (HIGH VALUE)
+#### 2.5 Z3 SMT Solver Integration
 
-**Status:** NOT STARTED
+**Status:** ✅ COMPLETE
 
-**Proposed Z3 Verification Targets:**
+**Z3 Verification Proofs (18 total in `tests/test_z3_verification.rs`):**
 
-| Property | Description | Priority |
-|----------|-------------|----------|
-| Frame arithmetic overflow | Prove wrapping semantics are correct | HIGH |
-| Circular buffer bounds | Prove head/tail always valid | HIGH |
-| Rollback frame selection | Prove target is always <= current_frame | HIGH |
-| Sparse saving correctness | Prove saved state available when needed | MEDIUM |
-| Input consistency | Prove confirmed inputs never change | MEDIUM |
+| Category | Proofs | Properties Verified |
+|----------|--------|---------------------|
+| Frame Arithmetic | 4 | Addition bounds, rollback validity, comparison transitivity, increment safety |
+| Circular Buffer | 5 | Index validity, head advancement, wraparound, length invariant, distance calc |
+| Rollback Selection | 3 | Target in past, within prediction window, saved state available |
+| Frame Delay | 2 | Overflow prevention, sequential preservation |
+| Input Consistency | 1 | Position uniqueness within window |
+| Comprehensive | 2 | Complete rollback safety, prediction threshold |
 
-**Implementation Tasks:**
-- [ ] Add `z3` as dev-dependency with optional feature
-- [ ] Create `src/verification/z3_proofs.rs` module
-- [ ] Write proofs for frame arithmetic safety
-- [ ] Write proofs for circular buffer indexing
-- [ ] Write proofs for rollback frame selection
-- [ ] Add Z3 to CI (optional, may require Z3 installation)
+**Implementation:**
+- [x] Add `z3` as dev-dependency with `bundled` feature (builds Z3 from source)
+- [x] Create `tests/test_z3_verification.rs` with 17 proofs
+- [x] Write proofs for frame arithmetic safety (4 proofs)
+- [x] Write proofs for circular buffer indexing (5 proofs)
+- [x] Write proofs for rollback frame selection (3 proofs)
+- [x] Add Z3 to CI (z3-verification job in rust.yml)
 
-#### 2.6 Creusot Deductive Verification (OPTIONAL)
-
-Deductive verifier using Why3 platform. Lower priority since Kani covers many properties.
-
-- [ ] Add `creusot-contracts` as optional dev-dependency
-- [ ] Add Creusot annotations to critical types
-
-#### 2.7 Prusti Contract Verification (OPTIONAL)
-
-ETH Zurich's verifier with VS Code extension. Lower priority.
-
-- [ ] Add `prusti-contracts` as optional dev-dependency
-- [ ] Add contract annotations to critical functions
+**Note:** Z3 build requires `cmake` and `libclang-dev`. The bundled feature compiles Z3 from source (~5 min first build).
 
 ### Phase 3: Test Coverage (Continued)
 
@@ -118,33 +114,13 @@ ETH Zurich's verifier with VS Code extension. Lower priority.
 - [ ] Timing invariance tests
 - [ ] Replay consistency tests
 
-### Phase 4: Enhanced Usability
+### Phase 4: Enhanced Usability (Continued)
 
 #### 4.2 Examples
 - [ ] Advanced configuration examples
 - [ ] Error handling examples
 
-#### 4.3 Document Network Limits (HIGH PRIORITY)
-
-**Status:** TODO - Low effort, high value
-
-Add "Network Requirements" section to USER_GUIDE.md documenting:
-- Supported conditions (<15% packet loss, <200ms RTT)
-- Network conditions to avoid
-- Tuning recommendations for marginal conditions
-
-**Implementation Tasks:**
-- [ ] Add "Network Requirements" section to USER_GUIDE.md
-- [ ] Add network condition table to README.md
-- [ ] Document `SyncConfig` presets for different scenarios
-- [ ] Add troubleshooting guide for sync failures
-
-### Phase 5: Performance
-
-#### 5.1 Benchmarking
-- [ ] Set up criterion benchmarks
-- [ ] Benchmark core operations (input queue, sync layer, serialization)
-- [ ] Track performance across commits
+### Phase 5: Performance (Continued)
 
 #### 5.2 Continuous Fuzzing
 - [ ] Set up cargo-fuzz / OSS-Fuzz
@@ -163,66 +139,6 @@ Add "Network Requirements" section to USER_GUIDE.md documenting:
 - [ ] Separate protocol from session logic
 - [ ] Clean interfaces between layers
 - [ ] Reduce function sizes (< 50 lines)
-
-### Phase 7: Configuration & Observability
-
-#### 7.1 INPUT_QUEUE_LENGTH Configurability (DEFERRED)
-
-**Status:** DEFERRED - High effort, low immediate value
-
-Current value (128) is generous for typical games. Keep as compile-time constant.
-
-#### 7.2 Sync Protocol Configurability (HIGH PRIORITY)
-
-**Status:** TODO - Medium effort, high value
-
-**Problem:** The sync protocol requires `NUM_SYNC_PACKETS = 5` successful roundtrips. With packet loss >15%, sync times become excessive.
-
-**Proposed Solution:** Create a `SyncConfig` struct:
-
-```rust
-#[derive(Debug, Clone)]
-pub struct SyncConfig {
-    pub sync_packets: u32,              // Default: 5
-    pub sync_retry_interval: Duration,  // Default: 200ms
-    pub sync_timeout: Option<Duration>, // Default: None
-    pub running_retry_interval: Duration, // Default: 200ms
-    pub keepalive_interval: Duration,   // Default: 200ms
-}
-```
-
-**Implementation Tasks:**
-- [ ] Create `SyncConfig` struct in `src/sessions/builder.rs`
-- [ ] Add `with_sync_config()` method to `SessionBuilder`
-- [ ] Pass config through to `UdpProtocol::new()`
-- [ ] Replace constants with config values in `protocol.rs`
-- [ ] Add `SyncTimeout` error variant to `FortressError`
-- [ ] Update `poll()` to check sync timeout
-- [ ] Add unit tests for configurable sync
-- [ ] Add integration test with custom sync config
-- [ ] Update docs and examples
-
-#### 7.3 Sync Telemetry & Observability (HIGH PRIORITY)
-
-**Status:** TODO - Low effort, high value
-
-Extend telemetry system with sync-specific violations:
-
-```rust
-pub enum ViolationKind {
-    // ... existing variants ...
-    Synchronization,  // Sync protocol issues
-}
-```
-
-**Implementation Tasks:**
-- [ ] Add `ViolationKind::Synchronization` to telemetry
-- [ ] Add sync retry warning threshold constant
-- [ ] Add sync duration warning threshold
-- [ ] Emit warning violations when thresholds exceeded
-- [ ] Enhance `Event::Synchronizing` with RTT and elapsed time
-- [ ] Add tests for telemetry emission
-- [ ] Update telemetry documentation
 
 ---
 
@@ -243,8 +159,8 @@ The `advance_queue_head` function contains gap-filling code for handling frame d
 ## Quality Gates
 
 ### Before Merging
-- All library tests pass (180/180)
-- All in-process integration tests pass
+- All library tests pass
+- All integration tests pass
 - Coverage maintained or improved
 - No clippy warnings
 - No panics in library code
@@ -256,7 +172,11 @@ The `advance_queue_head` function contains gap-filling code for handling frame d
 
 ### Before 1.0 Stable
 - TLA+ specs for all protocols ✅ (4/4 complete)
-- Kani proofs for critical functions ✅ (35 proofs complete)
+- TLA+ specs validated in CI ✅
+- Kani proofs for critical functions ✅ (35 proofs)
+- Kani proofs validated in CI ✅ (all 35 passing)
+- Z3 SMT proofs for algorithm safety ✅ (18 proofs)
+- Z3 proofs validated in CI ✅ (all 18 passing)
 - Formal specification complete ✅
 - Deterministic hashing ✅
 - No known correctness issues ✅
@@ -266,40 +186,44 @@ The `advance_queue_head` function contains gap-filling code for handling frame d
 
 ## Progress Log (Recent)
 
-### December 2025 - Sessions 14-18
+### December 2025
 
-**Session 18: Protocol Configurability Planning**
-- Deep analysis of sync protocol and packet loss
-- Designed Phase 7.2 (SyncConfig), 7.3 (Sync Telemetry), 4.3 (Network Docs)
-- Decision: 15% is practical packet loss limit for rollback netcode
+**Session 27 (Dec 8):** Z3 CI Integration Complete
+- Added `z3-verification` job to `.github/workflows/rust.yml`
+- Z3 tests (18 proofs) now run in CI with caching for faster builds
+- Dependencies: cmake, libclang-dev installed automatically
+- Fixed clippy warnings across test files (clone on Copy types)
+- All formal verification now validated in CI: TLA+ (4), Kani (35), Z3 (17)
 
-**Session 17: Network Testing Expansion**
-- Network resilience tests: 20 → 31 tests
-- Multi-process tests: 8 → 17 tests
-- All tests pass reliably
+**Session 26 (Dec 8):** Phase 2.5 Z3 SMT Verification Complete
+- Added `z3` dev-dependency with `bundled` feature (builds Z3 from source)
+- Created `tests/test_z3_verification.rs` with 17 formal proofs
+- Frame arithmetic proofs: bounds, rollback validity, transitivity, increment safety
+- Circular buffer proofs: index validity, head advancement, wraparound, length invariant
+- Rollback selection proofs: target in past, within prediction window, saved state available
+- Frame delay proofs: overflow prevention, sequential preservation
+- Input consistency proof: position uniqueness within queue window
+- Comprehensive proofs: complete rollback safety, prediction threshold
+- Total integration tests: 117 (99 + 18 Z3 proofs)
+- Dependencies: cmake, libclang-dev required for bundled Z3 build
 
-**Session 16: Edge Cases & Theorem Prover Research**
-- Analyzed 5 "rollback before frames exist" edge cases (all protected)
-- Researched Z3, Creusot, Prusti, Haybale integration options
-- Key finding: Library handles all edge cases correctly
+**Session 25 (Dec 8):** Phase 7.5 Config API Consistency Complete
+- Added `Copy` trait to `SyncConfig` and `ProtocolConfig`
+- Fixed doc links, all 29 doc tests pass
+- Created `tests/test_config.rs` with 25 tests
+- Total integration tests: 99
 
-**Session 15: Deterministic Hashing**
-- Created `fortress_rollback::hash` module with FNV-1a
-- Eliminated all non-deterministic hashing
-- Added edge case tests
+**Session 24 (Dec 8):** Kani CI + SpectatorConfig/TimeSyncConfig + Bug Fix
+- All 35 Kani proofs passing in CI
+- Kani-discovered bug: `frame_delay` now validated `< INPUT_QUEUE_LENGTH`
+- SpectatorConfig/TimeSyncConfig complete with presets
 
-**Session 14: BUG-001 & BUG-002**
-- BUG-001 (Multi-Process Desync): Fixed - windowed checksum computation
-- BUG-002 (Network Test Timing): Fixed - increased timeouts
+**Session 23 (Dec 8):** Network docs, InputQueue fix, ProtocolConfig
+- Phase 4.3: Document Network Limits
+- Fixed InputQueue circular buffer invariant violation
+- ProtocolConfig struct with presets
 
-**Session 13: TLA+ Completion**
-- Completed Concurrency.tla for GameStateCell
-- TLA+ specs 100% complete (4/4)
-
-**Session 12: Kani & Compatibility**
-- 35 Kani proofs created
-- Downgraded to Rust 2021 edition for 1.75+ compatibility
-
-**Session 11: Documentation & Formal Specs**
-- Created ARCHITECTURE.md, USER_GUIDE.md
-- Completed Phase 0 formal specifications (FORMAL_SPEC.md, API_CONTRACTS.md, DETERMINISM_MODEL.md)
+**Session 17-22:** Testing, Sync configurability, Agent standardization
+- 31 network resilience tests, 17 multi-process tests
+- SyncConfig struct with presets
+- Standardized LLM agent instruction files

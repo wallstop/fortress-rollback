@@ -42,6 +42,16 @@ Alpha / experimental only.
 - [Issues](https://github.com/wallstop/fortress-rollback/issues)
 - [Contribution Guide](./CONTRIBUTING.md)
 
+### Network Requirements
+
+| Condition | Supported | Optimal |
+|-----------|-----------|---------|
+| RTT | <200ms | <100ms |
+| Packet Loss | <15% | <5% |
+| Jitter | <50ms | <20ms |
+
+For detailed configuration guidance, see the [User Guide](./docs/USER_GUIDE.md#network-requirements).
+
 ## Migration from ggrs
 
 Moving from the original `ggrs` crate? See the step-by-step guide in [MIGRATION.md](./MIGRATION.md). It covers the crate rename (`fortress-rollback`), the new `Config::Address` `Ord` bound, and import changes (`fortress_rollback`).

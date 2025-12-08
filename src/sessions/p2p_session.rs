@@ -2,8 +2,9 @@ use crate::error::FortressError;
 use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::network::network_stats::NetworkStats;
-use crate::network::protocol::{UdpProtocol, MAX_CHECKSUM_HISTORY_SIZE};
+use crate::network::protocol::UdpProtocol;
 use crate::report_violation;
+use crate::sessions::builder::ProtocolConfig;
 use crate::sync_layer::SyncLayer;
 use crate::telemetry::{ViolationKind, ViolationObserver, ViolationSeverity};
 use crate::DesyncDetection;
@@ -163,6 +164,8 @@ where
     last_sent_checksum_frame: Frame,
     /// Optional observer for specification violations.
     violation_observer: Option<Arc<dyn ViolationObserver>>,
+    /// Protocol configuration for network behavior.
+    protocol_config: ProtocolConfig,
 }
 
 impl<T: Config> P2PSession<T> {
@@ -181,6 +184,7 @@ impl<T: Config> P2PSession<T> {
         desync_detection: DesyncDetection,
         input_delay: usize,
         violation_observer: Option<Arc<dyn ViolationObserver>>,
+        protocol_config: ProtocolConfig,
     ) -> Self {
         // local connection status
         let mut local_connect_status = Vec::new();
@@ -239,6 +243,7 @@ impl<T: Config> P2PSession<T> {
             local_checksum_history: BTreeMap::new(),
             last_sent_checksum_frame: Frame::NULL,
             violation_observer,
+            protocol_config,
         }
     }
 
@@ -1028,9 +1033,19 @@ impl<T: Config> P2PSession<T> {
     ) {
         match event {
             // forward to user
-            Event::Synchronizing { total, count } => {
-                self.event_queue
-                    .push_back(FortressEvent::Synchronizing { addr, total, count });
+            Event::Synchronizing {
+                total,
+                count,
+                total_requests_sent,
+                elapsed_ms,
+            } => {
+                self.event_queue.push_back(FortressEvent::Synchronizing {
+                    addr,
+                    total,
+                    count,
+                    total_requests_sent,
+                    elapsed_ms,
+                });
             }
             // forward to user
             Event::NetworkInterrupted { disconnect_timeout } => {
@@ -1065,6 +1080,11 @@ impl<T: Config> P2PSession<T> {
 
                 self.event_queue
                     .push_back(FortressEvent::Disconnected { addr });
+            }
+            // forward sync timeout to user
+            Event::SyncTimeout { elapsed_ms } => {
+                self.event_queue
+                    .push_back(FortressEvent::SyncTimeout { addr, elapsed_ms });
             }
             // add the input and all associated information
             Event::Input { input, player } => {
@@ -1161,9 +1181,10 @@ impl<T: Config> P2PSession<T> {
                         self.local_checksum_history.insert(frame_to_send, checksum);
                     }
 
-                    if self.local_checksum_history.len() > MAX_CHECKSUM_HISTORY_SIZE {
-                        let oldest_frame_to_keep = frame_to_send
-                            - (MAX_CHECKSUM_HISTORY_SIZE as i32 - 1) * interval as i32;
+                    let max_history = self.protocol_config.max_checksum_history;
+                    if self.local_checksum_history.len() > max_history {
+                        let oldest_frame_to_keep =
+                            frame_to_send - (max_history as i32 - 1) * interval as i32;
                         self.local_checksum_history
                             .retain(|&frame, _| frame >= oldest_frame_to_keep);
                     }

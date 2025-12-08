@@ -1,19 +1,19 @@
 // For format details, see https://aka.ms/devcontainer.json. For config options, see the
 // README at: https://github.com/devcontainers/templates/tree/main/src/rust
 {
-	"name": "Rust",
-	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-	"image": "mcr.microsoft.com/devcontainers/rust:2-1-trixie",
-	"features": {
-		"ghcr.io/devcontainers/features/powershell:1": {},
-		"ghcr.io/devcontainers/features/python:1": {},
-		"ghcr.io/devcontainers/features/rust:1": {},
-		"ghcr.io/nikiforovall/devcontainer-features/dotnet-csharpier:1": {},
-		"ghcr.io/devcontainers-extra/features/npm-package:1": {},
-		"ghcr.io/devcontainers-extra/features/apt-packages:1": {
-			"packages": "libasound2-dev,default-jre,graphviz"
-		}
+	"name": "Fortress Rollback - Full Verification Environment",
+	
+	// Use our custom Dockerfile with all verification tools pre-installed
+	"build": {
+		"dockerfile": "Dockerfile",
+		"context": ".."
 	},
+	
+	// Additional features (on top of what's in Dockerfile)
+	"features": {
+		"ghcr.io/devcontainers/features/powershell:1": {}
+	},
+	
 	"mounts": [
 		{
 			"source": "devcontainer-cargo-cache-${devcontainerId}",
@@ -21,5 +21,44 @@
 			"type": "volume"
 		}
 	],
-	"postCreateCommand": "bash -c 'mkdir -p /opt/tla && curl -L https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o /opt/tla/tla2tools.jar'"
+	
+	// Post-create setup (ensure everything is ready)
+	"postCreateCommand": "bash -c '\n    set -e\n    echo \"=== Setting up Fortress Rollback Development Environment ===\"\n    \n    # Ensure TLA+ tools are in place\n    mkdir -p .tla-tools\n    if [ -f /opt/tla/tla2tools.jar ]; then\n        cp /opt/tla/tla2tools.jar .tla-tools/\n    elif [ ! -f .tla-tools/tla2tools.jar ]; then\n        echo \"Downloading TLA+ tools...\"\n        curl -L https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o .tla-tools/tla2tools.jar\n    fi\n    \n    # Install Rust nightly if missing\n    if ! rustup run nightly rustc --version > /dev/null 2>&1; then\n        echo \"Installing Rust nightly...\"\n        rustup install nightly\n        rustup component add rust-src --toolchain nightly\n        rustup component add llvm-tools-preview --toolchain nightly\n    fi\n    \n    # Install Miri if missing\n    if ! rustup +nightly which miri > /dev/null 2>&1; then\n        echo \"Installing Miri...\"\n        rustup +nightly component add miri || true\n    fi\n    \n    # Install Kani if missing (this can take a while)\n    if ! command -v cargo-kani > /dev/null 2>&1; then\n        echo \"Installing Kani verifier (this may take a few minutes)...\"\n        cargo install --locked kani-verifier || echo \"Kani install failed, install manually with: cargo install --locked kani-verifier && cargo kani setup\"\n        cargo kani setup || echo \"Run cargo kani setup to complete Kani installation\"\n    fi\n    \n    # Install cargo tools if missing\n    command -v cargo-nextest > /dev/null 2>&1 || cargo install cargo-nextest || true\n    command -v cargo-audit > /dev/null 2>&1 || cargo install cargo-audit || true\n    command -v cargo-deny > /dev/null 2>&1 || cargo install cargo-deny || true\n    command -v cargo-llvm-cov > /dev/null 2>&1 || cargo install cargo-llvm-cov || true\n    command -v cargo-mutants > /dev/null 2>&1 || cargo install cargo-mutants || true\n    \n    # Install Z3 if missing\n    if ! python3 -c \"import z3\" 2>/dev/null; then\n        echo \"Installing Z3...\"\n        pip3 install --break-system-packages z3-solver || pip3 install z3-solver || true\n    fi\n    \n    # Build project to cache dependencies\n    cargo build 2>/dev/null || true\n    \n    echo \"=== Development environment ready! ===\"\n    echo \"Run ./scripts/check-tools.sh to verify all tools are installed.\"\n'",
+	
+	// Environment variables for tools
+	"containerEnv": {
+		"TLA_TOOLS_JAR": "${containerWorkspaceFolder}/.tla-tools/tla2tools.jar",
+		"RUST_BACKTRACE": "1",
+		"CARGO_INCREMENTAL": "0",
+		"MIRIFLAGS": "-Zmiri-symbolic-alignment-check -Zmiri-strict-provenance"
+	},
+	
+	// Run as vscode user
+	"remoteUser": "vscode",
+	
+	// VS Code customizations
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"rust-lang.rust-analyzer",
+				"tamasfe.even-better-toml",
+				"serayuzgur.crates",
+				"vadimcn.vscode-lldb",
+				"alygin.vscode-tlaplus",
+				"ms-python.python",
+				"ms-python.vscode-pylance",
+				"ryanluker.vscode-coverage-gutters",
+				"streetsidesoftware.code-spell-checker"
+			],
+			"settings": {
+				"rust-analyzer.cargo.features": "all",
+				"rust-analyzer.checkOnSave.command": "clippy",
+				"rust-analyzer.checkOnSave.allTargets": true,
+				"editor.formatOnSave": true,
+				"[rust]": {
+					"editor.defaultFormatter": "rust-lang.rust-analyzer"
+				}
+			}
+		}
+	}
 }

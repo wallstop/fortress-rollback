@@ -15,8 +15,6 @@ use crate::{
 
 // The amount of frames the spectator advances in a single step if not too far behind
 const NORMAL_SPEED: usize = 1;
-// The amount of inputs a spectator can buffer (a second worth of inputs)
-pub(crate) const SPECTATOR_BUFFER_SIZE: usize = 60;
 
 /// [`SpectatorSession`] provides all functionality to connect to a remote host in a peer-to-peer fashion.
 /// The host will broadcast all confirmed inputs to this session.
@@ -27,6 +25,7 @@ where
 {
     state: SessionState,
     num_players: usize,
+    buffer_size: usize,
     inputs: Vec<Vec<PlayerInput<T::Input>>>,
     host_connect_status: Vec<ConnectionStatus>,
     socket: Box<dyn NonBlockingSocket<T::Address>>,
@@ -48,6 +47,7 @@ impl<T: Config> SpectatorSession<T> {
         num_players: usize,
         socket: Box<dyn NonBlockingSocket<T::Address>>,
         host: UdpProtocol<T>,
+        buffer_size: usize,
         max_frames_behind: usize,
         catchup_speed: usize,
         violation_observer: Option<Arc<dyn ViolationObserver>>,
@@ -58,12 +58,16 @@ impl<T: Config> SpectatorSession<T> {
             host_connect_status.push(ConnectionStatus::default());
         }
 
+        // Use at least 1 for buffer size to prevent panics
+        let actual_buffer_size = buffer_size.max(1);
+
         Self {
             state: SessionState::Synchronizing,
             num_players,
+            buffer_size: actual_buffer_size,
             inputs: vec![
                 vec![PlayerInput::blank_input(Frame::NULL); num_players];
-                SPECTATOR_BUFFER_SIZE
+                actual_buffer_size
             ],
             host_connect_status,
             socket,
@@ -196,14 +200,14 @@ impl<T: Config> SpectatorSession<T> {
         &self,
         frame_to_grab: Frame,
     ) -> Result<Vec<(T::Input, InputStatus)>, FortressError> {
-        let player_inputs = &self.inputs[frame_to_grab.as_i32() as usize % SPECTATOR_BUFFER_SIZE];
+        let player_inputs = &self.inputs[frame_to_grab.as_i32() as usize % self.buffer_size];
 
         // We haven't received the input from the host yet. Wait.
         if player_inputs[0].frame < frame_to_grab {
             return Err(FortressError::PredictionThreshold);
         }
 
-        // The host is more than [`SPECTATOR_BUFFER_SIZE`] frames ahead of the spectator. The input we need is gone forever.
+        // The host is more than buffer_size frames ahead of the spectator. The input we need is gone forever.
         if player_inputs[0].frame > frame_to_grab {
             return Err(FortressError::SpectatorTooFarBehind);
         }
@@ -226,9 +230,19 @@ impl<T: Config> SpectatorSession<T> {
     fn handle_event(&mut self, event: Event<T>, addr: T::Address) {
         match event {
             // forward to user
-            Event::Synchronizing { total, count } => {
-                self.event_queue
-                    .push_back(FortressEvent::Synchronizing { addr, total, count });
+            Event::Synchronizing {
+                total,
+                count,
+                total_requests_sent,
+                elapsed_ms,
+            } => {
+                self.event_queue.push_back(FortressEvent::Synchronizing {
+                    addr,
+                    total,
+                    count,
+                    total_requests_sent,
+                    elapsed_ms,
+                });
             }
             // forward to user
             Event::NetworkInterrupted { disconnect_timeout } => {
@@ -254,11 +268,16 @@ impl<T: Config> SpectatorSession<T> {
                 self.event_queue
                     .push_back(FortressEvent::Disconnected { addr });
             }
+            // forward sync timeout to user
+            Event::SyncTimeout { elapsed_ms } => {
+                self.event_queue
+                    .push_back(FortressEvent::SyncTimeout { addr, elapsed_ms });
+            }
             // add the input and all associated information
             Event::Input { input, player } => {
                 // save the input
-                self.inputs[input.frame.as_i32() as usize % SPECTATOR_BUFFER_SIZE]
-                    [player.as_usize()] = input;
+                self.inputs[input.frame.as_i32() as usize % self.buffer_size][player.as_usize()] =
+                    input;
                 assert!(input.frame >= self.last_recv_frame);
                 self.last_recv_frame = input.frame;
 

@@ -115,6 +115,13 @@ pub enum ViolationKind {
     /// which could lead to undefined behavior or incorrect results.
     /// Only checked in debug builds or when `paranoid` feature is enabled.
     Invariant,
+    /// Synchronization protocol issues.
+    ///
+    /// Examples:
+    /// - Excessive sync retries due to packet loss
+    /// - Sync duration exceeding expected time
+    /// - Repeated sync failures before connection established
+    Synchronization,
 }
 
 impl ViolationKind {
@@ -130,6 +137,7 @@ impl ViolationKind {
             Self::Configuration => "configuration",
             Self::InternalError => "internal_error",
             Self::Invariant => "invariant",
+            Self::Synchronization => "synchronization",
         }
     }
 }
@@ -1244,6 +1252,65 @@ mod tests {
             "test message"
         );
         // Falls back to TracingObserver, shouldn't panic
+    }
+
+    // ==========================================
+    // Synchronization Violation Tests
+    // ==========================================
+
+    #[test]
+    fn test_violation_kind_synchronization_as_str() {
+        assert_eq!(ViolationKind::Synchronization.as_str(), "synchronization");
+    }
+
+    #[test]
+    fn test_synchronization_violation_can_be_created() {
+        let observer = Arc::new(CollectingObserver::new());
+        let observer_ref: Option<Arc<dyn ViolationObserver>> = Some(observer.clone());
+
+        report_violation_to!(
+            &observer_ref,
+            ViolationSeverity::Warning,
+            ViolationKind::Synchronization,
+            "Excessive sync retries: {} requests sent (threshold: {}). Possible high packet loss.",
+            15,
+            10
+        );
+
+        let violations = observer.violations();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].kind, ViolationKind::Synchronization);
+        assert_eq!(violations[0].severity, ViolationSeverity::Warning);
+        assert!(violations[0].message.contains("Excessive sync retries"));
+        assert!(violations[0].message.contains("15"));
+        assert!(violations[0].message.contains("10"));
+    }
+
+    #[test]
+    fn test_synchronization_violation_ordering() {
+        // Verify Synchronization is ordered correctly with other variants
+        assert!(ViolationKind::FrameSync < ViolationKind::Synchronization);
+        assert!(ViolationKind::Invariant < ViolationKind::Synchronization);
+    }
+
+    #[test]
+    fn test_synchronization_duration_warning() {
+        let observer = Arc::new(CollectingObserver::new());
+        let observer_ref: Option<Arc<dyn ViolationObserver>> = Some(observer.clone());
+
+        report_violation_to!(
+            &observer_ref,
+            ViolationSeverity::Warning,
+            ViolationKind::Synchronization,
+            "Sync duration exceeded threshold: {}ms (threshold: {}ms). Network latency may be high.",
+            5000,
+            3000
+        );
+
+        let violations = observer.violations();
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("5000ms"));
+        assert!(violations[0].message.contains("3000ms"));
     }
 
     // ==========================================

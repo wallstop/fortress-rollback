@@ -38,6 +38,44 @@ GGRS is a Rust implementation of GGPO rollback networking. This fork focuses on:
 - Document verification artifacts
 - Prove safety properties for concurrent code
 
+**Formal Verification Philosophy:**
+- **Specs model production** - TLA+/Kani/Z3 specs must accurately represent production code
+- **When verification fails, assume production has a bug first** - investigate before relaxing specs
+- **Never "fix" specs just to make them pass** - this defeats the purpose of verification
+- **Document all spec changes** - explain what production behavior necessitates the change
+- **Invariants represent real safety properties** - only relax with strong justification
+- **Review spec changes carefully** - ensure they don't hide real bugs
+
+**When Formal Verification or Analysis Reveals Issues:**
+After fixing any bug discovered through formal verification, code review, or other analysis:
+1. **Add comprehensive regression tests** - Cover the exact scenario that was discovered
+2. **Test related edge cases** - Look for similar issues in related code paths
+3. **Test boundary conditions** - Add tests at the edges of valid ranges (zero, max, off-by-one)
+4. **Test invariant preservation** - Ensure invariants hold across all state transitions
+5. **Test full cycles** - Create-use-modify-destroy lifecycle tests
+6. **Add negative tests** - Verify that violations are properly detected
+7. **Document the discovery** - Tests should explain what was found and why it matters
+
+```rust
+// Example: After discovering load_frame() didn't update last_saved_frame
+// Add these categories of tests:
+
+#[test]
+fn test_load_frame_updates_last_saved_frame_invariant() { /* Direct reproduction */ }
+
+#[test]  
+fn test_load_frame_zero_updates_last_saved_frame() { /* Edge case: frame 0 */ }
+
+#[test]
+fn test_multiple_rollbacks_maintain_invariants() { /* Chained operations */ }
+
+#[test]
+fn test_full_rollback_cycle_maintains_invariants() { /* Full lifecycle */ }
+
+#[test]
+fn test_invariant_checker_identifies_violations() { /* Negative test */ }
+```
+
 ## Code Standards
 
 ### Function Documentation Template
@@ -103,16 +141,37 @@ fn descriptive_test_name_explaining_scenario() {
 6. Document the fix in CHANGELOG.md
 
 ### When Tests Fail or Are Flaky
-**CRITICAL: Always perform Root Cause Analysis (RCA)**
+**CRITICAL: Always perform deep Root Cause Analysis (RCA)**
 
-- **Never band-aid patch**: Disabling assertions, adding arbitrary sleeps, or commenting out checks are NOT fixes
-- **Distinguish test bug vs production bug**: Is the test wrong, or is the production code wrong?
-- **Fix at the correct level**:
-  - Production bug → Fix library code
-  - Test bug → Fix test's incorrect assumptions
-  - Timing issue → Add proper synchronization (not arbitrary sleeps)
-  - Flakiness → Find and eliminate the source of non-determinism
-- **Document the fix**: Explain what was wrong and why the fix is correct
+The goal is never just to "make tests pass" — it's to understand and comprehensively fix the underlying issue.
+
+#### Investigation Steps
+1. **Reproduce the failure** - Run multiple times, note patterns and conditions
+2. **Understand the test's intent** - What invariant or behavior is being verified?
+3. **Trace the failure** - Add logging, examine state, understand the exact failure mode
+4. **Identify root cause** - Keep asking "why" until you reach the fundamental issue
+5. **Verify hypothesis** - Confirm your understanding before coding a fix
+6. **Check for similar issues** - Are there related problems elsewhere?
+
+#### Determining Where to Fix
+- **Production bug indicators**: Test expectations match docs, logic is straightforward, other code depends on this behavior
+- **Test bug indicators**: Test makes unguaranteed assumptions, has race conditions, or contradicts documentation
+
+#### Comprehensive Fix Approach
+- **Production bug** → Fix library code, verify other tests still pass, add regression test if missing
+- **Test bug** → Fix test's incorrect assumptions, document why original was wrong
+- **Timing issue** → Add proper synchronization primitives (channels, barriers, events) — NOT arbitrary sleeps
+- **Flakiness** → Find and eliminate the source of non-determinism completely
+- **Document everything** → Explain root cause and why the fix is correct
+
+#### Strictly Forbidden "Fixes"
+- ❌ Commenting out or weakening failing assertions
+- ❌ Adding `Thread::sleep()` or arbitrary delays to "fix" timing
+- ❌ Catching and ignoring errors in test code
+- ❌ Marking tests as `#[ignore]` without documented fix plan
+- ❌ Relaxing tolerances/thresholds without understanding why original was set
+- ❌ Changing expected values to match actual without root cause analysis
+- ❌ Removing test functionality that exists in production
 
 ### Improving Performance
 1. Benchmark current performance

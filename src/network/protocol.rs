@@ -5,6 +5,7 @@ use crate::network::messages::{
     QualityReply, QualityReport, SyncReply, SyncRequest,
 };
 use crate::report_violation;
+use crate::sessions::builder::{ProtocolConfig, SyncConfig};
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::time_sync::TimeSync;
 use crate::{Config, DesyncDetection, FortressError, Frame, NonBlockingSocket, PlayerHandle};
@@ -19,15 +20,6 @@ use std::ops::Add;
 use super::network_stats::NetworkStats;
 
 const UDP_HEADER_SIZE: usize = 28; // Size of IP + UDP headers
-const NUM_SYNC_PACKETS: u32 = 5;
-const UDP_SHUTDOWN_TIMER: u64 = 5000;
-const PENDING_OUTPUT_SIZE: usize = 128;
-const SYNC_RETRY_INTERVAL: Duration = Duration::from_millis(200);
-const RUNNING_RETRY_INTERVAL: Duration = Duration::from_millis(200);
-const KEEP_ALIVE_INTERVAL: Duration = Duration::from_millis(200);
-const QUALITY_REPORT_INTERVAL: Duration = Duration::from_millis(200);
-/// Number of old checksums to keep in memory
-pub const MAX_CHECKSUM_HISTORY_SIZE: usize = 32;
 
 fn millis_since_epoch() -> u128 {
     #[cfg(not(target_arch = "wasm32"))]
@@ -108,7 +100,16 @@ where
     T: Config,
 {
     /// The session is currently synchronizing with the remote client. It will continue until `count` reaches `total`.
-    Synchronizing { total: u32, count: u32 },
+    Synchronizing {
+        /// Total sync roundtrips required.
+        total: u32,
+        /// Completed sync roundtrips so far.
+        count: u32,
+        /// Total sync requests sent (includes retries due to packet loss).
+        total_requests_sent: u32,
+        /// Milliseconds elapsed since sync started.
+        elapsed_ms: u128,
+    },
     /// The session is now synchronized with the remote client.
     Synchronized,
     /// The session has received an input from the remote client. This event will not be forwarded to the user.
@@ -122,6 +123,12 @@ where
     NetworkInterrupted { disconnect_timeout: u128 },
     /// Sent only after a `NetworkInterrupted` event, if communication has resumed.
     NetworkResumed,
+    /// Synchronization has timed out. This is only emitted if a sync timeout was configured.
+    /// The session will continue trying to sync, but the user may choose to abort.
+    SyncTimeout {
+        /// Milliseconds elapsed since sync started.
+        elapsed_ms: u128,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -146,6 +153,12 @@ where
     state: ProtocolState,
     sync_remaining_roundtrips: u32,
     sync_random_requests: BTreeSet<u32>,
+    /// Total sync requests sent (tracks retries for telemetry).
+    sync_requests_sent: u32,
+    /// Whether we've emitted a sync retry warning (emit only once).
+    sync_retry_warning_sent: bool,
+    /// Whether we've emitted a sync duration warning (emit only once).
+    sync_duration_warning_sent: bool,
     running_last_quality_report: Instant,
     running_last_input_recv: Instant,
     disconnect_notify_sent: bool,
@@ -157,6 +170,12 @@ where
     shutdown_timeout: Instant,
     fps: usize,
     magic: u16,
+
+    // sync configuration
+    sync_config: SyncConfig,
+
+    // protocol configuration
+    protocol_config: ProtocolConfig,
 
     // the other client
     peer_addr: T::Address,
@@ -209,6 +228,8 @@ impl<T: Config> UdpProtocol<T> {
         disconnect_notify_start: Duration,
         fps: usize,
         desync_detection: DesyncDetection,
+        sync_config: SyncConfig,
+        protocol_config: ProtocolConfig,
     ) -> Self {
         let mut magic = rand::random::<u16>();
         while magic == 0 {
@@ -236,8 +257,11 @@ impl<T: Config> UdpProtocol<T> {
 
             // state
             state: ProtocolState::Initializing,
-            sync_remaining_roundtrips: NUM_SYNC_PACKETS,
+            sync_remaining_roundtrips: sync_config.num_sync_packets,
             sync_random_requests: BTreeSet::new(),
+            sync_requests_sent: 0,
+            sync_retry_warning_sent: false,
+            sync_duration_warning_sent: false,
             running_last_quality_report: Instant::now(),
             running_last_input_recv: Instant::now(),
             disconnect_notify_sent: false,
@@ -250,13 +274,19 @@ impl<T: Config> UdpProtocol<T> {
             fps,
             magic,
 
+            // sync configuration
+            sync_config,
+
+            // protocol configuration
+            protocol_config,
+
             // the other client
             peer_addr,
             remote_magic: 0,
             peer_connect_status,
 
             // input compression
-            pending_output: VecDeque::with_capacity(PENDING_OUTPUT_SIZE),
+            pending_output: VecDeque::new(),
             last_acked_input: InputBytes::zeroed::<T>(local_players),
             max_prediction,
             recv_inputs,
@@ -344,13 +374,13 @@ impl<T: Config> UdpProtocol<T> {
 
         self.state = ProtocolState::Disconnected;
         // schedule the timeout which will lead to shutdown
-        self.shutdown_timeout = Instant::now().add(Duration::from_millis(UDP_SHUTDOWN_TIMER))
+        self.shutdown_timeout = Instant::now().add(self.protocol_config.shutdown_delay)
     }
 
     pub(crate) fn synchronize(&mut self) {
         assert_eq!(self.state, ProtocolState::Initializing);
         self.state = ProtocolState::Synchronizing;
-        self.sync_remaining_roundtrips = NUM_SYNC_PACKETS;
+        self.sync_remaining_roundtrips = self.sync_config.num_sync_packets;
         self.stats_start_time = millis_since_epoch();
         self.send_sync_request();
     }
@@ -367,25 +397,39 @@ impl<T: Config> UdpProtocol<T> {
         let now = Instant::now();
         match self.state {
             ProtocolState::Synchronizing => {
+                // Check for sync timeout if configured
+                if let Some(timeout) = self.sync_config.sync_timeout {
+                    let elapsed = Duration::from_millis(
+                        (millis_since_epoch().saturating_sub(self.stats_start_time)) as u64,
+                    );
+                    if elapsed > timeout {
+                        self.event_queue.push_back(Event::SyncTimeout {
+                            elapsed_ms: elapsed.as_millis(),
+                        });
+                    }
+                }
+
                 // some time has passed, let us send another sync request
-                if self.last_send_time + SYNC_RETRY_INTERVAL < now {
+                if self.last_send_time + self.sync_config.sync_retry_interval < now {
                     self.send_sync_request();
                 }
             }
             ProtocolState::Running => {
                 // resend pending inputs, if some time has passed without sending or receiving inputs
-                if self.running_last_input_recv + RUNNING_RETRY_INTERVAL < now {
+                if self.running_last_input_recv + self.sync_config.running_retry_interval < now {
                     self.send_pending_output(connect_status);
                     self.running_last_input_recv = Instant::now();
                 }
 
                 // periodically send a quality report
-                if self.running_last_quality_report + QUALITY_REPORT_INTERVAL < now {
+                if self.running_last_quality_report + self.protocol_config.quality_report_interval
+                    < now
+                {
                     self.send_quality_report();
                 }
 
                 // send keep alive packet if we didn't send a packet for some time
-                if self.last_send_time + KEEP_ALIVE_INTERVAL < now {
+                if self.last_send_time + self.sync_config.keepalive_interval < now {
                     self.send_keep_alive();
                 }
 
@@ -483,7 +527,7 @@ impl<T: Config> UdpProtocol<T> {
 
         // we should never have so much pending input for a remote player (if they didn't ack, we should stop at MAX_PREDICTION_THRESHOLD)
         // this is a spectator that didn't ack our input, we just disconnect them
-        if self.pending_output.len() > PENDING_OUTPUT_SIZE {
+        if self.pending_output.len() > self.protocol_config.pending_output_limit {
             self.event_queue.push_back(Event::Disconnected);
         }
 
@@ -539,6 +583,37 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     fn send_sync_request(&mut self) {
+        self.sync_requests_sent += 1;
+
+        // Check for excessive retries and emit warning (once)
+        if !self.sync_retry_warning_sent
+            && self.sync_requests_sent > self.protocol_config.sync_retry_warning_threshold
+        {
+            self.sync_retry_warning_sent = true;
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::Synchronization,
+                "Excessive sync retries: {} requests sent (threshold: {}). Possible high packet loss.",
+                self.sync_requests_sent,
+                self.protocol_config.sync_retry_warning_threshold
+            );
+        }
+
+        // Check for excessive sync duration and emit warning (once)
+        let elapsed_ms = millis_since_epoch().saturating_sub(self.stats_start_time);
+        if !self.sync_duration_warning_sent
+            && elapsed_ms > self.protocol_config.sync_duration_warning_ms
+        {
+            self.sync_duration_warning_sent = true;
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::Synchronization,
+                "Sync duration exceeded threshold: {}ms (threshold: {}ms). Network latency may be high.",
+                elapsed_ms,
+                self.protocol_config.sync_duration_warning_ms
+            );
+        }
+
         let random_number = rand::random::<u32>();
         self.sync_random_requests.insert(random_number);
         let body = SyncRequest {
@@ -638,11 +713,14 @@ impl<T: Config> UdpProtocol<T> {
         }
         // the sync reply is good, so we send a sync request again until we have finished the required roundtrips. Then, we can conclude the syncing process.
         self.sync_remaining_roundtrips -= 1;
+        let elapsed_ms = millis_since_epoch().saturating_sub(self.stats_start_time);
         if self.sync_remaining_roundtrips > 0 {
             // register an event
             let evt = Event::Synchronizing {
-                total: NUM_SYNC_PACKETS,
-                count: NUM_SYNC_PACKETS - self.sync_remaining_roundtrips,
+                total: self.sync_config.num_sync_packets,
+                count: self.sync_config.num_sync_packets - self.sync_remaining_roundtrips,
+                total_requests_sent: self.sync_requests_sent,
+                elapsed_ms,
             };
             self.event_queue.push_back(evt);
             // send another sync request
@@ -764,9 +842,9 @@ impl<T: Config> UdpProtocol<T> {
             1
         };
 
-        if self.pending_checksums.len() >= MAX_CHECKSUM_HISTORY_SIZE {
-            let oldest_frame_to_keep =
-                body.frame - (MAX_CHECKSUM_HISTORY_SIZE as i32 - 1) * interval as i32;
+        let max_history = self.protocol_config.max_checksum_history;
+        if self.pending_checksums.len() >= max_history {
+            let oldest_frame_to_keep = body.frame - (max_history as i32 - 1) * interval as i32;
             self.pending_checksums
                 .retain(|&frame, _| frame >= oldest_frame_to_keep);
         }
@@ -818,11 +896,32 @@ mod tests {
         "127.0.0.1:7000".parse().unwrap()
     }
 
+    /// Default number of sync packets for test purposes
+    const TEST_NUM_SYNC_PACKETS: u32 = 5;
+
     fn create_protocol(
         handles: Vec<PlayerHandle>,
         num_players: usize,
         local_players: usize,
         max_prediction: usize,
+    ) -> UdpProtocol<TestConfig> {
+        create_protocol_with_config(
+            handles,
+            num_players,
+            local_players,
+            max_prediction,
+            SyncConfig::default(),
+            ProtocolConfig::default(),
+        )
+    }
+
+    fn create_protocol_with_config(
+        handles: Vec<PlayerHandle>,
+        num_players: usize,
+        local_players: usize,
+        max_prediction: usize,
+        sync_config: SyncConfig,
+        protocol_config: ProtocolConfig,
     ) -> UdpProtocol<TestConfig> {
         UdpProtocol::new(
             handles,
@@ -834,6 +933,8 @@ mod tests {
             Duration::from_millis(3000),
             60,
             DesyncDetection::Off,
+            sync_config,
+            protocol_config,
         )
     }
 
@@ -897,7 +998,7 @@ mod tests {
         protocol.synchronize();
 
         // Complete all sync roundtrips
-        for _ in 0..NUM_SYNC_PACKETS {
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
             // Get the random request from our sync request
             let random = *protocol.sync_random_requests.iter().next().unwrap();
 
@@ -952,7 +1053,7 @@ mod tests {
         protocol.synchronize();
 
         // Complete sync
-        for _ in 0..NUM_SYNC_PACKETS {
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader { magic: 999 };
             protocol.on_sync_reply(
@@ -1011,7 +1112,7 @@ mod tests {
         protocol.synchronize();
 
         // Complete sync with magic 999
-        for _ in 0..NUM_SYNC_PACKETS {
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader { magic: 999 };
             protocol.on_sync_reply(
@@ -1043,7 +1144,7 @@ mod tests {
         protocol.synchronize();
 
         // Complete sync with magic 999
-        for _ in 0..NUM_SYNC_PACKETS {
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader { magic: 999 };
             protocol.on_sync_reply(
@@ -1077,7 +1178,7 @@ mod tests {
         protocol.synchronize();
 
         // Complete sync
-        for _ in 0..NUM_SYNC_PACKETS {
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader { magic: 999 };
             protocol.on_sync_reply(
@@ -1115,7 +1216,7 @@ mod tests {
         protocol.synchronize();
 
         // Complete sync
-        for _ in 0..NUM_SYNC_PACKETS {
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader { magic: 999 };
             protocol.on_sync_reply(
@@ -1183,7 +1284,7 @@ mod tests {
         protocol.synchronize();
 
         // Complete sync
-        for _ in 0..NUM_SYNC_PACKETS {
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader { magic: 999 };
             protocol.on_sync_reply(
@@ -1238,6 +1339,9 @@ mod tests {
 
     #[test]
     fn checksum_report_limits_history_size() {
+        let protocol_config = ProtocolConfig::default();
+        let max_history = protocol_config.max_checksum_history;
+
         let mut protocol: UdpProtocol<TestConfig> = UdpProtocol::new(
             vec![PlayerHandle::new(0)],
             test_addr(),
@@ -1248,10 +1352,12 @@ mod tests {
             Duration::from_millis(3000),
             60,
             DesyncDetection::On { interval: 1 },
+            SyncConfig::default(),
+            protocol_config,
         );
 
-        // Add more than MAX_CHECKSUM_HISTORY_SIZE checksums
-        for frame in 0..(MAX_CHECKSUM_HISTORY_SIZE as i32 + 10) {
+        // Add more than max_checksum_history checksums
+        for frame in 0..(max_history as i32 + 10) {
             let report = ChecksumReport {
                 frame: Frame::new(frame),
                 checksum: frame as u128,
@@ -1259,11 +1365,11 @@ mod tests {
             protocol.on_checksum_report(&report);
         }
 
-        // Should have limited to MAX_CHECKSUM_HISTORY_SIZE
-        assert!(protocol.pending_checksums.len() <= MAX_CHECKSUM_HISTORY_SIZE);
+        // Should have limited to max_checksum_history
+        assert!(protocol.pending_checksums.len() <= max_history);
 
         // Oldest frames should be removed
-        let max_frame = Frame::new(MAX_CHECKSUM_HISTORY_SIZE as i32 + 9);
+        let max_frame = Frame::new(max_history as i32 + 9);
         assert!(protocol.pending_checksums.contains_key(&max_frame));
         // Old frames should be gone
         assert!(!protocol.pending_checksums.contains_key(&Frame::new(0)));
@@ -1289,7 +1395,7 @@ mod tests {
         protocol.synchronize();
 
         // Complete sync
-        for _ in 0..NUM_SYNC_PACKETS {
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader { magic: 999 };
             protocol.on_sync_reply(
@@ -1319,7 +1425,7 @@ mod tests {
         protocol.synchronize();
 
         // Complete sync to generate Synchronizing and Synchronized events
-        for _ in 0..NUM_SYNC_PACKETS {
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader { magic: 999 };
             protocol.on_sync_reply(
@@ -1545,7 +1651,188 @@ mod tests {
             Duration::from_millis(3000),
             60,
             DesyncDetection::Off,
+            SyncConfig::default(),
+            ProtocolConfig::default(),
         );
         assert!(protocol1 != protocol3);
+    }
+
+    // ==========================================
+    // SyncConfig Tests
+    // ==========================================
+
+    #[test]
+    fn sync_config_default_values() {
+        let config = SyncConfig::default();
+        assert_eq!(config.num_sync_packets, 5);
+        assert_eq!(config.sync_retry_interval, Duration::from_millis(200));
+        assert_eq!(config.sync_timeout, None);
+        assert_eq!(config.running_retry_interval, Duration::from_millis(200));
+        assert_eq!(config.keepalive_interval, Duration::from_millis(200));
+    }
+
+    #[test]
+    fn sync_config_high_latency_preset() {
+        let config = SyncConfig::high_latency();
+        assert_eq!(config.num_sync_packets, 5);
+        assert_eq!(config.sync_retry_interval, Duration::from_millis(400));
+        assert_eq!(config.sync_timeout, Some(Duration::from_secs(10)));
+        assert_eq!(config.running_retry_interval, Duration::from_millis(400));
+        assert_eq!(config.keepalive_interval, Duration::from_millis(400));
+    }
+
+    #[test]
+    fn sync_config_lossy_preset() {
+        let config = SyncConfig::lossy();
+        assert_eq!(config.num_sync_packets, 8);
+        assert_eq!(config.sync_retry_interval, Duration::from_millis(200));
+        assert_eq!(config.sync_timeout, Some(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn sync_config_lan_preset() {
+        let config = SyncConfig::lan();
+        assert_eq!(config.num_sync_packets, 3);
+        assert_eq!(config.sync_retry_interval, Duration::from_millis(100));
+        assert_eq!(config.sync_timeout, Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn protocol_uses_custom_num_sync_packets() {
+        let custom_config = SyncConfig {
+            num_sync_packets: 3,
+            ..SyncConfig::default()
+        };
+
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            custom_config,
+            ProtocolConfig::default(),
+        );
+
+        protocol.synchronize();
+
+        // Simulate 3 successful sync roundtrips
+        for i in 0..3 {
+            let request_msg = protocol.send_queue.pop_back().unwrap();
+            let random = match request_msg.body {
+                MessageBody::SyncRequest(req) => req.random_request,
+                _ => panic!("Expected SyncRequest"),
+            };
+
+            let reply = Message {
+                header: MessageHeader { magic: 42 },
+                body: MessageBody::SyncReply(SyncReply {
+                    random_reply: random,
+                }),
+            };
+            protocol.handle_message(&reply);
+
+            // Check events
+            let events: Vec<_> = protocol.poll(&[]).collect();
+            if i < 2 {
+                // Should get Synchronizing events for first 2 roundtrips
+                assert!(events.iter().any(
+                    |e| matches!(e, Event::Synchronizing { total: 3, count, .. } if *count == i + 1)
+                ));
+            } else {
+                // Final roundtrip should produce Synchronized
+                assert!(events.iter().any(|e| matches!(e, Event::Synchronized)));
+            }
+        }
+
+        assert!(protocol.is_running());
+    }
+
+    #[test]
+    fn sync_config_equality() {
+        let config1 = SyncConfig::default();
+        let config2 = SyncConfig::default();
+        let config3 = SyncConfig::lan();
+
+        assert_eq!(config1, config2);
+        assert_ne!(config1, config3);
+    }
+
+    #[test]
+    fn sync_config_clone() {
+        let config = SyncConfig::high_latency();
+        let cloned = config;
+        assert_eq!(config, cloned);
+    }
+
+    // ==========================================
+    // ProtocolConfig Tests
+    // ==========================================
+
+    #[test]
+    fn protocol_config_default_values() {
+        let config = ProtocolConfig::default();
+        assert_eq!(config.quality_report_interval, Duration::from_millis(200));
+        assert_eq!(config.shutdown_delay, Duration::from_millis(5000));
+        assert_eq!(config.max_checksum_history, 32);
+        assert_eq!(config.pending_output_limit, 128);
+        assert_eq!(config.sync_retry_warning_threshold, 10);
+        assert_eq!(config.sync_duration_warning_ms, 3000);
+    }
+
+    #[test]
+    fn protocol_config_competitive_preset() {
+        let config = ProtocolConfig::competitive();
+        assert_eq!(config.quality_report_interval, Duration::from_millis(100));
+        assert_eq!(config.shutdown_delay, Duration::from_millis(3000));
+        assert_eq!(config.max_checksum_history, 32);
+        assert_eq!(config.pending_output_limit, 128);
+        assert_eq!(config.sync_retry_warning_threshold, 10);
+        assert_eq!(config.sync_duration_warning_ms, 2000);
+    }
+
+    #[test]
+    fn protocol_config_high_latency_preset() {
+        let config = ProtocolConfig::high_latency();
+        assert_eq!(config.quality_report_interval, Duration::from_millis(400));
+        assert_eq!(config.shutdown_delay, Duration::from_millis(10000));
+        assert_eq!(config.max_checksum_history, 64);
+        assert_eq!(config.pending_output_limit, 256);
+        assert_eq!(config.sync_retry_warning_threshold, 20);
+        assert_eq!(config.sync_duration_warning_ms, 10000);
+    }
+
+    #[test]
+    fn protocol_config_debug_preset() {
+        let config = ProtocolConfig::debug();
+        assert_eq!(config.quality_report_interval, Duration::from_millis(500));
+        assert_eq!(config.shutdown_delay, Duration::from_millis(30000));
+        assert_eq!(config.max_checksum_history, 128);
+        assert_eq!(config.pending_output_limit, 64);
+        assert_eq!(config.sync_retry_warning_threshold, 5);
+        assert_eq!(config.sync_duration_warning_ms, 1000);
+    }
+
+    #[test]
+    fn protocol_config_equality() {
+        let config1 = ProtocolConfig::default();
+        let config2 = ProtocolConfig::default();
+        let config3 = ProtocolConfig::competitive();
+
+        assert_eq!(config1, config2);
+        assert_ne!(config1, config3);
+    }
+
+    #[test]
+    fn protocol_config_clone() {
+        let config = ProtocolConfig::high_latency();
+        let cloned = config;
+        assert_eq!(config, cloned);
+    }
+
+    #[test]
+    fn protocol_config_new_same_as_default() {
+        let config1 = ProtocolConfig::new();
+        let config2 = ProtocolConfig::default();
+        assert_eq!(config1, config2);
     }
 }

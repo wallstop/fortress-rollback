@@ -40,6 +40,16 @@ macroquad = { version = "=0.3.25", features = ["log-rs"] }
 tracing-subscriber = "0.3"
 tracing-log = "0.2"
 proptest = "=1.4.0"
+# Concurrency testing
+loom = "0.7"
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+# Additional testing utilities
+quickcheck = "1.0"
+quickcheck_macros = "1.0"
+arbitrary = { version = "1.3", features = ["derive"] }
+# SMT solver for formal verification (builds Z3 from source)
+z3 = { version = "0.19", features = ["bundled"] }
 
 # Test binaries for multi-process network testing
 [[test]]
@@ -64,3 +74,16 @@ path = "examples/ex_game/ex_game_spectator.rs"
 [[example]]
 name = "ex_game_synctest"
 path = "examples/ex_game/ex_game_synctest.rs"
+
+# Benchmarks (using criterion)
+[[bench]]
+name = "input_queue"
+harness = false
+
+[[bench]]
+name = "sync_layer"
+harness = false
+
+# Profile for benchmarks
+[profile.bench]
+debug = true

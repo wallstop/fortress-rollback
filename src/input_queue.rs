@@ -1,10 +1,25 @@
 use crate::frame_info::PlayerInput;
 use crate::telemetry::{InvariantChecker, InvariantViolation};
-use crate::{Config, Frame, InputStatus};
+use crate::{Config, FortressError, Frame, InputStatus};
 use std::cmp;
 
 /// The length of the input queue. This describes the number of inputs Fortress Rollback can hold at the same time per player.
-const INPUT_QUEUE_LENGTH: usize = 128;
+///
+/// For Kani verification, we use a smaller queue (8 elements) to keep verification tractable.
+/// This is sufficient to prove the invariants hold for the circular buffer logic.
+#[cfg(kani)]
+pub(crate) const INPUT_QUEUE_LENGTH: usize = 8;
+
+/// The length of the input queue. This describes the number of inputs Fortress Rollback can hold at the same time per player.
+/// At 60fps, 128 frames = ~2.1 seconds of input history.
+#[cfg(not(kani))]
+pub(crate) const INPUT_QUEUE_LENGTH: usize = 128;
+
+/// The maximum allowed frame delay. Must be less than [`INPUT_QUEUE_LENGTH`] to ensure
+/// the circular buffer doesn't overflow when advancing the queue head.
+///
+/// This constraint was discovered through Kani formal verification of the `add_input` function.
+pub(crate) const MAX_FRAME_DELAY: usize = INPUT_QUEUE_LENGTH - 1;
 
 /// Defines the strategy used to predict inputs when we haven't received the actual input yet.
 ///
@@ -142,8 +157,25 @@ impl<T: Config> InputQueue<T> {
         self.first_incorrect_frame
     }
 
-    pub(crate) fn set_frame_delay(&mut self, delay: usize) {
+    /// Sets the frame delay for this input queue.
+    ///
+    /// # Errors
+    /// Returns `FortressError::InvalidRequest` if `delay >= INPUT_QUEUE_LENGTH`.
+    /// This constraint ensures the circular buffer doesn't overflow when advancing the queue head.
+    pub(crate) fn set_frame_delay(&mut self, delay: usize) -> Result<(), FortressError> {
+        if delay > MAX_FRAME_DELAY {
+            return Err(FortressError::InvalidRequest {
+                info: format!(
+                    "Frame delay {} exceeds maximum allowed value of {} (INPUT_QUEUE_LENGTH - 1). \
+                     At 60fps, this would be {:.1}+ seconds of delay, which is impractical for gameplay.",
+                    delay,
+                    MAX_FRAME_DELAY,
+                    delay as f64 / 60.0
+                ),
+            });
+        }
         self.frame_delay = delay;
+        Ok(())
     }
 
     pub(crate) fn reset_prediction(&mut self) {
@@ -182,8 +214,14 @@ impl<T: Config> InputQueue<T> {
 
         // move the tail to "delete inputs", wrap around if necessary
         if frame >= self.last_added_frame {
-            // delete all but most recent
-            self.tail = self.head;
+            // delete all but most recent - set tail to the position of the most recent input
+            // The most recent input is at (head - 1), so tail should point there
+            // This maintains the circular buffer invariant: length = (head - tail) mod INPUT_QUEUE_LENGTH
+            self.tail = if self.head == 0 {
+                INPUT_QUEUE_LENGTH - 1
+            } else {
+                self.head - 1
+            };
             self.length = 1;
         } else if frame <= self.inputs[self.tail].frame {
             // we don't need to delete anything
@@ -536,7 +574,7 @@ mod input_queue_tests {
     fn test_delayed_inputs() {
         let mut queue = InputQueue::<TestConfig>::new(0);
         let delay: i32 = 2;
-        queue.set_frame_delay(delay as usize);
+        queue.set_frame_delay(delay as usize).expect("valid delay");
         for i in 0..10i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
             queue.add_input(input);
@@ -615,6 +653,184 @@ mod input_queue_tests {
         // Discard all frames (should keep at least the most recent)
         queue.discard_confirmed_frames(Frame::new(100));
         assert_eq!(queue.length, 1);
+    }
+
+    /// Test that discard_confirmed_frames keeps the most recent input accessible
+    /// and maintains proper circular buffer invariants.
+    #[test]
+    fn test_discard_all_but_one_preserves_most_recent() {
+        let mut queue = InputQueue::<TestConfig>::new(0);
+
+        // Add 5 inputs
+        for i in 0..5i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            queue.add_input(input);
+        }
+
+        // Before discard: head=5, tail=0, length=5
+        assert_eq!(queue.length, 5);
+        assert_eq!(queue.head, 5);
+        assert_eq!(queue.tail, 0);
+
+        // Discard all - this triggers the "keep most recent" logic
+        queue.discard_confirmed_frames(Frame::new(100));
+
+        // Length should be 1 (keeping the most recent input)
+        assert_eq!(queue.length, 1);
+
+        // After fix: tail should point to the last input (head - 1 = 4)
+        // This maintains the invariant: length = head - tail = 5 - 4 = 1
+        assert_eq!(queue.tail, 4);
+        assert_eq!(queue.head, 5);
+
+        // Verify the invariants now pass
+        assert!(
+            queue.check_invariants().is_ok(),
+            "Invariants should pass after discard_all_but_one"
+        );
+
+        // The most recent input (frame 4) should still be accessible
+        let result = queue.confirmed_input(Frame::new(4));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().input.inp, 4);
+    }
+
+    /// Regression test: discard_confirmed_frames with head at position 0 (wraparound edge case)
+    #[test]
+    fn test_discard_all_but_one_with_head_at_zero() {
+        let mut queue = InputQueue::<TestConfig>::new(0);
+
+        // Fill the queue completely and then some to cause head wraparound
+        // INPUT_QUEUE_LENGTH = 128, so adding 128 inputs will put head at 0
+        for i in 0..128i32 {
+            let input = PlayerInput::new(
+                Frame::new(i),
+                TestInput {
+                    inp: (i % 256) as u8,
+                },
+            );
+            queue.add_input(input);
+        }
+
+        // Head should now be at 0 (wrapped around)
+        assert_eq!(queue.head, 0);
+        assert_eq!(queue.length, 128);
+
+        // Discard all but most recent
+        queue.discard_confirmed_frames(Frame::new(1000));
+
+        // Should keep exactly 1 input
+        assert_eq!(queue.length, 1);
+
+        // Tail should be at 127 (head - 1 with wraparound: 0 - 1 = -1 -> 127)
+        assert_eq!(queue.tail, 127);
+
+        // Invariants should pass
+        assert!(
+            queue.check_invariants().is_ok(),
+            "Invariants should pass with head at 0"
+        );
+
+        // The most recent input (frame 127) should be accessible
+        let result = queue.confirmed_input(Frame::new(127));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().input.inp, 127);
+    }
+
+    /// Regression test: multiple consecutive discard_all_but_one operations maintain invariants
+    #[test]
+    fn test_multiple_discards_maintain_invariants() {
+        let mut queue = InputQueue::<TestConfig>::new(0);
+
+        for cycle in 0..3 {
+            // Add some inputs
+            for i in 0..10i32 {
+                let frame = Frame::new(cycle * 10 + i);
+                let input = PlayerInput::new(frame, TestInput { inp: i as u8 });
+                queue.add_input(input);
+            }
+
+            // Discard all but most recent
+            queue.discard_confirmed_frames(Frame::new(10000));
+
+            // Should have exactly 1 input
+            assert_eq!(queue.length, 1, "Cycle {} should have length 1", cycle);
+
+            // Invariants should pass
+            assert!(
+                queue.check_invariants().is_ok(),
+                "Invariants should pass after cycle {}",
+                cycle
+            );
+        }
+    }
+
+    /// Regression test: verify discard preserves the correct frame value, not just any input
+    #[test]
+    fn test_discard_all_preserves_correct_frame_value() {
+        let mut queue = InputQueue::<TestConfig>::new(0);
+
+        // Add inputs with unique values to verify we keep the RIGHT one
+        for i in 0..5i32 {
+            let input = PlayerInput::new(
+                Frame::new(i),
+                TestInput {
+                    inp: (i * 10 + 5) as u8,
+                },
+            );
+            queue.add_input(input);
+        }
+
+        // Last added is frame 4, with value 45
+        queue.discard_confirmed_frames(Frame::new(100));
+
+        assert_eq!(queue.length, 1);
+
+        // Verify we kept frame 4 with value 45
+        let result = queue.confirmed_input(Frame::new(4));
+        assert!(result.is_ok());
+        let input = result.unwrap();
+        assert_eq!(input.input.inp, 45);
+        assert_eq!(input.frame, Frame::new(4));
+    }
+
+    /// Regression test: full lifecycle of add -> discard -> add maintains invariants
+    #[test]
+    fn test_full_lifecycle_maintains_invariants() {
+        let mut queue = InputQueue::<TestConfig>::new(0);
+
+        // Phase 1: Add initial inputs
+        for i in 0..5i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            queue.add_input(input);
+        }
+        assert!(queue.check_invariants().is_ok(), "Phase 1 invariants");
+
+        // Phase 2: Partial discard
+        queue.discard_confirmed_frames(Frame::new(2));
+        assert!(queue.check_invariants().is_ok(), "Phase 2 invariants");
+
+        // Phase 3: Add more inputs
+        for i in 5..10i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            queue.add_input(input);
+        }
+        assert!(queue.check_invariants().is_ok(), "Phase 3 invariants");
+
+        // Phase 4: Discard all but one
+        queue.discard_confirmed_frames(Frame::new(100));
+        assert!(queue.check_invariants().is_ok(), "Phase 4 invariants");
+        assert_eq!(queue.length, 1);
+
+        // Phase 5: Continue adding
+        for i in 10..15i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            queue.add_input(input);
+        }
+        assert!(queue.check_invariants().is_ok(), "Phase 5 invariants");
+
+        // Should now have 6 inputs (1 kept + 5 new)
+        assert_eq!(queue.length, 6);
     }
 
     #[test]
@@ -792,7 +1008,7 @@ mod input_queue_tests {
         let mut queue = InputQueue::<TestConfig>::new(0);
 
         // Start with delay of 2 from the beginning
-        queue.set_frame_delay(2);
+        queue.set_frame_delay(2).expect("valid delay");
 
         // Add first input (frame 0)
         let input0 = PlayerInput::new(Frame::new(0), TestInput { inp: 1 });
@@ -828,7 +1044,7 @@ mod input_queue_tests {
         assert_eq!(queue.last_added_frame, Frame::new(0));
 
         // Change frame delay mid-session (not a supported operation via public API)
-        queue.set_frame_delay(2);
+        queue.set_frame_delay(2).expect("valid delay");
 
         // Try to add next sequential input - it gets DROPPED because the sequential
         // check uses the new delay: (1 + 2) != (0 + 1), so 3 != 1
@@ -891,7 +1107,7 @@ mod input_queue_tests {
     #[test]
     fn test_invariant_checker_with_frame_delay() {
         let mut queue = InputQueue::<TestConfig>::new(0);
-        queue.set_frame_delay(5);
+        queue.set_frame_delay(5).expect("valid delay");
 
         for i in 0..10i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
@@ -911,6 +1127,110 @@ mod input_queue_tests {
 
         queue.reset_prediction();
         assert!(queue.check_invariants().is_ok());
+    }
+
+    // ========================================================================
+    // Frame Delay Bounds Checking Tests
+    // These tests verify the fix for a Kani-discovered edge case where
+    // frame_delay >= INPUT_QUEUE_LENGTH could cause circular buffer overflow.
+    // ========================================================================
+
+    /// Regression test: set_frame_delay rejects delay >= INPUT_QUEUE_LENGTH
+    /// This constraint was discovered through Kani formal verification.
+    #[test]
+    fn test_set_frame_delay_rejects_excessive_delay() {
+        let mut queue = InputQueue::<TestConfig>::new(0);
+
+        // Delay exactly at the limit should fail
+        let result = queue.set_frame_delay(INPUT_QUEUE_LENGTH);
+        assert!(result.is_err());
+        if let Err(FortressError::InvalidRequest { info }) = result {
+            assert!(
+                info.contains("exceeds maximum"),
+                "Error should explain the issue"
+            );
+        } else {
+            panic!("Expected InvalidRequest error");
+        }
+
+        // Delay well above limit should also fail
+        let result = queue.set_frame_delay(INPUT_QUEUE_LENGTH + 100);
+        assert!(result.is_err());
+    }
+
+    /// Test: Maximum allowed delay (INPUT_QUEUE_LENGTH - 1) should be accepted
+    #[test]
+    fn test_set_frame_delay_accepts_max_valid_delay() {
+        let mut queue = InputQueue::<TestConfig>::new(0);
+
+        // Delay at MAX_FRAME_DELAY should succeed
+        let result = queue.set_frame_delay(MAX_FRAME_DELAY);
+        assert!(result.is_ok());
+        assert_eq!(queue.frame_delay, MAX_FRAME_DELAY);
+    }
+
+    /// Test: Zero delay should be accepted (common case)
+    #[test]
+    fn test_set_frame_delay_accepts_zero() {
+        let mut queue = InputQueue::<TestConfig>::new(0);
+
+        let result = queue.set_frame_delay(0);
+        assert!(result.is_ok());
+        assert_eq!(queue.frame_delay, 0);
+    }
+
+    /// Test: Typical game delays (1-8 frames) should all be accepted
+    #[test]
+    fn test_set_frame_delay_accepts_typical_values() {
+        for delay in 1..=8 {
+            let mut queue = InputQueue::<TestConfig>::new(0);
+            let result = queue.set_frame_delay(delay);
+            assert!(result.is_ok(), "Delay {} should be accepted", delay);
+            assert_eq!(queue.frame_delay, delay);
+        }
+    }
+
+    /// Test: After successful delay set, adding inputs works correctly
+    #[test]
+    fn test_frame_delay_with_inputs_after_set() {
+        let mut queue = InputQueue::<TestConfig>::new(0);
+        queue.set_frame_delay(3).expect("valid delay");
+
+        // Add input at frame 0
+        let input = PlayerInput::new(Frame::new(0), TestInput { inp: 42 });
+        let result = queue.add_input(input);
+
+        // Should be stored at frame 0 + 3 = 3
+        assert_eq!(result, Frame::new(3));
+        assert_eq!(queue.last_added_frame, Frame::new(3));
+        assert!(queue.check_invariants().is_ok());
+    }
+
+    /// Test: After rejected delay, queue state remains unchanged
+    #[test]
+    fn test_rejected_frame_delay_preserves_state() {
+        let mut queue = InputQueue::<TestConfig>::new(0);
+
+        // Set a valid delay first
+        queue.set_frame_delay(5).expect("valid delay");
+        assert_eq!(queue.frame_delay, 5);
+
+        // Try to set an invalid delay
+        let result = queue.set_frame_delay(INPUT_QUEUE_LENGTH);
+        assert!(result.is_err());
+
+        // Original delay should be preserved
+        assert_eq!(queue.frame_delay, 5);
+    }
+
+    /// Test: Ensure the constant relationship is correct
+    #[test]
+    fn test_max_frame_delay_constant_is_correct() {
+        assert_eq!(
+            MAX_FRAME_DELAY,
+            INPUT_QUEUE_LENGTH - 1,
+            "MAX_FRAME_DELAY should be INPUT_QUEUE_LENGTH - 1"
+        );
     }
 }
 
@@ -1027,7 +1347,7 @@ mod property_tests {
             count in 1usize..=30,
         ) {
             let mut queue = InputQueue::<TestConfig>::new(0);
-            queue.set_frame_delay(delay);
+            queue.set_frame_delay(delay).expect("valid delay");
 
             // Add inputs
             for i in 0..count as i32 {
@@ -1231,6 +1551,7 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies INV-4 (length = 0) and INV-5 (head = tail = 0) at initialization.
     #[kani::proof]
+    #[kani::unwind(12)]
     fn proof_new_queue_valid() {
         let queue = InputQueue::<TestConfig>::new(0);
 
@@ -1265,6 +1586,7 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies that adding a single input maintains INV-4 and INV-5.
     #[kani::proof]
+    #[kani::unwind(12)]
     fn proof_add_single_input_maintains_invariants() {
         let mut queue = InputQueue::<TestConfig>::new(0);
 
@@ -1303,7 +1625,7 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies INV-4 and INV-5 hold after adding multiple sequential inputs.
     #[kani::proof]
-    #[kani::unwind(10)]
+    #[kani::unwind(12)]
     fn proof_sequential_inputs_maintain_invariants() {
         let mut queue = InputQueue::<TestConfig>::new(0);
         let count: usize = kani::any();
@@ -1343,6 +1665,7 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies that head index wraps around correctly when reaching INPUT_QUEUE_LENGTH.
     #[kani::proof]
+    #[kani::unwind(12)]
     fn proof_head_wraparound() {
         let head: usize = kani::any();
         kani::assume(head < INPUT_QUEUE_LENGTH);
@@ -1365,6 +1688,7 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies that frame-to-index calculation (frame % INPUT_QUEUE_LENGTH) is always valid.
     #[kani::proof]
+    #[kani::unwind(12)]
     fn proof_queue_index_calculation() {
         let frame: i32 = kani::any();
         kani::assume(frame >= 0 && frame <= 10_000_000);
@@ -1381,6 +1705,7 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies the circular buffer length formula: length = (head - tail + N) % N
     #[kani::proof]
+    #[kani::unwind(12)]
     fn proof_length_calculation_consistent() {
         let head: usize = kani::any();
         let tail: usize = kani::any();
@@ -1408,7 +1733,7 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies that discarding frames maintains INV-4 and INV-5.
     #[kani::proof]
-    #[kani::unwind(6)]
+    #[kani::unwind(12)]
     fn proof_discard_maintains_invariants() {
         let mut queue = InputQueue::<TestConfig>::new(0);
 
@@ -1444,14 +1769,20 @@ mod kani_input_queue_proofs {
     /// Proof: Frame delay doesn't violate invariants
     ///
     /// Verifies that setting frame delay maintains valid queue state.
+    /// Note: delay is bounded by INPUT_QUEUE_LENGTH - 1 to prevent overflow.
+    /// In practice, delays this large are unreasonable for real-time games anyway.
     #[kani::proof]
+    #[kani::unwind(12)]
     fn proof_frame_delay_maintains_invariants() {
         let mut queue = InputQueue::<TestConfig>::new(0);
 
         let delay: usize = kani::any();
-        kani::assume(delay <= 10);
+        // Frame delay must be less than queue length to prevent overflow
+        kani::assume(delay < INPUT_QUEUE_LENGTH);
 
-        queue.set_frame_delay(delay);
+        // set_frame_delay should succeed for valid delays (< INPUT_QUEUE_LENGTH)
+        let set_result = queue.set_frame_delay(delay);
+        kani::assert(set_result.is_ok(), "Valid delay should be accepted");
 
         // Add input with delay
         let input = PlayerInput::new(Frame::new(0), TestInput { inp: 0 });
@@ -1489,6 +1820,7 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies that add_input rejects non-sequential frame inputs, preserving invariants.
     #[kani::proof]
+    #[kani::unwind(12)]
     fn proof_non_sequential_rejected() {
         let mut queue = InputQueue::<TestConfig>::new(0);
 
@@ -1509,6 +1841,7 @@ mod kani_input_queue_proofs {
 
     /// Proof: reset_prediction maintains structural invariants
     #[kani::proof]
+    #[kani::unwind(12)]
     fn proof_reset_maintains_structure() {
         let mut queue = InputQueue::<TestConfig>::new(0);
 
@@ -1546,7 +1879,7 @@ mod kani_input_queue_proofs {
 
     /// Proof: Confirmed input retrieval is valid for stored frames
     #[kani::proof]
-    #[kani::unwind(6)]
+    #[kani::unwind(12)]
     fn proof_confirmed_input_valid_index() {
         let mut queue = InputQueue::<TestConfig>::new(0);
 

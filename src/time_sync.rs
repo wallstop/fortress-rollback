@@ -1,19 +1,88 @@
 use crate::Frame;
 
-const FRAME_WINDOW_SIZE: usize = 30;
+/// Default window size for time synchronization frame advantage calculation.
+const DEFAULT_FRAME_WINDOW_SIZE: usize = 30;
+
+/// Configuration for time synchronization behavior.
+///
+/// The time sync system tracks local and remote frame advantages over a
+/// sliding window to calculate how fast/slow this peer should run relative
+/// to the other peer(s).
+///
+/// # Example
+///
+/// ```
+/// use fortress_rollback::TimeSyncConfig;
+///
+/// // For more responsive sync (may cause more fluctuation)
+/// let responsive_config = TimeSyncConfig {
+///     window_size: 15,
+/// };
+///
+/// // For smoother sync (slower to adapt to changes)
+/// let smooth_config = TimeSyncConfig {
+///     window_size: 60,
+/// };
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeSyncConfig {
+    /// The number of frames to average when calculating frame advantage.
+    /// A larger window provides a more stable (less jittery) sync but
+    /// is slower to react to network changes. A smaller window reacts
+    /// faster but may cause more fluctuation in game speed.
+    ///
+    /// Default: 30 frames (0.5 seconds at 60 FPS)
+    pub window_size: usize,
+}
+
+impl Default for TimeSyncConfig {
+    fn default() -> Self {
+        Self {
+            window_size: DEFAULT_FRAME_WINDOW_SIZE,
+        }
+    }
+}
+
+impl TimeSyncConfig {
+    /// Creates a new `TimeSyncConfig` with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Configuration preset for responsive synchronization.
+    ///
+    /// Uses a smaller window to react quickly to network changes,
+    /// at the cost of potentially more fluctuation in game speed.
+    pub fn responsive() -> Self {
+        Self { window_size: 15 }
+    }
+
+    /// Configuration preset for smooth synchronization.
+    ///
+    /// Uses a larger window to provide stable, smooth synchronization,
+    /// at the cost of slower adaptation to network changes.
+    pub fn smooth() -> Self {
+        Self { window_size: 60 }
+    }
+
+    /// Configuration preset for LAN play.
+    ///
+    /// Uses a small window since LAN connections are typically stable.
+    pub fn lan() -> Self {
+        Self { window_size: 10 }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct TimeSync {
-    local: [i32; FRAME_WINDOW_SIZE],
-    remote: [i32; FRAME_WINDOW_SIZE],
+    local: Vec<i32>,
+    remote: Vec<i32>,
+    window_size: usize,
 }
 
 impl Default for TimeSync {
     fn default() -> Self {
-        Self {
-            local: [0; FRAME_WINDOW_SIZE],
-            remote: [0; FRAME_WINDOW_SIZE],
-        }
+        Self::with_config(TimeSyncConfig::default())
     }
 }
 
@@ -22,9 +91,19 @@ impl TimeSync {
         Self::default()
     }
 
+    /// Creates a new TimeSync with the given configuration.
+    pub(crate) fn with_config(config: TimeSyncConfig) -> Self {
+        let window_size = config.window_size.max(1); // Ensure at least 1
+        Self {
+            local: vec![0; window_size],
+            remote: vec![0; window_size],
+            window_size,
+        }
+    }
+
     pub(crate) fn advance_frame(&mut self, frame: Frame, local_adv: i32, remote_adv: i32) {
-        self.local[frame.as_i32() as usize % self.local.len()] = local_adv;
-        self.remote[frame.as_i32() as usize % self.remote.len()] = remote_adv;
+        self.local[frame.as_i32() as usize % self.window_size] = local_adv;
+        self.remote[frame.as_i32() as usize % self.window_size] = remote_adv;
     }
 
     pub(crate) fn average_frame_advantage(&self) -> i32 {
@@ -47,6 +126,9 @@ impl TimeSync {
 mod sync_layer_tests {
 
     use super::*;
+
+    /// Default window size for tests (matches TimeSyncConfig::default())
+    const FRAME_WINDOW_SIZE: usize = 30;
 
     #[test]
     fn test_advance_frame_no_advantage() {

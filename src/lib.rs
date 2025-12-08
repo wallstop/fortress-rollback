@@ -15,11 +15,12 @@ pub use network::messages::Message;
 pub use network::network_stats::NetworkStats;
 pub use network::udp_socket::UdpNonBlockingSocket;
 use serde::{de::DeserializeOwned, Serialize};
-pub use sessions::builder::SessionBuilder;
+pub use sessions::builder::{ProtocolConfig, SessionBuilder, SpectatorConfig, SyncConfig};
 pub use sessions::p2p_session::P2PSession;
 pub use sessions::p2p_spectator_session::SpectatorSession;
 pub use sessions::sync_test_session::SyncTestSession;
 pub use sync_layer::{GameStateAccessor, GameStateCell};
+pub use time_sync::TimeSyncConfig;
 
 // Re-export prediction strategies
 pub use crate::input_queue::{BlankPrediction, PredictionStrategy, RepeatLastConfirmed};
@@ -483,6 +484,12 @@ where
         total: u32,
         /// Current number of successful synchronization steps.
         count: u32,
+        /// Total sync requests sent (includes retries due to packet loss).
+        /// Higher values indicate network issues during synchronization.
+        total_requests_sent: u32,
+        /// Milliseconds elapsed since synchronization started.
+        /// Useful for detecting slow sync due to high latency or packet loss.
+        elapsed_ms: u128,
     },
     /// The session is now synchronized with the remote client.
     Synchronized {
@@ -521,6 +528,15 @@ where
         remote_checksum: u128,
         /// remote address of the endpoint.
         addr: T::Address,
+    },
+    /// Synchronization has timed out. This is only emitted if a sync timeout was configured
+    /// via [`SyncConfig`]. The session will continue trying to sync, but the user may choose
+    /// to abort and disconnect.
+    SyncTimeout {
+        /// The address of the endpoint that timed out.
+        addr: T::Address,
+        /// Milliseconds elapsed since synchronization started.
+        elapsed_ms: u128,
     },
 }
 

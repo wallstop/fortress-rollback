@@ -2,14 +2,30 @@
 
 This directory contains TLA+ specifications for formally verifying the correctness properties of Fortress Rollback.
 
+## Quick Start
+
+```bash
+# Run all TLA+ verification (from project root)
+./scripts/verify-tla.sh
+
+# List available specs
+./scripts/verify-tla.sh --list
+
+# Verify specific spec
+./scripts/verify-tla.sh NetworkProtocol
+
+# Quick verification (smaller bounds)
+./scripts/verify-tla.sh --quick
+```
+
 ## Files
 
-| File | Description |
-|------|-------------|
-| `NetworkProtocol.tla` | UDP protocol state machine for peer-to-peer communication |
-| `InputQueue.tla` | Circular buffer input queue with prediction/confirmation |
-| `Rollback.tla` | Rollback mechanism for state restoration and resimulation |
-| `Concurrency.tla` | GameStateCell thread-safe state access via Arc<Mutex<T>> |
+| File | Config | Status | Description |
+|------|--------|--------|-------------|
+| `NetworkProtocol.tla` | `NetworkProtocol.cfg` | ✓ CI | UDP protocol state machine |
+| `InputQueue.tla` | `InputQueue.cfg` | ✓ CI | Circular buffer input queue |
+| `Rollback.tla` | `Rollback.cfg` | ✓ CI | Rollback mechanism |
+| `Concurrency.tla` | `Concurrency.cfg` | ✓ CI | GameStateCell thread safety |
 
 ## Properties Verified
 
@@ -38,14 +54,13 @@ This directory contains TLA+ specifications for formally verifying the correctne
 ### Rollback.tla
 
 **Safety (from FORMAL_SPEC.md):**
-- INV-2: Rollback depth bounded by `max_prediction`
-- INV-6: State availability for rollback frames
-- INV-7: Confirmed frame consistency
-- INV-8: Saved frame consistency
-- SAFE-4: Rollback restores correct state
+- INV-1: Frame monotonicity (except during rollback)
+- INV-2: Rollback target is valid frame
+- INV-7: Confirmed frame in valid range
+- INV-8: Saved frame in valid range
+- SAFE-4: Rollback restores correct state (state exists for rollback target)
 
-**Liveness:**
-- LIVE-3: Progress guaranteed
+**Liveness (disabled for CI due to state space):**
 - LIVE-4: Rollback completes
 
 ### Concurrency.tla
@@ -68,7 +83,27 @@ This directory contains TLA+ specifications for formally verifying the correctne
 
 ## Running the Specifications
 
-### Prerequisites
+### Automated (Recommended)
+
+Use the verification scripts from the project root:
+
+```bash
+# Run all enabled TLA+ specs in CI
+./scripts/verify-tla.sh
+
+# Run specific spec
+./scripts/verify-tla.sh InputQueue
+
+# Run quick verification (smaller state bounds)
+./scripts/verify-tla.sh --quick
+
+# List available specs
+./scripts/verify-tla.sh --list
+```
+
+The script automatically downloads TLC tools if needed.
+
+### Prerequisites for Manual Verification
 
 1. Install TLA+ Toolbox or TLC command-line tools
 2. Download from: https://lamport.azurewebsites.net/tla/tools.html
@@ -79,10 +114,26 @@ This directory contains TLA+ specifications for formally verifying the correctne
 2. File → Open Spec → Add New Spec
 3. Select one of the `.tla` files
 4. Create a new model (Model → New Model)
-5. Configure constants (see below)
+5. Configure constants (see `.cfg` files for values)
 6. Run Model Checker
 
-### Suggested Configurations
+### Configuration Files
+
+Each spec has a `.cfg` file with TLC-compatible settings:
+
+| Config File | Key Constants | State Space |
+|-------------|---------------|-------------|
+| `NetworkProtocol.cfg` | MAX_FRAME=5, randomId=1..5 | ~12,000 states |
+| `InputQueue.cfg` | QUEUE_LENGTH=4, MAX_FRAME=6 | ~77,000 states |
+| `Concurrency.cfg` | MAX_FRAME=4 | Small |
+| `Rollback.cfg` | MAX_PREDICTION=1, MAX_FRAME=3 | ~52M states |
+
+**Note on NULL_FRAME:** TLC config files don't support negative numbers,
+so we use `NULL_FRAME = 999` as a sentinel value instead of -1.
+
+### Legacy Manual Configurations
+
+For TLA+ Toolbox or custom model checking:
 
 #### NetworkProtocol.tla
 ```
