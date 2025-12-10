@@ -1,11 +1,12 @@
-use parking_lot::{MappedMutexGuard, Mutex};
+#[allow(unused_imports)] // MappedMutexGuard not used under loom
+use crate::sync::{Arc, MappedMutexGuard, Mutex};
 use std::ops::Deref;
-use std::sync::Arc;
 
 use crate::frame_info::{GameState, PlayerInput};
 use crate::input_queue::InputQueue;
 use crate::network::messages::ConnectionStatus;
 use crate::report_violation;
+use crate::sessions::builder::SaveMode;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
 use crate::{Config, FortressError, FortressRequest, Frame, InputStatus, PlayerHandle};
 
@@ -17,8 +18,19 @@ pub struct GameStateCell<T>(Arc<Mutex<GameState<T>>>);
 
 impl<T> GameStateCell<T> {
     /// Saves a `T` the user creates into the cell.
+    #[cfg(not(loom))]
     pub fn save(&self, frame: Frame, data: Option<T>, checksum: Option<u128>) {
         let mut state = self.0.lock();
+        assert!(!frame.is_null());
+        state.frame = frame;
+        state.data = data;
+        state.checksum = checksum;
+    }
+
+    /// Saves a `T` the user creates into the cell (loom version).
+    #[cfg(loom)]
+    pub fn save(&self, frame: Frame, data: Option<T>, checksum: Option<u128>) {
+        let mut state = self.0.lock().unwrap();
         assert!(!frame.is_null());
         state.frame = frame;
         state.data = data;
@@ -61,6 +73,8 @@ impl<T> GameStateCell<T> {
     ///
     /// If you really, really need mutable access to the `T`, then consider using the aptly named
     /// [GameStateAccessor::as_mut_dangerous()].
+    #[cfg(not(loom))]
+    #[must_use]
     pub fn data(&self) -> Option<GameStateAccessor<'_, T>> {
         if let Ok(mapped_data) =
             parking_lot::MutexGuard::try_map(self.0.lock(), |state| state.data.as_mut())
@@ -71,12 +85,50 @@ impl<T> GameStateCell<T> {
         }
     }
 
-    pub(crate) fn frame(&self) -> Frame {
+    /// Under loom, we can't use MappedMutexGuard. Instead, we check if data exists
+    /// and return None if not. For actual access under loom, tests should use load()
+    /// which requires Clone.
+    #[cfg(loom)]
+    pub fn data(&self) -> Option<GameStateAccessor<'_, T>> {
+        // Under loom, we cannot project the guard to a subfield.
+        // Return None to indicate this API is not available under loom testing.
+        // Tests should use load() instead which requires Clone.
+        let _guard = self.0.lock().unwrap();
+        // We can't return the accessor because loom's MutexGuard doesn't support try_map.
+        // The loom tests should test concurrency via save/load/frame operations.
+        None
+    }
+
+    #[cfg(not(loom))]
+    /// Returns the frame number for this saved state.
+    ///
+    /// # Note
+    /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
+    #[must_use]
+    pub fn frame(&self) -> Frame {
         self.0.lock().frame
     }
 
-    pub(crate) fn checksum(&self) -> Option<u128> {
+    #[cfg(loom)]
+    /// Returns the frame number for this saved state (loom version).
+    pub fn frame(&self) -> Frame {
+        self.0.lock().unwrap().frame
+    }
+
+    #[cfg(not(loom))]
+    /// Returns the checksum for this saved state, if one was saved.
+    ///
+    /// # Note
+    /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
+    #[must_use]
+    pub fn checksum(&self) -> Option<u128> {
         self.0.lock().checksum
+    }
+
+    #[cfg(loom)]
+    /// Returns the checksum for this saved state (loom version).
+    pub fn checksum(&self) -> Option<u128> {
+        self.0.lock().unwrap().checksum
     }
 }
 
@@ -84,9 +136,19 @@ impl<T: Clone> GameStateCell<T> {
     /// Loads a `T` that the user previously saved into this cell, by cloning the `T`.
     ///
     /// See also [data()](Self::data) if you want a reference to the `T` without cloning it.
+    #[cfg(not(loom))]
+    #[must_use]
     pub fn load(&self) -> Option<T> {
         let data = self.data()?;
         Some(data.clone())
+    }
+
+    /// Under loom, we can't use the MappedMutexGuard-based data() method,
+    /// so we access the data directly through the mutex.
+    #[cfg(loom)]
+    pub fn load(&self) -> Option<T> {
+        let guard = self.0.lock().unwrap();
+        guard.data.clone()
     }
 }
 
@@ -102,9 +164,21 @@ impl<T> Clone for GameStateCell<T> {
     }
 }
 
+#[cfg(not(loom))]
 impl<T> std::fmt::Debug for GameStateCell<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let inner = self.0.lock();
+        f.debug_struct("GameStateCell")
+            .field("frame", &inner.frame)
+            .field("checksum", &inner.checksum)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(loom)]
+impl<T> std::fmt::Debug for GameStateCell<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.0.lock().unwrap();
         f.debug_struct("GameStateCell")
             .field("frame", &inner.frame)
             .field("checksum", &inner.checksum)
@@ -120,8 +194,17 @@ impl<T> std::fmt::Debug for GameStateCell<T> {
 /// This type exists to A) hide the type of the lock guard that allows thread-safe access to the
 ///  saved `T` so that it does not form part of Fortress Rollback API and B) make dangerous mutable access to the
 ///  `T` very explicit (see [as_mut_dangerous()](Self::as_mut_dangerous)).
+///
+/// Note: Under loom testing, this type is not available as loom doesn't support `MappedMutexGuard`.
+/// Use [`GameStateCell::load()`] instead which requires `T: Clone`.
+#[cfg(not(loom))]
 pub struct GameStateAccessor<'c, T>(MappedMutexGuard<'c, T>);
 
+/// Placeholder type under loom - the actual accessor cannot be created.
+#[cfg(loom)]
+pub struct GameStateAccessor<'c, T>(std::marker::PhantomData<&'c T>);
+
+#[cfg(not(loom))]
 impl<'c, T> Deref for GameStateAccessor<'c, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
@@ -129,6 +212,16 @@ impl<'c, T> Deref for GameStateAccessor<'c, T> {
     }
 }
 
+#[cfg(loom)]
+impl<'c, T> Deref for GameStateAccessor<'c, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        // This should never be called under loom as data() returns None
+        unreachable!("GameStateAccessor::deref called under loom - this should not happen")
+    }
+}
+
+#[cfg(not(loom))]
 impl<'c, T> GameStateAccessor<'c, T> {
     /// Get mutable access to the `T` that the user previously saved into a [GameStateCell].
     ///
@@ -143,12 +236,31 @@ impl<'c, T> GameStateAccessor<'c, T> {
     }
 }
 
-pub(crate) struct SavedStates<T> {
+#[cfg(loom)]
+impl<'c, T> GameStateAccessor<'c, T> {
+    /// Under loom, this method is not available.
+    pub fn as_mut_dangerous(&mut self) -> &mut T {
+        unreachable!(
+            "GameStateAccessor::as_mut_dangerous called under loom - this should not happen"
+        )
+    }
+}
+
+/// Container for saved game states used during rollback.
+///
+/// # Note
+///
+/// This type is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
+/// It is not part of the stable public API.
+pub struct SavedStates<T> {
+    /// The vector of game state cells.
     pub states: Vec<GameStateCell<T>>,
 }
 
 impl<T> SavedStates<T> {
-    fn new(max_pred: usize) -> Self {
+    /// Creates a new SavedStates container with the given capacity.
+    #[must_use]
+    pub fn new(max_pred: usize) -> Self {
         // we need to store the current frame plus the number of max predictions, so that we can
         // roll back to the very first frame even when we have predicted as far ahead as we can.
         let num_cells = max_pred + 1;
@@ -160,7 +272,8 @@ impl<T> SavedStates<T> {
         Self { states }
     }
 
-    fn get_cell(&self, frame: Frame) -> Result<GameStateCell<T>, FortressError> {
+    /// Gets the cell for a given frame.
+    pub fn get_cell(&self, frame: Frame) -> Result<GameStateCell<T>, FortressError> {
         if frame.as_i32() < 0 {
             return Err(FortressError::InvalidFrame {
                 frame,
@@ -172,26 +285,88 @@ impl<T> SavedStates<T> {
     }
 }
 
-pub(crate) struct SyncLayer<T>
+/// The synchronization layer manages game state, input queues, and rollback operations.
+///
+/// # Note
+///
+/// This type is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
+/// It is not part of the stable public API.
+///
+/// # Formal Specification Alignment
+/// - **TLA+**: `SyncLayer` state in `specs/tla/Rollback.tla`
+/// - **Invariants verified**:
+///   - INV-1: Frame monotonicity (except during rollback)
+///   - INV-2: Rollback bounded by `max_prediction`
+///   - INV-6: State availability for rollback frames
+///   - INV-7: `last_confirmed_frame <= current_frame`
+///   - INV-8: `last_saved_frame <= current_frame`
+/// - **Kani proofs**: 14 proofs in `sync_layer.rs` verify bounds and state transitions
+/// - **Loom tests**: `GameStateCell` concurrent access verified in `loom-tests/`
+pub struct SyncLayer<T>
 where
     T: Config,
 {
     num_players: usize,
+    /// Maximum frames of prediction allowed before rollback is required.
+    ///
+    /// # Formal Specification Alignment
+    /// - **TLA+**: `MAX_PREDICTION` in `specs/tla/Rollback.tla`
+    /// - **Z3**: `MAX_PREDICTION` in `tests/test_z3_verification.rs`
+    /// - **FORMAL_SPEC.md**: INV-2 requires `rollback_depth <= max_prediction`
     max_prediction: usize,
     saved_states: SavedStates<T::State>,
+    /// The last frame where all player inputs are confirmed.
+    ///
+    /// # Formal Specification Alignment
+    /// - **TLA+**: `lastConfirmedFrame` in `specs/tla/Rollback.tla`
+    /// - **FORMAL_SPEC.md**: INV-7 requires `last_confirmed_frame <= current_frame`
     last_confirmed_frame: Frame,
+    /// The most recently saved frame.
+    ///
+    /// # Formal Specification Alignment
+    /// - **TLA+**: `lastSavedFrame` in `specs/tla/Rollback.tla`
+    /// - **FORMAL_SPEC.md**: INV-8 requires `last_saved_frame <= current_frame`
     last_saved_frame: Frame,
+    /// The current simulation frame.
+    ///
+    /// # Formal Specification Alignment
+    /// - **TLA+**: `currentFrame` in `specs/tla/Rollback.tla`
+    /// - **FORMAL_SPEC.md**: INV-1 requires monotonic increase (except rollback)
     current_frame: Frame,
     input_queues: Vec<InputQueue<T>>,
 }
 
 impl<T: Config> SyncLayer<T> {
-    /// Creates a new `SyncLayer` instance with given values.
-    pub(crate) fn new(num_players: usize, max_prediction: usize) -> Self {
+    /// Creates a new `SyncLayer` instance with given values and default queue length.
+    ///
+    /// Note: This function exists for backward compatibility and testing.
+    /// The main construction path uses `with_queue_length` via `SessionBuilder`.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn new(num_players: usize, max_prediction: usize) -> Self {
+        Self::with_queue_length(
+            num_players,
+            max_prediction,
+            crate::input_queue::INPUT_QUEUE_LENGTH,
+        )
+    }
+
+    /// Creates a new `SyncLayer` instance with a custom input queue length.
+    ///
+    /// # Arguments
+    /// * `num_players` - The number of players in the session
+    /// * `max_prediction` - Maximum frames of prediction allowed
+    /// * `queue_length` - The size of the input queue circular buffer per player
+    #[must_use]
+    pub fn with_queue_length(
+        num_players: usize,
+        max_prediction: usize,
+        queue_length: usize,
+    ) -> Self {
         // initialize input_queues with player indices for deterministic prediction
         let mut input_queues = Vec::new();
         for player_index in 0..num_players {
-            input_queues.push(InputQueue::new(player_index));
+            input_queues.push(InputQueue::with_queue_length(player_index, queue_length));
         }
         Self {
             num_players,
@@ -204,25 +379,55 @@ impl<T: Config> SyncLayer<T> {
         }
     }
 
-    pub(crate) fn current_frame(&self) -> Frame {
+    /// Returns the current simulation frame.
+    ///
+    /// # Note
+    /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
+    #[must_use]
+    pub fn current_frame(&self) -> Frame {
         self.current_frame
     }
 
-    pub(crate) fn advance_frame(&mut self) {
+    /// Advances the simulation by one frame.
+    ///
+    /// # Note
+    /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
+    pub fn advance_frame(&mut self) {
         self.current_frame += 1;
     }
 
     /// Saves the current game state.
     ///
-    /// # Panics
-    /// This method will not panic as `current_frame` is always valid (>= 0).
-    pub(crate) fn save_current_state(&mut self) -> FortressRequest<T> {
+    /// This method maintains the invariant that `current_frame` is always valid (>= 0),
+    /// which is guaranteed by construction (initialized to 0) and by the fact that
+    /// the only mutation is via `advance_frame()` which increments it.
+    ///
+    /// # Note
+    /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
+    pub fn save_current_state(&mut self) -> FortressRequest<T> {
         self.last_saved_frame = self.current_frame;
-        // current_frame is always >= 0, so this cannot fail
-        let cell = self
-            .saved_states
-            .get_cell(self.current_frame)
-            .expect("Internal error: current_frame should always be valid for get_cell");
+        // Debug assertion to catch invariant violations during development.
+        // current_frame is initialized to 0 and only incremented, so this should never fail.
+        debug_assert!(
+            self.current_frame.as_i32() >= 0,
+            "Internal invariant violation: current_frame must be non-negative"
+        );
+        // Use match to handle the theoretical error case gracefully instead of panicking.
+        // In the impossible case of an invalid frame, create a default cell.
+        let cell = match self.saved_states.get_cell(self.current_frame) {
+            Ok(cell) => cell,
+            Err(_) => {
+                // This should never happen due to our invariants, but if it does,
+                // report it and return a default cell to avoid panicking.
+                report_violation!(
+                    ViolationSeverity::Critical,
+                    ViolationKind::InternalError,
+                    "save_current_state: current_frame {} failed get_cell - this indicates an internal bug",
+                    self.current_frame
+                );
+                GameStateCell::default()
+            }
+        };
         FortressRequest::SaveGameState {
             cell,
             frame: self.current_frame,
@@ -234,7 +439,10 @@ impl<T: Config> SyncLayer<T> {
     /// # Errors
     /// Returns `FortressError::InvalidPlayerHandle` if `player_handle >= num_players`.
     /// Returns `FortressError::InvalidRequest` if `delay` exceeds the maximum allowed value.
-    pub(crate) fn set_frame_delay(
+    ///
+    /// # Note
+    /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
+    pub fn set_frame_delay(
         &mut self,
         player_handle: PlayerHandle,
         delay: usize,
@@ -249,7 +457,11 @@ impl<T: Config> SyncLayer<T> {
         Ok(())
     }
 
-    pub(crate) fn reset_prediction(&mut self) {
+    /// Resets the prediction state for all input queues.
+    ///
+    /// # Note
+    /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
+    pub fn reset_prediction(&mut self) {
         for i in 0..self.num_players {
             self.input_queues[i].reset_prediction();
         }
@@ -263,7 +475,10 @@ impl<T: Config> SyncLayer<T> {
     /// - `frame_to_load` is not in the past (>= current_frame)
     /// - `frame_to_load` is outside the prediction window
     /// - The saved state for `frame_to_load` doesn't exist or has wrong frame
-    pub(crate) fn load_frame(
+    ///
+    /// # Note
+    /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
+    pub fn load_frame(
         &mut self,
         frame_to_load: Frame,
     ) -> Result<FortressRequest<T>, FortressError> {
@@ -297,7 +512,10 @@ impl<T: Config> SyncLayer<T> {
         }
 
         let cell = self.saved_states.get_cell(frame_to_load)?;
+        #[cfg(not(loom))]
         let cell_frame = cell.0.lock().frame;
+        #[cfg(loom)]
+        let cell_frame = cell.0.lock().unwrap().frame;
         if cell_frame != frame_to_load {
             return Err(FortressError::InvalidFrame {
                 frame: frame_to_load,
@@ -374,7 +592,7 @@ impl<T: Config> SyncLayer<T> {
     }
 
     /// Sets the last confirmed frame to a given frame. By raising the last confirmed frame, we can discard all previous frames, as they are no longer necessary.
-    pub(crate) fn set_last_confirmed_frame(&mut self, mut frame: Frame, sparse_saving: bool) {
+    pub(crate) fn set_last_confirmed_frame(&mut self, mut frame: Frame, save_mode: SaveMode) {
         // don't set the last confirmed frame after the first incorrect frame before a rollback has happened
         let mut first_incorrect: Frame = Frame::NULL;
         for handle in 0..self.num_players {
@@ -385,7 +603,7 @@ impl<T: Config> SyncLayer<T> {
         }
 
         // if sparse saving option is turned on, don't set the last confirmed frame after the last saved frame
-        if sparse_saving {
+        if save_mode == SaveMode::Sparse {
             frame = std::cmp::min(frame, self.last_saved_frame);
         }
 
@@ -428,20 +646,33 @@ impl<T: Config> SyncLayer<T> {
     pub(crate) fn saved_state_by_frame(&self, frame: Frame) -> Option<GameStateCell<T::State>> {
         let cell = self.saved_states.get_cell(frame).ok()?;
 
-        if cell.0.lock().frame == frame {
+        #[cfg(not(loom))]
+        let cell_frame = cell.0.lock().frame;
+        #[cfg(loom)]
+        let cell_frame = cell.0.lock().unwrap().frame;
+
+        if cell_frame == frame {
             Some(cell)
         } else {
             None
         }
     }
 
-    /// Returns the latest saved frame
-    pub(crate) fn last_saved_frame(&self) -> Frame {
+    /// Returns the latest saved frame.
+    ///
+    /// # Note
+    /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
+    #[must_use]
+    pub fn last_saved_frame(&self) -> Frame {
         self.last_saved_frame
     }
 
-    /// Returns the latest confirmed frame
-    pub(crate) fn last_confirmed_frame(&self) -> Frame {
+    /// Returns the latest confirmed frame.
+    ///
+    /// # Note
+    /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
+    #[must_use]
+    pub fn last_confirmed_frame(&self) -> Frame {
         self.last_confirmed_frame
     }
 }
@@ -1046,7 +1277,7 @@ mod sync_layer_tests {
         }
 
         // Set confirmed frame
-        sync_layer.set_last_confirmed_frame(Frame::new(3), false);
+        sync_layer.set_last_confirmed_frame(Frame::new(3), SaveMode::EveryFrame);
 
         // Verify invariant: last_confirmed_frame <= current_frame
         assert!(sync_layer.last_confirmed_frame() <= sync_layer.current_frame());
@@ -1070,7 +1301,7 @@ mod sync_layer_tests {
         assert_eq!(sync_layer.current_frame(), Frame::new(10));
 
         // Try to set confirmed frame beyond current frame
-        sync_layer.set_last_confirmed_frame(Frame::new(15), false);
+        sync_layer.set_last_confirmed_frame(Frame::new(15), SaveMode::EveryFrame);
 
         // Should be clamped to current_frame
         assert!(
@@ -1188,7 +1419,7 @@ mod sync_layer_tests {
         }
 
         // Confirm up to frame 5
-        sync_layer.set_last_confirmed_frame(Frame::new(5), false);
+        sync_layer.set_last_confirmed_frame(Frame::new(5), SaveMode::EveryFrame);
         assert_eq!(sync_layer.last_confirmed_frame(), Frame::new(5));
     }
 
@@ -1208,7 +1439,7 @@ mod sync_layer_tests {
         }
 
         // With sparse saving, confirmed frame should not exceed last saved frame (0)
-        sync_layer.set_last_confirmed_frame(Frame::new(5), true);
+        sync_layer.set_last_confirmed_frame(Frame::new(5), SaveMode::Sparse);
         assert_eq!(sync_layer.last_confirmed_frame(), Frame::new(0));
     }
 
@@ -1381,7 +1612,7 @@ mod sync_layer_tests {
             sync_layer.advance_frame();
         }
 
-        sync_layer.set_last_confirmed_frame(Frame::new(5), false);
+        sync_layer.set_last_confirmed_frame(Frame::new(5), SaveMode::EveryFrame);
         assert!(sync_layer.check_invariants().is_ok());
     }
 
@@ -1399,6 +1630,185 @@ mod sync_layer_tests {
             sync_layer.add_remote_input(PlayerHandle::new(1), game_input);
             sync_layer.advance_frame();
             assert!(sync_layer.check_invariants().is_ok());
+        }
+    }
+
+    // ==========================================
+    // save_current_state Invariant Tests
+    // ==========================================
+
+    /// Verifies that save_current_state maintains the current_frame invariant
+    /// by checking that current_frame is always non-negative.
+    #[test]
+    fn test_save_current_state_maintains_frame_invariant() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        // Save at frame 0 - the initial state
+        let request = sync_layer.save_current_state();
+        match &request {
+            FortressRequest::SaveGameState { frame, .. } => {
+                assert!(frame.as_i32() >= 0, "Frame should be non-negative");
+                assert_eq!(*frame, Frame::new(0));
+            }
+            _ => panic!("Expected SaveGameState request"),
+        }
+
+        // Advance many frames and verify invariant holds at each
+        for expected_frame in 1..100 {
+            sync_layer.advance_frame();
+            let request = sync_layer.save_current_state();
+            match &request {
+                FortressRequest::SaveGameState { frame, .. } => {
+                    assert!(frame.as_i32() >= 0, "Frame should be non-negative");
+                    assert_eq!(*frame, Frame::new(expected_frame));
+                }
+                _ => panic!("Expected SaveGameState request"),
+            }
+        }
+    }
+
+    /// Verifies that save_current_state correctly updates last_saved_frame.
+    #[test]
+    fn test_save_current_state_updates_last_saved_frame() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        // Initially last_saved_frame is NULL
+        assert_eq!(sync_layer.last_saved_frame(), Frame::NULL);
+
+        // After saving, it should be updated
+        sync_layer.save_current_state();
+        assert_eq!(sync_layer.last_saved_frame(), Frame::new(0));
+
+        // Advance and save again
+        sync_layer.advance_frame();
+        sync_layer.save_current_state();
+        assert_eq!(sync_layer.last_saved_frame(), Frame::new(1));
+    }
+
+    /// Verifies that save_current_state works correctly after rollback.
+    #[test]
+    fn test_save_current_state_after_rollback() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        // Save and advance several frames
+        for i in 0..5 {
+            let request = sync_layer.save_current_state();
+            if let FortressRequest::SaveGameState { cell, frame } = request {
+                cell.save(frame, Some(i as u8), None);
+            }
+            sync_layer.advance_frame();
+        }
+
+        assert_eq!(sync_layer.current_frame(), Frame::new(5));
+
+        // Load frame 2 (rollback)
+        let result = sync_layer.load_frame(Frame::new(2));
+        assert!(result.is_ok());
+        assert_eq!(sync_layer.current_frame(), Frame::new(2));
+
+        // Now save_current_state should work correctly at frame 2
+        let request = sync_layer.save_current_state();
+        match &request {
+            FortressRequest::SaveGameState { frame, .. } => {
+                assert_eq!(*frame, Frame::new(2));
+            }
+            _ => panic!("Expected SaveGameState request"),
+        }
+        assert_eq!(sync_layer.last_saved_frame(), Frame::new(2));
+    }
+
+    /// Verifies save_current_state works correctly at frame 0 (boundary condition).
+    #[test]
+    fn test_save_current_state_at_frame_zero() {
+        let sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        // Should work correctly at frame 0
+        assert_eq!(sync_layer.current_frame(), Frame::new(0));
+
+        // Note: We use a non-mutable borrow pattern to test the const-ness
+        // but save_current_state needs &mut self, so this is mainly documenting
+        // that frame 0 is a valid state
+        let mut sync_layer = sync_layer;
+        let request = sync_layer.save_current_state();
+        match request {
+            FortressRequest::SaveGameState { frame, cell } => {
+                assert_eq!(frame, Frame::new(0));
+                // Cell should be usable
+                cell.save(Frame::new(0), Some(42u8), Some(12345));
+                assert_eq!(cell.frame(), Frame::new(0));
+                assert_eq!(cell.load(), Some(42u8));
+            }
+            _ => panic!("Expected SaveGameState request"),
+        }
+    }
+
+    /// Verifies that save_current_state provides correct cell cycling
+    /// when frames exceed max_prediction.
+    #[test]
+    fn test_save_current_state_cell_cycling() {
+        const MAX_PREDICTION: usize = 4;
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, MAX_PREDICTION);
+
+        // Save more frames than we have cells (max_prediction + 1 = 5 cells)
+        // Frame 0 and Frame 5 should use the same cell slot (index 0)
+        // Frame 1 and Frame 6 should use the same cell slot (index 1)
+
+        // First, save frames 0-4
+        for i in 0..=MAX_PREDICTION {
+            let request = sync_layer.save_current_state();
+            if let FortressRequest::SaveGameState { cell, frame } = request {
+                cell.save(frame, Some((i * 10) as u8), None);
+            }
+            if i < MAX_PREDICTION {
+                sync_layer.advance_frame();
+            }
+        }
+
+        // Now at frame 4, advance to frame 5
+        sync_layer.advance_frame();
+        assert_eq!(sync_layer.current_frame(), Frame::new(5));
+
+        // Save at frame 5 - this should overwrite cell slot 0
+        let request = sync_layer.save_current_state();
+        if let FortressRequest::SaveGameState { cell, frame } = request {
+            assert_eq!(frame, Frame::new(5));
+            cell.save(frame, Some(50u8), None);
+            // Verify the cell now has frame 5's data
+            assert_eq!(cell.load(), Some(50u8));
+        }
+    }
+
+    /// Documents the invariant that save_current_state relies on:
+    /// current_frame is always non-negative because it's initialized to 0
+    /// and only modified by advance_frame() which increments it.
+    #[test]
+    fn test_save_current_state_invariant_documentation() {
+        // This test documents and verifies the invariant that save_current_state relies on.
+        //
+        // Invariant: current_frame >= 0
+        //
+        // Proof:
+        // 1. SyncLayer::new() initializes current_frame to Frame::new(0)
+        // 2. advance_frame() is the only method that modifies current_frame
+        // 3. advance_frame() only increments: self.current_frame += 1
+        // 4. load_frame() can reduce current_frame but only to a frame that was
+        //    previously valid (saved state exists)
+        // 5. Therefore, current_frame is always >= 0
+        //
+        // The save_current_state() method uses this invariant to call get_cell()
+        // which requires frame >= 0. If this invariant were violated (which should
+        // be impossible), the telemetry system would report a Critical violation.
+
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        // Verify initial state
+        assert_eq!(sync_layer.current_frame(), Frame::new(0));
+        assert!(sync_layer.current_frame().as_i32() >= 0);
+
+        // Verify after many operations
+        for _ in 0..1000 {
+            sync_layer.advance_frame();
+            assert!(sync_layer.current_frame().as_i32() >= 0);
         }
     }
 }
@@ -1758,7 +2168,7 @@ mod kani_sync_layer_proofs {
         let confirm_frame: i32 = kani::any();
         kani::assume(confirm_frame >= 0 && confirm_frame <= 15);
 
-        sync_layer.set_last_confirmed_frame(Frame::new(confirm_frame), false);
+        sync_layer.set_last_confirmed_frame(Frame::new(confirm_frame), SaveMode::EveryFrame);
 
         // INV-7: last_confirmed_frame <= current_frame
         kani::assert(
@@ -1785,7 +2195,7 @@ mod kani_sync_layer_proofs {
         }
 
         // With sparse saving enabled, confirm frame should not exceed last_saved (0)
-        sync_layer.set_last_confirmed_frame(Frame::new(5), true);
+        sync_layer.set_last_confirmed_frame(Frame::new(5), SaveMode::Sparse);
 
         kani::assert(
             sync_layer.last_confirmed_frame() <= sync_layer.last_saved_frame(),

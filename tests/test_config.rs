@@ -285,8 +285,8 @@ fn test_session_with_custom_protocol_config() -> Result<(), FortressError> {
         shutdown_delay: Duration::from_millis(4000),
         max_checksum_history: 64,
         pending_output_limit: 200,
-        sync_retry_warning_threshold: 15,
-        sync_duration_warning_ms: 5000,
+        // Leave some fields to default to demonstrate forward-compatible pattern
+        ..Default::default()
     };
 
     let _sess = SessionBuilder::<StubConfig>::new()
@@ -310,8 +310,8 @@ fn test_session_with_custom_sync_config() -> Result<(), FortressError> {
         num_sync_packets: 7,
         sync_retry_interval: Duration::from_millis(250),
         sync_timeout: Some(Duration::from_secs(8)),
-        running_retry_interval: Duration::from_millis(250),
-        keepalive_interval: Duration::from_millis(250),
+        // Leave some fields to default to demonstrate forward-compatible pattern
+        ..Default::default()
     };
 
     let _sess = SessionBuilder::<StubConfig>::new()

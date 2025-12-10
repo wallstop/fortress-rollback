@@ -1,16 +1,27 @@
 // special thanks to james7132
+//!
+//! # Compression Module
+//!
+//! This module provides XOR delta encoding and RLE compression for network messages.
+//!
+//! # Note
+//!
+//! These functions are re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
+//! They are not part of the stable public API.
 
-pub(crate) fn encode<'a>(
-    reference: &[u8],
-    pending_input: impl Iterator<Item = &'a Vec<u8>>,
-) -> Vec<u8> {
+use crate::report_violation;
+use crate::telemetry::{ViolationKind, ViolationSeverity};
+
+/// Encodes input bytes using XOR delta encoding followed by RLE compression.
+pub fn encode<'a>(reference: &[u8], pending_input: impl Iterator<Item = &'a Vec<u8>>) -> Vec<u8> {
     // first, do a XOR encoding to the reference input (will probably lead to a lot of same bits in sequence)
     let buf = delta_encode(reference, pending_input);
     // then, RLE encode the buffer (making use of the property mentioned above)
     bitfield_rle::encode(buf)
 }
 
-pub(crate) fn delta_encode<'a>(
+/// Performs XOR delta encoding against a reference.
+pub fn delta_encode<'a>(
     ref_bytes: &[u8],
     pending_input: impl Iterator<Item = &'a Vec<u8>>,
 ) -> Vec<u8> {
@@ -20,7 +31,17 @@ pub(crate) fn delta_encode<'a>(
 
     for input in pending_input {
         let input_bytes = input;
-        assert_eq!(input_bytes.len(), ref_bytes.len());
+        // Validate input length matches reference - skip mismatched inputs with warning
+        if input_bytes.len() != ref_bytes.len() {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "delta_encode: input length {} doesn't match reference length {} - skipping",
+                input_bytes.len(),
+                ref_bytes.len()
+            );
+            continue;
+        }
 
         for (b1, b2) in ref_bytes.iter().zip(input_bytes.iter()) {
             bytes.push(b1 ^ b2);
@@ -29,7 +50,8 @@ pub(crate) fn delta_encode<'a>(
     bytes
 }
 
-pub(crate) fn decode(
+/// Decodes RLE-compressed XOR delta-encoded data.
+pub fn decode(
     reference: &[u8],
     data: &[u8],
 ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
@@ -37,13 +59,42 @@ pub(crate) fn decode(
     let buf = bitfield_rle::decode(data)?;
 
     // decode the delta-encoding
-    Ok(delta_decode(reference, &buf))
+    delta_decode(reference, &buf)
 }
 
+/// Decodes XOR delta-encoded data against a reference.
 // Note: is_multiple_of() is nightly-only, so we use modulo
 #[allow(clippy::manual_is_multiple_of)]
-pub(crate) fn delta_decode(ref_bytes: &[u8], data: &[u8]) -> Vec<Vec<u8>> {
-    assert!(!ref_bytes.is_empty() && data.len() % ref_bytes.len() == 0);
+pub fn delta_decode(
+    ref_bytes: &[u8],
+    data: &[u8],
+) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
+    // Validate preconditions - return error instead of panicking
+    if ref_bytes.is_empty() {
+        report_violation!(
+            ViolationSeverity::Error,
+            ViolationKind::NetworkProtocol,
+            "delta_decode: reference bytes is empty"
+        );
+        return Err("delta_decode: reference bytes is empty".into());
+    }
+
+    if data.len() % ref_bytes.len() != 0 {
+        report_violation!(
+            ViolationSeverity::Error,
+            ViolationKind::NetworkProtocol,
+            "delta_decode: data length {} is not a multiple of reference length {}",
+            data.len(),
+            ref_bytes.len()
+        );
+        return Err(format!(
+            "delta_decode: data length {} is not a multiple of reference length {}",
+            data.len(),
+            ref_bytes.len()
+        )
+        .into());
+    }
+
     let out_size = data.len() / ref_bytes.len();
     let mut output = Vec::with_capacity(out_size);
 
@@ -55,12 +106,10 @@ pub(crate) fn delta_decode(ref_bytes: &[u8], data: &[u8]) -> Vec<Vec<u8>> {
         output.push(buffer);
     }
 
-    output
-}
-
-// #########
-// # TESTS #
-// #########
+    Ok(output)
+} // #########
+  // # TESTS #
+  // #########
 
 #[cfg(test)]
 mod compression_tests {
@@ -129,9 +178,41 @@ mod compression_tests {
         let inputs = vec![input.clone()];
 
         let encoded = delta_encode(&ref_bytes, inputs.iter());
-        let decoded = delta_decode(&ref_bytes, &encoded);
+        let decoded = delta_decode(&ref_bytes, &encoded).unwrap();
 
         assert_eq!(decoded, inputs);
+    }
+
+    #[test]
+    fn test_delta_decode_empty_reference_returns_error() {
+        let ref_bytes: Vec<u8> = vec![];
+        let data = vec![1, 2, 3];
+
+        let result = delta_decode(&ref_bytes, &data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_delta_decode_misaligned_data_returns_error() {
+        let ref_bytes = vec![1, 2, 3, 4];
+        let data = vec![1, 2, 3]; // Not a multiple of 4
+
+        let result = delta_decode(&ref_bytes, &data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_delta_encode_skips_mismatched_inputs() {
+        let ref_bytes = vec![1, 2, 3, 4];
+        let good_input = vec![5, 6, 7, 8];
+        let bad_input = vec![1, 2]; // Wrong length
+        let inputs = [good_input.clone(), bad_input, good_input.clone()];
+
+        let encoded = delta_encode(&ref_bytes, inputs.iter());
+
+        // Should only have encoded the two good inputs (8 bytes total)
+        // Each good input XORs with ref to produce 4 bytes
+        assert_eq!(encoded.len(), 8);
     }
 }
 
@@ -189,7 +270,7 @@ mod property_tests {
             proptest::test_runner::TestRunner::default()
                 .run(&combined, |(ref_bytes, inputs)| {
                     let encoded = delta_encode(&ref_bytes, inputs.iter());
-                    let decoded = delta_decode(&ref_bytes, &encoded);
+                    let decoded = delta_decode(&ref_bytes, &encoded).expect("decode should succeed");
                     prop_assert_eq!(decoded, inputs);
                     Ok(())
                 })?;

@@ -4,7 +4,7 @@ use crate::network::messages::ConnectionStatus;
 use crate::network::network_stats::NetworkStats;
 use crate::network::protocol::UdpProtocol;
 use crate::report_violation;
-use crate::sessions::builder::ProtocolConfig;
+use crate::sessions::builder::{ProtocolConfig, SaveMode};
 use crate::sync_layer::SyncLayer;
 use crate::telemetry::{ViolationKind, ViolationObserver, ViolationSeverity};
 use crate::DesyncDetection;
@@ -24,13 +24,22 @@ const RECOMMENDATION_INTERVAL: Frame = Frame::new(60);
 const MIN_RECOMMENDATION: u32 = 3;
 const MAX_EVENT_QUEUE_SIZE: usize = 100;
 
-pub(crate) struct PlayerRegistry<T>
+/// Registry tracking all players and their connection states.
+///
+/// # Note
+///
+/// This type is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
+/// It is not part of the stable public API.
+pub struct PlayerRegistry<T>
 where
     T: Config,
 {
-    pub(crate) handles: BTreeMap<PlayerHandle, PlayerType<T::Address>>,
-    pub(crate) remotes: BTreeMap<T::Address, UdpProtocol<T>>,
-    pub(crate) spectators: BTreeMap<T::Address, UdpProtocol<T>>,
+    /// Map from player handles to their types.
+    pub handles: BTreeMap<PlayerHandle, PlayerType<T::Address>>,
+    /// Map from addresses to protocol handlers for remote players.
+    pub remotes: BTreeMap<T::Address, UdpProtocol<T>>,
+    /// Map from addresses to protocol handlers for spectators.
+    pub spectators: BTreeMap<T::Address, UdpProtocol<T>>,
 }
 
 impl<T> std::fmt::Debug for PlayerRegistry<T>
@@ -38,16 +47,25 @@ where
     T: Config,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to ensure all fields are included when new fields are added.
+        let Self {
+            handles,
+            remotes,
+            spectators,
+        } = self;
+
         f.debug_struct("PlayerRegistry")
-            .field("handles", &self.handles)
-            .field("remotes", &self.remotes.keys())
-            .field("spectators", &self.spectators.keys())
+            .field("handles", handles)
+            .field("remotes", &remotes.keys())
+            .field("spectators", &spectators.keys())
             .finish()
     }
 }
 
 impl<T: Config> PlayerRegistry<T> {
-    pub(crate) fn new() -> Self {
+    /// Creates a new empty player registry.
+    #[must_use]
+    pub fn new() -> Self {
         Self {
             handles: BTreeMap::new(),
             remotes: BTreeMap::new(),
@@ -55,7 +73,9 @@ impl<T: Config> PlayerRegistry<T> {
         }
     }
 
-    pub(crate) fn local_player_handles(&self) -> Vec<PlayerHandle> {
+    /// Returns handles for all local players.
+    #[must_use]
+    pub fn local_player_handles(&self) -> Vec<PlayerHandle> {
         self.handles
             .iter()
             .filter_map(|(k, v)| match v {
@@ -66,7 +86,9 @@ impl<T: Config> PlayerRegistry<T> {
             .collect()
     }
 
-    pub(crate) fn remote_player_handles(&self) -> Vec<PlayerHandle> {
+    /// Returns handles for all remote players.
+    #[must_use]
+    pub fn remote_player_handles(&self) -> Vec<PlayerHandle> {
         self.handles
             .iter()
             .filter_map(|(k, v)| match v {
@@ -77,7 +99,9 @@ impl<T: Config> PlayerRegistry<T> {
             .collect()
     }
 
-    pub(crate) fn spectator_handles(&self) -> Vec<PlayerHandle> {
+    /// Returns handles for all spectators.
+    #[must_use]
+    pub fn spectator_handles(&self) -> Vec<PlayerHandle> {
         self.handles
             .iter()
             .filter_map(|(k, v)| match v {
@@ -88,20 +112,25 @@ impl<T: Config> PlayerRegistry<T> {
             .collect()
     }
 
-    pub(crate) fn num_players(&self) -> usize {
+    /// Returns the number of players (local + remote, excluding spectators).
+    #[must_use]
+    pub fn num_players(&self) -> usize {
         self.handles
             .iter()
             .filter(|(_, v)| matches!(v, PlayerType::Local | PlayerType::Remote(_)))
             .count()
     }
 
-    pub(crate) fn num_spectators(&self) -> usize {
+    /// Returns the number of spectators.
+    #[must_use]
+    pub fn num_spectators(&self) -> usize {
         self.handles
             .iter()
             .filter(|(_, v)| matches!(v, PlayerType::Spectator(_)))
             .count()
     }
 
+    /// Returns all handles associated with a given address.
     pub fn handles_by_address(&self, addr: T::Address) -> Vec<PlayerHandle> {
         let handles: Vec<PlayerHandle> = self
             .handles
@@ -117,6 +146,12 @@ impl<T: Config> PlayerRegistry<T> {
     }
 }
 
+impl<T: Config> Default for PlayerRegistry<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A [`P2PSession`] provides all functionality to connect to remote clients in a peer-to-peer fashion, exchange inputs and handle the gamestate by saving, loading and advancing.
 pub struct P2PSession<T>
 where
@@ -128,8 +163,8 @@ where
     max_prediction: usize,
     /// The sync layer handles player input queues and provides predictions.
     sync_layer: SyncLayer<T>,
-    /// With sparse saving, the session will only request to save the minimum confirmed frame.
-    sparse_saving: bool,
+    /// Controls how game states are saved for rollback.
+    save_mode: SaveMode,
 
     /// If we receive a disconnect from another client, we have to rollback from that frame on in order to prevent wrong predictions
     disconnect_frame: Frame,
@@ -180,11 +215,12 @@ impl<T: Config> P2PSession<T> {
         max_prediction: usize,
         socket: Box<dyn NonBlockingSocket<T::Address>>,
         players: PlayerRegistry<T>,
-        sparse_saving: bool,
+        save_mode: SaveMode,
         desync_detection: DesyncDetection,
         input_delay: usize,
         violation_observer: Option<Arc<dyn ViolationObserver>>,
         protocol_config: ProtocolConfig,
+        queue_length: usize,
     ) -> Self {
         // local connection status
         let mut local_connect_status = Vec::new();
@@ -193,7 +229,8 @@ impl<T: Config> P2PSession<T> {
         }
 
         // sync layer & set input delay
-        let mut sync_layer = SyncLayer::new(num_players, max_prediction);
+        let mut sync_layer =
+            SyncLayer::with_queue_length(num_players, max_prediction, queue_length);
         for (player_handle, player_type) in players.handles.iter() {
             if let PlayerType::Local = player_type {
                 // This should never fail during construction as player handles are validated
@@ -210,7 +247,7 @@ impl<T: Config> P2PSession<T> {
             SessionState::Synchronizing
         };
 
-        let sparse_saving = if max_prediction == 0 && sparse_saving {
+        let save_mode = if max_prediction == 0 && save_mode == SaveMode::Sparse {
             // in lockstep mode, saving will never happen, but we use the last saved frame to mark
             // control marking frames confirmed, so we need to turn off sparse saving to ensure that
             // frames are marked as confirmed - otherwise we will never advance the game state.
@@ -219,16 +256,16 @@ impl<T: Config> P2PSession<T> {
                 ViolationKind::Configuration,
                 "Sparse saving setting is ignored because lockstep mode is on (max_prediction set to 0), so no saving will take place"
             );
-            false
+            SaveMode::EveryFrame
         } else {
-            sparse_saving
+            save_mode
         };
 
         Self {
             state,
             num_players,
             max_prediction,
-            sparse_saving,
+            save_mode,
             socket,
             local_connect_status,
             next_recommended_sleep: Frame::new(0),
@@ -361,7 +398,7 @@ impl<T: Config> P2PSession<T> {
 
             // request gamestate save of current frame
             let last_saved = self.sync_layer.last_saved_frame();
-            if self.sparse_saving {
+            if self.save_mode == SaveMode::Sparse {
                 self.check_last_saved_state(last_saved, confirmed_frame, &mut requests)?;
             } else {
                 // without sparse saving, always save the current frame after correcting and rollbacking
@@ -378,7 +415,7 @@ impl<T: Config> P2PSession<T> {
 
         // set the last confirmed frame and discard all saved inputs before that frame
         self.sync_layer
-            .set_last_confirmed_frame(confirmed_frame, self.sparse_saving);
+            .set_last_confirmed_frame(confirmed_frame, self.save_mode);
 
         /*
          *  WAIT RECOMMENDATION
@@ -554,18 +591,21 @@ impl<T: Config> P2PSession<T> {
         player_handle: PlayerHandle,
     ) -> Result<NetworkStats, FortressError> {
         match self.player_reg.handles.get(&player_handle) {
-            Some(PlayerType::Remote(addr)) => self
-                .player_reg
-                .remotes
-                .get(addr)
-                .expect("Endpoint should exist for any registered player")
-                .network_stats(),
-            Some(PlayerType::Spectator(addr)) => self
-                .player_reg
-                .remotes
-                .get(addr)
-                .expect("Endpoint should exist for any registered player")
-                .network_stats(),
+            Some(PlayerType::Remote(addr)) => match self.player_reg.remotes.get(addr) {
+                Some(endpoint) => endpoint.network_stats(),
+                None => Err(FortressError::InternalError {
+                    context: format!(
+                        "Endpoint not found for registered remote player at {:?}",
+                        addr
+                    ),
+                }),
+            },
+            Some(PlayerType::Spectator(addr)) => match self.player_reg.remotes.get(addr) {
+                Some(endpoint) => endpoint.network_stats(),
+                None => Err(FortressError::InternalError {
+                    context: format!("Endpoint not found for registered spectator at {:?}", addr),
+                }),
+            },
             _ => Err(FortressError::InvalidRequest {
                 info: "Given player handle not referring to a remote player or spectator"
                     .to_owned(),
@@ -574,6 +614,7 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// Returns the highest confirmed frame. We have received all input for this frame and it is thus correct.
+    #[must_use]
     pub fn confirmed_frame(&self) -> Frame {
         let mut confirmed_frame = Frame::new(i32::MAX);
 
@@ -596,11 +637,13 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// Returns the current frame of a session.
+    #[must_use]
     pub fn current_frame(&self) -> Frame {
         self.sync_layer.current_frame()
     }
 
     /// Returns the maximum prediction window of a session.
+    #[must_use]
     pub fn max_prediction(&self) -> usize {
         self.max_prediction
     }
@@ -609,16 +652,19 @@ impl<T: Config> P2PSession<T> {
     ///
     /// In lockstep mode, a session will only advance if the current frame has inputs confirmed from
     /// all other players.
+    #[must_use]
     pub fn in_lockstep_mode(&mut self) -> bool {
         self.max_prediction == 0
     }
 
     /// Returns the current [`SessionState`] of a session.
+    #[must_use]
     pub fn current_state(&self) -> SessionState {
         self.state
     }
 
     /// Returns all events that happened since last queried for events. If the number of stored events exceeds `MAX_EVENT_QUEUE_SIZE`, the oldest events will be discarded.
+    #[must_use]
     pub fn events(&mut self) -> Drain<'_, FortressEvent<T>> {
         self.event_queue.drain(..)
     }
@@ -665,41 +711,49 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// Returns the number of players added to this session
+    #[must_use]
     pub fn num_players(&self) -> usize {
         self.player_reg.num_players()
     }
 
     /// Return the number of spectators currently registered
+    #[must_use]
     pub fn num_spectators(&self) -> usize {
         self.player_reg.num_spectators()
     }
 
     /// Returns the handles of local players that have been added
+    #[must_use]
     pub fn local_player_handles(&self) -> Vec<PlayerHandle> {
         self.player_reg.local_player_handles()
     }
 
     /// Returns the handles of remote players that have been added
+    #[must_use]
     pub fn remote_player_handles(&self) -> Vec<PlayerHandle> {
         self.player_reg.remote_player_handles()
     }
 
     /// Returns the handles of spectators that have been added
+    #[must_use]
     pub fn spectator_handles(&self) -> Vec<PlayerHandle> {
         self.player_reg.spectator_handles()
     }
 
     /// Returns all handles associated to a certain address
+    #[must_use]
     pub fn handles_by_address(&self, addr: T::Address) -> Vec<PlayerHandle> {
         self.player_reg.handles_by_address(addr)
     }
 
     /// Returns the number of frames this session is estimated to be ahead of other sessions
+    #[must_use]
     pub fn frames_ahead(&self) -> i32 {
         self.frames_ahead
     }
 
     /// Returns the [`DesyncDetection`] mode set for this session at creation time.
+    #[must_use]
     pub fn desync_detection(&self) -> DesyncDetection {
         self.desync_detection
     }
@@ -710,6 +764,7 @@ impl<T: Config> P2PSession<T> {
     /// when using a [`CollectingObserver`] or similar.
     ///
     /// [`CollectingObserver`]: crate::telemetry::CollectingObserver
+    #[must_use]
     pub fn violation_observer(&self) -> Option<&Arc<dyn ViolationObserver>> {
         self.violation_observer.as_ref()
     }
@@ -802,7 +857,7 @@ impl<T: Config> P2PSession<T> {
     ) -> Result<(), FortressError> {
         let current_frame = self.sync_layer.current_frame();
         // determine the frame to load
-        let frame_to_load = if self.sparse_saving {
+        let frame_to_load = if self.save_mode == SaveMode::Sparse {
             // if sparse saving is turned on, we will rollback to the last saved state
             self.sync_layer.last_saved_frame()
         } else {
@@ -849,7 +904,7 @@ impl<T: Config> P2PSession<T> {
                 .synchronized_inputs(&self.local_connect_status);
 
             // decide whether to request a state save
-            if self.sparse_saving {
+            if self.save_mode == SaveMode::Sparse {
                 // with sparse saving, we only save exactly the min_confirmed frame
                 if self.sync_layer.current_frame() == min_confirmed {
                     requests.push(self.sync_layer.save_current_state());
@@ -892,11 +947,35 @@ impl<T: Config> P2PSession<T> {
             let mut inputs = self
                 .sync_layer
                 .confirmed_inputs(self.next_spectator_frame, &self.local_connect_status)?;
-            assert_eq!(inputs.len(), self.num_players);
+
+            // Validate input count matches num_players - this should always hold due to construction
+            // but we recover gracefully rather than panic if somehow violated
+            if inputs.len() != self.num_players {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InternalError,
+                    "confirmed_inputs returned {} inputs but expected {} - skipping spectator send for frame {}",
+                    inputs.len(),
+                    self.num_players,
+                    self.next_spectator_frame
+                );
+                self.next_spectator_frame += 1;
+                continue;
+            }
 
             let mut input_map = BTreeMap::new();
             for (handle, input) in inputs.iter_mut().enumerate() {
-                assert!(input.frame == Frame::NULL || input.frame == self.next_spectator_frame);
+                // Validate frame consistency - should be NULL or match expected frame
+                if input.frame != Frame::NULL && input.frame != self.next_spectator_frame {
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::FrameSync,
+                        "Input frame {} doesn't match expected spectator frame {} for handle {}",
+                        input.frame,
+                        self.next_spectator_frame,
+                        handle
+                    );
+                }
                 input_map.insert(PlayerHandle::new(handle), *input);
             }
 
@@ -979,13 +1058,11 @@ impl<T: Config> P2PSession<T> {
             && self.frames_ahead >= MIN_RECOMMENDATION as i32
         {
             self.next_recommended_sleep = self.sync_layer.current_frame() + RECOMMENDATION_INTERVAL;
+            // frames_ahead is guaranteed to be >= MIN_RECOMMENDATION (positive), so try_into should succeed.
+            // Using unwrap_or(0) as defense-in-depth; 0 effectively skips the recommendation.
+            let skip_frames = self.frames_ahead.try_into().unwrap_or(0);
             self.event_queue
-                .push_back(FortressEvent::WaitRecommendation {
-                    skip_frames: self
-                        .frames_ahead
-                        .try_into()
-                        .expect("frames ahead is negative despite being positive."),
-                });
+                .push_back(FortressEvent::WaitRecommendation { skip_frames });
         }
     }
 

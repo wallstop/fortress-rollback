@@ -5,6 +5,7 @@ use crate::error::FortressError;
 use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::report_violation;
+use crate::sessions::builder::SaveMode;
 use crate::sync_layer::SyncLayer;
 use crate::telemetry::{ViolationKind, ViolationObserver, ViolationSeverity};
 use crate::{Config, FortressRequest, Frame, PlayerHandle};
@@ -27,6 +28,11 @@ where
 }
 
 impl<T: Config> SyncTestSession<T> {
+    /// Creates a new sync test session with the default queue length.
+    ///
+    /// Note: This function exists for backward compatibility.
+    /// The main construction path uses `with_queue_length` via `SessionBuilder`.
+    #[allow(dead_code)]
     pub(crate) fn new(
         num_players: usize,
         max_prediction: usize,
@@ -34,12 +40,31 @@ impl<T: Config> SyncTestSession<T> {
         input_delay: usize,
         violation_observer: Option<Arc<dyn ViolationObserver>>,
     ) -> Self {
+        Self::with_queue_length(
+            num_players,
+            max_prediction,
+            check_distance,
+            input_delay,
+            violation_observer,
+            crate::input_queue::INPUT_QUEUE_LENGTH,
+        )
+    }
+
+    pub(crate) fn with_queue_length(
+        num_players: usize,
+        max_prediction: usize,
+        check_distance: usize,
+        input_delay: usize,
+        violation_observer: Option<Arc<dyn ViolationObserver>>,
+        queue_length: usize,
+    ) -> Self {
         let mut dummy_connect_status = Vec::new();
         for _ in 0..num_players {
             dummy_connect_status.push(ConnectionStatus::default());
         }
 
-        let mut sync_layer = SyncLayer::new(num_players, max_prediction);
+        let mut sync_layer =
+            SyncLayer::with_queue_length(num_players, max_prediction, queue_length);
         for i in 0..num_players {
             // This should never fail during construction as player handles are sequential and valid
             sync_layer
@@ -150,7 +175,8 @@ impl<T: Config> SyncTestSession<T> {
         // inputs from other players
         let safe_frame = self.sync_layer.current_frame() - self.check_distance as i32;
 
-        self.sync_layer.set_last_confirmed_frame(safe_frame, false);
+        self.sync_layer
+            .set_last_confirmed_frame(safe_frame, SaveMode::EveryFrame);
 
         // also, we update the dummy connect status to pretend that we received inputs from all players
         for con_stat in &mut self.dummy_connect_status {
@@ -161,21 +187,25 @@ impl<T: Config> SyncTestSession<T> {
     }
 
     /// Returns the current frame of a session.
+    #[must_use]
     pub fn current_frame(&self) -> Frame {
         self.sync_layer.current_frame()
     }
 
     /// Returns the number of players this session was constructed with.
+    #[must_use]
     pub fn num_players(&self) -> usize {
         self.num_players
     }
 
     /// Returns the maximum prediction window of a session.
+    #[must_use]
     pub fn max_prediction(&self) -> usize {
         self.max_prediction
     }
 
     /// Returns the check distance set on creation, i.e. the length of the simulated rollbacks
+    #[must_use]
     pub fn check_distance(&self) -> usize {
         self.check_distance
     }
@@ -186,6 +216,7 @@ impl<T: Config> SyncTestSession<T> {
     /// when using a [`CollectingObserver`] or similar.
     ///
     /// [`CollectingObserver`]: crate::telemetry::CollectingObserver
+    #[must_use]
     pub fn violation_observer(&self) -> Option<&Arc<dyn ViolationObserver>> {
         self.violation_observer.as_ref()
     }

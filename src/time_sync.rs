@@ -1,3 +1,5 @@
+use crate::report_violation;
+use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::Frame;
 
 /// Default window size for time synchronization frame advantage calculation.
@@ -17,11 +19,13 @@ const DEFAULT_FRAME_WINDOW_SIZE: usize = 30;
 /// // For more responsive sync (may cause more fluctuation)
 /// let responsive_config = TimeSyncConfig {
 ///     window_size: 15,
+///     ..TimeSyncConfig::default()
 /// };
 ///
 /// // For smoother sync (slower to adapt to changes)
 /// let smooth_config = TimeSyncConfig {
 ///     window_size: 60,
+///     ..TimeSyncConfig::default()
 /// };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +49,7 @@ impl Default for TimeSyncConfig {
 
 impl TimeSyncConfig {
     /// Creates a new `TimeSyncConfig` with default values.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -53,6 +58,7 @@ impl TimeSyncConfig {
     ///
     /// Uses a smaller window to react quickly to network changes,
     /// at the cost of potentially more fluctuation in game speed.
+    #[must_use]
     pub fn responsive() -> Self {
         Self { window_size: 15 }
     }
@@ -61,6 +67,7 @@ impl TimeSyncConfig {
     ///
     /// Uses a larger window to provide stable, smooth synchronization,
     /// at the cost of slower adaptation to network changes.
+    #[must_use]
     pub fn smooth() -> Self {
         Self { window_size: 60 }
     }
@@ -68,13 +75,23 @@ impl TimeSyncConfig {
     /// Configuration preset for LAN play.
     ///
     /// Uses a small window since LAN connections are typically stable.
+    #[must_use]
     pub fn lan() -> Self {
         Self { window_size: 10 }
     }
 }
 
+/// Handles time synchronization between peers.
+///
+/// TimeSync tracks frame advantage differentials between local and remote peers,
+/// using a rolling window average to smooth out network jitter.
+///
+/// # Note
+///
+/// This type is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
+/// It is not part of the stable public API.
 #[derive(Debug)]
-pub(crate) struct TimeSync {
+pub struct TimeSync {
     local: Vec<i32>,
     remote: Vec<i32>,
     window_size: usize,
@@ -87,12 +104,15 @@ impl Default for TimeSync {
 }
 
 impl TimeSync {
-    pub(crate) fn new() -> Self {
+    /// Creates a new TimeSync with default configuration.
+    #[must_use]
+    pub fn new() -> Self {
         Self::default()
     }
 
     /// Creates a new TimeSync with the given configuration.
-    pub(crate) fn with_config(config: TimeSyncConfig) -> Self {
+    #[must_use]
+    pub fn with_config(config: TimeSyncConfig) -> Self {
         let window_size = config.window_size.max(1); // Ensure at least 1
         Self {
             local: vec![0; window_size],
@@ -101,12 +121,27 @@ impl TimeSync {
         }
     }
 
-    pub(crate) fn advance_frame(&mut self, frame: Frame, local_adv: i32, remote_adv: i32) {
+    /// Advances the time sync state for a frame.
+    pub fn advance_frame(&mut self, frame: Frame, local_adv: i32, remote_adv: i32) {
+        // Handle NULL or negative frames gracefully - this can happen if input serialization
+        // fails (returns Frame::NULL), or in edge cases during initialization.
+        // We skip the update rather than panic on invalid array index.
+        if frame.is_null() || frame.as_i32() < 0 {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "TimeSync::advance_frame called with invalid frame {:?}, skipping update",
+                frame
+            );
+            return;
+        }
         self.local[frame.as_i32() as usize % self.window_size] = local_adv;
         self.remote[frame.as_i32() as usize % self.window_size] = remote_adv;
     }
 
-    pub(crate) fn average_frame_advantage(&self) -> i32 {
+    /// Calculates the average frame advantage between local and remote peers.
+    #[must_use]
+    pub fn average_frame_advantage(&self) -> i32 {
         // average local and remote frame advantages
         let local_sum: i32 = self.local.iter().sum();
         let local_avg = local_sum as f32 / self.local.len() as f32;
@@ -261,5 +296,36 @@ mod sync_layer_tests {
         // The value should be stored at position 1000 % 30 = 10
         assert_eq!(time_sync.local[10], 5);
         assert_eq!(time_sync.remote[10], -5);
+    }
+
+    #[test]
+    fn test_advance_frame_null_frame_skipped() {
+        let mut time_sync = TimeSync::default();
+
+        // Initialize with some known values first
+        time_sync.advance_frame(Frame::new(0), 10, 20);
+        assert_eq!(time_sync.local[0], 10);
+        assert_eq!(time_sync.remote[0], 20);
+
+        // Advance with NULL frame - should be skipped
+        time_sync.advance_frame(Frame::NULL, 99, 99);
+
+        // Values should not have changed (NULL frame is skipped)
+        // Note: NULL is -1, which would wrap to a large index if not handled
+        // The test passes if we don't panic
+        assert_eq!(time_sync.local[0], 10); // unchanged
+    }
+
+    #[test]
+    fn test_advance_frame_negative_frame_skipped() {
+        let mut time_sync = TimeSync::default();
+
+        // Initialize with some known values first
+        time_sync.advance_frame(Frame::new(5), 10, 20);
+
+        // Advance with negative frame - should be skipped (no panic)
+        time_sync.advance_frame(Frame::new(-5), 99, 99);
+
+        // Test passes if we don't panic from invalid array index
     }
 }

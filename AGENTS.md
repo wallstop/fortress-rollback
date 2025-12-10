@@ -46,6 +46,13 @@ GGRS is a Rust implementation of GGPO rollback networking. This fork focuses on:
 - **Invariants represent real safety properties** - only relax with strong justification
 - **Review spec changes carefully** - ensure they don't hide real bugs
 
+**Breaking Changes Policy:**
+- **API compatibility is NOT required** - Breaking the public API is acceptable
+- **Safety over compatibility** - If a change improves correctness or safety, make it
+- **Ergonomics over compatibility** - If a change makes the API harder to misuse, make it
+- **Document breaking changes** - Update CHANGELOG.md and MIGRATION.md as needed
+- **This is a fork, not a drop-in replacement** - We prioritize production-grade quality over backwards compatibility
+
 **When Formal Verification or Analysis Reveals Issues:**
 After fixing any bug discovered through formal verification, code review, or other analysis:
 1. **Add comprehensive regression tests** - Cover the exact scenario that was discovered
@@ -320,7 +327,8 @@ for request in session.events() {
 ## Quality Gates
 
 Before suggesting code, verify:
-- ✅ After every major change, run `cargo fmt`, `cargo clippy --all-targets --all-features`, and `cargo test`; fix all resulting issues before proceeding
+- ✅ After every major change, run `cargo fmt`, `cargo clippy --all-targets`, and `cargo test`; fix all resulting issues before proceeding
+  - Note: Use `--all-features` only when you need Z3 verification (it compiles Z3 from source which is slow)
 - ✅ Compiles without warnings
 - ✅ All tests pass
 - ✅ Documentation is complete

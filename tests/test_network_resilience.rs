@@ -10,7 +10,7 @@
 mod stubs;
 
 use fortress_rollback::{
-    ChaosConfig, ChaosSocket, FortressError, PlayerHandle, PlayerType, SessionBuilder,
+    ChaosConfig, ChaosSocket, FortressError, PlayerHandle, PlayerType, SaveMode, SessionBuilder,
     SessionState, UdpNonBlockingSocket,
 };
 use serial_test::serial;
@@ -2173,14 +2173,14 @@ fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
     // Enable sparse saving mode
     let socket1 = create_chaos_socket(9055, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
-        .with_sparse_saving_mode(true)
+        .with_save_mode(SaveMode::Sparse)
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
     let socket2 = create_chaos_socket(9056, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
-        .with_sparse_saving_mode(true)
+        .with_save_mode(SaveMode::Sparse)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;

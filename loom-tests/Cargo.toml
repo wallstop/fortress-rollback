@@ -1,0 +1,20 @@
+[package]
+name = "fortress-rollback-loom-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+# Minimal dependencies - just fortress-rollback and loom
+[dependencies]
+fortress-rollback = { path = ".." }
+
+[dev-dependencies]
+loom = "0.7"
+
+# This crate only exists for loom testing
+[[test]]
+name = "loom_game_state_cell"
+path = "tests/loom_game_state_cell.rs"

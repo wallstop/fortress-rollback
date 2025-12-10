@@ -36,6 +36,7 @@ impl Default for GameStub {
 
 impl GameStub {
     #[allow(dead_code)]
+    #[must_use]
     pub fn new() -> GameStub {
         GameStub {
             gs: StateStub { frame: 0, state: 0 },
@@ -49,6 +50,7 @@ impl GameStub {
                 FortressRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
                 FortressRequest::SaveGameState { cell, frame } => self.save_game_state(cell, frame),
                 FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
+                _ => unreachable!("Unknown request type"),
             }
         }
     }
@@ -81,6 +83,7 @@ impl Default for RandomChecksumGameStub {
 
 impl RandomChecksumGameStub {
     #[allow(dead_code)]
+    #[must_use]
     pub fn new() -> RandomChecksumGameStub {
         RandomChecksumGameStub {
             gs: StateStub { frame: 0, state: 0 },
@@ -95,6 +98,7 @@ impl RandomChecksumGameStub {
                 FortressRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
                 FortressRequest::SaveGameState { cell, frame } => self.save_game_state(cell, frame),
                 FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
+                _ => unreachable!("Unknown request type"),
             }
         }
     }

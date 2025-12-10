@@ -2,9 +2,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::Frame;
 
+/// Connection status for a peer in the network protocol.
+///
+/// # Note
+///
+/// This type is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
+/// It is not part of the stable public API.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ConnectionStatus {
+pub struct ConnectionStatus {
+    /// Whether this peer has disconnected.
     pub disconnected: bool,
+    /// The last frame received from this peer.
     pub last_frame: Frame,
 }
 
@@ -50,12 +58,21 @@ impl Default for Input {
 
 impl std::fmt::Debug for Input {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to ensure all fields are included when new fields are added.
+        let Self {
+            peer_connect_status,
+            disconnect_requested,
+            start_frame,
+            ack_frame,
+            bytes,
+        } = self;
+
         f.debug_struct("Input")
-            .field("peer_connect_status", &self.peer_connect_status)
-            .field("disconnect_requested", &self.disconnect_requested)
-            .field("start_frame", &self.start_frame)
-            .field("ack_frame", &self.ack_frame)
-            .field("bytes", &BytesDebug(&self.bytes))
+            .field("peer_connect_status", peer_connect_status)
+            .field("disconnect_requested", disconnect_requested)
+            .field("start_frame", start_frame)
+            .field("ack_frame", ack_frame)
+            .field("bytes", &BytesDebug(bytes))
             .finish()
     }
 }
@@ -138,4 +155,192 @@ pub(crate) enum MessageBody {
 pub struct Message {
     pub(crate) header: MessageHeader,
     pub(crate) body: MessageBody,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connection_status_default() {
+        let status = ConnectionStatus::default();
+        assert!(!status.disconnected);
+        assert_eq!(status.last_frame, Frame::NULL);
+    }
+
+    #[test]
+    fn test_connection_status_debug_clone() {
+        let status = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(100),
+        };
+        let cloned = status;
+        assert!(cloned.disconnected);
+        assert_eq!(cloned.last_frame, Frame::new(100));
+        let debug = format!("{:?}", status);
+        assert!(debug.contains("ConnectionStatus"));
+    }
+
+    #[test]
+    fn test_sync_request_default() {
+        let req = SyncRequest::default();
+        assert_eq!(req.random_request, 0);
+    }
+
+    #[test]
+    fn test_sync_reply_default() {
+        let reply = SyncReply::default();
+        assert_eq!(reply.random_reply, 0);
+    }
+
+    #[test]
+    fn test_input_default() {
+        let input = Input::default();
+        assert!(input.peer_connect_status.is_empty());
+        assert!(!input.disconnect_requested);
+        assert_eq!(input.start_frame, Frame::NULL);
+        assert_eq!(input.ack_frame, Frame::NULL);
+        assert!(input.bytes.is_empty());
+    }
+
+    #[test]
+    fn test_input_debug() {
+        let input = Input {
+            peer_connect_status: vec![ConnectionStatus::default()],
+            disconnect_requested: true,
+            start_frame: Frame::new(10),
+            ack_frame: Frame::new(5),
+            bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        };
+        let debug = format!("{:?}", input);
+        assert!(debug.contains("Input"));
+        assert!(debug.contains("disconnect_requested"));
+        assert!(debug.contains("0xdeadbeef"));
+    }
+
+    #[test]
+    fn test_input_ack_default() {
+        let ack = InputAck::default();
+        assert_eq!(ack.ack_frame, Frame::NULL);
+    }
+
+    #[test]
+    fn test_quality_report_default() {
+        let report = QualityReport::default();
+        assert_eq!(report.frame_advantage, 0);
+        assert_eq!(report.ping, 0);
+    }
+
+    #[test]
+    fn test_quality_reply_default() {
+        let reply = QualityReply::default();
+        assert_eq!(reply.pong, 0);
+    }
+
+    #[test]
+    fn test_checksum_report_default() {
+        let report = ChecksumReport::default();
+        assert_eq!(report.checksum, 0);
+        assert_eq!(report.frame, Frame::default());
+    }
+
+    #[test]
+    fn test_message_header_default() {
+        let header = MessageHeader::default();
+        assert_eq!(header.magic, 0);
+    }
+
+    #[test]
+    fn test_message_body_variants() {
+        // Test each variant can be created and compared
+        let sync_req = MessageBody::SyncRequest(SyncRequest { random_request: 42 });
+        let sync_req2 = MessageBody::SyncRequest(SyncRequest { random_request: 42 });
+        assert_eq!(sync_req, sync_req2);
+
+        let sync_reply = MessageBody::SyncReply(SyncReply { random_reply: 123 });
+        let debug = format!("{:?}", sync_reply);
+        assert!(debug.contains("SyncReply"));
+
+        let input = MessageBody::Input(Input::default());
+        assert!(matches!(input, MessageBody::Input(_)));
+
+        let input_ack = MessageBody::InputAck(InputAck::default());
+        assert!(matches!(input_ack, MessageBody::InputAck(_)));
+
+        let quality_report = MessageBody::QualityReport(QualityReport::default());
+        assert!(matches!(quality_report, MessageBody::QualityReport(_)));
+
+        let quality_reply = MessageBody::QualityReply(QualityReply::default());
+        assert!(matches!(quality_reply, MessageBody::QualityReply(_)));
+
+        let checksum_report = MessageBody::ChecksumReport(ChecksumReport::default());
+        assert!(matches!(checksum_report, MessageBody::ChecksumReport(_)));
+
+        let keep_alive = MessageBody::KeepAlive;
+        assert!(matches!(keep_alive, MessageBody::KeepAlive));
+    }
+
+    #[test]
+    fn test_message_clone_eq() {
+        let msg = Message {
+            header: MessageHeader { magic: 0x1234 },
+            body: MessageBody::KeepAlive,
+        };
+        let cloned = msg.clone();
+        assert_eq!(msg, cloned);
+    }
+
+    #[test]
+    fn test_message_serialization() {
+        let msg = Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::SyncRequest(SyncRequest {
+                random_request: 999,
+            }),
+        };
+
+        // Test that serialization/deserialization roundtrips correctly
+        let serialized = bincode::serialize(&msg).expect("serialization should succeed");
+        let deserialized: Message =
+            bincode::deserialize(&serialized).expect("deserialization should succeed");
+        assert_eq!(msg, deserialized);
+    }
+
+    #[test]
+    fn test_input_serialization() {
+        let input = Input {
+            peer_connect_status: vec![
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(10),
+                },
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(20),
+                },
+            ],
+            disconnect_requested: false,
+            start_frame: Frame::new(100),
+            ack_frame: Frame::new(50),
+            bytes: vec![1, 2, 3, 4, 5],
+        };
+
+        let serialized = bincode::serialize(&input).expect("serialization should succeed");
+        let deserialized: Input =
+            bincode::deserialize(&serialized).expect("deserialization should succeed");
+        assert_eq!(input, deserialized);
+    }
+
+    #[test]
+    fn test_bytes_debug_empty() {
+        let input = Input {
+            peer_connect_status: vec![],
+            disconnect_requested: false,
+            start_frame: Frame::NULL,
+            ack_frame: Frame::NULL,
+            bytes: vec![],
+        };
+        let debug = format!("{:?}", input);
+        assert!(debug.contains("0x")); // Empty bytes should still show "0x" prefix
+    }
 }

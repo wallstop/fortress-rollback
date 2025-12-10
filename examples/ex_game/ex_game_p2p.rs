@@ -2,7 +2,8 @@ mod ex_game;
 
 use ex_game::{FortressConfig, Game};
 use fortress_rollback::{
-    DesyncDetection, PlayerHandle, PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket,
+    DesyncDetection, PlayerHandle, PlayerType, SaveMode, SessionBuilder, SessionState,
+    UdpNonBlockingSocket,
 };
 use instant::{Duration, Instant};
 use macroquad::prelude::*;
@@ -66,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // saving of game state takes much longer than advancing the game state N times, you can
         // improve performance by turning sparse saving mode on (N == average number of predictions
         // Fortress Rollback must make, which is determined by prediction window, FPS and latency to clients).
-        .with_sparse_saving_mode(false);
+        .with_save_mode(SaveMode::EveryFrame);
 
     // add players
     for (i, player_addr) in opt.players.iter().enumerate() {

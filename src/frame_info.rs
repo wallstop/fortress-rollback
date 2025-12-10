@@ -2,8 +2,13 @@ use crate::Frame;
 
 /// Represents the game state of your game for a single frame. The `data` holds the game state, `frame` indicates the associated frame number
 /// and `checksum` can additionally be provided for use during a `SyncTestSession`.
+///
+/// # Note
+///
+/// This type is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
+/// It is not part of the stable public API.
 #[derive(Debug, Clone)]
-pub(crate) struct GameState<S> {
+pub struct GameState<S> {
     /// The frame to which this info belongs to.
     pub frame: Frame,
     /// The game state
@@ -23,24 +28,31 @@ impl<S> Default for GameState<S> {
 }
 
 /// Represents an input for a single player in a single frame. The associated frame is denoted with `frame`.
+///
+/// # Note
+///
+/// This type is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
+/// It is not part of the stable public API.
 #[derive(Debug, Copy, Clone, PartialEq)]
-pub(crate) struct PlayerInput<I>
+pub struct PlayerInput<I>
 where
     I: Copy + Clone + PartialEq,
 {
     /// The frame to which this info belongs to. [`Frame::NULL`] represents an invalid frame
-    pub(crate) frame: Frame,
+    pub frame: Frame,
     /// The input struct given by the user
-    pub(crate) input: I,
+    pub input: I,
 }
 
 impl<I: Copy + Clone + PartialEq + Default> PlayerInput<I> {
     /// Creates a new `PlayerInput` with the given frame and input.
-    pub(crate) fn new(frame: Frame, input: I) -> Self {
+    pub fn new(frame: Frame, input: I) -> Self {
         Self { frame, input }
     }
 
-    pub(crate) fn blank_input(frame: Frame) -> Self {
+    /// Creates a blank input with the default value for the input type.
+    #[must_use]
+    pub fn blank_input(frame: Frame) -> Self {
         Self {
             frame,
             input: I::default(),

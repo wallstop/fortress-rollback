@@ -288,6 +288,7 @@ impl TestGame {
                         .log_advance(self.state.frame, self.state.value, &inputs);
                     self.state.advance(&inputs);
                 }
+                _ => unreachable!("Unknown request type"),
             }
         }
     }

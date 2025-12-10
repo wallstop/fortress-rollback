@@ -31,3 +31,5 @@ specs/**/*Rollback_TTrace_*
 states/**
 *.z3-trace
 states.dot
+
+loom-tests/target/**

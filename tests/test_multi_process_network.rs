@@ -602,9 +602,11 @@ fn test_asymmetric_network() {
 // =============================================================================
 
 /// Long session (1000 frames) with moderate packet loss.
+///
+/// Note: This test runs ~1000 frames with 5% packet loss. In release mode,
+/// it typically completes in ~2-3 seconds.
 #[test]
 #[serial]
-#[ignore] // This test takes a while, run with --ignored
 fn test_stress_long_session_with_loss() {
     let peer1_config = PeerConfig {
         local_port: 10017,
@@ -998,10 +1000,12 @@ fn test_medium_session_300_frames() {
     );
 }
 
-/// Stress test with very long session (2000 frames) - ignored by default.
+/// Stress test with very long session (2000 frames).
+///
+/// Note: This test runs 2000 frames with 3% packet loss and 20ms latency.
+/// In release mode, it typically completes in ~7-8 seconds.
 #[test]
 #[serial]
-#[ignore] // Takes a long time, run with --ignored
 fn test_stress_very_long_session() {
     let peer1_config = PeerConfig {
         local_port: 10031,
@@ -1554,16 +1558,8 @@ fn test_extreme_asymmetric_one_perfect_one_terrible() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    assert!(
-        result1.success,
-        "Perfect peer failed: {:?}",
-        result1.error
-    );
-    assert!(
-        result2.success,
-        "Terrible peer failed: {:?}",
-        result2.error
-    );
+    assert!(result1.success, "Perfect peer failed: {:?}", result1.error);
+    assert!(result2.success, "Terrible peer failed: {:?}", result2.error);
 
     assert_eq!(
         result1.final_value, result2.final_value,

@@ -24,6 +24,12 @@ This is a **fork** of GGRS (Good Game Rollback System) focused on:
 - Document invariants and preconditions
 - Suggest Z3 constraints for critical safety properties
 
+**Breaking Changes Policy:**
+- **API compatibility is NOT required** - Breaking the public API is acceptable
+- **Prefer safer/more ergonomic APIs** - If a change prevents misuse or improves safety, make it
+- **Document breaking changes** - Update CHANGELOG.md and MIGRATION.md as needed
+- **This is a production-grade fork** - Quality and correctness take precedence over backwards compatibility
+
 **Formal Verification Philosophy:**
 - **Specs model production** - TLA+/Kani/Z3 specs must accurately represent production code
 - **When verification fails, assume production has a bug first** - investigate before relaxing specs

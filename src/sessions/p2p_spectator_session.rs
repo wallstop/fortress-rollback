@@ -7,8 +7,9 @@ use crate::{
         messages::ConnectionStatus,
         protocol::{Event, UdpProtocol},
     },
+    report_violation,
     sessions::builder::MAX_EVENT_QUEUE_SIZE,
-    telemetry::ViolationObserver,
+    telemetry::{ViolationKind, ViolationObserver, ViolationSeverity},
     Config, FortressError, FortressEvent, FortressRequest, Frame, InputStatus, NetworkStats,
     NonBlockingSocket, PlayerHandle, SessionState,
 };
@@ -89,7 +90,18 @@ impl<T: Config> SpectatorSession<T> {
     /// Returns the number of frames behind the host
     pub fn frames_behind_host(&self) -> usize {
         let diff = self.last_recv_frame - self.current_frame;
-        assert!(diff >= 0);
+        // Gracefully handle the case where current_frame somehow exceeds last_recv_frame.
+        // This shouldn't happen in normal operation, but we report it and return 0 rather than panic.
+        if diff < 0 {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "frames_behind_host: current_frame {} exceeds last_recv_frame {} - returning 0",
+                self.current_frame,
+                self.last_recv_frame
+            );
+            return 0;
+        }
         diff as usize
     }
 
@@ -200,6 +212,20 @@ impl<T: Config> SpectatorSession<T> {
         &self,
         frame_to_grab: Frame,
     ) -> Result<Vec<(T::Input, InputStatus)>, FortressError> {
+        // Validate frame is valid before computing index
+        if frame_to_grab.is_null() || frame_to_grab.as_i32() < 0 {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::FrameSync,
+                "inputs_at_frame called with invalid frame {:?}",
+                frame_to_grab
+            );
+            return Err(FortressError::InvalidFrame {
+                frame: frame_to_grab,
+                reason: "Frame is NULL or negative".to_string(),
+            });
+        }
+
         let player_inputs = &self.inputs[frame_to_grab.as_i32() as usize % self.buffer_size];
 
         // We haven't received the input from the host yet. Wait.
@@ -275,11 +301,48 @@ impl<T: Config> SpectatorSession<T> {
             }
             // add the input and all associated information
             Event::Input { input, player } => {
+                // Validate frame before using as index - negative frames would wrap around
+                if input.frame.is_null() || input.frame.as_i32() < 0 {
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::FrameSync,
+                        "Received input with invalid frame {:?} for player {} - ignoring",
+                        input.frame,
+                        player
+                    );
+                    return;
+                }
+
+                // Validate player handle is in bounds
+                if player.as_usize() >= self.num_players {
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::InternalError,
+                        "Received input for player {} but only {} players configured - ignoring",
+                        player,
+                        self.num_players
+                    );
+                    return;
+                }
+
                 // save the input
                 self.inputs[input.frame.as_i32() as usize % self.buffer_size][player.as_usize()] =
                     input;
-                assert!(input.frame >= self.last_recv_frame);
-                self.last_recv_frame = input.frame;
+
+                // Validate frame ordering - should receive frames in order
+                if input.frame < self.last_recv_frame {
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::FrameSync,
+                        "Received out-of-order input: frame {} is older than last_recv_frame {}",
+                        input.frame,
+                        self.last_recv_frame
+                    );
+                    // Still update if this is a newer frame than what we had
+                }
+                if input.frame > self.last_recv_frame {
+                    self.last_recv_frame = input.frame;
+                }
 
                 // update the frame advantage
                 self.host.update_local_frame_advantage(input.frame);

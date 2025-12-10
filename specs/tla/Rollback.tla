@@ -17,6 +17,11 @@
 (*   - Safety: Deterministic restoration (SAFE-4)                          *)
 (*   - Liveness: Rollback completes (LIVE-4, disabled for CI)              *)
 (*                                                                         *)
+(* Production-Spec Alignment (as of Phase 9/10):                           *)
+(*   MAX_PREDICTION maps to SessionBuilder.max_prediction (default: 8).    *)
+(*   The invariants proven here hold for ANY valid MAX_PREDICTION > 0.     *)
+(*   TLA+ uses small values (1-3) for tractable exhaustive model checking. *)
+(*                                                                         *)
 (* REVIEW COMPLETED (Dec 7, 2025):                                         *)
 (*   Invariants INV-7 and INV-8 are now stricter, requiring lastSavedFrame *)
 (*   and lastConfirmedFrame to be <= currentFrame. The LoadState action    *)
@@ -28,9 +33,9 @@
 EXTENDS Integers, Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS
-    MAX_PREDICTION,         \* Maximum prediction window (8)
+    MAX_PREDICTION,         \* Maximum prediction window (default 8, configurable)
     MAX_FRAME,              \* Maximum frame for model checking
-    NUM_PLAYERS,            \* Number of players
+    NUM_PLAYERS,            \* Number of players (configurable, default 2)
     NULL_FRAME              \* Sentinel value (-1)
 
 ASSUME MAX_PREDICTION \in Nat /\ MAX_PREDICTION > 0

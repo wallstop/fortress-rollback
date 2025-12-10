@@ -94,6 +94,7 @@ impl Game {
                     }
                 }
                 FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
+                _ => unreachable!("Unknown request type"),
             }
         }
     }

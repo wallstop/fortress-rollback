@@ -4,7 +4,7 @@ use std::sync::Arc;
 use instant::Duration;
 
 use crate::{
-    input_queue::MAX_FRAME_DELAY, network::protocol::UdpProtocol,
+    input_queue::INPUT_QUEUE_LENGTH, network::protocol::UdpProtocol,
     sessions::p2p_session::PlayerRegistry, telemetry::ViolationObserver, time_sync::TimeSyncConfig,
     Config, DesyncDetection, FortressError, NonBlockingSocket, P2PSession, PlayerHandle,
     PlayerType, SpectatorSession, SyncTestSession,
@@ -15,6 +15,12 @@ use crate::{
 /// This struct allows fine-tuning the sync handshake behavior for different
 /// network conditions. The defaults work well for typical networks with <15%
 /// packet loss and <100ms RTT.
+///
+/// # Forward Compatibility
+///
+/// New fields may be added to this struct in future versions. To ensure your
+/// code continues to compile, always use the `..Default::default()` or
+/// `..SyncConfig::default()` pattern when constructing instances.
 ///
 /// # Example
 ///
@@ -85,6 +91,7 @@ impl Default for SyncConfig {
 
 impl SyncConfig {
     /// Creates a new `SyncConfig` with default values.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -92,6 +99,7 @@ impl SyncConfig {
     /// Configuration preset for high-latency networks (100-200ms RTT).
     ///
     /// Uses longer intervals to avoid flooding the network with retries.
+    #[must_use]
     pub fn high_latency() -> Self {
         Self {
             num_sync_packets: 5,
@@ -105,6 +113,7 @@ impl SyncConfig {
     /// Configuration preset for lossy networks (5-15% packet loss).
     ///
     /// Uses more sync packets for higher confidence and a sync timeout.
+    #[must_use]
     pub fn lossy() -> Self {
         Self {
             num_sync_packets: 8,
@@ -118,6 +127,7 @@ impl SyncConfig {
     /// Configuration preset for local network / LAN play.
     ///
     /// Uses shorter intervals and fewer sync packets for faster connection.
+    #[must_use]
     pub fn lan() -> Self {
         Self {
             num_sync_packets: 3,
@@ -133,6 +143,12 @@ impl SyncConfig {
 ///
 /// These settings control network timing, buffering, and telemetry thresholds.
 /// The defaults work well for most scenarios; adjust for specific requirements.
+///
+/// # Forward Compatibility
+///
+/// New fields may be added to this struct in future versions. To ensure your
+/// code continues to compile, always use the `..Default::default()` or
+/// `..ProtocolConfig::default()` pattern when constructing instances.
 ///
 /// # Example
 ///
@@ -223,6 +239,7 @@ impl Default for ProtocolConfig {
 
 impl ProtocolConfig {
     /// Creates a new `ProtocolConfig` with default values.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -231,6 +248,7 @@ impl ProtocolConfig {
     ///
     /// Uses faster quality reports and shorter shutdown delay for
     /// more responsive network stats and quicker cleanup.
+    #[must_use]
     pub fn competitive() -> Self {
         Self {
             quality_report_interval: Duration::from_millis(100),
@@ -246,6 +264,7 @@ impl ProtocolConfig {
     ///
     /// Uses longer intervals and more tolerant thresholds to reduce
     /// unnecessary warnings on slower connections.
+    #[must_use]
     pub fn high_latency() -> Self {
         Self {
             quality_report_interval: Duration::from_millis(400),
@@ -261,6 +280,7 @@ impl ProtocolConfig {
     ///
     /// Uses longer timeouts and lower warning thresholds to make
     /// it easier to observe telemetry events during development.
+    #[must_use]
     pub fn debug() -> Self {
         Self {
             quality_report_interval: Duration::from_millis(500),
@@ -288,6 +308,7 @@ impl ProtocolConfig {
 ///     buffer_size: 90,
 ///     catchup_speed: 2,
 ///     max_frames_behind: 15,
+///     ..SpectatorConfig::default()
 /// };
 ///
 /// // For spectators on slower connections
@@ -339,6 +360,7 @@ impl Default for SpectatorConfig {
 
 impl SpectatorConfig {
     /// Creates a new `SpectatorConfig` with default values.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -347,6 +369,7 @@ impl SpectatorConfig {
     ///
     /// Uses a larger buffer and faster catch-up for games where
     /// falling behind is more noticeable.
+    #[must_use]
     pub fn fast_paced() -> Self {
         Self {
             buffer_size: 90,
@@ -358,6 +381,7 @@ impl SpectatorConfig {
     /// Configuration preset for spectators on slower connections.
     ///
     /// Uses a larger buffer and more tolerance for falling behind.
+    #[must_use]
     pub fn slow_connection() -> Self {
         Self {
             buffer_size: 120,
@@ -369,6 +393,7 @@ impl SpectatorConfig {
     /// Configuration preset for local viewing with minimal latency.
     ///
     /// Uses smaller buffer and stricter catch-up for responsive viewing.
+    #[must_use]
     pub fn local() -> Self {
         Self {
             buffer_size: 30,
@@ -378,13 +403,245 @@ impl SpectatorConfig {
     }
 }
 
+/// Configuration for input queue sizing.
+///
+/// These settings control the size of the input queue (circular buffer) that stores
+/// player inputs. A larger queue allows for longer input history and higher frame delays,
+/// but uses more memory.
+///
+/// # Forward Compatibility
+///
+/// New fields may be added to this struct in future versions. To ensure your
+/// code continues to compile, always use the `..Default::default()` or
+/// `..InputQueueConfig::default()` pattern when constructing instances.
+///
+/// # Memory Usage
+///
+/// Each input queue stores `queue_length` inputs per player. With 2 players and
+/// 128-frame queue (default), this is 256 input slots total.
+///
+/// # Constraints
+///
+/// - `queue_length` must be at least 2 (minimum for circular buffer operation)
+/// - `queue_length` should be a power of 2 for optimal modulo performance (not enforced)
+/// - `frame_delay` must be less than `queue_length` (enforced at session creation)
+///
+/// # Example
+///
+/// ```
+/// use fortress_rollback::InputQueueConfig;
+///
+/// // Default configuration (128 frames = ~2.1 seconds at 60 FPS)
+/// let default = InputQueueConfig::default();
+/// assert_eq!(default.queue_length, 128);
+///
+/// // For games needing longer input history
+/// let high_latency = InputQueueConfig::high_latency();
+/// assert_eq!(high_latency.queue_length, 256);
+///
+/// // For memory-constrained environments
+/// let minimal = InputQueueConfig::minimal();
+/// assert_eq!(minimal.queue_length, 32);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputQueueConfig {
+    /// The length of the input queue (circular buffer) per player.
+    ///
+    /// This determines:
+    /// - How many frames of input history are stored
+    /// - The maximum allowed frame delay (`queue_length - 1`)
+    /// - Memory usage per player
+    ///
+    /// At 60 FPS:
+    /// - 32 frames = ~0.5 seconds
+    /// - 64 frames = ~1.1 seconds
+    /// - 128 frames (default) = ~2.1 seconds
+    /// - 256 frames = ~4.3 seconds
+    ///
+    /// # Formal Specification Alignment
+    /// - **TLA+**: `QUEUE_LENGTH` in `specs/tla/InputQueue.tla` (uses 3 for model checking)
+    /// - **Kani**: `INPUT_QUEUE_LENGTH` in `src/input_queue.rs` (uses 8 for tractable verification)
+    /// - **Z3**: `INPUT_QUEUE_LENGTH` in `tests/test_z3_verification.rs` (uses 128)
+    /// - **FORMAL_SPEC.md**: INV-4 (queue length bounds), INV-5 (index validity)
+    /// - **SPEC_DIVERGENCES.md**: Documents why different values are used
+    ///
+    /// Default: 128
+    pub queue_length: usize,
+}
+
+impl Default for InputQueueConfig {
+    fn default() -> Self {
+        Self {
+            queue_length: INPUT_QUEUE_LENGTH,
+        }
+    }
+}
+
+impl InputQueueConfig {
+    /// Creates a new `InputQueueConfig` with default values.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Configuration for high-latency networks.
+    ///
+    /// Uses a larger queue (256 frames = ~4.3 seconds at 60 FPS) to allow
+    /// for higher frame delays and longer rollback windows.
+    #[must_use]
+    pub fn high_latency() -> Self {
+        Self { queue_length: 256 }
+    }
+
+    /// Configuration for minimal memory usage.
+    ///
+    /// Uses a smaller queue (32 frames = ~0.5 seconds at 60 FPS).
+    /// Suitable for games with low latency requirements.
+    #[must_use]
+    pub fn minimal() -> Self {
+        Self { queue_length: 32 }
+    }
+
+    /// Configuration for standard networks.
+    ///
+    /// Uses the default queue size (128 frames = ~2.1 seconds at 60 FPS).
+    #[must_use]
+    pub fn standard() -> Self {
+        Self::default()
+    }
+
+    /// Returns the maximum allowed frame delay for this configuration.
+    ///
+    /// This is always `queue_length - 1` to ensure the circular buffer
+    /// doesn't overflow when advancing the queue head.
+    #[must_use]
+    pub fn max_frame_delay(&self) -> usize {
+        self.queue_length.saturating_sub(1)
+    }
+
+    /// Validates that the given frame delay is valid for this configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns `FortressError::InvalidRequest` if `frame_delay >= queue_length`.
+    pub fn validate_frame_delay(&self, frame_delay: usize) -> Result<(), FortressError> {
+        if frame_delay >= self.queue_length {
+            return Err(FortressError::InvalidRequest {
+                info: format!(
+                    "Frame delay {} is too large for queue length {}. Maximum allowed: {}",
+                    frame_delay,
+                    self.queue_length,
+                    self.max_frame_delay()
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validates the configuration itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns `FortressError::InvalidRequest` if `queue_length < 2`.
+    pub fn validate(&self) -> Result<(), FortressError> {
+        if self.queue_length < 2 {
+            return Err(FortressError::InvalidRequest {
+                info: format!(
+                    "Input queue length {} is too small. Minimum is 2.",
+                    self.queue_length
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
 const DEFAULT_PLAYERS: usize = 2;
-const DEFAULT_SAVE_MODE: bool = false;
 const DEFAULT_DETECTION_MODE: DesyncDetection = DesyncDetection::Off;
+
+/// Controls how game states are saved for rollback.
+///
+/// This enum replaces the boolean `sparse_saving` parameter for improved API clarity.
+/// Using an enum makes the code self-documenting and prevents accidentally passing
+/// the wrong boolean value.
+///
+/// # Choosing a Save Mode
+///
+/// - **`SaveMode::EveryFrame`** (default): Saves state every frame. Best when:
+///   - State serialization is fast
+///   - You want minimal rollback distance
+///   - You have sufficient memory for frame history
+///
+/// - **`SaveMode::Sparse`**: Only saves the minimum confirmed frame. Best when:
+///   - State serialization is expensive (complex game state)
+///   - You want to minimize save overhead
+///   - You can tolerate potentially longer rollbacks
+///
+/// # Example
+///
+/// ```
+/// use fortress_rollback::{SessionBuilder, SaveMode, Config};
+///
+/// # struct MyConfig;
+/// # impl Config for MyConfig {
+/// #     type Input = u32;
+/// #     type State = ();
+/// #     type Address = std::net::SocketAddr;
+/// # }
+/// // For games with expensive state serialization
+/// let builder = SessionBuilder::<MyConfig>::new()
+///     .with_save_mode(SaveMode::Sparse);
+///
+/// // For games with fast state serialization (default)
+/// let builder = SessionBuilder::<MyConfig>::new()
+///     .with_save_mode(SaveMode::EveryFrame);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum SaveMode {
+    /// Save game state every frame.
+    ///
+    /// This is the default mode. It provides the shortest possible rollback distance
+    /// since the most recent confirmed state is always available. However, it requires
+    /// a save operation every frame, which may be expensive for complex game states.
+    ///
+    /// Use this mode when:
+    /// - Your game state is small or fast to serialize
+    /// - You want minimal rollback distance
+    /// - You have sufficient memory for the frame history
+    #[default]
+    EveryFrame,
+
+    /// Only save the minimum confirmed frame.
+    ///
+    /// In this mode, only the frame for which all inputs from all players are confirmed
+    /// correct will be saved. This dramatically reduces the number of save operations
+    /// but may result in longer rollbacks when predictions are incorrect.
+    ///
+    /// Use this mode when:
+    /// - Saving your game state is expensive (large or complex state)
+    /// - Advancing the game state is relatively cheap
+    /// - You can tolerate longer rollbacks in exchange for fewer saves
+    Sparse,
+}
 const DEFAULT_INPUT_DELAY: usize = 0;
+/// Default peer disconnect timeout.
+///
+/// # Formal Specification Alignment
+/// - **FORMAL_SPEC.md**: `DEFAULT_DISCONNECT_TIMEOUT = 2000ms`
 const DEFAULT_DISCONNECT_TIMEOUT: Duration = Duration::from_millis(2000);
 const DEFAULT_DISCONNECT_NOTIFY_START: Duration = Duration::from_millis(500);
+/// Default frames per second for session timing.
+///
+/// # Formal Specification Alignment
+/// - **FORMAL_SPEC.md**: `DEFAULT_FPS = 60`
 const DEFAULT_FPS: usize = 60;
+/// Default maximum prediction window in frames.
+///
+/// # Formal Specification Alignment
+/// - **TLA+**: `MAX_PREDICTION` in `specs/tla/Rollback.tla` (set to 1-3 for model checking)
+/// - **Z3**: `MAX_PREDICTION = 8` in `tests/test_z3_verification.rs`
+/// - **FORMAL_SPEC.md**: `DEFAULT_MAX_PREDICTION = 8`, INV-2 bounds rollback depth
+/// - **Kani**: Various proofs verify rollback bounds with configurable max_prediction
 const DEFAULT_MAX_PREDICTION_FRAMES: usize = 8;
 const DEFAULT_CHECK_DISTANCE: usize = 2;
 // If the spectator is more than this amount of frames behind, it will advance the game two steps at a time to catch up
@@ -396,6 +653,7 @@ pub(crate) const MAX_EVENT_QUEUE_SIZE: usize = 100;
 
 /// The [`SessionBuilder`] builds all Fortress Rollback Sessions. After setting all appropriate values, use `SessionBuilder::start_yxz_session(...)`
 /// to consume the builder and create a Session of desired type.
+#[must_use = "SessionBuilder must be consumed by calling a start_*_session method"]
 pub struct SessionBuilder<T>
 where
     T: Config,
@@ -405,7 +663,7 @@ where
     max_prediction: usize,
     /// FPS defines the expected update frequency of this session.
     fps: usize,
-    sparse_saving: bool,
+    save_mode: SaveMode,
     desync_detection: DesyncDetection,
     /// The time until a remote player gets disconnected.
     disconnect_timeout: Duration,
@@ -426,29 +684,56 @@ where
     spectator_config: SpectatorConfig,
     /// Configuration for time synchronization.
     time_sync_config: TimeSyncConfig,
+    /// Configuration for input queue sizing.
+    input_queue_config: InputQueueConfig,
 }
 
 impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to ensure all fields are included when new fields are added.
+        // The compiler will error if a new field is added but not handled here.
+        let Self {
+            num_players,
+            local_players,
+            max_prediction,
+            fps,
+            save_mode,
+            desync_detection,
+            disconnect_timeout,
+            disconnect_notify_start,
+            player_reg,
+            input_delay,
+            check_dist,
+            max_frames_behind,
+            catchup_speed,
+            violation_observer,
+            sync_config,
+            protocol_config,
+            spectator_config,
+            time_sync_config,
+            input_queue_config,
+        } = self;
+
         f.debug_struct("SessionBuilder")
-            .field("num_players", &self.num_players)
-            .field("local_players", &self.local_players)
-            .field("max_prediction", &self.max_prediction)
-            .field("fps", &self.fps)
-            .field("sparse_saving", &self.sparse_saving)
-            .field("desync_detection", &self.desync_detection)
-            .field("disconnect_timeout", &self.disconnect_timeout)
-            .field("disconnect_notify_start", &self.disconnect_notify_start)
-            .field("player_reg", &self.player_reg)
-            .field("input_delay", &self.input_delay)
-            .field("check_dist", &self.check_dist)
-            .field("max_frames_behind", &self.max_frames_behind)
-            .field("catchup_speed", &self.catchup_speed)
-            .field("has_violation_observer", &self.violation_observer.is_some())
-            .field("sync_config", &self.sync_config)
-            .field("protocol_config", &self.protocol_config)
-            .field("spectator_config", &self.spectator_config)
-            .field("time_sync_config", &self.time_sync_config)
+            .field("num_players", num_players)
+            .field("local_players", local_players)
+            .field("max_prediction", max_prediction)
+            .field("fps", fps)
+            .field("save_mode", save_mode)
+            .field("desync_detection", desync_detection)
+            .field("disconnect_timeout", disconnect_timeout)
+            .field("disconnect_notify_start", disconnect_notify_start)
+            .field("player_reg", player_reg)
+            .field("input_delay", input_delay)
+            .field("check_dist", check_dist)
+            .field("max_frames_behind", max_frames_behind)
+            .field("catchup_speed", catchup_speed)
+            .field("has_violation_observer", &violation_observer.is_some())
+            .field("sync_config", sync_config)
+            .field("protocol_config", protocol_config)
+            .field("spectator_config", spectator_config)
+            .field("time_sync_config", time_sync_config)
+            .field("input_queue_config", input_queue_config)
             .finish()
     }
 }
@@ -468,7 +753,7 @@ impl<T: Config> SessionBuilder<T> {
             num_players: DEFAULT_PLAYERS,
             max_prediction: DEFAULT_MAX_PREDICTION_FRAMES,
             fps: DEFAULT_FPS,
-            sparse_saving: DEFAULT_SAVE_MODE,
+            save_mode: SaveMode::default(),
             desync_detection: DEFAULT_DETECTION_MODE,
             disconnect_timeout: DEFAULT_DISCONNECT_TIMEOUT,
             disconnect_notify_start: DEFAULT_DISCONNECT_NOTIFY_START,
@@ -481,6 +766,7 @@ impl<T: Config> SessionBuilder<T> {
             protocol_config: ProtocolConfig::default(),
             spectator_config: SpectatorConfig::default(),
             time_sync_config: TimeSyncConfig::default(),
+            input_queue_config: InputQueueConfig::default(),
         }
     }
 
@@ -556,18 +842,46 @@ impl<T: Config> SessionBuilder<T> {
     /// Change the amount of frames Fortress Rollback will delay the inputs for local players.
     ///
     /// # Panics
-    /// Panics if `delay` exceeds `MAX_FRAME_DELAY` (127 in production). This limit ensures
-    /// the circular input buffer doesn't overflow. At 60fps, 127 frames = ~2.1 seconds,
+    ///
+    /// Panics if `delay` is greater than or equal to the configured `queue_length`
+    /// (default 128, configurable via [`with_input_queue_config`](Self::with_input_queue_config)).
+    ///
+    /// This limit ensures the circular input buffer doesn't overflow.
+    /// At 60fps with default settings, max delay is 127 frames (~2.1 seconds),
     /// far exceeding any practical input delay (typically 0-8 frames).
     ///
     /// This constraint was discovered through Kani formal verification.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, InputQueueConfig};
+    ///
+    /// # #[derive(Debug)]
+    /// # struct TestConfig;
+    /// # impl Config for TestConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// // Default queue allows delays up to 127
+    /// let builder = SessionBuilder::<TestConfig>::new()
+    ///     .with_input_delay(8);
+    ///
+    /// // With custom queue size, max delay changes
+    /// let builder = SessionBuilder::<TestConfig>::new()
+    ///     .with_input_queue_config(InputQueueConfig::minimal()) // queue_length = 32
+    ///     .with_input_delay(30); // max is now 31
+    /// ```
     pub fn with_input_delay(mut self, delay: usize) -> Self {
+        let max_delay = self.input_queue_config.max_frame_delay();
         assert!(
-            delay <= MAX_FRAME_DELAY,
-            "Input delay {} exceeds maximum allowed value of {}. \
-             At 60fps, this would be {:.1}+ seconds of delay, which is impractical for gameplay.",
+            delay <= max_delay,
+            "Input delay {} exceeds maximum allowed value of {} (queue_length - 1). \
+             At 60fps, this would be {:.1}+ seconds of delay, which is impractical for gameplay. \
+             Consider increasing queue_length via with_input_queue_config() if you need larger delays.",
             delay,
-            MAX_FRAME_DELAY,
+            max_delay,
             delay as f64 / 60.0
         );
         self.input_delay = delay;
@@ -580,13 +894,50 @@ impl<T: Config> SessionBuilder<T> {
         self
     }
 
-    /// Sets the sparse saving mode. With sparse saving turned on, only the minimum confirmed frame
-    /// (for which all inputs from all players are confirmed correct) will be saved. This leads to
-    /// much less save requests at the cost of potentially longer rollbacks and thus more advance
-    /// frame requests. Recommended, if saving your gamestate takes much more time than advancing
+    /// Sets the save mode for game state management.
+    ///
+    /// Controls how frequently the session requests state saves for rollback.
+    /// See [`SaveMode`] for detailed documentation on each option.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, SaveMode, Config};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u32;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// // For games with expensive state serialization
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_save_mode(SaveMode::Sparse);
+    /// ```
+    pub fn with_save_mode(mut self, save_mode: SaveMode) -> Self {
+        self.save_mode = save_mode;
+        self
+    }
+
+    /// Sets the sparse saving mode (deprecated: use `with_save_mode` instead).
+    ///
+    /// With sparse saving turned on, only the minimum confirmed frame
+    /// (for which all inputs from all players are confirmed correct) will be saved.
+    /// This leads to much less save requests at the cost of potentially longer rollbacks
+    /// and thus more advance frame requests.
+    ///
+    /// Recommended if saving your gamestate takes much more time than advancing
     /// the game state.
+    #[deprecated(
+        since = "0.12.0",
+        note = "Use `with_save_mode(SaveMode::Sparse)` instead"
+    )]
     pub fn with_sparse_saving_mode(mut self, sparse_saving: bool) -> Self {
-        self.sparse_saving = sparse_saving;
+        self.save_mode = if sparse_saving {
+            SaveMode::Sparse
+        } else {
+            SaveMode::EveryFrame
+        };
         self
     }
 
@@ -746,6 +1097,50 @@ impl<T: Config> SessionBuilder<T> {
         self
     }
 
+    /// Sets the input queue configuration.
+    ///
+    /// This allows configuring the size of the input queue (circular buffer) that stores
+    /// player inputs. A larger queue allows for longer input history and higher frame delays,
+    /// but uses more memory.
+    ///
+    /// See [`InputQueueConfig`] for available options and presets.
+    ///
+    /// # Important
+    ///
+    /// If you plan to use [`with_input_delay`](Self::with_input_delay), call this method first
+    /// to ensure the delay is validated against the correct queue size.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, InputQueueConfig};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// // For high-latency networks, use a larger queue
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_input_queue_config(InputQueueConfig::high_latency());
+    ///
+    /// // For memory-constrained environments, use a smaller queue
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_input_queue_config(InputQueueConfig::minimal());
+    ///
+    /// // Or customize the queue length
+    /// let custom_config = InputQueueConfig {
+    ///     queue_length: 64,
+    /// };
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_input_queue_config(custom_config);
+    /// ```
+    pub fn with_input_queue_config(mut self, input_queue_config: InputQueueConfig) -> Self {
+        self.input_queue_config = input_queue_config;
+        self
+    }
+
     /// Sets the FPS this session is used with. This influences estimations for frame synchronization between sessions.
     /// # Errors
     /// - Returns [`InvalidRequest`] if the fps is 0
@@ -898,16 +1293,22 @@ impl<T: Config> SessionBuilder<T> {
             }
         }
 
+        // Validate the input queue configuration
+        self.input_queue_config.validate()?;
+        self.input_queue_config
+            .validate_frame_delay(self.input_delay)?;
+
         Ok(P2PSession::<T>::new(
             self.num_players,
             self.max_prediction,
             Box::new(socket),
             self.player_reg,
-            self.sparse_saving,
+            self.save_mode,
             self.desync_detection,
             self.input_delay,
             self.violation_observer,
             self.protocol_config,
+            self.input_queue_config.queue_length,
         ))
     }
 
@@ -958,12 +1359,19 @@ impl<T: Config> SessionBuilder<T> {
                 info: "Check distance too big.".to_owned(),
             });
         }
-        Ok(SyncTestSession::new(
+
+        // Validate the input queue configuration
+        self.input_queue_config.validate()?;
+        self.input_queue_config
+            .validate_frame_delay(self.input_delay)?;
+
+        Ok(SyncTestSession::with_queue_length(
             self.num_players,
             self.max_prediction,
             self.check_dist,
             self.input_delay,
             self.violation_observer,
+            self.input_queue_config.queue_length,
         ))
     }
 
@@ -1014,6 +1422,91 @@ mod tests {
     }
 
     // ========================================================================
+    // SaveMode Tests
+    // ========================================================================
+
+    #[test]
+    fn test_save_mode_default_is_every_frame() {
+        let mode = SaveMode::default();
+        assert_eq!(mode, SaveMode::EveryFrame);
+    }
+
+    #[test]
+    fn test_save_mode_equality() {
+        assert_eq!(SaveMode::EveryFrame, SaveMode::EveryFrame);
+        assert_eq!(SaveMode::Sparse, SaveMode::Sparse);
+        assert_ne!(SaveMode::EveryFrame, SaveMode::Sparse);
+    }
+
+    #[test]
+    fn test_save_mode_debug_format() {
+        let every_frame = SaveMode::EveryFrame;
+        let sparse = SaveMode::Sparse;
+        assert_eq!(format!("{:?}", every_frame), "EveryFrame");
+        assert_eq!(format!("{:?}", sparse), "Sparse");
+    }
+
+    #[test]
+    fn test_save_mode_clone() {
+        let mode = SaveMode::Sparse;
+        // Intentionally using clone to verify Clone trait works
+        let cloned = Clone::clone(&mode);
+        assert_eq!(mode, cloned);
+    }
+
+    #[test]
+    fn test_save_mode_copy() {
+        let mode = SaveMode::EveryFrame;
+        let copied: SaveMode = mode; // Copy
+        assert_eq!(mode, copied);
+    }
+
+    #[test]
+    fn test_with_save_mode_every_frame() {
+        let builder = SessionBuilder::<TestConfig>::new().with_save_mode(SaveMode::EveryFrame);
+        assert_eq!(builder.save_mode, SaveMode::EveryFrame);
+    }
+
+    #[test]
+    fn test_with_save_mode_sparse() {
+        let builder = SessionBuilder::<TestConfig>::new().with_save_mode(SaveMode::Sparse);
+        assert_eq!(builder.save_mode, SaveMode::Sparse);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_deprecated_with_sparse_saving_mode_true() {
+        let builder = SessionBuilder::<TestConfig>::new().with_sparse_saving_mode(true);
+        assert_eq!(builder.save_mode, SaveMode::Sparse);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_deprecated_with_sparse_saving_mode_false() {
+        let builder = SessionBuilder::<TestConfig>::new().with_sparse_saving_mode(false);
+        assert_eq!(builder.save_mode, SaveMode::EveryFrame);
+    }
+
+    #[test]
+    fn test_builder_default_save_mode() {
+        let builder = SessionBuilder::<TestConfig>::new();
+        assert_eq!(builder.save_mode, SaveMode::EveryFrame);
+    }
+
+    #[test]
+    fn test_save_mode_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(SaveMode::EveryFrame);
+        set.insert(SaveMode::Sparse);
+        assert_eq!(set.len(), 2);
+
+        // Inserting duplicates doesn't increase size
+        set.insert(SaveMode::EveryFrame);
+        assert_eq!(set.len(), 2);
+    }
+
+    // ========================================================================
     // Input Delay Bounds Tests
     // These tests verify the fix for a Kani-discovered edge case where
     // frame_delay >= INPUT_QUEUE_LENGTH could cause circular buffer overflow.
@@ -1035,14 +1528,17 @@ mod tests {
 
     #[test]
     fn test_with_input_delay_accepts_max_valid() {
-        let builder = SessionBuilder::<TestConfig>::new().with_input_delay(MAX_FRAME_DELAY);
-        assert_eq!(builder.input_delay, MAX_FRAME_DELAY);
+        use crate::input_queue::INPUT_QUEUE_LENGTH;
+        let max_delay = INPUT_QUEUE_LENGTH - 1;
+        let builder = SessionBuilder::<TestConfig>::new().with_input_delay(max_delay);
+        assert_eq!(builder.input_delay, max_delay);
     }
 
     #[test]
     #[should_panic(expected = "exceeds maximum allowed value")]
     fn test_with_input_delay_panics_on_excessive_delay() {
-        let _builder = SessionBuilder::<TestConfig>::new().with_input_delay(MAX_FRAME_DELAY + 1);
+        use crate::input_queue::INPUT_QUEUE_LENGTH;
+        let _builder = SessionBuilder::<TestConfig>::new().with_input_delay(INPUT_QUEUE_LENGTH);
     }
 
     #[test]
@@ -1050,5 +1546,266 @@ mod tests {
     fn test_with_input_delay_panics_on_queue_length() {
         use crate::input_queue::INPUT_QUEUE_LENGTH;
         let _builder = SessionBuilder::<TestConfig>::new().with_input_delay(INPUT_QUEUE_LENGTH);
+    }
+
+    // ========================================================================
+    // InputQueueConfig Tests
+    // ========================================================================
+
+    #[test]
+    fn test_input_queue_config_default() {
+        use crate::input_queue::INPUT_QUEUE_LENGTH;
+        let config = InputQueueConfig::default();
+        assert_eq!(config.queue_length, INPUT_QUEUE_LENGTH);
+    }
+
+    #[test]
+    fn test_input_queue_config_presets() {
+        let high_latency = InputQueueConfig::high_latency();
+        assert_eq!(high_latency.queue_length, 256);
+
+        let minimal = InputQueueConfig::minimal();
+        assert_eq!(minimal.queue_length, 32);
+
+        let standard = InputQueueConfig::standard();
+        assert_eq!(standard, InputQueueConfig::default());
+    }
+
+    #[test]
+    fn test_input_queue_config_max_frame_delay() {
+        let config = InputQueueConfig { queue_length: 64 };
+        assert_eq!(config.max_frame_delay(), 63);
+
+        let config = InputQueueConfig { queue_length: 128 };
+        assert_eq!(config.max_frame_delay(), 127);
+    }
+
+    #[test]
+    fn test_input_queue_config_validate() {
+        // Valid configs
+        assert!(InputQueueConfig { queue_length: 2 }.validate().is_ok());
+        assert!(InputQueueConfig { queue_length: 128 }.validate().is_ok());
+
+        // Invalid configs
+        assert!(InputQueueConfig { queue_length: 0 }.validate().is_err());
+        assert!(InputQueueConfig { queue_length: 1 }.validate().is_err());
+    }
+
+    #[test]
+    fn test_input_queue_config_validate_frame_delay() {
+        let config = InputQueueConfig { queue_length: 32 };
+
+        // Valid delays
+        assert!(config.validate_frame_delay(0).is_ok());
+        assert!(config.validate_frame_delay(31).is_ok());
+
+        // Invalid delays
+        assert!(config.validate_frame_delay(32).is_err());
+        assert!(config.validate_frame_delay(100).is_err());
+    }
+
+    #[test]
+    fn test_with_input_queue_config() {
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_input_queue_config(InputQueueConfig::minimal());
+        assert_eq!(builder.input_queue_config.queue_length, 32);
+    }
+
+    #[test]
+    fn test_input_queue_config_affects_max_delay() {
+        // With minimal config (queue_length=32), max delay is 31
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_input_queue_config(InputQueueConfig::minimal())
+            .with_input_delay(31); // Should succeed
+        assert_eq!(builder.input_delay, 31);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds maximum allowed value")]
+    fn test_input_queue_config_custom_queue_validates_delay() {
+        // With minimal config (queue_length=32), max delay is 31
+        // Trying to set delay=32 should panic
+        let _builder = SessionBuilder::<TestConfig>::new()
+            .with_input_queue_config(InputQueueConfig::minimal())
+            .with_input_delay(32);
+    }
+}
+
+// =============================================================================
+// Kani Formal Verification Proofs for InputQueueConfig
+// =============================================================================
+//
+// These proofs formally verify the validation constraints for configurable constants.
+// This completes the Phase 11 gap analysis by adding formal verification for:
+// - InputQueueConfig.validate() - queue_length >= 2
+// - InputQueueConfig.validate_frame_delay() - frame_delay < queue_length
+// - InputQueueConfig.max_frame_delay() - derivation is correct
+//
+// The proofs verify these constraints hold for ANY valid configuration within
+// Kani's symbolic execution bounds.
+#[cfg(kani)]
+mod kani_config_proofs {
+    use super::*;
+
+    /// Proof: validate() accepts all queue_length >= 2
+    ///
+    /// Verifies that InputQueueConfig.validate() returns Ok for any queue_length >= 2
+    /// and Err for queue_length < 2.
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn proof_validate_accepts_valid_queue_lengths() {
+        let queue_length: usize = kani::any();
+        // Focus on boundary region for tractability
+        kani::assume(queue_length <= 512);
+
+        let config = InputQueueConfig { queue_length };
+        let result = config.validate();
+
+        if queue_length >= 2 {
+            kani::assert(result.is_ok(), "validate() should accept queue_length >= 2");
+        } else {
+            kani::assert(result.is_err(), "validate() should reject queue_length < 2");
+        }
+    }
+
+    /// Proof: validate() boundary condition at queue_length = 2
+    ///
+    /// Specifically verifies the minimum valid queue_length.
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn proof_validate_boundary_at_two() {
+        // queue_length = 1 should fail
+        let config_one = InputQueueConfig { queue_length: 1 };
+        kani::assert(
+            config_one.validate().is_err(),
+            "queue_length=1 should be invalid",
+        );
+
+        // queue_length = 2 should succeed
+        let config_two = InputQueueConfig { queue_length: 2 };
+        kani::assert(
+            config_two.validate().is_ok(),
+            "queue_length=2 should be valid",
+        );
+    }
+
+    /// Proof: validate_frame_delay() enforces frame_delay < queue_length
+    ///
+    /// Verifies that validate_frame_delay returns Ok when frame_delay < queue_length
+    /// and Err when frame_delay >= queue_length.
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn proof_validate_frame_delay_constraint() {
+        let queue_length: usize = kani::any();
+        let frame_delay: usize = kani::any();
+
+        // Keep bounds tractable
+        kani::assume(queue_length >= 2 && queue_length <= 256);
+        kani::assume(frame_delay <= 256);
+
+        let config = InputQueueConfig { queue_length };
+        let result = config.validate_frame_delay(frame_delay);
+
+        if frame_delay < queue_length {
+            kani::assert(
+                result.is_ok(),
+                "validate_frame_delay should accept delay < queue_length",
+            );
+        } else {
+            kani::assert(
+                result.is_err(),
+                "validate_frame_delay should reject delay >= queue_length",
+            );
+        }
+    }
+
+    /// Proof: max_frame_delay() returns queue_length - 1 (with saturation)
+    ///
+    /// Verifies that max_frame_delay() correctly computes queue_length - 1,
+    /// using saturating_sub to handle the edge case of queue_length = 0.
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn proof_max_frame_delay_derivation() {
+        let queue_length: usize = kani::any();
+        kani::assume(queue_length <= 512);
+
+        let config = InputQueueConfig { queue_length };
+        let max_delay = config.max_frame_delay();
+
+        // Should be queue_length - 1, or 0 if queue_length is 0
+        let expected = queue_length.saturating_sub(1);
+        kani::assert(
+            max_delay == expected,
+            "max_frame_delay should equal queue_length.saturating_sub(1)",
+        );
+    }
+
+    /// Proof: max_frame_delay() is always a valid frame_delay
+    ///
+    /// Verifies that validate_frame_delay(max_frame_delay()) always succeeds
+    /// for valid configurations (queue_length >= 2).
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn proof_max_frame_delay_is_valid_delay() {
+        let queue_length: usize = kani::any();
+        kani::assume(queue_length >= 2 && queue_length <= 256);
+
+        let config = InputQueueConfig { queue_length };
+        let max_delay = config.max_frame_delay();
+        let result = config.validate_frame_delay(max_delay);
+
+        kani::assert(
+            result.is_ok(),
+            "max_frame_delay() should always be a valid frame_delay for valid configs",
+        );
+    }
+
+    /// Proof: All presets are valid configurations
+    ///
+    /// Verifies that standard(), high_latency(), and minimal() presets
+    /// all pass validate().
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn proof_all_presets_valid() {
+        let standard = InputQueueConfig::standard();
+        let high_latency = InputQueueConfig::high_latency();
+        let minimal = InputQueueConfig::minimal();
+
+        kani::assert(
+            standard.validate().is_ok(),
+            "standard() preset should be valid",
+        );
+        kani::assert(
+            high_latency.validate().is_ok(),
+            "high_latency() preset should be valid",
+        );
+        kani::assert(
+            minimal.validate().is_ok(),
+            "minimal() preset should be valid",
+        );
+    }
+
+    /// Proof: Presets have correct queue_length values
+    ///
+    /// Verifies the documented preset values.
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn proof_preset_values() {
+        let standard = InputQueueConfig::standard();
+        let high_latency = InputQueueConfig::high_latency();
+        let minimal = InputQueueConfig::minimal();
+
+        kani::assert(
+            standard.queue_length == 128,
+            "standard() should have queue_length=128",
+        );
+        kani::assert(
+            high_latency.queue_length == 256,
+            "high_latency() should have queue_length=256",
+        );
+        kani::assert(
+            minimal.queue_length == 32,
+            "minimal() should have queue_length=32",
+        );
     }
 }

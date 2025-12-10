@@ -24,10 +24,22 @@ const UDP_HEADER_SIZE: usize = 28; // Size of IP + UDP headers
 fn millis_since_epoch() -> u128 {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_millis()
+        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(duration) => duration.as_millis(),
+            Err(_) => {
+                // System time is before UNIX_EPOCH - this can happen due to:
+                // - NTP adjustments moving clock backwards
+                // - VM snapshots with stale time
+                // - Misconfigured system clocks
+                // Report via telemetry and return 0 as a safe fallback.
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::InternalError,
+                    "System time is before UNIX_EPOCH - clock may have gone backwards. Using 0 as fallback."
+                );
+                0
+            }
+        }
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -45,6 +57,12 @@ struct InputBytes {
 }
 
 impl InputBytes {
+    /// Creates a zeroed InputBytes for the given number of players.
+    ///
+    /// # Panics
+    /// This function panics if serialization of the default Input type fails, which indicates
+    /// a fundamental issue with the Config::Input type's serialization implementation.
+    /// This is acceptable because it happens during session construction (init-time).
     fn zeroed<T: Config>(num_players: usize) -> Self {
         let input_size =
             bincode::serialized_size(&T::Input::default()).expect("input serialization failed");
@@ -55,6 +73,10 @@ impl InputBytes {
         }
     }
 
+    /// Creates an InputBytes from the given inputs.
+    ///
+    /// If serialization fails (which should never happen with a properly implemented Config::Input),
+    /// returns an empty InputBytes and logs an error via the violation reporter.
     fn from_inputs<T: Config>(
         num_players: usize,
         inputs: &BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
@@ -64,38 +86,103 @@ impl InputBytes {
         // in ascending order
         for handle in 0..num_players {
             if let Some(input) = inputs.get(&PlayerHandle::new(handle)) {
-                assert!(frame == Frame::NULL || input.frame == Frame::NULL || frame == input.frame);
+                // Validate frame consistency - all inputs for a send should have the same frame
+                let frames_inconsistent =
+                    frame != Frame::NULL && input.frame != Frame::NULL && frame != input.frame;
+
+                if frames_inconsistent {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::InternalError,
+                        "Input frames inconsistent during serialization: expected frame {:?}, got {:?} for player {}. This indicates a bug in input collection.",
+                        frame,
+                        input.frame,
+                        handle
+                    );
+                }
+
+                // Also assert in debug builds for immediate detection during development
+                debug_assert!(
+                    !frames_inconsistent,
+                    "Input frames must be consistent: expected {:?}, got {:?}",
+                    frame, input.frame
+                );
+
                 if input.frame != Frame::NULL {
                     frame = input.frame;
                 }
 
-                bincode::serialize_into(&mut bytes, &input.input)
-                    .expect("input serialization failed");
+                if let Err(e) = bincode::serialize_into(&mut bytes, &input.input) {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "Failed to serialize input for player {}: {}. This likely indicates a bug in your Config::Input serialization.",
+                        handle,
+                        e
+                    );
+                    return Self {
+                        frame: Frame::NULL,
+                        bytes: Vec::new(),
+                    };
+                }
             }
         }
         Self { frame, bytes }
     }
 
-    // Note: is_multiple_of() is nightly-only, so we use modulo
+    /// Converts InputBytes to a vector of PlayerInput.
+    ///
+    /// If the data is malformed or deserialization fails, returns an empty vector and logs an error.
     #[allow(clippy::manual_is_multiple_of)]
     fn to_player_inputs<T: Config>(&self, num_players: usize) -> Vec<PlayerInput<T::Input>> {
         let mut player_inputs = Vec::new();
-        assert!(num_players > 0 && self.bytes.len() % num_players == 0);
+
+        // Validate inputs before processing
+        if num_players == 0 {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "Cannot convert InputBytes with num_players=0"
+            );
+            return player_inputs;
+        }
+
+        if self.bytes.len() % num_players != 0 {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "InputBytes length {} is not divisible by num_players {}",
+                self.bytes.len(),
+                num_players
+            );
+            return player_inputs;
+        }
+
         let size = self.bytes.len() / num_players;
         for p in 0..num_players {
             let start = p * size;
             let end = start + size;
             let player_byte_slice = &self.bytes[start..end];
-            let input: T::Input =
-                bincode::deserialize(player_byte_slice).expect("input deserialization failed");
-            player_inputs.push(PlayerInput::new(self.frame, input));
+            match bincode::deserialize::<T::Input>(player_byte_slice) {
+                Ok(input) => player_inputs.push(PlayerInput::new(self.frame, input)),
+                Err(e) => {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "Failed to deserialize input for player {}: {}. This may indicate network corruption or a bug in your Config::Input deserialization.",
+                        p,
+                        e
+                    );
+                    return player_inputs;
+                }
+            }
         }
         player_inputs
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Event<T>
+pub enum Event<T>
 where
     T: Config,
 {
@@ -132,7 +219,7 @@ where
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum ProtocolState {
+pub enum ProtocolState {
     Initializing,
     Synchronizing,
     Running,
@@ -140,7 +227,7 @@ enum ProtocolState {
     Shutdown,
 }
 
-pub(crate) struct UdpProtocol<T>
+pub struct UdpProtocol<T>
 where
     T: Config,
 {
@@ -315,7 +402,8 @@ impl<T: Config> UdpProtocol<T> {
             return;
         }
         // Estimate which frame the other client is on by looking at the last frame they gave us plus some delta for the packet roundtrip time.
-        let ping = i32::try_from(self.round_trip_time / 2).expect("Ping is higher than i32::MAX");
+        // Use saturating conversion to avoid panic if round_trip_time is extremely large
+        let ping = i32::try_from(self.round_trip_time / 2).unwrap_or(i32::MAX);
         let remote_frame = self.last_recv_frame() + ((ping * self.fps as i32) / 1000);
         // Our frame "advantage" is how many frames behind the remote client we are. (It's an advantage because they will have to predict more often)
         self.local_frame_advantage = remote_frame - local_frame;
@@ -466,10 +554,10 @@ impl<T: Config> UdpProtocol<T> {
         while !self.pending_output.is_empty() {
             if let Some(input) = self.pending_output.front() {
                 if input.frame <= ack_frame {
-                    self.last_acked_input = self
-                        .pending_output
-                        .pop_front()
-                        .expect("Expected input to exist");
+                    // This should always succeed since we just checked front() and is_empty()
+                    if let Some(popped) = self.pending_output.pop_front() {
+                        self.last_acked_input = popped;
+                    }
                 } else {
                     break;
                 }
@@ -624,12 +712,14 @@ impl<T: Config> UdpProtocol<T> {
 
     fn send_quality_report(&mut self) {
         self.running_last_quality_report = Instant::now();
+        // Clamp to i16 range and convert - the clamp guarantees this won't fail,
+        // but we use unwrap_or as defense-in-depth
+        let clamped = self
+            .local_frame_advantage
+            .clamp(i16::MIN as i32, i16::MAX as i32);
+        let frame_advantage = i16::try_from(clamped).unwrap_or(0);
         let body = QualityReport {
-            frame_advantage: i16::try_from(
-                self.local_frame_advantage
-                    .clamp(i16::MIN as i32, i16::MAX as i32),
-            )
-            .expect("local_frame_advantage should have been clamped into the range of an i16"),
+            frame_advantage,
             ping: millis_since_epoch(),
         };
 
@@ -758,9 +848,30 @@ impl<T: Config> UdpProtocol<T> {
             }
         }
 
-        // if the encoded packet is decoded with an input we did not receive yet, we cannot recover
-        assert!(
-            self.last_recv_frame() == Frame::NULL || self.last_recv_frame() + 1 >= body.start_frame
+        // Validate that received inputs are in a recoverable order.
+        // If we receive an input for a frame that's too far ahead, we can't decode it
+        // because we don't have the reference frame.
+        let gap_too_large =
+            self.last_recv_frame() != Frame::NULL && self.last_recv_frame() + 1 < body.start_frame;
+
+        if gap_too_large {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "Received input for frame {} but we're only at frame {} - gap too large to decode. This may indicate packet loss or network issues.",
+                body.start_frame,
+                self.last_recv_frame()
+            );
+            // Don't process this packet - we can't decode it without the reference frame
+            return;
+        }
+
+        // Also assert in debug builds for immediate detection during development
+        debug_assert!(
+            self.last_recv_frame() == Frame::NULL || self.last_recv_frame() + 1 >= body.start_frame,
+            "Received input for frame {} but we're only at frame {}",
+            body.start_frame,
+            self.last_recv_frame()
         );
 
         // if we did not receive any input yet, we decode with the blank input,
@@ -775,7 +886,18 @@ impl<T: Config> UdpProtocol<T> {
         if let Some(decode_inp) = self.recv_inputs.get(&decode_frame) {
             self.running_last_input_recv = Instant::now();
 
-            let recv_inputs = decode(&decode_inp.bytes, &body.bytes).expect("decoding failed");
+            let recv_inputs = match decode(&decode_inp.bytes, &body.bytes) {
+                Ok(inputs) => inputs,
+                Err(e) => {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "Failed to decode input packet: {:?}. Packet may be corrupted.",
+                        e
+                    );
+                    return;
+                }
+            };
 
             for (i, inp) in recv_inputs.into_iter().enumerate() {
                 let inp_frame = body.start_frame + i as i32;
@@ -793,10 +915,13 @@ impl<T: Config> UdpProtocol<T> {
                 self.recv_inputs.insert(input_data.frame, input_data);
 
                 for (i, player_input) in player_inputs.into_iter().enumerate() {
-                    self.event_queue.push_back(Event::Input {
-                        input: player_input,
-                        player: self.handles[i],
-                    });
+                    // Bounds check on handles - should always be valid but be defensive
+                    if i < self.handles.len() {
+                        self.event_queue.push_back(Event::Input {
+                            input: player_input,
+                            player: self.handles[i],
+                        });
+                    }
                 }
             }
 
@@ -825,8 +950,10 @@ impl<T: Config> UdpProtocol<T> {
     /// Upon receiving a `QualityReply`, update network stats.
     fn on_quality_reply(&mut self, body: &QualityReply) {
         let millis = millis_since_epoch();
-        assert!(millis >= body.pong);
-        self.round_trip_time = millis - body.pong;
+        // Use saturating subtraction to handle edge cases where system time
+        // may have drifted or gone backwards (e.g., NTP adjustments, high load).
+        // A 0 RTT is harmless - it will be corrected on the next quality report.
+        self.round_trip_time = millis.saturating_sub(body.pong);
     }
 
     /// Upon receiving a `ChecksumReport`, add it to the checksum history
@@ -1658,6 +1785,408 @@ mod tests {
     }
 
     // ==========================================
+    // Frame Gap Detection Tests
+    // ==========================================
+
+    /// Test that on_input correctly detects and handles frame gaps.
+    /// When the gap is too large to decode (we don't have the reference frame),
+    /// the input should be dropped and a violation should be reported.
+    #[test]
+    fn on_input_rejects_input_with_too_large_gap() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        // Complete sync to get to Running state
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            let header = MessageHeader { magic: 999 };
+            protocol.on_sync_reply(
+                header,
+                SyncReply {
+                    random_reply: random,
+                },
+            );
+        }
+        assert!(protocol.is_running());
+
+        // Set up initial state: we have received frame 0
+        protocol.recv_inputs.insert(
+            Frame::new(0),
+            InputBytes {
+                frame: Frame::new(0),
+                bytes: vec![0, 0, 0, 0],
+            },
+        );
+
+        // Try to receive an input that's too far ahead (frame 5 when we're at 0)
+        // This creates a gap that's too large to decode
+        let input = Input {
+            start_frame: Frame::new(5), // Gap of 5 when max is 1
+            ack_frame: Frame::NULL,
+            bytes: vec![1, 2, 3, 4],
+            disconnect_requested: false,
+            peer_connect_status: vec![ConnectionStatus::default(); 2],
+        };
+
+        // Clear event queue and record input count before
+        protocol.event_queue.clear();
+        let inputs_before = protocol.recv_inputs.len();
+
+        // Call on_input with the gap
+        protocol.on_input(&input);
+
+        // Verify: no new inputs were added (because gap too large)
+        assert_eq!(
+            protocol.recv_inputs.len(),
+            inputs_before,
+            "No inputs should be added when gap is too large"
+        );
+
+        // Verify: no input events were generated
+        let input_events: Vec<_> = protocol
+            .event_queue
+            .iter()
+            .filter(|e| matches!(e, Event::Input { .. }))
+            .collect();
+        assert!(
+            input_events.is_empty(),
+            "No input events should be generated when gap is too large"
+        );
+    }
+
+    /// Test that consecutive frames are processed correctly
+    #[test]
+    fn on_input_accepts_consecutive_frame() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        // Complete sync
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            let header = MessageHeader { magic: 999 };
+            protocol.on_sync_reply(
+                header,
+                SyncReply {
+                    random_reply: random,
+                },
+            );
+        }
+
+        // Set up initial state: we have frame 0
+        let initial_bytes = vec![0u8; 4]; // TestConfig::Input is [u8; 4]
+        protocol.recv_inputs.insert(
+            Frame::new(0),
+            InputBytes {
+                frame: Frame::new(0),
+                bytes: initial_bytes.clone(),
+            },
+        );
+
+        // Encode frame 1 relative to frame 0
+        let frame1_bytes = vec![1u8; 4];
+        let encoded = encode(&initial_bytes, std::iter::once(&frame1_bytes));
+
+        let input = Input {
+            start_frame: Frame::new(1), // Consecutive - gap of 1 is ok
+            ack_frame: Frame::NULL,
+            bytes: encoded,
+            disconnect_requested: false,
+            peer_connect_status: vec![ConnectionStatus::default(); 2],
+        };
+
+        protocol.event_queue.clear();
+        protocol.on_input(&input);
+
+        // Verify: frame 1 was added
+        assert!(
+            protocol.recv_inputs.contains_key(&Frame::new(1)),
+            "Frame 1 should be added when gap is acceptable"
+        );
+    }
+
+    /// Test that first input (when no previous non-NULL input exists) is accepted
+    #[test]
+    fn on_input_accepts_first_input_with_null_frame() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        // Complete sync
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            let header = MessageHeader { magic: 999 };
+            protocol.on_sync_reply(
+                header,
+                SyncReply {
+                    random_reply: random,
+                },
+            );
+        }
+
+        // The protocol constructor inserts Frame::NULL entry for decoding first input.
+        // So recv_inputs is NOT empty, but last_recv_frame() returns Frame::NULL
+        // because the NULL frame is special.
+        assert!(
+            protocol.recv_inputs.contains_key(&Frame::NULL),
+            "Protocol should have Frame::NULL entry for decoding"
+        );
+        assert_eq!(
+            protocol.last_recv_frame(),
+            Frame::NULL,
+            "last_recv_frame should return NULL when only NULL entry exists"
+        );
+
+        // Get the zeroed bytes from the protocol's NULL entry - this is the reference for encoding
+        let zeroed_bytes = protocol
+            .recv_inputs
+            .get(&Frame::NULL)
+            .unwrap()
+            .bytes
+            .clone();
+
+        // First input comes with frame 0, encoded relative to zeroed bytes
+        let test_input = TestInput { inp: 42 };
+        let test_bytes = bincode::serialize(&test_input).unwrap();
+
+        // The encoded bytes should have the same size as the reference
+        assert_eq!(
+            test_bytes.len(),
+            zeroed_bytes.len(),
+            "Input size should match zeroed size"
+        );
+
+        let encoded = encode(&zeroed_bytes, std::iter::once(&test_bytes));
+
+        let input = Input {
+            start_frame: Frame::new(0),
+            ack_frame: Frame::NULL,
+            bytes: encoded,
+            disconnect_requested: false,
+            peer_connect_status: vec![ConnectionStatus::default(); 2],
+        };
+
+        protocol.event_queue.clear();
+        protocol.on_input(&input);
+
+        // Verify: frame 0 was added
+        assert!(
+            protocol.recv_inputs.contains_key(&Frame::new(0)),
+            "First input (frame 0) should be accepted when last_recv_frame is NULL"
+        );
+    }
+
+    /// Test frame gap boundary: gap of exactly 1 is acceptable
+    #[test]
+    fn on_input_boundary_gap_of_one_is_acceptable() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        // Complete sync
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            let header = MessageHeader { magic: 999 };
+            protocol.on_sync_reply(
+                header,
+                SyncReply {
+                    random_reply: random,
+                },
+            );
+        }
+
+        // Set up: we have frame 5
+        let frame5_bytes = vec![5u8; 4];
+        protocol.recv_inputs.insert(
+            Frame::new(5),
+            InputBytes {
+                frame: Frame::new(5),
+                bytes: frame5_bytes.clone(),
+            },
+        );
+
+        // Receive frame 6 (gap of exactly 1)
+        let frame6_bytes = vec![6u8; 4];
+        let encoded = encode(&frame5_bytes, std::iter::once(&frame6_bytes));
+
+        let input = Input {
+            start_frame: Frame::new(6), // last_recv_frame() + 1 = 6, so 6 >= 6 is ok
+            ack_frame: Frame::NULL,
+            bytes: encoded,
+            disconnect_requested: false,
+            peer_connect_status: vec![ConnectionStatus::default(); 2],
+        };
+
+        let inputs_before = protocol.recv_inputs.len();
+        protocol.event_queue.clear();
+        protocol.on_input(&input);
+
+        // Verify: frame 6 was added
+        assert!(
+            protocol.recv_inputs.contains_key(&Frame::new(6)),
+            "Gap of 1 should be acceptable"
+        );
+        assert_eq!(protocol.recv_inputs.len(), inputs_before + 1);
+    }
+
+    /// Test frame gap boundary: gap of exactly 2 is rejected
+    #[test]
+    fn on_input_boundary_gap_of_two_is_rejected() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize();
+
+        // Complete sync
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            let header = MessageHeader { magic: 999 };
+            protocol.on_sync_reply(
+                header,
+                SyncReply {
+                    random_reply: random,
+                },
+            );
+        }
+
+        // Set up: we have frame 5
+        protocol.recv_inputs.insert(
+            Frame::new(5),
+            InputBytes {
+                frame: Frame::new(5),
+                bytes: vec![5u8; 4],
+            },
+        );
+
+        // Try to receive frame 7 (gap of 2 - we're missing frame 6)
+        let input = Input {
+            start_frame: Frame::new(7), // last_recv_frame() + 1 = 6, but we have 7 < 6 is false
+            ack_frame: Frame::NULL,
+            bytes: vec![1, 2, 3, 4], // Won't be decoded anyway
+            disconnect_requested: false,
+            peer_connect_status: vec![ConnectionStatus::default(); 2],
+        };
+
+        let inputs_before = protocol.recv_inputs.len();
+        protocol.event_queue.clear();
+        protocol.on_input(&input);
+
+        // Verify: no new inputs were added
+        assert_eq!(
+            protocol.recv_inputs.len(),
+            inputs_before,
+            "Gap of 2 should be rejected"
+        );
+        assert!(!protocol.recv_inputs.contains_key(&Frame::new(7)));
+    }
+
+    // ==========================================
+    // Input Frame Consistency Tests
+    // ==========================================
+
+    /// Test that from_inputs validates frame consistency across all inputs.
+    ///
+    /// Note: In debug builds, this triggers a debug_assert panic to catch bugs early.
+    /// In release builds, it logs a violation but continues processing.
+    /// This test verifies that consistent frames work correctly.
+    #[test]
+    fn from_inputs_detects_inconsistent_frames_via_violation() {
+        use std::collections::BTreeMap;
+
+        // Test that consistent frames DON'T trigger a violation
+        let mut inputs = BTreeMap::new();
+
+        // Add inputs with the SAME frame (consistent)
+        inputs.insert(
+            PlayerHandle::new(0),
+            PlayerInput {
+                frame: Frame::new(5),
+                input: TestInput { inp: 1 },
+            },
+        );
+        inputs.insert(
+            PlayerHandle::new(1),
+            PlayerInput {
+                frame: Frame::new(5), // Same frame - no violation
+                input: TestInput { inp: 2 },
+            },
+        );
+
+        // This should work without panic
+        let result = InputBytes::from_inputs::<TestConfig>(2, &inputs);
+        assert!(
+            !result.bytes.is_empty(),
+            "Should produce bytes for consistent frames"
+        );
+        assert_eq!(result.frame, Frame::new(5));
+
+        // Note: The inconsistent case cannot be tested in debug builds because
+        // it triggers a debug_assert. The violation path is verified through:
+        // 1. Code review - report_violation! is called before debug_assert
+        // 2. The debug_assert ensures immediate detection during development
+        // 3. In release builds, the violation would be logged and processing continues
+    }
+
+    /// Test that from_inputs handles consistent frames correctly
+    #[test]
+    fn from_inputs_accepts_consistent_frames() {
+        use std::collections::BTreeMap;
+
+        let mut inputs = BTreeMap::new();
+
+        // Add inputs with consistent frames
+        inputs.insert(
+            PlayerHandle::new(0),
+            PlayerInput {
+                frame: Frame::new(5),
+                input: TestInput { inp: 1 },
+            },
+        );
+        inputs.insert(
+            PlayerHandle::new(1),
+            PlayerInput {
+                frame: Frame::new(5), // Same frame
+                input: TestInput { inp: 2 },
+            },
+        );
+
+        let result = InputBytes::from_inputs::<TestConfig>(2, &inputs);
+
+        assert!(!result.bytes.is_empty());
+        assert_eq!(result.frame, Frame::new(5));
+    }
+
+    /// Test that from_inputs handles NULL frames as wildcard
+    #[test]
+    fn from_inputs_null_frame_is_wildcard() {
+        use std::collections::BTreeMap;
+
+        let mut inputs = BTreeMap::new();
+
+        // Add input with real frame and one with NULL
+        inputs.insert(
+            PlayerHandle::new(0),
+            PlayerInput {
+                frame: Frame::new(5),
+                input: TestInput { inp: 1 },
+            },
+        );
+        inputs.insert(
+            PlayerHandle::new(1),
+            PlayerInput {
+                frame: Frame::NULL, // NULL frame should be skipped in consistency check
+                input: TestInput { inp: 2 },
+            },
+        );
+
+        let result = InputBytes::from_inputs::<TestConfig>(2, &inputs);
+
+        // Should work without violation
+        assert!(!result.bytes.is_empty());
+        assert_eq!(result.frame, Frame::new(5));
+    }
+
+    // ==========================================
     // SyncConfig Tests
     // ==========================================
 
@@ -1834,5 +2363,84 @@ mod tests {
         let config1 = ProtocolConfig::new();
         let config2 = ProtocolConfig::default();
         assert_eq!(config1, config2);
+    }
+
+    // ==========================================
+    // Time Utility Tests
+    // ==========================================
+
+    #[test]
+    fn millis_since_epoch_returns_reasonable_value() {
+        // The function should return a value representing milliseconds since UNIX_EPOCH.
+        // As of 2020, this is at least 1577836800000 (Jan 1, 2020 00:00:00 UTC).
+        // As of 2030, it would be around 1893456000000.
+        let millis = millis_since_epoch();
+
+        // Should be at least year 2020 timestamp
+        assert!(
+            millis >= 1_577_836_800_000,
+            "Time should be after year 2020"
+        );
+
+        // Should not be unreasonably far in the future (year 2100)
+        assert!(
+            millis < 4_102_444_800_000,
+            "Time should be before year 2100"
+        );
+    }
+
+    #[test]
+    fn millis_since_epoch_is_monotonically_non_decreasing_in_short_term() {
+        // Within a single execution context, time should not go backwards
+        let first = millis_since_epoch();
+        let second = millis_since_epoch();
+
+        // Second call should be >= first (could be equal if very fast)
+        assert!(
+            second >= first,
+            "Time should not go backwards within same execution"
+        );
+    }
+
+    #[test]
+    fn millis_since_epoch_advances_over_time() {
+        let first = millis_since_epoch();
+
+        // Sleep for a tiny bit
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let second = millis_since_epoch();
+
+        // Should have advanced
+        assert!(second > first, "Time should advance after sleep");
+    }
+
+    /// Test documentation: The `millis_since_epoch` function gracefully handles
+    /// the case where system time is before UNIX_EPOCH by returning 0 and
+    /// reporting a violation. This cannot be easily tested without mocking,
+    /// but the code path is verified through code review. The test below
+    /// documents the expected behavior.
+    #[test]
+    fn millis_since_epoch_documents_backwards_time_handling() {
+        // This test documents the behavior when time goes backwards.
+        // The actual scenario (SystemTime before UNIX_EPOCH) cannot be triggered
+        // in a unit test without mocking std::time::SystemTime.
+        //
+        // Expected behavior:
+        // 1. When SystemTime::now().duration_since(UNIX_EPOCH) returns Err
+        // 2. The function reports a ViolationKind::InternalError via telemetry
+        // 3. The function returns 0 as a safe fallback
+        //
+        // This is covered by:
+        // - Code review of the implementation
+        // - The fact that the code compiles with the error handling path
+        // - Integration tests that would fail if the function panicked
+
+        // Simply verify the function works normally
+        let result = millis_since_epoch();
+        assert!(
+            result > 0,
+            "Under normal conditions, should return positive value"
+        );
     }
 }

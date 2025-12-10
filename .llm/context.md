@@ -114,6 +114,12 @@ After fixing any bug discovered through formal verification, code review, or oth
 
 ## Development Guidelines
 
+### Breaking Changes Policy
+- **API compatibility is NOT required** - Breaking the public API is acceptable if it provides a safer or more ergonomic experience
+- **Safety and correctness trump compatibility** - If a breaking change improves safety, determinism, or prevents misuse, make it
+- **Document all breaking changes** - Update CHANGELOG.md and MIGRATION.md when APIs change
+- **This fork prioritizes production-grade quality** - We are not a drop-in replacement for upstream GGRS
+
 ### Testing Standards
 - All new features must include tests
 - Aim for >90% code coverage
@@ -154,6 +160,152 @@ After fixing any bug discovered through formal verification, code review, or oth
 - Include recovery suggestions where applicable
 - Document error conditions in rustdoc
 - Never panic in library code (prefer Result)
+
+### Defensive Programming Patterns
+Apply these patterns from [corrode.dev/blog/defensive-programming](https://corrode.dev/blog/defensive-programming/) for safer, more robust code:
+
+#### Prefer Slice Pattern Matching Over Indexing
+```rust
+// ❌ Avoid: Decoupled length check and indexing can panic
+if !users.is_empty() {
+    let first = &users[0];
+}
+
+// ✅ Prefer: Compiler-enforced safe access
+match users.as_slice() {
+    [] => handle_empty(),
+    [single] => handle_one(single),
+    [first, rest @ ..] => handle_multiple(first, rest),
+}
+```
+
+#### Explicit Field Initialization Over Default Spread
+```rust
+// ❌ Avoid: New fields silently use defaults
+let config = Config { field1: value1, ..Default::default() };
+
+// ✅ Prefer: Compiler forces handling new fields
+let config = Config { field1: value1, field2: value2, field3: value3 };
+
+// ✅ Alternative: Destructure default for explicit handling
+let Config { field1, field2, field3 } = Config::default();
+let config = Config { field1: custom_value, field2, field3 };
+```
+
+#### Destructuring in Trait Implementations
+```rust
+// ❌ Avoid: New fields won't be included in comparison
+impl PartialEq for Order {
+    fn eq(&self, other: &Self) -> bool {
+        self.size == other.size && self.price == other.price
+    }
+}
+
+// ✅ Prefer: Compiler error when fields are added
+impl PartialEq for Order {
+    fn eq(&self, other: &Self) -> bool {
+        let Self { size, price, timestamp: _ } = self;
+        let Self { size: other_size, price: other_price, timestamp: _ } = other;
+        size == other_size && price == other_price
+    }
+}
+```
+
+#### Use TryFrom for Fallible Conversions
+```rust
+// ❌ Avoid: From that can fail hides errors
+impl From<RawData> for ProcessedData {
+    fn from(raw: RawData) -> Self {
+        Self { value: raw.value.unwrap_or_default() }
+    }
+}
+
+// ✅ Prefer: TryFrom makes fallibility explicit
+impl TryFrom<RawData> for ProcessedData {
+    type Error = ConversionError;
+    fn try_from(raw: RawData) -> Result<Self, Self::Error> {
+        Ok(Self { value: raw.value.ok_or(ConversionError::MissingValue)? })
+    }
+}
+```
+
+#### Exhaustive Match Arms
+```rust
+// ❌ Avoid: Wildcard hides unhandled variants
+match state {
+    State::Ready => handle_ready(),
+    State::Running => handle_running(),
+    _ => {}  // New variants silently fall through
+}
+
+// ✅ Prefer: Explicit variants catch additions
+match state {
+    State::Ready => handle_ready(),
+    State::Running => handle_running(),
+    State::Paused | State::Stopped => {}
+}
+```
+
+#### Named Placeholders in Patterns
+```rust
+// ❌ Avoid: Unclear which fields are ignored
+match event { Event::Input { _, _, .. } => {} }
+
+// ✅ Prefer: Self-documenting ignored fields
+match event { Event::Input { player: _, frame: _, data } => use_data(data) }
+```
+
+#### Temporary Mutability Pattern
+```rust
+// ✅ Confine mutability to initialization scope
+let data = {
+    let mut data = get_initial_data();
+    data.sort();
+    data.dedup();
+    data  // Return immutable
+};
+```
+
+#### Defensive Constructor Patterns (for libraries)
+```rust
+// Prevent bypassing validation with private field
+pub struct ValidatedConfig {
+    pub value: u32,
+    _private: (),  // Prevents direct construction
+}
+
+impl ValidatedConfig {
+    pub fn new(value: u32) -> Result<Self, ConfigError> {
+        if value == 0 { return Err(ConfigError::ZeroNotAllowed); }
+        Ok(Self { value, _private: () })
+    }
+}
+
+// Alternative: #[non_exhaustive] for cross-crate protection
+#[non_exhaustive]
+pub struct Config { pub value: u32 }
+```
+
+#### Mark Important Types with #[must_use]
+```rust
+#[must_use = "Configuration must be applied to take effect"]
+pub struct SessionConfig { /* ... */ }
+```
+
+#### Enums Over Booleans for Clarity
+```rust
+// ❌ Avoid: process_data(&data, true, false, true);
+// ✅ Prefer: process_data(&data, Compression::Enabled, Encryption::Disabled, Validation::Strict);
+```
+
+#### Recommended Clippy Lints
+```toml
+[lints.clippy]
+indexing_slicing = "warn"        # Prefer .get() or pattern matching
+fallible_impl_from = "deny"      # Use TryFrom for fallible conversions
+wildcard_enum_match_arm = "warn" # Prefer explicit match arms
+must_use_candidate = "warn"      # Add #[must_use] where appropriate
+```
 
 ## Key Technical Details
 
@@ -240,7 +392,8 @@ The goal is NOT to "make the test pass" — it's to understand and fix the under
 ## Contributing to This Fork
 
 When contributing, ensure:
-1. After every major change, run `cargo fmt`, `cargo clippy --all-targets --all-features`, and `cargo test`, and fix all resulting issues
+1. After every major change, run `cargo fmt`, `cargo clippy --all-targets`, and `cargo test`, and fix all resulting issues
+   - Note: Use `--features z3-verification` only when working on Z3 tests (compiles Z3 from source, which is slow)
 2. Tests accompany all changes
 3. Documentation is updated
 4. Code passes all lints and checks

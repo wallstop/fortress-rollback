@@ -20,6 +20,12 @@ GGRS is a Rust implementation of GGPO rollback networking for multiplayer games.
 - Think about edge cases and error conditions
 - Consider formal verification for critical logic
 
+### Breaking Changes Policy
+- **API compatibility is NOT required** - Breaking the public API is acceptable if it provides a safer or more ergonomic experience
+- **Safety and correctness trump compatibility** - If a breaking change improves safety, determinism, or prevents misuse, make it
+- **Document all breaking changes** - Update CHANGELOG.md and MIGRATION.md when APIs change
+- **This fork prioritizes production-grade quality** - We are not a drop-in replacement for upstream GGRS
+
 ### Code Style
 - Use 100% safe Rust (`#![forbid(unsafe_code)]`)
 - Follow Rust idioms and conventions
@@ -174,6 +180,178 @@ fn rollback_restores_state_correctly() {
     assert_eq!(session.current_frame(), 1);
     assert_ne!(session.current_state(), frame_2_state);
 }
+```
+
+## Defensive Programming Patterns
+
+Apply these patterns from [corrode.dev/blog/defensive-programming](https://corrode.dev/blog/defensive-programming/) for safer, more robust code:
+
+### Prefer Slice Pattern Matching Over Indexing
+```rust
+// ❌ Avoid: Decoupled length check and indexing can panic
+if !users.is_empty() {
+    let first = &users[0];
+}
+
+// ✅ Prefer: Compiler-enforced safe access
+match users.as_slice() {
+    [] => handle_empty(),
+    [single] => handle_one(single),
+    [first, rest @ ..] => handle_multiple(first, rest),
+}
+```
+
+### Explicit Field Initialization Over Default Spread
+```rust
+// ❌ Avoid: New fields silently use defaults
+let config = Config {
+    field1: value1,
+    ..Default::default()
+};
+
+// ✅ Prefer: Compiler forces handling new fields
+let config = Config {
+    field1: value1,
+    field2: value2,
+    field3: value3,
+};
+
+// ✅ Alternative: Destructure default for explicit handling
+let Config { field1, field2, field3 } = Config::default();
+let config = Config {
+    field1: custom_value,  // Override
+    field2,                // Use default (explicit)
+    field3,                // Use default (explicit)
+};
+```
+
+### Destructuring in Trait Implementations
+```rust
+// ❌ Avoid: New fields won't be included in comparison
+impl PartialEq for Order {
+    fn eq(&self, other: &Self) -> bool {
+        self.size == other.size && self.price == other.price
+    }
+}
+
+// ✅ Prefer: Compiler error when fields are added
+impl PartialEq for Order {
+    fn eq(&self, other: &Self) -> bool {
+        let Self { size, price, timestamp: _ } = self;
+        let Self { size: other_size, price: other_price, timestamp: _ } = other;
+        size == other_size && price == other_price
+    }
+}
+```
+
+### Use TryFrom for Fallible Conversions
+```rust
+// ❌ Avoid: From that can fail hides errors
+impl From<RawData> for ProcessedData {
+    fn from(raw: RawData) -> Self {
+        Self { value: raw.value.unwrap_or_default() }  // Hidden fallibility
+    }
+}
+
+// ✅ Prefer: TryFrom makes fallibility explicit
+impl TryFrom<RawData> for ProcessedData {
+    type Error = ConversionError;
+    fn try_from(raw: RawData) -> Result<Self, Self::Error> {
+        Ok(Self { value: raw.value.ok_or(ConversionError::MissingValue)? })
+    }
+}
+```
+
+### Exhaustive Match Arms
+```rust
+// ❌ Avoid: Wildcard hides unhandled variants
+match state {
+    State::Ready => handle_ready(),
+    State::Running => handle_running(),
+    _ => {}  // New variants silently fall through
+}
+
+// ✅ Prefer: Explicit variants catch additions
+match state {
+    State::Ready => handle_ready(),
+    State::Running => handle_running(),
+    State::Paused | State::Stopped => {}  // Explicitly grouped
+}
+```
+
+### Named Placeholders in Patterns
+```rust
+// ❌ Avoid: Unclear which fields are ignored
+match event {
+    Event::Input { _, _, .. } => {}
+}
+
+// ✅ Prefer: Self-documenting ignored fields
+match event {
+    Event::Input { player: _, frame: _, data } => use_data(data),
+}
+```
+
+### Temporary Mutability Pattern
+```rust
+// ✅ Confine mutability to initialization scope
+let data = {
+    let mut data = get_initial_data();
+    data.sort();
+    data.dedup();
+    data  // Return immutable
+};
+// `data` is now immutable, temps don't leak
+```
+
+### Defensive Constructor Patterns
+```rust
+// For libraries: Prevent bypassing validation
+pub struct ValidatedConfig {
+    pub value: u32,
+    _private: (),  // Prevents direct construction
+}
+
+impl ValidatedConfig {
+    pub fn new(value: u32) -> Result<Self, ConfigError> {
+        if value == 0 { return Err(ConfigError::ZeroNotAllowed); }
+        Ok(Self { value, _private: () })
+    }
+}
+
+// Alternative: Use #[non_exhaustive] for cross-crate protection
+#[non_exhaustive]
+pub struct Config {
+    pub value: u32,
+}
+```
+
+### Mark Important Types with #[must_use]
+```rust
+#[must_use = "Configuration must be applied to take effect"]
+pub struct SessionConfig { /* ... */ }
+
+#[must_use = "Errors must be handled"]
+pub enum SessionError { /* ... */ }
+```
+
+### Enums Over Booleans for Clarity
+```rust
+// ❌ Avoid: Unclear at call site
+process_data(&data, true, false, true);
+
+// ✅ Prefer: Self-documenting call sites
+process_data(&data, Compression::Enabled, Encryption::Disabled, Validation::Strict);
+```
+
+### Recommended Clippy Lints
+Add to `Cargo.toml` for defensive programming enforcement:
+```toml
+[lints.clippy]
+indexing_slicing = "warn"        # Prefer .get() or pattern matching
+fallible_impl_from = "deny"      # Use TryFrom for fallible conversions
+wildcard_enum_match_arm = "warn" # Prefer explicit match arms
+must_use_candidate = "warn"      # Add #[must_use] where appropriate
 ```
 
 ## Verification Guidance

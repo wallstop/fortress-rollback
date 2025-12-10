@@ -38,6 +38,7 @@ impl Default for GameStubEnum {
 
 impl GameStubEnum {
     #[allow(dead_code)]
+    #[must_use]
     pub fn new() -> GameStubEnum {
         GameStubEnum {
             gs: StateStubEnum { frame: 0, state: 0 },
@@ -51,6 +52,7 @@ impl GameStubEnum {
                 FortressRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
                 FortressRequest::SaveGameState { cell, frame } => self.save_game_state(cell, frame),
                 FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
+                _ => unreachable!("Unknown request type"),
             }
         }
     }

@@ -15,7 +15,9 @@ pub use network::messages::Message;
 pub use network::network_stats::NetworkStats;
 pub use network::udp_socket::UdpNonBlockingSocket;
 use serde::{de::DeserializeOwned, Serialize};
-pub use sessions::builder::{ProtocolConfig, SessionBuilder, SpectatorConfig, SyncConfig};
+pub use sessions::builder::{
+    InputQueueConfig, ProtocolConfig, SaveMode, SessionBuilder, SpectatorConfig, SyncConfig,
+};
 pub use sessions::p2p_session::P2PSession;
 pub use sessions::p2p_spectator_session::SpectatorSession;
 pub use sessions::sync_test_session::SyncTestSession;
@@ -25,26 +27,113 @@ pub use time_sync::TimeSyncConfig;
 // Re-export prediction strategies
 pub use crate::input_queue::{BlankPrediction, PredictionStrategy, RepeatLastConfirmed};
 
-pub(crate) mod error;
-pub(crate) mod frame_info;
+// Internal modules - made pub for re-export in __internal, but doc(hidden) for API cleanliness
+#[doc(hidden)]
+pub mod error;
+#[doc(hidden)]
+pub mod frame_info;
 pub mod hash;
-pub(crate) mod input_queue;
-pub(crate) mod sync_layer;
+#[doc(hidden)]
+pub mod input_queue;
+#[doc(hidden)]
+pub mod sync;
+#[doc(hidden)]
+pub mod sync_layer;
 pub mod telemetry;
-pub(crate) mod time_sync;
-pub(crate) mod sessions {
-    pub(crate) mod builder;
-    pub(crate) mod p2p_session;
-    pub(crate) mod p2p_spectator_session;
-    pub(crate) mod sync_test_session;
+#[doc(hidden)]
+pub mod time_sync;
+#[doc(hidden)]
+pub mod sessions {
+    #[doc(hidden)]
+    pub mod builder;
+    #[doc(hidden)]
+    pub mod p2p_session;
+    #[doc(hidden)]
+    pub mod p2p_spectator_session;
+    #[doc(hidden)]
+    pub mod sync_test_session;
 }
-pub(crate) mod network {
+#[doc(hidden)]
+pub mod network {
     pub mod chaos_socket;
-    pub(crate) mod compression;
-    pub(crate) mod messages;
-    pub(crate) mod network_stats;
-    pub(crate) mod protocol;
-    pub(crate) mod udp_socket;
+    #[doc(hidden)]
+    pub mod compression;
+    #[doc(hidden)]
+    pub mod messages;
+    #[doc(hidden)]
+    pub mod network_stats;
+    #[doc(hidden)]
+    pub mod protocol;
+    #[doc(hidden)]
+    pub mod udp_socket;
+}
+
+/// Internal module exposing implementation details for testing, fuzzing, and formal verification.
+///
+/// # ⚠️ WARNING: No Stability Guarantees
+///
+/// **This module is NOT part of the public API.** Everything here is:
+/// - Subject to change without notice
+/// - Not covered by semver compatibility guarantees
+/// - Intended ONLY for:
+///   - Fuzzing (cargo-fuzz, libFuzzer, AFL)
+///   - Property-based testing (proptest, quickcheck)
+///   - Formal verification (Kani, Z3)
+///   - Integration testing in the same workspace
+///
+/// **DO NOT** depend on anything in this module for production code.
+/// **DO NOT** import these types in your game/application code.
+///
+/// # Rationale
+///
+/// Rollback networking has complex invariants that benefit from direct testing
+/// of internal components:
+/// - **InputQueue**: Circular buffer with prediction, frame delay, rollback semantics
+/// - **SyncLayer**: Frame synchronization, state management, rollback coordination
+/// - **TimeSync**: Time synchronization calculations and averaging
+/// - **Compression**: Delta encoding for network efficiency
+/// - **Protocol**: State machine for peer connections
+///
+/// By exposing these internals (with clear warnings), we enable:
+/// 1. Higher fuzz coverage (direct component testing vs. through session APIs)
+/// 2. Better fault isolation (pinpoint which component failed)
+/// 3. Direct invariant testing (test component contracts directly)
+/// 4. Same code paths for testing and production (no `#[cfg(test)]` divergence)
+///
+/// # Example: Fuzz Target
+///
+/// ```ignore
+/// use fortress_rollback::__internal::{InputQueue, PlayerInput};
+/// use fortress_rollback::Frame;
+///
+/// // Direct fuzzing of InputQueue (not possible without this module)
+/// fuzz_target!(|ops: Vec<QueueOp>| {
+///     let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 32);
+///     for op in ops {
+///         match op {
+///             QueueOp::Add(frame, input) => queue.add_input(PlayerInput::new(frame, input)),
+///             QueueOp::Get(frame) => queue.input(frame),
+///             // ...
+///         }
+///     }
+/// });
+/// ```
+#[doc(hidden)]
+pub mod __internal {
+
+    // Core types
+    pub use crate::frame_info::{GameState, PlayerInput};
+    pub use crate::input_queue::{InputQueue, INPUT_QUEUE_LENGTH, MAX_FRAME_DELAY};
+    pub use crate::sync_layer::{GameStateCell, SavedStates, SyncLayer};
+    pub use crate::time_sync::TimeSync;
+
+    // Network internals
+    pub use crate::network::compression::{decode, delta_decode, delta_encode, encode};
+    pub use crate::network::messages::ConnectionStatus;
+    pub use crate::network::protocol::{Event, ProtocolState, UdpProtocol};
+
+    // Session internals
+    pub use crate::sessions::p2p_session::PlayerRegistry;
 }
 
 // #############
@@ -52,6 +141,11 @@ pub(crate) mod network {
 // #############
 
 /// Internally, -1 represents no frame / invalid frame.
+///
+/// # Formal Specification Alignment
+/// - **TLA+**: `NULL_FRAME = 999` in `specs/tla/*.cfg` (uses 999 to stay in Nat domain)
+/// - **Z3**: `NULL_FRAME = -1` in `tests/test_z3_verification.rs`
+/// - **FORMAL_SPEC.md**: `NULL_FRAME = -1`, with `VALID_FRAME(f) ↔ f ≥ 0`
 pub const NULL_FRAME: i32 = -1;
 
 /// A frame is a single step of game execution.
@@ -61,6 +155,12 @@ pub const NULL_FRAME: i32 = -1;
 /// and increment sequentially.
 ///
 /// The special value [`NULL_FRAME`] (-1) represents "no frame" or "uninitialized".
+///
+/// # Formal Specification Alignment
+/// - **TLA+**: `Frame == {NULL_FRAME} ∪ (0..MAX_FRAME)` in `specs/tla/Rollback.tla`
+/// - **Z3**: Frame arithmetic proofs in `tests/test_z3_verification.rs`
+/// - **FORMAL_SPEC.md**: Core type definition with operations `frame_add`, `frame_sub`, `frame_valid`
+/// - **Kani**: `kani_frame_*` proofs verify overflow safety and arithmetic correctness
 ///
 /// # Type Safety
 ///
@@ -116,12 +216,14 @@ impl Frame {
     /// Note: This does not validate the frame number. Use [`Frame::is_valid()`]
     /// to check if the frame represents a valid (non-negative) frame number.
     #[inline]
+    #[must_use]
     pub const fn new(frame: i32) -> Self {
         Frame(frame)
     }
 
     /// Returns the underlying `i32` value.
     #[inline]
+    #[must_use]
     pub const fn as_i32(self) -> i32 {
         self.0
     }
@@ -137,6 +239,7 @@ impl Frame {
     /// assert!(!Frame::new(0).is_null());
     /// ```
     #[inline]
+    #[must_use]
     pub const fn is_null(self) -> bool {
         self.0 == NULL_FRAME
     }
@@ -154,6 +257,7 @@ impl Frame {
     /// assert!(!Frame::new(-5).is_valid());
     /// ```
     #[inline]
+    #[must_use]
     pub const fn is_valid(self) -> bool {
         self.0 >= 0
     }
@@ -162,6 +266,7 @@ impl Frame {
     ///
     /// This is useful for handling the null/valid frame pattern with Option.
     #[inline]
+    #[must_use]
     pub const fn to_option(self) -> Option<Frame> {
         if self.is_valid() {
             Some(self)
@@ -172,6 +277,7 @@ impl Frame {
 
     /// Creates a Frame from an Option, using NULL for None.
     #[inline]
+    #[must_use]
     pub const fn from_option(opt: Option<Frame>) -> Frame {
         match opt {
             Some(f) => f,
@@ -345,12 +451,14 @@ impl PlayerHandle {
     /// Use [`is_valid_player_for()`](Self::is_valid_player_for) or
     /// [`is_spectator_for()`](Self::is_spectator_for) to check validity.
     #[inline]
+    #[must_use]
     pub const fn new(handle: usize) -> Self {
         PlayerHandle(handle)
     }
 
     /// Returns the underlying `usize` value.
     #[inline]
+    #[must_use]
     pub const fn as_usize(self) -> usize {
         self.0
     }
@@ -368,6 +476,7 @@ impl PlayerHandle {
     /// assert!(!handle.is_valid_player_for(1)); // Invalid for 1-player session
     /// ```
     #[inline]
+    #[must_use]
     pub const fn is_valid_player_for(self, num_players: usize) -> bool {
         self.0 < num_players
     }
@@ -385,6 +494,7 @@ impl PlayerHandle {
     /// assert!(!handle.is_spectator_for(3)); // Player in 3-player session
     /// ```
     #[inline]
+    #[must_use]
     pub const fn is_spectator_for(self, num_players: usize) -> bool {
         self.0 >= num_players
     }
@@ -471,7 +581,21 @@ pub enum InputStatus {
 }
 
 /// Notifications that you can receive from the session. Handling them is up to the user.
+///
+/// # Forward Compatibility
+///
+/// This enum is marked `#[non_exhaustive]` because new event types may be
+/// added in future versions. Always include a wildcard arm when matching:
+///
+/// ```ignore
+/// match event {
+///     FortressEvent::Synchronized { addr } => { /* handle */ }
+///     FortressEvent::Disconnected { addr } => { /* handle */ }
+///     _ => { /* handle unknown events */ }
+/// }
+/// ```
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FortressEvent<T>
 where
     T: Config,
@@ -541,6 +665,22 @@ where
 }
 
 /// Requests that you can receive from the session. Handling them is mandatory.
+///
+/// # Forward Compatibility
+///
+/// This enum is marked `#[non_exhaustive]` because new request types may be
+/// added in future versions. Always include a wildcard arm when matching,
+/// though new requests should be handled appropriately:
+///
+/// ```ignore
+/// match request {
+///     FortressRequest::SaveGameState { cell, frame } => { /* handle */ }
+///     FortressRequest::LoadGameState { cell, frame } => { /* handle */ }
+///     FortressRequest::AdvanceFrame { inputs } => { /* handle */ }
+///     _ => panic!("Unknown request type - upgrade fortress-rollback"),
+/// }
+/// ```
+#[non_exhaustive]
 pub enum FortressRequest<T>
 where
     T: Config,

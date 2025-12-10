@@ -13,12 +13,16 @@
 (*   - Safety: No invalid state transitions                                *)
 (*   - Liveness: Eventually synchronized (under fair scheduling)           *)
 (*   - No deadlocks                                                        *)
+(*                                                                         *)
+(* Production-Spec Alignment (as of Phase 9/10):                           *)
+(*   NUM_SYNC_PACKETS maps to SyncConfig.num_sync_packets (default: 5).    *)
+(*   The invariants proven here hold for ANY valid NUM_SYNC_PACKETS > 0.   *)
 (***************************************************************************)
 
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS
-    NUM_SYNC_PACKETS,       \* Number of sync roundtrips required (5)
+    NUM_SYNC_PACKETS,       \* Number of sync roundtrips required (default 5, configurable)
     PEERS                   \* Set of peer identifiers
 
 ASSUME NUM_SYNC_PACKETS \in Nat /\ NUM_SYNC_PACKETS > 0

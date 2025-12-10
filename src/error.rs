@@ -6,8 +6,22 @@ use crate::{Frame, PlayerHandle};
 
 /// This enum contains all error messages this library can return. Most API functions will generally return a [`Result<(), FortressError>`].
 ///
+/// # Forward Compatibility
+///
+/// This enum is marked `#[non_exhaustive]` because new error variants may be
+/// added in future versions. Always include a wildcard arm when matching:
+///
+/// ```ignore
+/// match error {
+///     FortressError::NotSynchronized => { /* handle */ }
+///     FortressError::PredictionThreshold => { /* handle */ }
+///     _ => { /* handle unknown errors */ }
+/// }
+/// ```
+///
 /// [`Result<(), FortressError>`]: std::result::Result
 #[derive(Debug, Clone, PartialEq, Hash)]
+#[non_exhaustive]
 pub enum FortressError {
     /// When the prediction threshold has been reached, we cannot accept more inputs from the local player.
     PredictionThreshold,
@@ -136,3 +150,151 @@ impl Display for FortressError {
 }
 
 impl Error for FortressError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_prediction_threshold_display() {
+        let err = FortressError::PredictionThreshold;
+        let display = format!("{}", err);
+        assert!(display.contains("Prediction threshold"));
+        assert!(display.contains("cannot proceed"));
+    }
+
+    #[test]
+    fn test_invalid_request_display() {
+        let err = FortressError::InvalidRequest {
+            info: "test error info".to_string(),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Invalid Request"));
+        assert!(display.contains("test error info"));
+    }
+
+    #[test]
+    fn test_not_synchronized_display() {
+        let err = FortressError::NotSynchronized;
+        let display = format!("{}", err);
+        assert!(display.contains("not yet synchronized"));
+    }
+
+    #[test]
+    fn test_mismatched_checksum_display() {
+        let err = FortressError::MismatchedChecksum {
+            current_frame: Frame::new(100),
+            mismatched_frames: vec![Frame::new(95), Frame::new(96)],
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("checksum mismatch"));
+        assert!(display.contains("100"));
+    }
+
+    #[test]
+    fn test_spectator_too_far_behind_display() {
+        let err = FortressError::SpectatorTooFarBehind;
+        let display = format!("{}", err);
+        assert!(display.contains("spectator"));
+        assert!(display.contains("behind"));
+    }
+
+    #[test]
+    fn test_invalid_frame_display() {
+        let err = FortressError::InvalidFrame {
+            frame: Frame::new(42),
+            reason: "frame is in the past".to_string(),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Invalid frame"));
+        assert!(display.contains("42"));
+        assert!(display.contains("frame is in the past"));
+    }
+
+    #[test]
+    fn test_invalid_player_handle_display() {
+        let err = FortressError::InvalidPlayerHandle {
+            handle: PlayerHandle(5),
+            max_handle: PlayerHandle(3),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Invalid player handle"));
+        assert!(display.contains("5"));
+        assert!(display.contains("3"));
+    }
+
+    #[test]
+    fn test_missing_input_display() {
+        let err = FortressError::MissingInput {
+            player_handle: PlayerHandle(1),
+            frame: Frame::new(50),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Missing input"));
+        assert!(display.contains("player 1"));
+        assert!(display.contains("frame 50"));
+    }
+
+    #[test]
+    fn test_serialization_error_display() {
+        let err = FortressError::SerializationError {
+            context: "failed to serialize game state".to_string(),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Serialization error"));
+        assert!(display.contains("failed to serialize game state"));
+    }
+
+    #[test]
+    fn test_internal_error_display() {
+        let err = FortressError::InternalError {
+            context: "unexpected state transition".to_string(),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Internal error"));
+        assert!(display.contains("please report as bug"));
+        assert!(display.contains("unexpected state transition"));
+    }
+
+    #[test]
+    fn test_socket_error_display() {
+        let err = FortressError::SocketError {
+            context: "connection refused".to_string(),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Socket error"));
+        assert!(display.contains("connection refused"));
+    }
+
+    #[test]
+    fn test_error_debug() {
+        let err = FortressError::PredictionThreshold;
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("PredictionThreshold"));
+    }
+
+    #[test]
+    fn test_error_clone() {
+        let err = FortressError::InvalidRequest {
+            info: "test".to_string(),
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn test_error_partial_eq() {
+        let err1 = FortressError::NotSynchronized;
+        let err2 = FortressError::NotSynchronized;
+        let err3 = FortressError::PredictionThreshold;
+        assert_eq!(err1, err2);
+        assert_ne!(err1, err3);
+    }
+
+    #[test]
+    fn test_error_implements_std_error() {
+        let err: Box<dyn Error> = Box::new(FortressError::NotSynchronized);
+        // This test verifies that FortressError implements std::error::Error
+        assert!(err.source().is_none());
+    }
+}

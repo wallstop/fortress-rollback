@@ -7,19 +7,54 @@ use std::cmp;
 ///
 /// For Kani verification, we use a smaller queue (8 elements) to keep verification tractable.
 /// This is sufficient to prove the invariants hold for the circular buffer logic.
+///
+/// # Note
+///
+/// This constant is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
+/// It is not part of the stable public API.
+///
+/// # Formal Specification Alignment
+/// - **TLA+**: `QUEUE_LENGTH` in `specs/tla/InputQueue.tla` (set to 3 for model checking)
+/// - **Z3**: `INPUT_QUEUE_LENGTH` in `tests/test_z3_verification.rs` (128)
+/// - **Kani**: Uses 8 for tractable verification, production uses 128
+/// - **FORMAL_SPEC.md**: INV-4 (queue length bounds), INV-5 (index validity)
 #[cfg(kani)]
-pub(crate) const INPUT_QUEUE_LENGTH: usize = 8;
+pub const INPUT_QUEUE_LENGTH: usize = 8;
 
 /// The length of the input queue. This describes the number of inputs Fortress Rollback can hold at the same time per player.
 /// At 60fps, 128 frames = ~2.1 seconds of input history.
+///
+/// # Note
+///
+/// This constant is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
+/// It is not part of the stable public API.
+///
+/// # Formal Specification Alignment
+/// - **TLA+**: `QUEUE_LENGTH` in `specs/tla/InputQueue.tla` (set to 3 for model checking)
+/// - **Z3**: `INPUT_QUEUE_LENGTH` in `tests/test_z3_verification.rs` (128)
+/// - **FORMAL_SPEC.md**: INV-4 requires `0 ≤ q.length ≤ INPUT_QUEUE_LENGTH`
 #[cfg(not(kani))]
-pub(crate) const INPUT_QUEUE_LENGTH: usize = 128;
+pub const INPUT_QUEUE_LENGTH: usize = 128;
 
 /// The maximum allowed frame delay. Must be less than [`INPUT_QUEUE_LENGTH`] to ensure
 /// the circular buffer doesn't overflow when advancing the queue head.
 ///
 /// This constraint was discovered through Kani formal verification of the `add_input` function.
-pub(crate) const MAX_FRAME_DELAY: usize = INPUT_QUEUE_LENGTH - 1;
+///
+/// # Note
+///
+/// This constant is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
+/// It is not part of the stable public API.
+///
+/// # Formal Specification Alignment  
+/// - **Kani**: `kani_add_input_no_overflow` proof verifies this constraint
+/// - **Z3**: `z3_proof_frame_delay_prevents_overflow` in `tests/test_z3_verification.rs`
+/// - **FORMAL_SPEC.md**: Ensures SAFE-1 (no buffer overflow) holds
+///
+/// Note: This constant is primarily used for testing. Production code uses
+/// the configurable `max_frame_delay()` method on `InputQueueConfig` or `InputQueue`.
+#[allow(dead_code)]
+pub const MAX_FRAME_DELAY: usize = INPUT_QUEUE_LENGTH - 1;
 
 /// Defines the strategy used to predict inputs when we haven't received the actual input yet.
 ///
@@ -96,9 +131,28 @@ impl<I: Copy + Default> PredictionStrategy<I> for BlankPrediction {
     }
 }
 
-/// `InputQueue` handles inputs for a single player and saves them in a circular array. Valid Inputs are between `head` and `tail`.
+/// `InputQueue` handles inputs for a single player and saves them in a circular array.
+/// Valid inputs are between `head` and `tail`.
+///
+/// This is the core circular buffer for managing player inputs in rollback networking.
+/// It handles:
+/// - Input storage with configurable queue length
+/// - Frame delay support
+/// - Input prediction when actual inputs haven't arrived
+/// - Tracking of incorrect predictions for rollback
+///
+/// # Note
+///
+/// This type is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
+/// It is not part of the stable public API.
+///
+/// # Formal Specification
+///
+/// - **TLA+**: `specs/tla/InputQueue.tla`
+/// - **Kani**: `kani_input_queue_proofs` module (invariant verification)
+/// - **Z3**: `tests/test_z3_verification.rs` (circular buffer arithmetic)
 #[derive(Debug, Clone)]
-pub(crate) struct InputQueue<T>
+pub struct InputQueue<T>
 where
     T: Config,
 {
@@ -124,6 +178,10 @@ where
     /// The player index this queue is for (used for prediction strategy)
     player_index: usize,
 
+    /// The length of the input queue (circular buffer).
+    /// This is configurable at construction time. Default is INPUT_QUEUE_LENGTH (128).
+    queue_length: usize,
+
     /// Our cyclic input queue
     inputs: Vec<PlayerInput<T::Input>>,
     /// A pre-allocated prediction we are going to use to return predictions from.
@@ -136,7 +194,31 @@ where
 }
 
 impl<T: Config> InputQueue<T> {
-    pub(crate) fn new(player_index: usize) -> Self {
+    /// Creates a new input queue with the default queue length (INPUT_QUEUE_LENGTH).
+    ///
+    /// Note: This function exists for backward compatibility and testing.
+    /// The main construction path uses `with_queue_length` via `SyncLayer::with_queue_length`.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn new(player_index: usize) -> Self {
+        Self::with_queue_length(player_index, INPUT_QUEUE_LENGTH)
+    }
+
+    /// Creates a new input queue with a custom queue length.
+    ///
+    /// # Arguments
+    /// * `player_index` - The index of the player this queue is for
+    /// * `queue_length` - The size of the circular buffer. Must be at least 2.
+    ///
+    /// # Panics
+    /// Panics if `queue_length < 2`.
+    #[must_use]
+    pub fn with_queue_length(player_index: usize, queue_length: usize) -> Self {
+        assert!(
+            queue_length >= 2,
+            "Queue length must be at least 2, got {}",
+            queue_length
+        );
         Self {
             head: 0,
             tail: 0,
@@ -147,29 +229,43 @@ impl<T: Config> InputQueue<T> {
             first_incorrect_frame: Frame::NULL,
             last_requested_frame: Frame::NULL,
             prediction: PlayerInput::blank_input(Frame::NULL),
-            inputs: vec![PlayerInput::blank_input(Frame::NULL); INPUT_QUEUE_LENGTH],
+            inputs: vec![PlayerInput::blank_input(Frame::NULL); queue_length],
             player_index,
+            queue_length,
             last_confirmed_input: None,
         }
     }
 
-    pub(crate) fn first_incorrect_frame(&self) -> Frame {
+    /// Returns the queue length (size of the circular buffer).
+    pub fn queue_length(&self) -> usize {
+        self.queue_length
+    }
+
+    /// Returns the maximum allowed frame delay for this queue.
+    /// This is always `queue_length - 1`.
+    pub fn max_frame_delay(&self) -> usize {
+        self.queue_length.saturating_sub(1)
+    }
+
+    /// Returns the first frame in the queue that is known to be an incorrect prediction.
+    pub fn first_incorrect_frame(&self) -> Frame {
         self.first_incorrect_frame
     }
 
     /// Sets the frame delay for this input queue.
     ///
     /// # Errors
-    /// Returns `FortressError::InvalidRequest` if `delay >= INPUT_QUEUE_LENGTH`.
+    /// Returns `FortressError::InvalidRequest` if `delay >= queue_length`.
     /// This constraint ensures the circular buffer doesn't overflow when advancing the queue head.
-    pub(crate) fn set_frame_delay(&mut self, delay: usize) -> Result<(), FortressError> {
-        if delay > MAX_FRAME_DELAY {
+    pub fn set_frame_delay(&mut self, delay: usize) -> Result<(), FortressError> {
+        let max_delay = self.max_frame_delay();
+        if delay > max_delay {
             return Err(FortressError::InvalidRequest {
                 info: format!(
-                    "Frame delay {} exceeds maximum allowed value of {} (INPUT_QUEUE_LENGTH - 1). \
+                    "Frame delay {} exceeds maximum allowed value of {} (queue_length - 1). \
                      At 60fps, this would be {:.1}+ seconds of delay, which is impractical for gameplay.",
                     delay,
-                    MAX_FRAME_DELAY,
+                    max_delay,
                     delay as f64 / 60.0
                 ),
             });
@@ -178,7 +274,8 @@ impl<T: Config> InputQueue<T> {
         Ok(())
     }
 
-    pub(crate) fn reset_prediction(&mut self) {
+    /// Resets the prediction state.
+    pub fn reset_prediction(&mut self) {
         self.prediction.frame = Frame::NULL;
         self.first_incorrect_frame = Frame::NULL;
         self.last_requested_frame = Frame::NULL;
@@ -186,11 +283,11 @@ impl<T: Config> InputQueue<T> {
 
     /// Returns a `PlayerInput` only if the input for the requested frame is confirmed.
     /// In contrast to `input()`, this will not return a prediction if there is no confirmed input for the frame.
-    pub(crate) fn confirmed_input(
+    pub fn confirmed_input(
         &self,
         requested_frame: Frame,
     ) -> Result<PlayerInput<T::Input>, crate::FortressError> {
-        let offset = requested_frame.as_i32() as usize % INPUT_QUEUE_LENGTH;
+        let offset = requested_frame.as_i32() as usize % self.queue_length;
 
         if self.inputs[offset].frame == requested_frame {
             return Ok(self.inputs[offset]);
@@ -205,8 +302,13 @@ impl<T: Config> InputQueue<T> {
         })
     }
 
-    /// Discards confirmed frames up to given `frame` from the queue. All confirmed frames are guaranteed to be synchronized between players, so there is no need to save the inputs anymore.
-    pub(crate) fn discard_confirmed_frames(&mut self, mut frame: Frame) {
+    /// Discards confirmed frames **before** the given `frame` from the queue.
+    /// All confirmed frames are guaranteed to be synchronized between players,
+    /// so there is no need to save the inputs anymore.
+    ///
+    /// Note: After calling `discard_confirmed_frames(5)`, frames 0-4 are discarded
+    /// and frame 5 becomes the new tail (oldest frame in queue).
+    pub fn discard_confirmed_frames(&mut self, mut frame: Frame) {
         // we only drop frames until the last frame that was requested, otherwise we might delete data still needed
         if !self.last_requested_frame.is_null() {
             frame = cmp::min(frame, self.last_requested_frame);
@@ -216,23 +318,28 @@ impl<T: Config> InputQueue<T> {
         if frame >= self.last_added_frame {
             // delete all but most recent - set tail to the position of the most recent input
             // The most recent input is at (head - 1), so tail should point there
-            // This maintains the circular buffer invariant: length = (head - tail) mod INPUT_QUEUE_LENGTH
+            // This maintains the circular buffer invariant: length = (head - tail) mod queue_length
             self.tail = if self.head == 0 {
-                INPUT_QUEUE_LENGTH - 1
+                self.queue_length - 1
             } else {
                 self.head - 1
             };
             self.length = 1;
         } else if frame <= self.inputs[self.tail].frame {
-            // we don't need to delete anything
+            // The target frame is at or before the current tail - nothing to delete
+            // (frames before tail don't exist in the queue)
         } else {
-            let offset = (frame - self.inputs[self.tail].frame) as usize;
-            self.tail = (self.tail + offset) % INPUT_QUEUE_LENGTH;
+            // Discard frames from tail up to (but not including) 'frame'
+            // After this, 'frame' becomes the new tail
+            let tail_frame = self.inputs[self.tail].frame;
+            let offset = (frame - tail_frame) as usize;
+            self.tail = (self.tail + offset) % self.queue_length;
             self.length -= offset;
         }
     }
 
-    /// Returns the game input of a single player for a given frame, if that input does not exist, we return a prediction instead.
+    /// Returns the game input of a single player for a given frame.
+    /// If that input does not exist, returns a prediction instead.
     ///
     /// # Determinism
     ///
@@ -246,7 +353,7 @@ impl<T: Config> InputQueue<T> {
     ///
     /// This is DIFFERENT from the original GGPO approach of using "last added" input,
     /// which depended on local timing and caused desyncs.
-    pub(crate) fn input(&mut self, requested_frame: Frame) -> (T::Input, InputStatus) {
+    pub fn input(&mut self, requested_frame: Frame) -> (T::Input, InputStatus) {
         // No one should ever try to grab any input when we have a prediction error.
         // Doing so means that we're just going further down the wrong path. Assert this to verify that it's true.
         assert!(self.first_incorrect_frame.is_null());
@@ -263,7 +370,7 @@ impl<T: Config> InputQueue<T> {
             let mut offset: usize = (requested_frame - self.inputs[self.tail].frame) as usize;
 
             if offset < self.length {
-                offset = (offset + self.tail) % INPUT_QUEUE_LENGTH;
+                offset = (offset + self.tail) % self.queue_length;
                 assert!(self.inputs[offset].frame == requested_frame);
                 return (self.inputs[offset].input, InputStatus::Confirmed);
             }
@@ -290,7 +397,7 @@ impl<T: Config> InputQueue<T> {
     }
 
     /// Adds an input frame to the queue. Will consider the set frame delay.
-    pub(crate) fn add_input(&mut self, input: PlayerInput<T::Input>) -> Frame {
+    pub fn add_input(&mut self, input: PlayerInput<T::Input>) -> Frame {
         // Verify that inputs are passed in sequentially by the user, regardless of frame delay.
         if !self.last_added_frame.is_null()
             && input.frame + self.frame_delay as i32 != self.last_added_frame + 1
@@ -312,7 +419,7 @@ impl<T: Config> InputQueue<T> {
     /// Returns the frame number
     fn add_input_by_frame(&mut self, input: PlayerInput<T::Input>, frame_number: Frame) {
         let previous_position = match self.head {
-            0 => INPUT_QUEUE_LENGTH - 1,
+            0 => self.queue_length - 1,
             _ => self.head - 1,
         };
 
@@ -322,9 +429,9 @@ impl<T: Config> InputQueue<T> {
         // Add the frame to the back of the queue
         self.inputs[self.head] = input;
         self.inputs[self.head].frame = frame_number;
-        self.head = (self.head + 1) % INPUT_QUEUE_LENGTH;
+        self.head = (self.head + 1) % self.queue_length;
         self.length += 1;
-        assert!(self.length <= INPUT_QUEUE_LENGTH);
+        assert!(self.length <= self.queue_length);
         self.first_frame = false;
         self.last_added_frame = frame_number;
 
@@ -356,7 +463,7 @@ impl<T: Config> InputQueue<T> {
     /// Advances the queue head to the next frame and either drops inputs or fills the queue if the input delay has changed since the last frame.
     fn advance_queue_head(&mut self, mut input_frame: Frame) -> Frame {
         let previous_position = match self.head {
-            0 => INPUT_QUEUE_LENGTH - 1,
+            0 => self.queue_length - 1,
             _ => self.head - 1,
         };
 
@@ -381,7 +488,7 @@ impl<T: Config> InputQueue<T> {
         }
 
         let previous_position = match self.head {
-            0 => INPUT_QUEUE_LENGTH - 1,
+            0 => self.queue_length - 1,
             _ => self.head - 1,
         };
         assert!(input_frame == 0 || input_frame == self.inputs[previous_position].frame + 1);
@@ -394,67 +501,83 @@ impl<T: Config> InvariantChecker for InputQueue<T> {
     ///
     /// # Invariants
     ///
-    /// 1. `length` must not exceed `INPUT_QUEUE_LENGTH`
-    /// 2. `head` and `tail` must be valid indices (< INPUT_QUEUE_LENGTH)
-    /// 3. `length` must equal the distance from tail to head in the circular buffer
+    /// 1. `length` must not exceed `queue_length`
+    /// 2. `head` and `tail` must be valid indices (< queue_length)
+    /// 3. `length` must be consistent with head/tail positions (accounting for full queue)
     /// 4. If `length > 0`, the frames in the queue should be consecutive
     /// 5. `frame_delay` must be within reasonable bounds
     /// 6. `first_incorrect_frame` should be NULL_FRAME or >= 0
     fn check_invariants(&self) -> Result<(), InvariantViolation> {
-        // Invariant 1: length <= INPUT_QUEUE_LENGTH
-        if self.length > INPUT_QUEUE_LENGTH {
+        // Invariant 1: length <= queue_length
+        if self.length > self.queue_length {
             return Err(
-                InvariantViolation::new("InputQueue", "length exceeds INPUT_QUEUE_LENGTH")
-                    .with_details(format!(
-                        "length={}, max={}",
-                        self.length, INPUT_QUEUE_LENGTH
-                    )),
+                InvariantViolation::new("InputQueue", "length exceeds queue_length")
+                    .with_details(format!("length={}, max={}", self.length, self.queue_length)),
             );
         }
 
         // Invariant 2: head and tail are valid indices
-        if self.head >= INPUT_QUEUE_LENGTH {
+        if self.head >= self.queue_length {
             return Err(
-                InvariantViolation::new("InputQueue", "head index out of bounds").with_details(
-                    format!("head={}, max={}", self.head, INPUT_QUEUE_LENGTH - 1),
-                ),
+                InvariantViolation::new("InputQueue", "head index out of bounds")
+                    .with_details(format!("head={}, max={}", self.head, self.queue_length - 1)),
             );
         }
 
-        if self.tail >= INPUT_QUEUE_LENGTH {
+        if self.tail >= self.queue_length {
             return Err(
-                InvariantViolation::new("InputQueue", "tail index out of bounds").with_details(
-                    format!("tail={}, max={}", self.tail, INPUT_QUEUE_LENGTH - 1),
-                ),
+                InvariantViolation::new("InputQueue", "tail index out of bounds")
+                    .with_details(format!("tail={}, max={}", self.tail, self.queue_length - 1)),
             );
         }
 
-        // Invariant 3: length equals circular distance from tail to head
-        let calculated_length = if self.head >= self.tail {
-            self.head - self.tail
+        // Invariant 3: length is consistent with head/tail positions
+        // Note: In a circular buffer, when head == tail, the queue can be either empty (length=0)
+        // or full (length=queue_length). We cannot distinguish these from head/tail alone.
+        // The stored `length` field is the source of truth.
+        //
+        // We verify: if head != tail, length must match the circular distance.
+        // If head == tail, length must be either 0 or queue_length.
+        if self.head == self.tail {
+            // When head == tail, queue is either empty or full
+            if self.length != 0 && self.length != self.queue_length {
+                return Err(InvariantViolation::new(
+                    "InputQueue",
+                    "when head==tail, length must be 0 (empty) or queue_length (full)",
+                )
+                .with_details(format!(
+                    "length={}, queue_length={}, head={}, tail={}",
+                    self.length, self.queue_length, self.head, self.tail
+                )));
+            }
         } else {
-            INPUT_QUEUE_LENGTH - self.tail + self.head
-        };
+            // When head != tail, we can calculate the expected length
+            let calculated_length = if self.head > self.tail {
+                self.head - self.tail
+            } else {
+                self.queue_length - self.tail + self.head
+            };
 
-        if self.length != calculated_length {
-            return Err(InvariantViolation::new(
-                "InputQueue",
-                "length does not match head/tail positions",
-            )
-            .with_details(format!(
-                "length={}, calculated={}, head={}, tail={}",
-                self.length, calculated_length, self.head, self.tail
-            )));
+            if self.length != calculated_length {
+                return Err(InvariantViolation::new(
+                    "InputQueue",
+                    "length does not match head/tail positions",
+                )
+                .with_details(format!(
+                    "length={}, calculated={}, head={}, tail={}",
+                    self.length, calculated_length, self.head, self.tail
+                )));
+            }
         }
 
         // Invariant 4: inputs vector has correct size
-        if self.inputs.len() != INPUT_QUEUE_LENGTH {
+        if self.inputs.len() != self.queue_length {
             return Err(
                 InvariantViolation::new("InputQueue", "inputs vector has incorrect size")
                     .with_details(format!(
                         "size={}, expected={}",
                         self.inputs.len(),
-                        INPUT_QUEUE_LENGTH
+                        self.queue_length
                     )),
             );
         }
@@ -1516,10 +1639,26 @@ mod property_tests {
 /// Kani proofs for InputQueue buffer bounds (INV-4, INV-5 from FORMAL_SPEC.md).
 ///
 /// These proofs verify:
-/// - INV-4: Queue length is always bounded by INPUT_QUEUE_LENGTH (128)
+/// - INV-4: Queue length is always bounded by INPUT_QUEUE_LENGTH
 /// - INV-5: Queue indices (head, tail) are always valid (< INPUT_QUEUE_LENGTH)
 /// - Circular buffer wraparound is correct
 /// - Length calculation matches actual buffer usage
+///
+/// # Configurable Constants Alignment (Phase 9/10)
+///
+/// Production code now allows configurable queue lengths via [`InputQueueConfig`]:
+/// - `InputQueueConfig::standard()` - 128 frames (default)
+/// - `InputQueueConfig::high_latency()` - 256 frames
+/// - `InputQueueConfig::minimal()` - 32 frames
+///
+/// Kani uses `INPUT_QUEUE_LENGTH = 8` (via `#[cfg(kani)]`) for tractable verification.
+/// The invariants verified here are **size-independent** - they hold for any queue
+/// length >= 2. The proofs verify:
+/// - Circular buffer arithmetic correctness (wraparound at any boundary)
+/// - Index bounds checking (always < queue_length)
+/// - Length bounds (always <= queue_length)
+///
+/// Therefore, proofs passing for queue_length=8 imply correctness for 32, 128, 256.
 ///
 /// Note: Requires Kani verifier. Install with:
 ///   cargo install --locked kani-verifier

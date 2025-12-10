@@ -22,8 +22,9 @@
 //! ```
 
 use crate::Frame;
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Severity of a specification violation.
 ///
@@ -67,7 +68,13 @@ impl std::fmt::Display for ViolationSeverity {
 ///
 /// Each category corresponds to a major subsystem of the library,
 /// making it easy to filter and route violations.
+///
+/// # Forward Compatibility
+///
+/// This enum is marked `#[non_exhaustive]` because new violation categories
+/// may be added in future versions. Always include a wildcard arm when matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum ViolationKind {
     /// Frame synchronization invariant violated.
     ///
@@ -372,29 +379,25 @@ impl CollectingObserver {
     /// Returns a copy of all collected violations.
     #[must_use]
     pub fn violations(&self) -> Vec<SpecViolation> {
-        self.violations.lock().unwrap().clone()
+        self.violations.lock().clone()
     }
 
     /// Returns the number of collected violations.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.violations.lock().unwrap().len()
+        self.violations.lock().len()
     }
 
     /// Returns true if no violations have been collected.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.violations.lock().unwrap().is_empty()
+        self.violations.lock().is_empty()
     }
 
     /// Checks if any violation of the specified kind has been collected.
     #[must_use]
     pub fn has_violation(&self, kind: ViolationKind) -> bool {
-        self.violations
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|v| v.kind == kind)
+        self.violations.lock().iter().any(|v| v.kind == kind)
     }
 
     /// Checks if any violation with the specified severity has been collected.
@@ -402,7 +405,6 @@ impl CollectingObserver {
     pub fn has_severity(&self, severity: ViolationSeverity) -> bool {
         self.violations
             .lock()
-            .unwrap()
             .iter()
             .any(|v| v.severity == severity)
     }
@@ -412,7 +414,6 @@ impl CollectingObserver {
     pub fn violations_of_kind(&self, kind: ViolationKind) -> Vec<SpecViolation> {
         self.violations
             .lock()
-            .unwrap()
             .iter()
             .filter(|v| v.kind == kind)
             .cloned()
@@ -424,7 +425,6 @@ impl CollectingObserver {
     pub fn violations_at_severity(&self, min_severity: ViolationSeverity) -> Vec<SpecViolation> {
         self.violations
             .lock()
-            .unwrap()
             .iter()
             .filter(|v| v.severity >= min_severity)
             .cloned()
@@ -433,13 +433,13 @@ impl CollectingObserver {
 
     /// Clears all collected violations.
     pub fn clear(&self) {
-        self.violations.lock().unwrap().clear();
+        self.violations.lock().clear();
     }
 }
 
 impl ViolationObserver for CollectingObserver {
     fn on_violation(&self, violation: &SpecViolation) {
-        self.violations.lock().unwrap().push(violation.clone());
+        self.violations.lock().push(violation.clone());
     }
 }
 
@@ -1080,6 +1080,187 @@ mod tests {
 
         observer.clear();
         assert!(observer.is_empty());
+    }
+
+    // ==========================================
+    // CollectingObserver Concurrent Access Tests
+    // ==========================================
+
+    /// Tests that CollectingObserver handles concurrent writes correctly.
+    /// With parking_lot::Mutex, this should never deadlock or panic.
+    #[test]
+    fn test_collecting_observer_concurrent_writes() {
+        use std::thread;
+
+        let observer = Arc::new(CollectingObserver::new());
+        let mut handles = vec![];
+
+        // Spawn 10 threads, each adding 100 violations
+        for thread_id in 0..10 {
+            let observer_clone = observer.clone();
+            let handle = thread::spawn(move || {
+                for i in 0..100 {
+                    let violation = SpecViolation::new(
+                        ViolationSeverity::Warning,
+                        ViolationKind::FrameSync,
+                        format!("thread {} violation {}", thread_id, i),
+                        "concurrent_test.rs:1",
+                    );
+                    observer_clone.on_violation(&violation);
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("Thread should not panic");
+        }
+
+        // Should have exactly 1000 violations (10 threads * 100 violations)
+        assert_eq!(observer.len(), 1000);
+    }
+
+    /// Tests that CollectingObserver handles concurrent reads correctly.
+    #[test]
+    fn test_collecting_observer_concurrent_reads() {
+        use std::thread;
+
+        let observer = Arc::new(CollectingObserver::new());
+
+        // Add some violations first
+        for i in 0..100 {
+            observer.on_violation(&SpecViolation::new(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                format!("violation {}", i),
+                "test.rs:1",
+            ));
+        }
+
+        let mut handles = vec![];
+
+        // Spawn 10 threads, each reading violations multiple times
+        for _ in 0..10 {
+            let observer_clone = observer.clone();
+            let handle = thread::spawn(move || {
+                for _ in 0..100 {
+                    let len = observer_clone.len();
+                    assert_eq!(len, 100);
+
+                    let is_empty = observer_clone.is_empty();
+                    assert!(!is_empty);
+
+                    let has_frame_sync = observer_clone.has_violation(ViolationKind::FrameSync);
+                    assert!(has_frame_sync);
+
+                    let violations = observer_clone.violations();
+                    assert_eq!(violations.len(), 100);
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("Thread should not panic");
+        }
+    }
+
+    /// Tests that CollectingObserver handles concurrent reads and writes.
+    #[test]
+    fn test_collecting_observer_concurrent_read_write() {
+        use std::thread;
+
+        let observer = Arc::new(CollectingObserver::new());
+        let mut handles = vec![];
+
+        // Spawn writer threads
+        for thread_id in 0..5 {
+            let observer_clone = observer.clone();
+            let handle = thread::spawn(move || {
+                for i in 0..50 {
+                    let violation = SpecViolation::new(
+                        ViolationSeverity::Warning,
+                        ViolationKind::FrameSync,
+                        format!("write thread {} violation {}", thread_id, i),
+                        "concurrent_rw_test.rs:1",
+                    );
+                    observer_clone.on_violation(&violation);
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Spawn reader threads
+        for _ in 0..5 {
+            let observer_clone = observer.clone();
+            let handle = thread::spawn(move || {
+                for _ in 0..100 {
+                    // These operations should not panic even while other threads are writing
+                    let _ = observer_clone.len();
+                    let _ = observer_clone.is_empty();
+                    let _ = observer_clone.has_violation(ViolationKind::FrameSync);
+                    let _ = observer_clone.violations();
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("Thread should not panic");
+        }
+
+        // Should have exactly 250 violations (5 write threads * 50 violations)
+        assert_eq!(observer.len(), 250);
+    }
+
+    /// Tests that parking_lot::Mutex doesn't poison on panic (unlike std::sync::Mutex).
+    /// This is a key property that ensures the observer remains usable even if a
+    /// thread panics while holding the lock.
+    #[test]
+    fn test_collecting_observer_no_poison_on_panic() {
+        use std::thread;
+
+        let observer = Arc::new(CollectingObserver::new());
+
+        // Add a violation before the panic
+        observer.on_violation(&SpecViolation::new(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "before panic",
+            "test.rs:1",
+        ));
+
+        // Spawn a thread that will panic while using the observer
+        // (though parking_lot's operations are so fast it's hard to panic mid-operation)
+        let observer_clone = observer.clone();
+        let handle = thread::spawn(move || {
+            // Use the observer
+            let _ = observer_clone.len();
+            // Panic
+            panic!("intentional panic for testing");
+        });
+
+        // Wait for the thread (it should panic)
+        let result = handle.join();
+        assert!(result.is_err(), "Thread should have panicked");
+
+        // The observer should still be usable (not poisoned)
+        // With std::sync::Mutex, this would panic with "PoisonError"
+        // With parking_lot::Mutex, this works fine
+        assert_eq!(observer.len(), 1);
+        assert!(!observer.is_empty());
+
+        // Should still be able to add violations
+        observer.on_violation(&SpecViolation::new(
+            ViolationSeverity::Error,
+            ViolationKind::InputQueue,
+            "after panic",
+            "test.rs:2",
+        ));
+        assert_eq!(observer.len(), 2);
     }
 
     #[test]

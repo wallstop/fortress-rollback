@@ -2,6 +2,32 @@
 
 Gathered here are some additional instructions on how to build and run the examples. Note that the examples are usually kept up-to-date with the most recent version of the code. If you are looking for example code compatible with a version published on crates.io, take a look at the [release tags](https://github.com/wallstop/fortress-rollback/tags).
 
+## Configuration Example
+
+Demonstrates all available configuration options including:
+- Basic session setup
+- Network presets (LAN, high-latency, lossy)
+- Custom fine-tuned configurations
+- Competitive and casual setups
+- Spectator configuration
+
+```shell
+cargo run --example configuration
+```
+
+## Error Handling Example
+
+Demonstrates proper error handling patterns:
+- Configuration-time errors
+- Session setup errors
+- Runtime error handling
+- Recovery strategies
+- Comprehensive error matching
+
+```shell
+cargo run --example error_handling
+```
+
 ## ExGame
 
 ExGame is a very basic 2-4 player game example with each player controlling a coloured shape.

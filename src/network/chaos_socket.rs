@@ -108,11 +108,13 @@ impl ChaosConfig {
     }
 
     /// Creates a config with no chaos (passthrough mode).
+    #[must_use]
     pub fn passthrough() -> Self {
         Self::default()
     }
 
     /// Creates a config simulating high latency conditions.
+    #[must_use]
     pub fn high_latency(latency_ms: u64) -> Self {
         Self {
             latency: Duration::from_millis(latency_ms),
@@ -121,6 +123,7 @@ impl ChaosConfig {
     }
 
     /// Creates a config simulating packet loss.
+    #[must_use]
     pub fn lossy(loss_rate: f64) -> Self {
         Self {
             send_loss_rate: loss_rate,
@@ -130,6 +133,7 @@ impl ChaosConfig {
     }
 
     /// Creates a config simulating typical poor network conditions.
+    #[must_use]
     pub fn poor_network() -> Self {
         Self {
             latency: Duration::from_millis(100),
@@ -141,6 +145,7 @@ impl ChaosConfig {
     }
 
     /// Creates a config simulating very bad network conditions.
+    #[must_use]
     pub fn terrible_network() -> Self {
         Self {
             latency: Duration::from_millis(250),
@@ -157,6 +162,7 @@ impl ChaosConfig {
 
 /// Builder for [`ChaosConfig`].
 #[derive(Debug, Clone, Default)]
+#[must_use = "ChaosConfigBuilder must be consumed by calling .build()"]
 pub struct ChaosConfigBuilder {
     config: ChaosConfig,
 }
@@ -245,6 +251,7 @@ impl ChaosConfigBuilder {
     }
 
     /// Builds the configuration.
+    #[must_use]
     pub fn build(self) -> ChaosConfig {
         self.config
     }
