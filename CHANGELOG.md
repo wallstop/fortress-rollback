@@ -4,6 +4,18 @@ In this document, all remarkable changes are listed. Not mentioned are smaller c
 
 ## Unreleased
 
+### Fixed
+
+- **[ROLLBACK]** Fixed crash when misprediction detected at frame 0 (first frame)
+  - **Issue:** When a remote input correction arrived at frame 0 before advancing past it,
+    `adjust_gamestate()` would attempt `load_frame(0)` which fails because you cannot
+    load the frame you're currently on
+  - **Error message:** `InvalidFrame { frame: Frame(0), reason: "must load frame in the past" }`
+  - **Fix:** Added guard to detect when `frame_to_load >= current_frame` and skip rollback
+    (just reset predictions), since we haven't advanced past the incorrect frame yet
+  - **Impact:** Sessions using terrible network conditions (high latency + packet loss)
+    no longer crash during early frame misprediction correction
+
 ### Breaking Changes
 
 - **[REBRAND]** Crate renamed to `fortress-rollback` (import as `fortress_rollback`)

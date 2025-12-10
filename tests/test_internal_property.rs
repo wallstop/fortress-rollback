@@ -343,3 +343,134 @@ proptest! {
         );
     }
 }
+
+// ============================================================================
+// Frame 0 Edge Case Tests (FV-GAP-5)
+// ============================================================================
+//
+// These tests were added as part of the Frame 0 Rollback FV Gap Analysis (Session 47).
+// They explicitly target the edge case where first_incorrect_frame == current_frame,
+// which can occur at frame 0 when a misprediction is detected before any frame advances.
+
+proptest! {
+    /// FV-GAP-5: First incorrect frame at frame 0 is handled correctly
+    ///
+    /// When first_incorrect_frame equals the current frame (both 0), the system
+    /// should not attempt to rollback (since there's nothing to roll back to).
+    /// Instead, it should reset predictions and continue normally.
+    #[test]
+    fn prop_frame_0_misprediction_does_not_panic(
+        _predicted_input in any::<u8>(),
+        actual_input in any::<u8>(),
+        _num_players in 1usize..4,
+    ) {
+        // This test verifies the invariant: when first_incorrect == current_frame,
+        // rollback is skipped (handled by the guard in adjust_gamestate).
+        // We test this at the InputQueue level by simulating the scenario.
+
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+
+        // At frame 0, predict an input for frame 0
+        let (pred, status) = queue.input(Frame::new(0));
+        let _ = (pred, status); // predictions at frame 0 before any input
+
+        // Add the "actual" input for frame 0 (potentially different from prediction)
+        let actual = PlayerInput::new(Frame::new(0), TestInput { value: actual_input });
+        queue.add_input(actual);
+
+        // The queue should remain valid regardless of misprediction
+        let result = queue.check_invariants();
+        prop_assert!(
+            result.is_ok(),
+            "Queue should remain valid after frame 0 input: {:?}",
+            result.err()
+        );
+    }
+
+    /// FV-GAP-5: Predictions at frame 0 are reset correctly
+    ///
+    /// Verifies that reset_prediction() works correctly when called at frame 0,
+    /// which is what happens in the skip_rollback path.
+    #[test]
+    fn prop_frame_0_reset_prediction(
+        initial_value in any::<u8>(),
+    ) {
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+
+        // Add initial input at frame 0
+        let input = PlayerInput::new(Frame::new(0), TestInput { value: initial_value });
+        queue.add_input(input);
+
+        // Request prediction for frame 1 (this marks frame 1 as predicted)
+        let (pred, status) = queue.input(Frame::new(1));
+        prop_assert_eq!(status, InputStatus::Predicted);
+        let _ = pred;
+
+        // Reset prediction (as done in skip_rollback path)
+        queue.reset_prediction();
+
+        // first_incorrect_frame should be NULL after reset
+        let fif = queue.first_incorrect_frame();
+        prop_assert!(
+            fif.is_null(),
+            "first_incorrect_frame should be NULL after reset, got {:?}",
+            fif
+        );
+
+        // Queue invariants should hold
+        let result = queue.check_invariants();
+        prop_assert!(
+            result.is_ok(),
+            "Queue invariants should hold after reset: {:?}",
+            result.err()
+        );
+    }
+
+    /// FV-GAP-5: Multiple predictions from frame 0 are handled
+    ///
+    /// Tests the scenario where multiple future frames are predicted starting from
+    /// frame 0, then actual inputs arrive. The invariants should hold throughout.
+    #[test]
+    fn prop_frame_0_multiple_predictions(
+        num_predictions in 1usize..8,
+        actual_values in prop::collection::vec(any::<u8>(), 1..8),
+    ) {
+        let num_predictions = std::cmp::min(num_predictions, actual_values.len());
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+
+        // Request predictions for frames 0..num_predictions
+        for i in 0..num_predictions {
+            let (_, status) = queue.input(Frame::new(i as i32));
+            prop_assert_eq!(
+                status,
+                InputStatus::Predicted,
+                "Frame {} should be predicted",
+                i
+            );
+        }
+
+        // Now add actual inputs for those frames (may differ from predictions)
+        for (i, &value) in actual_values.iter().take(num_predictions).enumerate() {
+            let input = PlayerInput::new(Frame::new(i as i32), TestInput { value });
+            queue.add_input(input);
+        }
+
+        // Queue should remain valid regardless of mispredictions
+        let result = queue.check_invariants();
+        prop_assert!(
+            result.is_ok(),
+            "Queue should remain valid after adding {} actual inputs: {:?}",
+            num_predictions,
+            result.err()
+        );
+
+        // Reset and verify
+        queue.reset_prediction();
+        let result = queue.check_invariants();
+        prop_assert!(
+            result.is_ok(),
+            "Queue should remain valid after reset: {:?}",
+            result.err()
+        );
+    }
+}

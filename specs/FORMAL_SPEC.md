@@ -1,10 +1,17 @@
 # Fortress Rollback Formal Specification
 
-**Version:** 1.0
-**Date:** December 6, 2025
+**Version:** 1.1
+**Date:** December 10, 2025
 **Status:** Complete
 
 This document provides a formal specification of Fortress Rollback's core components, invariants, and correctness properties. It serves as the foundation for formal verification using TLA+, Z3, and Kani.
+
+## Changelog
+
+- **v1.1 (Session 47 - Dec 10, 2025):** FV-GAP-6 updates
+  - Added INV-9: Rollback Target Guard
+  - Strengthened `load_frame()` precondition: `frame < current_frame` (was ≤)
+  - Added `skip_rollback()` operation specification
 
 ---
 
@@ -158,6 +165,23 @@ Once confirmed, inputs never change.
 ### INV-8: Saved Frame Consistency
 ```
 □(last_saved_frame ≤ current_frame)
+```
+
+### INV-9: Rollback Target Guard (Added Session 47 - FV-GAP-6)
+```
+□(load_frame_called(f) → f < current_frame)
+```
+The `load_frame()` operation is only called when the target frame is strictly
+less than the current frame. When `first_incorrect_frame >= current_frame`,
+`skip_rollback()` is called instead.
+
+This invariant captures the guard in `adjust_gamestate()`:
+```rust
+if frame_to_load >= current_frame {
+    // skip_rollback path
+    return Ok(());
+}
+// Only reach load_frame if frame_to_load < current_frame
 ```
 
 ### INV-9: Message Causality
@@ -324,10 +348,15 @@ POST:
 ```
 
 #### load_frame(frame) → Result<LoadRequest, Error>
+
+**Updated (Session 47 - FV-GAP-6):** The precondition was strengthened to require
+`frame < current_frame` (strictly less than). The case where `frame >= current_frame`
+is handled by `skip_rollback()` instead.
+
 ```
 PRE:
     frame ≠ NULL_FRAME
-    frame ≤ current_frame
+    frame < current_frame           -- STRENGTHENED: was ≤, now strictly <
     frame ≥ current_frame - max_prediction
 
 POST:
@@ -336,6 +365,35 @@ POST:
 
 ERROR:
     frame = NULL_FRAME → InvalidFrame("cannot load NULL_FRAME")
+    frame >= current_frame → InvalidFrame("must load frame in the past")
+```
+
+#### skip_rollback()
+
+**Added (Session 47 - FV-GAP-6):** This operation handles the case where
+`first_incorrect_frame >= current_frame`, which can occur at frame 0 when a
+misprediction is detected before any frame has advanced.
+
+```
+PRE:
+    first_incorrect_frame ≠ NULL_FRAME
+    first_incorrect_frame >= current_frame   -- This is the trigger condition
+
+POST:
+    first_incorrect_frame' = NULL_FRAME      -- Reset prediction tracking
+    -- No state change (no load_frame call)
+
+COMMENT:
+    This operation is called instead of load_frame() when the rollback
+    target would be at or after the current frame. The typical scenario
+    is misprediction detected at frame 0:
+        first_incorrect_frame = 0, current_frame = 0
+    
+    Production code (p2p_session.rs, adjust_gamestate):
+        if frame_to_load >= current_frame {
+            self.sync_layer.reset_prediction();
+            return Ok(());  // Skip rollback
+        }
 ```
 
 ---

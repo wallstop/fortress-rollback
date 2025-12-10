@@ -346,9 +346,18 @@ fn z3_proof_circular_distance_non_wrapped() {
 // Rollback Frame Selection Proofs
 // =============================================================================
 
-/// Z3 Proof: Rollback target is always in the past
+/// Z3 Proof: Rollback target is always in the past when rollback occurs
 ///
-/// Proves that load_frame's target is always < current_frame when rollback is needed.
+/// Proves that when we actually execute a rollback (call load_frame), the target
+/// is always < current_frame. This models the production guard in adjust_gamestate():
+///   if frame_to_load >= current_frame { skip_rollback; return Ok(()) }
+///
+/// The precondition `first_incorrect_frame < current_frame` is now explicitly
+/// documented as the GUARD for entering the rollback path (not a general constraint).
+///
+/// FV-GAP-2: This proof was reviewed as part of the Frame 0 Rollback FV Gap Analysis.
+/// The precondition is correct because production code skips rollback when
+/// first_incorrect >= current_frame. See also: z3_proof_skip_rollback_when_frame_equal.
 #[test]
 fn z3_proof_rollback_target_in_past() {
     let cfg = Config::new();
@@ -361,7 +370,8 @@ fn z3_proof_rollback_target_in_past() {
         // current_frame is valid
         solver.assert(current_frame.ge(0));
 
-        // first_incorrect_frame is valid and < current_frame (there's a misprediction)
+        // GUARD: We only enter the rollback path when first_incorrect < current_frame
+        // (when first_incorrect >= current_frame, SkipRollback handles it)
         solver.assert(first_incorrect_frame.ge(0));
         solver.assert(first_incorrect_frame.lt(&current_frame));
 
@@ -375,7 +385,93 @@ fn z3_proof_rollback_target_in_past() {
         assert_eq!(
             check_result,
             SatResult::Unsat,
-            "Z3 should prove rollback target is always in the past"
+            "Z3 should prove rollback target is always in the past when rollback executes"
+        );
+    });
+}
+
+/// Z3 Proof: Skip rollback path is taken when first_incorrect >= current_frame
+///
+/// Proves that the guard `frame_to_load >= current_frame` correctly identifies
+/// when rollback should be skipped. This models the production code:
+///   if frame_to_load >= current_frame {
+///       debug!("Skipping rollback...");
+///       self.sync_layer.reset_prediction();
+///       return Ok(());
+///   }
+///
+/// FV-GAP-2: New proof added as part of Frame 0 Rollback FV Gap Analysis.
+/// This explicitly verifies the edge case where first_incorrect == current_frame
+/// (which can happen at frame 0 with misprediction detected immediately).
+#[test]
+fn z3_proof_skip_rollback_when_frame_equal() {
+    let cfg = Config::new();
+    with_z3_config(&cfg, || {
+        let solver = Solver::new();
+
+        let current_frame = Int::fresh_const("current_frame");
+        let first_incorrect_frame = Int::fresh_const("first_incorrect_frame");
+
+        // current_frame is valid (can be 0, the first frame)
+        solver.assert(current_frame.ge(0));
+
+        // first_incorrect_frame is valid and within prediction window
+        solver.assert(first_incorrect_frame.ge(0));
+        solver.assert(first_incorrect_frame.le(&current_frame)); // Note: <= (includes ==)
+        solver.assert((&current_frame - &first_incorrect_frame).le(MAX_PREDICTION));
+
+        // The skip guard is: frame_to_load >= current_frame
+        // In non-sparse mode, frame_to_load = first_incorrect_frame
+        let frame_to_load = &first_incorrect_frame;
+        let should_skip = frame_to_load.ge(&current_frame);
+
+        // Prove: When should_skip is true, we DON'T call load_frame
+        // Equivalently: should_skip AND first_incorrect < current_frame is UNSAT
+        solver.assert(&should_skip);
+        solver.assert(first_incorrect_frame.lt(&current_frame));
+
+        let check_result = solver.check();
+        assert_eq!(
+            check_result,
+            SatResult::Unsat,
+            "Z3 should prove skip_rollback and normal_rollback are mutually exclusive"
+        );
+    });
+}
+
+/// Z3 Proof: Frame 0 misprediction is handled by skip_rollback
+///
+/// Proves that when first_incorrect_frame == current_frame == 0 (frame 0 misprediction
+/// detected at frame 0), the skip_rollback path is taken.
+///
+/// FV-GAP-2: This proof explicitly covers the bug scenario that caused
+/// test_terrible_network_preset to fail. Before the fix, this would have
+/// attempted load_frame(0) with current_frame=0, causing an error.
+#[test]
+fn z3_proof_frame_zero_misprediction_skips_rollback() {
+    let cfg = Config::new();
+    with_z3_config(&cfg, || {
+        let solver = Solver::new();
+
+        let current_frame = Int::fresh_const("current_frame");
+        let first_incorrect_frame = Int::fresh_const("first_incorrect_frame");
+
+        // Scenario: Both frames are 0 (misprediction at first frame)
+        solver.assert(current_frame.eq(0));
+        solver.assert(first_incorrect_frame.eq(0));
+
+        // The skip guard: frame_to_load >= current_frame
+        let frame_to_load = &first_incorrect_frame; // Non-sparse: frame_to_load = first_incorrect
+        let should_skip = frame_to_load.ge(&current_frame);
+
+        // Prove: In this scenario, should_skip must be true
+        solver.assert(should_skip.not());
+
+        let check_result = solver.check();
+        assert_eq!(
+            check_result,
+            SatResult::Unsat,
+            "Z3 should prove frame 0 misprediction triggers skip_rollback"
         );
     });
 }

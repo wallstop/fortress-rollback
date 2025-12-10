@@ -875,6 +875,20 @@ impl<T: Config> P2PSession<T> {
                 first_incorrect
             );
         }
+
+        // If frame_to_load >= current_frame, there's nothing to roll back to.
+        // This can happen when a misprediction is detected at the current frame
+        // (e.g., at frame 0 when we haven't advanced yet). In this case, we just
+        // need to reset predictions - the next frame advance will use the correct inputs.
+        if frame_to_load >= current_frame {
+            debug!(
+                "Skipping rollback: frame_to_load {} >= current_frame {} - resetting predictions only",
+                frame_to_load, current_frame
+            );
+            self.sync_layer.reset_prediction();
+            return Ok(());
+        }
+
         let count = current_frame - frame_to_load;
 
         // request to load that frame

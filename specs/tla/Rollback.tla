@@ -8,6 +8,7 @@
 (*   - Rollback triggered by incorrect predictions                         *)
 (*   - State restoration and resimulation                                  *)
 (*   - Sparse saving mode                                                  *)
+(*   - Skip rollback when frame_to_load >= currentFrame (FV-GAP-1)         *)
 (*                                                                         *)
 (* Properties verified:                                                    *)
 (*   - Safety: Rollback target is valid frame (INV-2)                      *)
@@ -17,10 +18,23 @@
 (*   - Safety: Deterministic restoration (SAFE-4)                          *)
 (*   - Liveness: Rollback completes (LIVE-4, disabled for CI)              *)
 (*                                                                         *)
-(* Production-Spec Alignment (as of Phase 9/10):                           *)
+(* Production-Spec Alignment (as of Session 47):                           *)
 (*   MAX_PREDICTION maps to SessionBuilder.max_prediction (default: 8).    *)
 (*   The invariants proven here hold for ANY valid MAX_PREDICTION > 0.     *)
 (*   TLA+ uses small values (1-3) for tractable exhaustive model checking. *)
+(*                                                                         *)
+(* FV-GAP Fix (Session 47 - Dec 10, 2025):                                 *)
+(*   Added SkipRollback action to model the frame_to_load >= currentFrame  *)
+(*   edge case. This was discovered by test_terrible_network_preset which  *)
+(*   triggered when first_incorrect == current_frame == 0 (misprediction   *)
+(*   at frame 0). The spec now explicitly handles this path by resetting   *)
+(*   prediction without entering rollback state.                           *)
+(*                                                                         *)
+(*   Changes made:                                                         *)
+(*     1. StartRollback now guards: target < currentFrame                  *)
+(*     2. New SkipRollback action: when target >= currentFrame, reset      *)
+(*        firstIncorrectFrame without entering rollback state              *)
+(*     3. Next relation updated to include SkipRollback                    *)
 (*                                                                         *)
 (* REVIEW COMPLETED (Dec 7, 2025):                                         *)
 (*   Invariants INV-7 and INV-8 are now stricter, requiring lastSavedFrame *)
@@ -208,6 +222,9 @@ SaveState ==
 
 (***************************************************************************)
 (* Action: Start rollback (triggered by incorrect prediction)              *)
+(* GUARD: frame_to_load < currentFrame (can't rollback to current frame)   *)
+(* This matches the production guard in adjust_gamestate:                   *)
+(*   if frame_to_load >= current_frame { skip_rollback; return Ok(()) }    *)
 (***************************************************************************)
 StartRollback ==
     /\ firstIncorrectFrame # NULL_FRAME
@@ -218,12 +235,40 @@ StartRollback ==
     /\ LET target == IF sparseSaving
                      THEN lastSavedFrame
                      ELSE firstIncorrectFrame
-       IN /\ rollbackTarget' = target
+       IN /\ target < currentFrame  \* GUARD: can only rollback to past frames
+          /\ rollbackTarget' = target
           /\ StateSaved(target)  \* State must exist
     /\ inRollback' = TRUE
     /\ UNCHANGED <<currentFrame, lastConfirmedFrame, lastSavedFrame,
                    savedStates, playerInputs, inputConfirmed,
                    firstIncorrectFrame, sparseSaving>>
+
+(***************************************************************************)
+(* Action: Skip rollback when frame_to_load >= currentFrame                *)
+(* This models the production code path:                                    *)
+(*   if frame_to_load >= current_frame {                                   *)
+(*       debug!("Skipping rollback...");                                   *)
+(*       self.sync_layer.reset_prediction();                               *)
+(*       return Ok(());                                                    *)
+(*   }                                                                      *)
+(* This happens when misprediction is detected at frame 0 (first frame)    *)
+(* or when sparse saving causes frame_to_load == currentFrame.             *)
+(***************************************************************************)
+SkipRollback ==
+    /\ firstIncorrectFrame # NULL_FRAME
+    /\ ~inRollback
+    /\ firstIncorrectFrame <= currentFrame
+    /\ firstIncorrectFrame >= currentFrame - MAX_PREDICTION
+    \* Determine rollback target
+    /\ LET target == IF sparseSaving
+                     THEN lastSavedFrame
+                     ELSE firstIncorrectFrame
+       IN target >= currentFrame  \* TRIGGER: would be at or after current frame
+    \* Skip rollback: just reset prediction tracking, no state change
+    /\ firstIncorrectFrame' = NULL_FRAME
+    /\ UNCHANGED <<currentFrame, lastConfirmedFrame, lastSavedFrame,
+                   savedStates, playerInputs, inputConfirmed, inRollback,
+                   rollbackTarget, sparseSaving>>
 
 (**************************************************************************)
 (* Action: Load saved state (part of rollback)                             *)
@@ -315,6 +360,7 @@ Next ==
         ReceiveRemoteInput(p, f, i)
     \/ SaveState
     \/ StartRollback
+    \/ SkipRollback  \* NEW: Handle frame_to_load >= currentFrame case
     \/ LoadState
     \/ ResimulateFrame
     \/ CompleteRollback
@@ -344,6 +390,9 @@ RollbackConsistency ==
         StateSaved(rollbackTarget)
 
 \* Combined safety invariant
+\* Note: INV-9 (RollbackTargetStrictlyPast) was considered but determined
+\* to be implicit in StartRollback's guard: target < currentFrame.
+\* After LoadState, currentFrame == rollbackTarget which is valid.
 SafetyInvariant ==
     /\ FrameMonotonicity
     /\ RollbackBounded
