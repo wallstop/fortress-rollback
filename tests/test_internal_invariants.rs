@@ -1017,7 +1017,7 @@ mod game_state_cell_production_behavior {
             value: 12345,
             frame: 0,
         };
-        cell.save(Frame::new(0), Some(state.clone()), Some(0xDEADBEEF));
+        cell.save(Frame::new(0), Some(state), Some(0xDEADBEEF));
 
         assert_eq!(cell.frame(), Frame::new(0));
         assert_eq!(cell.checksum(), Some(0xDEADBEEF));

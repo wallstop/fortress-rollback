@@ -1,13 +1,13 @@
 mod ex_game;
 
+use clap::Parser;
 use ex_game::{FortressConfig, Game};
 use fortress_rollback::{
     FortressError, FortressEvent, SessionBuilder, SessionState, UdpNonBlockingSocket,
 };
-use instant::{Duration, Instant};
 use macroquad::prelude::*;
 use std::net::SocketAddr;
-use structopt::StructOpt;
+use web_time::{Duration, Instant};
 
 const FPS: f64 = 60.0;
 
@@ -23,13 +23,13 @@ fn window_conf() -> Conf {
     }
 }
 
-#[derive(StructOpt)]
+#[derive(Parser)]
 struct Opt {
-    #[structopt(short, long)]
+    #[arg(short, long)]
     local_port: u16,
-    #[structopt(short, long)]
+    #[arg(short, long)]
     num_players: usize,
-    #[structopt(short, long)]
+    #[arg(short, long)]
     host: SocketAddr,
 }
 
@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_log::LogTracer::init()?;
 
     // read cmd line arguments
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
 
     // create a Fortress Rollback session for a spectator
     let socket = UdpNonBlockingSocket::bind_to_port(opt.local_port)?;

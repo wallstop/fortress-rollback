@@ -1,10 +1,10 @@
 mod ex_game;
 
+use clap::Parser;
 use ex_game::Game;
 use fortress_rollback::{PlayerHandle, SessionBuilder};
-use instant::{Duration, Instant};
 use macroquad::prelude::*;
-use structopt::StructOpt;
+use web_time::{Duration, Instant};
 
 const FPS: f64 = 60.0;
 
@@ -20,11 +20,11 @@ fn window_conf() -> Conf {
     }
 }
 
-#[derive(StructOpt)]
+#[derive(Parser)]
 struct Opt {
-    #[structopt(short, long)]
+    #[arg(short, long)]
     num_players: usize,
-    #[structopt(short, long)]
+    #[arg(short = 'd', long)]
     check_distance: usize,
 }
 
@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_log::LogTracer::init()?;
 
     // read cmd line arguments
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
 
     // create a Fortress Rollback session
     let mut sess = SessionBuilder::new()

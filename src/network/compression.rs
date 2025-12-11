@@ -175,7 +175,7 @@ mod compression_tests {
         // XOR is its own inverse: (a ^ b) ^ b = a
         let ref_bytes = vec![0x12, 0x34, 0x56, 0x78];
         let input = vec![0xAB, 0xCD, 0xEF, 0x01];
-        let inputs = vec![input.clone()];
+        let inputs = vec![input];
 
         let encoded = delta_encode(&ref_bytes, inputs.iter());
         let decoded = delta_decode(&ref_bytes, &encoded).unwrap();
@@ -206,7 +206,7 @@ mod compression_tests {
         let ref_bytes = vec![1, 2, 3, 4];
         let good_input = vec![5, 6, 7, 8];
         let bad_input = vec![1, 2]; // Wrong length
-        let inputs = [good_input.clone(), bad_input, good_input.clone()];
+        let inputs = [good_input.clone(), bad_input, good_input];
 
         let encoded = delta_encode(&ref_bytes, inputs.iter());
 

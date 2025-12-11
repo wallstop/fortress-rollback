@@ -13,6 +13,10 @@ categories = ["network-programming", "game-development"]
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(loom)'] }
 
+# cargo-machete configuration - ignore dependencies used only for feature enablement
+[package.metadata.cargo-machete]
+ignored = ["getrandom"] # Used for wasm-bindgen feature to enable getrandom/js
+
 # Defensive programming clippy lints
 # Reference: https://corrode.dev/blog/defensive-programming/
 [lints.clippy]
@@ -20,10 +24,19 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(loom)'] }
 must_use_candidate = "warn"
 # Catch fallible From implementations that should be TryFrom
 fallible_impl_from = "deny"
+# Make clone() calls explicit for readability
+implicit_clone = "warn"
+# Remove unnecessary clone() calls
+redundant_clone = "warn"
+# Use to_owned() for &str instead of to_string() for clarity
+inefficient_to_string = "warn"
+# Note: wildcard_enum_match_arm is NOT enabled because public enums use #[non_exhaustive],
+# which already forces external users to handle wildcards. Internal test code uses wildcards
+# intentionally for internal enums like MessageBody.
 
 [features]
 sync-send = []
-wasm-bindgen = ["instant/wasm-bindgen", "getrandom/js"]
+wasm-bindgen = ["getrandom/js"]
 # Enable runtime invariant checking in release builds (for debugging production issues)
 paranoid = []
 # Enable loom-compatible synchronization primitives for concurrency testing
@@ -39,7 +52,7 @@ bincode = "1.3"
 rand = { version = "0.8", features = ["small_rng"] }
 bitfield-rle = "0.2.1"
 parking_lot = "0.12"
-instant = "0.1"
+web-time = "1.1"
 getrandom = { version = "0.2", optional = true }
 tracing = "0.1"
 # SMT solver for formal verification (builds Z3 from source - SLOW)
@@ -54,8 +67,8 @@ loom = "0.7"
 js-sys = "0.3"
 
 [dev-dependencies]
-serial_test = "0.5"
-structopt = "0.3"
+serial_test = "3.2"
+clap = { version = "4.5", features = ["derive"] }
 macroquad = { version = "=0.3.25", features = ["log-rs"] }
 tracing-subscriber = "0.3"
 tracing-log = "0.2"
@@ -108,4 +121,4 @@ debug = true
 [[test]]
 name = "loom_concurrency"
 path = "tests/loom_concurrency.rs"
-required-features = []  # No features required, but only runs under cfg(loom)
+required-features = []             # No features required, but only runs under cfg(loom)

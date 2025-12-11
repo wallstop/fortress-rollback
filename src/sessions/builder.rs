@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use instant::Duration;
+use web_time::Duration;
 
 use crate::{
     input_queue::INPUT_QUEUE_LENGTH, network::protocol::UdpProtocol,
@@ -26,7 +26,7 @@ use crate::{
 ///
 /// ```
 /// use fortress_rollback::SyncConfig;
-/// use instant::Duration;
+/// use web_time::Duration;
 ///
 /// // For high-latency networks, increase retry intervals
 /// let high_latency_config = SyncConfig {
@@ -154,7 +154,7 @@ impl SyncConfig {
 ///
 /// ```
 /// use fortress_rollback::ProtocolConfig;
-/// use instant::Duration;
+/// use web_time::Duration;
 ///
 /// // For competitive/LAN play, use faster quality reports
 /// let competitive_config = ProtocolConfig {
@@ -1015,7 +1015,7 @@ impl<T: Config> SessionBuilder<T> {
     ///
     /// // Or customize individual settings
     /// let custom_config = ProtocolConfig {
-    ///     quality_report_interval: instant::Duration::from_millis(100),
+    ///     quality_report_interval: web_time::Duration::from_millis(100),
     ///     ..ProtocolConfig::default()
     /// };
     /// let builder = SessionBuilder::<MyConfig>::new()

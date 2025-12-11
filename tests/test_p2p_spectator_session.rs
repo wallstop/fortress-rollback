@@ -263,7 +263,7 @@ fn test_violation_observer_attached() {
     let observer = Arc::new(CollectingObserver::new());
 
     let spec_sess = SessionBuilder::<StubConfig>::new()
-        .with_violation_observer(observer.clone())
+        .with_violation_observer(observer)
         .start_spectator_session(host_addr, socket);
 
     // Verify observer is attached

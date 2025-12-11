@@ -895,7 +895,7 @@ mod tests {
         let msg = test_message();
 
         // Queue a message to receive
-        inner.to_receive.push((addr, msg.clone()));
+        inner.to_receive.push((addr, msg));
 
         // Set up high latency (100ms)
         let config = ChaosConfig::builder().latency_ms(100).seed(42).build();

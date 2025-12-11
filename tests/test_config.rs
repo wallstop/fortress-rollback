@@ -13,10 +13,10 @@ use fortress_rollback::{
     FortressError, PlayerHandle, PlayerType, ProtocolConfig, SessionBuilder, SpectatorConfig,
     SyncConfig, TimeSyncConfig, UdpNonBlockingSocket,
 };
-use instant::Duration;
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use stubs::StubConfig;
+use web_time::Duration;
 
 // ============================================================================
 // SyncConfig Tests

@@ -11,11 +11,11 @@ use crate::time_sync::TimeSync;
 use crate::{Config, DesyncDetection, FortressError, Frame, NonBlockingSocket, PlayerHandle};
 use tracing::trace;
 
-use instant::{Duration, Instant};
 use std::collections::vec_deque::Drain;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::TryFrom;
 use std::ops::Add;
+use web_time::{Duration, Instant};
 
 use super::network_stats::NetworkStats;
 

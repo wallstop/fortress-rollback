@@ -19,8 +19,8 @@ use fortress_rollback::{
     Config, DesyncDetection, ProtocolConfig, SaveMode, SessionBuilder, SpectatorConfig, SyncConfig,
     TimeSyncConfig,
 };
-use instant::Duration;
 use std::net::SocketAddr;
+use web_time::Duration;
 
 // Define a minimal config for demonstration
 struct GameConfig;
