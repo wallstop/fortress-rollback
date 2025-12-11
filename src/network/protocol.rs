@@ -5,6 +5,7 @@ use crate::network::messages::{
     QualityReply, QualityReport, SyncReply, SyncRequest,
 };
 use crate::report_violation;
+use crate::rng::random;
 use crate::sessions::builder::{ProtocolConfig, SyncConfig};
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::time_sync::TimeSync;
@@ -86,30 +87,24 @@ impl InputBytes {
         // in ascending order
         for handle in 0..num_players {
             if let Some(input) = inputs.get(&PlayerHandle::new(handle)) {
-                // Validate frame consistency - all inputs for a send should have the same frame
-                let frames_inconsistent =
-                    frame != Frame::NULL && input.frame != Frame::NULL && frame != input.frame;
-
-                if frames_inconsistent {
-                    report_violation!(
-                        ViolationSeverity::Error,
-                        ViolationKind::InternalError,
-                        "Input frames inconsistent during serialization: expected frame {:?}, got {:?} for player {}. This indicates a bug in input collection.",
-                        frame,
-                        input.frame,
-                        handle
-                    );
-                }
-
-                // Also assert in debug builds for immediate detection during development
-                debug_assert!(
-                    !frames_inconsistent,
-                    "Input frames must be consistent: expected {:?}, got {:?}",
-                    frame, input.frame
-                );
-
-                if input.frame != Frame::NULL {
+                // Track the frame - use the first non-NULL frame we see.
+                // All inputs in a single send *should* have the same frame, but if not,
+                // log it and continue with the first frame (the data is still valid).
+                if frame == Frame::NULL && input.frame != Frame::NULL {
                     frame = input.frame;
+                } else if frame != Frame::NULL && input.frame != Frame::NULL && frame != input.frame
+                {
+                    // This indicates a bug in the calling code, but we can still
+                    // proceed - the serialized bytes are correct, just the frame
+                    // metadata is inconsistent.
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::InternalError,
+                        "Input frame mismatch during serialization: using frame {:?}, but player {} has frame {:?}",
+                        frame,
+                        handle,
+                        input.frame
+                    );
                 }
 
                 if let Err(e) = bincode::serialize_into(&mut bytes, &input.input) {
@@ -181,6 +176,12 @@ impl InputBytes {
     }
 }
 
+/// Protocol events that occur during network communication.
+///
+/// # Note
+///
+/// This type is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
+/// It is not part of the stable public API.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event<T>
 where
@@ -218,15 +219,39 @@ where
     },
 }
 
-#[derive(Debug, PartialEq, Eq)]
+/// Internal state machine for the UDP protocol.
+///
+/// # Note
+///
+/// This type is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
+/// It is not part of the stable public API.
+///
+/// # Formal Specification Alignment
+/// - **TLA+**: State machine modeled in `specs/tla/NetworkProtocol.tla`
+/// - **Verified properties**:
+///   - Valid transitions: Initializing → Synchronizing → Running → Disconnected → Shutdown
+///   - `sync_remaining` counter never negative (SyncRemainingNonNegative invariant)
+///   - Only Running state processes game inputs
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolState {
+    /// Initial state before any communication.
     Initializing,
+    /// Currently synchronizing with the peer.
     Synchronizing,
+    /// Normal operation, exchanging game inputs.
     Running,
+    /// Peer has disconnected.
     Disconnected,
+    /// Protocol has shut down.
     Shutdown,
 }
 
+/// UDP protocol handler for peer-to-peer communication.
+///
+/// # Note
+///
+/// This type is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
+/// It is not part of the stable public API.
 pub struct UdpProtocol<T>
 where
     T: Config,
@@ -318,9 +343,9 @@ impl<T: Config> UdpProtocol<T> {
         sync_config: SyncConfig,
         protocol_config: ProtocolConfig,
     ) -> Self {
-        let mut magic = rand::random::<u16>();
+        let mut magic: u16 = random();
         while magic == 0 {
-            magic = rand::random::<u16>();
+            magic = random();
         }
 
         handles.sort_unstable();
@@ -702,7 +727,7 @@ impl<T: Config> UdpProtocol<T> {
             );
         }
 
-        let random_number = rand::random::<u32>();
+        let random_number: u32 = random();
         self.sync_random_requests.insert(random_number);
         let body = SyncRequest {
             random_request: random_number,
@@ -838,41 +863,31 @@ impl<T: Config> UdpProtocol<T> {
             }
         } else {
             // update the peer connection status
-            for i in 0..self.peer_connect_status.len() {
-                self.peer_connect_status[i].disconnected = body.peer_connect_status[i].disconnected
-                    || self.peer_connect_status[i].disconnected;
-                self.peer_connect_status[i].last_frame = std::cmp::max(
-                    self.peer_connect_status[i].last_frame,
-                    body.peer_connect_status[i].last_frame,
-                );
+            // Use zip to safely handle potential length mismatches (malformed packets)
+            for (local, remote) in self
+                .peer_connect_status
+                .iter_mut()
+                .zip(body.peer_connect_status.iter())
+            {
+                local.disconnected = remote.disconnected || local.disconnected;
+                local.last_frame = std::cmp::max(local.last_frame, remote.last_frame);
             }
         }
 
         // Validate that received inputs are in a recoverable order.
         // If we receive an input for a frame that's too far ahead, we can't decode it
-        // because we don't have the reference frame.
-        let gap_too_large =
-            self.last_recv_frame() != Frame::NULL && self.last_recv_frame() + 1 < body.start_frame;
-
-        if gap_too_large {
+        // because we don't have the reference frame. This is normal UDP behavior -
+        // packets can be lost or reordered. We just drop it and wait for retransmission.
+        if self.last_recv_frame() != Frame::NULL && self.last_recv_frame() + 1 < body.start_frame {
             report_violation!(
                 ViolationSeverity::Warning,
                 ViolationKind::NetworkProtocol,
-                "Received input for frame {} but we're only at frame {} - gap too large to decode. This may indicate packet loss or network issues.",
+                "Received input for frame {} but last received was frame {} - gap too large to decode (likely packet loss)",
                 body.start_frame,
                 self.last_recv_frame()
             );
-            // Don't process this packet - we can't decode it without the reference frame
             return;
         }
-
-        // Also assert in debug builds for immediate detection during development
-        debug_assert!(
-            self.last_recv_frame() == Frame::NULL || self.last_recv_frame() + 1 >= body.start_frame,
-            "Received input for frame {} but we're only at frame {}",
-            body.start_frame,
-            self.last_recv_frame()
-        );
 
         // if we did not receive any input yet, we decode with the blank input,
         // otherwise we use the input previous to the start of the encoded inputs
@@ -1093,6 +1108,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::wildcard_enum_match_arm)]
     fn sync_request_queues_sync_reply() {
         let mut protocol: UdpProtocol<TestConfig> =
             create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
@@ -1405,6 +1421,7 @@ mod tests {
     // ==========================================
 
     #[test]
+    #[allow(clippy::wildcard_enum_match_arm)]
     fn quality_report_triggers_reply() {
         let mut protocol: UdpProtocol<TestConfig> =
             create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
@@ -1739,6 +1756,7 @@ mod tests {
     // ==========================================
 
     #[test]
+    #[allow(clippy::wildcard_enum_match_arm)]
     fn send_checksum_report_queues_message() {
         let mut protocol: UdpProtocol<TestConfig> =
             create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
@@ -2084,19 +2102,18 @@ mod tests {
     // Input Frame Consistency Tests
     // ==========================================
 
-    /// Test that from_inputs validates frame consistency across all inputs.
+    /// Test that from_inputs handles frame consistency correctly.
     ///
-    /// Note: In debug builds, this triggers a debug_assert panic to catch bugs early.
-    /// In release builds, it logs a violation but continues processing.
-    /// This test verifies that consistent frames work correctly.
+    /// When frames are inconsistent, the function logs a warning violation
+    /// but continues processing using the first non-NULL frame. This is
+    /// safe because the serialized input data is still correct - only the
+    /// frame metadata is inconsistent.
     #[test]
-    fn from_inputs_detects_inconsistent_frames_via_violation() {
+    fn from_inputs_handles_inconsistent_frames_gracefully() {
         use std::collections::BTreeMap;
 
-        // Test that consistent frames DON'T trigger a violation
+        // Test 1: Consistent frames work correctly
         let mut inputs = BTreeMap::new();
-
-        // Add inputs with the SAME frame (consistent)
         inputs.insert(
             PlayerHandle::new(0),
             PlayerInput {
@@ -2112,7 +2129,6 @@ mod tests {
             },
         );
 
-        // This should work without panic
         let result = InputBytes::from_inputs::<TestConfig>(2, &inputs);
         assert!(
             !result.bytes.is_empty(),
@@ -2120,11 +2136,32 @@ mod tests {
         );
         assert_eq!(result.frame, Frame::new(5));
 
-        // Note: The inconsistent case cannot be tested in debug builds because
-        // it triggers a debug_assert. The violation path is verified through:
-        // 1. Code review - report_violation! is called before debug_assert
-        // 2. The debug_assert ensures immediate detection during development
-        // 3. In release builds, the violation would be logged and processing continues
+        // Test 2: Inconsistent frames still produce valid output
+        // (with a warning violation logged)
+        let mut inconsistent_inputs = BTreeMap::new();
+        inconsistent_inputs.insert(
+            PlayerHandle::new(0),
+            PlayerInput {
+                frame: Frame::new(5),
+                input: TestInput { inp: 1 },
+            },
+        );
+        inconsistent_inputs.insert(
+            PlayerHandle::new(1),
+            PlayerInput {
+                frame: Frame::new(7), // Different frame - logs warning but continues
+                input: TestInput { inp: 2 },
+            },
+        );
+
+        let result = InputBytes::from_inputs::<TestConfig>(2, &inconsistent_inputs);
+        // Should still produce valid bytes - the serialized input data is correct
+        assert!(
+            !result.bytes.is_empty(),
+            "Should still produce bytes for inconsistent frames"
+        );
+        // Uses the first non-NULL frame (from player 0)
+        assert_eq!(result.frame, Frame::new(5));
     }
 
     /// Test that from_inputs handles consistent frames correctly
@@ -2132,9 +2169,8 @@ mod tests {
     fn from_inputs_accepts_consistent_frames() {
         use std::collections::BTreeMap;
 
-        let mut inputs = BTreeMap::new();
-
         // Add inputs with consistent frames
+        let mut inputs = BTreeMap::new();
         inputs.insert(
             PlayerHandle::new(0),
             PlayerInput {
@@ -2227,6 +2263,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::wildcard_enum_match_arm)]
     fn protocol_uses_custom_num_sync_packets() {
         let custom_config = SyncConfig {
             num_sync_packets: 3,

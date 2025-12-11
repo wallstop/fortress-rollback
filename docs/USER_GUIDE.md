@@ -175,7 +175,7 @@ use fortress_rollback::{
     DesyncDetection, PlayerHandle, PlayerType, SessionBuilder,
     UdpNonBlockingSocket,
 };
-use instant::Duration;
+use web_time::Duration;
 
 let socket = UdpNonBlockingSocket::bind_to_port(7000)?;
 let remote_addr = "192.168.1.100:7000".parse()?;
@@ -244,7 +244,7 @@ In lockstep mode:
 A typical game loop with Fortress Rollback:
 
 ```rust
-use instant::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 const FPS: f64 = 60.0;
 let frame_duration = Duration::from_secs_f64(1.0 / FPS);

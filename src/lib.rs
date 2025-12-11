@@ -35,6 +35,11 @@ pub mod frame_info;
 pub mod hash;
 #[doc(hidden)]
 pub mod input_queue;
+/// Internal random number generator module based on PCG32.
+///
+/// Provides a minimal, high-quality PRNG that replaces the `rand` crate dependency.
+/// See the module documentation for usage details.
+pub mod rng;
 #[doc(hidden)]
 pub mod sync;
 #[doc(hidden)]

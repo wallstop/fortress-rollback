@@ -1,4 +1,4 @@
-use rand::{prelude::ThreadRng, thread_rng, Rng};
+use fortress_rollback::rng::{Rng, ThreadRng, thread_rng};
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 use std::net::SocketAddr;
@@ -106,7 +106,7 @@ impl RandomChecksumGameStub {
     fn save_game_state(&mut self, cell: GameStateCell<StateStub>, frame: Frame) {
         assert_eq!(self.gs.frame, frame.as_i32());
 
-        let random_checksum: u128 = self.rng.r#gen();
+        let random_checksum: u128 = self.rng.gen();
         cell.save(frame, Some(self.gs), Some(random_checksum));
     }
 

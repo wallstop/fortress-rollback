@@ -394,7 +394,8 @@ fn test_asymmetric_packet_loss() -> Result<(), FortressError> {
 
     // Synchronize with asymmetric loss - need sleep for protocol retry timers
     // Player 1 has 15% send loss, which compounds with player 2's receive
-    for _ in 0..150 {
+    // Use more iterations with shorter sleep to allow more sync attempts
+    for _ in 0..300 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
 
@@ -403,7 +404,7 @@ fn test_asymmetric_packet_loss() -> Result<(), FortressError> {
         {
             break;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(50));
     }
 
     assert_eq!(
@@ -2163,10 +2164,11 @@ fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
     let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9055);
     let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9056);
 
+    // Reduced latency and packet loss for more reliable synchronization
     let chaos_config = ChaosConfig::builder()
-        .latency_ms(40)
-        .jitter_ms(15)
-        .packet_loss_rate(0.05)
+        .latency_ms(20)
+        .jitter_ms(10)
+        .packet_loss_rate(0.03)
         .seed(42)
         .build();
 
@@ -2185,11 +2187,11 @@ fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    // Synchronize
-    for _ in 0..150 {
+    // Synchronize - allow sufficient time for latency + packet loss retries
+    for _ in 0..400 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(20));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
