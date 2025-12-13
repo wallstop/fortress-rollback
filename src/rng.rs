@@ -584,4 +584,329 @@ mod tests {
             assert_eq!(rng.next_u32(), exp, "Golden test failed");
         }
     }
+
+    #[test]
+    fn test_gen_range_usize_small() {
+        let mut rng = Pcg32::seed_from_u64(42);
+
+        for _ in 0..1000 {
+            let val = rng.gen_range_usize(10..20);
+            assert!(val >= 10);
+            assert!(val < 20);
+        }
+    }
+
+    #[test]
+    fn test_gen_range_usize_large() {
+        let mut rng = Pcg32::seed_from_u64(42);
+
+        // Test with a range larger than u32::MAX
+        let large_start: usize = (u32::MAX as usize) + 1000;
+        let large_end: usize = large_start + 1000;
+
+        for _ in 0..100 {
+            let val = rng.gen_range_usize(large_start..large_end);
+            assert!(val >= large_start);
+            assert!(val < large_end);
+        }
+    }
+
+    #[test]
+    fn test_gen_range_i64_inclusive() {
+        let mut rng = Pcg32::seed_from_u64(42);
+
+        for _ in 0..1000 {
+            let val = rng.gen_range_i64_inclusive(-100..=100);
+            assert!(val >= -100);
+            assert!(val <= 100);
+        }
+
+        // Test with negative-only range
+        for _ in 0..100 {
+            let val = rng.gen_range_i64_inclusive(-50..=-10);
+            assert!(val >= -50);
+            assert!(val <= -10);
+        }
+    }
+
+    #[test]
+    fn test_gen_range_single_value() {
+        let mut rng = Pcg32::seed_from_u64(42);
+
+        // Single value range should always return that value
+        for _ in 0..100 {
+            let val = rng.gen_range(42..43);
+            assert_eq!(val, 42);
+        }
+    }
+
+    #[test]
+    fn test_next_u64_combines_correctly() {
+        let mut rng = Pcg32::seed_from_u64(42);
+
+        // Verify u64 covers full range (tests high bits are populated)
+        let mut has_high_bits = false;
+        for _ in 0..1000 {
+            let val = rng.next_u64();
+            if val > u64::from(u32::MAX) {
+                has_high_bits = true;
+                break;
+            }
+        }
+        assert!(
+            has_high_bits,
+            "next_u64 should produce values with high bits set"
+        );
+    }
+}
+
+// =============================================================================
+// Property-Based Tests
+// =============================================================================
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Property: Same seed always produces identical sequence.
+        ///
+        /// This is critical for rollback networking - game state must be
+        /// deterministically reproducible from the same seed.
+        #[test]
+        fn prop_determinism_same_seed_same_sequence(seed in any::<u64>()) {
+            let mut rng1 = Pcg32::seed_from_u64(seed);
+            let mut rng2 = Pcg32::seed_from_u64(seed);
+
+            for _ in 0..100 {
+                prop_assert_eq!(
+                    rng1.next_u32(), rng2.next_u32(),
+                    "Same seed must produce identical sequences"
+                );
+            }
+        }
+
+        /// Property: Different seeds produce different sequences.
+        ///
+        /// While collisions are possible, they should be astronomically rare.
+        /// With PCG32's 64-bit state, two random seeds colliding in the first
+        /// few outputs should essentially never happen.
+        #[test]
+        fn prop_different_seeds_different_sequences(seed1 in any::<u64>(), seed2 in any::<u64>()) {
+            prop_assume!(seed1 != seed2);
+
+            let mut rng1 = Pcg32::seed_from_u64(seed1);
+            let mut rng2 = Pcg32::seed_from_u64(seed2);
+
+            // Collect first 10 values
+            let seq1: Vec<u32> = (0..10).map(|_| rng1.next_u32()).collect();
+            let seq2: Vec<u32> = (0..10).map(|_| rng2.next_u32()).collect();
+
+            // Sequences should differ (extremely unlikely to collide)
+            prop_assert_ne!(seq1, seq2, "Different seeds should produce different sequences");
+        }
+
+        /// Property: gen_range output is always within the specified range.
+        #[test]
+        fn prop_gen_range_within_bounds(
+            seed in any::<u64>(),
+            start in 0u32..1000,
+            span in 1u32..1000,
+        ) {
+            let end = start.saturating_add(span);
+            prop_assume!(end > start); // Ensure valid range
+
+            let mut rng = Pcg32::seed_from_u64(seed);
+
+            for _ in 0..100 {
+                let val = rng.gen_range(start..end);
+                prop_assert!(val >= start, "gen_range output {} below start {}", val, start);
+                prop_assert!(val < end, "gen_range output {} >= end {}", val, end);
+            }
+        }
+
+        /// Property: gen_range_usize output is always within the specified range.
+        #[test]
+        fn prop_gen_range_usize_within_bounds(
+            seed in any::<u64>(),
+            start in 0usize..10000,
+            span in 1usize..10000,
+        ) {
+            let end = start.saturating_add(span);
+            prop_assume!(end > start);
+
+            let mut rng = Pcg32::seed_from_u64(seed);
+
+            for _ in 0..50 {
+                let val = rng.gen_range_usize(start..end);
+                prop_assert!(val >= start, "gen_range_usize output {} below start {}", val, start);
+                prop_assert!(val < end, "gen_range_usize output {} >= end {}", val, end);
+            }
+        }
+
+        /// Property: gen_range_i64_inclusive output is always within the specified range.
+        #[test]
+        fn prop_gen_range_i64_within_bounds(
+            seed in any::<u64>(),
+            start in -10000i64..10000,
+            span in 1i64..1000,
+        ) {
+            let end = start.saturating_add(span);
+
+            let mut rng = Pcg32::seed_from_u64(seed);
+
+            for _ in 0..50 {
+                let val = rng.gen_range_i64_inclusive(start..=end);
+                prop_assert!(val >= start, "gen_range_i64 output {} below start {}", val, start);
+                prop_assert!(val <= end, "gen_range_i64 output {} > end {}", val, end);
+            }
+        }
+
+        /// Property: gen_bool probability is approximately respected.
+        ///
+        /// Tests that gen_bool(p) returns true approximately p% of the time.
+        #[test]
+        fn prop_gen_bool_probability(
+            seed in any::<u64>(),
+            probability in 0.1f64..0.9, // Avoid edge cases for statistical stability
+        ) {
+            let mut rng = Pcg32::seed_from_u64(seed);
+            let samples = 1000;
+
+            let true_count = (0..samples).filter(|_| rng.gen_bool(probability)).count();
+            let actual_probability = true_count as f64 / samples as f64;
+
+            // Allow 15% tolerance for statistical variance
+            let tolerance = 0.15;
+            prop_assert!(
+                (actual_probability - probability).abs() < tolerance,
+                "gen_bool({}) produced {}% true (expected ~{}%)",
+                probability,
+                actual_probability * 100.0,
+                probability * 100.0
+            );
+        }
+
+        /// Property: fill_bytes produces deterministic output for same seed.
+        #[test]
+        fn prop_fill_bytes_deterministic(
+            seed in any::<u64>(),
+            len in 0usize..256,
+        ) {
+            let mut rng1 = Pcg32::seed_from_u64(seed);
+            let mut rng2 = Pcg32::seed_from_u64(seed);
+
+            let mut buf1 = vec![0u8; len];
+            let mut buf2 = vec![0u8; len];
+
+            rng1.fill_bytes(&mut buf1);
+            rng2.fill_bytes(&mut buf2);
+
+            prop_assert_eq!(buf1, buf2, "fill_bytes must be deterministic for same seed");
+        }
+
+        /// Property: RandomValue generation is deterministic.
+        #[test]
+        fn prop_random_value_deterministic(seed in any::<u64>()) {
+            let mut rng1 = Pcg32::seed_from_u64(seed);
+            let mut rng2 = Pcg32::seed_from_u64(seed);
+
+            // Test various types
+            prop_assert_eq!(rng1.gen::<u8>(), rng2.gen::<u8>());
+            prop_assert_eq!(rng1.gen::<u16>(), rng2.gen::<u16>());
+            prop_assert_eq!(rng1.gen::<u32>(), rng2.gen::<u32>());
+            prop_assert_eq!(rng1.gen::<u64>(), rng2.gen::<u64>());
+            prop_assert_eq!(rng1.gen::<u128>(), rng2.gen::<u128>());
+            prop_assert_eq!(rng1.gen::<i32>(), rng2.gen::<i32>());
+            prop_assert_eq!(rng1.gen::<i64>(), rng2.gen::<i64>());
+            prop_assert_eq!(rng1.gen::<bool>(), rng2.gen::<bool>());
+        }
+
+        /// Property: f32 generation is always in [0.0, 1.0).
+        #[test]
+        fn prop_f32_bounds(seed in any::<u64>()) {
+            let mut rng = Pcg32::seed_from_u64(seed);
+
+            for _ in 0..100 {
+                let val: f32 = rng.gen();
+                prop_assert!(val >= 0.0, "f32 gen produced {} < 0.0", val);
+                prop_assert!(val < 1.0, "f32 gen produced {} >= 1.0", val);
+            }
+        }
+
+        /// Property: f64 generation is always in [0.0, 1.0).
+        #[test]
+        fn prop_f64_bounds(seed in any::<u64>()) {
+            let mut rng = Pcg32::seed_from_u64(seed);
+
+            for _ in 0..100 {
+                let val: f64 = rng.gen();
+                prop_assert!(val >= 0.0, "f64 gen produced {} < 0.0", val);
+                prop_assert!(val < 1.0, "f64 gen produced {} >= 1.0", val);
+            }
+        }
+
+        /// Property: Clone produces identical RNG that generates same sequence.
+        #[test]
+        fn prop_clone_produces_identical_sequence(seed in any::<u64>(), advance in 0usize..100) {
+            let mut rng1 = Pcg32::seed_from_u64(seed);
+
+            // Advance RNG by some amount
+            for _ in 0..advance {
+                let _ = rng1.next_u32();
+            }
+
+            // Clone at this point
+            let mut rng2 = rng1.clone();
+
+            // Both should produce identical values going forward
+            for _ in 0..50 {
+                prop_assert_eq!(
+                    rng1.next_u32(), rng2.next_u32(),
+                    "Cloned RNG must produce identical sequence"
+                );
+            }
+        }
+
+        /// Property: Distribution is approximately uniform across all bits.
+        ///
+        /// For a uniform random generator, each bit position should be 0 or 1
+        /// with roughly equal probability. With 1000 samples, we expect ~500
+        /// for each bit position, with statistical variance.
+        #[test]
+        fn prop_uniform_bit_distribution(seed in any::<u64>()) {
+            let mut rng = Pcg32::seed_from_u64(seed);
+            let samples = 1000;
+
+            let mut bit_counts = [0u32; 32];
+
+            for _ in 0..samples {
+                let val = rng.next_u32();
+                for (bit, count) in bit_counts.iter_mut().enumerate() {
+                    if (val >> bit) & 1 == 1 {
+                        *count += 1;
+                    }
+                }
+            }
+
+            // Each bit should be set approximately half the time
+            // With 1000 samples, expected = 500, stddev ≈ sqrt(1000 * 0.25) ≈ 15.8
+            // Allow 4 standard deviations (99.99% confidence) = ~64
+            // Use 30% tolerance for robustness (300)
+            let expected = samples as f64 / 2.0;
+            let tolerance = expected * 0.30;
+
+            for (bit, &count) in bit_counts.iter().enumerate() {
+                prop_assert!(
+                    (count as f64 - expected).abs() < tolerance,
+                    "Bit {} has count {} (expected ~{} +/- {})",
+                    bit,
+                    count,
+                    expected,
+                    tolerance
+                );
+            }
+        }
+    }
 }

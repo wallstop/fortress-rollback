@@ -10,6 +10,7 @@
 //! They are not part of the stable public API.
 
 use crate::report_violation;
+use crate::rle;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 
 /// Encodes input bytes using XOR delta encoding followed by RLE compression.
@@ -17,7 +18,7 @@ pub fn encode<'a>(reference: &[u8], pending_input: impl Iterator<Item = &'a Vec<
     // first, do a XOR encoding to the reference input (will probably lead to a lot of same bits in sequence)
     let buf = delta_encode(reference, pending_input);
     // then, RLE encode the buffer (making use of the property mentioned above)
-    bitfield_rle::encode(buf)
+    rle::encode(buf)
 }
 
 /// Performs XOR delta encoding against a reference.
@@ -56,7 +57,7 @@ pub fn decode(
     data: &[u8],
 ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
     // decode the RLE encoding first
-    let buf = bitfield_rle::decode(data)?;
+    let buf = rle::decode(data)?;
 
     // decode the delta-encoding
     delta_decode(reference, &buf)

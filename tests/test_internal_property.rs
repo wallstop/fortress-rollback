@@ -17,10 +17,13 @@
 //! - INV-SL2: last_saved_frame <= current_frame (or NULL)
 //! - INV-SL3: first_incorrect_frame < current_frame (when not NULL)
 //! - INV-SL4: Saved state available for frames within max_prediction
+//! - INV-SL5: Rollback/advance cycles preserve invariants
+//! - INV-SL6: Multiple players get correct inputs
+//! - INV-SL7: Checksums are deterministic (same state → same checksum)
 
 use fortress_rollback::__internal::{InputQueue, PlayerInput, SavedStates, SyncLayer};
 use fortress_rollback::telemetry::InvariantChecker;
-use fortress_rollback::{Config, Frame, InputStatus};
+use fortress_rollback::{Config, FortressRequest, Frame, InputStatus};
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -472,5 +475,338 @@ proptest! {
             "Queue should remain valid after reset: {:?}",
             result.err()
         );
+    }
+}
+
+// ============================================================================
+// SyncLayer Operational Property Tests (INV-SL5, INV-SL6, INV-SL7)
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// INV-SL5: Rollback/advance cycles preserve invariants
+    ///
+    /// Verifies that invariants hold through complete rollback sequences:
+    /// 1. Advance N frames, saving state at each
+    /// 2. Rollback to a previous frame
+    /// 3. Re-advance to the original frame
+    /// 4. Invariants should hold throughout
+    #[test]
+    fn prop_sync_layer_rollback_advance_cycles(
+        max_prediction in 4usize..12,
+        num_frames in 5usize..20,
+        rollback_target in 0usize..5,
+    ) {
+        let rollback_target = rollback_target.min(num_frames.saturating_sub(1));
+
+        let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(
+            2, // 2 players
+            max_prediction,
+            64,
+        );
+
+        // Phase 1: Advance N frames, saving state at each
+        for i in 0..num_frames {
+            let request = sync_layer.save_current_state();
+            if let fortress_rollback::FortressRequest::SaveGameState { cell, frame } = request {
+                let state = TestState { value: i as u64, frame: frame.as_i32() };
+                cell.save(frame, Some(state), Some(i as u128));
+            }
+
+            // Check invariants after each save
+            let result = sync_layer.check_invariants();
+            prop_assert!(
+                result.is_ok(),
+                "Invariants failed after save at frame {}: {:?}",
+                i,
+                result.err()
+            );
+
+            sync_layer.advance_frame();
+        }
+
+        let original_frame = sync_layer.current_frame();
+
+        // Phase 2: Rollback to target frame
+        let target_frame = Frame::new(rollback_target as i32);
+
+        // Only rollback if target is within prediction window
+        if original_frame.as_i32() - target_frame.as_i32() <= max_prediction as i32 {
+            let result = sync_layer.load_frame(target_frame);
+            if result.is_ok() {
+                // Check invariants after rollback
+                let inv_result = sync_layer.check_invariants();
+                prop_assert!(
+                    inv_result.is_ok(),
+                    "Invariants failed after rollback to frame {}: {:?}",
+                    rollback_target,
+                    inv_result.err()
+                );
+
+                // Verify frame-related invariants explicitly
+                prop_assert!(
+                    sync_layer.last_saved_frame() <= sync_layer.current_frame(),
+                    "INV-SL2: last_saved_frame ({}) > current_frame ({}) after rollback",
+                    sync_layer.last_saved_frame(),
+                    sync_layer.current_frame()
+                );
+
+                // Phase 3: Re-advance to original frame
+                while sync_layer.current_frame() < original_frame {
+                    let request = sync_layer.save_current_state();
+                    if let fortress_rollback::FortressRequest::SaveGameState { cell, frame } = request {
+                        let i = frame.as_i32() as u64;
+                        let state = TestState { value: i * 10, frame: frame.as_i32() };
+                        cell.save(frame, Some(state), Some(i as u128));
+                    }
+
+                    sync_layer.advance_frame();
+
+                    // Check invariants during re-advance
+                    let result = sync_layer.check_invariants();
+                    prop_assert!(
+                        result.is_ok(),
+                        "Invariants failed during re-advance at frame {}: {:?}",
+                        sync_layer.current_frame(),
+                        result.err()
+                    );
+                }
+            }
+        }
+    }
+
+    /// INV-SL5 variant: Multiple consecutive rollbacks maintain invariants
+    #[test]
+    fn prop_sync_layer_multiple_rollbacks(
+        max_prediction in 6usize..12,
+        num_rollbacks in 1usize..4,
+    ) {
+        let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(
+            2,
+            max_prediction,
+            64,
+        );
+
+        // Setup: advance to frame max_prediction and save all states
+        for i in 0..=max_prediction {
+            let request = sync_layer.save_current_state();
+            if let fortress_rollback::FortressRequest::SaveGameState { cell, frame } = request {
+                let state = TestState { value: i as u64, frame: frame.as_i32() };
+                cell.save(frame, Some(state), None);
+            }
+            if i < max_prediction {
+                sync_layer.advance_frame();
+            }
+        }
+
+        // Perform multiple rollbacks
+        let mut current = sync_layer.current_frame().as_i32();
+        for rollback_idx in 0..num_rollbacks {
+            // Rollback to a frame at least 1 behind current
+            let target = (current - 1 - (rollback_idx as i32)).max(0);
+            if current - target <= max_prediction as i32 && target < current {
+                let result = sync_layer.load_frame(Frame::new(target));
+                if result.is_ok() {
+                    current = sync_layer.current_frame().as_i32();
+
+                    let inv_result = sync_layer.check_invariants();
+                    prop_assert!(
+                        inv_result.is_ok(),
+                        "Invariants failed after rollback #{} to frame {}: {:?}",
+                        rollback_idx,
+                        target,
+                        inv_result.err()
+                    );
+
+                    // Re-advance one frame for next rollback
+                    let request = sync_layer.save_current_state();
+                    if let FortressRequest::SaveGameState { cell, frame } = request {
+                        cell.save(frame, Some(TestState::default()), None);
+                    }
+                    sync_layer.advance_frame();
+                    let _ = sync_layer.current_frame().as_i32();
+                }
+            }
+        }
+    }
+
+    /// INV-SL7: Checksums are deterministic - same state produces same checksum
+    ///
+    /// This tests that when the same game state is saved with a given checksum,
+    /// the checksum can be retrieved consistently.
+    #[test]
+    fn prop_sync_layer_checksum_consistency(
+        max_prediction in 4usize..12,
+        state_value in any::<u64>(),
+        checksum in any::<u128>(),
+    ) {
+        let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(
+            2,
+            max_prediction,
+            64,
+        );
+
+        // Use save_current_state() to get a cell through the public API
+        let request = sync_layer.save_current_state();
+        let cell = match request {
+            FortressRequest::SaveGameState { cell, frame } => {
+                prop_assert_eq!(frame, Frame::new(0));
+                cell
+            }
+            _ => {
+                prop_assert!(false, "Expected SaveGameState request");
+                return Ok(());
+            }
+        };
+
+        // Save state with checksum
+        let state = TestState { value: state_value, frame: 0 };
+        cell.save(Frame::new(0), Some(state), Some(checksum));
+
+        // Retrieve and verify checksum
+        let retrieved_checksum = cell.checksum();
+        prop_assert_eq!(
+            retrieved_checksum,
+            Some(checksum),
+            "Checksum should be retrievable after save"
+        );
+
+        // Retrieve and verify state
+        let retrieved_state = cell.load();
+        prop_assert!(
+            retrieved_state.is_some(),
+            "State should be retrievable after save"
+        );
+        prop_assert_eq!(
+            retrieved_state.unwrap().value,
+            state_value,
+            "State value should match"
+        );
+    }
+
+    /// INV-SL7 variant: Checksums are preserved through save/load cycles
+    #[test]
+    fn prop_sync_layer_checksum_preservation(
+        max_prediction in 4usize..10,
+        num_frames in 2usize..8,
+        checksums in prop::collection::vec(any::<u128>(), 1..10),
+    ) {
+        let num_frames = num_frames.min(checksums.len());
+        let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(
+            2,
+            max_prediction,
+            64,
+        );
+
+        // Save states with checksums, keeping references to cells
+        let mut saved_cells = Vec::new();
+        for (i, checksum) in checksums.iter().take(num_frames).enumerate() {
+            let request = sync_layer.save_current_state();
+            if let FortressRequest::SaveGameState { cell, frame } = request {
+                let state = TestState {
+                    value: i as u64,
+                    frame: frame.as_i32(),
+                };
+                cell.save(frame, Some(state), Some(*checksum));
+                saved_cells.push((frame, cell.clone(), *checksum));
+            }
+            if i < num_frames - 1 {
+                sync_layer.advance_frame();
+            }
+        }
+
+        // Verify all checksums are preserved by checking the cells we saved
+        for (frame, cell, expected_checksum) in &saved_cells {
+            // Only check frames within prediction window
+            if sync_layer.current_frame().as_i32() - frame.as_i32() <= max_prediction as i32 {
+                // Check the cell directly (it may have been overwritten if frame wrapped)
+                let actual_frame = cell.frame();
+                if actual_frame == *frame {
+                    let actual_checksum = cell.checksum();
+                    prop_assert_eq!(
+                        actual_checksum,
+                        Some(*expected_checksum),
+                        "Checksum for frame {} should be preserved",
+                        frame
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// SavedStates Advanced Property Tests
+// ============================================================================
+
+proptest! {
+    /// SavedStates: Overwrite detection when frame wraps around
+    ///
+    /// When a frame wraps around in the circular buffer, the old state should
+    /// be overwritten. This tests that we can detect this by checking frame().
+    #[test]
+    fn prop_saved_states_overwrite_detection(
+        max_prediction in 2usize..8,
+        base_frame in 0i32..10,
+    ) {
+        let states = SavedStates::<u64>::new(max_prediction);
+        let num_cells = max_prediction + 1;
+
+        let frame1 = Frame::new(base_frame);
+        let frame2 = Frame::new(base_frame + num_cells as i32);
+
+        // Save at frame1
+        let cell1 = states.get_cell(frame1).unwrap();
+        cell1.save(frame1, Some(100), Some(1000));
+
+        // Verify frame1 is stored
+        prop_assert_eq!(cell1.frame(), frame1);
+        prop_assert_eq!(cell1.checksum(), Some(1000));
+
+        // Now save at frame2 (wraps to same cell)
+        let cell2 = states.get_cell(frame2).unwrap();
+        cell2.save(frame2, Some(200), Some(2000));
+
+        // The frame number should now be frame2
+        let cell_check = states.get_cell(frame1).unwrap();
+        prop_assert_eq!(
+            cell_check.frame(),
+            frame2,
+            "Cell should have been overwritten with frame2"
+        );
+
+        // Attempting to use this cell for frame1 should be invalid
+        // (the cell contains frame2 data)
+        prop_assert_ne!(
+            cell_check.frame(),
+            frame1,
+            "Old frame1 data should be overwritten"
+        );
+    }
+
+    /// SavedStates: All cells are independently accessible
+    #[test]
+    fn prop_saved_states_all_cells_accessible(
+        max_prediction in 2usize..10,
+    ) {
+        let states = SavedStates::<u64>::new(max_prediction);
+        let num_cells = max_prediction + 1;
+
+        // Save unique values in all cells
+        for i in 0..num_cells {
+            let frame = Frame::new(i as i32);
+            let cell = states.get_cell(frame).unwrap();
+            cell.save(frame, Some(i as u64 * 100), Some(i as u128));
+        }
+
+        // Verify all cells have correct values
+        for i in 0..num_cells {
+            let frame = Frame::new(i as i32);
+            let cell = states.get_cell(frame).unwrap();
+            prop_assert_eq!(cell.frame(), frame);
+            prop_assert_eq!(cell.load(), Some(i as u64 * 100));
+            prop_assert_eq!(cell.checksum(), Some(i as u128));
+        }
     }
 }

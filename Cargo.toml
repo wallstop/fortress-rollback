@@ -13,10 +13,6 @@ categories = ["network-programming", "game-development"]
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(loom)'] }
 
-# cargo-machete configuration - ignore dependencies used only for feature enablement
-[package.metadata.cargo-machete]
-ignored = ["getrandom"] # Used for wasm-bindgen feature to enable getrandom/js
-
 # Defensive programming clippy lints
 # Reference: https://corrode.dev/blog/defensive-programming/
 [lints.clippy]
@@ -36,7 +32,7 @@ inefficient_to_string = "warn"
 
 [features]
 sync-send = []
-wasm-bindgen = ["getrandom/js"]
+wasm-bindgen = []
 # Enable runtime invariant checking in release builds (for debugging production issues)
 paranoid = []
 # Enable loom-compatible synchronization primitives for concurrency testing
@@ -49,10 +45,8 @@ z3-verification = ["dep:z3"]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bincode = "1.3"
-bitfield-rle = "0.2.1"
 parking_lot = "0.12"
 web-time = "1.1"
-getrandom = { version = "0.2", optional = true }
 tracing = "0.1"
 # SMT solver for formal verification (builds Z3 from source - SLOW)
 # Only compiled when z3-verification feature is enabled
@@ -75,8 +69,6 @@ proptest = "=1.4.0"
 # Benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
 # Additional testing utilities
-quickcheck = "1.0"
-quickcheck_macros = "1.0"
 arbitrary = { version = "1.3", features = ["derive"] }
 
 # Test binaries for multi-process network testing

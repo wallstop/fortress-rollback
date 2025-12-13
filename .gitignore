@@ -33,3 +33,5 @@ states/**
 states.dot
 
 loom-tests/target/**
+mutants.out/**
+progress/**

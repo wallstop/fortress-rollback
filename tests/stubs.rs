@@ -1,4 +1,4 @@
-use fortress_rollback::rng::{Rng, ThreadRng, thread_rng};
+use fortress_rollback::rng::{thread_rng, Rng, ThreadRng};
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 use std::net::SocketAddr;

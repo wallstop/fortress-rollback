@@ -265,3 +265,216 @@ mod tests {
         assert_eq!(hasher.finish(), 0x8594_4171_f739_67e8);
     }
 }
+
+// =============================================================================
+// Property-Based Tests
+// =============================================================================
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::hash::BuildHasher;
+
+    proptest! {
+        /// Property: Determinism - Same input always produces same hash
+        ///
+        /// This is critical for rollback networking where peers must agree on checksums.
+        #[test]
+        fn prop_hash_deterministic(input in any::<Vec<u8>>()) {
+            let hash1 = {
+                let mut hasher = DeterministicHasher::new();
+                hasher.write(&input);
+                hasher.finish()
+            };
+            let hash2 = {
+                let mut hasher = DeterministicHasher::new();
+                hasher.write(&input);
+                hasher.finish()
+            };
+            prop_assert_eq!(hash1, hash2, "Same input must produce same hash");
+        }
+
+        /// Property: Determinism for integers - Same integer always produces same hash
+        #[test]
+        fn prop_hash_deterministic_u64(value in any::<u64>()) {
+            let hash1 = fnv1a_hash(&value);
+            let hash2 = fnv1a_hash(&value);
+            prop_assert_eq!(hash1, hash2, "Same value must produce same hash");
+        }
+
+        /// Property: Incremental hashing consistency
+        ///
+        /// Verifies that writing data incrementally produces the same result
+        /// regardless of how the writes are chunked.
+        #[test]
+        fn prop_incremental_hashing_consistent(
+            part_a in any::<Vec<u8>>(),
+            part_b in any::<Vec<u8>>(),
+        ) {
+            // Hash in two parts
+            let hash_incremental = {
+                let mut hasher = DeterministicHasher::new();
+                hasher.write(&part_a);
+                hasher.write(&part_b);
+                hasher.finish()
+            };
+
+            // Hash concatenated
+            let mut combined = part_a;
+            combined.extend_from_slice(&part_b);
+            let hash_combined = {
+                let mut hasher = DeterministicHasher::new();
+                hasher.write(&combined);
+                hasher.finish()
+            };
+
+            prop_assert_eq!(
+                hash_incremental, hash_combined,
+                "Incremental and combined hashing must match"
+            );
+        }
+
+        /// Property: Different inputs usually produce different hashes
+        ///
+        /// While collisions are possible, they should be rare for arbitrary inputs.
+        /// We test this by ensuring small differences in input produce different hashes.
+        #[test]
+        fn prop_different_inputs_different_hashes(
+            base in any::<u64>().prop_filter("non-max", |v| *v < u64::MAX),
+        ) {
+            let hash1 = fnv1a_hash(&base);
+            let hash2 = fnv1a_hash(&(base + 1));
+            // Adjacent integers should have different hashes
+            prop_assert_ne!(hash1, hash2, "Adjacent values should produce different hashes");
+        }
+
+        /// Property: Empty input produces offset basis
+        ///
+        /// FNV-1a defines hash("") = offset_basis
+        #[test]
+        fn prop_empty_input_offset_basis(_seed in any::<u8>()) {
+            let hasher = DeterministicHasher::new();
+            prop_assert_eq!(hasher.finish(), FNV_OFFSET_BASIS);
+
+            let mut hasher2 = DeterministicHasher::new();
+            hasher2.write(&[]);
+            prop_assert_eq!(hasher2.finish(), FNV_OFFSET_BASIS);
+        }
+
+        /// Property: Single byte hashing follows FNV-1a formula
+        ///
+        /// For single byte b: hash = (offset_basis XOR b) * prime
+        #[test]
+        fn prop_single_byte_fnv1a_formula(byte in any::<u8>()) {
+            let mut hasher = DeterministicHasher::new();
+            hasher.write(&[byte]);
+            let actual = hasher.finish();
+
+            // Manual FNV-1a calculation
+            let expected = FNV_OFFSET_BASIS ^ u64::from(byte);
+            let expected = expected.wrapping_mul(FNV_PRIME);
+
+            prop_assert_eq!(actual, expected, "Single byte hash must follow FNV-1a formula");
+        }
+
+        /// Property: Order matters - ab != ba (usually)
+        ///
+        /// Hash functions should be sensitive to order of data.
+        #[test]
+        fn prop_order_sensitive(
+            a in 1u8..=254,  // Avoid 0 and 255 for cleaner testing
+            b in 1u8..=254,
+        ) {
+            prop_assume!(a != b);  // Only test when a and b are different
+
+            let hash_ab = {
+                let mut hasher = DeterministicHasher::new();
+                hasher.write(&[a, b]);
+                hasher.finish()
+            };
+
+            let hash_ba = {
+                let mut hasher = DeterministicHasher::new();
+                hasher.write(&[b, a]);
+                hasher.finish()
+            };
+
+            prop_assert_ne!(hash_ab, hash_ba, "Order should affect hash result");
+        }
+
+        /// Property: fnv1a_hash convenience function matches manual hashing
+        #[test]
+        fn prop_convenience_function_matches_manual(value in any::<i32>()) {
+            let convenience_hash = fnv1a_hash(&value);
+
+            let manual_hash = {
+                let mut hasher = DeterministicHasher::new();
+                value.hash(&mut hasher);
+                hasher.finish()
+            };
+
+            prop_assert_eq!(
+                convenience_hash, manual_hash,
+                "Convenience function must match manual hashing"
+            );
+        }
+
+        /// Property: BuildHasher produces consistent hashers
+        #[test]
+        fn prop_build_hasher_consistent(input in any::<Vec<u8>>()) {
+            let build_hasher = DeterministicBuildHasher;
+
+            let hash1 = {
+                let mut hasher = build_hasher.build_hasher();
+                hasher.write(&input);
+                hasher.finish()
+            };
+
+            let hash2 = {
+                let mut hasher = build_hasher.build_hasher();
+                hasher.write(&input);
+                hasher.finish()
+            };
+
+            prop_assert_eq!(hash1, hash2, "BuildHasher must produce consistent hashers");
+        }
+    }
+
+    /// Extended FNV-1a test vectors from various sources
+    /// These verify our implementation against known correct values
+    #[test]
+    fn test_extended_fnv1a_vectors() {
+        // Test vectors calculated using the FNV-1a algorithm definition
+        // FNV-1a: for each byte b: hash = (hash XOR b) * FNV_prime
+        let test_cases: &[(&[u8], u64)] = &[
+            // Empty string
+            (b"", 0xcbf2_9ce4_8422_2325),
+            // Single characters
+            (b"a", 0xaf63_dc4c_8601_ec8c),
+            (b"b", 0xaf63_df4c_8601_f1a5),
+            (b"c", 0xaf63_de4c_8601_eff2),
+            // Common strings
+            (b"foobar", 0x8594_4171_f739_67e8),
+            (b"hello", 0xa430_d846_80aa_bd0b),
+            (b"world", 0x4f59_ff5e_730c_8af3),
+            // Numeric patterns
+            (b"123", 0x456f_c218_1822_c4db),
+            (b"0", 0xaf63_ad4c_8601_9caf),
+            // Edge cases with special characters
+            (b"\0", 0xaf63_bd4c_8601_b7df),   // null byte
+            (b"\xff", 0xaf64_724c_8602_eb6e), // 0xFF
+        ];
+
+        for (input, expected) in test_cases {
+            let mut hasher = DeterministicHasher::new();
+            hasher.write(input);
+            let actual = hasher.finish();
+            assert_eq!(
+                actual, *expected,
+                "FNV-1a mismatch for input {:?}: expected 0x{:016x}, got 0x{:016x}",
+                input, expected, actual
+            );
+        }
+    }
+}

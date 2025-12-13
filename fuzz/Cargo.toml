@@ -69,3 +69,12 @@ path = "fuzz_targets/fuzz_sync_layer_direct.rs"
 test = false
 doc = false
 bench = false
+
+# Fuzz target: Direct RLE encode/decode testing
+# Tests RLE roundtrip, decode safety, and stress patterns
+[[bin]]
+name = "fuzz_rle"
+path = "fuzz_targets/fuzz_rle.rs"
+test = false
+doc = false
+bench = false

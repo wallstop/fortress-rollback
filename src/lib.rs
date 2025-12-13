@@ -35,6 +35,11 @@ pub mod frame_info;
 pub mod hash;
 #[doc(hidden)]
 pub mod input_queue;
+/// Internal run-length encoding module for network compression.
+///
+/// Provides RLE encoding/decoding that replaces the `bitfield-rle` crate dependency.
+/// See the module documentation for usage details.
+pub mod rle;
 /// Internal random number generator module based on PCG32.
 ///
 /// Provides a minimal, high-quality PRNG that replaces the `rand` crate dependency.
@@ -82,7 +87,7 @@ pub mod network {
 /// - Not covered by semver compatibility guarantees
 /// - Intended ONLY for:
 ///   - Fuzzing (cargo-fuzz, libFuzzer, AFL)
-///   - Property-based testing (proptest, quickcheck)
+///   - Property-based testing (proptest)
 ///   - Formal verification (Kani, Z3)
 ///   - Integration testing in the same workspace
 ///
@@ -136,6 +141,9 @@ pub mod __internal {
     pub use crate::network::compression::{decode, delta_decode, delta_encode, encode};
     pub use crate::network::messages::ConnectionStatus;
     pub use crate::network::protocol::{Event, ProtocolState, UdpProtocol};
+
+    // RLE compression (internal implementation)
+    pub use crate::rle::{decode as rle_decode, encode as rle_encode};
 
     // Session internals
     pub use crate::sessions::p2p_session::PlayerRegistry;

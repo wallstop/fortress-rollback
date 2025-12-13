@@ -88,10 +88,6 @@ criteria = "safe-to-run"
 version = "0.6.3"
 criteria = "safe-to-run"
 
-[[exemptions.bitfield-rle]]
-version = "0.2.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.bitflags]]
 version = "1.3.2"
 criteria = "safe-to-run"
@@ -1074,10 +1070,6 @@ criteria = "safe-to-run"
 
 [[exemptions.valuable]]
 version = "0.1.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.varinteger]]
-version = "1.0.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.vcpkg]]
