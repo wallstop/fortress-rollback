@@ -132,7 +132,28 @@ mod tests {
     use super::*;
     use crate::network::messages::{MessageBody, MessageHeader};
 
+    // Helper function to wait for messages with retry logic
+    // This is necessary because UDP packet delivery timing can vary across platforms
+    #[cfg(not(miri))]
+    fn wait_for_messages(
+        socket: &mut UdpNonBlockingSocket,
+        expected_count: usize,
+        max_retries: u32,
+    ) -> Vec<(SocketAddr, Message)> {
+        let mut all_received = Vec::new();
+        for _ in 0..max_retries {
+            let received = socket.receive_all_messages();
+            all_received.extend(received);
+            if all_received.len() >= expected_count {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        all_received
+    }
+
     #[test]
+    #[cfg(not(miri))] // Miri cannot execute foreign functions like socket()
     fn test_udp_socket_bind_to_port() {
         // Bind to port 0 to let OS assign an available port
         let socket = UdpNonBlockingSocket::bind_to_port(0);
@@ -140,6 +161,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))] // Miri cannot execute foreign functions like socket()
     fn test_udp_socket_is_non_blocking() {
         let mut socket = UdpNonBlockingSocket::bind_to_port(0).unwrap();
         // receive_all_messages should return immediately even with no messages
@@ -148,6 +170,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))] // Miri cannot execute foreign functions like socket()
     fn test_udp_socket_send_and_receive() {
         let mut socket1 = UdpNonBlockingSocket::bind_to_port(0).unwrap();
         let mut socket2 = UdpNonBlockingSocket::bind_to_port(0).unwrap();
@@ -163,18 +186,21 @@ mod tests {
         // Send from socket1 to socket2
         socket1.send_to(&msg, &addr2);
 
-        // Give a tiny bit of time for the packet to arrive
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Receive on socket2
-        let received = socket2.receive_all_messages();
-        assert_eq!(received.len(), 1);
+        // Wait for message with retry logic (UDP timing varies by platform)
+        let received = wait_for_messages(&mut socket2, 1, 20);
+        assert_eq!(
+            received.len(),
+            1,
+            "Expected 1 message but got {}",
+            received.len()
+        );
         // Check port matches (IP may differ between 0.0.0.0 and 127.0.0.1)
         assert_eq!(received[0].0.port(), addr1.port());
         assert_eq!(received[0].1, msg);
     }
 
     #[test]
+    #[cfg(not(miri))] // Miri cannot execute foreign functions like socket()
     fn test_udp_socket_receive_multiple_messages() {
         let mut socket1 = UdpNonBlockingSocket::bind_to_port(0).unwrap();
         let mut socket2 = UdpNonBlockingSocket::bind_to_port(0).unwrap();
@@ -193,13 +219,18 @@ mod tests {
         socket1.send_to(&msg1, &addr2);
         socket1.send_to(&msg2, &addr2);
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        let received = socket2.receive_all_messages();
-        assert_eq!(received.len(), 2);
+        // Wait for messages with retry logic (UDP timing varies by platform)
+        let received = wait_for_messages(&mut socket2, 2, 20);
+        assert_eq!(
+            received.len(),
+            2,
+            "Expected 2 messages but got {}",
+            received.len()
+        );
     }
 
     #[test]
+    #[cfg(not(miri))] // Miri cannot execute foreign functions like socket()
     fn test_udp_socket_debug() {
         let socket = UdpNonBlockingSocket::bind_to_port(0).unwrap();
         let debug = format!("{:?}", socket);

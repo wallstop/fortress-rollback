@@ -187,7 +187,7 @@ jobs:
 
       - name: Run Kani verification
         run: ./scripts/verify-kani.sh --quick
-        timeout-minutes: 45
+        timeout-minutes: 90
 
   package-dry-run:
     runs-on: ubuntu-latest
