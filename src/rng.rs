@@ -27,6 +27,10 @@
 //! let value = rng.gen_range(0..100);
 //! ```
 
+use crate::{
+    report_violation,
+    telemetry::{ViolationKind, ViolationSeverity},
+};
 use std::cell::RefCell;
 
 /// PCG32 random number generator.
@@ -136,11 +140,20 @@ pub trait Rng {
 
     /// Generates a random `u32` value in the given range `[low, high)`.
     ///
-    /// # Panics
-    /// Panics if `range.is_empty()`.
+    /// # Empty Range Behavior
+    /// If `range.is_empty()`, reports a violation via telemetry and returns `range.start`.
     fn gen_range(&mut self, range: std::ops::Range<u32>) -> u32 {
         let span = range.end.wrapping_sub(range.start);
-        assert!(span > 0, "gen_range: range must not be empty");
+        if span == 0 {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::Configuration,
+                "gen_range called with empty range [{}..{})",
+                range.start,
+                range.end
+            );
+            return range.start;
+        }
 
         // Use rejection sampling to avoid bias
         let threshold = span.wrapping_neg() % span;
@@ -154,11 +167,20 @@ pub trait Rng {
 
     /// Generates a random `usize` value in the given range `[low, high)`.
     ///
-    /// # Panics
-    /// Panics if `range.is_empty()`.
+    /// # Empty Range Behavior
+    /// If `range.is_empty()`, reports a violation via telemetry and returns `range.start`.
     fn gen_range_usize(&mut self, range: std::ops::Range<usize>) -> usize {
         let span = range.end.wrapping_sub(range.start);
-        assert!(span > 0, "gen_range_usize: range must not be empty");
+        if span == 0 {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::Configuration,
+                "gen_range_usize called with empty range [{}..{})",
+                range.start,
+                range.end
+            );
+            return range.start;
+        }
 
         if span <= u32::MAX as usize {
             // Use 32-bit arithmetic for smaller ranges
@@ -184,15 +206,21 @@ pub trait Rng {
 
     /// Generates a random `i64` value in the given inclusive range `[low, high]`.
     ///
-    /// # Panics
-    /// Panics if `range.is_empty()` (i.e., `start > end`).
+    /// # Empty Range Behavior
+    /// If `start > end`, reports a violation via telemetry and returns `start`.
     fn gen_range_i64_inclusive(&mut self, range: std::ops::RangeInclusive<i64>) -> i64 {
         let start = *range.start();
         let end = *range.end();
-        assert!(
-            start <= end,
-            "gen_range_i64_inclusive: start must not exceed end"
-        );
+        if start > end {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::Configuration,
+                "gen_range_i64_inclusive called with invalid range [{}..={}]",
+                start,
+                end
+            );
+            return start;
+        }
 
         // Calculate span as u64 to handle full i64 range
         let span = (end as i128 - start as i128 + 1) as u64;
@@ -657,6 +685,85 @@ mod tests {
             has_high_bits,
             "next_u64 should produce values with high bits set"
         );
+    }
+
+    // =========================================================================
+    // Empty Range Tests (violation reporting with graceful fallback)
+    // =========================================================================
+
+    /// Tests that gen_range with an empty range (start == end) returns start
+    /// instead of panicking. A violation is reported via telemetry.
+    #[test]
+    fn test_gen_range_empty_returns_start() {
+        let mut rng = Pcg32::seed_from_u64(42);
+
+        // Empty range (start == end)
+        let result = rng.gen_range(100..100);
+        assert_eq!(result, 100, "Empty range should return start value");
+
+        // Test with different start values
+        let result = rng.gen_range(0..0);
+        assert_eq!(result, 0, "Empty range at 0 should return 0");
+
+        let result = rng.gen_range(u32::MAX..u32::MAX);
+        assert_eq!(result, u32::MAX, "Empty range at MAX should return MAX");
+    }
+
+    /// Tests that gen_range_usize with an empty range returns start
+    /// instead of panicking. A violation is reported via telemetry.
+    #[test]
+    fn test_gen_range_usize_empty_returns_start() {
+        let mut rng = Pcg32::seed_from_u64(42);
+
+        // Empty range
+        let result = rng.gen_range_usize(500..500);
+        assert_eq!(result, 500, "Empty range should return start value");
+
+        // Test with different start values
+        let result = rng.gen_range_usize(0..0);
+        assert_eq!(result, 0, "Empty range at 0 should return 0");
+    }
+
+    /// Tests that gen_range_i64_inclusive with an invalid range (start > end)
+    /// returns start instead of panicking. A violation is reported via telemetry.
+    #[test]
+    #[allow(clippy::reversed_empty_ranges)] // Intentionally testing invalid ranges
+    fn test_gen_range_i64_inclusive_invalid_returns_start() {
+        let mut rng = Pcg32::seed_from_u64(42);
+
+        // Invalid range (start > end)
+        let result = rng.gen_range_i64_inclusive(100..=-50);
+        assert_eq!(result, 100, "Invalid range should return start value");
+
+        let result = rng.gen_range_i64_inclusive(50..=10);
+        assert_eq!(result, 50, "Invalid range should return start value");
+
+        // Negative range with start > end
+        let result = rng.gen_range_i64_inclusive(-10..=-100);
+        assert_eq!(result, -10, "Invalid range should return start value");
+    }
+
+    /// Tests that gen_range_i64_inclusive with a single value range (start == end)
+    /// is valid and returns that value. This is NOT an error case.
+    #[test]
+    fn test_gen_range_i64_inclusive_single_value_is_valid() {
+        let mut rng = Pcg32::seed_from_u64(42);
+
+        // Single value range (start == end) is valid for inclusive ranges
+        for _ in 0..10 {
+            let result = rng.gen_range_i64_inclusive(42..=42);
+            assert_eq!(
+                result, 42,
+                "Single value inclusive range should return that value"
+            );
+        }
+
+        // Test with different values
+        let result = rng.gen_range_i64_inclusive(-100..=-100);
+        assert_eq!(result, -100, "Single value inclusive range should work");
+
+        let result = rng.gen_range_i64_inclusive(0..=0);
+        assert_eq!(result, 0, "Single value inclusive range should work");
     }
 }
 

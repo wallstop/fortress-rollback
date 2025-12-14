@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="../assets/logo.svg" alt="Fortress Rollback" width="128">
+</p>
+
 # Fortress Rollback User Guide
 
 This guide walks you through integrating Fortress Rollback into your game. By the end, you'll understand how to set up sessions, handle inputs, manage game state, and respond to network events.
@@ -910,7 +914,7 @@ let adjusted_time = if session.frames_ahead() > 2 {
 
 ## Next Steps
 
-- Read the [Architecture Guide](ARCHITECTURE.md) for deeper understanding
+- Read the [Architecture Guide](architecture.md) for deeper understanding
 - Check the examples in `examples/ex_game/` for working code
 - Join the GGPO Discord for community support
 - File issues at the project repository

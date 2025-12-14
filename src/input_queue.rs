@@ -1,5 +1,6 @@
 use crate::frame_info::PlayerInput;
-use crate::telemetry::{InvariantChecker, InvariantViolation};
+use crate::report_violation;
+use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
 use crate::{Config, FortressError, Frame, InputStatus};
 use std::cmp;
 
@@ -17,7 +18,7 @@ use std::cmp;
 /// - **TLA+**: `QUEUE_LENGTH` in `specs/tla/InputQueue.tla` (set to 3 for model checking)
 /// - **Z3**: `INPUT_QUEUE_LENGTH` in `tests/test_z3_verification.rs` (128)
 /// - **Kani**: Uses 8 for tractable verification, production uses 128
-/// - **FORMAL_SPEC.md**: INV-4 (queue length bounds), INV-5 (index validity)
+/// - **formal-spec.md**: INV-4 (queue length bounds), INV-5 (index validity)
 #[cfg(kani)]
 pub const INPUT_QUEUE_LENGTH: usize = 8;
 
@@ -32,7 +33,7 @@ pub const INPUT_QUEUE_LENGTH: usize = 8;
 /// # Formal Specification Alignment
 /// - **TLA+**: `QUEUE_LENGTH` in `specs/tla/InputQueue.tla` (set to 3 for model checking)
 /// - **Z3**: `INPUT_QUEUE_LENGTH` in `tests/test_z3_verification.rs` (128)
-/// - **FORMAL_SPEC.md**: INV-4 requires `0 ≤ q.length ≤ INPUT_QUEUE_LENGTH`
+/// - **formal-spec.md**: INV-4 requires `0 ≤ q.length ≤ INPUT_QUEUE_LENGTH`
 #[cfg(not(kani))]
 pub const INPUT_QUEUE_LENGTH: usize = 128;
 
@@ -49,7 +50,7 @@ pub const INPUT_QUEUE_LENGTH: usize = 128;
 /// # Formal Specification Alignment  
 /// - **Kani**: `kani_add_input_no_overflow` proof verifies this constraint
 /// - **Z3**: `z3_proof_frame_delay_prevents_overflow` in `tests/test_z3_verification.rs`
-/// - **FORMAL_SPEC.md**: Ensures SAFE-1 (no buffer overflow) holds
+/// - **formal-spec.md**: Ensures SAFE-1 (no buffer overflow) holds
 ///
 /// Note: This constant is primarily used for testing. Production code uses
 /// the configurable `max_frame_delay()` method on `InputQueueConfig` or `InputQueue`.
@@ -198,9 +199,12 @@ impl<T: Config> InputQueue<T> {
     ///
     /// Note: This function exists for backward compatibility and testing.
     /// The main construction path uses `with_queue_length` via `SyncLayer::with_queue_length`.
+    ///
+    /// # Returns
+    /// Returns `None` if the default queue length is invalid (should never happen).
     #[allow(dead_code)]
     #[must_use]
-    pub fn new(player_index: usize) -> Self {
+    pub fn new(player_index: usize) -> Option<Self> {
         Self::with_queue_length(player_index, INPUT_QUEUE_LENGTH)
     }
 
@@ -210,16 +214,20 @@ impl<T: Config> InputQueue<T> {
     /// * `player_index` - The index of the player this queue is for
     /// * `queue_length` - The size of the circular buffer. Must be at least 2.
     ///
-    /// # Panics
-    /// Panics if `queue_length < 2`.
+    /// # Returns
+    /// Returns `None` if `queue_length < 2`.
     #[must_use]
-    pub fn with_queue_length(player_index: usize, queue_length: usize) -> Self {
-        assert!(
-            queue_length >= 2,
-            "Queue length must be at least 2, got {}",
-            queue_length
-        );
-        Self {
+    pub fn with_queue_length(player_index: usize, queue_length: usize) -> Option<Self> {
+        if queue_length < 2 {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InputQueue,
+                "Queue length must be at least 2, got {}",
+                queue_length
+            );
+            return None;
+        }
+        Some(Self {
             head: 0,
             tail: 0,
             length: 0,
@@ -233,7 +241,7 @@ impl<T: Config> InputQueue<T> {
             player_index,
             queue_length,
             last_confirmed_input: None,
-        }
+        })
     }
 
     /// Returns the queue length (size of the circular buffer).
@@ -353,16 +361,37 @@ impl<T: Config> InputQueue<T> {
     ///
     /// This is DIFFERENT from the original GGPO approach of using "last added" input,
     /// which depended on local timing and caused desyncs.
-    pub fn input(&mut self, requested_frame: Frame) -> (T::Input, InputStatus) {
+    ///
+    /// # Returns
+    /// Returns `None` if called when a prediction error exists or if the requested frame
+    /// is before the oldest frame in the queue. In normal operation, this should not happen.
+    pub fn input(&mut self, requested_frame: Frame) -> Option<(T::Input, InputStatus)> {
         // No one should ever try to grab any input when we have a prediction error.
-        // Doing so means that we're just going further down the wrong path. Assert this to verify that it's true.
-        assert!(self.first_incorrect_frame.is_null());
+        // Doing so means that we're just going further down the wrong path.
+        if !self.first_incorrect_frame.is_null() {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InputQueue,
+                "Attempted to get input while prediction error exists (first_incorrect_frame={})",
+                self.first_incorrect_frame
+            );
+            return None;
+        }
 
         // Remember the last requested frame number for later. We'll need this in add_input() to drop out of prediction mode.
         self.last_requested_frame = requested_frame;
 
-        // assert that we request a frame that still exists
-        assert!(requested_frame >= self.inputs[self.tail].frame);
+        // Verify that we request a frame that still exists
+        if requested_frame < self.inputs[self.tail].frame {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InputQueue,
+                "Requested frame {} is before oldest frame {} in queue",
+                requested_frame,
+                self.inputs[self.tail].frame
+            );
+            return None;
+        }
 
         // We currently don't have a prediction frame
         if self.prediction.frame.as_i32() < 0 {
@@ -371,8 +400,19 @@ impl<T: Config> InputQueue<T> {
 
             if offset < self.length {
                 offset = (offset + self.tail) % self.queue_length;
-                assert!(self.inputs[offset].frame == requested_frame);
-                return (self.inputs[offset].input, InputStatus::Confirmed);
+                // Verify circular buffer indexing correctness
+                if self.inputs[offset].frame != requested_frame {
+                    report_violation!(
+                        ViolationSeverity::Critical,
+                        ViolationKind::InputQueue,
+                        "Circular buffer index mismatch: expected frame {}, got frame {} at offset {}",
+                        requested_frame,
+                        self.inputs[offset].frame,
+                        offset
+                    );
+                    return None;
+                }
+                return Some((self.inputs[offset].input, InputStatus::Confirmed));
             }
 
             // The requested frame isn't in the queue. This means we need to return a prediction frame.
@@ -391,9 +431,16 @@ impl<T: Config> InputQueue<T> {
         }
 
         // We must be predicting, so we return the prediction frame contents.
-        assert!(!self.prediction.frame.is_null());
+        if self.prediction.frame.is_null() {
+            report_violation!(
+                ViolationSeverity::Critical,
+                ViolationKind::InputQueue,
+                "Prediction frame is null when it should be set"
+            );
+            return None;
+        }
         let prediction_to_return = self.prediction; // PlayerInput has copy semantics
-        (prediction_to_return.input, InputStatus::Predicted)
+        Some((prediction_to_return.input, InputStatus::Predicted))
     }
 
     /// Adds an input frame to the queue. Will consider the set frame delay.
@@ -409,29 +456,63 @@ impl<T: Config> InputQueue<T> {
         // Move the queue head to the correct point in preparation to input the frame into the queue.
         let new_frame = self.advance_queue_head(input.frame);
         // if the frame is valid, then add the input
-        if !new_frame.is_null() {
-            self.add_input_by_frame(input, new_frame);
+        if !new_frame.is_null() && !self.add_input_by_frame(input, new_frame) {
+            // Invariant violation occurred during add
+            return Frame::NULL;
         }
         new_frame
     }
 
     /// Adds an input frame to the queue at the given frame number. If there are predicted inputs, we will check those and mark them as incorrect, if necessary.
-    /// Returns the frame number
-    fn add_input_by_frame(&mut self, input: PlayerInput<T::Input>, frame_number: Frame) {
+    /// Returns true if the input was added successfully, false if an invariant violation was detected.
+    fn add_input_by_frame(&mut self, input: PlayerInput<T::Input>, frame_number: Frame) -> bool {
         let previous_position = match self.head {
             0 => self.queue_length - 1,
             _ => self.head - 1,
         };
 
-        assert!(self.last_added_frame.is_null() || frame_number == self.last_added_frame + 1);
-        assert!(frame_number == 0 || self.inputs[previous_position].frame == frame_number - 1);
+        // Verify inputs are added sequentially
+        if !self.last_added_frame.is_null() && frame_number != self.last_added_frame + 1 {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InputQueue,
+                "Input frame {} is not sequential (last_added={})",
+                frame_number,
+                self.last_added_frame
+            );
+            return false;
+        }
+        if frame_number != 0 && self.inputs[previous_position].frame != frame_number - 1 {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InputQueue,
+                "Previous input frame {} does not precede current frame {}",
+                self.inputs[previous_position].frame,
+                frame_number
+            );
+            return false;
+        }
 
         // Add the frame to the back of the queue
         self.inputs[self.head] = input;
         self.inputs[self.head].frame = frame_number;
         self.head = (self.head + 1) % self.queue_length;
         self.length += 1;
-        assert!(self.length <= self.queue_length);
+
+        // Verify queue doesn't overflow
+        if self.length > self.queue_length {
+            report_violation!(
+                ViolationSeverity::Critical,
+                ViolationKind::InputQueue,
+                "Queue overflow: length {} exceeds capacity {}",
+                self.length,
+                self.queue_length
+            );
+            // Restore invariant by capping length
+            self.length = self.queue_length;
+            return false;
+        }
+
         self.first_frame = false;
         self.last_added_frame = frame_number;
 
@@ -441,7 +522,16 @@ impl<T: Config> InputQueue<T> {
 
         // We have been predicting. See if the inputs we've gotten match what we've been predicting. If so, don't worry about it.
         if !self.prediction.frame.is_null() {
-            assert!(frame_number == self.prediction.frame);
+            if frame_number != self.prediction.frame {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InputQueue,
+                    "Frame {} doesn't match prediction frame {}",
+                    frame_number,
+                    self.prediction.frame
+                );
+                return false;
+            }
 
             // Remember the first input which was incorrect so we can report it
             if self.first_incorrect_frame.is_null() && !self.prediction.equal(&input, true) {
@@ -458,9 +548,25 @@ impl<T: Config> InputQueue<T> {
                 self.prediction.frame += 1;
             }
         }
+
+        true
     }
 
-    /// Advances the queue head to the next frame and either drops inputs or fills the queue if the input delay has changed since the last frame.
+    /// Advances the queue head to the next frame, handling frame delay by filling gaps.
+    ///
+    /// When frame delay is configured, this function fills the gap between the expected
+    /// frame and the actual input frame by replicating the previous input. This is
+    /// necessary for initial inputs when delay > 0.
+    ///
+    /// Returns [`Frame::NULL`] if the input would be out of order (expected > input with delay).
+    /// Otherwise, returns the frame number with delay applied.
+    ///
+    /// # Note
+    ///
+    /// The gap-filling logic handles the initial delay setup. If frame delay is changed
+    /// mid-session (not supported via public API), the sequential check in [`add_input`]
+    /// will reject the input before this function is called, so the gap-filling for
+    /// mid-session delay changes will never execute.
     fn advance_queue_head(&mut self, mut input_frame: Frame) -> Frame {
         let previous_position = match self.head {
             0 => self.queue_length - 1,
@@ -474,24 +580,37 @@ impl<T: Config> InputQueue<T> {
         };
 
         input_frame += self.frame_delay as i32;
-        //  This can occur when the frame delay has dropped since the last time we shoved a frame into the system. In this case, there's no room on the queue. Toss it.
+
+        // If the expected frame is ahead of the input (frame delay decreased), reject the input
         if expected_frame > input_frame {
             return Frame::NULL;
         }
 
-        // This can occur when the frame delay has been increased since the last time we shoved a frame into the system.
-        // We need to replicate the last frame in the queue several times in order to fill the space left.
+        // Fill any gap between expected_frame and input_frame by replicating the previous input.
+        // This handles the initial delay setup when frame_delay > 0.
         while expected_frame < input_frame {
             let input_to_replicate = self.inputs[previous_position];
-            self.add_input_by_frame(input_to_replicate, expected_frame);
+            if !self.add_input_by_frame(input_to_replicate, expected_frame) {
+                return Frame::NULL;
+            }
             expected_frame += 1;
         }
 
+        // After filling gaps, verify the frame is sequential
         let previous_position = match self.head {
             0 => self.queue_length - 1,
             _ => self.head - 1,
         };
-        assert!(input_frame == 0 || input_frame == self.inputs[previous_position].frame + 1);
+        if input_frame != 0 && input_frame != self.inputs[previous_position].frame + 1 {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InputQueue,
+                "Frame sequencing broken after gap fill: input_frame={}, prev_frame={}",
+                input_frame,
+                self.inputs[previous_position].frame
+            );
+            return Frame::NULL;
+        }
         input_frame
     }
 }
@@ -652,9 +771,14 @@ mod input_queue_tests {
         type Address = SocketAddr;
     }
 
+    /// Helper to create a test queue, unwrapping the Option for test convenience.
+    fn test_queue(player_index: usize) -> InputQueue<TestConfig> {
+        InputQueue::<TestConfig>::new(player_index).expect("Failed to create test queue")
+    }
+
     #[test]
     fn test_add_input_wrong_frame() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         let input = PlayerInput::new(Frame::new(0), TestInput { inp: 0 });
         assert_eq!(queue.add_input(input), Frame::new(0)); // fine
         let input_wrong_frame = PlayerInput::new(Frame::new(3), TestInput { inp: 0 });
@@ -663,7 +787,7 @@ mod input_queue_tests {
 
     #[test]
     fn test_add_input_twice() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         let input = PlayerInput::new(Frame::new(0), TestInput { inp: 0 });
         assert_eq!(queue.add_input(input), Frame::new(0)); // fine
         assert_eq!(queue.add_input(input), Frame::NULL); // input dropped
@@ -671,7 +795,7 @@ mod input_queue_tests {
 
     #[test]
     fn test_add_input_sequentially() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         for i in 0..10i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: 0 });
             queue.add_input(input);
@@ -682,20 +806,22 @@ mod input_queue_tests {
 
     #[test]
     fn test_input_sequentially() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         for i in 0..10i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
             queue.add_input(input);
             assert_eq!(queue.last_added_frame, Frame::new(i));
             assert_eq!(queue.length, (i + 1) as usize);
-            let (input_in_queue, _status) = queue.input(Frame::new(i));
+            let (input_in_queue, _status) = queue
+                .input(Frame::new(i))
+                .expect("input should be available");
             assert_eq!(input_in_queue.inp, i as u8);
         }
     }
 
     #[test]
     fn test_delayed_inputs() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         let delay: i32 = 2;
         queue.set_frame_delay(delay as usize).expect("valid delay");
         for i in 0..10i32 {
@@ -703,7 +829,9 @@ mod input_queue_tests {
             queue.add_input(input);
             assert_eq!(queue.last_added_frame, Frame::new(i + delay));
             assert_eq!(queue.length, (i + delay + 1) as usize);
-            let (input_in_queue, _status) = queue.input(Frame::new(i));
+            let (input_in_queue, _status) = queue
+                .input(Frame::new(i))
+                .expect("input should be available");
             let correct_input = std::cmp::max(0, i - delay) as u8;
             assert_eq!(input_in_queue.inp, correct_input);
         }
@@ -711,7 +839,7 @@ mod input_queue_tests {
 
     #[test]
     fn test_confirmed_input_success() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         // Add inputs for frames 0-4
         for i in 0..5i32 {
             let input = PlayerInput::new(
@@ -732,7 +860,7 @@ mod input_queue_tests {
 
     #[test]
     fn test_confirmed_input_not_found() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         // Add inputs for frames 0-2
         for i in 0..3i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
@@ -745,7 +873,7 @@ mod input_queue_tests {
 
     #[test]
     fn test_discard_confirmed_frames_partial() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         // Add 10 inputs
         for i in 0..10i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
@@ -766,7 +894,7 @@ mod input_queue_tests {
 
     #[test]
     fn test_discard_confirmed_frames_all_but_one() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         // Add 10 inputs
         for i in 0..10i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
@@ -782,7 +910,7 @@ mod input_queue_tests {
     /// and maintains proper circular buffer invariants.
     #[test]
     fn test_discard_all_but_one_preserves_most_recent() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         // Add 5 inputs
         for i in 0..5i32 {
@@ -821,7 +949,7 @@ mod input_queue_tests {
     /// Regression test: discard_confirmed_frames with head at position 0 (wraparound edge case)
     #[test]
     fn test_discard_all_but_one_with_head_at_zero() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         // Fill the queue completely and then some to cause head wraparound
         // INPUT_QUEUE_LENGTH = 128, so adding 128 inputs will put head at 0
@@ -863,7 +991,7 @@ mod input_queue_tests {
     /// Regression test: multiple consecutive discard_all_but_one operations maintain invariants
     #[test]
     fn test_multiple_discards_maintain_invariants() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         for cycle in 0..3 {
             // Add some inputs
@@ -891,7 +1019,7 @@ mod input_queue_tests {
     /// Regression test: verify discard preserves the correct frame value, not just any input
     #[test]
     fn test_discard_all_preserves_correct_frame_value() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         // Add inputs with unique values to verify we keep the RIGHT one
         for i in 0..5i32 {
@@ -920,7 +1048,7 @@ mod input_queue_tests {
     /// Regression test: full lifecycle of add -> discard -> add maintains invariants
     #[test]
     fn test_full_lifecycle_maintains_invariants() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         // Phase 1: Add initial inputs
         for i in 0..5i32 {
@@ -958,7 +1086,7 @@ mod input_queue_tests {
 
     #[test]
     fn test_discard_confirmed_frames_respects_last_requested() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         // Add 10 inputs
         for i in 0..10i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
@@ -966,7 +1094,7 @@ mod input_queue_tests {
         }
 
         // Request frame 3 (this sets last_requested_frame)
-        let _ = queue.input(Frame::new(3));
+        let _ = queue.input(Frame::new(3)).expect("input");
 
         // Try to discard up to frame 8, but should only discard up to 3
         queue.discard_confirmed_frames(Frame::new(8));
@@ -978,7 +1106,7 @@ mod input_queue_tests {
 
     #[test]
     fn test_discard_nothing_when_frame_before_tail() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         // Add inputs for frames 0-9
         for i in 0..10i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
@@ -995,7 +1123,7 @@ mod input_queue_tests {
 
     #[test]
     fn test_reset_prediction() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         // Add a couple of inputs
         for i in 0..3i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
@@ -1003,7 +1131,7 @@ mod input_queue_tests {
         }
 
         // Request a frame beyond what we have (triggers prediction)
-        let (_, status) = queue.input(Frame::new(5));
+        let (_, status) = queue.input(Frame::new(5)).expect("input");
         assert_eq!(status, InputStatus::Predicted);
         assert!(queue.prediction.frame.as_i32() >= 0);
 
@@ -1016,7 +1144,7 @@ mod input_queue_tests {
 
     #[test]
     fn test_prediction_returns_last_confirmed_input() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         // Add inputs with specific values
         for i in 0..3i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: 42 }); // All inputs are 42
@@ -1024,7 +1152,7 @@ mod input_queue_tests {
         }
 
         // Request frame 5 (beyond what we have)
-        let (predicted_input, status) = queue.input(Frame::new(5));
+        let (predicted_input, status) = queue.input(Frame::new(5)).expect("input");
         assert_eq!(status, InputStatus::Predicted);
         // Prediction uses RepeatLastConfirmed - returns last confirmed input (42)
         assert_eq!(predicted_input.inp, 42);
@@ -1032,13 +1160,13 @@ mod input_queue_tests {
 
     #[test]
     fn test_first_incorrect_frame_detection() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         // Add initial input with a specific value
         let input0 = PlayerInput::new(Frame::new(0), TestInput { inp: 10 });
         queue.add_input(input0);
 
         // Request frame 1 (triggers prediction using RepeatLastConfirmed = 10)
-        let (predicted, status) = queue.input(Frame::new(1));
+        let (predicted, status) = queue.input(Frame::new(1)).expect("input");
         assert_eq!(status, InputStatus::Predicted);
         assert_eq!(predicted.inp, 10); // Predicted to be last confirmed (10)
 
@@ -1052,13 +1180,13 @@ mod input_queue_tests {
 
     #[test]
     fn test_first_incorrect_frame_correct_prediction() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         // Add initial input with specific value
         let input0 = PlayerInput::new(Frame::new(0), TestInput { inp: 42 });
         queue.add_input(input0);
 
         // Request frame 1 (triggers prediction using RepeatLastConfirmed = 42)
-        let _ = queue.input(Frame::new(1));
+        let _ = queue.input(Frame::new(1)).expect("input");
 
         // Add actual input for frame 1 with SAME value (correct prediction)
         let input1 = PlayerInput::new(Frame::new(1), TestInput { inp: 42 }); // Same as prediction
@@ -1070,7 +1198,7 @@ mod input_queue_tests {
 
     #[test]
     fn test_queue_wraparound() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         // Add more inputs than queue capacity to test wraparound
         // We add INPUT_QUEUE_LENGTH inputs, then discard some, then add more
@@ -1106,29 +1234,29 @@ mod input_queue_tests {
 
     #[test]
     fn test_input_returns_confirmed_status() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         let input = PlayerInput::new(Frame::new(0), TestInput { inp: 5 });
         queue.add_input(input);
 
-        let (retrieved, status) = queue.input(Frame::new(0));
+        let (retrieved, status) = queue.input(Frame::new(0)).expect("input");
         assert_eq!(status, InputStatus::Confirmed);
         assert_eq!(retrieved.inp, 5);
     }
 
     #[test]
     fn test_input_returns_predicted_status() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         let input = PlayerInput::new(Frame::new(0), TestInput { inp: 5 });
         queue.add_input(input);
 
         // Request frame beyond what we have
-        let (_, status) = queue.input(Frame::new(10));
+        let (_, status) = queue.input(Frame::new(10)).expect("input");
         assert_eq!(status, InputStatus::Predicted);
     }
 
     #[test]
     fn test_frame_delay_change_increase() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         // Start with delay of 2 from the beginning
         queue.set_frame_delay(2).expect("valid delay");
@@ -1148,18 +1276,19 @@ mod input_queue_tests {
 
     /// Tests that changing frame delay mid-session causes inputs to be dropped.
     ///
-    /// NOTE: This documents current behavior which may be a bug. The `advance_queue_head`
-    /// function has code to handle frame delay increases by replicating inputs, but that
-    /// code can never be reached because `add_input` rejects the input first due to the
-    /// sequential check. Since frame delay is only set at construction via the builder
-    /// and the API doesn't expose changing it mid-session, this is not exploitable.
-    /// However, the gap-filling code in `advance_queue_head` is effectively dead code.
+    /// Frame delay is only set at construction via the builder and the API doesn't
+    /// expose changing it mid-session. Changing it manually (as in this test) causes
+    /// subsequent inputs to be rejected because they fail the sequential check in
+    /// `add_input`: `input.frame + frame_delay != last_added_frame + 1`.
     ///
-    /// TODO: Either remove the dead gap-filling code, or fix the sequential check to
-    /// properly handle frame delay changes (if that's the intended behavior).
+    /// Note: The gap-filling code in `advance_queue_head` exists to handle the initial
+    /// delay setup (when first inputs are added with delay > 0). However, it will never
+    /// execute for mid-session delay changes because `add_input` rejects first.
+    ///
+    /// This test documents that frame delay changes mid-session are not supported.
     #[test]
     fn test_frame_delay_change_mid_session_drops_input() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         // Start with no delay, add first input
         let input0 = PlayerInput::new(Frame::new(0), TestInput { inp: 1 });
@@ -1182,11 +1311,11 @@ mod input_queue_tests {
 
     #[test]
     fn test_blank_prediction_on_frame_zero() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         // Request frame 0 without any inputs (edge case)
         // This should return a blank prediction
-        let (predicted, status) = queue.input(Frame::new(0));
+        let (predicted, status) = queue.input(Frame::new(0)).expect("input");
         assert_eq!(status, InputStatus::Predicted);
         assert_eq!(predicted.inp, TestInput::default().inp);
     }
@@ -1197,13 +1326,13 @@ mod input_queue_tests {
 
     #[test]
     fn test_invariant_checker_new_queue() {
-        let queue = InputQueue::<TestConfig>::new(0);
+        let queue = test_queue(0);
         assert!(queue.check_invariants().is_ok());
     }
 
     #[test]
     fn test_invariant_checker_after_add_input() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         for i in 0..10i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
             queue.add_input(input);
@@ -1217,7 +1346,7 @@ mod input_queue_tests {
 
     #[test]
     fn test_invariant_checker_after_discard() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         for i in 0..20i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
             queue.add_input(input);
@@ -1229,7 +1358,7 @@ mod input_queue_tests {
 
     #[test]
     fn test_invariant_checker_with_frame_delay() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         queue.set_frame_delay(5).expect("valid delay");
 
         for i in 0..10i32 {
@@ -1241,12 +1370,12 @@ mod input_queue_tests {
 
     #[test]
     fn test_invariant_checker_after_reset_prediction() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         for i in 0..5i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: 0 });
             queue.add_input(input);
         }
-        let _ = queue.input(Frame::new(10)); // Trigger prediction
+        let _ = queue.input(Frame::new(10)).expect("input"); // Trigger prediction
 
         queue.reset_prediction();
         assert!(queue.check_invariants().is_ok());
@@ -1262,7 +1391,7 @@ mod input_queue_tests {
     /// This constraint was discovered through Kani formal verification.
     #[test]
     fn test_set_frame_delay_rejects_excessive_delay() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         // Delay exactly at the limit should fail
         let result = queue.set_frame_delay(INPUT_QUEUE_LENGTH);
@@ -1284,7 +1413,7 @@ mod input_queue_tests {
     /// Test: Maximum allowed delay (INPUT_QUEUE_LENGTH - 1) should be accepted
     #[test]
     fn test_set_frame_delay_accepts_max_valid_delay() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         // Delay at MAX_FRAME_DELAY should succeed
         let result = queue.set_frame_delay(MAX_FRAME_DELAY);
@@ -1295,7 +1424,7 @@ mod input_queue_tests {
     /// Test: Zero delay should be accepted (common case)
     #[test]
     fn test_set_frame_delay_accepts_zero() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         let result = queue.set_frame_delay(0);
         assert!(result.is_ok());
@@ -1306,7 +1435,7 @@ mod input_queue_tests {
     #[test]
     fn test_set_frame_delay_accepts_typical_values() {
         for delay in 1..=8 {
-            let mut queue = InputQueue::<TestConfig>::new(0);
+            let mut queue = test_queue(0);
             let result = queue.set_frame_delay(delay);
             assert!(result.is_ok(), "Delay {} should be accepted", delay);
             assert_eq!(queue.frame_delay, delay);
@@ -1316,7 +1445,7 @@ mod input_queue_tests {
     /// Test: After successful delay set, adding inputs works correctly
     #[test]
     fn test_frame_delay_with_inputs_after_set() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         queue.set_frame_delay(3).expect("valid delay");
 
         // Add input at frame 0
@@ -1332,7 +1461,7 @@ mod input_queue_tests {
     /// Test: After rejected delay, queue state remains unchanged
     #[test]
     fn test_rejected_frame_delay_preserves_state() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         // Set a valid delay first
         queue.set_frame_delay(5).expect("valid delay");
@@ -1378,6 +1507,11 @@ mod property_tests {
         type Address = SocketAddr;
     }
 
+    fn test_queue(player_index: usize) -> InputQueue<TestConfig> {
+        InputQueue::<TestConfig>::new(player_index)
+            .expect("test_queue: InputQueue::new should succeed for valid player_index")
+    }
+
     // Strategy for generating input values
     fn input_value() -> impl Strategy<Value = u8> {
         any::<u8>()
@@ -1400,7 +1534,7 @@ mod property_tests {
             count in frame_count(),
             seed in any::<u64>(),
         ) {
-            let mut queue = InputQueue::<TestConfig>::new(0);
+            let mut queue = test_queue(0);
             let mut rng = seed;
 
             // Add sequential inputs
@@ -1423,7 +1557,7 @@ mod property_tests {
         fn prop_input_retrieval(
             count in 1usize..=50,
         ) {
-            let mut queue = InputQueue::<TestConfig>::new(0);
+            let mut queue = test_queue(0);
 
             // Add inputs with frame number as value
             for i in 0..count as i32 {
@@ -1445,7 +1579,7 @@ mod property_tests {
             total in 10usize..=50,
             discard_up_to in 0usize..=9,
         ) {
-            let mut queue = InputQueue::<TestConfig>::new(0);
+            let mut queue = test_queue(0);
 
             // Add inputs
             for i in 0..total as i32 {
@@ -1469,7 +1603,7 @@ mod property_tests {
             delay in frame_delay(),
             count in 1usize..=30,
         ) {
-            let mut queue = InputQueue::<TestConfig>::new(0);
+            let mut queue = test_queue(0);
             queue.set_frame_delay(delay).expect("valid delay");
 
             // Add inputs
@@ -1489,7 +1623,7 @@ mod property_tests {
             count in 1usize..=20,
             last_value in input_value(),
         ) {
-            let mut queue = InputQueue::<TestConfig>::new(0);
+            let mut queue = test_queue(0);
 
             // Add inputs, with last one having specific value
             for i in 0..(count - 1) as i32 {
@@ -1505,7 +1639,7 @@ mod property_tests {
 
             // Request frame beyond what we have
             let future_frame = Frame::new(count as i32 + 5);
-            let (predicted, status) = queue.input(future_frame);
+            let (predicted, status) = queue.input(future_frame).expect("input");
 
             prop_assert_eq!(status, InputStatus::Predicted);
             // Prediction uses RepeatLastConfirmed, which returns last_confirmed_input
@@ -1519,7 +1653,7 @@ mod property_tests {
         fn prop_queue_length_bounded_with_discard(
             count in 1usize..=200,
         ) {
-            let mut queue = InputQueue::<TestConfig>::new(0);
+            let mut queue = test_queue(0);
 
             // Add inputs with periodic discard (simulating real usage)
             for i in 0..count as i32 {
@@ -1542,7 +1676,7 @@ mod property_tests {
             frame in 0i32..100,
             value in input_value(),
         ) {
-            let mut queue = InputQueue::<TestConfig>::new(0);
+            let mut queue = test_queue(0);
 
             // Add inputs up to and including target frame
             for i in 0..=frame {
@@ -1566,7 +1700,7 @@ mod property_tests {
             base_frame in 0i32..50,
             skip in 2i32..10,
         ) {
-            let mut queue = InputQueue::<TestConfig>::new(0);
+            let mut queue = test_queue(0);
 
             // Add inputs sequentially up to base_frame
             for i in 0..=base_frame {
@@ -1587,7 +1721,7 @@ mod property_tests {
         fn prop_incorrect_frame_detection(
             count in 2usize..=20,
         ) {
-            let mut queue = InputQueue::<TestConfig>::new(0);
+            let mut queue = test_queue(0);
 
             // Add initial inputs with value 0
             for i in 0..(count - 1) as i32 {
@@ -1597,7 +1731,7 @@ mod property_tests {
 
             // Request the next frame (triggers prediction of 0)
             let predicted_frame = Frame::new((count - 1) as i32);
-            let (predicted, _) = queue.input(predicted_frame);
+            let (predicted, _) = queue.input(predicted_frame).expect("input");
             prop_assert_eq!(predicted.inp, 0); // Prediction based on last input
 
             // Add actual input with DIFFERENT value
@@ -1613,14 +1747,14 @@ mod property_tests {
         fn prop_reset_clears_state(
             count in 1usize..=10,
         ) {
-            let mut queue = InputQueue::<TestConfig>::new(0);
+            let mut queue = test_queue(0);
 
             // Add some inputs and trigger prediction
             for i in 0..count as i32 {
                 let input = PlayerInput::new(Frame::new(i), TestInput { inp: 0 });
                 queue.add_input(input);
             }
-            let _ = queue.input(Frame::new(count as i32 + 5)); // Trigger prediction
+            let _ = queue.input(Frame::new(count as i32 + 5)).expect("input"); // Trigger prediction
 
             // Reset
             queue.reset_prediction();
@@ -1636,7 +1770,7 @@ mod property_tests {
 // # KANI PROOFS     #
 // ###################
 
-/// Kani proofs for InputQueue buffer bounds (INV-4, INV-5 from FORMAL_SPEC.md).
+/// Kani proofs for InputQueue buffer bounds (INV-4, INV-5 from formal-spec.md).
 ///
 /// These proofs verify:
 /// - INV-4: Queue length is always bounded by INPUT_QUEUE_LENGTH
@@ -1690,9 +1824,9 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies INV-4 (length = 0) and INV-5 (head = tail = 0) at initialization.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(2)]
     fn proof_new_queue_valid() {
-        let queue = InputQueue::<TestConfig>::new(0);
+        let queue = test_queue(0);
 
         // INV-4: length bounded
         kani::assert(queue.length == 0, "New queue should have length 0");
@@ -1725,9 +1859,9 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies that adding a single input maintains INV-4 and INV-5.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(2)]
     fn proof_add_single_input_maintains_invariants() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         let input_val: u8 = kani::any();
         let input = PlayerInput::new(Frame::new(0), TestInput { inp: input_val });
@@ -1764,9 +1898,9 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies INV-4 and INV-5 hold after adding multiple sequential inputs.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(10)]
     fn proof_sequential_inputs_maintain_invariants() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
         let count: usize = kani::any();
         kani::assume(count > 0 && count <= 8);
 
@@ -1804,7 +1938,7 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies that head index wraps around correctly when reaching INPUT_QUEUE_LENGTH.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(2)]
     fn proof_head_wraparound() {
         let head: usize = kani::any();
         kani::assume(head < INPUT_QUEUE_LENGTH);
@@ -1827,7 +1961,7 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies that frame-to-index calculation (frame % INPUT_QUEUE_LENGTH) is always valid.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(2)]
     fn proof_queue_index_calculation() {
         let frame: i32 = kani::any();
         kani::assume(frame >= 0 && frame <= 10_000_000);
@@ -1844,7 +1978,7 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies the circular buffer length formula: length = (head - tail + N) % N
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(2)]
     fn proof_length_calculation_consistent() {
         let head: usize = kani::any();
         let tail: usize = kani::any();
@@ -1872,9 +2006,9 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies that discarding frames maintains INV-4 and INV-5.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(7)]
     fn proof_discard_maintains_invariants() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         // Add a few inputs first
         for i in 0..5i32 {
@@ -1911,9 +2045,9 @@ mod kani_input_queue_proofs {
     /// Note: delay is bounded by INPUT_QUEUE_LENGTH - 1 to prevent overflow.
     /// In practice, delays this large are unreasonable for real-time games anyway.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(3)]
     fn proof_frame_delay_maintains_invariants() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         let delay: usize = kani::any();
         // Frame delay must be less than queue length to prevent overflow
@@ -1959,9 +2093,9 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies that add_input rejects non-sequential frame inputs, preserving invariants.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(3)]
     fn proof_non_sequential_rejected() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         // Add first input
         let input0 = PlayerInput::new(Frame::new(0), TestInput { inp: 0 });
@@ -1980,9 +2114,9 @@ mod kani_input_queue_proofs {
 
     /// Proof: reset_prediction maintains structural invariants
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(5)]
     fn proof_reset_maintains_structure() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         // Add some inputs
         for i in 0..3i32 {
@@ -2018,9 +2152,9 @@ mod kani_input_queue_proofs {
 
     /// Proof: Confirmed input retrieval is valid for stored frames
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(7)]
     fn proof_confirmed_input_valid_index() {
-        let mut queue = InputQueue::<TestConfig>::new(0);
+        let mut queue = test_queue(0);
 
         // Add some inputs
         let count: usize = kani::any();

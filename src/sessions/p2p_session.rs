@@ -20,8 +20,26 @@ use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::sync::Arc;
 
+/// Minimum frames between [`FortressEvent::WaitRecommendation`] events.
+///
+/// Set to 60 (1 second at 60fps) to avoid spamming the user with frequent
+/// wait suggestions. This prevents the event queue from being overwhelmed
+/// with wait recommendations during network instability.
 const RECOMMENDATION_INTERVAL: Frame = Frame::new(60);
+
+/// Minimum recommended frames to wait when behind.
+///
+/// When the session calculates that the local player should wait for
+/// remote players to catch up, this ensures the recommendation is at
+/// least 3 frames. This avoids micro-stuttering from very small waits
+/// and provides enough time for network conditions to improve.
 const MIN_RECOMMENDATION: u32 = 3;
+
+/// Maximum number of events to queue before oldest are dropped.
+///
+/// This prevents unbounded memory growth if events aren't being consumed.
+/// At 100 events, there's ample buffer for typical network jitter while
+/// providing backpressure if the application isn't processing events.
 const MAX_EVENT_QUEUE_SIZE: usize = 100;
 
 /// Registry tracking all players and their connection states.
@@ -234,9 +252,15 @@ impl<T: Config> P2PSession<T> {
         for (player_handle, player_type) in players.handles.iter() {
             if let PlayerType::Local = player_type {
                 // This should never fail during construction as player handles are validated
-                sync_layer
-                    .set_frame_delay(*player_handle, input_delay)
-                    .expect("Internal error: invalid player handle during session construction");
+                if let Err(e) = sync_layer.set_frame_delay(*player_handle, input_delay) {
+                    report_violation!(
+                        ViolationSeverity::Critical,
+                        ViolationKind::InternalError,
+                        "Failed to set frame delay for player {:?} during session construction: {}",
+                        player_handle,
+                        e
+                    );
+                }
             }
         }
 
@@ -359,8 +383,10 @@ impl<T: Config> P2PSession<T> {
             self.compare_local_checksums_against_peers();
         }
 
-        // This list of requests will be returned to the user
-        let mut requests = Vec::new();
+        // This list of requests will be returned to the user.
+        // Pre-allocate with capacity for typical case: 1 save + 1 advance = 2 requests.
+        // During rollback, more requests will be added but Vec will grow as needed.
+        let mut requests = Vec::with_capacity(2);
 
         /*
          * ROLLBACKS AND GAME STATE MANAGEMENT
@@ -476,9 +502,23 @@ impl<T: Config> P2PSession<T> {
         };
         if can_advance {
             // get correct inputs for the current frame
-            let inputs = self
+            let inputs = match self
                 .sync_layer
-                .synchronized_inputs(&self.local_connect_status);
+                .synchronized_inputs(&self.local_connect_status)
+            {
+                Some(inputs) => inputs,
+                None => {
+                    report_violation!(
+                        ViolationSeverity::Critical,
+                        ViolationKind::InternalError,
+                        "Failed to get synchronized inputs for frame {}",
+                        self.sync_layer.current_frame()
+                    );
+                    return Err(FortressError::InternalError {
+                        context: "Failed to get synchronized inputs".to_owned(),
+                    });
+                }
+            };
             // advance the frame count
             self.sync_layer.advance_frame();
             // clear the local inputs after advancing the frame to allow new inputs to be ingested
@@ -913,9 +953,23 @@ impl<T: Config> P2PSession<T> {
 
         // step forward to the previous current state, but with updated inputs
         for i in 0..count {
-            let inputs = self
+            let inputs = match self
                 .sync_layer
-                .synchronized_inputs(&self.local_connect_status);
+                .synchronized_inputs(&self.local_connect_status)
+            {
+                Some(inputs) => inputs,
+                None => {
+                    report_violation!(
+                        ViolationSeverity::Critical,
+                        ViolationKind::InternalError,
+                        "Failed to get synchronized inputs during resimulation at frame {}",
+                        self.sync_layer.current_frame()
+                    );
+                    return Err(FortressError::InternalError {
+                        context: "Failed to get synchronized inputs during resimulation".to_owned(),
+                    });
+                }
+            };
 
             // decide whether to request a state save
             if self.save_mode == SaveMode::Sparse {
@@ -1180,15 +1234,32 @@ impl<T: Config> P2PSession<T> {
             // add the input and all associated information
             Event::Input { input, player } => {
                 // input only comes from remote players, not spectators
-                assert!(player.is_valid_player_for(self.num_players));
+                if !player.is_valid_player_for(self.num_players) {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "Received input from invalid player handle {} (max={})",
+                        player,
+                        self.num_players - 1
+                    );
+                    return;
+                }
                 if !self.local_connect_status[player.as_usize()].disconnected {
                     // check if the input comes in the correct sequence
                     let current_remote_frame =
                         self.local_connect_status[player.as_usize()].last_frame;
-                    assert!(
-                        current_remote_frame == Frame::NULL
-                            || current_remote_frame + 1 == input.frame
-                    );
+                    if current_remote_frame != Frame::NULL
+                        && current_remote_frame + 1 != input.frame
+                    {
+                        report_violation!(
+                            ViolationSeverity::Error,
+                            ViolationKind::NetworkProtocol,
+                            "Input sequence violation: expected frame {}, got {}",
+                            current_remote_frame + 1,
+                            input.frame
+                        );
+                        return;
+                    }
                     // update our info
                     self.local_connect_status[player.as_usize()].last_frame = input.frame;
                     // add the remote input

@@ -18,23 +18,45 @@ pub struct GameStateCell<T>(Arc<Mutex<GameState<T>>>);
 
 impl<T> GameStateCell<T> {
     /// Saves a `T` the user creates into the cell.
+    ///
+    /// # Returns
+    /// Returns `false` if the frame is null (which would be a caller error), `true` otherwise.
     #[cfg(not(loom))]
-    pub fn save(&self, frame: Frame, data: Option<T>, checksum: Option<u128>) {
+    pub fn save(&self, frame: Frame, data: Option<T>, checksum: Option<u128>) -> bool {
+        if frame.is_null() {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::StateManagement,
+                "Attempted to save state with null frame"
+            );
+            return false;
+        }
         let mut state = self.0.lock();
-        assert!(!frame.is_null());
         state.frame = frame;
         state.data = data;
         state.checksum = checksum;
+        true
     }
 
     /// Saves a `T` the user creates into the cell (loom version).
+    ///
+    /// # Returns
+    /// Returns `false` if the frame is null (which would be a caller error), `true` otherwise.
     #[cfg(loom)]
-    pub fn save(&self, frame: Frame, data: Option<T>, checksum: Option<u128>) {
+    pub fn save(&self, frame: Frame, data: Option<T>, checksum: Option<u128>) -> bool {
+        if frame.is_null() {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::StateManagement,
+                "Attempted to save state with null frame"
+            );
+            return false;
+        }
         let mut state = self.0.lock().unwrap();
-        assert!(!frame.is_null());
         state.frame = frame;
         state.data = data;
         state.checksum = checksum;
+        true
     }
 
     /// Provides direct access to the `T` that the user previously saved into the cell (if there was
@@ -312,26 +334,26 @@ where
     /// # Formal Specification Alignment
     /// - **TLA+**: `MAX_PREDICTION` in `specs/tla/Rollback.tla`
     /// - **Z3**: `MAX_PREDICTION` in `tests/test_z3_verification.rs`
-    /// - **FORMAL_SPEC.md**: INV-2 requires `rollback_depth <= max_prediction`
+    /// - **formal-spec.md**: INV-2 requires `rollback_depth <= max_prediction`
     max_prediction: usize,
     saved_states: SavedStates<T::State>,
     /// The last frame where all player inputs are confirmed.
     ///
     /// # Formal Specification Alignment
     /// - **TLA+**: `lastConfirmedFrame` in `specs/tla/Rollback.tla`
-    /// - **FORMAL_SPEC.md**: INV-7 requires `last_confirmed_frame <= current_frame`
+    /// - **formal-spec.md**: INV-7 requires `last_confirmed_frame <= current_frame`
     last_confirmed_frame: Frame,
     /// The most recently saved frame.
     ///
     /// # Formal Specification Alignment
     /// - **TLA+**: `lastSavedFrame` in `specs/tla/Rollback.tla`
-    /// - **FORMAL_SPEC.md**: INV-8 requires `last_saved_frame <= current_frame`
+    /// - **formal-spec.md**: INV-8 requires `last_saved_frame <= current_frame`
     last_saved_frame: Frame,
     /// The current simulation frame.
     ///
     /// # Formal Specification Alignment
     /// - **TLA+**: `currentFrame` in `specs/tla/Rollback.tla`
-    /// - **FORMAL_SPEC.md**: INV-1 requires monotonic increase (except rollback)
+    /// - **formal-spec.md**: INV-1 requires monotonic increase (except rollback)
     current_frame: Frame,
     input_queues: Vec<InputQueue<T>>,
 }
@@ -366,7 +388,20 @@ impl<T: Config> SyncLayer<T> {
         // initialize input_queues with player indices for deterministic prediction
         let mut input_queues = Vec::new();
         for player_index in 0..num_players {
-            input_queues.push(InputQueue::with_queue_length(player_index, queue_length));
+            // queue_length should be validated before calling this function
+            // If it's invalid, report a violation and use a default
+            match InputQueue::with_queue_length(player_index, queue_length) {
+                Some(queue) => input_queues.push(queue),
+                None => {
+                    // Fallback: use the default queue length
+                    if let Some(queue) = InputQueue::with_queue_length(
+                        player_index,
+                        crate::input_queue::INPUT_QUEUE_LENGTH,
+                    ) {
+                        input_queues.push(queue);
+                    }
+                }
+            }
         }
         Self {
             num_players,
@@ -538,13 +573,24 @@ impl<T: Config> SyncLayer<T> {
 
     /// Adds local input to the corresponding input queue. Checks if the prediction threshold has been reached. Returns the frame number where the input is actually added to.
     /// This number will only be different if the input delay was set to a number higher than 0.
+    ///
+    /// Returns `Frame::NULL` if the input frame doesn't match the current frame.
     pub(crate) fn add_local_input(
         &mut self,
         player_handle: PlayerHandle,
         input: PlayerInput<T::Input>,
     ) -> Frame {
         // The input provided should match the current frame, we account for input delay later
-        assert_eq!(input.frame, self.current_frame);
+        if input.frame != self.current_frame {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::FrameSync,
+                "Input frame {} doesn't match current frame {}",
+                input.frame,
+                self.current_frame
+            );
+            return Frame::NULL;
+        }
         self.input_queues[player_handle.as_usize()].add_input(input)
     }
 
@@ -559,19 +605,22 @@ impl<T: Config> SyncLayer<T> {
     }
 
     /// Returns inputs for all players for the current frame of the sync layer. If there are none for a specific player, return predictions.
+    ///
+    /// # Returns
+    /// Returns `None` if any input queue operation fails (indicates a severe internal error).
     pub(crate) fn synchronized_inputs(
         &mut self,
         connect_status: &[ConnectionStatus],
-    ) -> Vec<(T::Input, InputStatus)> {
+    ) -> Option<Vec<(T::Input, InputStatus)>> {
         let mut inputs = Vec::new();
         for (i, con_stat) in connect_status.iter().enumerate() {
             if con_stat.disconnected && con_stat.last_frame < self.current_frame {
                 inputs.push((T::Input::default(), InputStatus::Disconnected));
             } else {
-                inputs.push(self.input_queues[i].input(self.current_frame));
+                inputs.push(self.input_queues[i].input(self.current_frame)?);
             }
         }
-        inputs
+        Some(inputs)
     }
 
     /// Returns confirmed inputs for all players for the current frame of the sync layer.
@@ -831,7 +880,9 @@ mod sync_layer_tests {
             dummy_connect_status[1].last_frame = Frame::new(i);
 
             if i >= 3 {
-                let sync_inputs = sync_layer.synchronized_inputs(&dummy_connect_status);
+                let sync_inputs = sync_layer
+                    .synchronized_inputs(&dummy_connect_status)
+                    .expect("synchronized inputs should be available");
                 let player0_inputs = sync_inputs[0].0.inp;
                 let player1_inputs = sync_inputs[1].0.inp;
                 assert_eq!(player0_inputs, i as u8 - p1_delay as u8);
@@ -1482,7 +1533,9 @@ mod sync_layer_tests {
         connect_status[1].disconnected = true;
         connect_status[1].last_frame = Frame::NULL; // Disconnected before frame 0
 
-        let inputs = sync_layer.synchronized_inputs(&connect_status);
+        let inputs = sync_layer
+            .synchronized_inputs(&connect_status)
+            .expect("synchronized inputs should be available");
         assert_eq!(inputs.len(), 2);
         assert_eq!(inputs[0].1, InputStatus::Confirmed);
         assert_eq!(inputs[1].1, InputStatus::Disconnected);
@@ -1856,7 +1909,7 @@ mod kani_sync_layer_proofs {
     /// Verifies all invariants hold at initialization.
     /// Note: Bounds are reduced for Kani verification tractability.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(4)]
     fn proof_new_sync_layer_valid() {
         let num_players: usize = kani::any();
         let max_prediction: usize = kani::any();
@@ -1903,7 +1956,7 @@ mod kani_sync_layer_proofs {
     ///
     /// Verifies that advance_frame always increases current_frame.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(2)]
     fn proof_advance_frame_monotonic() {
         let mut sync_layer = SyncLayer::<TestConfig>::new(2, 3);
 
@@ -1923,7 +1976,7 @@ mod kani_sync_layer_proofs {
 
     /// Proof: Multiple advances maintain monotonicity
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(5)]
     fn proof_multiple_advances_monotonic() {
         let mut sync_layer = SyncLayer::<TestConfig>::new(2, 3);
         let count: usize = kani::any();
@@ -1951,7 +2004,7 @@ mod kani_sync_layer_proofs {
     ///
     /// Verifies that after saving, last_saved_frame == current_frame.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(5)]
     fn proof_save_maintains_inv8() {
         let mut sync_layer = SyncLayer::<TestConfig>::new(2, 3);
 
@@ -1980,7 +2033,7 @@ mod kani_sync_layer_proofs {
     ///
     /// Verifies that load_frame rejects invalid frames.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(7)]
     fn proof_load_frame_validates_bounds() {
         let mut sync_layer = SyncLayer::<TestConfig>::new(2, 3);
 
@@ -2016,7 +2069,7 @@ mod kani_sync_layer_proofs {
 
     /// Proof: load_frame success maintains invariants
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(7)]
     fn proof_load_frame_success_maintains_invariants() {
         let mut sync_layer = SyncLayer::<TestConfig>::new(2, 3);
 
@@ -2043,7 +2096,7 @@ mod kani_sync_layer_proofs {
 
     /// Proof: set_frame_delay validates player handle
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(4)]
     fn proof_set_frame_delay_validates_handle() {
         let num_players: usize = kani::any();
         kani::assume(num_players > 0 && num_players <= 2);
@@ -2065,7 +2118,7 @@ mod kani_sync_layer_proofs {
 
     /// Proof: Saved states count is correct
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(5)]
     fn proof_saved_states_count() {
         let max_prediction: usize = kani::any();
         kani::assume(max_prediction > 0 && max_prediction <= 3);
@@ -2081,7 +2134,7 @@ mod kani_sync_layer_proofs {
 
     /// Proof: SavedStates get_cell validates frame
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(2)]
     fn proof_get_cell_validates_frame() {
         let saved_states: SavedStates<u8> = SavedStates::new(3);
 
@@ -2098,7 +2151,7 @@ mod kani_sync_layer_proofs {
 
     /// Proof: SavedStates uses circular indexing correctly
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(2)]
     fn proof_saved_states_circular_index() {
         let max_prediction: usize = kani::any();
         kani::assume(max_prediction > 0 && max_prediction <= 3);
@@ -2120,7 +2173,7 @@ mod kani_sync_layer_proofs {
 
     /// Proof: reset_prediction doesn't affect frame state
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(5)]
     fn proof_reset_prediction_preserves_frames() {
         let mut sync_layer = SyncLayer::<TestConfig>::new(2, 3);
 
@@ -2152,7 +2205,7 @@ mod kani_sync_layer_proofs {
 
     /// Proof: INV-7 holds after set_last_confirmed_frame
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(7)]
     fn proof_confirmed_frame_bounded() {
         let mut sync_layer = SyncLayer::<TestConfig>::new(2, 3);
 
@@ -2179,7 +2232,7 @@ mod kani_sync_layer_proofs {
 
     /// Proof: Sparse saving respects last_saved_frame
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(7)]
     fn proof_sparse_saving_respects_saved_frame() {
         let mut sync_layer = SyncLayer::<TestConfig>::new(2, 3);
 

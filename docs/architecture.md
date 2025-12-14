@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="../assets/logo.svg" alt="Fortress Rollback" width="128">
+</p>
+
 # Fortress Rollback Architecture Guide
 
 This document provides a comprehensive overview of Fortress Rollback's internal architecture, data flow, and design decisions. Understanding these concepts will help you integrate the library effectively and troubleshoot issues.
@@ -600,4 +604,4 @@ Fortress Rollback provides a robust foundation for rollback networking:
 
 The request-based API gives you full control over when saves, loads, and advances happen, making integration with your game loop straightforward.
 
-For practical usage examples, see the [User Guide](USER_GUIDE.md).
+For practical usage examples, see the [User Guide](user-guide.md).

@@ -67,7 +67,7 @@ mod input_queue_invariants {
     /// Verify invariants hold for a newly constructed InputQueue.
     #[test]
     fn test_new_queue_invariants() {
-        let queue = InputQueue::<TestConfig>::new(0);
+        let queue = InputQueue::<TestConfig>::new(0).expect("queue");
         assert!(
             queue.check_invariants().is_ok(),
             "New queue should pass all invariants"
@@ -78,7 +78,7 @@ mod input_queue_invariants {
     #[test]
     fn test_custom_length_queue_invariants() {
         for len in [32, 64, 128, 256] {
-            let queue = InputQueue::<TestConfig>::with_queue_length(0, len);
+            let queue = InputQueue::<TestConfig>::with_queue_length(0, len).expect("queue");
             assert!(
                 queue.check_invariants().is_ok(),
                 "Queue with length {} should pass invariants",
@@ -90,7 +90,7 @@ mod input_queue_invariants {
     /// Verify invariants hold after sequential adds.
     #[test]
     fn test_invariants_after_sequential_adds() {
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
 
         for i in 0..50 {
             let input = PlayerInput::new(Frame::new(i), TestInput { value: i as u8 });
@@ -109,7 +109,7 @@ mod input_queue_invariants {
     /// Verify invariants hold after discard operations.
     #[test]
     fn test_invariants_after_discard() {
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
 
         // Add some inputs
         for i in 0..40 {
@@ -137,7 +137,7 @@ mod input_queue_invariants {
     #[test]
     fn test_invariants_with_frame_delay() {
         for delay in [1, 2, 4, 7] {
-            let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+            let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
             queue.set_frame_delay(delay).expect("valid delay");
 
             for i in 0..30 {
@@ -161,7 +161,7 @@ mod input_queue_invariants {
     /// Verify invariants hold after prediction and reset.
     #[test]
     fn test_invariants_after_prediction_reset() {
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
 
         // Add some confirmed inputs
         for i in 0..10 {
@@ -196,7 +196,7 @@ mod input_queue_invariants {
     #[test]
     fn test_invariants_during_wraparound() {
         let queue_len = 32;
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_len);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_len).expect("queue");
 
         // Add enough inputs to cause wraparound
         for i in 0..100 {
@@ -224,7 +224,7 @@ mod input_queue_invariants {
     #[test]
     fn test_invariant_violation_detection() {
         // Create a valid queue and verify it passes
-        let queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+        let queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
         let result = queue.check_invariants();
         assert!(result.is_ok());
 
@@ -401,7 +401,7 @@ mod invariant_violation_details {
     #[test]
     fn test_valid_states_pass() {
         // InputQueue
-        let queue = InputQueue::<TestConfig>::new(0);
+        let queue = InputQueue::<TestConfig>::new(0).expect("queue");
         let queue_result = queue.check_invariants();
         assert!(queue_result.is_ok());
 
@@ -428,7 +428,7 @@ mod input_queue_production_behavior {
     #[test]
     fn test_circular_buffer_wraparound_production() {
         let queue_len = 32;
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_len);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_len).expect("queue");
 
         // Add more inputs than the queue can hold without discard
         // This should trigger wraparound in the circular buffer
@@ -469,7 +469,7 @@ mod input_queue_production_behavior {
     /// When requesting inputs beyond what's available, prediction must be deterministic.
     #[test]
     fn test_prediction_is_deterministic_across_requests() {
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
 
         // Add a few confirmed inputs
         for i in 0..5 {
@@ -478,12 +478,12 @@ mod input_queue_production_behavior {
         }
 
         // Request frames beyond what we have (triggers prediction)
-        let (pred1, status1) = queue.input(Frame::new(10));
+        let (pred1, status1) = queue.input(Frame::new(10)).expect("input");
         assert_eq!(status1, fortress_rollback::InputStatus::Predicted);
 
         // Reset and request again - should get same prediction
         queue.reset_prediction();
-        let (pred2, status2) = queue.input(Frame::new(10));
+        let (pred2, status2) = queue.input(Frame::new(10)).expect("input");
         assert_eq!(status2, fortress_rollback::InputStatus::Predicted);
 
         // Predictions must be identical for determinism
@@ -497,7 +497,7 @@ mod input_queue_production_behavior {
     /// Frame delay is critical for network latency compensation.
     #[test]
     fn test_frame_delay_production_behavior() {
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
         let delay = 3;
         queue.set_frame_delay(delay).expect("valid delay");
 
@@ -518,7 +518,7 @@ mod input_queue_production_behavior {
         }
 
         // When we request frame 3, we should get the input we added at frame 0
-        let (input, status) = queue.input(Frame::new(delay as i32));
+        let (input, status) = queue.input(Frame::new(delay as i32)).expect("input");
         assert_eq!(status, fortress_rollback::InputStatus::Confirmed);
         assert_eq!(input.value, 0, "Frame {} should have input value 0", delay);
     }
@@ -527,7 +527,7 @@ mod input_queue_production_behavior {
     /// In production, confirmed frames are discarded to save memory.
     #[test]
     fn test_discard_maintains_queue_integrity() {
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
 
         // Add many inputs
         for i in 0..50 {
@@ -555,7 +555,7 @@ mod input_queue_production_behavior {
     /// This is essential for knowing when rollback is needed.
     #[test]
     fn test_first_incorrect_frame_tracking() {
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
 
         // Add initial confirmed inputs
         for i in 0..5 {
@@ -590,7 +590,7 @@ mod input_queue_production_behavior {
     /// Verify reset_prediction clears prediction state properly.
     #[test]
     fn test_reset_prediction_clears_state() {
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
 
         // Add some inputs
         for i in 0..5 {
@@ -620,7 +620,7 @@ mod input_queue_production_behavior {
     #[test]
     fn test_max_frame_delay_boundary() {
         let queue_len = 32;
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_len);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_len).expect("queue");
 
         // Max delay is queue_length - 1
         let max_delay = queue.max_frame_delay();
@@ -639,7 +639,7 @@ mod input_queue_production_behavior {
     #[test]
     fn test_sequential_additions_across_boundary() {
         let queue_len = 16;
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_len);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_len).expect("queue");
 
         // Add frames 0 through queue_len*2, discarding periodically to prevent overflow
         for i in 0..(queue_len as i32 * 2) {
@@ -1134,7 +1134,7 @@ mod stress_tests {
     /// Stress test: rapid add/discard cycles.
     #[test]
     fn test_rapid_add_discard_cycles() {
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 32);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 32).expect("queue");
 
         for cycle in 0..100 {
             // Add a batch
@@ -1234,7 +1234,7 @@ mod edge_cases {
     /// The queue can hold at most 2 frames at once.
     #[test]
     fn test_minimum_queue_length() {
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 2);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 2).expect("queue");
 
         // Should work with minimal queue - add first input
         let frame0 = queue.add_input(PlayerInput::new(Frame::new(0), TestInput { value: 0 }));
@@ -1357,7 +1357,7 @@ mod edge_cases {
     #[test]
     fn test_frame_delay_at_boundary() {
         let queue_len = 16;
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_len);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_len).expect("queue");
 
         // Max delay is queue_length - 1
         let max_delay = queue.max_frame_delay();

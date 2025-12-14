@@ -1338,7 +1338,7 @@ mod kani_proofs {
     /// This proves that the decode loop always terminates and returns a valid
     /// number of consumed bytes.
     #[kani::proof]
-    #[kani::unwind(12)] // Max 10 bytes + 2 for loop overhead
+    #[kani::unwind(5)] // 3 bytes + 2 for loop overhead
     fn proof_varint_decode_terminates() {
         // Test with a small buffer to keep proof tractable
         let b0: u8 = kani::any();
@@ -1369,7 +1369,7 @@ mod kani_proofs {
     ///
     /// Decoding at different offsets should not cause buffer overflow.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(4)]
     fn proof_varint_decode_offset_safe() {
         let b0: u8 = kani::any();
         let b1: u8 = kani::any();
@@ -1437,7 +1437,7 @@ mod kani_proofs {
     /// A varint with all continuation bits set should consume all available bytes
     /// (up to the overflow limit).
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(4)]
     fn proof_varint_continuation_handling() {
         // Create buffer with first byte having continuation, second without
         let byte1: u8 = kani::any();

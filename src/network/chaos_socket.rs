@@ -454,8 +454,10 @@ where
 
         while let Some(packet) = self.in_flight.front() {
             if packet.deliver_at <= now {
-                let packet = self.in_flight.pop_front().unwrap();
-                ready.push((packet.addr, packet.msg));
+                // Safe: front() returned Some, so pop_front() will return Some
+                if let Some(packet) = self.in_flight.pop_front() {
+                    ready.push((packet.addr, packet.msg));
+                }
             } else {
                 break;
             }

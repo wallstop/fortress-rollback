@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200" width="800" height="200">
+  <defs>
+    <linearGradient id="fortressGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#4A90D9"/>
+      <stop offset="100%" style="stop-color:#2C5282"/>
+    </linearGradient>
+    <linearGradient id="arrowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#F6AD55"/>
+      <stop offset="100%" style="stop-color:#ED8936"/>
+    </linearGradient>
+    <linearGradient id="textGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#2C5282"/>
+      <stop offset="50%" style="stop-color:#4A90D9"/>
+      <stop offset="100%" style="stop-color:#2C5282"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Logo icon section -->
+  <g transform="translate(30, 20)">
+    <!-- Background circle -->
+    <circle cx="80" cy="80" r="75" fill="#1A365D" opacity="0.1"/>
+    
+    <!-- Fortress -->
+    <g fill="url(#fortressGradient)">
+      <!-- Left tower -->
+      <rect x="35" y="60" width="22" height="55"/>
+      <rect x="35" y="50" width="8" height="15"/>
+      <rect x="49" y="50" width="8" height="15"/>
+      
+      <!-- Center tower -->
+      <rect x="62" y="42" width="36" height="73"/>
+      <rect x="62" y="30" width="10" height="18"/>
+      <rect x="75" y="30" width="10" height="18"/>
+      <rect x="88" y="30" width="10" height="18"/>
+      
+      <!-- Right tower -->
+      <rect x="103" y="60" width="22" height="55"/>
+      <rect x="103" y="50" width="8" height="15"/>
+      <rect x="117" y="50" width="8" height="15"/>
+      
+      <!-- Base wall -->
+      <rect x="35" y="110" width="90" height="10" rx="2"/>
+    </g>
+    
+    <!-- Gate -->
+    <rect x="72" y="85" width="16" height="25" rx="8" ry="8" fill="#1A365D"/>
+    <rect x="72" y="95" width="16" height="15" fill="#1A365D"/>
+    
+    <!-- Rollback arcs (without arrow heads) -->
+    <g stroke-linecap="round">
+      <path d="M 15 80 A 65 65 0 0 1 48 28" fill="none" stroke="url(#arrowGradient)" stroke-width="6"/>
+      <path d="M 145 80 A 65 65 0 0 1 112 132" fill="none" stroke="url(#arrowGradient)" stroke-width="6"/>
+    </g>
+
+  </g>
+  
+  <!-- Text section -->
+  <g>
+    <text x="220" y="95" 
+          font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" 
+          font-size="52" 
+          font-weight="700" 
+          fill="#2C5282">
+      fortress
+    </text>
+    <text x="220" y="145" 
+          font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" 
+          font-size="42" 
+          font-weight="400" 
+          fill="#ED8936">
+      rollback
+    </text>
+  </g>
+  
+  <!-- Tagline -->
+  <text x="220" y="175" 
+        font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" 
+        font-size="14" 
+        fill="#4A5568"
+        letter-spacing="2">
+    SAFE RUST ROLLBACK NETCODE
+  </text>
+  
+  <!-- Decorative Rust gear icon hint -->
+  <g transform="translate(680, 85)" fill="#ED8936" opacity="0.3">
+    <circle cx="30" cy="30" r="18" fill="none" stroke="#ED8936" stroke-width="4"/>
+    <circle cx="30" cy="30" r="8" fill="#ED8936"/>
+    <!-- Gear teeth -->
+    <rect x="26" y="4" width="8" height="12" rx="2"/>
+    <rect x="26" y="44" width="8" height="12" rx="2"/>
+    <rect x="4" y="26" width="12" height="8" rx="2"/>
+    <rect x="44" y="26" width="12" height="8" rx="2"/>
+  </g>
+</svg>

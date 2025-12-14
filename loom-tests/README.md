@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="../assets/logo-small.svg" alt="Fortress Rollback" width="64">
+</p>
+
 # Fortress Rollback Loom Tests
 
 This crate contains [loom](https://docs.rs/loom) concurrency tests for Fortress Rollback.

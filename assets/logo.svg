@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Gradient for fortress -->
+    <linearGradient id="fortressGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#4A90D9;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#2C5282;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- Gradient for arrows -->
+    <linearGradient id="arrowGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#F6AD55;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#ED8936;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- Shadow filter -->
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="2" dy="4" stdDeviation="4" flood-color="#1A365D" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+  
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="240" fill="#1A365D" opacity="0.1"/>
+  
+  <!-- Fortress Base -->
+  <g filter="url(#shadow)">
+    <!-- Main fortress body -->
+    <rect x="156" y="220" width="200" height="160" rx="4" fill="url(#fortressGrad)"/>
+    
+    <!-- Left tower -->
+    <rect x="126" y="180" width="60" height="200" rx="2" fill="url(#fortressGrad)"/>
+    <!-- Left tower battlement -->
+    <rect x="126" y="160" width="18" height="30" fill="url(#fortressGrad)"/>
+    <rect x="152" y="160" width="18" height="30" fill="url(#fortressGrad)"/>
+    
+    <!-- Right tower -->
+    <rect x="326" y="180" width="60" height="200" rx="2" fill="url(#fortressGrad)"/>
+    <!-- Right tower battlement -->
+    <rect x="342" y="160" width="18" height="30" fill="url(#fortressGrad)"/>
+    <rect x="368" y="160" width="18" height="30" fill="url(#fortressGrad)"/>
+    
+    <!-- Center tower (taller) -->
+    <rect x="216" y="140" width="80" height="240" rx="2" fill="url(#fortressGrad)"/>
+    <!-- Center tower battlements -->
+    <rect x="216" y="115" width="22" height="35" fill="url(#fortressGrad)"/>
+    <rect x="245" y="115" width="22" height="35" fill="url(#fortressGrad)"/>
+    <rect x="274" y="115" width="22" height="35" fill="url(#fortressGrad)"/>
+    
+    <!-- Gate -->
+    <rect x="231" y="300" width="50" height="80" rx="25" ry="25" fill="#1A365D"/>
+    <rect x="231" y="325" width="50" height="55" fill="#1A365D"/>
+  </g>
+  
+  <!-- Rollback Arcs (circular arcs around fortress) -->
+  <g stroke-linecap="round">
+    <!-- Left curved arc -->
+    <path d="M 100 256 A 156 156 0 0 1 175 125" 
+          fill="none" stroke="url(#arrowGrad)" stroke-width="12"/>
+    
+    <!-- Right curved arc -->
+    <path d="M 412 256 A 156 156 0 0 1 337 387" 
+          fill="none" stroke="url(#arrowGrad)" stroke-width="12"/>
+  </g>
+
+  
+  <!-- R letter overlay on center tower (subtle) -->
+  <text x="256" y="260" 
+        font-family="Arial, sans-serif" 
+        font-size="60" 
+        font-weight="bold" 
+        fill="#1A365D" 
+        text-anchor="middle" 
+        opacity="0.3">R</text>
+</svg>

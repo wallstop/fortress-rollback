@@ -1,7 +1,21 @@
-[![crates.io](https://img.shields.io/crates/v/fortress-rollback?style=for-the-badge)](https://crates.io/crates/fortress-rollback)
-[![CI](https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/rust.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/wallstop/fortress-rollback/actions/workflows/rust.yml)
-[![Publish](https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/publish.yml?branch=main&style=for-the-badge&label=Publish)](https://github.com/wallstop/fortress-rollback/actions/workflows/publish.yml)
-[![Coverage](https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/coverage.yml?branch=main&style=for-the-badge&label=Coverage)](https://github.com/wallstop/fortress-rollback/actions/workflows/coverage.yml)
+<p align="center">
+  <img src="assets/logo-banner.svg" alt="Fortress Rollback" width="600">
+</p>
+
+<p align="center">
+  <a href="https://crates.io/crates/fortress-rollback"><img src="https://img.shields.io/crates/v/fortress-rollback?style=for-the-badge" alt="crates.io"></a>
+  <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/rust.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/rust.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
+  <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/publish.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/publish.yml?branch=main&style=for-the-badge&label=Publish" alt="Publish"></a>
+  <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/coverage.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/coverage.yml?branch=main&style=for-the-badge&label=Coverage" alt="Coverage"></a>
+</p>
+
+---
+
+> **🤖 AI-Assisted Development Notice**
+>
+> This project was developed with **substantial AI assistance**. The vast majority of the code, documentation, tests, and formal specifications were written with the help of **Claude Opus 4.5** and **Codex 5.1**. Human oversight was provided for code review, architectural decisions, and final approval, but the implementation work was heavily AI-driven. This transparency is provided so users can make informed decisions about using this crate.
+
+---
 
 ## P2P Rollback Networking in Rust
 
@@ -27,6 +41,22 @@ To get started with Fortress Rollback, check out the following resources:
 - [Examples](./examples/)
 - [Documentation](https://docs.rs/fortress-rollback/newest/fortress_rollback/)
 
+### System Dependencies for Examples
+
+The interactive examples use [macroquad](https://github.com/not-fl3/macroquad), which requires system libraries:
+
+**Linux (Debian/Ubuntu):**
+```shell
+sudo apt-get install libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
+```
+
+**Linux (Fedora/RHEL):**
+```shell
+sudo dnf install alsa-lib-devel libX11-devel libXi-devel mesa-libGL-devel
+```
+
+**macOS/Windows:** No additional dependencies required.
+
 ## Development Status
 
 Alpha / experimental only.
@@ -38,9 +68,9 @@ Alpha / experimental only.
 - **Panic-Free API**: All public APIs return `Result` types instead of panicking
 - **Enhanced Testing**: Full desync detection with confirmed input checksums via `P2PSession::confirmed_inputs_for_frame()`
 
-- [Changelog](./CHANGELOG.md)
+- [Changelog](./docs/changelog.md)
 - [Issues](https://github.com/wallstop/fortress-rollback/issues)
-- [Contribution Guide](./CONTRIBUTING.md)
+- [Contribution Guide](./docs/contributing.md)
 
 ### Network Requirements
 
@@ -50,11 +80,11 @@ Alpha / experimental only.
 | Packet Loss | <15% | <5% |
 | Jitter | <50ms | <20ms |
 
-For detailed configuration guidance, see the [User Guide](./docs/USER_GUIDE.md#network-requirements).
+For detailed configuration guidance, see the [User Guide](./docs/user-guide.md#network-requirements).
 
 ## Migration from ggrs
 
-Moving from the original `ggrs` crate? See the step-by-step guide in [MIGRATION.md](./MIGRATION.md). It covers the crate rename (`fortress-rollback`), the new `Config::Address` `Ord` bound, and import changes (`fortress_rollback`).
+Moving from the original `ggrs` crate? See the step-by-step guide in [migration.md](./docs/migration.md). It covers the crate rename (`fortress-rollback`), the new `Config::Address` `Ord` bound, and import changes (`fortress_rollback`).
 
 ## Useful Links
 

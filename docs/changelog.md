@@ -1,8 +1,29 @@
+<p align="center">
+  <img src="../assets/logo-small.svg" alt="Fortress Rollback" width="64">
+</p>
+
 # Changelog
 
 In this document, all remarkable changes are listed. Not mentioned are smaller code cleanups or documentation improvements.
 
 ## Unreleased
+
+### Added
+
+- **[DOCS]** Pre-commit hooks configuration for code quality automation
+  - Markdown linting with `markdownlint`
+  - Link validation for markdown and rustdoc links
+  - Cargo fmt and clippy integration
+  - Install with: `pip install pre-commit && pre-commit install`
+- **[CI]** New `docs.yml` workflow for documentation and link validation
+  - Validates markdown formatting across all documentation files
+  - Checks for broken local and external links in markdown
+  - Verifies rustdoc intra-doc links compile without warnings
+- **[TOOLS]** New `scripts/check-links.sh` for local file reference validation
+  - Validates markdown links resolve to existing files
+  - Checks anchor references within markdown files
+  - Validates file paths referenced in Rust doc comments
+  - Run with `./scripts/check-links.sh --verbose` for detailed output
 
 ### Fixed
 

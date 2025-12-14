@@ -22,29 +22,55 @@ use super::network_stats::NetworkStats;
 
 const UDP_HEADER_SIZE: usize = 28; // Size of IP + UDP headers
 
-fn millis_since_epoch() -> u128 {
+/// Returns the current wall-clock time as milliseconds since UNIX_EPOCH.
+///
+/// This function returns `Some(millis)` under normal conditions, or `None` if the system
+/// clock is in an invalid state (e.g., before UNIX_EPOCH due to NTP adjustments, VM snapshots,
+/// or misconfigured clocks).
+///
+/// # When to use
+/// Use this ONLY when you need wall-clock time that can be compared across different machines
+/// (e.g., for ping/pong RTT calculation). For local elapsed time measurements, prefer using
+/// `Instant` which is guaranteed monotonic.
+///
+/// # Returns
+/// - `Some(millis)` - The current time in milliseconds since UNIX_EPOCH
+/// - `None` - If the system clock is before UNIX_EPOCH (abnormal condition)
+fn millis_since_epoch() -> Option<u128> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-            Ok(duration) => duration.as_millis(),
+            Ok(duration) => Some(duration.as_millis()),
             Err(_) => {
                 // System time is before UNIX_EPOCH - this can happen due to:
                 // - NTP adjustments moving clock backwards
                 // - VM snapshots with stale time
                 // - Misconfigured system clocks
-                // Report via telemetry and return 0 as a safe fallback.
+                // Report via telemetry and return None so callers can handle appropriately.
                 report_violation!(
                     ViolationSeverity::Warning,
                     ViolationKind::InternalError,
-                    "System time is before UNIX_EPOCH - clock may have gone backwards. Using 0 as fallback."
+                    "System time is before UNIX_EPOCH - clock may have gone backwards"
                 );
-                0
+                None
             }
         }
     }
     #[cfg(target_arch = "wasm32")]
     {
-        js_sys::Date::new_0().get_time() as u128
+        // In WASM, Date.getTime() returns milliseconds since epoch as a f64.
+        // It can technically be negative for dates before 1970, but this is rare.
+        let time = js_sys::Date::new_0().get_time();
+        if time >= 0.0 {
+            Some(time as u128)
+        } else {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::InternalError,
+                "WASM Date.getTime() returned negative value - clock may be misconfigured"
+            );
+            None
+        }
     }
 }
 
@@ -60,17 +86,27 @@ struct InputBytes {
 impl InputBytes {
     /// Creates a zeroed InputBytes for the given number of players.
     ///
-    /// # Panics
-    /// This function panics if serialization of the default Input type fails, which indicates
+    /// # Returns
+    /// Returns `None` if serialization of the default Input type fails, which indicates
     /// a fundamental issue with the Config::Input type's serialization implementation.
-    /// This is acceptable because it happens during session construction (init-time).
-    fn zeroed<T: Config>(num_players: usize) -> Self {
-        let input_size =
-            bincode::serialized_size(&T::Input::default()).expect("input serialization failed");
-        let size = (input_size as usize) * num_players;
-        Self {
-            frame: Frame::NULL,
-            bytes: vec![0; size],
+    fn zeroed<T: Config>(num_players: usize) -> Option<Self> {
+        match bincode::serialized_size(&T::Input::default()) {
+            Ok(input_size) => {
+                let size = (input_size as usize) * num_players;
+                Some(Self {
+                    frame: Frame::NULL,
+                    bytes: vec![0; size],
+                })
+            }
+            Err(e) => {
+                report_violation!(
+                    ViolationSeverity::Critical,
+                    ViolationKind::InternalError,
+                    "Failed to serialize default input type: {}",
+                    e
+                );
+                None
+            }
         }
     }
 
@@ -306,7 +342,10 @@ where
     remote_frame_advantage: i32,
 
     // network
-    stats_start_time: u128,
+    /// The instant when synchronization started, used for elapsed time calculations.
+    /// Using Instant (monotonic clock) instead of wall-clock time ensures reliable
+    /// duration measurements even if the system clock is adjusted.
+    stats_start_time: Instant,
     packets_sent: usize,
     bytes_sent: usize,
     round_trip_time: u128,
@@ -329,6 +368,9 @@ impl<T: Config> UdpProtocol<T> {
     ///
     /// Note: This is an internal constructor called via SessionBuilder. The many parameters are
     /// acceptable here because users interact through the builder pattern, not this method directly.
+    ///
+    /// # Returns
+    /// Returns `None` if input serialization fails (indicates a fundamental issue with Config::Input).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         mut handles: Vec<PlayerHandle>,
@@ -342,7 +384,7 @@ impl<T: Config> UdpProtocol<T> {
         desync_detection: DesyncDetection,
         sync_config: SyncConfig,
         protocol_config: ProtocolConfig,
-    ) -> Self {
+    ) -> Option<Self> {
         let mut magic: u16 = random();
         while magic == 0 {
             magic = random();
@@ -357,11 +399,14 @@ impl<T: Config> UdpProtocol<T> {
             peer_connect_status.push(ConnectionStatus::default());
         }
 
-        // received input history
+        // received input history - may fail if serialization is broken
         let mut recv_inputs = BTreeMap::new();
-        recv_inputs.insert(Frame::NULL, InputBytes::zeroed::<T>(recv_player_num));
+        recv_inputs.insert(Frame::NULL, InputBytes::zeroed::<T>(recv_player_num)?);
 
-        Self {
+        // last acked input - may fail if serialization is broken
+        let last_acked_input = InputBytes::zeroed::<T>(local_players)?;
+
+        Some(Self {
             num_players,
             handles,
             send_queue: VecDeque::new(),
@@ -399,7 +444,7 @@ impl<T: Config> UdpProtocol<T> {
 
             // input compression
             pending_output: VecDeque::new(),
-            last_acked_input: InputBytes::zeroed::<T>(local_players),
+            last_acked_input,
             max_prediction,
             recv_inputs,
 
@@ -409,7 +454,7 @@ impl<T: Config> UdpProtocol<T> {
             remote_frame_advantage: 0,
 
             // network
-            stats_start_time: 0,
+            stats_start_time: Instant::now(),
             packets_sent: 0,
             bytes_sent: 0,
             round_trip_time: 0,
@@ -419,7 +464,7 @@ impl<T: Config> UdpProtocol<T> {
             // debug desync
             pending_checksums: BTreeMap::new(),
             desync_detection,
-        }
+        })
     }
 
     pub(crate) fn update_local_frame_advantage(&mut self, local_frame: Frame) {
@@ -439,8 +484,8 @@ impl<T: Config> UdpProtocol<T> {
             return Err(FortressError::NotSynchronized);
         }
 
-        let now = millis_since_epoch();
-        let seconds = (now - self.stats_start_time) / 1000;
+        let elapsed = self.stats_start_time.elapsed();
+        let seconds = elapsed.as_secs();
         if seconds == 0 {
             return Err(FortressError::NotSynchronized);
         }
@@ -494,7 +539,7 @@ impl<T: Config> UdpProtocol<T> {
         assert_eq!(self.state, ProtocolState::Initializing);
         self.state = ProtocolState::Synchronizing;
         self.sync_remaining_roundtrips = self.sync_config.num_sync_packets;
-        self.stats_start_time = millis_since_epoch();
+        self.stats_start_time = Instant::now();
         self.send_sync_request();
     }
 
@@ -512,9 +557,7 @@ impl<T: Config> UdpProtocol<T> {
             ProtocolState::Synchronizing => {
                 // Check for sync timeout if configured
                 if let Some(timeout) = self.sync_config.sync_timeout {
-                    let elapsed = Duration::from_millis(
-                        (millis_since_epoch().saturating_sub(self.stats_start_time)) as u64,
-                    );
+                    let elapsed = self.stats_start_time.elapsed();
                     if elapsed > timeout {
                         self.event_queue.push_back(Event::SyncTimeout {
                             elapsed_ms: elapsed.as_millis(),
@@ -651,10 +694,19 @@ impl<T: Config> UdpProtocol<T> {
         let mut body = Input::default();
 
         if let Some(input) = self.pending_output.front() {
-            assert!(
-                self.last_acked_input.frame == Frame::NULL
-                    || self.last_acked_input.frame + 1 == input.frame
-            );
+            // Verify input frames are sequential relative to last acked
+            if self.last_acked_input.frame != Frame::NULL
+                && self.last_acked_input.frame + 1 != input.frame
+            {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::NetworkProtocol,
+                    "Input frame sequence violation: last_acked={}, pending_front={}",
+                    self.last_acked_input.frame,
+                    input.frame
+                );
+                return;
+            }
             body.start_frame = input.frame;
 
             // encode all pending inputs to a byte buffer
@@ -713,7 +765,7 @@ impl<T: Config> UdpProtocol<T> {
         }
 
         // Check for excessive sync duration and emit warning (once)
-        let elapsed_ms = millis_since_epoch().saturating_sub(self.stats_start_time);
+        let elapsed_ms = self.stats_start_time.elapsed().as_millis();
         if !self.sync_duration_warning_sent
             && elapsed_ms > self.protocol_config.sync_duration_warning_ms
         {
@@ -737,6 +789,15 @@ impl<T: Config> UdpProtocol<T> {
 
     fn send_quality_report(&mut self) {
         self.running_last_quality_report = Instant::now();
+
+        // Get wall-clock time for ping calculation.
+        // If the system clock is in an abnormal state, skip sending this quality report.
+        // The peer will request another one later, and hopefully the clock will be fixed by then.
+        let Some(ping_timestamp) = millis_since_epoch() else {
+            trace!("Skipping quality report due to invalid system clock");
+            return;
+        };
+
         // Clamp to i16 range and convert - the clamp guarantees this won't fail,
         // but we use unwrap_or as defense-in-depth
         let clamped = self
@@ -745,7 +806,7 @@ impl<T: Config> UdpProtocol<T> {
         let frame_advantage = i16::try_from(clamped).unwrap_or(0);
         let body = QualityReport {
             frame_advantage,
-            ping: millis_since_epoch(),
+            ping: ping_timestamp,
         };
 
         self.queue_message(MessageBody::QualityReport(body));
@@ -828,7 +889,7 @@ impl<T: Config> UdpProtocol<T> {
         }
         // the sync reply is good, so we send a sync request again until we have finished the required roundtrips. Then, we can conclude the syncing process.
         self.sync_remaining_roundtrips -= 1;
-        let elapsed_ms = millis_since_epoch().saturating_sub(self.stats_start_time);
+        let elapsed_ms = self.stats_start_time.elapsed().as_millis();
         if self.sync_remaining_roundtrips > 0 {
             // register an event
             let evt = Event::Synchronizing {
@@ -964,9 +1025,15 @@ impl<T: Config> UdpProtocol<T> {
 
     /// Upon receiving a `QualityReply`, update network stats.
     fn on_quality_reply(&mut self, body: &QualityReply) {
-        let millis = millis_since_epoch();
+        // Get current wall-clock time to calculate RTT.
+        // If the system clock is in an abnormal state, skip this RTT update.
+        // The next quality report cycle will try again.
+        let Some(millis) = millis_since_epoch() else {
+            trace!("Skipping RTT update due to invalid system clock");
+            return;
+        };
         // Use saturating subtraction to handle edge cases where system time
-        // may have drifted or gone backwards (e.g., NTP adjustments, high load).
+        // may have drifted between the ping and pong (e.g., NTP adjustments).
         // A 0 RTT is harmless - it will be corrected on the next quality report.
         self.round_trip_time = millis.saturating_sub(body.pong);
     }
@@ -1078,6 +1145,7 @@ mod tests {
             sync_config,
             protocol_config,
         )
+        .expect("Failed to create test protocol")
     }
 
     // ==========================================
@@ -1498,7 +1566,8 @@ mod tests {
             DesyncDetection::On { interval: 1 },
             SyncConfig::default(),
             protocol_config,
-        );
+        )
+        .expect("Failed to create test protocol");
 
         // Add more than max_checksum_history checksums
         for frame in 0..(max_history as i32 + 10) {
@@ -1703,7 +1772,8 @@ mod tests {
 
     #[test]
     fn input_bytes_zeroed_creates_correct_size() {
-        let input_bytes = InputBytes::zeroed::<TestConfig>(2);
+        let input_bytes =
+            InputBytes::zeroed::<TestConfig>(2).expect("Failed to create input bytes");
 
         assert_eq!(input_bytes.frame, Frame::NULL);
         // Each TestInput is 4 bytes (u32), so 2 players = 8 bytes
@@ -1798,7 +1868,8 @@ mod tests {
             DesyncDetection::Off,
             SyncConfig::default(),
             ProtocolConfig::default(),
-        );
+        )
+        .expect("Failed to create test protocol");
         assert!(protocol1 != protocol3);
     }
 
@@ -2407,11 +2478,21 @@ mod tests {
     // ==========================================
 
     #[test]
+    fn millis_since_epoch_returns_some_under_normal_conditions() {
+        // Under normal conditions, millis_since_epoch should return Some with a valid timestamp
+        let millis = millis_since_epoch();
+        assert!(
+            millis.is_some(),
+            "millis_since_epoch should return Some under normal conditions"
+        );
+    }
+
+    #[test]
     fn millis_since_epoch_returns_reasonable_value() {
         // The function should return a value representing milliseconds since UNIX_EPOCH.
         // As of 2020, this is at least 1577836800000 (Jan 1, 2020 00:00:00 UTC).
         // As of 2030, it would be around 1893456000000.
-        let millis = millis_since_epoch();
+        let millis = millis_since_epoch().expect("Should return Some under normal conditions");
 
         // Should be at least year 2020 timestamp
         assert!(
@@ -2429,8 +2510,8 @@ mod tests {
     #[test]
     fn millis_since_epoch_is_monotonically_non_decreasing_in_short_term() {
         // Within a single execution context, time should not go backwards
-        let first = millis_since_epoch();
-        let second = millis_since_epoch();
+        let first = millis_since_epoch().expect("Should return Some");
+        let second = millis_since_epoch().expect("Should return Some");
 
         // Second call should be >= first (could be equal if very fast)
         assert!(
@@ -2441,19 +2522,19 @@ mod tests {
 
     #[test]
     fn millis_since_epoch_advances_over_time() {
-        let first = millis_since_epoch();
+        let first = millis_since_epoch().expect("Should return Some");
 
         // Sleep for a tiny bit
         std::thread::sleep(std::time::Duration::from_millis(2));
 
-        let second = millis_since_epoch();
+        let second = millis_since_epoch().expect("Should return Some");
 
         // Should have advanced
         assert!(second > first, "Time should advance after sleep");
     }
 
     /// Test documentation: The `millis_since_epoch` function gracefully handles
-    /// the case where system time is before UNIX_EPOCH by returning 0 and
+    /// the case where system time is before UNIX_EPOCH by returning None and
     /// reporting a violation. This cannot be easily tested without mocking,
     /// but the code path is verified through code review. The test below
     /// documents the expected behavior.
@@ -2466,7 +2547,16 @@ mod tests {
         // Expected behavior:
         // 1. When SystemTime::now().duration_since(UNIX_EPOCH) returns Err
         // 2. The function reports a ViolationKind::InternalError via telemetry
-        // 3. The function returns 0 as a safe fallback
+        // 3. The function returns None to signal the abnormal condition
+        //
+        // Callers are responsible for handling None appropriately:
+        // - send_quality_report: Skips sending the report
+        // - on_quality_reply: Skips updating RTT
+        //
+        // This design ensures:
+        // - No incorrect fallback values (like 0) propagate through the system
+        // - Callers make explicit decisions about how to handle clock issues
+        // - The system degrades gracefully rather than using invalid data
         //
         // This is covered by:
         // - Code review of the implementation
@@ -2476,7 +2566,11 @@ mod tests {
         // Simply verify the function works normally
         let result = millis_since_epoch();
         assert!(
-            result > 0,
+            result.is_some(),
+            "Under normal conditions, should return Some"
+        );
+        assert!(
+            result.unwrap() > 0,
             "Under normal conditions, should return positive value"
         );
     }

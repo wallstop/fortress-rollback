@@ -1,4 +1,9 @@
 //! # Fortress Rollback (formerly GGRS)
+//!
+//! <p align="center">
+//!   <img src="https://raw.githubusercontent.com/wallstop/fortress-rollback/main/assets/logo-banner.svg" alt="Fortress Rollback" width="400">
+//! </p>
+//!
 //! Fortress Rollback is a fortified, verified reimagination of the GGPO network SDK written in 100% safe Rust.
 //! The callback-style API from the original library has been replaced with a simple request-driven control flow.
 //! Instead of registering callback functions, Fortress Rollback (previously GGRS) returns a list of requests for the user to fulfill.
@@ -158,7 +163,7 @@ pub mod __internal {
 /// # Formal Specification Alignment
 /// - **TLA+**: `NULL_FRAME = 999` in `specs/tla/*.cfg` (uses 999 to stay in Nat domain)
 /// - **Z3**: `NULL_FRAME = -1` in `tests/test_z3_verification.rs`
-/// - **FORMAL_SPEC.md**: `NULL_FRAME = -1`, with `VALID_FRAME(f) ↔ f ≥ 0`
+/// - **formal-spec.md**: `NULL_FRAME = -1`, with `VALID_FRAME(f) ↔ f ≥ 0`
 pub const NULL_FRAME: i32 = -1;
 
 /// A frame is a single step of game execution.
@@ -172,7 +177,7 @@ pub const NULL_FRAME: i32 = -1;
 /// # Formal Specification Alignment
 /// - **TLA+**: `Frame == {NULL_FRAME} ∪ (0..MAX_FRAME)` in `specs/tla/Rollback.tla`
 /// - **Z3**: Frame arithmetic proofs in `tests/test_z3_verification.rs`
-/// - **FORMAL_SPEC.md**: Core type definition with operations `frame_add`, `frame_sub`, `frame_valid`
+/// - **formal-spec.md**: Core type definition with operations `frame_add`, `frame_sub`, `frame_valid`
 /// - **Kani**: `kani_frame_*` proofs verify overflow safety and arithmetic correctness
 ///
 /// # Type Safety
@@ -679,20 +684,67 @@ where
 
 /// Requests that you can receive from the session. Handling them is mandatory.
 ///
+/// # ⚠️ CRITICAL: Request Ordering
+///
+/// **Requests MUST be fulfilled in the exact order they are returned.** The session
+/// returns requests in a specific sequence that ensures correct simulation:
+///
+/// ```text
+/// ┌──────────────────────────────────────────────────────────────┐
+/// │                    Request Flow                               │
+/// ├──────────────────────────────────────────────────────────────┤
+/// │ 1. SaveGameState  ─► Save current state before advancing     │
+/// │         ↓                                                     │
+/// │ 2. LoadGameState  ─► (During rollback) Load earlier state    │
+/// │         ↓                                                     │
+/// │ 3. AdvanceFrame   ─► Apply inputs and advance simulation     │
+/// └──────────────────────────────────────────────────────────────┘
+/// ```
+///
+/// # Why Order Matters
+///
+/// - **`SaveGameState` before `AdvanceFrame`**: Ensures the state can be rolled
+///   back if a misprediction is detected later.
+/// - **`LoadGameState` resets simulation**: When rollback occurs, loading
+///   restores an earlier known-correct state.
+/// - **`AdvanceFrame` uses loaded state**: After a load, advance applies
+///   corrected inputs to the restored state.
+///
+/// # Consequences of Wrong Ordering
+///
+/// Processing requests out of order will cause:
+/// - **Desyncs**: Wrong state saved/loaded, causing peers to diverge
+/// - **Incorrect simulation**: Inputs applied to wrong state
+/// - **Assertion failures**: Internal invariants violated
+///
+/// # Example
+///
+/// ```ignore
+/// let requests = session.advance_frame()?;
+/// // Process in order - DO NOT reorder!
+/// for request in requests {
+///     match request {
+///         FortressRequest::SaveGameState { cell, frame } => {
+///             let checksum = compute_checksum(&game_state);
+///             cell.save(frame, Some(game_state.clone()), Some(checksum));
+///         }
+///         FortressRequest::LoadGameState { cell, frame } => {
+///             if let Some(state) = cell.load() {
+///                 game_state = state;
+///             }
+///         }
+///         FortressRequest::AdvanceFrame { inputs } => {
+///             game_state.update(&inputs);
+///         }
+///         _ => panic!("Unknown request type"),
+///     }
+/// }
+/// ```
+///
 /// # Forward Compatibility
 ///
 /// This enum is marked `#[non_exhaustive]` because new request types may be
-/// added in future versions. Always include a wildcard arm when matching,
-/// though new requests should be handled appropriately:
-///
-/// ```ignore
-/// match request {
-///     FortressRequest::SaveGameState { cell, frame } => { /* handle */ }
-///     FortressRequest::LoadGameState { cell, frame } => { /* handle */ }
-///     FortressRequest::AdvanceFrame { inputs } => { /* handle */ }
-///     _ => panic!("Unknown request type - upgrade fortress-rollback"),
-/// }
-/// ```
+/// added in future versions. Always include a wildcard arm when matching.
 #[non_exhaustive]
 pub enum FortressRequest<T>
 where
@@ -727,6 +779,47 @@ where
 //  special thanks to james7132 for the idea of a config trait that bundles all generics
 
 /// Compile time parameterization for sessions.
+///
+/// This trait bundles the generic types needed for a session. Implement this on
+/// a marker struct to configure your session types.
+///
+/// # Example
+///
+/// ```
+/// use fortress_rollback::Config;
+/// use serde::{Deserialize, Serialize};
+/// use std::net::SocketAddr;
+///
+/// // Your game's input type
+/// #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+/// struct GameInput {
+///     buttons: u8,
+///     stick_x: i8,
+///     stick_y: i8,
+/// }
+///
+/// // Your game's state (for save/load)
+/// #[derive(Clone)]
+/// struct GameState {
+///     frame: i32,
+///     // ... game-specific state
+/// }
+///
+/// // Marker struct for Config
+/// struct GameConfig;
+///
+/// impl Config for GameConfig {
+///     type Input = GameInput;
+///     type State = GameState;
+///     type Address = SocketAddr; // Most common choice for UDP games
+/// }
+/// ```
+///
+/// # Common Patterns
+///
+/// - **UDP Games**: Use `std::net::SocketAddr` for `Address`
+/// - **WebRTC/Browser**: Use a custom address type from your WebRTC library
+/// - **Local Testing**: Any `Clone + PartialEq + Eq + Ord + Hash + Debug` type works
 #[cfg(feature = "sync-send")]
 pub trait Config: 'static + Send + Sync {
     /// The input type for a session. This is the only game-related data
@@ -798,7 +891,7 @@ where
 // # KANI PROOFS     #
 // ###################
 
-/// Kani proofs for Frame arithmetic safety (SAFE-6 from FORMAL_SPEC.md).
+/// Kani proofs for Frame arithmetic safety (SAFE-6 from formal-spec.md).
 ///
 /// These proofs verify:
 /// - Frame addition does not overflow in typical usage

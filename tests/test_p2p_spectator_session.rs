@@ -25,7 +25,9 @@ fn test_addr(port: u16) -> SocketAddr {
 fn test_start_session() {
     let host_addr = test_addr(7777);
     let socket = UdpNonBlockingSocket::bind_to_port(9999).unwrap();
-    let spec_sess = SessionBuilder::<StubConfig>::new().start_spectator_session(host_addr, socket);
+    let spec_sess = SessionBuilder::<StubConfig>::new()
+        .start_spectator_session(host_addr, socket)
+        .expect("spectator session should start");
     assert_eq!(spec_sess.current_state(), SessionState::Synchronizing);
 }
 
@@ -43,8 +45,9 @@ fn test_synchronize_with_host() -> Result<(), FortressError> {
         .start_p2p_session(socket1)?;
 
     let socket2 = UdpNonBlockingSocket::bind_to_port(8888).unwrap();
-    let mut spec_sess =
-        SessionBuilder::<StubConfig>::new().start_spectator_session(host_addr, socket2);
+    let mut spec_sess = SessionBuilder::<StubConfig>::new()
+        .start_spectator_session(host_addr, socket2)
+        .expect("spectator session should start");
 
     assert_eq!(spec_sess.current_state(), SessionState::Synchronizing);
     assert_eq!(host_sess.current_state(), SessionState::Synchronizing);
@@ -69,7 +72,9 @@ fn test_synchronize_with_host() -> Result<(), FortressError> {
 fn test_current_frame_starts_at_null() {
     let host_addr = test_addr(7100);
     let socket = UdpNonBlockingSocket::bind_to_port(7101).unwrap();
-    let spec_sess = SessionBuilder::<StubConfig>::new().start_spectator_session(host_addr, socket);
+    let spec_sess = SessionBuilder::<StubConfig>::new()
+        .start_spectator_session(host_addr, socket)
+        .expect("spectator session should start");
 
     // Before synchronization, current_frame should be NULL (-1)
     assert!(spec_sess.current_frame().is_null());
@@ -80,7 +85,9 @@ fn test_current_frame_starts_at_null() {
 fn test_frames_behind_host_initially_zero() {
     let host_addr = test_addr(7110);
     let socket = UdpNonBlockingSocket::bind_to_port(7111).unwrap();
-    let spec_sess = SessionBuilder::<StubConfig>::new().start_spectator_session(host_addr, socket);
+    let spec_sess = SessionBuilder::<StubConfig>::new()
+        .start_spectator_session(host_addr, socket)
+        .expect("spectator session should start");
 
     // Both current_frame and last_recv_frame are NULL, so difference is 0
     assert_eq!(spec_sess.frames_behind_host(), 0);
@@ -91,7 +98,9 @@ fn test_frames_behind_host_initially_zero() {
 fn test_num_players_default() {
     let host_addr = test_addr(7120);
     let socket = UdpNonBlockingSocket::bind_to_port(7121).unwrap();
-    let spec_sess = SessionBuilder::<StubConfig>::new().start_spectator_session(host_addr, socket);
+    let spec_sess = SessionBuilder::<StubConfig>::new()
+        .start_spectator_session(host_addr, socket)
+        .expect("spectator session should start");
 
     // Default number of players is 2
     assert_eq!(spec_sess.num_players(), 2);
@@ -104,7 +113,8 @@ fn test_num_players_custom() {
     let socket = UdpNonBlockingSocket::bind_to_port(7131).unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
-        .start_spectator_session(host_addr, socket);
+        .start_spectator_session(host_addr, socket)
+        .expect("spectator session should start");
 
     assert_eq!(spec_sess.num_players(), 4);
 }
@@ -118,7 +128,9 @@ fn test_num_players_custom() {
 fn test_network_stats_not_synchronized() {
     let host_addr = test_addr(7140);
     let socket = UdpNonBlockingSocket::bind_to_port(7141).unwrap();
-    let spec_sess = SessionBuilder::<StubConfig>::new().start_spectator_session(host_addr, socket);
+    let spec_sess = SessionBuilder::<StubConfig>::new()
+        .start_spectator_session(host_addr, socket)
+        .expect("spectator session should start");
 
     // Network stats should fail when not synchronized
     let result = spec_sess.network_stats();
@@ -135,8 +147,9 @@ fn test_network_stats_not_synchronized() {
 fn test_events_empty_initially() {
     let host_addr = test_addr(7150);
     let socket = UdpNonBlockingSocket::bind_to_port(7151).unwrap();
-    let mut spec_sess =
-        SessionBuilder::<StubConfig>::new().start_spectator_session(host_addr, socket);
+    let mut spec_sess = SessionBuilder::<StubConfig>::new()
+        .start_spectator_session(host_addr, socket)
+        .expect("spectator session should start");
 
     // Initially, there should be no events
     let events: Vec<_> = spec_sess.events().collect();
@@ -158,8 +171,9 @@ fn test_events_generated_during_sync() -> Result<(), FortressError> {
         .start_p2p_session(socket1)?;
 
     let socket2 = UdpNonBlockingSocket::bind_to_port(7161).unwrap();
-    let mut spec_sess =
-        SessionBuilder::<StubConfig>::new().start_spectator_session(host_addr, socket2);
+    let mut spec_sess = SessionBuilder::<StubConfig>::new()
+        .start_spectator_session(host_addr, socket2)
+        .expect("spectator session should start");
 
     // Poll a few times to generate synchronization events
     for _ in 0..10 {
@@ -185,8 +199,9 @@ fn test_events_generated_during_sync() -> Result<(), FortressError> {
 fn test_advance_frame_before_sync_fails() {
     let host_addr = test_addr(7170);
     let socket = UdpNonBlockingSocket::bind_to_port(7171).unwrap();
-    let mut spec_sess =
-        SessionBuilder::<StubConfig>::new().start_spectator_session(host_addr, socket);
+    let mut spec_sess = SessionBuilder::<StubConfig>::new()
+        .start_spectator_session(host_addr, socket)
+        .expect("spectator session should start");
 
     // advance_frame should fail when not synchronized
     let result = spec_sess.advance_frame();
@@ -211,7 +226,8 @@ fn test_advance_frame_after_sync() -> Result<(), FortressError> {
     let socket2 = UdpNonBlockingSocket::bind_to_port(7181).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
-        .start_spectator_session(host_addr, socket2);
+        .start_spectator_session(host_addr, socket2)
+        .expect("spectator session should start");
 
     let mut host_game = GameStub::new();
 
@@ -264,7 +280,8 @@ fn test_violation_observer_attached() {
 
     let spec_sess = SessionBuilder::<StubConfig>::new()
         .with_violation_observer(observer)
-        .start_spectator_session(host_addr, socket);
+        .start_spectator_session(host_addr, socket)
+        .expect("spectator session should start");
 
     // Verify observer is attached
     assert!(spec_sess.violation_observer().is_some());
@@ -275,7 +292,9 @@ fn test_violation_observer_attached() {
 fn test_no_violation_observer_by_default() {
     let host_addr = test_addr(7200);
     let socket = UdpNonBlockingSocket::bind_to_port(7201).unwrap();
-    let spec_sess = SessionBuilder::<StubConfig>::new().start_spectator_session(host_addr, socket);
+    let spec_sess = SessionBuilder::<StubConfig>::new()
+        .start_spectator_session(host_addr, socket)
+        .expect("spectator session should start");
 
     // By default, no observer should be attached
     assert!(spec_sess.violation_observer().is_none());
@@ -311,7 +330,8 @@ fn test_spectator_config_buffer_size() -> Result<(), FortressError> {
     let spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .with_spectator_config(spectator_config)
-        .start_spectator_session(host_addr, socket2);
+        .start_spectator_session(host_addr, socket2)
+        .expect("spectator session should start");
 
     // Session should be created successfully
     assert_eq!(spec_sess.current_state(), SessionState::Synchronizing);
@@ -338,7 +358,8 @@ fn test_spectator_with_input_queue_config() -> Result<(), FortressError> {
     let spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .with_input_queue_config(InputQueueConfig::high_latency())
-        .start_spectator_session(host_addr, socket2);
+        .start_spectator_session(host_addr, socket2)
+        .expect("spectator session should start");
 
     assert_eq!(spec_sess.current_state(), SessionState::Synchronizing);
 
@@ -354,8 +375,9 @@ fn test_spectator_with_input_queue_config() -> Result<(), FortressError> {
 fn test_poll_remote_clients_no_host() {
     let host_addr = test_addr(7230);
     let socket = UdpNonBlockingSocket::bind_to_port(7231).unwrap();
-    let mut spec_sess =
-        SessionBuilder::<StubConfig>::new().start_spectator_session(host_addr, socket);
+    let mut spec_sess = SessionBuilder::<StubConfig>::new()
+        .start_spectator_session(host_addr, socket)
+        .expect("spectator session should start");
 
     // Polling with no host should not panic
     for _ in 0..10 {
@@ -387,7 +409,8 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
     let socket2 = UdpNonBlockingSocket::bind_to_port(7241).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
-        .start_spectator_session(host_addr, socket2);
+        .start_spectator_session(host_addr, socket2)
+        .expect("spectator session should start");
 
     let mut host_game = GameStub::new();
 
@@ -457,7 +480,8 @@ fn test_synchronized_event_generated() -> Result<(), FortressError> {
     let socket2 = UdpNonBlockingSocket::bind_to_port(7251).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
-        .start_spectator_session(host_addr, socket2);
+        .start_spectator_session(host_addr, socket2)
+        .expect("spectator session should start");
 
     let mut found_synchronized = false;
 
@@ -500,7 +524,8 @@ fn test_synchronizing_events_generated() -> Result<(), FortressError> {
     let socket2 = UdpNonBlockingSocket::bind_to_port(7261).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
-        .start_spectator_session(host_addr, socket2);
+        .start_spectator_session(host_addr, socket2)
+        .expect("spectator session should start");
 
     let mut found_synchronizing = false;
 
@@ -555,7 +580,8 @@ fn test_spectator_catchup_speed() -> Result<(), FortressError> {
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .with_spectator_config(spectator_config)
-        .start_spectator_session(host_addr, socket2);
+        .start_spectator_session(host_addr, socket2)
+        .expect("spectator session should start");
 
     let mut host_game = GameStub::new();
 
@@ -612,12 +638,14 @@ fn test_multiple_spectators_same_host() -> Result<(), FortressError> {
     let socket2 = UdpNonBlockingSocket::bind_to_port(7281).unwrap();
     let mut spec_sess1 = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
-        .start_spectator_session(host_addr, socket2);
+        .start_spectator_session(host_addr, socket2)
+        .expect("spectator session should start");
 
     let socket3 = UdpNonBlockingSocket::bind_to_port(7282).unwrap();
     let mut spec_sess2 = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
-        .start_spectator_session(host_addr, socket3);
+        .start_spectator_session(host_addr, socket3)
+        .expect("spectator session should start");
 
     // Synchronize all
     for _ in 0..100 {
@@ -642,7 +670,8 @@ fn test_spectator_disconnect_timeout() -> Result<(), FortressError> {
     let socket = UdpNonBlockingSocket::bind_to_port(7291).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
-        .start_spectator_session(host_addr, socket);
+        .start_spectator_session(host_addr, socket)
+        .expect("spectator session should start");
 
     // Poll for a while without any host
     for _ in 0..20 {

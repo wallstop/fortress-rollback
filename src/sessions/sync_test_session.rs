@@ -67,9 +67,15 @@ impl<T: Config> SyncTestSession<T> {
             SyncLayer::with_queue_length(num_players, max_prediction, queue_length);
         for i in 0..num_players {
             // This should never fail during construction as player handles are sequential and valid
-            sync_layer
-                .set_frame_delay(PlayerHandle::new(i), input_delay)
-                .expect("Internal error: invalid player handle during session construction");
+            if let Err(e) = sync_layer.set_frame_delay(PlayerHandle::new(i), input_delay) {
+                report_violation!(
+                    ViolationSeverity::Critical,
+                    ViolationKind::InternalError,
+                    "Failed to set frame delay for player {} during session construction: {}",
+                    i,
+                    e
+                );
+            }
         }
 
         Self {
@@ -118,7 +124,9 @@ impl<T: Config> SyncTestSession<T> {
     /// [`Vec<FortressRequest>`]: FortressRequest
     /// [`MismatchedChecksum`]: FortressError::MismatchedChecksum
     pub fn advance_frame(&mut self) -> Result<Vec<FortressRequest<T>>, FortressError> {
-        let mut requests = Vec::new();
+        // Pre-allocate with capacity for typical case: 1 save + 1 advance = 2 requests.
+        // During rollback testing, more requests will be added as the Vec grows.
+        let mut requests = Vec::with_capacity(2);
 
         // if we advanced far enough into the game do comparisons and rollbacks
         let current_frame = self.sync_layer.current_frame();
@@ -163,9 +171,23 @@ impl<T: Config> SyncTestSession<T> {
         }
 
         // get the correct inputs for all players from the sync layer
-        let inputs = self
+        let inputs = match self
             .sync_layer
-            .synchronized_inputs(&self.dummy_connect_status);
+            .synchronized_inputs(&self.dummy_connect_status)
+        {
+            Some(inputs) => inputs,
+            None => {
+                report_violation!(
+                    ViolationSeverity::Critical,
+                    ViolationKind::InternalError,
+                    "Failed to get synchronized inputs for frame {}",
+                    self.sync_layer.current_frame()
+                );
+                return Err(FortressError::InternalError {
+                    context: "Failed to get synchronized inputs".to_owned(),
+                });
+            }
+        };
 
         // advance the frame
         requests.push(FortressRequest::AdvanceFrame { inputs });
@@ -265,9 +287,23 @@ impl<T: Config> SyncTestSession<T> {
 
         // step forward to the previous current state
         for i in 0..count {
-            let inputs = self
+            let inputs = match self
                 .sync_layer
-                .synchronized_inputs(&self.dummy_connect_status);
+                .synchronized_inputs(&self.dummy_connect_status)
+            {
+                Some(inputs) => inputs,
+                None => {
+                    report_violation!(
+                        ViolationSeverity::Critical,
+                        ViolationKind::InternalError,
+                        "Failed to get synchronized inputs during resimulation at frame {}",
+                        self.sync_layer.current_frame()
+                    );
+                    return Err(FortressError::InternalError {
+                        context: "Failed to get synchronized inputs during resimulation".to_owned(),
+                    });
+                }
+            };
 
             // first save (except in the first step, because we just loaded that state)
             if i > 0 {

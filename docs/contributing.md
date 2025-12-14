@@ -1,6 +1,10 @@
+<p align="center">
+  <img src="../assets/logo.svg" alt="Fortress Rollback" width="128">
+</p>
+
 # Contribution Guidelines
 
-First and foremost: Thank you for showing interest in contributing to Fortress Rollback (a fork of GGRS)! Make sure to read the [Code of Conduct](./CODE_OF_CONDUCT.md).
+First and foremost: Thank you for showing interest in contributing to Fortress Rollback (a fork of GGRS)! Make sure to read the [Code of Conduct](./code-of-conduct.md).
 If you have a cool example or showcase of Fortress Rollback in use, let me know so your project can be highlighted!
 
 ## Create an issue
@@ -31,3 +35,50 @@ With the following prefixes commonly used:
 
 More about the [GitHub flow](https://guides.github.com/introduction/flow/).
 More about the [Conventional Commits Specification](https://www.conventionalcommits.org/en/v1.0.0/)
+
+## Pre-commit Hooks
+
+This project uses [pre-commit](https://pre-commit.com/) to ensure code quality before commits.
+
+### Setup
+
+```bash
+# Install pre-commit (requires Python)
+pip install pre-commit
+
+# Install the git hooks
+pre-commit install
+```
+
+### What's Checked
+
+The pre-commit hooks validate:
+
+- **Code formatting**: `cargo fmt` for Rust files
+- **Linting**: `cargo clippy` for Rust code quality
+- **Markdown formatting**: `markdownlint` for consistent documentation
+- **Link validation**: Local file references and markdown links
+- **Rustdoc links**: Intra-doc link resolution
+- **General hygiene**: Trailing whitespace, YAML/TOML syntax, merge conflicts
+
+### Running Manually
+
+```bash
+# Run all hooks on all files
+pre-commit run --all-files
+
+# Run a specific hook
+pre-commit run markdownlint --all-files
+pre-commit run check-links --all-files
+
+# Run the link checker script directly
+./scripts/check-links.sh --verbose
+```
+
+### Bypassing Hooks (Emergencies Only)
+
+```bash
+git commit --no-verify -m "emergency fix"
+```
+
+Note: CI will still run these checks on pull requests

@@ -70,6 +70,12 @@ check_tool "clippy" "cargo clippy --version"
 check_tool "rustfmt" "cargo fmt --version"
 echo ""
 
+echo "Documentation & Linting:"
+check_tool "pre-commit" "pre-commit --version" "false"
+check_tool "markdownlint" "markdownlint --version" "false"
+check_tool "markdown-link-check" "markdown-link-check --version" "false"
+echo ""
+
 echo "Profiling:"
 check_tool "flamegraph" "cargo flamegraph --version" "false"
 check_tool "valgrind" "valgrind --version" "false"

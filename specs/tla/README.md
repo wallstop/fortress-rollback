@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="../../assets/logo-small.svg" alt="Fortress Rollback" width="64">
+</p>
+
 # TLA+ Specifications for Fortress Rollback
 
 This directory contains TLA+ specifications for formally verifying the correctness properties of Fortress Rollback.
@@ -42,7 +46,7 @@ This directory contains TLA+ specifications for formally verifying the correctne
 
 ### InputQueue.tla
 
-**Safety (from FORMAL_SPEC.md):**
+**Safety (from formal-spec.md):**
 - INV-4: Queue length bounded by `QUEUE_LENGTH` (128)
 - INV-5: Head and tail indices always valid
 - FIFO ordering preserved
@@ -53,7 +57,7 @@ This directory contains TLA+ specifications for formally verifying the correctne
 
 ### Rollback.tla
 
-**Safety (from FORMAL_SPEC.md):**
+**Safety (from formal-spec.md):**
 - INV-1: Frame monotonicity (except during rollback)
 - INV-2: Rollback target is valid frame
 - INV-7: Confirmed frame in valid range

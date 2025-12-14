@@ -87,7 +87,7 @@ proptest! {
         queue_length in queue_length_strategy(),
         num_frames in frame_count_strategy(),
     ) {
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_length);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_length).expect("queue");
 
         // Leave a buffer before we need to discard (at least 4 frames margin)
         let discard_threshold = queue_length.saturating_sub(4);
@@ -119,7 +119,7 @@ proptest! {
         queue_length in queue_length_strategy(),
         num_frames in 1usize..100,
     ) {
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_length);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_length).expect("queue");
 
         let mut last_frame = Frame::NULL;
         let discard_threshold = queue_length.saturating_sub(4);
@@ -154,8 +154,8 @@ proptest! {
         prediction_frames in 1usize..10,
     ) {
         // Create two identical queues
-        let mut queue1 = InputQueue::<TestConfig>::with_queue_length(0, queue_length);
-        let mut queue2 = InputQueue::<TestConfig>::with_queue_length(0, queue_length);
+        let mut queue1 = InputQueue::<TestConfig>::with_queue_length(0, queue_length).expect("queue");
+        let mut queue2 = InputQueue::<TestConfig>::with_queue_length(0, queue_length).expect("queue");
 
         // Add same initial input to both
         let initial_input = PlayerInput::new(Frame::new(0), TestInput { value: last_confirmed_value });
@@ -164,8 +164,8 @@ proptest! {
 
         // Request predictions for same future frames
         for i in 1..=prediction_frames as i32 {
-            let (pred1, status1) = queue1.input(Frame::new(i));
-            let (pred2, status2) = queue2.input(Frame::new(i));
+            let (pred1, status1) = queue1.input(Frame::new(i)).expect("input");
+            let (pred2, status2) = queue2.input(Frame::new(i)).expect("input");
 
             // Predictions must be identical
             prop_assert_eq!(
@@ -187,7 +187,7 @@ proptest! {
         queue_length in queue_length_strategy(),
         num_frames in 5usize..50,
     ) {
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_length);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_length).expect("queue");
         let discard_threshold = queue_length.saturating_sub(4);
 
         // Add some confirmed inputs, with proper discarding to prevent overflow
@@ -203,7 +203,7 @@ proptest! {
 
         // Request frames beyond confirmed (triggers prediction)
         let future_frame = Frame::new((num_frames + 5) as i32);
-        let (_pred, status) = queue.input(future_frame);
+        let (_pred, status) = queue.input(future_frame).expect("input");
         prop_assert_eq!(status, InputStatus::Predicted);
 
         // Reset and check first_incorrect_frame
@@ -371,10 +371,10 @@ proptest! {
         // rollback is skipped (handled by the guard in adjust_gamestate).
         // We test this at the InputQueue level by simulating the scenario.
 
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
 
         // At frame 0, predict an input for frame 0
-        let (pred, status) = queue.input(Frame::new(0));
+        let (pred, status) = queue.input(Frame::new(0)).expect("input");
         let _ = (pred, status); // predictions at frame 0 before any input
 
         // Add the "actual" input for frame 0 (potentially different from prediction)
@@ -398,14 +398,14 @@ proptest! {
     fn prop_frame_0_reset_prediction(
         initial_value in any::<u8>(),
     ) {
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
 
         // Add initial input at frame 0
         let input = PlayerInput::new(Frame::new(0), TestInput { value: initial_value });
         queue.add_input(input);
 
         // Request prediction for frame 1 (this marks frame 1 as predicted)
-        let (pred, status) = queue.input(Frame::new(1));
+        let (pred, status) = queue.input(Frame::new(1)).expect("input");
         prop_assert_eq!(status, InputStatus::Predicted);
         let _ = pred;
 
@@ -439,11 +439,11 @@ proptest! {
         actual_values in prop::collection::vec(any::<u8>(), 1..8),
     ) {
         let num_predictions = std::cmp::min(num_predictions, actual_values.len());
-        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
 
         // Request predictions for frames 0..num_predictions
         for i in 0..num_predictions {
-            let (_, status) = queue.input(Frame::new(i as i32));
+            let (_, status) = queue.input(Frame::new(i as i32)).expect("input");
             prop_assert_eq!(
                 status,
                 InputStatus::Predicted,

@@ -12,6 +12,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Validate GitHub Actions workflows and YAML files
+  validate-yaml:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Validate YAML files
+        run: |
+          yamllint -d "{extends: relaxed, rules: {line-length: {max: 200}}}" \
+            .github/workflows/*.yml \
+            docker/docker-compose.yml \
+            .pre-commit-config.yaml
+
+      - name: Install actionlint
+        run: |
+          bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          sudo mv actionlint /usr/local/bin/
+
+      - name: Validate GitHub Actions workflows
+        run: actionlint
+
   build:
     runs-on: windows-latest
 
@@ -155,10 +180,9 @@ jobs:
         run: cargo test --test test_z3_verification --verbose
         timeout-minutes: 15
 
-  # Kani Formal Verification
-  kani-verification:
+  # Kani Formal Verification (Tier 1 - Fast proofs)
+  kani-verification-tier1:
     runs-on: ubuntu-latest
-    # Kani can be slow, don't block on build
     continue-on-error: true
 
     steps:
@@ -176,7 +200,7 @@ jobs:
             ~/.cargo/bin/cargo-kani
             ~/.cargo/bin/kani-*
             ~/.kani
-          key: kani-0.56.0-${{ runner.os }}
+          key: kani-0.66.0-${{ runner.os }}
 
       - name: Install Kani
         run: |
@@ -185,9 +209,75 @@ jobs:
             cargo kani setup
           fi
 
-      - name: Run Kani verification
-        run: ./scripts/verify-kani.sh --quick
-        timeout-minutes: 90
+      - name: Run Kani verification (Tier 1 - Fast)
+        run: ./scripts/verify-kani.sh --quick --tier 1
+        timeout-minutes: 5
+
+  # Kani Formal Verification (Tier 2 - Medium proofs)
+  kani-verification-tier2:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - name: Cache Kani
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-kani
+            ~/.cargo/bin/kani-*
+            ~/.kani
+          key: kani-0.66.0-${{ runner.os }}
+
+      - name: Install Kani
+        run: |
+          if ! command -v cargo-kani &> /dev/null; then
+            cargo install --locked kani-verifier
+            cargo kani setup
+          fi
+
+      - name: Run Kani verification (Tier 2 - Medium)
+        run: ./scripts/verify-kani.sh --quick --tier 2
+        timeout-minutes: 10
+
+  # Kani Formal Verification (Tier 3 - Slow proofs)
+  kani-verification-tier3:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - name: Cache Kani
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-kani
+            ~/.cargo/bin/kani-*
+            ~/.kani
+          key: kani-0.66.0-${{ runner.os }}
+
+      - name: Install Kani
+        run: |
+          if ! command -v cargo-kani &> /dev/null; then
+            cargo install --locked kani-verifier
+            cargo kani setup
+          fi
+
+      - name: Run Kani verification (Tier 3 - Slow)
+        run: ./scripts/verify-kani.sh --quick --tier 3
+        timeout-minutes: 15
 
   package-dry-run:
     runs-on: ubuntu-latest

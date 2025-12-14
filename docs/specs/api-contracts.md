@@ -1,10 +1,14 @@
+<p align="center">
+  <img src="../../assets/logo-small.svg" alt="Fortress Rollback" width="64">
+</p>
+
 # Fortress Rollback API Contracts
 
 **Version:** 1.0
 **Date:** December 6, 2025
 **Status:** Complete
 
-This document specifies preconditions, postconditions, and invariants for all public APIs. It complements FORMAL_SPEC.md and serves as a reference for verification and documentation.
+This document specifies preconditions, postconditions, and invariants for all public APIs. It complements formal-spec.md and serves as a reference for verification and documentation.
 
 ---
 

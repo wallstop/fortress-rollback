@@ -40,6 +40,9 @@ paranoid = []
 loom = []
 # Enable Z3 formal verification tests (slow to compile - builds Z3 from source)
 z3-verification = ["dep:z3"]
+# Enable graphical examples (ex_game_*) - requires system audio/graphics libraries
+# On Linux: sudo apt-get install libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
+graphical-examples = ["dep:macroquad"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -51,6 +54,9 @@ tracing = "0.1"
 # SMT solver for formal verification (builds Z3 from source - SLOW)
 # Only compiled when z3-verification feature is enabled
 z3 = { version = "0.19", features = ["bundled"], optional = true }
+# Graphical examples dependency (requires system audio/graphics libraries)
+# On Linux: sudo apt-get install libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
+macroquad = { version = "=0.3.25", features = ["log-rs"], optional = true }
 
 # Loom for concurrency testing - only used when cfg(loom) is set
 [target.'cfg(loom)'.dependencies]
@@ -62,7 +68,6 @@ js-sys = "0.3"
 [dev-dependencies]
 serial_test = "3.2"
 clap = { version = "4.5", features = ["derive"] }
-macroquad = { version = "=0.3.25", features = ["log-rs"] }
 tracing-subscriber = "0.3"
 tracing-log = "0.2"
 proptest = "=1.4.0"
@@ -86,14 +91,17 @@ bench = false
 [[example]]
 name = "ex_game_p2p"
 path = "examples/ex_game/ex_game_p2p.rs"
+required-features = ["graphical-examples"]
 
 [[example]]
 name = "ex_game_spectator"
 path = "examples/ex_game/ex_game_spectator.rs"
+required-features = ["graphical-examples"]
 
 [[example]]
 name = "ex_game_synctest"
 path = "examples/ex_game/ex_game_synctest.rs"
+required-features = ["graphical-examples"]
 
 # Benchmarks (using criterion)
 [[bench]]
@@ -102,6 +110,10 @@ harness = false
 
 [[bench]]
 name = "sync_layer"
+harness = false
+
+[[bench]]
+name = "p2p_session"
 harness = false
 
 # Profile for benchmarks

@@ -54,7 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_num_players(opt.num_players)
         .with_max_frames_behind(5)? // (optional) when the spectator is more than this amount of frames behind, it will catch up
         .with_catchup_speed(2)? // (optional) set this to 1 if you don't want any catch-ups
-        .start_spectator_session(opt.host, socket);
+        .start_spectator_session(opt.host, socket)
+        .expect("Failed to start spectator session");
 
     // Create a new box game
     let mut game = Game::new(opt.num_players);

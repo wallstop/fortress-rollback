@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="../assets/logo.svg" alt="Fortress Rollback" width="128">
+</p>
+
 # Migration Guide: ggrs → fortress-rollback
 
 Fortress Rollback is the correctness-first, verified fork of the original `ggrs` crate. This guide explains how to migrate existing projects.

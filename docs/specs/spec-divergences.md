@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="../../assets/logo-small.svg" alt="Fortress Rollback" width="64">
+</p>
+
 # Spec-Production Divergences
 
 **Version:** 1.2
@@ -75,7 +79,7 @@ The following aspects are verified to be perfectly aligned:
 
 1. **Grep for constants** - Compared all named constants across TLA+, Z3, Kani, and production code
 2. **State machine review** - Verified state enum values and transitions match
-3. **Invariant trace** - Linked each FORMAL_SPEC.md invariant to both spec and code implementation
+3. **Invariant trace** - Linked each formal-spec.md invariant to both spec and code implementation
 4. **Documentation linkage** - Added `# Formal Specification Alignment` sections to key production code
 
 ---

@@ -1,14 +1,14 @@
-# OpenAI AGENTS Instructions for GGRS
+# OpenAI AGENTS Instructions for Fortress Rollback
 
-## Overview
+> **Important**: Read [`.llm/context.md`](.llm/context.md) for complete project context, policies, and guidelines.
 
-**Context File**: Refer to [`.llm/context.md`](.llm/context.md) for comprehensive project documentation.
+## Quick Reference
 
-GGRS is a Rust implementation of GGPO rollback networking. This fork focuses on:
-- **>90% test coverage**
-- **Formal verification** (TLA+, Z3)
-- **Enhanced usability** (intuitive APIs, clear errors)
-- **Code clarity** (simple, maintainable)
+This is a **fork** of GGRS (Good Game Rollback System) focused on:
+- **>90% test coverage** - All code must be thoroughly tested
+- **Formal verification** - TLA+ and Z3 verification of critical components
+- **Enhanced usability** - Simple, intuitive, hard-to-misuse APIs
+- **Code clarity** - Easy to understand and maintain
 
 ## Core Requirements
 
@@ -30,58 +30,7 @@ GGRS is a Rust implementation of GGPO rollback networking. This fork focuses on:
 - Explain non-obvious design decisions
 - Document invariants and safety properties
 - Keep examples synchronized with code
-- Maintain CHANGELOG.md
-
-### Formally Verified
-- Model critical components in TLA+
-- Verify algorithms with Z3
-- Document verification artifacts
-- Prove safety properties for concurrent code
-
-**Formal Verification Philosophy:**
-- **Specs model production** - TLA+/Kani/Z3 specs must accurately represent production code
-- **When verification fails, assume production has a bug first** - investigate before relaxing specs
-- **Never "fix" specs just to make them pass** - this defeats the purpose of verification
-- **Document all spec changes** - explain what production behavior necessitates the change
-- **Invariants represent real safety properties** - only relax with strong justification
-- **Review spec changes carefully** - ensure they don't hide real bugs
-
-**Breaking Changes Policy:**
-- **API compatibility is NOT required** - Breaking the public API is acceptable
-- **Safety over compatibility** - If a change improves correctness or safety, make it
-- **Ergonomics over compatibility** - If a change makes the API harder to misuse, make it
-- **Document breaking changes** - Update CHANGELOG.md and MIGRATION.md as needed
-- **This is a fork, not a drop-in replacement** - We prioritize production-grade quality over backwards compatibility
-
-**When Formal Verification or Analysis Reveals Issues:**
-After fixing any bug discovered through formal verification, code review, or other analysis:
-1. **Add comprehensive regression tests** - Cover the exact scenario that was discovered
-2. **Test related edge cases** - Look for similar issues in related code paths
-3. **Test boundary conditions** - Add tests at the edges of valid ranges (zero, max, off-by-one)
-4. **Test invariant preservation** - Ensure invariants hold across all state transitions
-5. **Test full cycles** - Create-use-modify-destroy lifecycle tests
-6. **Add negative tests** - Verify that violations are properly detected
-7. **Document the discovery** - Tests should explain what was found and why it matters
-
-```rust
-// Example: After discovering load_frame() didn't update last_saved_frame
-// Add these categories of tests:
-
-#[test]
-fn test_load_frame_updates_last_saved_frame_invariant() { /* Direct reproduction */ }
-
-#[test]  
-fn test_load_frame_zero_updates_last_saved_frame() { /* Edge case: frame 0 */ }
-
-#[test]
-fn test_multiple_rollbacks_maintain_invariants() { /* Chained operations */ }
-
-#[test]
-fn test_full_rollback_cycle_maintains_invariants() { /* Full lifecycle */ }
-
-#[test]
-fn test_invariant_checker_identifies_violations() { /* Negative test */ }
-```
+- Maintain docs/changelog.md
 
 ## Code Standards
 
@@ -89,26 +38,18 @@ fn test_invariant_checker_identifies_violations() { /* Negative test */ }
 ```rust
 /// Brief one-line description.
 ///
-/// More detailed explanation if needed, covering:
-/// - What the function does
-/// - When to use it
-/// - Important considerations
-///
 /// # Arguments
 /// * `param1` - Description
-/// * `param2` - Description
 ///
 /// # Errors
 /// * `ErrorVariant1` - When this occurs
-/// * `ErrorVariant2` - When this occurs
 ///
 /// # Examples
 /// ```
-/// # use ggrs::*;
-/// let result = function(arg1, arg2)?;
-/// assert_eq!(result, expected);
+/// # use fortress_rollback::*;
+/// let result = function(arg1)?;
 /// ```
-pub fn function(param1: Type1, param2: Type2) -> Result<ReturnType, FortressError> {
+pub fn function(param1: Type1) -> Result<ReturnType, FortressError> {
     // Implementation
 }
 ```
@@ -136,7 +77,7 @@ fn descriptive_test_name_explaining_scenario() {
 2. Implement feature with full documentation
 3. Update examples if API surface changes
 4. Consider formal verification needs
-5. Update CHANGELOG.md
+5. Update docs/changelog.md
 6. Ensure all tests pass
 
 ### Fixing a Bug
@@ -145,48 +86,16 @@ fn descriptive_test_name_explaining_scenario() {
 3. Fix the implementation (not the test, unless the test is wrong)
 4. Verify test passes
 5. Check for similar issues elsewhere
-6. Document the fix in CHANGELOG.md
+6. Document the fix in docs/changelog.md
 
-### When Tests Fail or Are Flaky
-**CRITICAL: Always perform deep Root Cause Analysis (RCA)**
+### When Tests Fail
+See [`.llm/context.md`](.llm/context.md) for the complete Root Cause Analysis methodology.
 
-The goal is never just to "make tests pass" — it's to understand and comprehensively fix the underlying issue.
-
-#### Investigation Steps
-1. **Reproduce the failure** - Run multiple times, note patterns and conditions
-2. **Understand the test's intent** - What invariant or behavior is being verified?
-3. **Trace the failure** - Add logging, examine state, understand the exact failure mode
-4. **Identify root cause** - Keep asking "why" until you reach the fundamental issue
-5. **Verify hypothesis** - Confirm your understanding before coding a fix
-6. **Check for similar issues** - Are there related problems elsewhere?
-
-#### Determining Where to Fix
-- **Production bug indicators**: Test expectations match docs, logic is straightforward, other code depends on this behavior
-- **Test bug indicators**: Test makes unguaranteed assumptions, has race conditions, or contradicts documentation
-
-#### Comprehensive Fix Approach
-- **Production bug** → Fix library code, verify other tests still pass, add regression test if missing
-- **Test bug** → Fix test's incorrect assumptions, document why original was wrong
-- **Timing issue** → Add proper synchronization primitives (channels, barriers, events) — NOT arbitrary sleeps
-- **Flakiness** → Find and eliminate the source of non-determinism completely
-- **Document everything** → Explain root cause and why the fix is correct
-
-#### Strictly Forbidden "Fixes"
-- ❌ Commenting out or weakening failing assertions
-- ❌ Adding `Thread::sleep()` or arbitrary delays to "fix" timing
-- ❌ Catching and ignoring errors in test code
-- ❌ Marking tests as `#[ignore]` without documented fix plan
-- ❌ Relaxing tolerances/thresholds without understanding why original was set
-- ❌ Changing expected values to match actual without root cause analysis
-- ❌ Removing test functionality that exists in production
-
-### Improving Performance
-1. Benchmark current performance
-2. Identify bottleneck
-3. Implement optimization
-4. Verify correctness (tests still pass)
-5. Benchmark improvement
-6. Document performance characteristics
+**Key points:**
+- Always investigate root cause before fixing
+- Distinguish between test bugs and production bugs
+- Never use arbitrary sleeps to "fix" timing issues
+- Never comment out or weaken failing assertions
 
 ## Key Architecture Components
 
@@ -207,65 +116,6 @@ The goal is never just to "make tests pass" — it's to understand and comprehen
 - Rollback state management
 - Time synchronization between peers
 
-### Error Handling
-- `FortressError` enum with variants for all error cases
-- `Result<T, FortressError>` return types
-- Context-rich error messages
-- Recovery suggestions where applicable
-
-## Best Practices
-
-### Code Quality
-- Use clippy and fix all warnings
-- Follow Rust naming conventions
-- Keep functions focused (single responsibility)
-- Prefer composition over complexity
-- Make invalid states unrepresentable
-
-### Testing
-- Test public behavior, not implementation
-- Use descriptive test names
-- Avoid test interdependencies
-- Make tests deterministic (no randomness/timing)
-- Test error conditions explicitly
-
-### Documentation
-- Write docs for humans, not machines
-- Include practical examples
-- Explain the "why" behind decisions
-- Link related concepts
-- Keep docs synchronized with code
-
-### Performance
-- Profile before optimizing
-- Document algorithmic complexity
-- Avoid premature optimization
-- Consider memory allocation patterns
-- Benchmark critical paths
-
-## Verification Approach
-
-### TLA+ Models
-Use for:
-- State machine modeling
-- Concurrency correctness
-- Protocol verification
-- Liveness properties
-
-### Z3 Constraints
-Use for:
-- Algorithm correctness
-- Invariant checking
-- Safety properties
-- Boundary conditions
-
-### Testing Strategies
-- Unit tests for isolated behavior
-- Integration tests for component interaction
-- Property-based tests for invariants
-- Determinism tests for consistency
-- Performance tests for regressions
-
 ## Project Navigation
 
 **Source Code**
@@ -278,12 +128,6 @@ Use for:
 **Tests & Examples**
 - `tests/` - Integration tests
 - `examples/ex_game/` - Working examples
-
-**Documentation**
-- `README.md` - Project overview
-- `CONTRIBUTING.md` - Contribution guide
-- `CHANGELOG.md` - Version history
-- `.llm/context.md` - Complete context
 
 ## Quick Reference
 
@@ -314,26 +158,26 @@ for request in session.events() {
 }
 ```
 
-## Resources
-
-- Full context: `.llm/context.md`
-- Contributing: `CONTRIBUTING.md`
-- Changelog: `CHANGELOG.md`
-- Original GGPO: https://www.ggpo.net/
-- Rust docs: https://docs.rs/ggrs/
-- TLA+: https://lamport.azurewebsites.net/tla/tla.html
-- Z3: https://github.com/Z3Prover/z3
-
 ## Quality Gates
 
 Before suggesting code, verify:
-- ✅ After every major change, run `cargo fmt`, `cargo clippy --all-targets`, and `cargo test`; fix all resulting issues before proceeding
-  - Note: Use `--all-features` only when you need Z3 verification (it compiles Z3 from source which is slow)
 - ✅ Compiles without warnings
 - ✅ All tests pass
 - ✅ Documentation is complete
 - ✅ Error handling is comprehensive
 - ✅ 100% safe Rust
-- ✅ Performance is acceptable
 - ✅ Examples work correctly
-- ✅ CHANGELOG is updated
+
+After every major change:
+```bash
+cargo fmt
+cargo clippy --all-targets
+cargo test
+```
+
+## Resources
+
+- Full context: `.llm/context.md`
+- Contributing: `docs/contributing.md`
+- Changelog: `docs/changelog.md`
+- Original GGPO: https://www.ggpo.net/

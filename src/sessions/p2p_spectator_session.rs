@@ -14,7 +14,10 @@ use crate::{
     NonBlockingSocket, PlayerHandle, SessionState,
 };
 
-// The amount of frames the spectator advances in a single step if not too far behind
+/// The number of frames the spectator advances in a single step during normal operation.
+///
+/// When not catching up to the host, spectators advance one frame at a time to maintain
+/// smooth playback. During catchup mode (when far behind), `catchup_speed` is used instead.
 const NORMAL_SPEED: usize = 1;
 
 /// [`SpectatorSession`] provides all functionality to connect to a remote host in a peer-to-peer fashion.
@@ -147,13 +150,15 @@ impl<T: Config> SpectatorSession<T> {
             return Err(FortressError::NotSynchronized);
         }
 
-        let mut requests = Vec::new();
-
         let frames_to_advance = if self.frames_behind_host() > self.max_frames_behind {
             self.catchup_speed
         } else {
             NORMAL_SPEED
         };
+
+        // Pre-allocate for the expected number of frames to advance.
+        // In normal operation this is 1, in catchup mode it's catchup_speed.
+        let mut requests = Vec::with_capacity(frames_to_advance);
 
         for _ in 0..frames_to_advance {
             // get inputs for the next frame

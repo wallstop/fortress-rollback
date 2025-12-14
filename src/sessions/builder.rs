@@ -4,8 +4,12 @@ use std::sync::Arc;
 use web_time::Duration;
 
 use crate::{
-    input_queue::INPUT_QUEUE_LENGTH, network::protocol::UdpProtocol,
-    sessions::p2p_session::PlayerRegistry, telemetry::ViolationObserver, time_sync::TimeSyncConfig,
+    input_queue::INPUT_QUEUE_LENGTH,
+    network::protocol::UdpProtocol,
+    report_violation,
+    sessions::p2p_session::PlayerRegistry,
+    telemetry::{ViolationKind, ViolationObserver, ViolationSeverity},
+    time_sync::TimeSyncConfig,
     Config, DesyncDetection, FortressError, NonBlockingSocket, P2PSession, PlayerHandle,
     PlayerType, SpectatorSession, SyncTestSession,
 };
@@ -462,8 +466,8 @@ pub struct InputQueueConfig {
     /// - **TLA+**: `QUEUE_LENGTH` in `specs/tla/InputQueue.tla` (uses 3 for model checking)
     /// - **Kani**: `INPUT_QUEUE_LENGTH` in `src/input_queue.rs` (uses 8 for tractable verification)
     /// - **Z3**: `INPUT_QUEUE_LENGTH` in `tests/test_z3_verification.rs` (uses 128)
-    /// - **FORMAL_SPEC.md**: INV-4 (queue length bounds), INV-5 (index validity)
-    /// - **SPEC_DIVERGENCES.md**: Documents why different values are used
+    /// - **formal-spec.md**: INV-4 (queue length bounds), INV-5 (index validity)
+    /// - **spec-divergences.md**: Documents why different values are used
     ///
     /// Default: 128
     pub queue_length: usize,
@@ -627,20 +631,20 @@ const DEFAULT_INPUT_DELAY: usize = 0;
 /// Default peer disconnect timeout.
 ///
 /// # Formal Specification Alignment
-/// - **FORMAL_SPEC.md**: `DEFAULT_DISCONNECT_TIMEOUT = 2000ms`
+/// - **formal-spec.md**: `DEFAULT_DISCONNECT_TIMEOUT = 2000ms`
 const DEFAULT_DISCONNECT_TIMEOUT: Duration = Duration::from_millis(2000);
 const DEFAULT_DISCONNECT_NOTIFY_START: Duration = Duration::from_millis(500);
 /// Default frames per second for session timing.
 ///
 /// # Formal Specification Alignment
-/// - **FORMAL_SPEC.md**: `DEFAULT_FPS = 60`
+/// - **formal-spec.md**: `DEFAULT_FPS = 60`
 const DEFAULT_FPS: usize = 60;
 /// Default maximum prediction window in frames.
 ///
 /// # Formal Specification Alignment
 /// - **TLA+**: `MAX_PREDICTION` in `specs/tla/Rollback.tla` (set to 1-3 for model checking)
 /// - **Z3**: `MAX_PREDICTION = 8` in `tests/test_z3_verification.rs`
-/// - **FORMAL_SPEC.md**: `DEFAULT_MAX_PREDICTION = 8`, INV-2 bounds rollback depth
+/// - **formal-spec.md**: `DEFAULT_MAX_PREDICTION = 8`, INV-2 bounds rollback depth
 /// - **Kani**: Various proofs verify rollback bounds with configurable max_prediction
 const DEFAULT_MAX_PREDICTION_FRAMES: usize = 8;
 const DEFAULT_CHECK_DISTANCE: usize = 2;
@@ -841,10 +845,11 @@ impl<T: Config> SessionBuilder<T> {
 
     /// Change the amount of frames Fortress Rollback will delay the inputs for local players.
     ///
-    /// # Panics
+    /// # Note on Invalid Values
     ///
-    /// Panics if `delay` is greater than or equal to the configured `queue_length`
-    /// (default 128, configurable via [`with_input_queue_config`](Self::with_input_queue_config)).
+    /// If `delay` is greater than or equal to the configured `queue_length`
+    /// (default 128, configurable via [`with_input_queue_config`](Self::with_input_queue_config)),
+    /// a violation is reported and the delay is clamped to the maximum allowed value.
     ///
     /// This limit ensures the circular input buffer doesn't overflow.
     /// At 60fps with default settings, max delay is 127 frames (~2.1 seconds),
@@ -875,16 +880,20 @@ impl<T: Config> SessionBuilder<T> {
     /// ```
     pub fn with_input_delay(mut self, delay: usize) -> Self {
         let max_delay = self.input_queue_config.max_frame_delay();
-        assert!(
-            delay <= max_delay,
-            "Input delay {} exceeds maximum allowed value of {} (queue_length - 1). \
-             At 60fps, this would be {:.1}+ seconds of delay, which is impractical for gameplay. \
-             Consider increasing queue_length via with_input_queue_config() if you need larger delays.",
-            delay,
-            max_delay,
-            delay as f64 / 60.0
-        );
-        self.input_delay = delay;
+        if delay > max_delay {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::Configuration,
+                "Input delay {} exceeds maximum allowed value of {} (queue_length - 1). \
+                 At 60fps, this would be {:.1}+ seconds of delay. Clamping to max.",
+                delay,
+                max_delay,
+                delay as f64 / 60.0
+            );
+            self.input_delay = max_delay;
+        } else {
+            self.input_delay = delay;
+        }
         self
     }
 
@@ -1278,16 +1287,24 @@ impl<T: Config> SessionBuilder<T> {
         for (player_type, handles) in addr_count.into_iter() {
             match player_type {
                 PlayerType::Remote(peer_addr) => {
-                    self.player_reg.remotes.insert(
-                        peer_addr.clone(),
-                        self.create_endpoint(handles, peer_addr.clone(), self.local_players),
-                    );
+                    let endpoint = self
+                        .create_endpoint(handles, peer_addr.clone(), self.local_players)
+                        .ok_or_else(|| FortressError::SerializationError {
+                            context:
+                                "Failed to create protocol endpoint - input serialization error"
+                                    .to_owned(),
+                        })?;
+                    self.player_reg.remotes.insert(peer_addr, endpoint);
                 }
                 PlayerType::Spectator(peer_addr) => {
-                    self.player_reg.spectators.insert(
-                        peer_addr.clone(),
-                        self.create_endpoint(handles, peer_addr.clone(), self.num_players), // the host of the spectator sends inputs for all players
-                    );
+                    let endpoint = self
+                        .create_endpoint(handles, peer_addr.clone(), self.num_players) // the host of the spectator sends inputs for all players
+                        .ok_or_else(|| FortressError::SerializationError {
+                            context:
+                                "Failed to create spectator endpoint - input serialization error"
+                                    .to_owned(),
+                        })?;
+                    self.player_reg.spectators.insert(peer_addr, endpoint);
                 }
                 PlayerType::Local => (),
             }
@@ -1316,11 +1333,14 @@ impl<T: Config> SessionBuilder<T> {
     /// A [`SpectatorSession`] provides all functionality to connect to a remote host in a peer-to-peer fashion.
     /// The host will broadcast all confirmed inputs to this session.
     /// This session can be used to spectate a session without contributing to the game input.
+    ///
+    /// # Returns
+    /// Returns `None` if the protocol initialization fails (e.g., due to serialization issues with the Input type).
     pub fn start_spectator_session(
         self,
         host_addr: T::Address,
         socket: impl NonBlockingSocket<T::Address> + 'static,
-    ) -> SpectatorSession<T> {
+    ) -> Option<SpectatorSession<T>> {
         // create host endpoint
         let mut host = UdpProtocol::new(
             (0..self.num_players).map(PlayerHandle::new).collect(),
@@ -1334,9 +1354,9 @@ impl<T: Config> SessionBuilder<T> {
             DesyncDetection::Off,
             self.sync_config,
             self.protocol_config,
-        );
+        )?;
         host.synchronize();
-        SpectatorSession::new(
+        Some(SpectatorSession::new(
             self.num_players,
             Box::new(socket),
             host,
@@ -1344,7 +1364,7 @@ impl<T: Config> SessionBuilder<T> {
             self.spectator_config.max_frames_behind,
             self.spectator_config.catchup_speed,
             self.violation_observer,
-        )
+        ))
     }
 
     /// Consumes the builder to construct a new [`SyncTestSession`]. During a [`SyncTestSession`], Fortress Rollback will simulate a rollback every frame
@@ -1380,7 +1400,7 @@ impl<T: Config> SessionBuilder<T> {
         handles: Vec<PlayerHandle>,
         peer_addr: T::Address,
         local_players: usize,
-    ) -> UdpProtocol<T> {
+    ) -> Option<UdpProtocol<T>> {
         // create the endpoint, set parameters
         let mut endpoint = UdpProtocol::new(
             handles,
@@ -1394,10 +1414,10 @@ impl<T: Config> SessionBuilder<T> {
             self.desync_detection,
             self.sync_config,
             self.protocol_config,
-        );
+        )?;
         // start the synchronization
         endpoint.synchronize();
-        endpoint
+        Some(endpoint)
     }
 }
 
@@ -1535,17 +1555,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "exceeds maximum allowed value")]
-    fn test_with_input_delay_panics_on_excessive_delay() {
+    fn test_with_input_delay_clamps_excessive_delay() {
         use crate::input_queue::INPUT_QUEUE_LENGTH;
-        let _builder = SessionBuilder::<TestConfig>::new().with_input_delay(INPUT_QUEUE_LENGTH);
+        let builder = SessionBuilder::<TestConfig>::new().with_input_delay(INPUT_QUEUE_LENGTH);
+        // Excessive delay should be clamped to max allowed value (queue_length - 1)
+        assert_eq!(builder.input_delay, INPUT_QUEUE_LENGTH - 1);
     }
 
     #[test]
-    #[should_panic(expected = "exceeds maximum allowed value")]
-    fn test_with_input_delay_panics_on_queue_length() {
+    fn test_with_input_delay_clamps_to_queue_length() {
         use crate::input_queue::INPUT_QUEUE_LENGTH;
-        let _builder = SessionBuilder::<TestConfig>::new().with_input_delay(INPUT_QUEUE_LENGTH);
+        let builder = SessionBuilder::<TestConfig>::new().with_input_delay(INPUT_QUEUE_LENGTH * 2);
+        // Excessive delay should be clamped to max allowed value (queue_length - 1)
+        assert_eq!(builder.input_delay, INPUT_QUEUE_LENGTH - 1);
     }
 
     // ========================================================================
@@ -1621,13 +1643,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "exceeds maximum allowed value")]
-    fn test_input_queue_config_custom_queue_validates_delay() {
+    fn test_input_queue_config_custom_queue_clamps_delay() {
         // With minimal config (queue_length=32), max delay is 31
-        // Trying to set delay=32 should panic
-        let _builder = SessionBuilder::<TestConfig>::new()
+        // Trying to set delay=32 should clamp to 31
+        let builder = SessionBuilder::<TestConfig>::new()
             .with_input_queue_config(InputQueueConfig::minimal())
             .with_input_delay(32);
+        assert_eq!(builder.input_delay, 31);
     }
 }
 

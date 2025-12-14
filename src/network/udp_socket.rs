@@ -152,6 +152,16 @@ mod tests {
         all_received
     }
 
+    // Helper to convert a socket's local address to a loopback address for sending.
+    // When a socket binds to 0.0.0.0:port, its local_addr() returns 0.0.0.0:port,
+    // but on Windows (and some other platforms), you cannot send to 0.0.0.0 - you
+    // must send to 127.0.0.1 for loopback communication to work correctly.
+    #[cfg(not(miri))]
+    fn to_loopback_addr(socket: &UdpNonBlockingSocket) -> SocketAddr {
+        let local = socket.socket.local_addr().unwrap();
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local.port())
+    }
+
     #[test]
     #[cfg(not(miri))] // Miri cannot execute foreign functions like socket()
     fn test_udp_socket_bind_to_port() {
@@ -175,8 +185,10 @@ mod tests {
         let mut socket1 = UdpNonBlockingSocket::bind_to_port(0).unwrap();
         let mut socket2 = UdpNonBlockingSocket::bind_to_port(0).unwrap();
 
-        let addr1 = socket1.socket.local_addr().unwrap();
-        let addr2 = socket2.socket.local_addr().unwrap();
+        // Use loopback addresses for cross-platform compatibility.
+        // Sockets bind to 0.0.0.0:port, but on Windows you cannot send to 0.0.0.0.
+        let addr1 = to_loopback_addr(&socket1);
+        let addr2 = to_loopback_addr(&socket2);
 
         let msg = Message {
             header: MessageHeader { magic: 0x1234 },
@@ -205,7 +217,9 @@ mod tests {
         let mut socket1 = UdpNonBlockingSocket::bind_to_port(0).unwrap();
         let mut socket2 = UdpNonBlockingSocket::bind_to_port(0).unwrap();
 
-        let addr2 = socket2.socket.local_addr().unwrap();
+        // Use loopback address for cross-platform compatibility.
+        // On Windows, sending to 0.0.0.0:port doesn't work - must use 127.0.0.1.
+        let addr2 = to_loopback_addr(&socket2);
 
         let msg1 = Message {
             header: MessageHeader { magic: 0x1111 },

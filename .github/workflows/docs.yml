@@ -1,0 +1,83 @@
+name: Docs & Links
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  markdown-lint:
+    name: Markdown Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install markdownlint-cli
+        run: npm install -g markdownlint-cli
+
+      - name: Run markdownlint
+        run: markdownlint '**/*.md' --config .markdownlint.json --ignore 'target/**' --ignore 'fuzz/target/**' --ignore 'loom-tests/target/**'
+
+  link-check:
+    name: Link Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install markdown-link-check
+        run: npm install -g markdown-link-check
+
+      - name: Check markdown links (external)
+        run: |
+          find . -name "*.md" \
+            -not -path "./target/*" \
+            -not -path "./fuzz/target/*" \
+            -not -path "./loom-tests/target/*" \
+            -exec markdown-link-check --config .markdown-link-check.json {} \;
+        continue-on-error: true  # External links may have rate limits
+
+      - name: Check local file links
+        run: ./scripts/check-links.sh
+
+  rustdoc-links:
+    name: Rustdoc Link Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Check rustdoc links
+        run: |
+          # Build docs and capture warnings
+          OUTPUT=$(cargo doc --no-deps 2>&1)
+          echo "$OUTPUT"
+
+          # Check for unresolved link warnings
+          if echo "$OUTPUT" | grep -E "warning: .*unresolved link"; then
+            echo "::error::Found broken rustdoc links"
+            exit 1
+          fi
+
+      - name: Check for broken intra-doc links
+        run: |
+          # Run with RUSTDOCFLAGS to treat warnings as errors for links
+          RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --no-deps

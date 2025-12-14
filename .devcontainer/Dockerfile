@@ -27,8 +27,12 @@ RUN apt-get update && apt-get install -y \
     libclang-dev \
     # Java (for TLA+)
     default-jdk \
-    # Audio (for macroquad examples)
+    # macroquad example dependencies (graphics, audio, input)
+    # See: https://github.com/not-fl3/macroquad and examples/README.md
     libasound2-dev \
+    libx11-dev \
+    libxi-dev \
+    libgl1-mesa-dev \
     # Visualization
     graphviz \
     # Networking tools (for network testing)
@@ -90,6 +94,15 @@ RUN cargo install cargo-audit && \
     cargo install flamegraph && \
     cargo install cargo-nextest && \
     cargo install cargo-watch
+
+# Install Node.js and markdown tools (for pre-commit hooks)
+USER root
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    npm install -g markdownlint-cli markdown-link-check && \
+    pip3 install --break-system-packages pre-commit && \
+    rm -rf /var/lib/apt/lists/*
+USER vscode
 
 # Set environment variables
 ENV RUST_BACKTRACE=1
