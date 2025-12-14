@@ -627,34 +627,159 @@ pub use crate::input_queue::InputQueue;
    - Documented consequences of wrong ordering (desyncs, assertion failures)
    - Added complete example code showing proper request handling
 
-### Phase 4: Code Organization (3-5 days) 🟢
+### Phase 4: Code Organization (3-5 days) 🟡 IN PROGRESS
 
-1. **Split large files into submodules**
-   - `protocol.rs` → protocol module
-   - `sync_layer.rs` → sync_layer module
+#### 4.1 Split `sync_layer.rs` into submodules 🔄 STARTED
 
-2. **Reorganize test files**
-   - Group by feature area
-   - Move integration test helpers to common module
+**Current State:** Partial module structure created in `src/sync_layer/`
 
-3. **Extract examples to workspace member**
-   - Isolate macroquad dependency
-   - Simplify main crate dependencies
+**File Analysis (current line counts):**
+| File | Total Lines | Implementation | Tests/Kani |
+|------|-------------|----------------|------------|
+| `sync_layer.rs` | 2,259 | ~835 | ~1,424 |
+| `protocol.rs` | 2,577 | TBD | TBD |
+| `input_queue.rs` | 2,181 | TBD | TBD |
+| `builder.rs` | 1,833 | TBD | TBD |
+| `rle.rs` | 1,457 | TBD | TBD |
+
+**Proposed Module Structure for `sync_layer`:**
+```
+src/sync_layer/
+├── mod.rs              # Re-exports, SyncLayer struct + impl + tests + Kani proofs
+├── game_state_cell.rs  # GameStateCell, GameStateAccessor (~260 lines)
+└── saved_states.rs     # SavedStates container (~45 lines)
+```
+
+**Files Created (incomplete):**
+- `src/sync_layer/game_state_cell.rs` - Contains `GameStateCell` and `GameStateAccessor`
+- `src/sync_layer/saved_states.rs` - Contains `SavedStates`
+
+**Next Steps to Complete 4.1:**
+1. Create `src/sync_layer/mod.rs` with:
+   - Submodule declarations (`mod game_state_cell; mod saved_states;`)
+   - Re-exports (`pub use game_state_cell::*; pub use saved_states::*;`)
+   - Full `SyncLayer<T>` struct and all impl blocks
+   - `InvariantChecker` impl for `SyncLayer`
+   - All `#[cfg(test)]` module `sync_layer_tests` (~600 lines)
+   - All `#[cfg(kani)]` module `kani_sync_layer_proofs` (~260 lines)
+2. Delete original `src/sync_layer.rs`
+3. Update `src/lib.rs` imports (should work automatically due to Rust module resolution)
+4. Verify all tests pass: `cargo test`
+5. Verify Kani proofs: `cargo kani --tests` (optional, slow)
+
+**Dependencies for `game_state_cell.rs`:**
+```rust
+use crate::sync::{Arc, MappedMutexGuard, Mutex};
+use crate::frame_info::GameState;
+use crate::report_violation;
+use crate::telemetry::{ViolationKind, ViolationSeverity};
+use crate::Frame;
+```
+
+**Dependencies for `saved_states.rs`:**
+```rust
+use crate::sync_layer::GameStateCell;
+use crate::{FortressError, Frame};
+```
+
+**Dependencies for `mod.rs` (SyncLayer):**
+```rust
+use crate::frame_info::{GameState, PlayerInput};
+use crate::input_queue::InputQueue;
+use crate::network::messages::ConnectionStatus;
+use crate::report_violation;
+use crate::sessions::builder::SaveMode;
+use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
+use crate::{Config, FortressError, FortressRequest, Frame, InputStatus, PlayerHandle};
+```
+
+#### 4.2 Split `protocol.rs` into submodules (NOT STARTED)
+
+**Proposed Structure:**
+```
+src/network/protocol/
+├── mod.rs              # Re-exports, UdpProtocol struct
+├── state_machine.rs    # ProtocolState enum, state transitions
+├── handlers.rs         # Message handling (on_* methods)
+└── sending.rs          # Message sending (send_* methods)
+```
+
+#### 4.3 Reorganize test files (NOT STARTED)
+
+**Current Structure:**
+```
+tests/
+├── test_p2p_session.rs
+├── test_p2p_session_enum.rs
+├── test_synctest_session.rs
+├── test_synctest_session_enum.rs
+├── test_p2p_spectator_session.rs
+├── test_determinism.rs
+├── test_network_resilience.rs
+├── test_multi_process_network.rs
+├── test_internal_invariants.rs
+├── test_internal_property.rs
+├── test_metamorphic.rs
+├── test_z3_verification.rs
+└── ...
+```
+
+**Proposed Structure:**
+```
+tests/
+├── sessions/
+│   ├── p2p.rs
+│   ├── p2p_enum.rs
+│   ├── spectator.rs
+│   ├── synctest.rs
+│   └── synctest_enum.rs
+├── network/
+│   ├── resilience.rs
+│   └── multi_process.rs
+├── verification/
+│   ├── determinism.rs
+│   ├── invariants.rs
+│   ├── property.rs
+│   ├── metamorphic.rs
+│   └── z3.rs
+└── common/
+    ├── mod.rs
+    ├── stubs.rs
+    └── config.rs
+```
+
+#### 4.4 Extract examples to workspace member (NOT STARTED)
+
+**Goal:** Isolate `macroquad` dependency (requires ALSA/X11 on Linux)
+
+**Proposed Structure:**
+```toml
+# Root Cargo.toml
+[workspace]
+members = [".", "examples/game"]
+
+# examples/game/Cargo.toml
+[package]
+name = "fortress-examples"
+version = "0.1.0"
+
+[dependencies]
+fortress-rollback = { path = "../.." }
+macroquad = "0.3"
+```
 
 ### Phase 5: Documentation Polish (1-2 days) 🟢
 
-1. **Add magic number documentation**
-   - RECOMMENDATION_INTERVAL
-   - MIN_RECOMMENDATION
-   - MAX_EVENT_QUEUE_SIZE
+1. **Add control flow diagrams** (NOT STARTED)
+   - `advance_frame` state machine diagram
+   - Protocol state transitions diagram
+   - Add to `docs/architecture.md`
 
-2. **Add control flow diagrams**
-   - advance_frame state machine
-   - Protocol state transitions
-
-3. **Document Loom testing strategy**
-   - Why certain tests exist
-   - How to run and interpret
+2. **Document Loom testing strategy** (NOT STARTED)
+   - Why `GameStateCell` needs concurrent testing
+   - How to run: `cd loom-tests && cargo test`
+   - How to interpret results
+   - Add to `loom-tests/README.md`
 
 ---
 
@@ -669,14 +794,35 @@ Fortress Rollback is an **exemplary Rust library** demonstrating how to build co
 - Comprehensive formal verification
 - Excellent documentation
 
-**Primary Areas for Improvement:**
-1. A few remaining `assert!` macros in RNG code
-2. Performance optimization opportunities in hot paths
-3. Large file sizes could be split for maintainability
-4. Example dependencies could be better isolated
+**Remaining Work (Phase 4-5):**
+1. Complete `sync_layer` module split (partially started)
+2. Split `protocol.rs` into submodules
+3. Reorganize test files into subdirectories
+4. Extract examples to workspace member
+5. Add architectural diagrams
+6. Document Loom testing strategy
 
-The action plan prioritizes correctness fixes first (Phase 1), then performance (Phase 2), usability (Phase 3), and finally organizational improvements (Phases 4-5). Total estimated effort: 10-15 days for all phases.
+**Estimated Remaining Effort:** 4-6 days
+
+---
+
+## Progress Log
+
+| Date | Phase | Item | Status |
+|------|-------|------|--------|
+| Dec 13 | 1 | Convert RNG `assert!` to `report_violation!` | ✅ |
+| Dec 13 | 1 | Clarify InputQueue gap-filling code | ✅ |
+| Dec 13 | 1 | Audit `millis_since_epoch()` callers | ✅ |
+| Dec 13 | 2 | Optimize `advance_frame()` allocations | ✅ |
+| Dec 13 | 2 | Add P2P session benchmarks | ✅ |
+| Dec 13 | 2 | Document magic numbers | ✅ |
+| Dec 13 | 3 | Document system dependencies | ✅ |
+| Dec 13 | 3 | Improve Config trait docs | ✅ |
+| Dec 13 | 3 | Improve request ordering docs | ✅ |
+| Dec 14 | 4 | Analyze sync_layer.rs structure | ✅ |
+| Dec 14 | 4 | Create sync_layer submodule files | 🔄 Partial |
 
 ---
 
 *This analysis was conducted on December 13, 2025 by Claude Opus 4.5 at the request of the project maintainer.*
+*Updated December 14, 2025 with Phase 4 progress and detailed next steps.*
