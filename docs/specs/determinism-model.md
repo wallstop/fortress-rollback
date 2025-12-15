@@ -266,7 +266,6 @@ fn compute_checksum(state: &GameState) -> u128 {
 ```
 
 > **Note:** The `network::codec` module ensures consistent bincode configuration (fixed-size integers) across all serialization calls.
-```
 
 ### R4: Avoid Platform-Specific Behavior
 

@@ -240,6 +240,7 @@ if !observer.is_empty() {
 ```
 
 Built-in observers:
+
 - **`TracingObserver`** (default): Logs to the `tracing` crate
 - **`CollectingObserver`**: Stores violations for testing/debugging
 - **`CompositeObserver`**: Forwards to multiple observers

@@ -276,13 +276,27 @@ run_kani() {
     summary_line=$(grep "Complete - " "$output_file" 2>/dev/null | tail -1 || echo "")
     
     if [[ -n "$summary_line" ]]; then
-        PASSED=$(echo "$summary_line" | grep -oP '\d+ successfully' | grep -oP '\d+' || echo "0")
-        FAILED=$(echo "$summary_line" | grep -oP '\d+ failures' | grep -oP '\d+' || echo "0")
-        TOTAL=$(echo "$summary_line" | grep -oP '\d+ total' | grep -oP '\d+' || echo "0")
+        # Extract numbers using sed for better portability (grep -P not available everywhere)
+        # Use tr -d to strip any whitespace/newlines from extracted values
+        PASSED=$(echo "$summary_line" | sed -n 's/.*\([0-9][0-9]*\) successfully.*/\1/p' | head -1 | tr -d '[:space:]')
+        FAILED=$(echo "$summary_line" | sed -n 's/.*\([0-9][0-9]*\) failure.*/\1/p' | head -1 | tr -d '[:space:]')
+        TOTAL=$(echo "$summary_line" | sed -n 's/.*\([0-9][0-9]*\) total.*/\1/p' | head -1 | tr -d '[:space:]')
+        # Default to 0 if extraction failed
+        PASSED=${PASSED:-0}
+        FAILED=${FAILED:-0}
+        TOTAL=${TOTAL:-0}
     else
         # Fallback to counting individual results
-        PASSED=$(grep -c "VERIFICATION:- SUCCESSFUL" "$output_file" 2>/dev/null || echo "0")
-        FAILED=$(grep -c "VERIFICATION:- FAILED" "$output_file" 2>/dev/null || echo "0")
+        # Note: grep -c returns exit code 1 when no matches (but still outputs "0")
+        # Using || VARNAME=0 pattern to handle this correctly
+        # Use tr -d to strip any whitespace/newlines from grep output
+        PASSED=$(grep -c "VERIFICATION:- SUCCESSFUL" "$output_file" 2>/dev/null | tr -d '[:space:]') || PASSED=0
+        FAILED=$(grep -c "VERIFICATION:- FAILED" "$output_file" 2>/dev/null | tr -d '[:space:]') || FAILED=0
+        # Ensure values are clean integers before arithmetic
+        PASSED=${PASSED%%[^0-9]*}
+        FAILED=${FAILED%%[^0-9]*}
+        PASSED=${PASSED:-0}
+        FAILED=${FAILED:-0}
         TOTAL=$((PASSED + FAILED))
     fi
     

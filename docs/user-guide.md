@@ -1826,6 +1826,7 @@ Example JSON output:
 ```
 
 Key serialization behaviors:
+
 - `severity` and `kind` are serialized as snake_case strings (`"warning"`, `"frame_sync"`)
 - `frame` is serialized as an integer for valid frames, or `null` for `None`/`Frame::NULL`
 - `context` is serialized as a JSON object with string keys and values
