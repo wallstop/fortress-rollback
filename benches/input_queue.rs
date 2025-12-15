@@ -5,8 +5,9 @@
 //! Note: InputQueue is internal, so we benchmark through the public session APIs.
 //! For direct InputQueue benchmarks, the module would need to be made public.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use fortress_rollback::Frame;
+use std::hint::black_box;
 
 fn bench_frame_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("Frame");

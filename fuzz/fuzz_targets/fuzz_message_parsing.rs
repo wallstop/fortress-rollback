@@ -13,17 +13,18 @@
 
 use libfuzzer_sys::fuzz_target;
 
-// Import the Message type from the public API
+// Import the Message type and codec from the public API
+use fortress_rollback::network::codec;
 use fortress_rollback::Message;
 
 fuzz_target!(|data: &[u8]| {
-    // Test bincode deserialization - should never panic
+    // Test codec deserialization - should never panic
     // Even malformed data should return Err, not panic
-    let _result: Result<Message, _> = bincode::deserialize(data);
+    let _result: Result<Message, _> = codec::decode_value(data);
 
     // If deserialization succeeded, ensure re-serialization works
-    if let Ok(msg) = bincode::deserialize::<Message>(data) {
+    if let Ok(msg) = codec::decode_value::<Message>(data) {
         // Round-trip should work without panicking
-        let _serialized = bincode::serialize(&msg);
+        let _serialized = codec::encode(&msg);
     }
 });

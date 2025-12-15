@@ -3,21 +3,36 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
 };
 
+use crate::network::codec;
 use crate::report_violation;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::{network::messages::Message, NonBlockingSocket};
 
 const RECV_BUFFER_SIZE: usize = 4096;
+/// Size of the pre-allocated send buffer. This should be large enough to hold
+/// any message we might send. 1KB is generous for typical network messages.
+const SEND_BUFFER_SIZE: usize = 1024;
 /// A packet larger than this may be fragmented, so ideally we wouldn't send packets larger than
 /// this.
 /// Source: <https://stackoverflow.com/a/35697810/775982>
 const IDEAL_MAX_UDP_PACKET_SIZE: usize = 508;
 
 /// A simple non-blocking UDP socket to use with Fortress Rollback Sessions. Listens to 0.0.0.0 on a given port.
+///
+/// # Performance
+///
+/// This socket maintains internal buffers for both sending and receiving to minimize
+/// allocations in the hot path. The send buffer is reused across calls to [`send_to`],
+/// and the receive buffer is sized to handle typical UDP MTU sizes.
+///
+/// [`send_to`]: NonBlockingSocket::send_to
 #[derive(Debug)]
 pub struct UdpNonBlockingSocket {
     socket: UdpSocket,
-    buffer: [u8; RECV_BUFFER_SIZE],
+    /// Receive buffer - reused across recv_from calls
+    recv_buffer: [u8; RECV_BUFFER_SIZE],
+    /// Send buffer - reused across send_to calls to avoid allocation
+    send_buffer: [u8; SEND_BUFFER_SIZE],
 }
 
 impl UdpNonBlockingSocket {
@@ -28,17 +43,45 @@ impl UdpNonBlockingSocket {
         socket.set_nonblocking(true)?;
         Ok(Self {
             socket,
-            buffer: [0; RECV_BUFFER_SIZE],
+            recv_buffer: [0; RECV_BUFFER_SIZE],
+            send_buffer: [0; SEND_BUFFER_SIZE],
         })
     }
 }
 
 impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
     fn send_to(&mut self, msg: &Message, addr: &SocketAddr) {
-        // Serialize the message; if this fails, log an error and skip sending.
-        // This should never happen with well-formed Message types, but we don't want to panic.
-        let buf = match bincode::serialize(&msg) {
-            Ok(buf) => buf,
+        // Serialize into the pre-allocated send buffer to avoid allocation.
+        // This is the hot path for network sends.
+        let len = match codec::encode_into(msg, &mut self.send_buffer) {
+            Ok(len) => len,
+            Err(codec::CodecError::BufferTooSmall { provided, .. }) => {
+                // The message is larger than our send buffer. This is unusual but we can
+                // handle it by falling back to allocation. Log a warning since this suggests
+                // the message is unusually large (possibly large input structs).
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "Message too large for send buffer ({} bytes), falling back to allocation. Consider reducing input struct size.",
+                    provided
+                );
+                // Fall back to allocating encode
+                match codec::encode(msg) {
+                    Ok(buf) => {
+                        self.send_encoded_packet(&buf, addr);
+                        return;
+                    },
+                    Err(e) => {
+                        report_violation!(
+                            ViolationSeverity::Error,
+                            ViolationKind::NetworkProtocol,
+                            "Failed to serialize message: {}",
+                            e
+                        );
+                        return;
+                    },
+                }
+            },
             Err(e) => {
                 report_violation!(
                     ViolationSeverity::Error,
@@ -50,6 +93,56 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
             },
         };
 
+        self.send_encoded_packet(&self.send_buffer[..len], addr);
+    }
+
+    fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
+        // Pre-allocate for typical case of 1-4 messages per poll
+        let mut received_messages = Vec::with_capacity(4);
+        loop {
+            match self.socket.recv_from(&mut self.recv_buffer) {
+                Ok((number_of_bytes, src_addr)) => {
+                    // Defensive check: if we received more bytes than buffer allows,
+                    // something is seriously wrong - skip this packet
+                    if number_of_bytes > RECV_BUFFER_SIZE {
+                        report_violation!(
+                            ViolationSeverity::Error,
+                            ViolationKind::NetworkProtocol,
+                            "Received {} bytes but buffer is only {} bytes",
+                            number_of_bytes,
+                            RECV_BUFFER_SIZE
+                        );
+                        continue;
+                    }
+                    if let Ok(msg) = codec::decode_value(&self.recv_buffer[0..number_of_bytes]) {
+                        received_messages.push((src_addr, msg));
+                    }
+                },
+                // there are no more messages
+                Err(ref err) if err.kind() == ErrorKind::WouldBlock => return received_messages,
+                // datagram socket sometimes get this error as a result of calling the send_to method
+                Err(ref err) if err.kind() == ErrorKind::ConnectionReset => continue,
+                // For other errors, log and stop receiving (don't panic)
+                Err(err) => {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "Unexpected socket error: {:?}: {}",
+                        err.kind(),
+                        err
+                    );
+                    return received_messages;
+                },
+            }
+        }
+    }
+}
+
+impl UdpNonBlockingSocket {
+    /// Sends an already-encoded packet to the given address.
+    ///
+    /// This is a helper that handles packet size warnings and send errors.
+    fn send_encoded_packet(&self, buf: &[u8], addr: &SocketAddr) {
         // Overly large packets risk being fragmented, which can increase packet loss (any fragment
         // of a packet getting lost will cause the whole fragment to be lost), or increase latency
         // to be delayed (have to wait for all fragments to arrive).
@@ -75,7 +168,7 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
 
         // Send the packet; if this fails, log an error but don't panic.
         // UDP is best-effort, so dropped packets are expected behavior.
-        if let Err(e) = self.socket.send_to(&buf, addr) {
+        if let Err(e) = self.socket.send_to(buf, addr) {
             report_violation!(
                 ViolationSeverity::Warning,
                 ViolationKind::NetworkProtocol,
@@ -83,47 +176,6 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
                 addr,
                 e
             );
-        }
-    }
-
-    fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
-        // Pre-allocate for typical case of 1-4 messages per poll
-        let mut received_messages = Vec::with_capacity(4);
-        loop {
-            match self.socket.recv_from(&mut self.buffer) {
-                Ok((number_of_bytes, src_addr)) => {
-                    // Defensive check: if we received more bytes than buffer allows,
-                    // something is seriously wrong - skip this packet
-                    if number_of_bytes > RECV_BUFFER_SIZE {
-                        report_violation!(
-                            ViolationSeverity::Error,
-                            ViolationKind::NetworkProtocol,
-                            "Received {} bytes but buffer is only {} bytes",
-                            number_of_bytes,
-                            RECV_BUFFER_SIZE
-                        );
-                        continue;
-                    }
-                    if let Ok(msg) = bincode::deserialize(&self.buffer[0..number_of_bytes]) {
-                        received_messages.push((src_addr, msg));
-                    }
-                },
-                // there are no more messages
-                Err(ref err) if err.kind() == ErrorKind::WouldBlock => return received_messages,
-                // datagram socket sometimes get this error as a result of calling the send_to method
-                Err(ref err) if err.kind() == ErrorKind::ConnectionReset => continue,
-                // For other errors, log and stop receiving (don't panic)
-                Err(err) => {
-                    report_violation!(
-                        ViolationSeverity::Error,
-                        ViolationKind::NetworkProtocol,
-                        "Unexpected socket error: {:?}: {}",
-                        err.kind(),
-                        err
-                    );
-                    return received_messages;
-                },
-            }
         }
     }
 }
@@ -263,5 +315,14 @@ mod tests {
     fn test_recv_buffer_size_constant() {
         // Verify the buffer size is 4KB
         assert_eq!(RECV_BUFFER_SIZE, 4096);
+    }
+
+    #[test]
+    fn test_send_buffer_size_constant() {
+        // Verify the send buffer is 1KB, which is generous for typical messages
+        // This should be larger than IDEAL_MAX_UDP_PACKET_SIZE to handle edge cases
+        assert_eq!(SEND_BUFFER_SIZE, 1024);
+        // Compile-time assertion that send buffer is larger than ideal packet size
+        const _: () = assert!(SEND_BUFFER_SIZE > IDEAL_MAX_UDP_PACKET_SIZE);
     }
 }

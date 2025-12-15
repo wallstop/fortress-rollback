@@ -37,32 +37,35 @@ Fortress Rollback is a Rust implementation of rollback networking for real-time 
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         User Application                         │
+│                         User Application                        │
 ├─────────────────────────────────────────────────────────────────┤
-│                        Session Layer                             │
+│                        Session Layer                            │
 │  ┌─────────────┐  ┌──────────────────┐  ┌───────────────────┐   │
 │  │ P2PSession  │  │ SpectatorSession │  │  SyncTestSession  │   │
 │  └─────────────┘  └──────────────────┘  └───────────────────┘   │
 ├─────────────────────────────────────────────────────────────────┤
-│                      Synchronization Layer                       │
+│                      Synchronization Layer                      │
 │  ┌─────────────────────────────────────────────────────────┐    │
-│  │                      SyncLayer                           │    │
+│  │                      SyncLayer                          │    │
 │  │  ┌──────────────┐  ┌────────────────┐  ┌─────────────┐  │    │
 │  │  │ InputQueue[] │  │  SavedStates   │  │  TimeSync   │  │    │
 │  │  └──────────────┘  └────────────────┘  └─────────────┘  │    │
 │  └─────────────────────────────────────────────────────────┘    │
 ├─────────────────────────────────────────────────────────────────┤
-│                        Network Layer                             │
+│                        Network Layer                            │
 │  ┌───────────────────┐  ┌────────────────┐  ┌────────────────┐  │
-│  │   UdpProtocol     │  │   Messages     │  │  Compression   │  │
+│  │   UdpProtocol     │  │   Messages     │  │     Codec      │  │
 │  └───────────────────┘  └────────────────┘  └────────────────┘  │
+│                         ┌────────────────┐                      │
+│                         │  Compression   │                      │
+│                         └────────────────┘                      │
 ├─────────────────────────────────────────────────────────────────┤
-│                        Socket Layer                              │
+│                        Socket Layer                             │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │              NonBlockingSocket (trait)                    │   │
-│  │  ┌───────────────────┐  ┌──────────────────────────────┐ │   │
-│  │  │ UdpNonBlockingSocket│ │      Custom Sockets         │ │   │
-│  │  └───────────────────┘  └──────────────────────────────┘ │   │
+│  │              NonBlockingSocket (trait)                   │   │
+│  │  ┌─────────────────────┐  ┌────────────────────────────┐ │   │
+│  │  │ UdpNonBlockingSocket│  │      Custom Sockets        │ │   │
+│  │  └─────────────────────┘  └────────────────────────────┘ │   │
 │  └──────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -370,7 +373,7 @@ This establishes:
 Regular message exchange:
 
 ```
-┌──────────────────────────────────────────────────────────────┐
+┌───────────────────────────────────────────────────────────────┐
 │  Message                                                      │
 │  ├── header: MessageHeader                                    │
 │  │   ├── magic: u16          // Identifies this session       │
@@ -381,7 +384,7 @@ Regular message exchange:
 │      ├── QualityReport       // Frame advantage info          │
 │      ├── QualityReply        // Response to quality report    │
 │      └── ChecksumReport      // For desync detection          │
-└──────────────────────────────────────────────────────────────┘
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ### Time Synchronization
@@ -505,13 +508,97 @@ This is used to:
 
 ## Network Protocol
 
-### Message Compression
+### Binary Codec (`network::codec`)
 
-Inputs are delta-compressed:
+The codec module provides centralized, deterministic serialization for all network messages using bincode. It encapsulates configuration to ensure consistent encoding across the codebase.
 
-1. First input sent in full
-2. Subsequent inputs XOR'd against previous
-3. Receiver reconstructs using same process
+**Key Design Points:**
+
+- **Centralized Configuration**: Single bincode config with fixed-size integers for deterministic message sizes
+- **Zero-Allocation Options**: `encode_into` writes to existing buffers for hot paths
+- **Clear Error Handling**: `CodecResult<T>` with descriptive error variants
+
+```rust
+use fortress_rollback::network::codec::{encode, decode, encode_into, CodecError};
+
+// Encode any serializable type (allocates)
+let data: u32 = 42;
+let bytes = encode(&data).expect("encoding should succeed");
+
+// Decode from bytes
+let (decoded, bytes_read): (u32, _) = decode(&bytes).expect("decoding should succeed");
+assert_eq!(data, decoded);
+
+// Zero-allocation encoding into pre-allocated buffer
+let mut buffer = [0u8; 256];
+let len = encode_into(&data, &mut buffer).expect("encoding should succeed");
+```
+
+**Available Functions:**
+
+| Function | Description | Use Case |
+|----------|-------------|----------|
+| `encode()` | Encode to new `Vec<u8>` | Simple/infrequent encoding |
+| `encode_into()` | Encode to existing slice | Hot paths, buffer reuse |
+| `encode_append()` | Append to existing `Vec` | Incremental message building |
+| `decode()` | Decode with bytes consumed | When you need byte count |
+| `decode_value()` | Decode ignoring byte count | Convenience when count not needed |
+
+**Why Fixed-Size Integers:**
+
+- Ensures deterministic message sizes (critical for rollback)
+- Standard config compatible across platforms
+- No variable-length encoding overhead
+
+### Input Compression (`network::compression`)
+
+Inputs are compressed using a two-stage pipeline to minimize bandwidth:
+
+```
+Input Bytes → XOR Delta Encoding → RLE Compression → Network
+```
+
+**Stage 1: XOR Delta Encoding**
+
+Each input is XOR'd against a reference (typically the first input):
+
+```
+Reference:  [0x01, 0x02, 0x03, 0x04]
+Input:      [0x01, 0x02, 0x05, 0x04]
+XOR Result: [0x00, 0x00, 0x06, 0x00]  // Many zeros = compressible!
+```
+
+Since consecutive game inputs are often similar (player holds same button), XOR produces many zero bytes.
+
+**Stage 2: RLE Compression**
+
+Run-Length Encoding compresses sequences of identical bytes:
+
+```
+[0x00, 0x00, 0x00, 0x00, 0x06, 0x00] → [RLE: 4×0x00, 1×0x06, 1×0x00]
+```
+
+**Compression Pipeline:**
+
+```rust,ignore
+// Internal usage (not public API)
+use fortress_rollback::__internal::{encode, decode, delta_encode, delta_decode};
+
+// Encode: XOR delta + RLE
+let reference = vec![0, 0, 0, 1];
+let inputs = vec![vec![0, 0, 1, 1], vec![0, 1, 0, 1]];
+let compressed = encode(&reference, inputs.iter());
+
+// Decode: RLE decompress + XOR reverse
+let decompressed = decode(&reference, &compressed).expect("decode should succeed");
+assert_eq!(inputs, decompressed);
+```
+
+**Properties:**
+
+- Encoding is deterministic (same inputs → same output)
+- XOR is self-inverse: `(a ⊕ b) ⊕ b = a`
+- Works best when inputs change slowly (typical for games)
 
 ### Reliability
 

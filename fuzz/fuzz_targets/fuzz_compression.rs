@@ -11,6 +11,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use fortress_rollback::network::codec;
 use libfuzzer_sys::fuzz_target;
 
 /// Structured input for compression fuzzing
@@ -50,21 +51,21 @@ fuzz_target!(|input: CompressionInput| {
             .collect();
 
         // Ensure operations don't panic
-        let _ = bincode::serialize(&xor_result);
+        let _ = codec::encode(&xor_result);
     }
 
     // Test boundary conditions:
     // - All zeros
     let zeros = vec![0u8; input.reference.len()];
-    let _ = bincode::serialize(&zeros);
+    let _ = codec::encode(&zeros);
 
     // - All ones
     let ones = vec![0xFFu8; input.reference.len()];
-    let _ = bincode::serialize(&ones);
+    let _ = codec::encode(&ones);
 
     // - Alternating pattern
     let alternating: Vec<u8> = (0..input.reference.len())
         .map(|i| if i % 2 == 0 { 0x55 } else { 0xAA })
         .collect();
-    let _ = bincode::serialize(&alternating);
+    let _ = codec::encode(&alternating);
 });

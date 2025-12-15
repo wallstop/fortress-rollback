@@ -293,6 +293,8 @@ mod tests {
 
     #[test]
     fn test_message_serialization() {
+        use crate::network::codec;
+
         let msg = Message {
             header: MessageHeader { magic: 0xABCD },
             body: MessageBody::SyncRequest(SyncRequest {
@@ -301,14 +303,16 @@ mod tests {
         };
 
         // Test that serialization/deserialization roundtrips correctly
-        let serialized = bincode::serialize(&msg).expect("serialization should succeed");
-        let deserialized: Message =
-            bincode::deserialize(&serialized).expect("deserialization should succeed");
+        let serialized = codec::encode(&msg).expect("serialization should succeed");
+        let (deserialized, _): (Message, _) =
+            codec::decode(&serialized).expect("deserialization should succeed");
         assert_eq!(msg, deserialized);
     }
 
     #[test]
     fn test_input_serialization() {
+        use crate::network::codec;
+
         let input = Input {
             peer_connect_status: vec![
                 ConnectionStatus {
@@ -326,9 +330,9 @@ mod tests {
             bytes: vec![1, 2, 3, 4, 5],
         };
 
-        let serialized = bincode::serialize(&input).expect("serialization should succeed");
-        let deserialized: Input =
-            bincode::deserialize(&serialized).expect("deserialization should succeed");
+        let serialized = codec::encode(&input).expect("serialization should succeed");
+        let (deserialized, _): (Input, _) =
+            codec::decode(&serialized).expect("deserialization should succeed");
         assert_eq!(input, deserialized);
     }
 

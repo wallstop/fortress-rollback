@@ -103,7 +103,11 @@ impl Game {
     // creating a checksum here is only relevant for SyncTestSessions
     fn save_game_state(&mut self, cell: GameStateCell<State>, frame: Frame) {
         assert_eq!(self.game_state.frame, frame.as_i32());
-        let buffer = bincode::serialize(&self.game_state).unwrap();
+        let buffer = bincode::serde::encode_to_vec(
+            &self.game_state,
+            bincode::config::standard().with_fixed_int_encoding(),
+        )
+        .unwrap();
         let checksum = fletcher16(&buffer) as u128;
         cell.save(frame, Some(self.game_state.clone()), Some(checksum));
     }
@@ -119,7 +123,11 @@ impl Game {
 
         // remember checksum to render it later
         // it is very inefficient to serialize the gamestate here just for the checksum
-        let buffer = bincode::serialize(&self.game_state).unwrap();
+        let buffer = bincode::serde::encode_to_vec(
+            &self.game_state,
+            bincode::config::standard().with_fixed_int_encoding(),
+        )
+        .unwrap();
         let checksum = fletcher16(&buffer) as u64;
         self.last_checksum = (Frame::new(self.game_state.frame), checksum);
         if self.game_state.frame % CHECKSUM_PERIOD == 0 {

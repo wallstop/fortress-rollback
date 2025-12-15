@@ -255,12 +255,17 @@ fn save_state(cell: GameStateCell<State>, frame: Frame, state: &GameState) {
 Checksums must be computed deterministically:
 
 ```rust,ignore
+use fortress_rollback::network::codec::encode;
+
 fn compute_checksum(state: &GameState) -> u128 {
-    // Use a deterministic serialization
-    let bytes = bincode::serialize(state).expect("serialize");
+    // Use the library's codec for deterministic serialization
+    let bytes = encode(state).expect("serialize");
     // Use a deterministic hash
     fletcher16(&bytes) as u128
 }
+```
+
+> **Note:** The `network::codec` module ensures consistent bincode configuration (fixed-size integers) across all serialization calls.
 ```
 
 ### R4: Avoid Platform-Specific Behavior

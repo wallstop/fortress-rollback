@@ -2,7 +2,8 @@
 //!
 //! Run with: cargo bench --bench sync_layer
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 
 // Placeholder benchmark - will be expanded once SyncLayer API is finalized
 fn bench_sync_layer_placeholder(c: &mut Criterion) {

@@ -17,6 +17,14 @@ This directory contains the user-facing documentation for the Fortress Rollback 
 | [Architecture](architecture.md) | Internal architecture, data flow, and design |
 | [Changelog](changelog.md) | Version history and breaking changes |
 
+### Network Layer Reference
+
+The architecture guide includes detailed documentation of the network serialization layer:
+
+- **[Binary Codec](architecture.md#binary-codec-networkcodec)** - Centralized bincode serialization with zero-allocation options
+- **[Input Compression](architecture.md#input-compression-networkcompression)** - XOR delta encoding + RLE compression pipeline
+- **[Message Types](architecture.md#during-gameplay)** - Protocol message format and types
+
 ## Formal Specifications
 
 | Document | Description |
@@ -33,12 +41,6 @@ This directory contains the user-facing documentation for the Fortress Rollback 
 | [Contributing](contributing.md) | Guidelines for contributors |
 | [Code of Conduct](code-of-conduct.md) | Community standards |
 | [Release Process](release.md) | How releases are managed |
-
-## Development
-
-| Document | Description |
-|----------|-------------|
-| [Development Plan](plan.md) | Project roadmap and status |
 
 ## Related Resources
 

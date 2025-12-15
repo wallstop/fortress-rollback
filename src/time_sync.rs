@@ -29,6 +29,7 @@ const DEFAULT_FRAME_WINDOW_SIZE: usize = 30;
 /// };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "TimeSyncConfig has no effect unless passed to SessionBuilder::with_time_sync_config()"]
 pub struct TimeSyncConfig {
     /// The number of frames to average when calculating frame advantage.
     /// A larger window provides a more stable (less jittery) sync but
@@ -49,7 +50,6 @@ impl Default for TimeSyncConfig {
 
 impl TimeSyncConfig {
     /// Creates a new `TimeSyncConfig` with default values.
-    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -58,7 +58,6 @@ impl TimeSyncConfig {
     ///
     /// Uses a smaller window to react quickly to network changes,
     /// at the cost of potentially more fluctuation in game speed.
-    #[must_use]
     pub fn responsive() -> Self {
         Self { window_size: 15 }
     }
@@ -67,7 +66,6 @@ impl TimeSyncConfig {
     ///
     /// Uses a larger window to provide stable, smooth synchronization,
     /// at the cost of slower adaptation to network changes.
-    #[must_use]
     pub fn smooth() -> Self {
         Self { window_size: 60 }
     }
@@ -75,7 +73,6 @@ impl TimeSyncConfig {
     /// Configuration preset for LAN play.
     ///
     /// Uses a small window since LAN connections are typically stable.
-    #[must_use]
     pub fn lan() -> Self {
         Self { window_size: 10 }
     }
@@ -88,7 +85,6 @@ impl TimeSyncConfig {
     ///
     /// Trade-off: Slower adaptation to actual network condition changes,
     /// but much smoother gameplay during normal mobile network variance.
-    #[must_use]
     pub fn mobile() -> Self {
         Self { window_size: 90 }
     }
@@ -98,7 +94,6 @@ impl TimeSyncConfig {
     /// Uses a smaller window for faster adaptation to network changes,
     /// prioritizing accurate sync over smooth speed transitions.
     /// Assumes good, stable network conditions.
-    #[must_use]
     pub fn competitive() -> Self {
         Self { window_size: 20 }
     }

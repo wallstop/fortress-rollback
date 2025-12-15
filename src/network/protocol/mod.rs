@@ -1842,7 +1842,7 @@ mod tests {
 
         // First input comes with frame 0, encoded relative to zeroed bytes
         let test_input = TestInput { inp: 42 };
-        let test_bytes = bincode::serialize(&test_input).unwrap();
+        let test_bytes = crate::network::codec::encode(&test_input).unwrap();
 
         // The encoded bytes should have the same size as the reference
         assert_eq!(

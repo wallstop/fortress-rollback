@@ -383,11 +383,13 @@ fn handle_requests(
 
 ### Computing Checksums
 
-Checksums enable desync detection. Serialize your state and hash it:
+Checksums enable desync detection. Serialize your state and hash it using the library's codec module:
 
 ```rust
+use fortress_rollback::network::codec::encode;
+
 fn compute_checksum(state: &GameState) -> u128 {
-    let bytes = bincode::serialize(state).expect("Serialization failed");
+    let bytes = encode(state).expect("Serialization failed");
     fletcher16(&bytes) as u128
 }
 
@@ -401,6 +403,8 @@ fn fletcher16(data: &[u8]) -> u16 {
     (sum2 << 8) | sum1
 }
 ```
+
+> **Note:** The `network::codec` module uses a fixed-integer bincode configuration that ensures deterministic serialization across platforms. This is the same configuration used internally for network messages.
 
 ---
 
@@ -1784,7 +1788,7 @@ This produces machine-parseable output like:
 
 All telemetry types implement `serde::Serialize` for direct JSON serialization:
 
-```rust
+```rust,ignore
 use fortress_rollback::telemetry::{SpecViolation, ViolationSeverity, ViolationKind};
 use fortress_rollback::Frame;
 

@@ -71,6 +71,11 @@ pub mod sessions {
 #[doc(hidden)]
 pub mod network {
     pub mod chaos_socket;
+    /// Binary codec for network message serialization.
+    ///
+    /// Provides centralized, zero-allocation-where-possible encoding and decoding
+    /// of network messages using bincode.
+    pub mod codec;
     #[doc(hidden)]
     pub mod compression;
     #[doc(hidden)]

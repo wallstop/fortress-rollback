@@ -47,6 +47,7 @@ use crate::NonBlockingSocket;
 /// Use [`ChaosConfig::builder()`] for a fluent configuration API.
 /// All durations default to zero and all rates default to 0.0 (no effect).
 #[derive(Debug, Clone)]
+#[must_use = "ChaosConfig has no effect unless passed to ChaosSocket::new()"]
 pub struct ChaosConfig {
     /// Base latency added to all packets (default: 0ms)
     pub latency: Duration,
@@ -106,45 +107,64 @@ impl ChaosConfig {
     }
 
     /// Creates a config with no chaos (passthrough mode).
-    #[must_use]
     pub fn passthrough() -> Self {
         Self::default()
     }
 
     /// Creates a config simulating high latency conditions.
-    #[must_use]
     pub fn high_latency(latency_ms: u64) -> Self {
+        // All fields explicitly listed to force consideration when new fields are added
         Self {
             latency: Duration::from_millis(latency_ms),
-            ..Default::default()
+            jitter: Duration::ZERO,
+            send_loss_rate: 0.0,
+            receive_loss_rate: 0.0,
+            duplication_rate: 0.0,
+            reorder_buffer_size: 0,
+            reorder_rate: 0.0,
+            burst_loss_probability: 0.0,
+            burst_loss_length: 0,
+            seed: None,
         }
     }
 
     /// Creates a config simulating packet loss.
-    #[must_use]
     pub fn lossy(loss_rate: f64) -> Self {
+        // All fields explicitly listed to force consideration when new fields are added
         Self {
+            latency: Duration::ZERO,
+            jitter: Duration::ZERO,
             send_loss_rate: loss_rate,
             receive_loss_rate: loss_rate,
-            ..Default::default()
+            duplication_rate: 0.0,
+            reorder_buffer_size: 0,
+            reorder_rate: 0.0,
+            burst_loss_probability: 0.0,
+            burst_loss_length: 0,
+            seed: None,
         }
     }
 
     /// Creates a config simulating typical poor network conditions.
-    #[must_use]
     pub fn poor_network() -> Self {
+        // All fields explicitly listed to force consideration when new fields are added
         Self {
             latency: Duration::from_millis(100),
             jitter: Duration::from_millis(50),
             send_loss_rate: 0.05,
             receive_loss_rate: 0.05,
-            ..Default::default()
+            duplication_rate: 0.0,
+            reorder_buffer_size: 0,
+            reorder_rate: 0.0,
+            burst_loss_probability: 0.0,
+            burst_loss_length: 0,
+            seed: None,
         }
     }
 
     /// Creates a config simulating very bad network conditions.
-    #[must_use]
     pub fn terrible_network() -> Self {
+        // All fields explicitly listed to force consideration when new fields are added
         Self {
             latency: Duration::from_millis(250),
             jitter: Duration::from_millis(100),
@@ -153,7 +173,9 @@ impl ChaosConfig {
             duplication_rate: 0.02,
             reorder_buffer_size: 5,
             reorder_rate: 0.1,
-            ..Default::default()
+            burst_loss_probability: 0.0,
+            burst_loss_length: 0,
+            seed: None,
         }
     }
 
@@ -168,8 +190,8 @@ impl ChaosConfig {
     /// - 40ms jitter (high variability)
     /// - 12% packet loss (higher than wired)
     /// - Occasional burst loss simulating handoffs
-    #[must_use]
     pub fn mobile_network() -> Self {
+        // All fields explicitly listed to force consideration when new fields are added
         Self {
             latency: Duration::from_millis(60),
             jitter: Duration::from_millis(40),
@@ -181,7 +203,7 @@ impl ChaosConfig {
             // Simulate handoff events - occasional burst loss
             burst_loss_probability: 0.02,
             burst_loss_length: 4,
-            ..Default::default()
+            seed: None,
         }
     }
 
@@ -195,8 +217,8 @@ impl ChaosConfig {
     /// - Low base latency (WiFi is fast when working)
     /// - Moderate jitter from contention
     /// - Burst loss pattern from interference
-    #[must_use]
     pub fn wifi_interference() -> Self {
+        // All fields explicitly listed to force consideration when new fields are added
         Self {
             latency: Duration::from_millis(15),
             jitter: Duration::from_millis(25),
@@ -208,7 +230,7 @@ impl ChaosConfig {
             // Bursty loss from interference
             burst_loss_probability: 0.05,
             burst_loss_length: 3,
-            ..Default::default()
+            seed: None,
         }
     }
 
@@ -221,14 +243,19 @@ impl ChaosConfig {
     /// - 120ms base latency (transatlantic/transpacific)
     /// - Low jitter (stable undersea cables)
     /// - Minimal packet loss (well-provisioned backbone)
-    #[must_use]
     pub fn intercontinental() -> Self {
+        // All fields explicitly listed to force consideration when new fields are added
         Self {
             latency: Duration::from_millis(120),
             jitter: Duration::from_millis(15),
             send_loss_rate: 0.02,
             receive_loss_rate: 0.02,
-            ..Default::default()
+            duplication_rate: 0.0,
+            reorder_buffer_size: 0,
+            reorder_rate: 0.0,
+            burst_loss_probability: 0.0,
+            burst_loss_length: 0,
+            seed: None,
         }
     }
 }
@@ -324,7 +351,6 @@ impl ChaosConfigBuilder {
     }
 
     /// Builds the configuration.
-    #[must_use]
     pub fn build(self) -> ChaosConfig {
         self.config
     }

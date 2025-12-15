@@ -95,7 +95,10 @@ fuzz_target!(|fuzz_input: FuzzInput| {
     };
 
     // Create queue directly using __internal access
-    let mut queue = InputQueue::<TestConfig>::with_queue_length(player_index, queue_length);
+    let mut queue = match InputQueue::<TestConfig>::with_queue_length(player_index, queue_length) {
+        Some(q) => q,
+        None => return, // Can't create queue with these parameters, skip this fuzzing round
+    };
 
     // Set initial delay if valid
     if initial_delay < queue_length {
@@ -120,7 +123,8 @@ fuzz_target!(|fuzz_input: FuzzInput| {
 
                 // Only add if frame is sequential (queue requires monotonic frames)
                 if frame_val > last_added_frame {
-                    let input = PlayerInput::new(Frame::new(frame_val), TestInput { value: *value });
+                    let input =
+                        PlayerInput::new(Frame::new(frame_val), TestInput { value: *value });
                     let result = queue.add_input(input);
 
                     // Verify result frame is valid
@@ -137,31 +141,33 @@ fuzz_target!(|fuzz_input: FuzzInput| {
                         }
                     }
                 }
-            }
+            },
 
             QueueOp::GetInput { frame } => {
                 let frame_val = (*frame as i32).max(0);
                 let frame = Frame::new(frame_val);
 
-                // Get input (may return predicted)
-                let (input, status) = queue.input(frame);
+                // Get input (may return predicted or None)
+                if let Some((input, status)) = queue.input(frame) {
+                    // Validate status is one of the expected values
+                    assert!(
+                        matches!(
+                            status,
+                            InputStatus::Confirmed
+                                | InputStatus::Predicted
+                                | InputStatus::Disconnected
+                        ),
+                        "Unexpected input status: {:?}",
+                        status
+                    );
 
-                // Validate status is one of the expected values
-                assert!(
-                    matches!(
-                        status,
-                        InputStatus::Confirmed | InputStatus::Predicted | InputStatus::Disconnected
-                    ),
-                    "Unexpected input status: {:?}",
-                    status
-                );
-
-                // If confirmed, frame should match
-                if status == InputStatus::Confirmed {
-                    // Input's frame field might differ due to delay
-                    let _ = input; // Just ensure no panic
+                    // If confirmed, frame should match
+                    if status == InputStatus::Confirmed {
+                        // Input's frame field might differ due to delay
+                        let _ = input; // Just ensure no panic
+                    }
                 }
-            }
+            },
 
             QueueOp::GetConfirmedInput { frame } => {
                 let frame_val = (*frame as i32).max(0);
@@ -173,7 +179,7 @@ fuzz_target!(|fuzz_input: FuzzInput| {
                     // Verify input is valid
                     let _ = input.input;
                 }
-            }
+            },
 
             QueueOp::DiscardFrames { frame } => {
                 let frame_val = (*frame as i32).max(0);
@@ -181,13 +187,13 @@ fuzz_target!(|fuzz_input: FuzzInput| {
 
                 queue.discard_confirmed_frames(frame);
                 frames_discarded_up_to = frames_discarded_up_to.max(frame_val);
-            }
+            },
 
             QueueOp::SetFrameDelay { delay } => {
                 let delay_val = (*delay as usize) % queue_length;
                 // This may fail if delay is too large
                 let _ = queue.set_frame_delay(delay_val);
-            }
+            },
 
             QueueOp::ResetPrediction => {
                 queue.reset_prediction();
@@ -196,22 +202,19 @@ fuzz_target!(|fuzz_input: FuzzInput| {
                     queue.first_incorrect_frame().is_null(),
                     "reset_prediction should clear first_incorrect_frame"
                 );
-            }
+            },
 
             QueueOp::GetFirstIncorrectFrame => {
                 let fif = queue.first_incorrect_frame();
                 // Just verify we can query without panic
                 let _ = fif.is_null();
-            }
+            },
 
             QueueOp::CheckLength => {
                 let queue_len = queue.queue_length();
                 // Just verify the accessor works without panic
-                assert!(
-                    queue_len > 0,
-                    "Queue length should be positive"
-                );
-            }
+                assert!(queue_len > 0, "Queue length should be positive");
+            },
         }
     }
 

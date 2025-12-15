@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use crate::frame_info::PlayerInput;
+use crate::network::codec;
 use crate::report_violation;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::{Config, Frame, PlayerHandle};
@@ -26,9 +27,11 @@ impl InputBytes {
     /// Returns `None` if serialization of the default Input type fails, which indicates
     /// a fundamental issue with the Config::Input type's serialization implementation.
     pub fn zeroed<T: Config>(num_players: usize) -> Option<Self> {
-        match bincode::serialized_size(&T::Input::default()) {
-            Ok(input_size) => {
-                let size = (input_size as usize) * num_players;
+        // Serialize once to get the size of the default input
+        match codec::encode(&T::Input::default()) {
+            Ok(encoded) => {
+                let input_size = encoded.len();
+                let size = input_size * num_players;
                 Some(Self {
                     frame: Frame::NULL,
                     bytes: vec![0; size],
@@ -79,7 +82,7 @@ impl InputBytes {
                     );
                 }
 
-                if let Err(e) = bincode::serialize_into(&mut bytes, &input.input) {
+                if let Err(e) = codec::encode_append(&input.input, &mut bytes) {
                     report_violation!(
                         ViolationSeverity::Error,
                         ViolationKind::NetworkProtocol,
@@ -129,8 +132,8 @@ impl InputBytes {
             let start = p * size;
             let end = start + size;
             let player_byte_slice = &self.bytes[start..end];
-            match bincode::deserialize::<T::Input>(player_byte_slice) {
-                Ok(input) => player_inputs.push(PlayerInput::new(self.frame, input)),
+            match codec::decode::<T::Input>(player_byte_slice) {
+                Ok((input, _)) => player_inputs.push(PlayerInput::new(self.frame, input)),
                 Err(e) => {
                     report_violation!(
                         ViolationSeverity::Error,

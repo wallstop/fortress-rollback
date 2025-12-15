@@ -100,7 +100,7 @@ fuzz_target!(|fuzz_input: FuzzInput| {
                 let player_handle = (*player as usize) % num_players;
                 // Ignore errors - we're testing that it doesn't panic
                 let _ = session.add_local_input(player_handle.into(), *input);
-            }
+            },
             SessionOp::AdvanceFrame => {
                 // Call advance_frame which returns requests
                 let advance_result = session.advance_frame();
@@ -110,13 +110,13 @@ fuzz_target!(|fuzz_input: FuzzInput| {
                             FortressRequest::SaveGameState { cell, frame } => {
                                 // Save current state
                                 cell.save(frame, Some(current_state.clone()), None);
-                            }
+                            },
                             FortressRequest::LoadGameState { cell, .. } => {
                                 // Load state
                                 if let Some(state) = cell.load() {
                                     current_state = state;
                                 }
-                            }
+                            },
                             FortressRequest::AdvanceFrame { inputs } => {
                                 // Update state based on inputs
                                 for (input, _status) in inputs {
@@ -127,18 +127,19 @@ fuzz_target!(|fuzz_input: FuzzInput| {
                                     current_state =
                                         current_state[current_state.len() - 512..].to_vec();
                                 }
-                            }
+                            },
+                            // Handle any other request types (future proofing)
+                            _ => {},
                         }
                     }
                 }
-            }
+            },
             SessionOp::GetState => {
                 // Just query state - should never panic
                 let _ = session.current_frame();
                 let _ = session.num_players();
                 let _ = session.max_prediction();
-            }
+            },
         }
     }
 });
-

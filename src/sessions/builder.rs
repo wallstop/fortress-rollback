@@ -47,6 +47,7 @@ use crate::{
 /// };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "SyncConfig has no effect unless passed to SessionBuilder::with_sync_config()"]
 pub struct SyncConfig {
     /// Number of successful sync roundtrips required before considering
     /// the connection synchronized. Higher values provide more confidence
@@ -95,7 +96,6 @@ impl Default for SyncConfig {
 
 impl SyncConfig {
     /// Creates a new `SyncConfig` with default values.
-    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -103,7 +103,6 @@ impl SyncConfig {
     /// Configuration preset for high-latency networks (100-200ms RTT).
     ///
     /// Uses longer intervals to avoid flooding the network with retries.
-    #[must_use]
     pub fn high_latency() -> Self {
         Self {
             num_sync_packets: 5,
@@ -117,7 +116,6 @@ impl SyncConfig {
     /// Configuration preset for lossy networks (5-15% packet loss).
     ///
     /// Uses more sync packets for higher confidence and a sync timeout.
-    #[must_use]
     pub fn lossy() -> Self {
         Self {
             num_sync_packets: 8,
@@ -131,7 +129,6 @@ impl SyncConfig {
     /// Configuration preset for local network / LAN play.
     ///
     /// Uses shorter intervals and fewer sync packets for faster connection.
-    #[must_use]
     pub fn lan() -> Self {
         Self {
             num_sync_packets: 3,
@@ -153,7 +150,6 @@ impl SyncConfig {
     /// - Intermittent packet loss (5-20%)
     /// - Connection handoff during WiFi/cellular switches
     /// - Variable RTT (60-200ms)
-    #[must_use]
     pub fn mobile() -> Self {
         Self {
             // More sync packets to handle intermittent loss
@@ -178,7 +174,6 @@ impl SyncConfig {
     /// - Fast sync handshake
     /// - Quick failure detection
     /// - Strict timeout for connection
-    #[must_use]
     pub fn competitive() -> Self {
         Self {
             // Fewer sync packets for faster connection
@@ -228,6 +223,7 @@ impl SyncConfig {
 /// };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "ProtocolConfig has no effect unless passed to SessionBuilder::with_protocol_config()"]
 pub struct ProtocolConfig {
     /// Interval between network quality reports.
     ///
@@ -295,7 +291,6 @@ impl Default for ProtocolConfig {
 
 impl ProtocolConfig {
     /// Creates a new `ProtocolConfig` with default values.
-    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -304,7 +299,6 @@ impl ProtocolConfig {
     ///
     /// Uses faster quality reports and shorter shutdown delay for
     /// more responsive network stats and quicker cleanup.
-    #[must_use]
     pub fn competitive() -> Self {
         Self {
             quality_report_interval: Duration::from_millis(100),
@@ -320,7 +314,6 @@ impl ProtocolConfig {
     ///
     /// Uses longer intervals and more tolerant thresholds to reduce
     /// unnecessary warnings on slower connections.
-    #[must_use]
     pub fn high_latency() -> Self {
         Self {
             quality_report_interval: Duration::from_millis(400),
@@ -336,7 +329,6 @@ impl ProtocolConfig {
     ///
     /// Uses longer timeouts and lower warning thresholds to make
     /// it easier to observe telemetry events during development.
-    #[must_use]
     pub fn debug() -> Self {
         Self {
             quality_report_interval: Duration::from_millis(500),
@@ -358,7 +350,6 @@ impl ProtocolConfig {
     /// - High jitter requiring more buffering
     /// - Connection handoffs during WiFi/cellular switches
     /// - Higher than normal retry expectations
-    #[must_use]
     pub fn mobile() -> Self {
         Self {
             // Slower quality reports to reduce bandwidth on metered connections
@@ -403,6 +394,7 @@ impl ProtocolConfig {
 /// };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "SpectatorConfig has no effect unless passed to SessionBuilder::with_spectator_config()"]
 pub struct SpectatorConfig {
     /// The number of frames of input that the spectator can buffer.
     /// This defines how many frames of inputs from the host the spectator
@@ -444,7 +436,6 @@ impl Default for SpectatorConfig {
 
 impl SpectatorConfig {
     /// Creates a new `SpectatorConfig` with default values.
-    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -453,7 +444,6 @@ impl SpectatorConfig {
     ///
     /// Uses a larger buffer and faster catch-up for games where
     /// falling behind is more noticeable.
-    #[must_use]
     pub fn fast_paced() -> Self {
         Self {
             buffer_size: 90,
@@ -465,7 +455,6 @@ impl SpectatorConfig {
     /// Configuration preset for spectators on slower connections.
     ///
     /// Uses a larger buffer and more tolerance for falling behind.
-    #[must_use]
     pub fn slow_connection() -> Self {
         Self {
             buffer_size: 120,
@@ -477,7 +466,6 @@ impl SpectatorConfig {
     /// Configuration preset for local viewing with minimal latency.
     ///
     /// Uses smaller buffer and stricter catch-up for responsive viewing.
-    #[must_use]
     pub fn local() -> Self {
         Self {
             buffer_size: 30,
@@ -496,7 +484,6 @@ impl SpectatorConfig {
     /// - Large buffer (3 seconds at 60 FPS)
     /// - Slow, smooth catch-up to avoid jarring speed changes
     /// - High tolerance for falling behind
-    #[must_use]
     pub fn broadcast() -> Self {
         Self {
             // 3 seconds of buffer at 60 FPS for smooth streaming
@@ -512,7 +499,6 @@ impl SpectatorConfig {
     ///
     /// Uses larger buffers and tolerant catch-up for variable
     /// mobile network conditions.
-    #[must_use]
     pub fn mobile() -> Self {
         Self {
             // 2 seconds of buffer at 60 FPS
@@ -566,6 +552,7 @@ impl SpectatorConfig {
 /// assert_eq!(minimal.queue_length, 32);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "InputQueueConfig has no effect unless passed to SessionBuilder::with_input_queue_config()"]
 pub struct InputQueueConfig {
     /// The length of the input queue (circular buffer) per player.
     ///
@@ -601,7 +588,6 @@ impl Default for InputQueueConfig {
 
 impl InputQueueConfig {
     /// Creates a new `InputQueueConfig` with default values.
-    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -610,7 +596,6 @@ impl InputQueueConfig {
     ///
     /// Uses a larger queue (256 frames = ~4.3 seconds at 60 FPS) to allow
     /// for higher frame delays and longer rollback windows.
-    #[must_use]
     pub fn high_latency() -> Self {
         Self { queue_length: 256 }
     }
@@ -619,7 +604,6 @@ impl InputQueueConfig {
     ///
     /// Uses a smaller queue (32 frames = ~0.5 seconds at 60 FPS).
     /// Suitable for games with low latency requirements.
-    #[must_use]
     pub fn minimal() -> Self {
         Self { queue_length: 32 }
     }
@@ -627,7 +611,6 @@ impl InputQueueConfig {
     /// Configuration for standard networks.
     ///
     /// Uses the default queue size (128 frames = ~2.1 seconds at 60 FPS).
-    #[must_use]
     pub fn standard() -> Self {
         Self::default()
     }

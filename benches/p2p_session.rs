@@ -5,12 +5,13 @@
 //! These benchmarks measure the performance of key session operations that run
 //! every frame (60+ times/second in typical games).
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use fortress_rollback::{
     Config, FortressRequest, Frame, PlayerHandle, SessionBuilder, SyncTestSession,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::hint::black_box;
 use std::net::SocketAddr;
 
 /// Simple test input type for benchmarking
@@ -210,6 +211,8 @@ fn bench_advance_frame_with_rollback(c: &mut Criterion) {
 
 /// Benchmark message serialization round trip
 fn bench_message_serialization(c: &mut Criterion) {
+    use fortress_rollback::network::codec;
+
     let mut group = c.benchmark_group("Message serialization");
 
     // Create a sample message with inputs
@@ -218,11 +221,11 @@ fn bench_message_serialization(c: &mut Criterion) {
     group.bench_function("round_trip_input_msg", |b| {
         b.iter(|| {
             // Serialize
-            let bytes = bincode::serialize(&sample_input_bytes).expect("serialize");
+            let bytes = codec::encode(&sample_input_bytes).expect("serialize");
             black_box(&bytes);
 
             // Deserialize
-            let _decoded: Vec<u8> = bincode::deserialize(&bytes).expect("deserialize");
+            let _decoded: Vec<u8> = codec::decode_value(&bytes).expect("deserialize");
         });
     });
 
@@ -234,7 +237,7 @@ fn bench_message_serialization(c: &mut Criterion) {
             stick_y: -128,
         };
         b.iter(|| {
-            let bytes = bincode::serialize(black_box(&input)).expect("serialize");
+            let bytes = codec::encode(black_box(&input)).expect("serialize");
             black_box(bytes);
         });
     });
@@ -245,10 +248,24 @@ fn bench_message_serialization(c: &mut Criterion) {
             stick_x: 127,
             stick_y: -128,
         };
-        let bytes = bincode::serialize(&input).expect("serialize");
+        let bytes = codec::encode(&input).expect("serialize");
         b.iter(|| {
-            let decoded: BenchInput = bincode::deserialize(black_box(&bytes)).expect("deserialize");
+            let decoded: BenchInput = codec::decode_value(black_box(&bytes)).expect("deserialize");
             black_box(decoded);
+        });
+    });
+
+    // Benchmark encode_into vs encode (allocation comparison)
+    group.bench_function("input_encode_into_buffer", |b| {
+        let input = BenchInput {
+            buttons: 0xFF,
+            stick_x: 127,
+            stick_y: -128,
+        };
+        let mut buffer = [0u8; 64];
+        b.iter(|| {
+            let len = codec::encode_into(black_box(&input), &mut buffer).expect("serialize");
+            black_box(len);
         });
     });
 
