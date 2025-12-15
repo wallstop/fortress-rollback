@@ -1820,6 +1820,12 @@ mod kani_input_queue_proofs {
         type Address = SocketAddr;
     }
 
+    /// Helper to create a test queue for Kani proofs.
+    fn test_queue(player_index: usize) -> InputQueue<TestConfig> {
+        InputQueue::<TestConfig>::new(player_index)
+            .expect("test_queue: InputQueue::new should succeed for valid player_index")
+    }
+
     /// Proof: New queue has valid initial state
     ///
     /// Verifies INV-4 (length = 0) and INV-5 (head = tail = 0) at initialization.

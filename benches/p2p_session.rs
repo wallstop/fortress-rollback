@@ -86,7 +86,7 @@ fn bench_advance_frame_no_rollback(c: &mut Criterion) {
                             FortressRequest::SaveGameState { cell, frame } => {
                                 cell.save(frame, Some(BenchState::default()), None);
                             },
-                            FortressRequest::LoadGameState { cell, frame: _ } => {
+                            FortressRequest::LoadGameState { cell, .. } => {
                                 black_box(cell.load());
                             },
                             _ => {},
@@ -143,7 +143,7 @@ fn bench_advance_frame_with_rollback(c: &mut Criterion) {
                     let requests = session.advance_frame().expect("Failed to advance frame");
                     for request in requests {
                         match request {
-                            FortressRequest::AdvanceFrame { inputs: _ } => {
+                            FortressRequest::AdvanceFrame { .. } => {
                                 current_state.frame += 1;
                             },
                             FortressRequest::SaveGameState { cell, frame } => {
@@ -184,7 +184,7 @@ fn bench_advance_frame_with_rollback(c: &mut Criterion) {
                     // Process all requests
                     for request in requests {
                         match request {
-                            FortressRequest::AdvanceFrame { inputs: _ } => {
+                            FortressRequest::AdvanceFrame { .. } => {
                                 current_state.frame += 1;
                             },
                             FortressRequest::SaveGameState { cell, frame } => {

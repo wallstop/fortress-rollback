@@ -230,7 +230,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libz3-dev
 
       - name: Run Z3 verification tests
-        run: cargo test --test verification --features z3-verification -- z3 --verbose
+        run: cargo test --test verification --features z3-verification -- z3
         timeout-minutes: 10
 
   # Kani Formal Verification (Tier 1 - Fast proofs)

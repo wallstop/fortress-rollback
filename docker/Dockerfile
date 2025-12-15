@@ -33,6 +33,7 @@ RUN cargo build --release --bin network_test_peer 2>/dev/null || true
 # Now copy the real source code
 COPY src ./src
 COPY tests ./tests
+COPY benches ./benches
 
 # Remove dummy files and rebuild
 RUN rm -f src/lib.rs tests/bin/network_test_peer.rs

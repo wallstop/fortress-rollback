@@ -11,6 +11,8 @@
 .claude/**
 .idea/**
 
+*.zip
+
 # Added by cargo
 
 /target

@@ -1884,7 +1884,6 @@ fn test_intercontinental_simulation() {
         seed: Some(42),
         timeout_secs: 180, // Longer timeout for high latency
         input_delay: 4,    // Higher input delay recommended
-        ..Default::default()
     };
 
     let peer2_config = PeerConfig {
@@ -1898,7 +1897,6 @@ fn test_intercontinental_simulation() {
         seed: Some(43),
         timeout_secs: 180,
         input_delay: 4,
-        ..Default::default()
     };
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
@@ -1944,7 +1942,6 @@ fn test_competitive_lan_simulation() {
         seed: Some(42),
         timeout_secs: 60,
         input_delay: 0, // No input delay for competitive
-        ..Default::default()
     };
 
     let peer2_config = PeerConfig {
@@ -1958,7 +1955,6 @@ fn test_competitive_lan_simulation() {
         seed: Some(43),
         timeout_secs: 60,
         input_delay: 0,
-        ..Default::default()
     };
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
