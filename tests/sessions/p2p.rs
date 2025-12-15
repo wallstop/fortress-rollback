@@ -1,12 +1,12 @@
-mod stubs;
+//! P2P session integration tests.
 
+use crate::common::stubs::{GameStub, StubConfig, StubInput};
 use fortress_rollback::{
     DesyncDetection, FortressError, FortressEvent, PlayerHandle, PlayerType, SessionBuilder,
     SessionState, UdpNonBlockingSocket,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use stubs::{GameStub, StubConfig, StubInput};
 
 #[test]
 #[serial]
@@ -126,8 +126,8 @@ fn test_advance_frame_p2p_sessions() -> Result<(), FortressError> {
     assert!(sess1.current_state() == SessionState::Running);
     assert!(sess2.current_state() == SessionState::Running);
 
-    let mut stub1 = stubs::GameStub::new();
-    let mut stub2 = stubs::GameStub::new();
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
     let reps = 10;
     for i in 0..reps {
         sess1.poll_remote_clients();
@@ -186,8 +186,8 @@ fn test_desyncs_detected() -> Result<(), FortressError> {
         FortressEvent::Synchronizing { .. } | FortressEvent::Synchronized { .. }
     )));
 
-    let mut stub1 = stubs::GameStub::new();
-    let mut stub2 = stubs::GameStub::new();
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
 
     // run normally for some frames (past first desync interval)
     for i in 0..110 {
@@ -311,8 +311,8 @@ fn test_desyncs_and_input_delay_no_panic() -> Result<(), FortressError> {
         FortressEvent::Synchronizing { .. } | FortressEvent::Synchronized { .. }
     )));
 
-    let mut stub1 = stubs::GameStub::new();
-    let mut stub2 = stubs::GameStub::new();
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
 
     // run normally for some frames (past first desync interval)
     for i in 0..150 {

@@ -1,3 +1,5 @@
+//! Game stub implementations for testing with struct-based inputs.
+
 use fortress_rollback::rng::{thread_rng, Rng, ThreadRng};
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
@@ -126,8 +128,6 @@ pub struct StateStub {
 }
 
 impl StateStub {
-    // Note: is_multiple_of() is nightly-only, so we use modulo
-    #[allow(clippy::manual_is_multiple_of)]
     fn advance_frame(&mut self, inputs: Vec<(StubInput, InputStatus)>) {
         // Sum all player inputs for deterministic state update
         let total_inputs: u32 = inputs.iter().map(|(input, _)| input.inp).sum();

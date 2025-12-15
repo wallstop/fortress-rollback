@@ -7,8 +7,7 @@
 //! - Jitter (variable latency)
 //! - Combined conditions
 
-mod stubs;
-
+use crate::common::stubs::{GameStub, StubConfig, StubInput};
 use fortress_rollback::{
     ChaosConfig, ChaosSocket, FortressError, PlayerHandle, PlayerType, SaveMode, SessionBuilder,
     SessionState, UdpNonBlockingSocket,
@@ -16,7 +15,6 @@ use fortress_rollback::{
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
-use stubs::{GameStub, StubConfig, StubInput};
 
 /// Helper to create a UDP socket wrapped with ChaosSocket.
 fn create_chaos_socket(

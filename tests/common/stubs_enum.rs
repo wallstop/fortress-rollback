@@ -1,3 +1,5 @@
+//! Game stub implementations for testing with enum-based inputs.
+
 use std::hash::Hash;
 use std::net::SocketAddr;
 

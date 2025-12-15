@@ -97,7 +97,7 @@ jobs:
       - name: Build network test peer
         run: cargo build --release --bin network_test_peer
       - name: Run multi-process network tests
-        run: cargo test --release --test test_multi_process_network -- --test-threads=1
+        run: cargo test --release --test network -- multi_process --test-threads=1
         timeout-minutes: 10
 
   # Docker-based network tests with tc/netem
@@ -177,7 +177,7 @@ jobs:
           key: z3-bundled-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Run Z3 verification tests
-        run: cargo test --test test_z3_verification --verbose
+        run: cargo test --test verification --features z3-verification -- z3 --verbose
         timeout-minutes: 15
 
   # Kani Formal Verification (Tier 1 - Fast proofs)

@@ -1,8 +1,7 @@
-mod stubs;
-mod stubs_enum;
+//! SyncTest session integration tests.
 
+use crate::common::stubs::{GameStub, RandomChecksumGameStub, StubConfig, StubInput};
 use fortress_rollback::{FortressError, FortressRequest, PlayerHandle, SessionBuilder};
-use stubs::{StubConfig, StubInput};
 
 #[test]
 fn test_create_session() {
@@ -14,7 +13,7 @@ fn test_create_session() {
 #[test]
 fn test_advance_frame_no_rollbacks() -> Result<(), FortressError> {
     let check_distance = 0;
-    let mut stub = stubs::GameStub::new();
+    let mut stub = GameStub::new();
     let mut sess = SessionBuilder::new()
         .with_check_distance(check_distance)
         .start_synctest_session()?;
@@ -34,7 +33,7 @@ fn test_advance_frame_no_rollbacks() -> Result<(), FortressError> {
 #[test]
 fn test_advance_frame_with_rollbacks() -> Result<(), FortressError> {
     let check_distance = 2;
-    let mut stub = stubs::GameStub::new();
+    let mut stub = GameStub::new();
     let mut sess = SessionBuilder::new()
         .with_check_distance(check_distance)
         .start_synctest_session()?;
@@ -67,7 +66,7 @@ fn test_advance_frame_with_rollbacks() -> Result<(), FortressError> {
 #[test]
 fn test_advance_frames_with_delayed_input() -> Result<(), FortressError> {
     let check_distance = 7;
-    let mut stub = stubs::GameStub::new();
+    let mut stub = GameStub::new();
     let mut sess = SessionBuilder::new()
         .with_check_distance(check_distance)
         .with_input_delay(2)
@@ -87,7 +86,7 @@ fn test_advance_frames_with_delayed_input() -> Result<(), FortressError> {
 #[test]
 #[should_panic]
 fn test_advance_frames_with_random_checksums() {
-    let mut stub = stubs::RandomChecksumGameStub::new();
+    let mut stub = RandomChecksumGameStub::new();
     let mut sess = SessionBuilder::new()
         .with_input_delay(2)
         .start_synctest_session()
@@ -109,7 +108,7 @@ fn test_advance_frames_with_random_checksums() {
 #[test]
 fn test_deep_rollback_scenario() -> Result<(), FortressError> {
     let check_distance = 7; // Maximum typical prediction window
-    let mut stub = stubs::GameStub::new();
+    let mut stub = GameStub::new();
     let mut sess = SessionBuilder::new()
         .with_check_distance(check_distance)
         .start_synctest_session()?;
@@ -155,7 +154,7 @@ fn test_deep_rollback_scenario() -> Result<(), FortressError> {
 #[test]
 fn test_frequent_rollback_consistency() -> Result<(), FortressError> {
     let check_distance = 1; // Minimum rollback distance for maximum frequency
-    let mut stub = stubs::GameStub::new();
+    let mut stub = GameStub::new();
     let mut sess = SessionBuilder::new()
         .with_check_distance(check_distance)
         .start_synctest_session()?;
@@ -193,7 +192,7 @@ fn test_rollback_with_varying_input_delay() -> Result<(), FortressError> {
     // Test multiple input delay values
     for input_delay in [0, 1, 2, 4] {
         let check_distance = 4;
-        let mut stub = stubs::GameStub::new();
+        let mut stub = GameStub::new();
         let mut sess = SessionBuilder::new()
             .with_check_distance(check_distance)
             .with_input_delay(input_delay)

@@ -64,8 +64,6 @@ pub fn decode(
 }
 
 /// Decodes XOR delta-encoded data against a reference.
-// Note: is_multiple_of() is nightly-only, so we use modulo
-#[allow(clippy::manual_is_multiple_of)]
 pub fn delta_decode(
     ref_bytes: &[u8],
     data: &[u8],

@@ -1,5 +1,6 @@
-mod stubs;
+//! Spectator session integration tests.
 
+use crate::common::stubs::{GameStub, StubConfig, StubInput};
 use fortress_rollback::{
     telemetry::CollectingObserver, FortressError, FortressEvent, InputQueueConfig, PlayerHandle,
     PlayerType, SessionBuilder, SessionState, SpectatorConfig, UdpNonBlockingSocket,
@@ -9,7 +10,6 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use stubs::{GameStub, StubConfig, StubInput};
 
 // Helper to create test addresses
 fn test_addr(port: u16) -> SocketAddr {

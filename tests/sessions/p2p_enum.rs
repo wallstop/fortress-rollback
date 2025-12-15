@@ -1,11 +1,11 @@
-mod stubs_enum;
+//! P2P session integration tests with enum-based inputs.
 
+use crate::common::stubs_enum::{EnumInput, GameStubEnum, StubEnumConfig};
 use fortress_rollback::{
     FortressError, PlayerHandle, PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use stubs_enum::{EnumInput, GameStubEnum, StubEnumConfig};
 
 #[test]
 #[serial]

@@ -40,7 +40,7 @@
 //!
 //! These tests require the `z3-verification` feature:
 //! ```bash
-//! cargo test --test test_z3_verification --features z3-verification
+//! cargo test --test verification --features z3-verification -- z3
 //! ```
 //!
 //! Note: First build may take several minutes to compile Z3 from source.

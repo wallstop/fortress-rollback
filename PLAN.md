@@ -91,16 +91,11 @@ bincode::serialized_size(&T::Input::default()).expect("input serialization faile
 
 ---
 
-**Issue 5: InputQueue Queue Length Validation**
+~~**Issue 5: InputQueue Queue Length Validation**~~ ✅ COMPLETED
 
-Location: `src/input_queue.rs`
-```rust
-assert!(queue_length >= 2, "Queue length must be at least 2, got {}", queue_length);
-```
+~~Location: `src/input_queue.rs`~~
 
-**Risk:** Panics if misconfigured.
-
-**Recommendation:** This is internal construction, but the panic should be converted to `report_violation!` returning a default `InputQueue` with minimum valid size, or propagate error up.
+**Resolution:** Converted to `report_violation!` with graceful recovery (returns `None`). Additionally, `InputQueueConfig::validate()` provides early validation that returns `Result<(), FortressError>` for proper error handling.
 
 ---
 
@@ -627,159 +622,147 @@ pub use crate::input_queue::InputQueue;
    - Documented consequences of wrong ordering (desyncs, assertion failures)
    - Added complete example code showing proper request handling
 
-### Phase 4: Code Organization (3-5 days) 🟡 IN PROGRESS
+### Phase 4: Code Organization ✅ COMPLETE
 
-#### 4.1 Split `sync_layer.rs` into submodules 🔄 STARTED
+#### 4.1 Split `sync_layer.rs` into submodules ✅ COMPLETE
 
-**Current State:** Partial module structure created in `src/sync_layer/`
-
-**File Analysis (current line counts):**
-| File | Total Lines | Implementation | Tests/Kani |
-|------|-------------|----------------|------------|
-| `sync_layer.rs` | 2,259 | ~835 | ~1,424 |
-| `protocol.rs` | 2,577 | TBD | TBD |
-| `input_queue.rs` | 2,181 | TBD | TBD |
-| `builder.rs` | 1,833 | TBD | TBD |
-| `rle.rs` | 1,457 | TBD | TBD |
-
-**Proposed Module Structure for `sync_layer`:**
+**Final Module Structure:**
 ```
 src/sync_layer/
-├── mod.rs              # Re-exports, SyncLayer struct + impl + tests + Kani proofs
-├── game_state_cell.rs  # GameStateCell, GameStateAccessor (~260 lines)
-└── saved_states.rs     # SavedStates container (~45 lines)
+├── mod.rs              # Re-exports, SyncLayer struct + impl + tests + Kani proofs (~1,550 lines)
+├── game_state_cell.rs  # GameStateCell, GameStateAccessor (~274 lines)
+└── saved_states.rs     # SavedStates container (~47 lines)
 ```
 
-**Files Created (incomplete):**
-- `src/sync_layer/game_state_cell.rs` - Contains `GameStateCell` and `GameStateAccessor`
-- `src/sync_layer/saved_states.rs` - Contains `SavedStates`
+**Summary:**
+- Extracted `GameStateCell` and `GameStateAccessor` to dedicated submodule
+- Extracted `SavedStates` to dedicated submodule
+- Created `mod.rs` with proper re-exports and containing `SyncLayer<T>` + all tests/proofs
+- All 419 library tests pass
+- Clippy passes (no new warnings)
 
-**Next Steps to Complete 4.1:**
-1. Create `src/sync_layer/mod.rs` with:
-   - Submodule declarations (`mod game_state_cell; mod saved_states;`)
-   - Re-exports (`pub use game_state_cell::*; pub use saved_states::*;`)
-   - Full `SyncLayer<T>` struct and all impl blocks
-   - `InvariantChecker` impl for `SyncLayer`
-   - All `#[cfg(test)]` module `sync_layer_tests` (~600 lines)
-   - All `#[cfg(kani)]` module `kani_sync_layer_proofs` (~260 lines)
-2. Delete original `src/sync_layer.rs`
-3. Update `src/lib.rs` imports (should work automatically due to Rust module resolution)
-4. Verify all tests pass: `cargo test`
-5. Verify Kani proofs: `cargo kani --tests` (optional, slow)
+**File Analysis (remaining large files):**
+| File | Total Lines | Notes |
+|------|-------------|-------|
+| `input_queue.rs` | 2,181 | Self-contained, lower priority |
+| `builder.rs` | 1,833 | Self-contained, lower priority |
+| `rle.rs` | 1,457 | Self-contained, lower priority |
 
-**Dependencies for `game_state_cell.rs`:**
-```rust
-use crate::sync::{Arc, MappedMutexGuard, Mutex};
-use crate::frame_info::GameState;
-use crate::report_violation;
-use crate::telemetry::{ViolationKind, ViolationSeverity};
-use crate::Frame;
-```
+#### 4.2 Split `protocol.rs` into submodules ✅ COMPLETE
 
-**Dependencies for `saved_states.rs`:**
-```rust
-use crate::sync_layer::GameStateCell;
-use crate::{FortressError, Frame};
-```
-
-**Dependencies for `mod.rs` (SyncLayer):**
-```rust
-use crate::frame_info::{GameState, PlayerInput};
-use crate::input_queue::InputQueue;
-use crate::network::messages::ConnectionStatus;
-use crate::report_violation;
-use crate::sessions::builder::SaveMode;
-use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
-use crate::{Config, FortressError, FortressRequest, Frame, InputStatus, PlayerHandle};
-```
-
-#### 4.2 Split `protocol.rs` into submodules (NOT STARTED)
-
-**Proposed Structure:**
+**Final Module Structure:**
 ```
 src/network/protocol/
-├── mod.rs              # Re-exports, UdpProtocol struct
-├── state_machine.rs    # ProtocolState enum, state transitions
-├── handlers.rs         # Message handling (on_* methods)
-└── sending.rs          # Message sending (send_* methods)
+├── mod.rs              # UdpProtocol struct + impl + tests (~2,370 lines)
+├── event.rs            # Event<T> enum (~50 lines)
+├── state.rs            # ProtocolState enum (~30 lines)
+└── input_bytes.rs      # InputBytes helper struct (~140 lines)
 ```
 
-#### 4.3 Reorganize test files (NOT STARTED)
+**Summary:**
+- Extracted `Event<T>` enum to dedicated submodule with proper re-export
+- Extracted `ProtocolState` enum to dedicated submodule with proper re-export
+- Extracted `InputBytes` helper struct to dedicated submodule (internal use via `pub(super)`)
+- Kept `UdpProtocol<T>` struct and all implementations together in mod.rs (avoids splitting impl blocks)
+- Kept all tests (~1,500 lines) in mod.rs
+- All 419 library tests pass
+- Clippy passes (no new warnings)
 
-**Current Structure:**
+**Design Decision:** Unlike the original proposed structure (separate handlers.rs and sending.rs), we kept all `UdpProtocol` methods in mod.rs. Splitting impl blocks across files would require making all struct fields `pub(super)`, which is less clean. This approach follows the sync_layer pattern: extract standalone types, keep the main struct impl unified.
+
+#### 4.3 Reorganize test files ✅ COMPLETE
+
+**New Structure:**
 ```
 tests/
-├── test_p2p_session.rs
-├── test_p2p_session_enum.rs
-├── test_synctest_session.rs
-├── test_synctest_session_enum.rs
-├── test_p2p_spectator_session.rs
-├── test_determinism.rs
-├── test_network_resilience.rs
-├── test_multi_process_network.rs
-├── test_internal_invariants.rs
-├── test_internal_property.rs
-├── test_metamorphic.rs
-├── test_z3_verification.rs
-└── ...
-```
-
-**Proposed Structure:**
-```
-tests/
+├── common/              # Shared test infrastructure
+│   ├── mod.rs           # Re-exports stubs and stubs_enum
+│   ├── stubs.rs         # Struct-based input stubs
+│   └── stubs_enum.rs    # Enum-based input stubs
+├── sessions.rs          # Entry point for session tests
 ├── sessions/
-│   ├── p2p.rs
-│   ├── p2p_enum.rs
-│   ├── spectator.rs
-│   ├── synctest.rs
-│   └── synctest_enum.rs
+│   ├── p2p.rs           # P2P session tests
+│   ├── p2p_enum.rs      # P2P session tests with enum inputs
+│   ├── spectator.rs     # Spectator session tests
+│   ├── synctest.rs      # SyncTest session tests
+│   └── synctest_enum.rs # SyncTest session tests with enum inputs
+├── network.rs           # Entry point for network tests
 ├── network/
-│   ├── resilience.rs
-│   └── multi_process.rs
+│   ├── resilience.rs    # ChaosSocket network resilience tests
+│   └── multi_process.rs # Multi-process network tests
+├── verification.rs      # Entry point for verification tests
 ├── verification/
-│   ├── determinism.rs
-│   ├── invariants.rs
-│   ├── property.rs
-│   ├── metamorphic.rs
-│   └── z3.rs
-└── common/
-    ├── mod.rs
-    ├── stubs.rs
-    └── config.rs
+│   ├── determinism.rs   # Determinism verification
+│   ├── invariants.rs    # Internal invariant tests
+│   ├── property.rs      # Property-based tests (proptest)
+│   ├── metamorphic.rs   # Metamorphic testing
+│   └── z3.rs            # Z3 SMT verification (feature-gated)
+├── config.rs            # Configuration struct tests
+└── loom_concurrency.rs  # Loom concurrency tests (cfg(loom))
 ```
 
-#### 4.4 Extract examples to workspace member (NOT STARTED)
+**Summary:**
+- Consolidated shared test stubs into `tests/common/` module
+- Organized session tests into `tests/sessions/` subdirectory
+- Organized network tests into `tests/network/` subdirectory
+- Organized verification tests into `tests/verification/` subdirectory
+- Kept standalone tests (config, loom) at top level
+- Updated Cargo.toml to remove explicit test target for reorganized tests
+- All 42 session tests, 25 config tests, 88 verification tests pass
 
-**Goal:** Isolate `macroquad` dependency (requires ALSA/X11 on Linux)
+#### 4.4 Extract examples to workspace member ✅ RESOLVED VIA FEATURE FLAG
 
-**Proposed Structure:**
-```toml
-# Root Cargo.toml
-[workspace]
-members = [".", "examples/game"]
+**Original Goal:** Isolate `macroquad` dependency (requires ALSA/X11 on Linux)
 
-# examples/game/Cargo.toml
-[package]
-name = "fortress-examples"
-version = "0.1.0"
+**Resolution:** After evaluation, the workspace extraction was deemed unnecessary because the feature flag approach already achieves the same isolation goals:
 
-[dependencies]
-fortress-rollback = { path = "../.." }
-macroquad = "0.3"
-```
+1. **`macroquad` is an optional dependency** (not a dev-dependency):
+   ```toml
+   macroquad = { version = "=0.3.25", features = ["log-rs"], optional = true }
+   ```
 
-### Phase 5: Documentation Polish (1-2 days) 🟢
+2. **Examples require explicit feature activation**:
+   ```toml
+   [[example]]
+   name = "ex_game_p2p"
+   required-features = ["graphical-examples"]
+   ```
 
-1. **Add control flow diagrams** (NOT STARTED)
+3. **Documentation is comprehensive** (`examples/README.md`):
+   - System dependencies for each platform documented
+   - Clear instructions for building with `--features graphical-examples`
+   - All graphical examples properly gated
+
+**Comparison:**
+| Aspect | Feature Flag (Current) | Workspace |
+|--------|----------------------|-----------|
+| Default build isolation | ✅ | ✅ |
+| cargo test isolation | ✅ | ✅ |
+| cargo publish | ✅ Works normally | Requires separate publish |
+| Setup complexity | ✅ Simple | More complex |
+
+**Decision:** Feature flag approach provides equivalent isolation with less complexity. No workspace extraction needed.
+
+### Phase 5: Documentation Polish ✅ COMPLETE
+
+1. **Add control flow diagrams** (OPTIONAL)
    - `advance_frame` state machine diagram
    - Protocol state transitions diagram
-   - Add to `docs/architecture.md`
+   - **Note:** `docs/architecture.md` already has comprehensive ASCII diagrams including:
+     - High-level architecture (layered diagram)
+     - SyncLayer, InputQueue, UdpProtocol component diagrams
+     - Input Flow (Local and Remote) diagrams
+     - Rollback Flow diagram
+   - Additional diagrams would be nice-to-have but not essential
 
-2. **Document Loom testing strategy** (NOT STARTED)
-   - Why `GameStateCell` needs concurrent testing
-   - How to run: `cd loom-tests && cargo test`
-   - How to interpret results
-   - Add to `loom-tests/README.md`
+2. **Document Loom testing strategy** ✅ ALREADY COMPLETE
+   - `loom-tests/README.md` already contains comprehensive documentation:
+     - Why a separate crate (dependency isolation, heavy dev-deps)
+     - How to run: `RUSTFLAGS="--cfg loom" cargo test --release`
+     - Configuration options (LOOM_MAX_PREEMPTIONS, LOOM_CHECKPOINT_FILE, etc.)
+     - Debugging failures with checkpoint files
+     - Current test descriptions (5 GameStateCell tests)
+     - Architecture notes (parking_lot vs loom::sync::Mutex)
 
 ---
 
@@ -794,15 +777,11 @@ Fortress Rollback is an **exemplary Rust library** demonstrating how to build co
 - Comprehensive formal verification
 - Excellent documentation
 
-**Remaining Work (Phase 4-5):**
-1. Complete `sync_layer` module split (partially started)
-2. Split `protocol.rs` into submodules
-3. Reorganize test files into subdirectories
-4. Extract examples to workspace member
-5. Add architectural diagrams
-6. Document Loom testing strategy
+**Remaining Work:** All essential work complete. ✅
 
-**Estimated Remaining Effort:** 4-6 days
+The only remaining item is optional documentation polish (additional architectural diagrams), but `docs/architecture.md` already contains comprehensive ASCII diagrams covering the high-level architecture, component interactions, input flows, and rollback mechanics.
+
+**Status:** Project improvements complete.
 
 ---
 
@@ -820,9 +799,16 @@ Fortress Rollback is an **exemplary Rust library** demonstrating how to build co
 | Dec 13 | 3 | Improve Config trait docs | ✅ |
 | Dec 13 | 3 | Improve request ordering docs | ✅ |
 | Dec 14 | 4 | Analyze sync_layer.rs structure | ✅ |
-| Dec 14 | 4 | Create sync_layer submodule files | 🔄 Partial |
+| Dec 14 | 4 | Complete sync_layer module split | ✅ |
+| Dec 14 | 4 | Complete protocol.rs module split | ✅ |
+| Dec 14 | 4 | Reorganize test files into subdirectories | ✅ |
+| Dec 14 | 4 | Evaluate workspace extraction (resolved via feature flag) | ✅ |
+| Dec 14 | - | Fix clippy unknown lint warnings | ✅ |
+| Dec 14 | 5 | Verify Loom testing strategy documentation | ✅ (already complete) |
+| Dec 14 | 1 | Verify Issue 5 (InputQueue validation) complete | ✅ |
+| Dec 14 | - | Final PLAN.md cleanup and verification | ✅ |
 
 ---
 
 *This analysis was conducted on December 13, 2025 by Claude Opus 4.5 at the request of the project maintainer.*
-*Updated December 14, 2025 with Phase 4 progress and detailed next steps.*
+*Updated December 14, 2025 - All phases complete. All essential improvements implemented and verified.*

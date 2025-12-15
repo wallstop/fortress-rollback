@@ -76,11 +76,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # Additional testing utilities
 arbitrary = { version = "1.3", features = ["derive"] }
 
-# Test binaries for multi-process network testing
-[[test]]
-name = "test_multi_process_network"
-path = "tests/test_multi_process_network.rs"
-
+# Network test peer binary for multi-process testing
 [[bin]]
 name = "network_test_peer"
 path = "tests/bin/network_test_peer.rs"
