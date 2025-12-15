@@ -1,37 +1,47 @@
 # Fortress Rollback Documentation
 
-This directory contains the documentation for the Fortress Rollback library.
+This directory contains the user-facing documentation for the Fortress Rollback library.
 
-## Quick Links
+## Getting Started
 
 | Document | Description |
 |----------|-------------|
-| [User Guide](user-guide.md) | Getting started with Fortress Rollback |
-| [Architecture](architecture.md) | Technical architecture and design |
-| [Migration](migration.md) | Migrating from GGRS to Fortress Rollback |
+| [**User Guide**](user-guide.md) | **📘 Complete guide to integrating Fortress Rollback** |
+| [Migration Guide](migration.md) | Migrating from GGRS to Fortress Rollback |
+| [Fortress vs GGRS](fortress-vs-ggrs.md) | Comparison, bug fixes, and differences |
+
+## Technical Reference
+
+| Document | Description |
+|----------|-------------|
+| [Architecture](architecture.md) | Internal architecture, data flow, and design |
+| [Changelog](changelog.md) | Version history and breaking changes |
+
+## Formal Specifications
+
+| Document | Description |
+|----------|-------------|
+| [Formal Spec](specs/formal-spec.md) | Core formal specifications in TLA+ notation |
+| [API Contracts](specs/api-contracts.md) | API preconditions, postconditions, and invariants |
+| [Determinism Model](specs/determinism-model.md) | Determinism requirements and verification |
+| [Spec Divergences](specs/spec-divergences.md) | Documented spec-implementation differences |
+
+## Contributing
+
+| Document | Description |
+|----------|-------------|
 | [Contributing](contributing.md) | Guidelines for contributors |
-| [Changelog](changelog.md) | Version history and changes |
-
-## Specifications
-
-Formal specifications and verification documentation:
-
-| Document | Description |
-|----------|-------------|
-| [Formal Spec](specs/formal-spec.md) | TLA+ formal specifications |
-| [API Contracts](specs/api-contracts.md) | API preconditions and postconditions |
-| [Determinism Model](specs/determinism-model.md) | Determinism requirements and guarantees |
-| [Spec Divergences](specs/spec-divergences.md) | Differences between spec and implementation |
-
-## Additional Resources
-
-| Document | Description |
-|----------|-------------|
+| [Code of Conduct](code-of-conduct.md) | Community standards |
 | [Release Process](release.md) | How releases are managed |
-| [Development Plan](plan.md) | Project roadmap and planning |
-| [Code of Conduct](code-of-conduct.md) | Community guidelines |
 
-## Related Documentation
+## Development
 
-- [Examples](../examples/README.md) - Working code examples
-- [TLA+ Specifications](../specs/tla/README.md) - TLA+ model checking specs
+| Document | Description |
+|----------|-------------|
+| [Development Plan](plan.md) | Project roadmap and status |
+
+## Related Resources
+
+- [Examples](../examples/README.md) - Working code examples with build instructions
+- [TLA+ Specifications](../specs/tla/README.md) - Runnable TLA+ model checking specs
+- [Root README](../README.md) - Project overview and quick start

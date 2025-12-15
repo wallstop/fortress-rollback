@@ -47,7 +47,7 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
                     e
                 );
                 return;
-            }
+            },
         };
 
         // Overly large packets risk being fragmented, which can increase packet loss (any fragment
@@ -87,7 +87,8 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
     }
 
     fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
-        let mut received_messages = Vec::new();
+        // Pre-allocate for typical case of 1-4 messages per poll
+        let mut received_messages = Vec::with_capacity(4);
         loop {
             match self.socket.recv_from(&mut self.buffer) {
                 Ok((number_of_bytes, src_addr)) => {
@@ -106,7 +107,7 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
                     if let Ok(msg) = bincode::deserialize(&self.buffer[0..number_of_bytes]) {
                         received_messages.push((src_addr, msg));
                     }
-                }
+                },
                 // there are no more messages
                 Err(ref err) if err.kind() == ErrorKind::WouldBlock => return received_messages,
                 // datagram socket sometimes get this error as a result of calling the send_to method
@@ -121,7 +122,7 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
                         err
                     );
                     return received_messages;
-                }
+                },
             }
         }
     }

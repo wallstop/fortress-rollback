@@ -186,7 +186,7 @@ impl<T: Config> SyncTestSession<T> {
                 return Err(FortressError::InternalError {
                     context: "Failed to get synchronized inputs".to_owned(),
                 });
-            }
+            },
         };
 
         // advance the frame
@@ -257,7 +257,7 @@ impl<T: Config> SyncTestSession<T> {
                     self.checksum_history
                         .insert(latest_cell.frame(), latest_cell.checksum());
                     true
-                }
+                },
             },
             None => true,
         }
@@ -302,7 +302,7 @@ impl<T: Config> SyncTestSession<T> {
                     return Err(FortressError::InternalError {
                         context: "Failed to get synchronized inputs during resimulation".to_owned(),
                     });
-                }
+                },
             };
 
             // first save (except in the first step, because we just loaded that state)

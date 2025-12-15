@@ -78,7 +78,7 @@ impl std::fmt::Debug for Input {
 }
 struct BytesDebug<'a>(&'a [u8]);
 
-impl<'a> std::fmt::Debug for BytesDebug<'a> {
+impl std::fmt::Debug for BytesDebug<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("0x")?;
         for byte in self.0 {
@@ -281,6 +281,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::redundant_clone)] // Testing Clone trait implementation
     fn test_message_clone_eq() {
         let msg = Message {
             header: MessageHeader { magic: 0x1234 },

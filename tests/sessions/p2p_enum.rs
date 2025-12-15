@@ -1,5 +1,8 @@
 //! P2P session integration tests with enum-based inputs.
 
+// Allow hardcoded IP addresses - 127.0.0.1 is appropriate for tests
+#![allow(clippy::ip_constant)]
+
 use crate::common::stubs_enum::{EnumInput, GameStubEnum, StubEnumConfig};
 use fortress_rollback::{
     FortressError, PlayerHandle, PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket,

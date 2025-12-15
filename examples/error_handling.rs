@@ -10,6 +10,9 @@
 //!
 //! Run with: `cargo run --example error_handling`
 
+// Allow print macros - examples use println! to demonstrate library usage to users
+#![allow(clippy::print_stdout, clippy::print_stderr, clippy::disallowed_macros)]
+
 use fortress_rollback::{
     Config, FortressError, PlayerHandle, PlayerType, SessionBuilder, UdpNonBlockingSocket,
 };
@@ -48,7 +51,7 @@ fn configuration_errors() {
             if let FortressError::InvalidRequest { info } = &e {
                 println!("   Reason: {}", info);
             }
-        }
+        },
     }
     println!();
 
@@ -63,7 +66,7 @@ fn configuration_errors() {
         Err(FortressError::InvalidRequest { info }) => {
             println!("   Error: Player handle already in use");
             println!("   Details: {}", info);
-        }
+        },
         Err(e) => println!("   Unexpected error type: {}", e),
     }
     println!();
@@ -79,7 +82,7 @@ fn configuration_errors() {
         Err(FortressError::InvalidRequest { info }) => {
             println!("   Error: Invalid player handle");
             println!("   Details: {}", info);
-        }
+        },
         Err(e) => println!("   Unexpected error type: {}", e),
     }
     println!();
@@ -94,7 +97,7 @@ fn configuration_errors() {
         Err(FortressError::InvalidRequest { info }) => {
             println!("   Error: Invalid configuration");
             println!("   Details: {}", info);
-        }
+        },
         Err(e) => println!("   Unexpected error type: {}", e),
     }
     println!();
@@ -113,7 +116,7 @@ fn session_setup_errors() {
         Err(e) => {
             println!("   Error: {}", e);
             println!("   Recovery: Try a different port or check permissions");
-        }
+        },
     }
     println!();
 
@@ -130,7 +133,7 @@ fn session_setup_errors() {
             Err(FortressError::InvalidRequest { info }) => {
                 println!("   Error: Cannot start session");
                 println!("   Details: {}", info);
-            }
+            },
             Err(e) => println!("   Error: {}", e),
         }
     }
@@ -154,7 +157,7 @@ fn runtime_error_handling() {
             println!("   Failed to create socket on port {}: {}", port1, e);
             println!("   Port may be in use. Try again later.");
             return;
-        }
+        },
     };
 
     let socket2 = match UdpNonBlockingSocket::bind_to_port(port2) {
@@ -163,7 +166,7 @@ fn runtime_error_handling() {
             println!("   Failed to create socket on port {}: {}", port2, e);
             println!("   Port may be in use. Try again later.");
             return;
-        }
+        },
     };
 
     let addr1: SocketAddr = format!("127.0.0.1:{}", port1).parse().unwrap();
@@ -187,7 +190,7 @@ fn runtime_error_handling() {
         (Err(e), _) | (_, Err(e)) => {
             println!("   Failed to create sessions: {}", e);
             return;
-        }
+        },
     };
 
     println!("   Sessions created on ports {} and {}", port1, port2);
@@ -200,7 +203,7 @@ fn runtime_error_handling() {
         Err(FortressError::NotSynchronized) => {
             println!("   Error: Session not synchronized yet");
             println!("   Recovery: Wait for SessionState::Running before adding inputs");
-        }
+        },
         Err(e) => println!("   Error: {}", e),
     }
 
@@ -212,7 +215,7 @@ fn runtime_error_handling() {
         Err(FortressError::NotSynchronized) => {
             println!("   Error: Cannot get stats - not synchronized");
             println!("   Recovery: Wait for synchronization to complete");
-        }
+        },
         Err(e) => println!("   Error: {}", e),
     }
 
@@ -227,10 +230,10 @@ fn runtime_error_handling() {
                 handle, max_handle
             );
             println!("   Recovery: Use handles 0 to num_players-1");
-        }
+        },
         Err(FortressError::InvalidRequest { info }) => {
             println!("   Error: {}", info);
-        }
+        },
         Err(e) => println!("   Error: {}", e),
     }
 

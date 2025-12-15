@@ -85,6 +85,7 @@ assert!(Frame::NULL.is_null()); // NULL_FRAME represents "no frame"
 ```
 
 Key properties:
+
 - Frame numbers start at 0 and increment sequentially
 - `Frame::NULL` (-1) represents "no frame" or "uninitialized"
 - Frames are used to index inputs, saved states, and track synchronization
@@ -104,6 +105,7 @@ assert!(spectator.is_spectator_for(2));    // Spectator handle
 ```
 
 Handle ranges:
+
 - `0..num_players`: Active players who contribute inputs
 - `num_players..`: Spectators who observe but don't contribute
 
@@ -148,6 +150,7 @@ SyncLayer
 ```
 
 **Key Operations:**
+
 - `add_local_input()`: Registers local player input
 - `add_remote_input()`: Registers remote player input
 - `synchronized_inputs()`: Returns inputs for current frame (confirmed or predicted)
@@ -157,6 +160,7 @@ SyncLayer
 ### InputQueue
 
 Each player has an `InputQueue` that:
+
 - Stores confirmed inputs in a circular buffer (128 entries)
 - Generates predictions when inputs haven't arrived
 - Tracks the first incorrect prediction for rollback detection
@@ -210,6 +214,7 @@ UdpProtocol
 ```
 
 **Protocol States:**
+
 1. `Initializing`: Not yet started
 2. `Synchronizing`: Exchanging sync packets
 3. `Running`: Normal operation
@@ -295,6 +300,7 @@ let mut session = SessionBuilder::<MyConfig>::new()
 ```
 
 **Features:**
+
 - Full rollback support
 - Automatic synchronization
 - Wait recommendations for frame pacing
@@ -312,6 +318,7 @@ let session = SessionBuilder::<MyConfig>::new()
 ```
 
 **Features:**
+
 - Receives confirmed inputs from host
 - Catchup mechanism when falling behind
 - No rollback needed (always has confirmed inputs)
@@ -328,6 +335,7 @@ let session = SessionBuilder::<MyConfig>::new()
 ```
 
 **Features:**
+
 - Simulates rollback every frame
 - Compares checksums after resimulation
 - Detects non-deterministic behavior
@@ -352,6 +360,7 @@ Peer A                              Peer B
 ```
 
 This establishes:
+
 - Round-trip time measurement
 - Magic number exchange for packet validation
 - Confirmation that both peers are ready
@@ -392,12 +401,13 @@ If you're ahead of your opponent (positive advantage), you receive `WaitRecommen
 ### When Rollback Occurs
 
 Rollback is triggered when:
+
 1. A prediction is proven wrong (received input differs from prediction)
 2. A remote player disconnects (need to resimulate with disconnect flag)
 
 ### Rollback Process
 
-```rust
+```rust,ignore
 // Simplified rollback flow in adjust_gamestate()
 
 let frame_to_load = if sparse_saving {
@@ -426,11 +436,13 @@ for _ in 0..frames_to_resimulate {
 ### Sparse vs. Full Saving
 
 **Full Saving (default):**
+
 - Saves state every frame
 - Minimal resimulation on rollback
 - Higher memory/CPU for saves
 
 **Sparse Saving:**
+
 - Only saves at confirmed frames
 - Longer rollbacks but fewer saves
 - Better when save is expensive
@@ -476,7 +488,7 @@ Frame:  [9] [1] [2] [3] [4] [5] [6] [7] [8]
 
 Each player has a `ConnectionStatus`:
 
-```rust
+```rust,ignore
 pub struct ConnectionStatus {
     pub disconnected: bool,  // Is the player disconnected?
     pub last_frame: Frame,   // Last frame we received input for
@@ -484,6 +496,7 @@ pub struct ConnectionStatus {
 ```
 
 This is used to:
+
 - Determine the confirmed frame (minimum of all `last_frame` values)
 - Skip disconnected players during input collection
 - Handle disconnect rollbacks
@@ -495,6 +508,7 @@ This is used to:
 ### Message Compression
 
 Inputs are delta-compressed:
+
 1. First input sent in full
 2. Subsequent inputs XOR'd against previous
 3. Receiver reconstructs using same process
@@ -502,6 +516,7 @@ Inputs are delta-compressed:
 ### Reliability
 
 The protocol is UDP-based (unreliable) but handles:
+
 - **Lost packets**: Inputs are resent until acknowledged
 - **Out-of-order**: Sequence numbers for ordering
 - **Duplicates**: Ignored via sequence tracking
@@ -509,6 +524,7 @@ The protocol is UDP-based (unreliable) but handles:
 ### Keep-Alive
 
 Regular packets maintain connection:
+
 - `KEEP_ALIVE_INTERVAL`: 200ms
 - `QualityReport` sent every 200ms
 - Disconnect after `disconnect_timeout` (default 2s)
@@ -519,33 +535,72 @@ Regular packets maintain connection:
 
 ### FortressError
 
-All errors use a single enum:
+All errors use a single enum (see [User Guide - Error Handling](user-guide.md#error-handling) for complete documentation):
 
 ```rust
 pub enum FortressError {
+    PredictionThreshold,
+    NotSynchronized,
     InvalidRequest { info: String },
     InvalidPlayerHandle { handle: PlayerHandle, max_handle: PlayerHandle },
     InvalidFrame { frame: Frame, reason: String },
-    NotSynchronized,
     MissingInput { player_handle: PlayerHandle, frame: Frame },
+    MismatchedChecksum { current_frame: Frame, mismatched_frames: Vec<Frame> },
+    SpectatorTooFarBehind,
+    SerializationError { context: String },
+    SocketError { context: String },
+    InternalError { context: String },
+    // ... (non-exhaustive, new variants may be added)
 }
 ```
 
 ### Violation Observer
 
-For monitoring internal issues:
+The telemetry system monitors internal specification violations—issues that don't necessarily cause errors but indicate unexpected behavior. See [User Guide - Specification Violations](user-guide.md#specification-violations-telemetry) for complete documentation.
 
 ```rust
+use fortress_rollback::telemetry::{CollectingObserver, ViolationKind};
+use std::sync::Arc;
+
 let observer = Arc::new(CollectingObserver::new());
 let session = SessionBuilder::<MyConfig>::new()
     .with_violation_observer(observer.clone())
     .start_p2p_session(socket)?;
 
-// Later, check for violations
+// After operations, check for violations
 for violation in observer.violations() {
-    eprintln!("Violation: {} - {}", violation.component, violation.message);
+    eprintln!(
+        "[{}/{}] {} at {}",
+        violation.severity,
+        violation.kind,
+        violation.message,
+        violation.location
+    );
+}
+
+// Check for specific violation types
+if observer.has_violation(ViolationKind::FrameSync) {
+    eprintln!("Frame synchronization issues detected");
 }
 ```
+
+**Violation Severities:**
+
+- `Warning`: Unexpected but recoverable
+- `Error`: Serious issue with degraded behavior
+- `Critical`: Invariant broken, state may be corrupt
+
+**Violation Kinds:**
+
+- `FrameSync`: Frame counter issues
+- `InputQueue`: Input sequence anomalies
+- `StateManagement`: Save/load issues
+- `NetworkProtocol`: Protocol state errors
+- `ChecksumMismatch`: Desync detection
+- `Synchronization`: Connection issues
+- `Configuration`: Invalid settings
+- `InternalError`: Library bugs
+- `Invariant`: Runtime check failures
 
 ---
 
@@ -555,7 +610,7 @@ for violation in observer.violations() {
 
 Prevents mixing frame numbers with arbitrary integers:
 
-```rust
+```rust,ignore
 let frame = Frame::new(5);
 let next = frame + 1;        // OK: Frame + i32 -> Frame
 let diff = next - frame;     // OK: Frame - Frame -> i32
@@ -566,7 +621,7 @@ let diff = next - frame;     // OK: Frame - Frame -> i32
 
 Prevents invalid handle usage:
 
-```rust
+```rust,ignore
 let handle = PlayerHandle::new(0);
 if handle.is_valid_player_for(num_players) {
     // Safe to use as player index
@@ -577,7 +632,7 @@ if handle.is_valid_player_for(num_players) {
 
 Compile-time parameterization bundles all type requirements:
 
-```rust
+```rust,ignore
 pub trait Config: 'static {
     type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned;
     type State: Clone;
@@ -586,6 +641,7 @@ pub trait Config: 'static {
 ```
 
 This ensures:
+
 - Input types are serializable for network transmission
 - State types are clonable for saving
 - Addresses can be used as map keys

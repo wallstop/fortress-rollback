@@ -120,6 +120,7 @@ The container needs `iproute2` installed (included in the Docker image).
 ### "RTNETLINK answers: Operation not permitted"
 
 The container needs `NET_ADMIN` capability:
+
 ```bash
 docker run --cap-add NET_ADMIN ...
 ```
@@ -127,6 +128,7 @@ docker run --cap-add NET_ADMIN ...
 ### Tests timing out
 
 Increase the timeout:
+
 ```bash
 TEST_TIMEOUT=120 docker compose -f docker/docker-compose.yml up
 ```

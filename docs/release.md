@@ -13,6 +13,7 @@
 6. If a bad release slips through, yank it: `cargo yank --vers X.Y.Z` (keeps name reserved).
 
 Notes:
+
 - The crates.io token must be stored as `CRATES_IO_TOKEN` in repo secrets.
 - Keep `README` badges pointing to the current workflows.
 - For pre-release/testing, you can publish with a pre-release version (e.g., `0.11.1-alpha.1`).

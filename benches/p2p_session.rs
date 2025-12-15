@@ -81,14 +81,14 @@ fn bench_advance_frame_no_rollback(c: &mut Criterion) {
                         match request {
                             FortressRequest::AdvanceFrame { inputs } => {
                                 black_box(inputs);
-                            }
+                            },
                             FortressRequest::SaveGameState { cell, frame } => {
                                 cell.save(frame, Some(BenchState::default()), None);
-                            }
+                            },
                             FortressRequest::LoadGameState { cell, frame: _ } => {
                                 black_box(cell.load());
-                            }
-                            _ => {}
+                            },
+                            _ => {},
                         }
                     }
                 });
@@ -144,19 +144,19 @@ fn bench_advance_frame_with_rollback(c: &mut Criterion) {
                         match request {
                             FortressRequest::AdvanceFrame { inputs: _ } => {
                                 current_state.frame += 1;
-                            }
+                            },
                             FortressRequest::SaveGameState { cell, frame } => {
                                 states.insert(frame, current_state.clone());
                                 cell.save(frame, Some(current_state.clone()), None);
-                            }
+                            },
                             FortressRequest::LoadGameState { cell, frame } => {
                                 if let Some(state) = cell.load() {
                                     current_state = state;
                                 } else if let Some(state) = states.get(&frame) {
                                     current_state = state.clone();
                                 }
-                            }
-                            _ => {}
+                            },
+                            _ => {},
                         }
                     }
                 }
@@ -185,19 +185,19 @@ fn bench_advance_frame_with_rollback(c: &mut Criterion) {
                         match request {
                             FortressRequest::AdvanceFrame { inputs: _ } => {
                                 current_state.frame += 1;
-                            }
+                            },
                             FortressRequest::SaveGameState { cell, frame } => {
                                 states.insert(frame, current_state.clone());
                                 cell.save(frame, Some(current_state.clone()), None);
-                            }
+                            },
                             FortressRequest::LoadGameState { cell, frame } => {
                                 if let Some(state) = cell.load() {
                                     current_state = state;
                                 } else if let Some(state) = states.get(&frame) {
                                     current_state = state.clone();
                                 }
-                            }
-                            _ => {}
+                            },
+                            _ => {},
                         }
                     }
                 });

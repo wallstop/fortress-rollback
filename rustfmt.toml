@@ -1,0 +1,29 @@
+# Rustfmt configuration for Fortress Rollback
+# See: https://rust-lang.github.io/rustfmt/
+# Note: Only stable options are used to avoid nightly requirement
+
+edition = "2021"
+
+# Line width
+max_width = 100
+use_small_heuristics = "Default"
+
+# Imports (stable subset)
+reorder_imports = true
+reorder_modules = true
+
+# Formatting improvements (stable)
+use_field_init_shorthand = true
+use_try_shorthand = true
+
+# Match arms
+match_arm_leading_pipes = "Never"
+match_block_trailing_comma = true
+
+# Function signatures
+fn_params_layout = "Tall"
+
+# Other stable options
+newline_style = "Unix"
+tab_spaces = 4
+hard_tabs = false

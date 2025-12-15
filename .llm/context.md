@@ -7,6 +7,7 @@
 Fortress Rollback is the correctness-first fork of GGRS, a reimagination of the GGPO (Good Game Peace Out) network SDK, written in 100% safe Rust. It provides peer-to-peer rollback networking capabilities for games, enabling deterministic multiplayer experiences with low-latency input prediction and rollback mechanics.
 
 ### Key Features
+
 - **100% Safe Rust**: No unsafe code, leveraging Rust's memory safety guarantees
 - **Request-Based API**: Simplified control flow replacing callback-style API
 - **P2P Rollback Networking**: Implements rollback netcode for real-time multiplayer games
@@ -15,6 +16,7 @@ Fortress Rollback is the correctness-first fork of GGRS, a reimagination of the 
 - **Desync Detection**: Checksum-based verification between peers
 
 ### Fork Goals
+
 1. **>90% test coverage** - Comprehensive unit, integration, property-based, and determinism tests
 2. **Formal verification** - TLA+ specifications, Z3 constraints, invariant proofs
 3. **Enhanced usability** - Intuitive APIs, clear error messages, type safety
@@ -29,40 +31,56 @@ fortress-rollback/
 │   ├── error.rs                  # Error types (FortressError)
 │   ├── frame_info.rs             # Frame metadata and tracking
 │   ├── input_queue.rs            # Input buffering and management
-│   ├── sync_layer.rs             # Core synchronization logic
+│   ├── hash.rs                   # Deterministic FNV-1a hashing
+│   ├── rle.rs                    # Run-length encoding for compression
+│   ├── rng.rs                    # Deterministic PCG32 random number generator
 │   ├── time_sync.rs              # Time synchronization between peers
+│   ├── sync_layer/
+│   │   ├── mod.rs                # Core synchronization logic (SyncLayer)
+│   │   ├── game_state_cell.rs    # Thread-safe game state storage
+│   │   └── saved_states.rs       # Circular buffer for rollback states
 │   ├── network/
 │   │   ├── compression.rs        # Network message compression
 │   │   ├── messages.rs           # Network protocol messages
 │   │   ├── network_stats.rs      # Network statistics tracking
-│   │   ├── protocol.rs           # Network protocol implementation
-│   │   └── udp_socket.rs         # UDP socket abstraction
+│   │   ├── chaos_socket.rs       # Testing socket with configurable chaos
+│   │   ├── udp_socket.rs         # UDP socket abstraction
+│   │   └── protocol/
+│   │       ├── mod.rs            # Network protocol implementation
+│   │       ├── event.rs          # Protocol events
+│   │       ├── state.rs          # Protocol state machine
+│   │       └── input_bytes.rs    # Input serialization helper
 │   └── sessions/
 │       ├── builder.rs            # Session builder pattern
 │       ├── p2p_session.rs        # Peer-to-peer session
 │       ├── p2p_spectator_session.rs  # Spectator session
 │       └── sync_test_session.rs  # Determinism testing session
-├── specs/                        # Formal specifications (TLA+)
+├── docs/                         # User documentation
+├── specs/tla/                    # TLA+ formal specifications
 ├── examples/                     # Example implementations
-├── tests/                        # Integration tests
+├── tests/                        # Integration tests (organized by category)
 ├── fuzz/                         # Fuzz testing targets
 ├── loom-tests/                   # Concurrency tests with Loom
+├── progress/                     # Development session notes
 └── Cargo.toml                    # Package manifest
 ```
 
 ## Core Concepts
 
 ### Session Types
+
 - **P2PSession**: Standard peer-to-peer gameplay session
 - **SpectatorSession**: Session for spectators who observe but don't participate
 - **SyncTestSession**: Determinism verification session for testing
 
 ### Player Types
+
 - **Local**: Player on the current device
 - **Remote**: Player on a remote device (identified by socket address)
 - **Spectator**: Remote observer (doesn't contribute input)
 
 ### Key Technical Concepts
+
 - **Frames**: Discrete time steps in game simulation
 - **Rollback**: Restoring previous state when predictions are wrong
 - **Input Delay**: Buffer frames to smooth over network jitter
@@ -75,12 +93,14 @@ fortress-rollback/
 ## Development Policies
 
 ### Breaking Changes Policy
+
 - **API compatibility is NOT required** - Breaking the public API is acceptable
 - **Safety and correctness trump compatibility** - If a breaking change improves safety, determinism, or prevents misuse, make it
 - **Document all breaking changes** - Update docs/changelog.md and docs/migration.md when APIs change
 - **This fork prioritizes production-grade quality** - We are not a drop-in replacement for upstream GGRS
 
 ### Code Quality Standards
+
 - 100% safe Rust (`#![forbid(unsafe_code)]`)
 - Enable and satisfy clippy lints (all, pedantic, nursery)
 - No panics in library code (use `Result<T, FortressError>`)
@@ -88,12 +108,15 @@ fortress-rollback/
 - All public items have rustdoc with examples
 
 ### Build & Test Commands
+
 After every major change, run:
+
 ```bash
 cargo fmt
 cargo clippy --all-targets
 cargo test
 ```
+
 Note: Use `--features z3-verification` only when working on Z3 tests (compiles Z3 from source, which is slow)
 
 ---
@@ -101,6 +124,7 @@ Note: Use `--features z3-verification` only when working on Z3 tests (compiles Z
 ## Testing Guidelines
 
 ### Test Coverage Requirements
+
 - All new features must include tests
 - Aim for >90% code coverage
 - Include both positive and negative test cases
@@ -108,6 +132,7 @@ Note: Use `--features z3-verification` only when working on Z3 tests (compiles Z
 - Use integration tests for cross-component behavior
 
 ### Test Structure
+
 ```rust
 #[test]
 fn descriptive_test_name_explaining_scenario() {
@@ -124,11 +149,13 @@ fn descriptive_test_name_explaining_scenario() {
 ```
 
 ### Root Cause Analysis for Test Failures
+
 **CRITICAL: When tests fail or are flaky, always perform deep investigation**
 
 The goal is NOT to "make the test pass" — it's to understand and fix the underlying issue.
 
 #### Investigation Methodology
+
 1. **Reproduce and characterize** - Run test multiple times; is it consistent or flaky? Under what conditions?
 2. **Understand the assertion** - What property is the test verifying? Why should it hold?
 3. **Trace execution** - Add logging, use debugger, examine state at failure point
@@ -137,18 +164,22 @@ The goal is NOT to "make the test pass" — it's to understand and fix the under
 6. **Consider scope** - Are there similar issues elsewhere in the codebase?
 
 #### Distinguishing Test Bug vs Production Bug
+
 **Production bug indicators:**
+
 - Test expectations align with documented/intended behavior
 - Multiple tests or users depend on the same behavior
 - The test logic is simple and clearly correct
 
 **Test bug indicators:**
+
 - Test makes assumptions not guaranteed by the API contract
 - Test has inherent race conditions or timing dependencies  
 - Test uses mocking incorrectly or has setup errors
 - Test expectations contradict documentation
 
 #### Comprehensive Fix Requirements
+
 1. **Fix at the correct level**:
    - Production bug → Fix library code, verify other tests still pass, add regression test if missing
    - Test bug → Fix test's incorrect assumptions, document why original was wrong
@@ -160,6 +191,7 @@ The goal is NOT to "make the test pass" — it's to understand and fix the under
 5. **Document the fix** - Explain root cause and why the solution is correct
 
 #### Strictly Forbidden "Fixes"
+
 - ❌ Commenting out or weakening failing assertions
 - ❌ Adding `Thread::sleep()` or arbitrary delays to "fix" timing
 - ❌ Catching and ignoring/swallowing errors in tests
@@ -173,6 +205,7 @@ The goal is NOT to "make the test pass" — it's to understand and fix the under
 ## Formal Verification
 
 ### Philosophy
+
 - **Specs model production** - TLA+/Kani/Z3 specs must accurately represent production code behavior
 - **When verification fails, assume production has a bug first** - investigate before relaxing specs
 - **Never "fix" specs just to make them pass** - this defeats the purpose of verification
@@ -180,6 +213,7 @@ The goal is NOT to "make the test pass" — it's to understand and fix the under
 - **Invariants represent real safety properties** - only relax with strong justification
 
 ### When Formal Verification Reveals Issues
+
 After fixing any bug discovered through formal verification, code review, or other analysis, add comprehensive test coverage:
 
 1. **Direct reproduction test** - Cover the exact scenario that was discovered
@@ -209,6 +243,7 @@ fn test_invariant_checker_identifies_violations() { /* Negative test */ }
 ```
 
 ### Verification Tools
+
 - **TLA+**: State machine modeling, concurrency correctness, protocol verification
 - **Z3**: Algorithm correctness, invariant checking, safety properties
 - **Loom**: Concurrency testing for Rust code
@@ -220,7 +255,8 @@ fn test_invariant_checker_identifies_violations() { /* Negative test */ }
 Apply these patterns from [corrode.dev/blog/defensive-programming](https://corrode.dev/blog/defensive-programming/):
 
 ### Slice Pattern Matching Over Indexing
-```rust
+
+```rust,ignore
 // ❌ Avoid: Decoupled length check and indexing can panic
 if !users.is_empty() { let first = &users[0]; }
 
@@ -233,7 +269,8 @@ match users.as_slice() {
 ```
 
 ### Explicit Field Initialization
-```rust
+
+```rust,ignore
 // ❌ Avoid: New fields silently use defaults
 let config = Config { field1: value1, ..Default::default() };
 
@@ -242,7 +279,8 @@ let config = Config { field1: value1, field2: value2, field3: value3 };
 ```
 
 ### Destructuring in Trait Implementations
-```rust
+
+```rust,ignore
 // ✅ Prefer: Compiler error when fields are added
 impl PartialEq for Order {
     fn eq(&self, other: &Self) -> bool {
@@ -254,7 +292,8 @@ impl PartialEq for Order {
 ```
 
 ### TryFrom for Fallible Conversions
-```rust
+
+```rust,ignore
 // ✅ Prefer: TryFrom makes fallibility explicit
 impl TryFrom<RawData> for ProcessedData {
     type Error = ConversionError;
@@ -265,7 +304,8 @@ impl TryFrom<RawData> for ProcessedData {
 ```
 
 ### Exhaustive Match Arms
-```rust
+
+```rust,ignore
 // ❌ Avoid: Wildcard hides unhandled variants
 match state { State::Ready => {}, _ => {} }
 
@@ -274,12 +314,14 @@ match state { State::Ready => {}, State::Running | State::Paused => {} }
 ```
 
 ### Enums Over Booleans
+
 ```rust
 // ❌ Avoid: process_data(&data, true, false, true);
 // ✅ Prefer: process_data(&data, Compression::Enabled, Encryption::Disabled, Validation::Strict);
 ```
 
 ### Recommended Clippy Lints
+
 ```toml
 [lints.clippy]
 indexing_slicing = "warn"
@@ -293,27 +335,29 @@ must_use_candidate = "warn"
 ## Code Examples
 
 ### Session Builder Pattern
-```rust
-let session = SessionBuilder::new()
+
+```rust,ignore
+let session = SessionBuilder::<MyConfig>::new()
     .with_num_players(2)
     .with_input_delay(2)
     .with_max_prediction(8)
-    .add_player(PlayerType::Local, 0)?
-    .add_player(PlayerType::Remote(addr), 1)?
-    .start_p2p_session()?;
+    .add_player(PlayerType::Local, PlayerHandle::new(0))?
+    .add_player(PlayerType::Remote(addr), PlayerHandle::new(1))?
+    .start_p2p_session(socket)?;
 ```
 
 ### Request Handling
-```rust
-for request in session.events() {
+
+```rust,ignore
+for request in session.advance_frame()? {
     match request {
-        GgrsRequest::SaveGameState { frame, cell } => {
-            cell.save(frame, &game_state, None);
+        FortressRequest::SaveGameState { frame, cell } => {
+            cell.save(frame, Some(game_state.clone()), None);
         }
-        GgrsRequest::LoadGameState { frame, cell } => {
-            game_state = cell.load(frame);
+        FortressRequest::LoadGameState { cell, .. } => {
+            game_state = cell.load().expect("State should exist");
         }
-        GgrsRequest::AdvanceFrame { inputs } => {
+        FortressRequest::AdvanceFrame { inputs } => {
             game_state.update(&inputs);
         }
     }
@@ -321,6 +365,7 @@ for request in session.events() {
 ```
 
 ### Function Documentation
+
 ```rust
 /// Advances the session by one frame, processing inputs and handling rollback.
 ///
@@ -341,6 +386,7 @@ pub fn advance_frame(&mut self) -> Result<(), FortressError> {
 ## Quality Checklist
 
 Before suggesting code, ensure it:
+
 - [ ] Compiles with no warnings
 - [ ] Includes tests (unit and/or integration)
 - [ ] Has rustdoc comments for public items

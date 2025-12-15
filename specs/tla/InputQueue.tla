@@ -23,6 +23,16 @@
 (*     - Minimal: 32 frames (~0.5s at 60 FPS)                              *)
 (*   The invariants proven here hold for ANY valid QUEUE_LENGTH >= 2.      *)
 (*   TLA+ uses small values (3) for tractable exhaustive model checking.   *)
+(*                                                                         *)
+(* IMPORTANT - Prediction Model (Fortress vs GGPO):                        *)
+(*   Production code uses `last_confirmed_input` for prediction source.    *)
+(*   This is DIFFERENT from original GGPO which used "last added input".   *)
+(*   The `lastConfirmedInput` variable in this spec models production's    *)
+(*   `last_confirmed_input` field, which is:                               *)
+(*     - Updated when ANY input is added (local or remote)                 *)
+(*     - Synchronized across all peers via the network protocol            *)
+(*     - Used as the basis for predictions (RepeatLastConfirmed strategy)  *)
+(*   This ensures determinism because confirmed inputs are synchronized.   *)
 (***************************************************************************)
 
 EXTENDS Integers, Naturals, Sequences, FiniteSets, TLC
@@ -38,6 +48,12 @@ ASSUME NULL_FRAME \notin 0..MAX_FRAME  \* Sentinel value (outside valid frame ra
 
 (***************************************************************************)
 (* Variables                                                               *)
+(*                                                                         *)
+(* NOTE: `lastConfirmedInput` maps to production's `last_confirmed_input`  *)
+(* field in InputQueue. It stores the most recent confirmed input value,   *)
+(* used as the source for predictions via RepeatLastConfirmed strategy.    *)
+(* This is DIFFERENT from original GGPO which used a separate `prediction` *)
+(* variable that could desync between peers.                               *)
 (***************************************************************************)
 VARIABLES
     inputs,                 \* inputs[i] = input at buffer index i
@@ -47,10 +63,10 @@ VARIABLES
     lastAddedFrame,         \* Frame of most recently added input
     lastRequestedFrame,     \* Frame most recently requested (for discard protection)
     firstIncorrectFrame,    \* First frame where prediction was wrong
-    prediction              \* Current prediction value
+    lastConfirmedInput      \* Last confirmed input (used for predictions)
 
 vars == <<inputs, head, tail, length, lastAddedFrame, lastRequestedFrame,
-          firstIncorrectFrame, prediction>>
+          firstIncorrectFrame, lastConfirmedInput>>
 
 (***************************************************************************)
 (* Type Definitions                                                        *)
@@ -72,7 +88,7 @@ TypeInvariant ==
     /\ lastAddedFrame \in Frame
     /\ lastRequestedFrame \in Frame
     /\ firstIncorrectFrame \in Frame
-    /\ prediction \in Input
+    /\ lastConfirmedInput \in Input
 
 (***************************************************************************)
 (* Initial State                                                           *)
@@ -87,7 +103,7 @@ Init ==
     /\ lastAddedFrame = NULL_FRAME
     /\ lastRequestedFrame = NULL_FRAME
     /\ firstIncorrectFrame = NULL_FRAME
-    /\ prediction = BlankInput
+    /\ lastConfirmedInput = BlankInput
 
 (***************************************************************************)
 (* Helper: Modular arithmetic for circular buffer                          *)
@@ -150,6 +166,10 @@ FIFOOrdering ==
 (* Action: Add input to queue                                              *)
 (* Pre: input.frame = lastAddedFrame + 1 (or lastAddedFrame = NULL_FRAME)  *)
 (* Post: Input added, head advanced, length incremented (up to max)        *)
+(*                                                                         *)
+(* Maps to production: InputQueue::add_input_by_frame()                    *)
+(* Updates lastConfirmedInput (production: last_confirmed_input) which is  *)
+(* used as the basis for future predictions via RepeatLastConfirmed.       *)
 (***************************************************************************)
 AddInput(input) ==
     /\ input.frame \in 0..MAX_FRAME
@@ -160,7 +180,7 @@ AddInput(input) ==
     /\ length' = IF length < QUEUE_LENGTH THEN length + 1 ELSE length
     /\ tail' = IF length >= QUEUE_LENGTH THEN NextIndex(tail) ELSE tail
     /\ lastAddedFrame' = input.frame
-    /\ prediction' = input  \* Update prediction to latest input
+    /\ lastConfirmedInput' = input  \* Update last confirmed input for predictions
     /\ UNCHANGED <<lastRequestedFrame, firstIncorrectFrame>>
 
 (***************************************************************************)
@@ -174,12 +194,17 @@ GetInput(frame) ==
                              THEN frame
                              ELSE lastRequestedFrame
     /\ UNCHANGED <<inputs, head, tail, length, lastAddedFrame,
-                   firstIncorrectFrame, prediction>>
+                   firstIncorrectFrame, lastConfirmedInput>>
 
 (***************************************************************************)
 (* Action: Add remote input (may detect incorrect prediction)              *)
-(* If the input differs from prediction and firstIncorrectFrame is null,   *)
-(* set firstIncorrectFrame to this frame.                                  *)
+(* If the input differs from lastConfirmedInput and firstIncorrectFrame    *)
+(* is null, set firstIncorrectFrame to this frame.                         *)
+(*                                                                         *)
+(* Maps to production: InputQueue::add_input_by_frame() when called with   *)
+(* remote inputs. The comparison against lastConfirmedInput.value models   *)
+(* production's `self.prediction.equal(&input, true)` check, where         *)
+(* `self.prediction` was generated from `last_confirmed_input`.            *)
 (***************************************************************************)
 AddRemoteInput(input) ==
     /\ input.frame \in 0..MAX_FRAME
@@ -190,11 +215,11 @@ AddRemoteInput(input) ==
     /\ length' = IF length < QUEUE_LENGTH THEN length + 1 ELSE length
     /\ tail' = IF length >= QUEUE_LENGTH THEN NextIndex(tail) ELSE tail
     /\ lastAddedFrame' = input.frame
-    \* Check if prediction was wrong
-    /\ IF firstIncorrectFrame = NULL_FRAME /\ input.value # prediction.value
+    \* Check if prediction was wrong (compares against last confirmed input)
+    /\ IF firstIncorrectFrame = NULL_FRAME /\ input.value # lastConfirmedInput.value
        THEN firstIncorrectFrame' = input.frame
        ELSE firstIncorrectFrame' = firstIncorrectFrame
-    /\ prediction' = input
+    /\ lastConfirmedInput' = input
     /\ UNCHANGED <<lastRequestedFrame>>
 
 (***************************************************************************)
@@ -209,7 +234,7 @@ DiscardConfirmed(upToFrame) ==
     /\ tail' = NextIndex(tail)
     /\ length' = length - 1
     /\ UNCHANGED <<inputs, head, lastAddedFrame, lastRequestedFrame,
-                   firstIncorrectFrame, prediction>>
+                   firstIncorrectFrame, lastConfirmedInput>>
 
 (***************************************************************************)
 (* Action: Reset prediction tracking (after rollback)                      *)
@@ -218,7 +243,7 @@ ResetPrediction ==
     /\ firstIncorrectFrame # NULL_FRAME
     /\ firstIncorrectFrame' = NULL_FRAME
     /\ UNCHANGED <<inputs, head, tail, length, lastAddedFrame,
-                   lastRequestedFrame, prediction>>
+                   lastRequestedFrame, lastConfirmedInput>>
 
 (***************************************************************************)
 (* Next State Relation                                                     *)

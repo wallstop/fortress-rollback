@@ -231,7 +231,7 @@ pub struct GameStateAccessor<'c, T>(MappedMutexGuard<'c, T>);
 pub struct GameStateAccessor<'c, T>(std::marker::PhantomData<&'c T>);
 
 #[cfg(not(loom))]
-impl<'c, T> Deref for GameStateAccessor<'c, T> {
+impl<T> Deref for GameStateAccessor<'_, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -239,7 +239,7 @@ impl<'c, T> Deref for GameStateAccessor<'c, T> {
 }
 
 #[cfg(loom)]
-impl<'c, T> Deref for GameStateAccessor<'c, T> {
+impl<T> Deref for GameStateAccessor<'_, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         // This should never be called under loom as data() returns None
@@ -248,7 +248,7 @@ impl<'c, T> Deref for GameStateAccessor<'c, T> {
 }
 
 #[cfg(not(loom))]
-impl<'c, T> GameStateAccessor<'c, T> {
+impl<T> GameStateAccessor<'_, T> {
     /// Get mutable access to the `T` that the user previously saved into a [GameStateCell].
     ///
     /// You probably do not need this! It's safer to use [Self::deref()](Deref::deref) instead;

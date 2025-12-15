@@ -17,7 +17,10 @@
 //! ## InputQueue (from check_invariants implementation)
 //! - INV-IQ-1: length <= queue_length
 //! - INV-IQ-2: head < queue_length
-//! - INV-IQ-3: tail < queue_length  
+//! - INV-IQ-3: tail < queue_length
+
+// Allow hardcoded IP addresses - 127.0.0.1 is appropriate for tests
+#![allow(clippy::ip_constant)]
 //! - INV-IQ-4: first_incorrect_frame is NULL or < last_added_frame (adjusted for delay)
 //!
 //! ## SyncLayer (from check_invariants implementation)
@@ -232,11 +235,11 @@ mod input_queue_invariants {
         // but we can verify the check_invariants method returns correctly
         let result = queue.check_invariants();
         match result {
-            Ok(()) => {} // Expected for valid queue
+            Ok(()) => {}, // Expected for valid queue
             Err(violation) => {
                 // If somehow invalid, ensure we get proper error info
                 assert!(!violation.to_string().is_empty());
-            }
+            },
         }
     }
 }
@@ -822,8 +825,7 @@ mod sync_layer_production_behavior {
         }
 
         // Now try to load a recent frame (should work)
-        let current = sync_layer.current_frame().as_i32();
-        let _recent_frame = current - 2; // Unused but documents the test intent
+        // The current frame minus 2 would be a recent frame that should exist in the buffer.
 
         // In production, states are saved each frame, so the slot should have
         // the correct frame data. The circular buffer overwrites old states.
@@ -900,7 +902,7 @@ mod sync_layer_production_behavior {
                     let loaded = cell.load();
                     assert!(loaded.is_some());
                     assert_eq!(loaded.unwrap().value, state.value);
-                }
+                },
                 _ => panic!("Expected SaveGameState request"),
             }
 
@@ -1102,6 +1104,7 @@ mod game_state_cell_production_behavior {
 
     /// Verify cloning cells shares underlying state.
     #[test]
+    #[allow(clippy::redundant_clone)] // Testing Clone trait - cell2 shares Arc with cell1
     fn test_cell_clone_shares_state() {
         let states = SavedStates::<TestState>::new(4);
         let cell1 = states.get_cell(Frame::new(0)).unwrap();

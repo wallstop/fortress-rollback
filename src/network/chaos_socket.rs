@@ -156,6 +156,81 @@ impl ChaosConfig {
             ..Default::default()
         }
     }
+
+    /// Creates a config simulating mobile/cellular network conditions.
+    ///
+    /// Mobile networks have high jitter, intermittent packet loss,
+    /// and occasional burst losses during handoffs between towers
+    /// or WiFi/cellular switches.
+    ///
+    /// Characteristics modeled:
+    /// - 60ms base latency (typical 4G/LTE)
+    /// - 40ms jitter (high variability)
+    /// - 12% packet loss (higher than wired)
+    /// - Occasional burst loss simulating handoffs
+    #[must_use]
+    pub fn mobile_network() -> Self {
+        Self {
+            latency: Duration::from_millis(60),
+            jitter: Duration::from_millis(40),
+            send_loss_rate: 0.12,
+            receive_loss_rate: 0.12,
+            duplication_rate: 0.01,
+            reorder_buffer_size: 3,
+            reorder_rate: 0.05,
+            // Simulate handoff events - occasional burst loss
+            burst_loss_probability: 0.02,
+            burst_loss_length: 4,
+            ..Default::default()
+        }
+    }
+
+    /// Creates a config simulating WiFi with interference.
+    ///
+    /// Congested WiFi networks (2.4GHz especially) experience
+    /// bursty packet loss patterns from interference with
+    /// microwaves, Bluetooth, neighboring networks, etc.
+    ///
+    /// Characteristics modeled:
+    /// - Low base latency (WiFi is fast when working)
+    /// - Moderate jitter from contention
+    /// - Burst loss pattern from interference
+    #[must_use]
+    pub fn wifi_interference() -> Self {
+        Self {
+            latency: Duration::from_millis(15),
+            jitter: Duration::from_millis(25),
+            send_loss_rate: 0.03,
+            receive_loss_rate: 0.03,
+            duplication_rate: 0.0,
+            reorder_buffer_size: 2,
+            reorder_rate: 0.02,
+            // Bursty loss from interference
+            burst_loss_probability: 0.05,
+            burst_loss_length: 3,
+            ..Default::default()
+        }
+    }
+
+    /// Creates a config simulating intercontinental connections.
+    ///
+    /// Cross-ocean connections have high but stable latency,
+    /// with occasional routing changes causing jitter spikes.
+    ///
+    /// Characteristics modeled:
+    /// - 120ms base latency (transatlantic/transpacific)
+    /// - Low jitter (stable undersea cables)
+    /// - Minimal packet loss (well-provisioned backbone)
+    #[must_use]
+    pub fn intercontinental() -> Self {
+        Self {
+            latency: Duration::from_millis(120),
+            jitter: Duration::from_millis(15),
+            send_loss_rate: 0.02,
+            receive_loss_rate: 0.02,
+            ..Default::default()
+        }
+    }
 }
 
 /// Builder for [`ChaosConfig`].
@@ -634,6 +709,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    // Allow float_cmp for tests - we're comparing exact values set via builder, not computed values
+    #![allow(clippy::float_cmp)]
+
     use super::*;
     use std::net::SocketAddr;
 
@@ -1063,5 +1141,208 @@ mod tests {
         socket.reset_stats();
         assert_eq!(socket.stats().burst_loss_events, 0);
         assert_eq!(socket.stats().packets_dropped_burst, 0);
+    }
+
+    // ============================================================================
+    // ChaosConfig Preset Tests
+    // ============================================================================
+
+    #[test]
+    fn test_passthrough_preset_has_no_effects() {
+        let config = ChaosConfig::passthrough();
+
+        assert_eq!(config.latency, Duration::ZERO);
+        assert_eq!(config.jitter, Duration::ZERO);
+        assert_eq!(config.send_loss_rate, 0.0);
+        assert_eq!(config.receive_loss_rate, 0.0);
+        assert_eq!(config.duplication_rate, 0.0);
+        assert_eq!(config.reorder_buffer_size, 0);
+        assert_eq!(config.reorder_rate, 0.0);
+        assert_eq!(config.burst_loss_probability, 0.0);
+        assert_eq!(config.burst_loss_length, 0);
+    }
+
+    #[test]
+    fn test_high_latency_preset() {
+        let config = ChaosConfig::high_latency(150);
+
+        assert_eq!(config.latency, Duration::from_millis(150));
+        // Should have no other effects
+        assert_eq!(config.jitter, Duration::ZERO);
+        assert_eq!(config.send_loss_rate, 0.0);
+        assert_eq!(config.receive_loss_rate, 0.0);
+    }
+
+    #[test]
+    fn test_lossy_preset() {
+        let config = ChaosConfig::lossy(0.1);
+
+        assert_eq!(config.send_loss_rate, 0.1);
+        assert_eq!(config.receive_loss_rate, 0.1);
+        // Should have no latency
+        assert_eq!(config.latency, Duration::ZERO);
+    }
+
+    #[test]
+    fn test_poor_network_preset() {
+        let config = ChaosConfig::poor_network();
+
+        // Should have moderate latency
+        assert!(config.latency >= Duration::from_millis(50));
+        assert!(config.latency <= Duration::from_millis(200));
+        // Should have some jitter
+        assert!(config.jitter > Duration::ZERO);
+        // Should have moderate loss (2-10%)
+        assert!(config.send_loss_rate >= 0.02);
+        assert!(config.send_loss_rate <= 0.10);
+        assert!(config.receive_loss_rate >= 0.02);
+        assert!(config.receive_loss_rate <= 0.10);
+    }
+
+    #[test]
+    fn test_terrible_network_preset() {
+        let config = ChaosConfig::terrible_network();
+        let poor = ChaosConfig::poor_network();
+
+        // Should be worse than poor network
+        assert!(config.latency > poor.latency);
+        assert!(config.jitter > poor.jitter);
+        assert!(config.send_loss_rate > poor.send_loss_rate);
+        // Should have reordering
+        assert!(config.reorder_buffer_size > 0);
+        assert!(config.reorder_rate > 0.0);
+        // Should have some duplication
+        assert!(config.duplication_rate > 0.0);
+    }
+
+    #[test]
+    fn test_mobile_network_preset() {
+        let config = ChaosConfig::mobile_network();
+
+        // Mobile characteristics:
+        // - Moderate latency (40-100ms typical for 4G/LTE)
+        assert!(config.latency >= Duration::from_millis(40));
+        assert!(config.latency <= Duration::from_millis(100));
+        // - High jitter (20-60ms)
+        assert!(config.jitter >= Duration::from_millis(20));
+        assert!(config.jitter <= Duration::from_millis(60));
+        // - Higher packet loss than wired (8-15%)
+        assert!(config.send_loss_rate >= 0.08);
+        assert!(config.send_loss_rate <= 0.15);
+        // - Should have burst loss for handoffs
+        assert!(config.burst_loss_probability > 0.0);
+        assert!(config.burst_loss_length > 0);
+        // - Some reordering
+        assert!(config.reorder_buffer_size > 0);
+    }
+
+    #[test]
+    fn test_wifi_interference_preset() {
+        let config = ChaosConfig::wifi_interference();
+
+        // WiFi characteristics:
+        // - Low base latency (WiFi is fast when working)
+        assert!(config.latency < Duration::from_millis(30));
+        // - Moderate jitter from contention
+        assert!(config.jitter > Duration::ZERO);
+        assert!(config.jitter <= Duration::from_millis(40));
+        // - Low baseline loss
+        assert!(config.send_loss_rate <= 0.05);
+        // - Should have burst loss pattern (key characteristic)
+        assert!(config.burst_loss_probability > 0.0);
+        assert!(config.burst_loss_length > 0);
+        // Burst loss should be more likely than mobile (interference is frequent)
+        let mobile = ChaosConfig::mobile_network();
+        assert!(config.burst_loss_probability >= mobile.burst_loss_probability);
+    }
+
+    #[test]
+    fn test_intercontinental_preset() {
+        let config = ChaosConfig::intercontinental();
+
+        // Intercontinental characteristics:
+        // - High but stable latency (100-150ms)
+        assert!(config.latency >= Duration::from_millis(100));
+        assert!(config.latency <= Duration::from_millis(150));
+        // - Low jitter (stable undersea cables)
+        assert!(config.jitter <= Duration::from_millis(20));
+        // - Low packet loss (well-provisioned backbone)
+        assert!(config.send_loss_rate <= 0.03);
+        // - No burst loss (stable infrastructure)
+        assert_eq!(config.burst_loss_probability, 0.0);
+    }
+
+    #[test]
+    fn test_preset_ordering_by_severity() {
+        // Verify presets are ordered from least to most severe
+        let passthrough = ChaosConfig::passthrough();
+        let wifi = ChaosConfig::wifi_interference();
+        let poor = ChaosConfig::poor_network();
+        let mobile = ChaosConfig::mobile_network();
+        let terrible = ChaosConfig::terrible_network();
+
+        // Passthrough should have no effects
+        assert_eq!(passthrough.send_loss_rate, 0.0);
+
+        // WiFi should have low base loss but burst
+        assert!(wifi.send_loss_rate < poor.send_loss_rate);
+
+        // Poor should be less severe than mobile/terrible
+        assert!(poor.send_loss_rate < mobile.send_loss_rate);
+        assert!(poor.latency < terrible.latency);
+
+        // Terrible should be the worst
+        assert!(terrible.latency >= poor.latency);
+        assert!(terrible.send_loss_rate >= poor.send_loss_rate);
+    }
+
+    #[test]
+    fn test_all_presets_have_sensible_values() {
+        let presets = [
+            ("passthrough", ChaosConfig::passthrough()),
+            ("high_latency", ChaosConfig::high_latency(100)),
+            ("lossy", ChaosConfig::lossy(0.1)),
+            ("poor_network", ChaosConfig::poor_network()),
+            ("terrible_network", ChaosConfig::terrible_network()),
+            ("mobile_network", ChaosConfig::mobile_network()),
+            ("wifi_interference", ChaosConfig::wifi_interference()),
+            ("intercontinental", ChaosConfig::intercontinental()),
+        ];
+
+        for (name, config) in presets {
+            // Loss rates should be in valid range
+            assert!(
+                (0.0..=1.0).contains(&config.send_loss_rate),
+                "{name}: send_loss_rate out of range"
+            );
+            assert!(
+                (0.0..=1.0).contains(&config.receive_loss_rate),
+                "{name}: receive_loss_rate out of range"
+            );
+            assert!(
+                (0.0..=1.0).contains(&config.duplication_rate),
+                "{name}: duplication_rate out of range"
+            );
+            assert!(
+                (0.0..=1.0).contains(&config.reorder_rate),
+                "{name}: reorder_rate out of range"
+            );
+            assert!(
+                (0.0..=1.0).contains(&config.burst_loss_probability),
+                "{name}: burst_loss_probability out of range"
+            );
+
+            // Latency should not be absurdly high (< 1 second)
+            assert!(
+                config.latency < Duration::from_secs(1),
+                "{name}: latency too high"
+            );
+
+            // Jitter should not exceed latency by too much
+            assert!(
+                config.jitter <= config.latency + Duration::from_millis(100),
+                "{name}: jitter unreasonably high compared to latency"
+            );
+        }
     }
 }

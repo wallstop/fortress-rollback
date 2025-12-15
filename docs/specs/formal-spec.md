@@ -70,6 +70,7 @@ VALID_FRAME(f) ↔ f ≥ 0
 ```
 
 **Operations:**
+
 ```
 frame_add: Frame × ℤ → Frame
     frame_add(f, n) = f + n
@@ -124,31 +125,38 @@ ConnectionStatus = {
 These invariants **MUST** hold at all times during system operation.
 
 ### INV-1: Frame Monotonicity
+
 ```
 □(current_frame' ≥ current_frame ∨ IN_ROLLBACK)
 ```
+
 The current frame never decreases except during explicit rollback.
 
 ### INV-2: Rollback Boundedness
+
 ```
 □(rollback_depth ≤ max_prediction)
     where rollback_depth = current_frame - frame_to_load
 ```
 
 ### INV-3: Input Consistency (Immutability)
+
 ```
 □(∀f ∈ Frame, p ∈ PlayerHandle:
     confirmed(f, p) → □(input(f, p) = input(f, p)))
 ```
+
 Once confirmed, inputs never change.
 
 ### INV-4: Queue Length Bounds
+
 ```
 □(∀q ∈ InputQueue: 0 ≤ q.length ≤ INPUT_QUEUE_LENGTH)
     where INPUT_QUEUE_LENGTH = 128
 ```
 
 ### INV-5: Queue Index Validity
+
 ```
 □(∀q ∈ InputQueue:
     q.head ∈ [0, INPUT_QUEUE_LENGTH) ∧
@@ -156,31 +164,37 @@ Once confirmed, inputs never change.
 ```
 
 ### INV-6: State Availability
+
 ```
 □(∀f ∈ [current_frame - max_prediction, current_frame]:
     state_exists(f) ∨ f < first_saved_frame)
 ```
 
 ### INV-7: Confirmed Frame Consistency
+
 ```
 □(last_confirmed_frame ≤ current_frame)
 ```
 
 ### INV-8: Saved Frame Consistency
+
 ```
 □(last_saved_frame ≤ current_frame)
 ```
 
 ### INV-9: Rollback Target Guard (Added Session 47 - FV-GAP-6)
+
 ```
 □(load_frame_called(f) → f < current_frame)
 ```
+
 The `load_frame()` operation is only called when the target frame is strictly
 less than the current frame. When `first_incorrect_frame >= current_frame`,
 `skip_rollback()` is called instead.
 
 This invariant captures the guard in `adjust_gamestate()`:
-```rust
+
+```rust,ignore
 if frame_to_load >= current_frame {
     // skip_rollback path
     return Ok(());
@@ -189,6 +203,7 @@ if frame_to_load >= current_frame {
 ```
 
 ### INV-9: Message Causality
+
 ```
 □(∀m1, m2 ∈ Message:
     sent(m1) < sent(m2) ∧ same_peer(m1, m2) →
@@ -196,15 +211,18 @@ if frame_to_load >= current_frame {
 ```
 
 ### INV-10: Determinism
+
 ```
 □(∀s1, s2 ∈ State, inputs ∈ InputSequence:
     s1 = s2 → advance(s1, inputs) = advance(s2, inputs))
 ```
 
 ### INV-11: No Panics
+
 ```
 □(∀api_call: result ∈ {Ok(_), Err(FortressError)})
 ```
+
 All public APIs return Result, never panic.
 
 ---
@@ -214,6 +232,7 @@ All public APIs return Result, never panic.
 ### InputQueue<T>
 
 **State:**
+
 ```
 InputQueue<T> = {
     inputs: Array<PlayerInput<T>, 128>,
@@ -229,6 +248,7 @@ InputQueue<T> = {
 ```
 
 **Initial State:**
+
 ```
 INIT = {
     inputs: [BLANK_INPUT(NULL_FRAME); 128],
@@ -244,6 +264,7 @@ INIT = {
 **Operations:**
 
 #### add_input(input) → Frame
+
 ```
 PRE:
     input.frame = last_added_frame + 1 ∨ last_added_frame = NULL_FRAME
@@ -259,6 +280,7 @@ RETURNS:
 ```
 
 #### get_input(frame) → (PlayerInput, InputStatus)
+
 ```
 PRE: frame ≥ 0
 
@@ -270,6 +292,7 @@ POST:
 ```
 
 #### confirmed_input(frame) → Result<PlayerInput, Error>
+
 ```
 PRE:
     frame ≤ last_added_frame
@@ -283,6 +306,7 @@ ERROR:
 ```
 
 #### reset_prediction()
+
 ```
 POST: first_incorrect_frame' = NULL_FRAME
 ```
@@ -290,6 +314,7 @@ POST: first_incorrect_frame' = NULL_FRAME
 ### SyncLayer<T>
 
 **State:**
+
 ```
 SyncLayer<T> = {
     num_players: ℕ,
@@ -306,6 +331,7 @@ SyncLayer<T> = {
 **Operations:**
 
 #### add_local_input(handle, input) → Result<Frame, Error>
+
 ```
 PRE:
     VALID_PLAYER(handle)
@@ -317,6 +343,7 @@ POST:
 ```
 
 #### add_remote_input(handle, input) → Frame
+
 ```
 PRE:
     VALID_PLAYER(handle)
@@ -329,6 +356,7 @@ POST:
 ```
 
 #### synchronized_inputs(connect_status) → Vec<(Input, InputStatus)>
+
 ```
 POST:
     result.length = num_players
@@ -340,11 +368,13 @@ POST:
 ```
 
 #### advance_frame()
+
 ```
 POST: current_frame' = current_frame + 1
 ```
 
 #### save_current_state() → SaveRequest
+
 ```
 POST:
     last_saved_frame' = current_frame
@@ -421,6 +451,7 @@ Transitions:
 ```
 
 **State Diagram:**
+
 ```
 ┌─────────────┐
 │ Initializing│
@@ -484,37 +515,44 @@ MessageBody =
 ## Safety Properties
 
 ### SAFE-1: No Buffer Overflow
+
 ```
 □(∀q ∈ InputQueue: q.length ≤ 128)
 ```
 
 ### SAFE-2: No Invalid Frame Access
+
 ```
 □(∀access(f): f = NULL_FRAME ∨ f ∈ [0, current_frame + max_prediction])
 ```
 
 ### SAFE-3: No State Loss
+
 ```
 □(∀f ∈ [current_frame - max_prediction, current_frame]:
     needs_rollback(f) → state_loadable(f))
 ```
 
 ### SAFE-4: Rollback Consistency
+
 ```
 □(load_frame(f) → ○(game_state = saved_state(f)))
 ```
 
 ### SAFE-5: No Deadlock
+
 ```
 □(state ≠ Shutdown → ◇(can_progress ∨ state = Shutdown))
 ```
 
 ### SAFE-6: No Integer Overflow
+
 ```
 □(∀f ∈ Frame, n ∈ ℤ: |f + n| < 2^31 - 1)
 ```
 
 ### SAFE-7: Checksum Integrity
+
 ```
 □(desync_detection = On →
     checksum_compare(f) only when ∀p: confirmed(f, p))
@@ -525,31 +563,37 @@ MessageBody =
 ## Liveness Properties
 
 ### LIVE-1: Eventual Synchronization
+
 ```
 □(network_available → ◇(∀p ∈ Peer: p.state = Running))
 ```
 
 ### LIVE-2: Input Confirmation
+
 ```
 □(predicted(f, p) ∧ ¬disconnected(p) → ◇(confirmed(f, p)))
 ```
 
 ### LIVE-3: Progress
+
 ```
 □(∃p: connected(p) → ◇(current_frame' > current_frame))
 ```
 
 ### LIVE-4: Rollback Completion
+
 ```
 □(IN_ROLLBACK → ◇(¬IN_ROLLBACK))
 ```
 
 ### LIVE-5: Disconnect Detection
+
 ```
 □(network_failed(p, duration > DISCONNECT_TIMEOUT) → ◇(disconnected(p)))
 ```
 
 ### LIVE-6: Spectator Catch-up
+
 ```
 □(spectator_behind(n) ∧ n > MAX_FRAMES_BEHIND →
     ◇(spectator_behind(m) ∧ m < n))

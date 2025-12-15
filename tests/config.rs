@@ -7,6 +7,9 @@
 //! 4. Preset methods return sensible values
 //! 5. Configs are properly applied to sessions
 
+// Allow hardcoded IP addresses - 127.0.0.1 is appropriate for tests
+#![allow(clippy::ip_constant)]
+
 // Shared test infrastructure
 #[path = "common/mod.rs"]
 mod common;
@@ -56,6 +59,48 @@ fn test_sync_config_presets() {
     let lan = SyncConfig::lan();
     assert!(lan.sync_retry_interval < Duration::from_millis(200));
     assert!(lan.num_sync_packets < 5);
+
+    // Mobile preset should have more sync packets and longer intervals than high_latency
+    let mobile = SyncConfig::mobile();
+    assert!(mobile.num_sync_packets > high_latency.num_sync_packets);
+    assert!(mobile.sync_retry_interval > Duration::from_millis(300));
+    assert!(mobile.sync_timeout.is_some());
+    // Mobile timeout should be longer than lossy
+    assert!(mobile.sync_timeout.unwrap() > lossy.sync_timeout.unwrap());
+
+    // Competitive preset should have fast intervals but strict timeout
+    let competitive = SyncConfig::competitive();
+    assert!(competitive.sync_retry_interval <= lan.sync_retry_interval);
+    assert!(competitive.sync_timeout.is_some());
+    // Competitive timeout should be shorter than lan
+    assert!(competitive.sync_timeout.unwrap() < lan.sync_timeout.unwrap());
+}
+
+#[test]
+fn test_sync_config_mobile_exact_values() {
+    let mobile = SyncConfig::mobile();
+
+    // Verify exact values for mobile preset
+    assert_eq!(mobile.num_sync_packets, 10);
+    assert_eq!(mobile.sync_retry_interval, Duration::from_millis(350));
+    assert_eq!(mobile.sync_timeout, Some(Duration::from_secs(15)));
+    assert_eq!(mobile.running_retry_interval, Duration::from_millis(350));
+    assert_eq!(mobile.keepalive_interval, Duration::from_millis(300));
+}
+
+#[test]
+fn test_sync_config_competitive_exact_values() {
+    let competitive = SyncConfig::competitive();
+
+    // Verify exact values for competitive preset
+    assert_eq!(competitive.num_sync_packets, 4);
+    assert_eq!(competitive.sync_retry_interval, Duration::from_millis(100));
+    assert_eq!(competitive.sync_timeout, Some(Duration::from_secs(3)));
+    assert_eq!(
+        competitive.running_retry_interval,
+        Duration::from_millis(100)
+    );
+    assert_eq!(competitive.keepalive_interval, Duration::from_millis(100));
 }
 
 #[test]
@@ -108,6 +153,26 @@ fn test_protocol_config_presets() {
     let debug = ProtocolConfig::debug();
     assert!(debug.sync_retry_warning_threshold < 10);
     assert!(debug.max_checksum_history > 32);
+
+    // Mobile preset should have high tolerance for retries and long shutdown delay
+    let mobile = ProtocolConfig::mobile();
+    assert!(mobile.pending_output_limit >= high_latency.pending_output_limit);
+    assert!(mobile.sync_retry_warning_threshold > high_latency.sync_retry_warning_threshold);
+    assert!(mobile.shutdown_delay > high_latency.shutdown_delay);
+    assert!(mobile.sync_duration_warning_ms > high_latency.sync_duration_warning_ms);
+}
+
+#[test]
+fn test_protocol_config_mobile_exact_values() {
+    let mobile = ProtocolConfig::mobile();
+
+    // Verify exact values for mobile preset
+    assert_eq!(mobile.quality_report_interval, Duration::from_millis(350));
+    assert_eq!(mobile.shutdown_delay, Duration::from_millis(15000));
+    assert_eq!(mobile.max_checksum_history, 64);
+    assert_eq!(mobile.pending_output_limit, 256);
+    assert_eq!(mobile.sync_retry_warning_threshold, 25);
+    assert_eq!(mobile.sync_duration_warning_ms, 12000);
 }
 
 #[test]
@@ -157,6 +222,44 @@ fn test_spectator_config_presets() {
     let local = SpectatorConfig::local();
     assert!(local.buffer_size < 60);
     assert!(local.max_frames_behind < 10);
+
+    // Broadcast preset should have very large buffer for streaming
+    let broadcast = SpectatorConfig::broadcast();
+    assert!(broadcast.buffer_size > slow_connection.buffer_size);
+    assert!(broadcast.max_frames_behind > slow_connection.max_frames_behind);
+    // Broadcast should have slow catchup to avoid visual stuttering
+    assert_eq!(broadcast.catchup_speed, 1);
+
+    // Mobile preset should have larger buffer than default
+    let mobile = SpectatorConfig::mobile();
+    assert!(mobile.buffer_size > 60);
+    assert!(mobile.max_frames_behind > 10);
+    // Mobile should be between slow_connection and broadcast
+    assert!(mobile.buffer_size <= broadcast.buffer_size);
+}
+
+#[test]
+fn test_spectator_config_broadcast_exact_values() {
+    let broadcast = SpectatorConfig::broadcast();
+
+    // Verify exact values for broadcast preset
+    // 3 seconds of buffer at 60 FPS
+    assert_eq!(broadcast.buffer_size, 180);
+    // Slow catchup to avoid stuttering on stream
+    assert_eq!(broadcast.catchup_speed, 1);
+    // Can fall far behind before catching up
+    assert_eq!(broadcast.max_frames_behind, 30);
+}
+
+#[test]
+fn test_spectator_config_mobile_exact_values() {
+    let mobile = SpectatorConfig::mobile();
+
+    // Verify exact values for mobile preset
+    // 2 seconds of buffer at 60 FPS
+    assert_eq!(mobile.buffer_size, 120);
+    assert_eq!(mobile.catchup_speed, 1);
+    assert_eq!(mobile.max_frames_behind, 25);
 }
 
 #[test]
@@ -201,6 +304,34 @@ fn test_time_sync_config_presets() {
     // LAN preset should have small window
     let lan = TimeSyncConfig::lan();
     assert!(lan.window_size < 30);
+
+    // Mobile preset should have largest window for smoothing jitter
+    let mobile = TimeSyncConfig::mobile();
+    assert!(mobile.window_size > smooth.window_size);
+
+    // Competitive preset should have smaller window than default for responsiveness
+    let competitive = TimeSyncConfig::competitive();
+    assert!(competitive.window_size < 30);
+    // But larger than LAN (assumes slightly worse conditions)
+    assert!(competitive.window_size > lan.window_size);
+}
+
+#[test]
+fn test_time_sync_config_mobile_exact_values() {
+    let mobile = TimeSyncConfig::mobile();
+
+    // Verify exact value for mobile preset
+    // Very large window to smooth out mobile network jitter
+    assert_eq!(mobile.window_size, 90);
+}
+
+#[test]
+fn test_time_sync_config_competitive_exact_values() {
+    let competitive = TimeSyncConfig::competitive();
+
+    // Verify exact value for competitive preset
+    // Small window for responsive sync, but not as small as LAN
+    assert_eq!(competitive.window_size, 20);
 }
 
 #[test]
@@ -357,6 +488,8 @@ fn test_all_configs_have_consistent_api() {
     let _: SyncConfig = SyncConfig::high_latency();
     let _: SyncConfig = SyncConfig::lossy();
     let _: SyncConfig = SyncConfig::lan();
+    let _: SyncConfig = SyncConfig::mobile();
+    let _: SyncConfig = SyncConfig::competitive();
 
     // ProtocolConfig
     let _: ProtocolConfig = ProtocolConfig::default();
@@ -364,6 +497,7 @@ fn test_all_configs_have_consistent_api() {
     let _: ProtocolConfig = ProtocolConfig::competitive();
     let _: ProtocolConfig = ProtocolConfig::high_latency();
     let _: ProtocolConfig = ProtocolConfig::debug();
+    let _: ProtocolConfig = ProtocolConfig::mobile();
 
     // SpectatorConfig
     let _: SpectatorConfig = SpectatorConfig::default();
@@ -371,6 +505,8 @@ fn test_all_configs_have_consistent_api() {
     let _: SpectatorConfig = SpectatorConfig::fast_paced();
     let _: SpectatorConfig = SpectatorConfig::slow_connection();
     let _: SpectatorConfig = SpectatorConfig::local();
+    let _: SpectatorConfig = SpectatorConfig::broadcast();
+    let _: SpectatorConfig = SpectatorConfig::mobile();
 
     // TimeSyncConfig
     let _: TimeSyncConfig = TimeSyncConfig::default();
@@ -378,6 +514,8 @@ fn test_all_configs_have_consistent_api() {
     let _: TimeSyncConfig = TimeSyncConfig::responsive();
     let _: TimeSyncConfig = TimeSyncConfig::smooth();
     let _: TimeSyncConfig = TimeSyncConfig::lan();
+    let _: TimeSyncConfig = TimeSyncConfig::mobile();
+    let _: TimeSyncConfig = TimeSyncConfig::competitive();
 }
 
 #[test]

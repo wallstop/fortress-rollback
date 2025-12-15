@@ -28,6 +28,7 @@ This document specifies preconditions, postconditions, and invariants for all pu
 ## Contract Notation
 
 Each API is documented with:
+
 - **Signature**: The function signature
 - **Pre**: Preconditions that must hold before calling
 - **Post**: Postconditions guaranteed after successful return
@@ -48,6 +49,7 @@ Each API is documented with:
 **Pre:** None
 
 **Post:**
+
 - `num_players = 2`
 - `max_prediction = 8`
 - `fps = 60`
@@ -86,15 +88,18 @@ Each API is documented with:
 ```
 
 **Pre:**
+
 - `handle` not already registered
 - For `Local` or `Remote`: `handle.0 < num_players`
 - For `Spectator`: `handle.0 >= num_players`
 
 **Post:**
+
 - Player registered with given type
 - For `Local`: `local_players += 1`
 
 **Errors:**
+
 - `InvalidRequest("Player handle already in use")` - handle duplicate
 - `InvalidRequest("...handle should be between 0 and num_players")` - invalid player handle
 - `InvalidRequest("...handle should be num_players or higher")` - invalid spectator handle
@@ -112,6 +117,7 @@ Each API is documented with:
 **Pre:** None
 
 **Post:**
+
 - `self.max_prediction = window`
 - `window = 0` → session operates in lockstep (no rollbacks)
 
@@ -148,6 +154,7 @@ Each API is documented with:
 **Post:** `self.fps = fps`
 
 **Errors:**
+
 - `InvalidRequest("FPS should be higher than 0")` - if `fps = 0`
 
 **Panics:** Never
@@ -209,20 +216,24 @@ Each API is documented with:
 ```
 
 **Pre:**
+
 - All player handles `0..num_players` have been registered via `add_player`
 - At least one local player
 
 **Post:**
+
 - Session created in `Synchronizing` state
 - All remote endpoints begin synchronization
 - Socket ownership transferred to session
 
 **Errors:**
+
 - `InvalidRequest("Not enough players have been added...")` - missing players
 
 **Panics:** Never
 
 **Invariants Established:**
+
 - INV-4: Queue length bounds
 - INV-5: Queue index validity
 - INV-11: No panics guarantee
@@ -238,6 +249,7 @@ Each API is documented with:
 **Pre:** None (no player registration required)
 
 **Post:**
+
 - Session created in `Synchronizing` state
 - Host endpoint begins synchronization
 
@@ -256,10 +268,12 @@ Each API is documented with:
 **Pre:** `check_distance < max_prediction`
 
 **Post:**
+
 - Session created (no network, immediate Running state equivalent)
 - Rollback simulation enabled
 
 **Errors:**
+
 - `InvalidRequest("Check distance too big")` - if `check_distance >= max_prediction`
 
 **Panics:** Never
@@ -309,6 +323,7 @@ Each API is documented with:
 **Pre:** None
 
 **Post:**
+
 - All pending messages from socket processed
 - Input queues updated with remote inputs
 - Protocol state machines advanced
@@ -319,6 +334,7 @@ Each API is documented with:
 **Panics:** Never
 
 **Side Effects:**
+
 - May trigger state transitions (Synchronizing → Running)
 - May queue `Synchronized`, `Disconnected`, `NetworkInterrupted` events
 
@@ -331,15 +347,18 @@ Each API is documented with:
 ```
 
 **Pre:**
+
 - `handle` is a local player
 - `current_state() = Running` OR input is being buffered
 - Not exceeding prediction threshold
 
 **Post:**
+
 - Input stored in `local_inputs` map
 - Input will be transmitted to remotes on next `advance_frame`
 
 **Errors:**
+
 - `InvalidPlayerHandle` - handle not registered or not local
 - `InvalidRequest("Prediction threshold reached")` - too far ahead
 
@@ -354,27 +373,32 @@ Each API is documented with:
 ```
 
 **Pre:**
+
 - `current_state() = Running`
 - All local players have provided input via `add_local_input`
 
 **Post:**
+
 - Returns sequence of requests to be processed **in order**
 - `current_frame` incremented (after processing requests)
 - If rollback needed: `LoadGameState` followed by `SaveGameState`/`AdvanceFrame` pairs
 - If no rollback: `SaveGameState` (unless sparse) then `AdvanceFrame`
 
 **Errors:**
+
 - `NotSynchronized` - if `current_state() != Running`
 - `InvalidRequest("Prediction threshold reached")` - exceeded max_prediction
 
 **Panics:** Never
 
 **Request Sequence (no rollback, full saving):**
+
 ```
 [SaveGameState { frame: N }, AdvanceFrame { inputs }]
 ```
 
 **Request Sequence (with rollback):**
+
 ```
 [LoadGameState { frame: K },
  SaveGameState { frame: K }, AdvanceFrame { inputs_K },
@@ -384,6 +408,7 @@ Each API is documented with:
 ```
 
 **Invariants Preserved:**
+
 - INV-1: Frame monotonicity (within rollback bounds)
 - INV-2: Rollback boundedness
 - INV-7: Confirmed frame consistency
@@ -400,6 +425,7 @@ Each API is documented with:
 **Pre:** None
 
 **Post:**
+
 - Returns iterator over pending events
 - Event queue emptied
 
@@ -436,6 +462,7 @@ Each API is documented with:
 **Post:** Returns stats (ping, bandwidth, etc.)
 
 **Errors:**
+
 - `InvalidPlayerHandle` - not a remote player
 - `NotSynchronized` - stats not yet available
 
@@ -452,10 +479,12 @@ Each API is documented with:
 **Pre:** `handle` is registered
 
 **Post:**
+
 - Player marked as disconnected
 - Future inputs use default value
 
 **Errors:**
+
 - `InvalidPlayerHandle` - not registered
 
 **Panics:** Never
@@ -473,10 +502,12 @@ Each API is documented with:
 **Pre:** `current_state() = Running`
 
 **Post:**
+
 - Returns `AdvanceFrame` requests only (no save/load)
 - May return multiple frames if catching up
 
 **Errors:**
+
 - `NotSynchronized` - not yet synchronized with host
 
 **Panics:** Never
@@ -494,11 +525,13 @@ Each API is documented with:
 **Pre:** All local inputs provided
 
 **Post:**
+
 - Simulates rollback of `check_distance` frames
 - Compares checksums for mismatch detection
 - Returns requests including save/load/advance
 
 **Errors:**
+
 - `InvalidRequest` on checksum mismatch (desync detected)
 
 **Panics:** Never
@@ -514,10 +547,12 @@ Each API is documented with:
 ```
 
 **Pre:**
+
 - Called in response to `SaveGameState` request
 - `frame` matches request frame
 
 **Post:**
+
 - State stored and retrievable via `load()`
 - Checksum stored for desync detection (if provided)
 
@@ -571,10 +606,12 @@ FortressRequest::SaveGameState { cell, frame }
 **Pre:** `game_state.frame == frame` (your state matches requested frame)
 
 **Post (after handling):**
+
 - `cell.save(frame, Some(state), checksum)` called
 - State is now loadable for rollback
 
 **User Responsibility:**
+
 - Clone entire game state
 - Compute checksum if desync detection enabled
 - Call `cell.save()` before processing next request
@@ -588,26 +625,30 @@ FortressRequest::LoadGameState { cell, frame }
 **Pre:** State was previously saved at `frame`
 
 **Post (after handling):**
+
 - `game_state = cell.load().expect("must exist")`
 - Game state restored to frame `frame`
 
 **User Responsibility:**
+
 - Replace entire game state with loaded state
 - Subsequent `AdvanceFrame` requests will resimulate
 
 ### AdvanceFrame Contract
 
-```rust
+```rust,ignore
 FortressRequest::AdvanceFrame { inputs }
 ```
 
 **Pre:** Game state is at the correct frame
 
 **Post (after handling):**
+
 - Game state advanced by one frame
 - `game_state.frame += 1` (or equivalent)
 
 **User Responsibility:**
+
 - Apply all inputs to game state deterministically
 - Handle `InputStatus::Disconnected` appropriately
 - Increment frame counter

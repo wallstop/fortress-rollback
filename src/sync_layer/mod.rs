@@ -116,7 +116,7 @@ impl<T: Config> SyncLayer<T> {
                     ) {
                         input_queues.push(queue);
                     }
-                }
+                },
             }
         }
         Self {
@@ -177,7 +177,7 @@ impl<T: Config> SyncLayer<T> {
                     self.current_frame
                 );
                 GameStateCell::default()
-            }
+            },
         };
         FortressRequest::SaveGameState {
             cell,
@@ -619,7 +619,7 @@ mod sync_layer_tests {
             Err(FortressError::InvalidPlayerHandle { handle, max_handle }) => {
                 assert_eq!(handle, PlayerHandle::new(2));
                 assert_eq!(max_handle, PlayerHandle::new(1));
-            }
+            },
             _ => panic!("Expected InvalidPlayerHandle error"),
         }
     }
@@ -657,7 +657,7 @@ mod sync_layer_tests {
                 // Save some data
                 cell.save(Frame::new(0), Some(42u8), Some(1234));
                 assert_eq!(cell.frame(), Frame::new(0));
-            }
+            },
             _ => panic!("Expected SaveGameState request"),
         }
         assert_eq!(sync_layer.last_saved_frame(), Frame::new(0));
@@ -668,7 +668,7 @@ mod sync_layer_tests {
         match request {
             FortressRequest::SaveGameState { frame, .. } => {
                 assert_eq!(frame, Frame::new(1));
-            }
+            },
             _ => panic!("Expected SaveGameState request"),
         }
         assert_eq!(sync_layer.last_saved_frame(), Frame::new(1));
@@ -697,7 +697,7 @@ mod sync_layer_tests {
             FortressRequest::LoadGameState { frame, cell } => {
                 assert_eq!(frame, Frame::new(0));
                 assert_eq!(cell.load(), Some(100u8));
-            }
+            },
             _ => panic!("Expected LoadGameState request"),
         }
         assert_eq!(sync_layer.current_frame(), Frame::new(0));
@@ -714,7 +714,7 @@ mod sync_layer_tests {
             Err(FortressError::InvalidFrame { frame, reason }) => {
                 assert_eq!(frame, Frame::NULL);
                 assert!(reason.contains("NULL_FRAME"));
-            }
+            },
             _ => panic!("Expected InvalidFrame error"),
         }
     }
@@ -731,7 +731,7 @@ mod sync_layer_tests {
             Err(FortressError::InvalidFrame { frame, reason }) => {
                 assert_eq!(frame, Frame::new(5));
                 assert!(reason.contains("past"));
-            }
+            },
             _ => panic!("Expected InvalidFrame error"),
         }
     }
@@ -750,7 +750,7 @@ mod sync_layer_tests {
             Err(FortressError::InvalidFrame { frame, reason }) => {
                 assert_eq!(frame, Frame::new(2));
                 assert!(reason.contains("past"));
-            }
+            },
             _ => panic!("Expected InvalidFrame error"),
         }
     }
@@ -772,7 +772,7 @@ mod sync_layer_tests {
             Err(FortressError::InvalidFrame { frame, reason }) => {
                 assert_eq!(frame, Frame::new(0));
                 assert!(reason.contains("prediction window"));
-            }
+            },
             _ => panic!("Expected InvalidFrame error"),
         }
     }
@@ -809,7 +809,7 @@ mod sync_layer_tests {
                 assert_eq!(cell.frame(), Frame::new(0));
                 assert_eq!(cell.load(), Some(42u8));
                 assert_eq!(cell.checksum(), Some(12345));
-            }
+            },
             _ => panic!("Expected LoadGameState request"),
         }
 
@@ -842,7 +842,7 @@ mod sync_layer_tests {
             Err(FortressError::InvalidFrame { frame, reason }) => {
                 assert_eq!(frame, Frame::new(0));
                 assert!(reason.contains("prediction window"));
-            }
+            },
             _ => panic!("Expected InvalidFrame error"),
         }
     }
@@ -1307,6 +1307,7 @@ mod sync_layer_tests {
     }
 
     #[test]
+    #[allow(clippy::redundant_clone)] // Testing Clone trait - cell2 shares Arc with cell1
     fn test_game_state_cell_clone() {
         let cell1 = GameStateCell::<u8>::default();
         cell1.save(Frame::new(10), Some(200), Some(5555));
@@ -1418,7 +1419,7 @@ mod sync_layer_tests {
             FortressRequest::SaveGameState { frame, .. } => {
                 assert!(frame.as_i32() >= 0, "Frame should be non-negative");
                 assert_eq!(*frame, Frame::new(0));
-            }
+            },
             _ => panic!("Expected SaveGameState request"),
         }
 
@@ -1430,7 +1431,7 @@ mod sync_layer_tests {
                 FortressRequest::SaveGameState { frame, .. } => {
                     assert!(frame.as_i32() >= 0, "Frame should be non-negative");
                     assert_eq!(*frame, Frame::new(expected_frame));
-                }
+                },
                 _ => panic!("Expected SaveGameState request"),
             }
         }
@@ -1480,7 +1481,7 @@ mod sync_layer_tests {
         match &request {
             FortressRequest::SaveGameState { frame, .. } => {
                 assert_eq!(*frame, Frame::new(2));
-            }
+            },
             _ => panic!("Expected SaveGameState request"),
         }
         assert_eq!(sync_layer.last_saved_frame(), Frame::new(2));
@@ -1506,7 +1507,7 @@ mod sync_layer_tests {
                 cell.save(Frame::new(0), Some(42u8), Some(12345));
                 assert_eq!(cell.frame(), Frame::new(0));
                 assert_eq!(cell.load(), Some(42u8));
-            }
+            },
             _ => panic!("Expected SaveGameState request"),
         }
     }

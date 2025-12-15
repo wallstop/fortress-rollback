@@ -18,6 +18,9 @@
 //! - **Chaos conditions**: Testing with packet loss, latency, jitter
 //! - **Stress tests**: High frame counts, aggressive network conditions
 
+// Allow print macros for test debugging output
+#![allow(clippy::print_stdout, clippy::print_stderr, clippy::disallowed_macros)]
+
 use serde::Deserialize;
 use serial_test::serial;
 use std::process::{Child, Command, Stdio};
@@ -127,7 +130,7 @@ fn wait_for_peer(child: Child, name: &str) -> TestResult {
                 rollbacks: 0,
                 error: Some(format!("Failed to parse output: {}", e)),
             }
-        }
+        },
     }
 }
 
@@ -1804,5 +1807,191 @@ fn test_baseline_no_chaos() {
     println!(
         "Baseline rollbacks - Peer 1: {}, Peer 2: {}",
         result1.rollbacks, result2.rollbacks
+    );
+}
+
+/// Test WiFi interference pattern - bursty packet loss.
+/// WiFi with interference has low base latency but burst loss events.
+#[test]
+#[serial]
+fn test_wifi_interference_simulation() {
+    let peer1_config = PeerConfig {
+        local_port: 10061,
+        player_index: 0,
+        peer_addr: "127.0.0.1:10062".to_string(),
+        frames: 100,
+        packet_loss: 0.03, // Low base loss
+        latency_ms: 15,    // Fast base latency
+        jitter_ms: 25,     // Moderate jitter
+        seed: Some(42),
+        timeout_secs: 90,
+        ..Default::default()
+    };
+
+    let peer2_config = PeerConfig {
+        local_port: 10062,
+        player_index: 1,
+        peer_addr: "127.0.0.1:10061".to_string(),
+        frames: 100,
+        packet_loss: 0.03,
+        latency_ms: 15,
+        jitter_ms: 25,
+        seed: Some(43),
+        timeout_secs: 90,
+        ..Default::default()
+    };
+
+    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+
+    assert!(
+        result1.success,
+        "Peer 1 failed WiFi simulation: {:?}",
+        result1.error
+    );
+    assert!(
+        result2.success,
+        "Peer 2 failed WiFi simulation: {:?}",
+        result2.error
+    );
+
+    // Verify determinism
+    assert_eq!(
+        result1.final_value, result2.final_value,
+        "Desync in WiFi simulation! peer1={}, peer2={}",
+        result1.final_value, result2.final_value
+    );
+    assert_eq!(result1.checksum, result2.checksum);
+
+    println!(
+        "WiFi simulation - Rollbacks: peer1={}, peer2={}",
+        result1.rollbacks, result2.rollbacks
+    );
+}
+
+/// Test intercontinental connection pattern - high but stable latency.
+/// Cross-ocean connections have consistent high latency with low loss.
+#[test]
+#[serial]
+fn test_intercontinental_simulation() {
+    let peer1_config = PeerConfig {
+        local_port: 10063,
+        player_index: 0,
+        peer_addr: "127.0.0.1:10064".to_string(),
+        frames: 80, // Fewer frames due to high latency
+        packet_loss: 0.02,
+        latency_ms: 120, // High but stable latency
+        jitter_ms: 15,   // Low jitter
+        seed: Some(42),
+        timeout_secs: 180, // Longer timeout for high latency
+        input_delay: 4,    // Higher input delay recommended
+        ..Default::default()
+    };
+
+    let peer2_config = PeerConfig {
+        local_port: 10064,
+        player_index: 1,
+        peer_addr: "127.0.0.1:10063".to_string(),
+        frames: 80,
+        packet_loss: 0.02,
+        latency_ms: 120,
+        jitter_ms: 15,
+        seed: Some(43),
+        timeout_secs: 180,
+        input_delay: 4,
+        ..Default::default()
+    };
+
+    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+
+    assert!(
+        result1.success,
+        "Peer 1 failed intercontinental simulation: {:?}",
+        result1.error
+    );
+    assert!(
+        result2.success,
+        "Peer 2 failed intercontinental simulation: {:?}",
+        result2.error
+    );
+
+    // Verify determinism
+    assert_eq!(
+        result1.final_value, result2.final_value,
+        "Desync in intercontinental simulation! peer1={}, peer2={}",
+        result1.final_value, result2.final_value
+    );
+    assert_eq!(result1.checksum, result2.checksum);
+
+    println!(
+        "Intercontinental simulation - Rollbacks: peer1={}, peer2={}",
+        result1.rollbacks, result2.rollbacks
+    );
+}
+
+/// Test competitive/LAN-like conditions - minimal latency and loss.
+/// Validates that competitive presets work well under ideal conditions.
+#[test]
+#[serial]
+fn test_competitive_lan_simulation() {
+    let peer1_config = PeerConfig {
+        local_port: 10065,
+        player_index: 0,
+        peer_addr: "127.0.0.1:10066".to_string(),
+        frames: 200, // More frames since it's fast
+        packet_loss: 0.0,
+        latency_ms: 2, // Near-zero latency
+        jitter_ms: 1,  // Minimal jitter
+        seed: Some(42),
+        timeout_secs: 60,
+        input_delay: 0, // No input delay for competitive
+        ..Default::default()
+    };
+
+    let peer2_config = PeerConfig {
+        local_port: 10066,
+        player_index: 1,
+        peer_addr: "127.0.0.1:10065".to_string(),
+        frames: 200,
+        packet_loss: 0.0,
+        latency_ms: 2,
+        jitter_ms: 1,
+        seed: Some(43),
+        timeout_secs: 60,
+        input_delay: 0,
+        ..Default::default()
+    };
+
+    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+
+    assert!(
+        result1.success,
+        "Peer 1 failed competitive simulation: {:?}",
+        result1.error
+    );
+    assert!(
+        result2.success,
+        "Peer 2 failed competitive simulation: {:?}",
+        result2.error
+    );
+
+    // Verify determinism
+    assert_eq!(
+        result1.final_value, result2.final_value,
+        "Desync in competitive simulation! peer1={}, peer2={}",
+        result1.final_value, result2.final_value
+    );
+    assert_eq!(result1.checksum, result2.checksum);
+
+    // Competitive should have minimal rollbacks with good network
+    println!(
+        "Competitive simulation - Rollbacks: peer1={}, peer2={}",
+        result1.rollbacks, result2.rollbacks
+    );
+
+    // With near-zero latency and no loss, rollbacks should be very low
+    assert!(
+        result1.rollbacks < 50,
+        "Competitive simulation had too many rollbacks: {}",
+        result1.rollbacks
     );
 }

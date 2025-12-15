@@ -52,6 +52,7 @@ In this document, all remarkable changes are listed. Not mentioned are smaller c
   - **Impact:** Most common address types (`SocketAddr`, `String`, etc.) already implement `Ord`
   - **Migration:** For custom address types, add `#[derive(PartialOrd, Ord)]` to your type
   - Example:
+
     ```rust
     // Before:
     #[derive(Clone, PartialEq, Eq, Hash, Debug)]

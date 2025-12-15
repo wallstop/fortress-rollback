@@ -43,6 +43,7 @@ No additional dependencies required (uses system APIs).
 ## Configuration Example
 
 Demonstrates all available configuration options including:
+
 - Basic session setup
 - Network presets (LAN, high-latency, lossy)
 - Custom fine-tuned configurations
@@ -56,6 +57,7 @@ cargo run --example configuration
 ## Error Handling Example
 
 Demonstrates proper error handling patterns:
+
 - Configuration-time errors
 - Session setup errors
 - Runtime error handling

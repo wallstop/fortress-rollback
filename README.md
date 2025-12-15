@@ -30,6 +30,7 @@ If you are interested in integrating rollback networking into your game or just 
 Fortress Rollback currently ships with the same demos you may know from GGRS. One is written with [macroquad](https://github.com/not-fl3/macroquad), the other with [bevy](https://bevyengine.org/). Both use [matchbox](https://github.com/johanhelsing/matchbox). Try it out with a friend! Just click the link and match with another player! (You can also open the link in two separate windows to play against yourself)
 
 🚧 MATCHMAKING CURRENTLY OFFLINE! 🚧
+
 - [Bevy Demo](https://gschup.github.io/bevy_ggrs_demo/) ([Repository](https://github.com/gschup/bevy_ggrs_demo))
 - [Macroquad Demo](https://gschup.github.io/ggrs_demo/) ([Repository](https://github.com/gschup/ggrs_demo))
 
@@ -46,11 +47,13 @@ To get started with Fortress Rollback, check out the following resources:
 The interactive examples use [macroquad](https://github.com/not-fl3/macroquad), which requires system libraries:
 
 **Linux (Debian/Ubuntu):**
+
 ```shell
 sudo apt-get install libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
 ```
 
 **Linux (Fedora/RHEL):**
+
 ```shell
 sudo dnf install alsa-lib-devel libX11-devel libXi-devel mesa-libGL-devel
 ```
@@ -64,9 +67,11 @@ Alpha / experimental only.
 ### Key Improvements in Fortress Rollback
 
 - **100% Deterministic**: All collections use `BTreeMap`/`BTreeSet` for guaranteed iteration order; new `hash` module provides FNV-1a deterministic hashing
-- **Correctness-First**: 180+ tests including multi-process network tests, network resilience tests, and formal TLA+ specifications
+- **Correctness-First**: 620+ tests including multi-process network tests, network resilience tests, and formal TLA+ specifications
 - **Panic-Free API**: All public APIs return `Result` types instead of panicking
 - **Enhanced Testing**: Full desync detection with confirmed input checksums via `P2PSession::confirmed_inputs_for_frame()`
+
+📋 **[Complete comparison with GGRS →](./docs/fortress-vs-ggrs.md)** — See all differences, bug fixes, and migration steps
 
 - [Changelog](./docs/changelog.md)
 - [Issues](https://github.com/wallstop/fortress-rollback/issues)

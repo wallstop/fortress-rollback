@@ -5,6 +5,7 @@
 ## Quick Reference
 
 This is a **fork** of GGRS (Good Game Rollback System) focused on:
+
 - **>90% test coverage** - All code must be thoroughly tested
 - **Formal verification** - TLA+ and Z3 verification of critical components
 - **Enhanced usability** - Simple, intuitive, hard-to-misuse APIs
@@ -13,6 +14,7 @@ This is a **fork** of GGRS (Good Game Rollback System) focused on:
 ## When Assisting
 
 ### General Approach
+
 - Prioritize correctness and safety over cleverness
 - Write self-documenting code with clear intent
 - Include tests with every code change
@@ -20,6 +22,7 @@ This is a **fork** of GGRS (Good Game Rollback System) focused on:
 - Consider formal verification for critical logic
 
 ### Code Style
+
 - Use 100% safe Rust (`#![forbid(unsafe_code)]`)
 - Follow Rust idioms and conventions
 - Write descriptive variable and function names
@@ -27,6 +30,7 @@ This is a **fork** of GGRS (Good Game Rollback System) focused on:
 - Prefer explicit over implicit
 
 ### Testing Philosophy
+
 - Test behavior, not implementation details
 - Include both happy path and error cases
 - Write deterministic tests (no flakiness)
@@ -34,15 +38,18 @@ This is a **fork** of GGRS (Good Game Rollback System) focused on:
 - Ensure tests are maintainable and readable
 
 ### When Tests Fail
+
 See [`.llm/context.md`](.llm/context.md) for the complete Root Cause Analysis methodology.
 
 **Key points:**
+
 - Always investigate root cause before fixing
 - Distinguish between test bugs and production bugs
 - Never use arbitrary sleeps to "fix" timing issues
 - Never comment out or weaken failing assertions
 
 ### Documentation
+
 - Every public item needs rustdoc with examples
 - Explain the "why" behind non-obvious decisions
 - Document invariants, preconditions, postconditions
@@ -52,6 +59,7 @@ See [`.llm/context.md`](.llm/context.md) for the complete Root Cause Analysis me
 ## Code Examples
 
 ### Good Function Design
+
 ```rust
 /// Adds local input for the current frame.
 ///
@@ -85,6 +93,7 @@ pub fn add_local_input(
 ```
 
 ### Good Test Structure
+
 ```rust
 #[test]
 fn rollback_restores_state_correctly() {
@@ -121,14 +130,15 @@ fn rollback_restores_state_correctly() {
 - `src/lib.rs` - Public API and core types
 - `src/sessions/` - Session implementations (P2P, Spectator, SyncTest)
 - `src/network/` - Network protocol and communication
-- `src/sync_layer.rs` - Core synchronization logic
+- `src/sync_layer/` - Core synchronization logic and state management
 - `src/input_queue.rs` - Input buffering and management
 - `examples/ex_game/` - Example implementations
-- `tests/` - Integration tests
+- `tests/` - Integration tests (organized by category)
 
 ## Assistance Checklist
 
 When providing code or suggestions:
+
 - ✅ Includes appropriate tests
 - ✅ Has complete rustdoc comments
 - ✅ Handles all error cases
@@ -140,6 +150,7 @@ When providing code or suggestions:
 - ✅ Works toward coverage goals
 
 After every major change:
+
 ```bash
 cargo fmt
 cargo clippy --all-targets
@@ -149,6 +160,8 @@ cargo test
 ## Additional Resources
 
 - Complete context: `.llm/context.md`
+- User guide: `docs/user-guide.md`
+- Architecture: `docs/architecture.md`
 - Contributing: `docs/contributing.md`
 - Changelog: `docs/changelog.md`
-- Original GGPO: https://www.ggpo.net/
+- Original GGPO: <https://www.ggpo.net/>

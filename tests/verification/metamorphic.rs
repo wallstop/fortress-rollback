@@ -148,13 +148,13 @@ fn run_synctest_session(
             match request {
                 FortressRequest::SaveGameState { cell, frame } => {
                     cell.save(frame, Some(state.clone()), Some(state.checksum()));
-                }
+                },
                 FortressRequest::LoadGameState { cell, .. } => {
                     state = cell.load().expect("Failed to load state");
-                }
+                },
                 FortressRequest::AdvanceFrame { inputs } => {
                     state.apply_inputs(&inputs);
-                }
+                },
                 _ => unreachable!("Unknown request type"),
             }
         }
@@ -351,13 +351,13 @@ fn test_metamorphic_input_delay_invariance() {
                 match request {
                     FortressRequest::SaveGameState { cell, frame } => {
                         cell.save(frame, Some(state.clone()), Some(state.checksum()));
-                    }
+                    },
                     FortressRequest::LoadGameState { cell, .. } => {
                         state = cell.load().expect("Failed to load state");
-                    }
+                    },
                     FortressRequest::AdvanceFrame { inputs } => {
                         state.apply_inputs(&inputs);
-                    }
+                    },
                     _ => unreachable!("Unknown request type"),
                 }
             }
@@ -387,13 +387,13 @@ fn test_metamorphic_input_delay_invariance() {
                 match request {
                     FortressRequest::SaveGameState { cell, frame } => {
                         cell.save(frame, Some(state.clone()), Some(state.checksum()));
-                    }
+                    },
                     FortressRequest::LoadGameState { cell, .. } => {
                         state = cell.load().expect("Failed to load state");
-                    }
+                    },
                     FortressRequest::AdvanceFrame { inputs } => {
                         state.apply_inputs(&inputs);
-                    }
+                    },
                     _ => unreachable!("Unknown request type"),
                 }
             }
@@ -444,13 +444,13 @@ fn test_metamorphic_prediction_window_invariance() {
                 match request {
                     FortressRequest::SaveGameState { cell, frame } => {
                         cell.save(frame, Some(state.clone()), Some(state.checksum()));
-                    }
+                    },
                     FortressRequest::LoadGameState { cell, .. } => {
                         state = cell.load().expect("Failed to load state");
-                    }
+                    },
                     FortressRequest::AdvanceFrame { inputs } => {
                         state.apply_inputs(&inputs);
-                    }
+                    },
                     _ => unreachable!("Unknown request type"),
                 }
             }
@@ -480,13 +480,13 @@ fn test_metamorphic_prediction_window_invariance() {
                 match request {
                     FortressRequest::SaveGameState { cell, frame } => {
                         cell.save(frame, Some(state.clone()), Some(state.checksum()));
-                    }
+                    },
                     FortressRequest::LoadGameState { cell, .. } => {
                         state = cell.load().expect("Failed to load state");
-                    }
+                    },
                     FortressRequest::AdvanceFrame { inputs } => {
                         state.apply_inputs(&inputs);
-                    }
+                    },
                     _ => unreachable!("Unknown request type"),
                 }
             }

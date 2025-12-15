@@ -8,8 +8,8 @@ mod input_bytes;
 mod state;
 
 pub use event::Event;
-pub use state::ProtocolState;
 use input_bytes::InputBytes;
+pub use state::ProtocolState;
 
 use crate::frame_info::PlayerInput;
 use crate::network::compression::{decode, encode};
@@ -66,7 +66,7 @@ fn millis_since_epoch() -> Option<u128> {
                     "System time is before UNIX_EPOCH - clock may have gone backwards"
                 );
                 None
-            }
+            },
         }
     }
     #[cfg(target_arch = "wasm32")]
@@ -374,7 +374,7 @@ impl<T: Config> UdpProtocol<T> {
                 if self.last_send_time + self.sync_config.sync_retry_interval < now {
                     self.send_sync_request();
                 }
-            }
+            },
             ProtocolState::Running => {
                 // resend pending inputs, if some time has passed without sending or receiving inputs
                 if self.running_last_input_recv + self.sync_config.running_retry_interval < now {
@@ -412,12 +412,12 @@ impl<T: Config> UdpProtocol<T> {
                     self.event_queue.push_back(Event::Disconnected);
                     self.disconnect_event_sent = true;
                 }
-            }
+            },
             ProtocolState::Disconnected => {
                 if self.shutdown_timeout < Instant::now() {
                     self.state = ProtocolState::Shutdown;
                 }
-            }
+            },
             ProtocolState::Initializing | ProtocolState::Shutdown => (),
         }
         self.event_queue.drain(..)
@@ -777,7 +777,7 @@ impl<T: Config> UdpProtocol<T> {
                         e
                     );
                     return;
-                }
+                },
             };
 
             for (i, inp) in recv_inputs.into_iter().enumerate() {
@@ -1002,7 +1002,7 @@ mod tests {
         match &msg.body {
             MessageBody::SyncReply(reply) => {
                 assert_eq!(reply.random_reply, 12345);
-            }
+            },
             _ => panic!("Expected SyncReply message"),
         }
     }
@@ -1327,7 +1327,7 @@ mod tests {
         match &msg.body {
             MessageBody::QualityReply(reply) => {
                 assert_eq!(reply.pong, 12345);
-            }
+            },
             _ => panic!("Expected QualityReply message"),
         }
     }
@@ -1645,7 +1645,7 @@ mod tests {
             MessageBody::ChecksumReport(report) => {
                 assert_eq!(report.frame, Frame::new(100));
                 assert_eq!(report.checksum, 0xDEADBEEF);
-            }
+            },
             _ => panic!("Expected ChecksumReport message"),
         }
     }

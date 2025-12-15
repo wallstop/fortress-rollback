@@ -10,11 +10,11 @@ This crate contains [loom](https://docs.rs/loom) concurrency tests for Fortress 
 
 Loom tests need to be isolated from the main crate's dev-dependencies because:
 
-1. **Incompatible dependencies**: Some dependencies (like `tokio`, `hyper-util`) 
+1. **Incompatible dependencies**: Some dependencies (like `tokio`, `hyper-util`)
    use `#![cfg(not(loom))]` to disable modules under loom, causing compilation failures
    when building with `RUSTFLAGS="--cfg loom"`.
 
-2. **Heavy dev-dependencies**: The main crate has many dev-dependencies (macroquad, 
+2. **Heavy dev-dependencies**: The main crate has many dev-dependencies (macroquad,
    criterion, z3, etc.) that don't need to be compiled for loom testing.
 
 3. **Minimal test surface**: Loom tests focus specifically on concurrent primitives,
@@ -51,6 +51,7 @@ LOOM_CHECKPOINT_INTERVAL=1 LOOM_LOG=trace LOOM_LOCATION=1 \
 ## Current Tests
 
 ### GameStateCell Tests (5 tests)
+
 - `test_concurrent_saves` - Multiple threads saving concurrently
 - `test_save_load_consistency` - Save and load never see partial state  
 - `test_multiple_readers_single_writer` - MRSW pattern verification
@@ -68,6 +69,7 @@ The main library (`fortress-rollback`) uses conditional compilation for loom:
 - **Loom testing**: Uses `loom::sync::Mutex` for exhaustive interleaving testing
 
 Key implementation details:
+
 - `src/sync.rs` - Abstraction module that re-exports the appropriate primitives
 - `GameStateCell::data()` returns `None` under loom (no `MappedMutexGuard` equivalent)
 - Tests should use `load()` which requires `T: Clone`

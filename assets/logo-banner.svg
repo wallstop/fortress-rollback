@@ -1,17 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200" width="800" height="200">
   <defs>
-    <linearGradient id="fortressGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+    <!-- Gradient for fortress -->
+    <linearGradient id="fortressGrad" x1="0%" y1="0%" x2="0%" y2="100%">
       <stop offset="0%" style="stop-color:#4A90D9"/>
       <stop offset="100%" style="stop-color:#2C5282"/>
     </linearGradient>
-    <linearGradient id="arrowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+    
+    <!-- Gradient for arrows -->
+    <linearGradient id="arrowGrad" x1="0%" y1="0%" x2="100%" y2="0%">
       <stop offset="0%" style="stop-color:#F6AD55"/>
       <stop offset="100%" style="stop-color:#ED8936"/>
-    </linearGradient>
-    <linearGradient id="textGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" style="stop-color:#2C5282"/>
-      <stop offset="50%" style="stop-color:#4A90D9"/>
-      <stop offset="100%" style="stop-color:#2C5282"/>
     </linearGradient>
   </defs>
   
@@ -21,37 +19,48 @@
     <circle cx="80" cy="80" r="75" fill="#1A365D" opacity="0.1"/>
     
     <!-- Fortress -->
-    <g fill="url(#fortressGradient)">
+    <g fill="url(#fortressGrad)">
       <!-- Left tower -->
-      <rect x="35" y="60" width="22" height="55"/>
-      <rect x="35" y="50" width="8" height="15"/>
-      <rect x="49" y="50" width="8" height="15"/>
+      <rect x="35" y="58" width="20" height="60" rx="1"/>
+      <!-- Left tower battlements -->
+      <rect x="35" y="48" width="6" height="14"/>
+      <rect x="47" y="48" width="6" height="14"/>
       
-      <!-- Center tower -->
-      <rect x="62" y="42" width="36" height="73"/>
-      <rect x="62" y="30" width="10" height="18"/>
-      <rect x="75" y="30" width="10" height="18"/>
-      <rect x="88" y="30" width="10" height="18"/>
+      <!-- Center tower (taller) -->
+      <rect x="61" y="40" width="38" height="78" rx="1"/>
+      <!-- Center tower battlements -->
+      <rect x="61" y="28" width="10" height="16"/>
+      <rect x="75" y="28" width="10" height="16"/>
+      <rect x="89" y="28" width="10" height="16"/>
       
       <!-- Right tower -->
-      <rect x="103" y="60" width="22" height="55"/>
-      <rect x="103" y="50" width="8" height="15"/>
-      <rect x="117" y="50" width="8" height="15"/>
+      <rect x="105" y="58" width="20" height="60" rx="1"/>
+      <!-- Right tower battlements -->
+      <rect x="107" y="48" width="6" height="14"/>
+      <rect x="119" y="48" width="6" height="14"/>
       
       <!-- Base wall -->
-      <rect x="35" y="110" width="90" height="10" rx="2"/>
+      <rect x="35" y="112" width="90" height="8" rx="1"/>
     </g>
     
     <!-- Gate -->
-    <rect x="72" y="85" width="16" height="25" rx="8" ry="8" fill="#1A365D"/>
-    <rect x="72" y="95" width="16" height="15" fill="#1A365D"/>
+    <rect x="71" y="88" width="18" height="26" rx="9" ry="9" fill="#1A365D"/>
+    <rect x="71" y="100" width="18" height="18" fill="#1A365D"/>
     
-    <!-- Rollback arcs (without arrow heads) -->
-    <g stroke-linecap="round">
-      <path d="M 15 80 A 65 65 0 0 1 48 28" fill="none" stroke="url(#arrowGradient)" stroke-width="6"/>
-      <path d="M 145 80 A 65 65 0 0 1 112 132" fill="none" stroke="url(#arrowGradient)" stroke-width="6"/>
+    <!-- Rollback arcs -->
+    <g fill="none" stroke="url(#arrowGrad)" stroke-width="6" stroke-linecap="round">
+      <path d="M 15 80 A 65 65 0 0 1 48 28"/>
+      <path d="M 145 80 A 65 65 0 0 1 112 132"/>
     </g>
-
+    
+    <!-- R letter overlay on center tower (subtle) -->
+    <text x="80" y="78" 
+          font-family="Arial, sans-serif" 
+          font-size="20" 
+          font-weight="bold" 
+          fill="#1A365D" 
+          text-anchor="middle" 
+          opacity="0.3">R</text>
   </g>
   
   <!-- Text section -->

@@ -26,11 +26,34 @@ use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// Custom serializer for `Option<Frame>` that outputs clean integers or null.
+///
+/// - `None` → `null`
+/// - `Some(Frame::NULL)` → `null`
+/// - `Some(Frame(n))` where n >= 0 → `n`
+mod frame_serializer {
+    use crate::Frame;
+    use serde::Serializer;
+
+    #[allow(clippy::ref_option)]
+    pub fn serialize<S>(frame: &Option<Frame>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match frame {
+            None => serializer.serialize_none(),
+            Some(f) if f.is_null() => serializer.serialize_none(),
+            Some(f) => serializer.serialize_i32(f.as_i32()),
+        }
+    }
+}
+
 /// Severity of a specification violation.
 ///
 /// Severities are ordered from least to most severe, allowing filtering
 /// and comparison operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ViolationSeverity {
     /// Unexpected but recoverable - operation continued with fallback.
     ///
@@ -73,7 +96,8 @@ impl std::fmt::Display for ViolationSeverity {
 ///
 /// This enum is marked `#[non_exhaustive]` because new violation categories
 /// may be added in future versions. Always include a wildcard arm when matching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ViolationKind {
     /// Frame synchronization invariant violated.
@@ -159,7 +183,35 @@ impl std::fmt::Display for ViolationKind {
 ///
 /// Contains all relevant context for diagnosing and responding to
 /// a violation of expected behavior or invariants.
-#[derive(Debug, Clone)]
+///
+/// # Serialization
+///
+/// This type implements `serde::Serialize` for structured JSON output.
+/// The frame field is serialized as `null` for [`Frame::NULL`], or as an
+/// integer for valid frames.
+///
+/// # Example
+///
+/// ```
+/// use fortress_rollback::telemetry::{SpecViolation, ViolationSeverity, ViolationKind};
+/// use fortress_rollback::Frame;
+///
+/// let violation = SpecViolation::new(
+///     ViolationSeverity::Warning,
+///     ViolationKind::FrameSync,
+///     "frame mismatch",
+///     "sync.rs:42",
+/// ).with_frame(Frame::new(100))
+///  .with_context("expected", "50")
+///  .with_context("actual", "100");
+///
+/// // Serialize to JSON
+/// let json = serde_json::to_string(&violation).unwrap();
+/// assert!(json.contains(r#""severity":"warning""#));
+/// assert!(json.contains(r#""kind":"frame_sync""#));
+/// assert!(json.contains(r#""frame":100"#));
+/// ```
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SpecViolation {
     /// The severity level of this violation.
     pub severity: ViolationSeverity,
@@ -170,6 +222,9 @@ pub struct SpecViolation {
     /// Source location where the violation was detected (file:line).
     pub location: &'static str,
     /// The game frame at which the violation occurred, if applicable.
+    ///
+    /// Serialized as an integer for valid frames, or `null` for `None`/[`Frame::NULL`].
+    #[serde(serialize_with = "frame_serializer::serialize")]
     pub frame: Option<Frame>,
     /// Additional structured context as key-value pairs.
     ///
@@ -209,6 +264,41 @@ impl SpecViolation {
     pub fn with_context(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.context.insert(key.into(), value.into());
         self
+    }
+
+    /// Serializes this violation to a JSON string.
+    ///
+    /// This is a convenience method for programmatic access to violation data.
+    /// Returns `None` if serialization fails (which should not happen for
+    /// well-formed violations).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::telemetry::{SpecViolation, ViolationSeverity, ViolationKind};
+    /// use fortress_rollback::Frame;
+    ///
+    /// let violation = SpecViolation::new(
+    ///     ViolationSeverity::Warning,
+    ///     ViolationKind::FrameSync,
+    ///     "test",
+    ///     "test.rs:1",
+    /// ).with_frame(Frame::new(42));
+    ///
+    /// let json = violation.to_json().unwrap();
+    /// assert!(json.contains(r#""frame":42"#));
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Option<String> {
+        serde_json::to_string(self).ok()
+    }
+
+    /// Serializes this violation to a pretty-printed JSON string.
+    ///
+    /// Like [`to_json`](Self::to_json), but with indentation for readability.
+    #[must_use]
+    pub fn to_json_pretty(&self) -> Option<String> {
+        serde_json::to_string_pretty(self).ok()
     }
 }
 
@@ -277,13 +367,26 @@ pub trait ViolationObserver {
 /// Built-in observer that logs violations via the `tracing` crate.
 ///
 /// This is the default observer that maintains backward compatibility
-/// with the previous `tracing::warn!` behavior.
+/// with the previous `tracing::warn!` behavior, but with improved
+/// structured output for machine parseability.
 ///
 /// # Log Levels
 ///
 /// - `Warning` severity → `tracing::warn!`
 /// - `Error` severity → `tracing::error!`
 /// - `Critical` severity → `tracing::error!` with additional context
+///
+/// # Structured Output
+///
+/// All fields are output as structured tracing fields:
+/// - `severity` - The severity level as a string (`warning`, `error`, `critical`)
+/// - `kind` - The violation category as a string (e.g., `frame_sync`, `input_queue`)
+/// - `location` - Source file and line number where the violation was detected
+/// - `frame` - The frame number as an integer, or "null" if not applicable
+/// - `context` - A compact representation of context key-value pairs
+///
+/// This structured output is compatible with JSON logging formatters
+/// (like `tracing-subscriber`'s JSON layer) and log aggregation systems.
 #[derive(Debug, Default, Clone)]
 pub struct TracingObserver;
 
@@ -293,46 +396,72 @@ impl TracingObserver {
     pub const fn new() -> Self {
         Self
     }
+
+    /// Formats the frame as a displayable value.
+    /// Returns the frame number for valid frames, or "null" for None/NULL frames.
+    fn format_frame(frame: Option<Frame>) -> String {
+        match frame {
+            None => "null".to_string(),
+            Some(f) if f.is_null() => "null".to_string(),
+            Some(f) => f.as_i32().to_string(),
+        }
+    }
 }
 
 impl ViolationObserver for TracingObserver {
     fn on_violation(&self, violation: &SpecViolation) {
+        let severity = violation.severity.as_str();
         let kind = violation.kind.as_str();
         let location = violation.location;
-        let frame = violation.frame;
+        let frame_str = Self::format_frame(violation.frame);
+
+        // Format context as a compact key=value string for compatibility
+        // with systems that don't support dynamic field expansion
+        let context_str = if violation.context.is_empty() {
+            "{}".to_string()
+        } else {
+            let pairs: Vec<String> = violation
+                .context
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            format!("{{{}}}", pairs.join(", "))
+        };
 
         match violation.severity {
             ViolationSeverity::Warning => {
                 tracing::warn!(
+                    severity,
                     kind,
                     location,
-                    ?frame,
-                    context = ?violation.context,
+                    frame = %frame_str,
+                    context = %context_str,
                     "{}",
                     violation.message
                 );
-            }
+            },
             ViolationSeverity::Error => {
                 tracing::error!(
+                    severity,
                     kind,
                     location,
-                    ?frame,
-                    context = ?violation.context,
+                    frame = %frame_str,
+                    context = %context_str,
                     "{}",
                     violation.message
                 );
-            }
+            },
             ViolationSeverity::Critical => {
                 tracing::error!(
+                    severity = "critical",
                     kind,
                     location,
-                    ?frame,
-                    context = ?violation.context,
-                    severity = "CRITICAL",
+                    frame = %frame_str,
+                    context = %context_str,
                     "{}",
                     violation.message
                 );
-            }
+            },
         }
     }
 }
@@ -723,7 +852,11 @@ macro_rules! report_violation_to {
 ///
 /// Contains information about what invariant was violated and any
 /// additional context for debugging.
-#[derive(Debug, Clone)]
+///
+/// # Serialization
+///
+/// This type implements `serde::Serialize` for structured JSON output.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct InvariantViolation {
     /// Name of the type whose invariant was violated.
     pub type_name: &'static str,
@@ -749,6 +882,21 @@ impl InvariantViolation {
     pub fn with_details(mut self, details: impl Into<String>) -> Self {
         self.details = Some(details.into());
         self
+    }
+
+    /// Serializes this violation to a JSON string.
+    ///
+    /// Returns `None` if serialization fails (which should not happen for
+    /// well-formed violations).
+    #[must_use]
+    pub fn to_json(&self) -> Option<String> {
+        serde_json::to_string(self).ok()
+    }
+
+    /// Serializes this violation to a pretty-printed JSON string.
+    #[must_use]
+    pub fn to_json_pretty(&self) -> Option<String> {
+        serde_json::to_string_pretty(self).ok()
     }
 }
 
@@ -1621,5 +1769,202 @@ mod tests {
             message: "panic test",
         };
         assert_invariants!(checker, "test context");
+    }
+
+    // ==========================================
+    // JSON Serialization Tests
+    // ==========================================
+
+    #[test]
+    fn test_violation_severity_serialization() {
+        assert_eq!(
+            serde_json::to_string(&ViolationSeverity::Warning).unwrap(),
+            r#""warning""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ViolationSeverity::Error).unwrap(),
+            r#""error""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ViolationSeverity::Critical).unwrap(),
+            r#""critical""#
+        );
+    }
+
+    #[test]
+    fn test_violation_kind_serialization() {
+        assert_eq!(
+            serde_json::to_string(&ViolationKind::FrameSync).unwrap(),
+            r#""frame_sync""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ViolationKind::InputQueue).unwrap(),
+            r#""input_queue""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ViolationKind::StateManagement).unwrap(),
+            r#""state_management""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ViolationKind::NetworkProtocol).unwrap(),
+            r#""network_protocol""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ViolationKind::ChecksumMismatch).unwrap(),
+            r#""checksum_mismatch""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ViolationKind::Synchronization).unwrap(),
+            r#""synchronization""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ViolationKind::Invariant).unwrap(),
+            r#""invariant""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ViolationKind::InternalError).unwrap(),
+            r#""internal_error""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ViolationKind::Configuration).unwrap(),
+            r#""configuration""#
+        );
+    }
+
+    #[test]
+    fn test_spec_violation_json_serialization_basic() {
+        let violation = SpecViolation::new(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "test message",
+            "test.rs:42",
+        );
+
+        let json = violation.to_json().unwrap();
+        assert!(json.contains(r#""severity":"warning""#));
+        assert!(json.contains(r#""kind":"frame_sync""#));
+        assert!(json.contains(r#""message":"test message""#));
+        assert!(json.contains(r#""location":"test.rs:42""#));
+        // frame should be null when not set
+        assert!(json.contains(r#""frame":null"#));
+    }
+
+    #[test]
+    fn test_spec_violation_json_serialization_with_frame() {
+        let violation = SpecViolation::new(
+            ViolationSeverity::Error,
+            ViolationKind::InputQueue,
+            "missing input",
+            "queue.rs:100",
+        )
+        .with_frame(Frame::new(42));
+
+        let json = violation.to_json().unwrap();
+        assert!(json.contains(r#""frame":42"#));
+        // Verify it's a number, not a string
+        assert!(!json.contains(r#""frame":"42""#));
+    }
+
+    #[test]
+    fn test_spec_violation_json_serialization_with_null_frame() {
+        let violation = SpecViolation::new(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "test",
+            "test.rs:1",
+        )
+        .with_frame(Frame::NULL);
+
+        let json = violation.to_json().unwrap();
+        // NULL frame should serialize as null, not as -1
+        assert!(json.contains(r#""frame":null"#));
+    }
+
+    #[test]
+    fn test_spec_violation_json_serialization_with_context() {
+        let violation = SpecViolation::new(
+            ViolationSeverity::Critical,
+            ViolationKind::ChecksumMismatch,
+            "checksum mismatch",
+            "sync.rs:50",
+        )
+        .with_frame(Frame::new(100))
+        .with_context("expected", "0x12345678")
+        .with_context("actual", "0x87654321");
+
+        let json = violation.to_json().unwrap();
+        assert!(json.contains(r#""severity":"critical""#));
+        assert!(json.contains(r#""frame":100"#));
+        // Context should be serialized as an object
+        assert!(json.contains(r#""expected":"0x12345678""#));
+        assert!(json.contains(r#""actual":"0x87654321""#));
+    }
+
+    #[test]
+    fn test_spec_violation_to_json_pretty() {
+        let violation = SpecViolation::new(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "test",
+            "test.rs:1",
+        );
+
+        let json_pretty = violation.to_json_pretty().unwrap();
+        // Pretty JSON should have newlines
+        assert!(json_pretty.contains('\n'));
+        assert!(json_pretty.contains("  ")); // indentation
+    }
+
+    #[test]
+    fn test_invariant_violation_json_serialization() {
+        let violation = InvariantViolation::new("TestType", "value out of range")
+            .with_details("value=-5, expected>=0");
+
+        let json = violation.to_json().unwrap();
+        assert!(json.contains(r#""type_name":"TestType""#));
+        assert!(json.contains(r#""invariant":"value out of range""#));
+        assert!(json.contains(r#""details":"value=-5, expected>=0""#));
+    }
+
+    #[test]
+    fn test_invariant_violation_json_without_details() {
+        let violation = InvariantViolation::new("Counter", "overflow");
+
+        let json = violation.to_json().unwrap();
+        assert!(json.contains(r#""type_name":"Counter""#));
+        assert!(json.contains(r#""invariant":"overflow""#));
+        assert!(json.contains(r#""details":null"#));
+    }
+
+    #[test]
+    fn test_spec_violation_roundtrip_parseable() {
+        // Verify that the JSON output can be parsed back by a JSON parser
+        let violation = SpecViolation::new(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "test message with \"quotes\" and special chars",
+            "test.rs:1",
+        )
+        .with_frame(Frame::new(42))
+        .with_context("key", "value with spaces");
+
+        let json = violation.to_json().unwrap();
+
+        // Parse it back as a generic JSON value
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["severity"], "warning");
+        assert_eq!(parsed["kind"], "frame_sync");
+        assert_eq!(parsed["frame"], 42);
+        assert_eq!(parsed["context"]["key"], "value with spaces");
+    }
+
+    #[test]
+    fn test_tracing_observer_format_frame() {
+        assert_eq!(TracingObserver::format_frame(None), "null");
+        assert_eq!(TracingObserver::format_frame(Some(Frame::NULL)), "null");
+        assert_eq!(TracingObserver::format_frame(Some(Frame::new(0))), "0");
+        assert_eq!(TracingObserver::format_frame(Some(Frame::new(100))), "100");
+        assert_eq!(TracingObserver::format_frame(Some(Frame::new(-5))), "-5");
     }
 }

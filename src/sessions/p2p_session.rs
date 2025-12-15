@@ -517,7 +517,7 @@ impl<T: Config> P2PSession<T> {
                     return Err(FortressError::InternalError {
                         context: "Failed to get synchronized inputs".to_owned(),
                     });
-                }
+                },
             };
             // advance the frame count
             self.sync_layer.advance_frame();
@@ -610,12 +610,12 @@ impl<T: Config> P2PSession<T> {
                 Err(FortressError::InvalidRequest {
                     info: "Player already disconnected.".to_owned(),
                 })
-            }
+            },
             // disconnecting spectators is simpler
             Some(PlayerType::Spectator(_)) => {
                 self.disconnect_player_at_frame(player_handle, Frame::NULL);
                 Ok(())
-            }
+            },
         }
     }
 
@@ -843,7 +843,7 @@ impl<T: Config> P2PSession<T> {
                     // resimulating with correct disconnect flags (to account for user having some AI kick in).
                     self.disconnect_frame = last_frame + 1;
                 }
-            }
+            },
             PlayerType::Spectator(addr) => {
                 let Some(endpoint) = self.player_reg.spectators.get_mut(addr) else {
                     report_violation!(
@@ -854,7 +854,7 @@ impl<T: Config> P2PSession<T> {
                     return;
                 };
                 endpoint.disconnect();
-            }
+            },
             PlayerType::Local => (),
         }
 
@@ -968,7 +968,7 @@ impl<T: Config> P2PSession<T> {
                     return Err(FortressError::InternalError {
                         context: "Failed to get synchronized inputs during resimulation".to_owned(),
                     });
-                }
+                },
             };
 
             // decide whether to request a state save
@@ -1191,7 +1191,7 @@ impl<T: Config> P2PSession<T> {
                     total_requests_sent,
                     elapsed_ms,
                 });
-            }
+            },
             // forward to user
             Event::NetworkInterrupted { disconnect_timeout } => {
                 self.event_queue
@@ -1199,18 +1199,18 @@ impl<T: Config> P2PSession<T> {
                         addr,
                         disconnect_timeout,
                     });
-            }
+            },
             // forward to user
             Event::NetworkResumed => {
                 self.event_queue
                     .push_back(FortressEvent::NetworkResumed { addr });
-            }
+            },
             // check if all remotes are synced, then forward to user
             Event::Synchronized => {
                 self.check_initial_sync();
                 self.event_queue
                     .push_back(FortressEvent::Synchronized { addr });
-            }
+            },
             // disconnect the player, then forward to user
             Event::Disconnected => {
                 for handle in player_handles {
@@ -1225,12 +1225,12 @@ impl<T: Config> P2PSession<T> {
 
                 self.event_queue
                     .push_back(FortressEvent::Disconnected { addr });
-            }
+            },
             // forward sync timeout to user
             Event::SyncTimeout { elapsed_ms } => {
                 self.event_queue
                     .push_back(FortressEvent::SyncTimeout { addr, elapsed_ms });
-            }
+            },
             // add the input and all associated information
             Event::Input { input, player } => {
                 // input only comes from remote players, not spectators
@@ -1265,7 +1265,7 @@ impl<T: Config> P2PSession<T> {
                     // add the remote input
                     self.sync_layer.add_remote_input(player, input);
                 }
-            }
+            },
         }
 
         // check event queue size and discard oldest events if too big
@@ -1304,7 +1304,7 @@ impl<T: Config> P2PSession<T> {
                         remote.pending_checksums.remove_entry(&frame);
                     }
                 }
-            }
+            },
             DesyncDetection::Off => (),
         }
     }
@@ -1351,7 +1351,7 @@ impl<T: Config> P2PSession<T> {
                             .retain(|&frame, _| frame >= oldest_frame_to_keep);
                     }
                 }
-            }
+            },
             DesyncDetection::Off => (),
         }
     }

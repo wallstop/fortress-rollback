@@ -14,4 +14,4 @@ This directory contains formal specification documents for the Fortress Rollback
 ## Related Resources
 
 - [TLA+ Specifications](../../specs/tla/README.md) - Runnable TLA+ model checking specifications
-- [Z3 Verification Tests](../../tests/test_z3_verification.rs) - Z3 SMT solver verification tests
+- [Z3 Verification Tests](../../tests/verification/z3.rs) - Z3 SMT solver verification tests

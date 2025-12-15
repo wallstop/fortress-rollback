@@ -141,6 +141,58 @@ impl SyncConfig {
             keepalive_interval: Duration::from_millis(100),
         }
     }
+
+    /// Configuration preset for mobile/cellular networks.
+    ///
+    /// Mobile networks have high variability, intermittent connectivity,
+    /// and often switch between WiFi and cellular. This preset combines
+    /// aspects of high_latency and lossy with additional tolerance.
+    ///
+    /// Characteristics addressed:
+    /// - High jitter (50-150ms variation)
+    /// - Intermittent packet loss (5-20%)
+    /// - Connection handoff during WiFi/cellular switches
+    /// - Variable RTT (60-200ms)
+    #[must_use]
+    pub fn mobile() -> Self {
+        Self {
+            // More sync packets to handle intermittent loss
+            num_sync_packets: 10,
+            // Longer retry interval to avoid flooding during handoffs
+            sync_retry_interval: Duration::from_millis(350),
+            // Generous timeout for connection establishment
+            sync_timeout: Some(Duration::from_secs(15)),
+            // Longer retry interval during gameplay
+            running_retry_interval: Duration::from_millis(350),
+            // More frequent keepalives to detect connection issues
+            keepalive_interval: Duration::from_millis(300),
+        }
+    }
+
+    /// Configuration preset for competitive/esports scenarios.
+    ///
+    /// Prioritizes quick detection of network issues over tolerance.
+    /// Assumes good network conditions and fails fast on problems.
+    ///
+    /// Characteristics:
+    /// - Fast sync handshake
+    /// - Quick failure detection
+    /// - Strict timeout for connection
+    #[must_use]
+    pub fn competitive() -> Self {
+        Self {
+            // Fewer sync packets for faster connection
+            num_sync_packets: 4,
+            // Fast retry for quick connection
+            sync_retry_interval: Duration::from_millis(100),
+            // Strict timeout - fail fast if network is bad
+            sync_timeout: Some(Duration::from_secs(3)),
+            // Fast retries during gameplay
+            running_retry_interval: Duration::from_millis(100),
+            // Frequent keepalives for quick disconnect detection
+            keepalive_interval: Duration::from_millis(100),
+        }
+    }
 }
 
 /// Configuration for network protocol behavior.
@@ -295,6 +347,34 @@ impl ProtocolConfig {
             sync_duration_warning_ms: 1000,
         }
     }
+
+    /// Configuration preset for mobile/cellular networks.
+    ///
+    /// Mobile networks have high variability and frequent temporary
+    /// disconnections during handoffs. This preset is more tolerant
+    /// of sync delays and allows for larger output buffers.
+    ///
+    /// Characteristics addressed:
+    /// - High jitter requiring more buffering
+    /// - Connection handoffs during WiFi/cellular switches
+    /// - Higher than normal retry expectations
+    #[must_use]
+    pub fn mobile() -> Self {
+        Self {
+            // Slower quality reports to reduce bandwidth on metered connections
+            quality_report_interval: Duration::from_millis(350),
+            // Very long shutdown delay to handle reconnection attempts
+            shutdown_delay: Duration::from_millis(15000),
+            // Larger checksum history for delayed desync detection
+            max_checksum_history: 64,
+            // Higher pending output limit for buffering during jitter
+            pending_output_limit: 256,
+            // Much higher threshold before warning - mobile is expected to retry often
+            sync_retry_warning_threshold: 25,
+            // Longer sync expected on mobile
+            sync_duration_warning_ms: 12000,
+        }
+    }
 }
 
 /// Configuration for spectator sessions.
@@ -403,6 +483,44 @@ impl SpectatorConfig {
             buffer_size: 30,
             catchup_speed: 2,
             max_frames_behind: 5,
+        }
+    }
+
+    /// Configuration preset for streaming/broadcast scenarios.
+    ///
+    /// Optimized for live event streaming, tournament broadcasts, and
+    /// replay viewers. Uses a very large buffer and conservative catch-up
+    /// to avoid visual stuttering on stream.
+    ///
+    /// Characteristics:
+    /// - Large buffer (3 seconds at 60 FPS)
+    /// - Slow, smooth catch-up to avoid jarring speed changes
+    /// - High tolerance for falling behind
+    #[must_use]
+    pub fn broadcast() -> Self {
+        Self {
+            // 3 seconds of buffer at 60 FPS for smooth streaming
+            buffer_size: 180,
+            // Very slow catch-up to avoid visual stuttering on stream
+            catchup_speed: 1,
+            // Can fall far behind before catching up - prioritize smooth playback
+            max_frames_behind: 30,
+        }
+    }
+
+    /// Configuration preset for mobile/cellular spectators.
+    ///
+    /// Uses larger buffers and tolerant catch-up for variable
+    /// mobile network conditions.
+    #[must_use]
+    pub fn mobile() -> Self {
+        Self {
+            // 2 seconds of buffer at 60 FPS
+            buffer_size: 120,
+            // Moderate catch-up speed
+            catchup_speed: 1,
+            // High tolerance for network variability
+            max_frames_behind: 25,
         }
     }
 }
@@ -804,21 +922,21 @@ impl<T: Config> SessionBuilder<T> {
                         info: "The player handle you provided is invalid. For a local player, the handle should be between 0 and num_players".to_owned(),
                     });
                 }
-            }
+            },
             PlayerType::Remote(_) => {
                 if !player_handle.is_valid_player_for(self.num_players) {
                     return Err(FortressError::InvalidRequest {
                         info: "The player handle you provided is invalid. For a remote player, the handle should be between 0 and num_players".to_owned(),
                     });
                 }
-            }
+            },
             PlayerType::Spectator(_) => {
                 if !player_handle.is_spectator_for(self.num_players) {
                     return Err(FortressError::InvalidRequest {
                         info: "The player handle you provided is invalid. For a spectator, the handle should be num_players or higher".to_owned(),
                     });
                 }
-            }
+            },
         }
         self.player_reg.handles.insert(player_handle, player_type);
         Ok(self)
@@ -1295,7 +1413,7 @@ impl<T: Config> SessionBuilder<T> {
                                     .to_owned(),
                         })?;
                     self.player_reg.remotes.insert(peer_addr, endpoint);
-                }
+                },
                 PlayerType::Spectator(peer_addr) => {
                     let endpoint = self
                         .create_endpoint(handles, peer_addr.clone(), self.num_players) // the host of the spectator sends inputs for all players
@@ -1305,7 +1423,7 @@ impl<T: Config> SessionBuilder<T> {
                                     .to_owned(),
                         })?;
                     self.player_reg.spectators.insert(peer_addr, endpoint);
-                }
+                },
                 PlayerType::Local => (),
             }
         }

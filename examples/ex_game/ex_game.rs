@@ -85,14 +85,14 @@ impl Game {
                     } else {
                         self.load_game_state(cell)
                     }
-                }
+                },
                 FortressRequest::SaveGameState { cell, frame } => {
                     if in_lockstep {
                         unreachable!("Should never get a save request if running in lockstep")
                     } else {
                         self.save_game_state(cell, frame)
                     }
-                }
+                },
                 FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
                 _ => unreachable!("Unknown request type"),
             }

@@ -53,6 +53,24 @@ The following aspects are verified to be perfectly aligned:
 | `SyncLayer` fields | `Rollback.tla` | `src/sync_layer.rs:263` | ✅ Aligned |
 | `InputQueue` fields | `InputQueue.tla` | `src/input_queue.rs:100` | ✅ Aligned |
 
+### Prediction Strategy Alignment (Fixed Dec 15, 2025)
+
+| Aspect | TLA+ Spec | Production Code | Status |
+|--------|-----------|-----------------|--------|
+| Prediction source | `lastConfirmedInput` | `last_confirmed_input` | ✅ Aligned |
+| Update timing | Updated on every `AddInput`/`AddRemoteInput` | Updated on every `add_input_by_frame` | ✅ Aligned |
+
+**IMPORTANT**: Fortress Rollback uses `last_confirmed_input` (updated when any input is added)
+as the source for predictions, NOT a separate `prediction` variable like original GGPO.
+This is intentional and ensures determinism across peers because:
+
+1. Confirmed inputs are synchronized via the network protocol
+2. Both local and remote inputs are "confirmed" by the time they reach the queue
+3. The `RepeatLastConfirmed` strategy uses this synchronized value
+
+The TLA+ spec was updated (Dec 15, 2025) to use `lastConfirmedInput` variable to match
+production naming and document this design decision.
+
 ### Invariant Implementation
 
 | Invariant | Spec Location | Code Location | Status |
@@ -123,6 +141,7 @@ so they don't have TLA+ counterparts:
 ### Presets Available
 
 **InputQueueConfig:**
+
 | Preset | Queue Length | Use Case |
 |--------|--------------|----------|
 | `standard()` | 128 | Default, ~2.1s at 60 FPS |
@@ -130,6 +149,7 @@ so they don't have TLA+ counterparts:
 | `minimal()` | 32 | Memory-constrained, ~0.5s at 60 FPS |
 
 **SyncConfig:**
+
 | Preset | Sync Packets | Retry Interval | Use Case |
 |--------|--------------|----------------|----------|
 | `default()` | 5 | 200ms | Standard networks |
@@ -168,6 +188,7 @@ When modifying specs or production code:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.3 | 2025-12-15 | Fixed InputQueue.tla to use `lastConfirmedInput` matching production's `last_confirmed_input` (was incorrectly named `prediction`, which modeled original GGPO behavior) |
 | 1.2 | 2025-12-09 | Comprehensive config struct documentation: SyncConfig, ProtocolConfig, SpectatorConfig, TimeSyncConfig |
 | 1.1 | 2025-12-09 | Phase 10: Documented configurable constants (InputQueueConfig) |
 | 1.0 | 2025-12-09 | Initial audit documenting all divergences and alignments |

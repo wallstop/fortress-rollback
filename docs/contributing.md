@@ -21,9 +21,11 @@ make sure all of your commits are atomic (one feature per commit).
 
 Always write a clear log message for your commits. One-line messages are fine for small changes, but bigger changes should look like this:
 
-    >$ git commit -m "prefix: brief summary of the commit
-    > 
-    > A paragraph describing what changed and its impact."
+```shell
+git commit -m "prefix: brief summary of the commit
+
+A paragraph describing what changed and its impact."
+```
 
 With the following prefixes commonly used:
 
@@ -73,6 +75,15 @@ pre-commit run check-links --all-files
 
 # Run the link checker script directly
 ./scripts/check-links.sh --verbose
+
+# Verify markdown code samples compile
+./scripts/verify-markdown-code.sh
+
+# With verbose output for debugging
+./scripts/verify-markdown-code.sh --verbose
+
+# Check a specific file
+./scripts/verify-markdown-code.sh docs/user-guide.md
 ```
 
 ### Bypassing Hooks (Emergencies Only)

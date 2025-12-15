@@ -46,6 +46,8 @@
 //! Note: First build may take several minutes to compile Z3 from source.
 
 #![cfg(feature = "z3-verification")]
+// Summary test functions use println! to output verification summaries
+#![allow(clippy::print_stdout, clippy::disallowed_macros)]
 
 use z3::ast::Int;
 use z3::{with_z3_config, Config, SatResult, Solver};

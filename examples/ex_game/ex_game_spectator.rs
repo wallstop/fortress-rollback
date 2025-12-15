@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "Frame {} skipped: Waiting for input from host.",
                             game.current_frame()
                         );
-                    }
+                    },
                     Err(e) => return Err(Box::new(e)),
                 }
             }

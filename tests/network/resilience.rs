@@ -7,10 +7,13 @@
 //! - Jitter (variable latency)
 //! - Combined conditions
 
+// Allow hardcoded IP addresses - 127.0.0.1 is appropriate for tests
+#![allow(clippy::ip_constant)]
+
 use crate::common::stubs::{GameStub, StubConfig, StubInput};
 use fortress_rollback::{
-    ChaosConfig, ChaosSocket, FortressError, PlayerHandle, PlayerType, SaveMode, SessionBuilder,
-    SessionState, UdpNonBlockingSocket,
+    ChaosConfig, ChaosSocket, FortressError, PlayerHandle, PlayerType, ProtocolConfig, SaveMode,
+    SessionBuilder, SessionState, SyncConfig, TimeSyncConfig, UdpNonBlockingSocket,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -2478,6 +2481,396 @@ fn test_terrible_network_preset() -> Result<(), FortressError> {
     assert!(
         stub1.gs.frame > 0,
         "Should advance frames with terrible network"
+    );
+
+    Ok(())
+}
+
+/// Test with "mobile network" preset - validates mobile network simulation.
+#[test]
+#[serial]
+fn test_mobile_network_preset() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9063);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9064);
+
+    // Use the mobile network preset with deterministic seed
+    let chaos_config1 = ChaosConfig::builder()
+        .latency(Duration::from_millis(60))
+        .jitter(Duration::from_millis(40))
+        .packet_loss_rate(0.12)
+        .duplication_rate(0.01)
+        .reorder_buffer_size(3)
+        .reorder_rate(0.05)
+        .burst_loss(0.02, 4)
+        .seed(12345)
+        .build();
+
+    let chaos_config2 = ChaosConfig::builder()
+        .latency(Duration::from_millis(60))
+        .jitter(Duration::from_millis(40))
+        .packet_loss_rate(0.12)
+        .duplication_rate(0.01)
+        .reorder_buffer_size(3)
+        .reorder_rate(0.05)
+        .burst_loss(0.02, 4)
+        .seed(12346)
+        .build();
+
+    let socket1 = create_chaos_socket(9063, chaos_config1);
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_sync_config(SyncConfig::mobile())
+        .with_protocol_config(ProtocolConfig::mobile())
+        .with_time_sync_config(TimeSyncConfig::mobile())
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9064, chaos_config2);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_sync_config(SyncConfig::mobile())
+        .with_protocol_config(ProtocolConfig::mobile())
+        .with_time_sync_config(TimeSyncConfig::mobile())
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Synchronize - mobile network needs generous time
+    for _ in 0..600 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(50));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize with mobile network preset"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize with mobile network preset"
+    );
+
+    // Advance frames
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for i in 0..30 {
+        for _ in 0..8 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+        std::thread::sleep(Duration::from_millis(40));
+
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+
+        let requests1 = sess1.advance_frame().unwrap();
+        let requests2 = sess2.advance_frame().unwrap();
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+
+    assert!(
+        stub1.gs.frame > 0,
+        "Should advance frames with mobile network preset"
+    );
+
+    Ok(())
+}
+
+/// Test with "wifi interference" preset - validates WiFi interference simulation.
+#[test]
+#[serial]
+fn test_wifi_interference_preset() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9065);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9066);
+
+    // Use WiFi interference characteristics with deterministic seed
+    let chaos_config1 = ChaosConfig::builder()
+        .latency(Duration::from_millis(15))
+        .jitter(Duration::from_millis(25))
+        .packet_loss_rate(0.03)
+        .reorder_buffer_size(2)
+        .reorder_rate(0.02)
+        .burst_loss(0.05, 3)
+        .seed(22222)
+        .build();
+
+    let chaos_config2 = ChaosConfig::builder()
+        .latency(Duration::from_millis(15))
+        .jitter(Duration::from_millis(25))
+        .packet_loss_rate(0.03)
+        .reorder_buffer_size(2)
+        .reorder_rate(0.02)
+        .burst_loss(0.05, 3)
+        .seed(22223)
+        .build();
+
+    let socket1 = create_chaos_socket(9065, chaos_config1);
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9066, chaos_config2);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Synchronize - WiFi should be faster than mobile
+    for _ in 0..300 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(30));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize with wifi interference preset"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize with wifi interference preset"
+    );
+
+    // Advance frames
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for i in 0..40 {
+        for _ in 0..6 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+
+        let requests1 = sess1.advance_frame().unwrap();
+        let requests2 = sess2.advance_frame().unwrap();
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+
+    assert!(
+        stub1.gs.frame >= 30,
+        "Should advance frames with wifi interference preset"
+    );
+
+    Ok(())
+}
+
+/// Test with "intercontinental" preset - validates high-latency stable connections.
+#[test]
+#[serial]
+fn test_intercontinental_preset() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9067);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9068);
+
+    // Use intercontinental characteristics with deterministic seed
+    let chaos_config1 = ChaosConfig::builder()
+        .latency(Duration::from_millis(120))
+        .jitter(Duration::from_millis(15))
+        .packet_loss_rate(0.02)
+        .seed(33333)
+        .build();
+
+    let chaos_config2 = ChaosConfig::builder()
+        .latency(Duration::from_millis(120))
+        .jitter(Duration::from_millis(15))
+        .packet_loss_rate(0.02)
+        .seed(33334)
+        .build();
+
+    let socket1 = create_chaos_socket(9067, chaos_config1);
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_sync_config(SyncConfig::high_latency())
+        .with_protocol_config(ProtocolConfig::high_latency())
+        .with_time_sync_config(TimeSyncConfig::smooth())
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9068, chaos_config2);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_sync_config(SyncConfig::high_latency())
+        .with_protocol_config(ProtocolConfig::high_latency())
+        .with_time_sync_config(TimeSyncConfig::smooth())
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Synchronize - intercontinental is stable but high latency
+    for _ in 0..400 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(50));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize with intercontinental preset"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize with intercontinental preset"
+    );
+
+    // Advance frames
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for i in 0..25 {
+        for _ in 0..10 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+        std::thread::sleep(Duration::from_millis(50));
+
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+
+        let requests1 = sess1.advance_frame().unwrap();
+        let requests2 = sess2.advance_frame().unwrap();
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+
+    assert!(
+        stub1.gs.frame > 0,
+        "Should advance frames with intercontinental preset"
+    );
+
+    Ok(())
+}
+
+/// Test competitive preset - validates fast sync and strict timeouts.
+#[test]
+#[serial]
+fn test_competitive_preset_fast_sync() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9069);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9070);
+
+    // No chaos - LAN-like conditions for competitive play
+    let socket1 = UdpNonBlockingSocket::bind_to_port(9069).unwrap();
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_sync_config(SyncConfig::competitive())
+        .with_protocol_config(ProtocolConfig::competitive())
+        .with_time_sync_config(TimeSyncConfig::competitive())
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = UdpNonBlockingSocket::bind_to_port(9070).unwrap();
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_sync_config(SyncConfig::competitive())
+        .with_protocol_config(ProtocolConfig::competitive())
+        .with_time_sync_config(TimeSyncConfig::competitive())
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Competitive should sync very fast
+    let start = std::time::Instant::now();
+    for _ in 0..100 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(10));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+    let sync_time = start.elapsed();
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize with competitive preset"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize with competitive preset"
+    );
+
+    // Competitive sync should be fast (< 2 seconds on localhost)
+    assert!(
+        sync_time < Duration::from_secs(2),
+        "Competitive preset should sync quickly, took {:?}",
+        sync_time
+    );
+
+    // Advance frames
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for i in 0..50 {
+        for _ in 0..4 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+            .unwrap();
+
+        let requests1 = sess1.advance_frame().unwrap();
+        let requests2 = sess2.advance_frame().unwrap();
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+
+    assert!(
+        stub1.gs.frame >= 40,
+        "Should advance many frames with competitive preset"
     );
 
     Ok(())

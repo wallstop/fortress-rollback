@@ -94,11 +94,11 @@ fn test_synctest_input_iteration_determinism() {
                             input_history: vec![],
                         };
                         cell.save(frame, Some(state), None);
-                    }
+                    },
                     FortressRequest::AdvanceFrame { .. } => {
                         frames_advanced += 1;
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
             }
         }

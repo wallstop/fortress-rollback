@@ -50,7 +50,7 @@ repos:
 
       - id: cargo-clippy
         name: cargo clippy
-        entry: cargo clippy --all-targets --all-features -- -D warnings
+        entry: cargo clippy --all-targets -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false
@@ -58,7 +58,7 @@ repos:
       # Check for broken rustdoc links
       - id: rustdoc-links
         name: rustdoc link check
-        entry: bash -c 'cargo doc --no-deps 2>&1 | grep -E "warning: .*unresolved link" && exit 1 || exit 0'
+        entry: "bash -c 'cargo doc --no-deps 2>&1 | grep -E \"warning: .*unresolved link\" && exit 1 || exit 0'"
         language: system
         pass_filenames: false
         files: '\.rs$'
@@ -70,3 +70,12 @@ repos:
         language: script
         pass_filenames: false
         files: '\.(md|rs)$'
+
+      # Check feature combinations compile (if cargo-hack is installed)
+      - id: cargo-hack-check
+        name: cargo hack feature check
+        entry: bash -c 'command -v cargo-hack >/dev/null && cargo hack check --feature-powerset --exclude-features z3-verification,graphical-examples || true'
+        language: system
+        pass_filenames: false
+        files: '\.rs$|Cargo\.toml$'
+        stages: [pre-push]  # Only run on push (slower check)

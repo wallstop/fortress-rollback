@@ -1,5 +1,8 @@
 //! Spectator session integration tests.
 
+// Allow hardcoded IP addresses - 127.0.0.1 is appropriate for tests
+#![allow(clippy::ip_constant)]
+
 use crate::common::stubs::{GameStub, StubConfig, StubInput};
 use fortress_rollback::{
     telemetry::CollectingObserver, FortressError, FortressEvent, InputQueueConfig, PlayerHandle,

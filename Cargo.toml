@@ -3,6 +3,7 @@ name = "fortress-rollback"
 version = "0.1.0"
 authors = ["wallstop <wallstop@wallstopstudios.com>"]
 edition = "2021"
+rust-version = "1.73"  # Minimum Supported Rust Version (MSRV) - required for div_ceil
 description = "Fortress Rollback (a fork of GGRS) is a fortified, verified P2P rollback networking library for Rust."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
@@ -26,6 +27,87 @@ implicit_clone = "warn"
 redundant_clone = "warn"
 # Use to_owned() for &str instead of to_string() for clarity
 inefficient_to_string = "warn"
+
+# === Additional defensive lints ===
+# No TODOs in production code
+todo = "deny"
+# No unimplemented!() in production code
+unimplemented = "deny"
+# No debug macros in production (use tracing)
+dbg_macro = "warn"
+# Use tracing instead of print statements
+print_stdout = "warn"
+print_stderr = "warn"
+
+# === Pedantic lints (enabled selectively) ===
+# Enable pedantic as baseline, then allow noisy ones
+pedantic = { level = "warn", priority = -1 }
+# Allow these commonly noisy pedantic lints
+module_name_repetitions = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# These are too strict for this codebase
+if_not_else = "allow"
+match_same_arms = "allow"
+single_match_else = "allow"
+unnested_or_patterns = "allow"
+unreadable_literal = "allow"
+items_after_statements = "allow"
+# Allow precision loss for frame calculations (never exceed mantissa)
+cast_precision_loss = "allow"
+# Allow sign loss for frame index calculations (validated elsewhere)
+cast_sign_loss = "allow"
+# Allow possible truncation (sizes are always within bounds)
+cast_possible_truncation = "allow"
+# Allow lossless casts (clearer intent)
+cast_lossless = "allow"
+# Allow possible wrap for intentional bit manipulation
+cast_possible_wrap = "allow"
+# Allow indexing - we use bounds checking where critical
+indexing_slicing = "allow"
+# Allow needless pass by value for small Copy types
+needless_pass_by_value = "allow"
+# Allow doc markdown flexibility
+doc_markdown = "allow"
+# Allow format string style choice
+uninlined_format_args = "allow"
+# Allow explicit returns for clarity
+needless_return = "allow"
+# Allow wildcard imports in tests
+wildcard_imports = "allow"
+# Allow redundant else for clarity
+redundant_else = "allow"
+# Allow bool comparison for readability
+bool_comparison = "allow"
+# Allow used underscore binding
+used_underscore_binding = "allow"
+# Allow struct field names
+struct_field_names = "allow"
+# Allow needless continue for clarity
+needless_continue = "allow"
+# Allow borrow as ptr patterns
+borrow_as_ptr = "allow"
+# Allow checked conversions style choice
+checked_conversions = "allow"
+# Allow explicit iter loops
+explicit_iter_loop = "allow"
+# Allow manual let else
+manual_let_else = "allow"
+# Allow range plus one patterns
+range_plus_one = "allow"
+# Allow explicit into iter
+explicit_into_iter_loop = "allow"
+# Allow semicolon if nothing returned style
+semicolon_if_nothing_returned = "allow"
+# Allow struct excessive bools (protocol state)
+struct_excessive_bools = "allow"
+# Allow trivially copy pass by ref (API consistency)
+trivially_copy_pass_by_ref = "allow"
+# Allow unchecked duration subtraction (validated)
+unchecked_duration_subtraction = "allow"
+
 # Note: wildcard_enum_match_arm is NOT enabled because public enums use #[non_exhaustive],
 # which already forces external users to handle wildcards. Internal test code uses wildcards
 # intentionally for internal enums like MessageBody.

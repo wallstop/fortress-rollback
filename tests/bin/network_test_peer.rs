@@ -28,6 +28,9 @@
 //! --packet-loss 0.1       # 10% packet loss
 //! --latency 50            # 50ms latency
 //! --jitter 20             # ±20ms jitter
+
+// Allow print macros for test output and error reporting
+#![allow(clippy::print_stdout, clippy::print_stderr, clippy::disallowed_macros)]
 //! --seed 42               # Deterministic chaos
 //! ```
 //!
@@ -170,10 +173,10 @@ impl TestState {
                 InputStatus::Confirmed | InputStatus::Predicted => {
                     // Update display value with all inputs (for smooth gameplay)
                     self.value = self.value.wrapping_add(input.value as i64 * (i as i64 + 1));
-                }
+                },
                 InputStatus::Disconnected => {
                     // Disconnected players contribute 0
-                }
+                },
             }
         }
         self.frame += 1;
@@ -275,19 +278,19 @@ impl TestGame {
                     self.state = cell.load().unwrap();
                     self.rollback_count += 1;
                     self.debug_log.log_load(frame.as_i32(), self.state.value);
-                }
+                },
                 FortressRequest::SaveGameState { cell, frame } => {
                     // Use a simple checksum for save - not used for final comparison
                     let checksum = self.state.value as u128;
                     self.debug_log.log_save(frame.as_i32(), self.state.value);
                     cell.save(frame, Some(self.state.clone()), Some(checksum));
-                }
+                },
                 FortressRequest::AdvanceFrame { inputs } => {
                     // Log BEFORE advancing so we can see the inputs that are being used
                     self.debug_log
                         .log_advance(self.state.frame, self.state.value, &inputs);
                     self.state.advance(&inputs);
-                }
+                },
                 _ => unreachable!("Unknown request type"),
             }
         }
@@ -317,49 +320,49 @@ fn parse_args() -> Args {
             "--local-port" => {
                 i += 1;
                 result.local_port = args[i].parse().expect("Invalid port");
-            }
+            },
             "--player-index" => {
                 i += 1;
                 result.player_index = args[i].parse().expect("Invalid player index");
-            }
+            },
             "--peer" => {
                 i += 1;
                 result.peer_addr = Some(args[i].parse().expect("Invalid peer address"));
-            }
+            },
             "--frames" => {
                 i += 1;
                 result.target_frames = args[i].parse().expect("Invalid frame count");
-            }
+            },
             "--packet-loss" => {
                 i += 1;
                 result.packet_loss = args[i].parse().expect("Invalid packet loss rate");
-            }
+            },
             "--latency" => {
                 i += 1;
                 result.latency_ms = args[i].parse().expect("Invalid latency");
-            }
+            },
             "--jitter" => {
                 i += 1;
                 result.jitter_ms = args[i].parse().expect("Invalid jitter");
-            }
+            },
             "--seed" => {
                 i += 1;
                 result.seed = Some(args[i].parse().expect("Invalid seed"));
-            }
+            },
             "--timeout" => {
                 i += 1;
                 result.timeout_secs = args[i].parse().expect("Invalid timeout");
-            }
+            },
             "--input-delay" => {
                 i += 1;
                 result.input_delay = args[i].parse().expect("Invalid input delay");
-            }
+            },
             "--debug" => {
                 result.debug = true;
-            }
+            },
             _ => {
                 eprintln!("Unknown argument: {}", args[i]);
-            }
+            },
         }
         i += 1;
     }
@@ -448,7 +451,7 @@ fn run_test(args: &Args) -> TestResult {
                 error: Some(format!("Failed to bind socket: {}", e)),
                 debug_log: None,
             };
-        }
+        },
     };
     let socket = ChaosSocket::new(inner_socket, chaos_config);
 
@@ -462,7 +465,8 @@ fn run_test(args: &Args) -> TestResult {
 
     // Add players based on our index
     let local_handle = PlayerHandle::new(args.player_index);
-    let remote_handle = PlayerHandle::new(if args.player_index == 0 { 1 } else { 0 });
+    // For a 2-player session, get the other player's index (0 -> 1, 1 -> 0)
+    let remote_handle = PlayerHandle::new(1 - args.player_index);
 
     sess_builder = match sess_builder.add_player(PlayerType::Local, local_handle) {
         Ok(b) => b,
@@ -476,7 +480,7 @@ fn run_test(args: &Args) -> TestResult {
                 error: Some(format!("Failed to add local player: {}", e)),
                 debug_log: None,
             };
-        }
+        },
     };
 
     sess_builder = match sess_builder.add_player(PlayerType::Remote(peer_addr), remote_handle) {
@@ -491,7 +495,7 @@ fn run_test(args: &Args) -> TestResult {
                 error: Some(format!("Failed to add remote player: {}", e)),
                 debug_log: None,
             };
-        }
+        },
     };
 
     let mut session = match sess_builder.start_p2p_session(socket) {
@@ -506,7 +510,7 @@ fn run_test(args: &Args) -> TestResult {
                 error: Some(format!("Failed to start session: {}", e)),
                 debug_log: None,
             };
-        }
+        },
     };
 
     let mut game = TestGame::new(args.debug);
@@ -650,7 +654,7 @@ fn run_test(args: &Args) -> TestResult {
                             None
                         },
                     };
-                }
+                },
             }
         }
 

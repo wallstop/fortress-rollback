@@ -90,16 +90,16 @@ impl Display for FortressError {
                     f,
                     "Prediction threshold is reached, cannot proceed without catching up."
                 )
-            }
+            },
             FortressError::InvalidRequest { info } => {
                 write!(f, "Invalid Request: {}", info)
-            }
+            },
             FortressError::NotSynchronized => {
                 write!(
                     f,
                     "The session is not yet synchronized with all remote sessions."
                 )
-            }
+            },
             FortressError::MismatchedChecksum {
                 current_frame,
                 mismatched_frames,
@@ -109,23 +109,23 @@ impl Display for FortressError {
                     "Detected checksum mismatch during rollback on frame {}, mismatched frames: {:?}",
                     current_frame, mismatched_frames
                 )
-            }
+            },
             FortressError::SpectatorTooFarBehind => {
                 write!(
                     f,
                     "The spectator got so far behind the host that catching up is impossible."
                 )
-            }
+            },
             FortressError::InvalidFrame { frame, reason } => {
                 write!(f, "Invalid frame {}: {}", frame, reason)
-            }
+            },
             FortressError::InvalidPlayerHandle { handle, max_handle } => {
                 write!(
                     f,
                     "Invalid player handle {}: must be less than or equal to {}",
                     handle, max_handle
                 )
-            }
+            },
             FortressError::MissingInput {
                 player_handle,
                 frame,
@@ -135,16 +135,16 @@ impl Display for FortressError {
                     "Missing input for player {} at frame {}",
                     player_handle, frame
                 )
-            }
+            },
             FortressError::SerializationError { context } => {
                 write!(f, "Serialization error: {}", context)
-            }
+            },
             FortressError::InternalError { context } => {
                 write!(f, "Internal error (please report as bug): {}", context)
-            }
+            },
             FortressError::SocketError { context } => {
                 write!(f, "Socket error: {}", context)
-            }
+            },
         }
     }
 }
@@ -219,8 +219,8 @@ mod tests {
         };
         let display = format!("{}", err);
         assert!(display.contains("Invalid player handle"));
-        assert!(display.contains("5"));
-        assert!(display.contains("3"));
+        assert!(display.contains('5'));
+        assert!(display.contains('3'));
     }
 
     #[test]
@@ -274,6 +274,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::redundant_clone)] // Testing Clone trait implementation
     fn test_error_clone() {
         let err = FortressError::InvalidRequest {
             info: "test".to_string(),

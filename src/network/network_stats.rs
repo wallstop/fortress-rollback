@@ -63,7 +63,7 @@ mod tests {
         };
         let debug = format!("{:?}", stats);
         assert!(debug.contains("NetworkStats"));
-        assert!(debug.contains("5"));
+        assert!(debug.contains('5'));
         assert!(debug.contains("100"));
         assert!(debug.contains("50"));
     }

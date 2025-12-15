@@ -33,7 +33,7 @@ impl InputBytes {
                     frame: Frame::NULL,
                     bytes: vec![0; size],
                 })
-            }
+            },
             Err(e) => {
                 report_violation!(
                     ViolationSeverity::Critical,
@@ -42,7 +42,7 @@ impl InputBytes {
                     e
                 );
                 None
-            }
+            },
         }
     }
 
@@ -140,7 +140,7 @@ impl InputBytes {
                         e
                     );
                     return player_inputs;
-                }
+                },
             }
         }
         player_inputs

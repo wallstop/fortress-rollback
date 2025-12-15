@@ -10,6 +10,8 @@
 //!
 //! Run with: `cargo run --example configuration`
 
+// Allow print macros - examples use println! to demonstrate library usage to users
+#![allow(clippy::print_stdout, clippy::print_stderr, clippy::disallowed_macros)]
 // Allow needless_update because we explicitly show `..Default::default()` pattern for
 // forward compatibility - even when all fields are specified, this pattern ensures
 // the example code will continue to compile when new fields are added in future versions.
@@ -40,6 +42,7 @@ fn main() {
     competitive_setup();
     casual_online_setup();
     spectator_setup();
+    dynamic_configuration();
 }
 
 /// Basic configuration with sensible defaults
@@ -74,27 +77,46 @@ fn network_presets() {
         .with_num_players(2)
         .with_sync_config(SyncConfig::lan())
         .with_protocol_config(ProtocolConfig::competitive())
-        .with_time_sync_config(TimeSyncConfig::responsive());
+        .with_time_sync_config(TimeSyncConfig::responsive())
+        .with_input_delay(0)
+        .with_max_prediction_window(4);
 
-    println!("LAN preset:");
-    println!("  - Fast sync with fewer roundtrips");
-    println!("  - Competitive timing (faster quality reports)");
-    println!("  - Responsive time sync");
+    println!("LAN preset (< 20ms RTT):");
+    println!("  - 0 input delay (immediate response)");
+    println!("  - 4-frame prediction window (minimal needed)");
+    println!("  - Fast sync with 3 packets, 100ms retry");
+    println!("  - 10-frame time sync window (fast adaptation)");
     println!("  Builder: {:?}\n", lan_builder);
 
-    // High-latency networks (100-200ms RTT)
+    // Regional internet (20-80ms RTT)
+    let regional_builder = SessionBuilder::<GameConfig>::new()
+        .with_num_players(2)
+        .with_sync_config(SyncConfig::default())
+        .with_protocol_config(ProtocolConfig::default())
+        .with_time_sync_config(TimeSyncConfig::default())
+        .with_input_delay(2)
+        .with_max_prediction_window(8);
+
+    println!("Regional preset (20-80ms RTT):");
+    println!("  - 2-frame input delay (reduces rollbacks)");
+    println!("  - 8-frame prediction window (handles jitter)");
+    println!("  - Default sync: 5 packets, 200ms retry");
+    println!("  Builder: {:?}\n", regional_builder);
+
+    // High-latency networks (80-200ms RTT)
     let high_latency_builder = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
         .with_sync_config(SyncConfig::high_latency())
         .with_protocol_config(ProtocolConfig::high_latency())
         .with_time_sync_config(TimeSyncConfig::smooth())
-        // Longer input delay helps with high latency
-        .with_input_delay(4);
+        .with_input_delay(4)
+        .with_max_prediction_window(12);
 
-    println!("High-latency preset:");
-    println!("  - Longer retry intervals to avoid flooding");
-    println!("  - More tolerant warning thresholds");
-    println!("  - Stable time sync (larger averaging window)");
+    println!("High-latency preset (80-200ms RTT):");
+    println!("  - 4-frame input delay (~67ms at 60 FPS)");
+    println!("  - 12-frame prediction window");
+    println!("  - 400ms retry intervals to avoid flooding");
+    println!("  - 60-frame time sync window (stable)");
     println!("  Builder: {:?}\n", high_latency_builder);
 
     // Lossy networks (5-15% packet loss)
@@ -102,13 +124,14 @@ fn network_presets() {
         .with_num_players(2)
         .with_sync_config(SyncConfig::lossy())
         .with_protocol_config(ProtocolConfig::default())
-        // Larger prediction window helps with packet loss
-        .with_max_prediction_window(12);
+        .with_time_sync_config(TimeSyncConfig::smooth())
+        .with_input_delay(3)
+        .with_max_prediction_window(15);
 
-    println!("Lossy network preset:");
-    println!("  - More sync packets for reliable handshake");
-    println!("  - Sync timeout to detect failures");
-    println!("  - Larger prediction window");
+    println!("Lossy network preset (5-15% packet loss):");
+    println!("  - 8 sync packets for reliable handshake");
+    println!("  - 15-frame prediction window");
+    println!("  - 3-frame input delay");
     println!("  Builder: {:?}\n", lossy_builder);
 }
 
@@ -174,28 +197,29 @@ fn competitive_setup() {
 
     let builder = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
-        // Minimal input delay for fastest response
-        .with_input_delay(0)
+        // Minimal input delay for fastest response (accept more rollbacks)
+        .with_input_delay(1)
         // Enable desync detection to catch cheating
-        .with_desync_detection_mode(DesyncDetection::On { interval: 60 })
+        .with_desync_detection_mode(DesyncDetection::On { interval: 30 })
         // Use competitive presets
         .with_sync_config(SyncConfig::lan())
         .with_protocol_config(ProtocolConfig::competitive())
         .with_time_sync_config(TimeSyncConfig::responsive())
         // Moderate prediction window
         .with_max_prediction_window(6)
-        // Fast disconnect detection
+        // Fast disconnect detection (forfeit on disconnect)
         .with_disconnect_timeout(Duration::from_millis(1500))
         .with_disconnect_notify_delay(Duration::from_millis(300))
         // High framerate for smooth gameplay
         .with_fps(120)
         .expect("FPS must be > 0");
 
-    println!("Competitive setup:");
-    println!("  - Zero input delay for fastest response");
-    println!("  - Frequent desync detection (every 60 frames)");
+    println!("Competitive setup (requires < 100ms RTT):");
+    println!("  - 1-frame input delay for fastest response");
+    println!("  - Frequent desync detection (every 30 frames)");
     println!("  - Fast disconnect detection (1.5s timeout)");
     println!("  - 120 FPS target");
+    println!("  - Recommended: Enforce RTT < 100ms in matchmaking");
     println!("  Builder: {:?}\n", builder);
 }
 
@@ -285,4 +309,77 @@ fn spectator_setup() {
     println!("  - 3x catch-up speed when behind");
     println!("  - Tolerates up to 30 frames behind");
     println!("  Builder: {:?}\n", builder);
+}
+
+/// Dynamically choose configuration based on measured network conditions
+fn dynamic_configuration() {
+    println!("--- Dynamic Configuration Based on Network Conditions ---");
+
+    // Example: Choose configuration based on RTT and packet loss
+    let example_rtt_ms = 85;
+    let example_packet_loss = 3.0;
+
+    let (input_delay, sync_config, prediction_window) =
+        choose_config_for_network(example_rtt_ms, example_packet_loss);
+
+    let builder = SessionBuilder::<GameConfig>::new()
+        .with_num_players(2)
+        .with_input_delay(input_delay)
+        .with_sync_config(sync_config)
+        .with_max_prediction_window(prediction_window);
+
+    println!(
+        "For RTT={}ms, packet_loss={:.1}%:",
+        example_rtt_ms, example_packet_loss
+    );
+    println!("  - Input delay: {} frames", input_delay);
+    println!("  - Prediction window: {} frames", prediction_window);
+    println!("  Builder: {:?}\n", builder);
+
+    // Show decision table
+    println!("Decision table for input delay:");
+    println!("  RTT 0-20ms   → 0 frames (immediate)");
+    println!("  RTT 21-60ms  → 1 frame (~17ms at 60 FPS)");
+    println!("  RTT 61-100ms → 2 frames (~33ms)");
+    println!("  RTT 101-150ms→ 3 frames (~50ms)");
+    println!("  RTT 150ms+   → 4 frames (~67ms)\n");
+
+    println!("Decision table for sync config:");
+    println!("  Packet loss > 5%  → SyncConfig::lossy()");
+    println!("  RTT > 100ms       → SyncConfig::high_latency()");
+    println!("  RTT < 20ms        → SyncConfig::lan()");
+    println!("  Otherwise         → SyncConfig::default()\n");
+}
+
+/// Helper function to choose configuration based on network conditions
+fn choose_config_for_network(rtt_ms: u32, packet_loss_percent: f32) -> (usize, SyncConfig, usize) {
+    // Choose input delay based on RTT
+    let input_delay = match rtt_ms {
+        0..=20 => 0,
+        21..=60 => 1,
+        61..=100 => 2,
+        101..=150 => 3,
+        _ => 4,
+    };
+
+    // Choose sync config based on conditions
+    let sync_config = if packet_loss_percent > 5.0 {
+        SyncConfig::lossy()
+    } else if rtt_ms > 100 {
+        SyncConfig::high_latency()
+    } else if rtt_ms < 20 {
+        SyncConfig::lan()
+    } else {
+        SyncConfig::default()
+    };
+
+    // Choose prediction window based on RTT
+    let prediction_window = match rtt_ms {
+        0..=50 => 6,
+        51..=100 => 8,
+        101..=150 => 10,
+        _ => 12,
+    };
+
+    (input_delay, sync_config, prediction_window)
 }

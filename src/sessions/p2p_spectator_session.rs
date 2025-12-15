@@ -274,7 +274,7 @@ impl<T: Config> SpectatorSession<T> {
                     total_requests_sent,
                     elapsed_ms,
                 });
-            }
+            },
             // forward to user
             Event::NetworkInterrupted { disconnect_timeout } => {
                 self.event_queue
@@ -282,28 +282,28 @@ impl<T: Config> SpectatorSession<T> {
                         addr,
                         disconnect_timeout,
                     });
-            }
+            },
             // forward to user
             Event::NetworkResumed => {
                 self.event_queue
                     .push_back(FortressEvent::NetworkResumed { addr });
-            }
+            },
             // synced with the host, then forward to user
             Event::Synchronized => {
                 self.state = SessionState::Running;
                 self.event_queue
                     .push_back(FortressEvent::Synchronized { addr });
-            }
+            },
             // disconnect the player, then forward to user
             Event::Disconnected => {
                 self.event_queue
                     .push_back(FortressEvent::Disconnected { addr });
-            }
+            },
             // forward sync timeout to user
             Event::SyncTimeout { elapsed_ms } => {
                 self.event_queue
                     .push_back(FortressEvent::SyncTimeout { addr, elapsed_ms });
-            }
+            },
             // add the input and all associated information
             Event::Input { input, player } => {
                 // Validate frame before using as index - negative frames would wrap around
@@ -357,7 +357,7 @@ impl<T: Config> SpectatorSession<T> {
                     self.host_connect_status[i] =
                         self.host.peer_connect_status(PlayerHandle::new(i));
                 }
-            }
+            },
         }
 
         // check event queue size and discard oldest events if too big

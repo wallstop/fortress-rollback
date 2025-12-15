@@ -5,12 +5,14 @@ This devcontainer provides a complete environment for developing, testing, and f
 ## Included Tools
 
 ### Formal Verification
+
 - **TLA+ Model Checker (TLC)** - For model checking concurrent protocols
 - **Kani** - Bounded model checker for Rust
 - **Miri** - Undefined behavior detection for Rust
 - **Z3** - SMT solver (via Python bindings)
 
 ### Testing
+
 - **cargo-nextest** - Fast parallel test runner
 - **cargo-tarpaulin** - Code coverage
 - **cargo-llvm-cov** - LLVM-instrumented coverage
@@ -20,16 +22,19 @@ This devcontainer provides a complete environment for developing, testing, and f
 - **loom** - Concurrency testing (via Cargo.toml)
 
 ### Security & Quality
+
 - **cargo-audit** - Vulnerability scanning
 - **cargo-deny** - License/dependency checking
 - **clippy** - Rust linter
 - **rustfmt** - Code formatter
 
 ### Profiling
+
 - **flamegraph** - Flame graph generation
 - **valgrind** - Memory debugging
 
 ### Network Testing
+
 - **iproute2/tc** - Traffic control for network simulation
 - **netcat** - Network diagnostics
 - **tcpdump** - Packet capture
@@ -45,16 +50,19 @@ After the container starts, verify all tools:
 ## Running Verification
 
 ### All Verifiers
+
 ```bash
 ./scripts/verify-all.sh
 ```
 
 ### TLA+ Only
+
 ```bash
 ./scripts/verify-tla.sh
 ```
 
 ### Kani Only
+
 ```bash
 ./scripts/verify-kani.sh
 # Or directly:
@@ -62,11 +70,13 @@ cargo kani
 ```
 
 ### Miri
+
 ```bash
 cargo +nightly miri test
 ```
 
 ### Tests with Coverage
+
 ```bash
 cargo tarpaulin --out Html
 # or
@@ -107,20 +117,26 @@ pip3 install z3-solver
 ## Troubleshooting
 
 ### Kani Setup Fails
+
 Kani requires downloading CBMC. Run:
+
 ```bash
 cargo kani setup
 ```
 
 ### Miri Not Found
+
 Ensure nightly is installed:
+
 ```bash
 rustup install nightly
 rustup +nightly component add miri
 ```
 
 ### TLA+ Tools Missing
+
 Download manually:
+
 ```bash
 mkdir -p .tla-tools
 curl -L https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o .tla-tools/tla2tools.jar

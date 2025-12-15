@@ -84,7 +84,7 @@ fn test_advance_frames_with_delayed_input() -> Result<(), FortressError> {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "MismatchedChecksum")]
 fn test_advance_frames_with_random_checksums() {
     let mut stub = RandomChecksumGameStub::new();
     let mut sess = SessionBuilder::new()

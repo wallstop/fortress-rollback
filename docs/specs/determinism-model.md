@@ -42,6 +42,7 @@ In the context of rollback networking, **determinism** means:
 ### Why Determinism Matters
 
 Rollback networking relies on the ability to:
+
 1. **Predict** the future by simulating with estimated inputs
 2. **Rollback** to a previous state when predictions are wrong
 3. **Resimulate** with corrected inputs
@@ -57,11 +58,13 @@ If resimulation produces different results than the original simulation, the gam
 **Requirement:** All collection iteration must be deterministic.
 
 **Implementation:**
+
 - ✅ `BTreeMap` used throughout (deterministic iteration by key order)
 - ✅ Zero `HashMap` usage in library code
 - ✅ `Config::Address` requires `Ord` trait for BTreeMap keys
 
 **Affected Code:**
+
 ```rust
 // All maps use BTreeMap
 local_inputs: BTreeMap<PlayerHandle, PlayerInput>
@@ -75,11 +78,13 @@ pending_checksums: BTreeMap<Frame, u128>
 **Requirement:** Game state must not depend on wall-clock time.
 
 **Implementation:**
+
 - ✅ Frame counter is the only "time" in game state
 - ✅ `Instant` used only for network timeouts (not game logic)
 - ✅ No `SystemTime` in game-critical paths
 
 **User Responsibility:**
+
 ```rust
 // WRONG - Non-deterministic!
 fn update(state: &mut GameState) {
@@ -97,10 +102,12 @@ fn update(state: &mut GameState) {
 **Requirement:** No unseeded random numbers in game logic.
 
 **Implementation:**
+
 - ✅ Library uses `rand::random()` only for sync handshake (not game state)
 - ✅ No RNG affects input processing or state management
 
 **User Responsibility:**
+
 ```rust
 // WRONG - Non-deterministic!
 fn spawn_enemy(state: &mut GameState) {
@@ -120,11 +127,13 @@ fn spawn_enemy(state: &mut GameState, rng: &mut SeededRng) {
 **Requirement:** Serialized data must be identical across platforms.
 
 **Implementation:**
+
 - ✅ `bincode` with default configuration (little-endian, fixed-size integers)
 - ✅ Input types require `Serialize + Deserialize`
 - ✅ No platform-specific serialization
 
 **Constraints on Input Types:**
+
 ```rust
 // Must implement these traits
 pub trait Config: 'static {
@@ -139,6 +148,7 @@ pub trait Config: 'static {
 **Requirement:** All state must be explicitly initialized.
 
 **Implementation:**
+
 - ✅ `#![forbid(unsafe_code)]` prevents uninitialized memory access
 - ✅ All arrays initialized with default values
 - ✅ Input queues initialized with `BLANK_INPUT`
@@ -148,12 +158,14 @@ pub trait Config: 'static {
 **Requirement:** Integer operations must produce consistent results.
 
 **Implementation:**
+
 - ✅ Rust's defined overflow behavior (panic in debug, wrap in release)
 - ✅ No reliance on overflow behavior in library code
 - ✅ Frame arithmetic uses checked operations where needed
 
 **User Responsibility:**
-```rust
+
+```rust,ignore
 // Be explicit about overflow handling
 let new_value = old_value.wrapping_add(delta); // Explicit wrapping
 let new_value = old_value.saturating_add(delta); // Saturating
@@ -186,12 +198,14 @@ rollback_to(F) + resimulate(corrected_inputs)
 ### G3: State Cell Determinism
 
 `GameStateCell` operations are deterministic:
+
 - `save(F, state, checksum)` stores exactly what is provided
 - `load()` returns exactly what was saved
 
 ### G4: No Hidden State
 
 The library maintains no hidden state that affects game simulation. All relevant state is:
+
 - Visible in the session struct
 - Saved/restored via `SaveGameState`/`LoadGameState`
 
@@ -228,7 +242,8 @@ fn advance_game(state: &mut GameState, inputs: &[(Input, InputStatus)]) {
 ### R2: Complete State Serialization
 
 When saving state, ALL mutable game data must be included:
-```rust
+
+```rust,ignore
 fn save_state(cell: GameStateCell<State>, frame: Frame, state: &GameState) {
     // Must save EVERYTHING that affects future frames
     cell.save(frame, Some(state.clone()), Some(compute_checksum(state)));
@@ -238,7 +253,8 @@ fn save_state(cell: GameStateCell<State>, frame: Frame, state: &GameState) {
 ### R3: Deterministic Checksum
 
 Checksums must be computed deterministically:
-```rust
+
+```rust,ignore
 fn compute_checksum(state: &GameState) -> u128 {
     // Use a deterministic serialization
     let bytes = bincode::serialize(state).expect("serialize");
@@ -249,7 +265,7 @@ fn compute_checksum(state: &GameState) -> u128 {
 
 ### R4: Avoid Platform-Specific Behavior
 
-```rust
+```rust,ignore
 // AVOID: Platform-specific floating point
 let result = (x as f64).sin(); // May vary slightly
 
@@ -263,7 +279,7 @@ let result = fixed_sin(x);
 
 ### Pitfall 1: HashMap Iteration
 
-```rust
+```rust,ignore
 // WRONG - HashMap iteration order is random
 for (key, value) in hash_map.iter() {
     process(key, value); // Order affects result
@@ -277,7 +293,7 @@ for (key, value) in btree_map.iter() {
 
 ### Pitfall 2: Floating Point Inconsistency
 
-```rust
+```rust,ignore
 // PROBLEMATIC - May vary across platforms
 let x = 0.1 + 0.2; // Floating point representation
 
@@ -287,7 +303,7 @@ let x = (a * 1000 + b * 1000) / 1000; // Integer math
 
 ### Pitfall 3: Thread-Local State
 
-```rust
+```rust,ignore
 // WRONG - Thread-local state not synchronized
 thread_local! {
     static COUNTER: Cell<u32> = Cell::new(0);
@@ -301,7 +317,7 @@ struct GameState {
 
 ### Pitfall 4: System Calls
 
-```rust
+```rust,ignore
 // WRONG - Depends on file system state
 let config = std::fs::read_to_string("config.txt")?;
 
@@ -313,7 +329,7 @@ struct GameState {
 
 ### Pitfall 5: Pointer Addresses
 
-```rust
+```rust,ignore
 // WRONG - Pointer addresses vary between runs
 let id = &object as *const _ as usize;
 
@@ -325,7 +341,7 @@ struct Object {
 
 ### Pitfall 6: Allocation Order
 
-```rust
+```rust,ignore
 // PROBLEMATIC - Vec reallocation can affect addresses
 let mut objects: Vec<Object> = vec![];
 for _ in 0..100 {
@@ -344,7 +360,7 @@ let mut objects: Vec<Object> = Vec::with_capacity(100);
 
 Use `SyncTestSession` to detect non-determinism locally:
 
-```rust
+```rust,ignore
 let mut session = SessionBuilder::<Config>::new()
     .with_num_players(1)
     .with_check_distance(4) // Compare last 4 frames
@@ -359,14 +375,15 @@ let mut session = SessionBuilder::<Config>::new()
 
 Enable desync detection in P2P sessions:
 
-```rust
+```rust,ignore
 let session = SessionBuilder::<Config>::new()
     .with_desync_detection_mode(DesyncDetection::On { interval: 100 })
     // ...
 ```
 
 Monitor for `FortressEvent::DesyncDetected`:
-```rust
+
+```rust,ignore
 for event in session.events() {
     if let FortressEvent::DesyncDetected { frame, local, remote, .. } = event {
         panic!("Desync at frame {}: local={}, remote={}", frame, local, remote);
@@ -378,7 +395,7 @@ for event in session.events() {
 
 Record inputs and replay on different machines:
 
-```rust
+```rust,ignore
 // Record
 let recorded_inputs: Vec<(Frame, Vec<Input>)> = record_session();
 
@@ -393,7 +410,7 @@ assert_eq!(machine_a_state, machine_b_state);
 
 Use proptest to generate random input sequences:
 
-```rust
+```rust,ignore
 proptest! {
     #[test]
     fn determinism_holds(inputs in any_input_sequence()) {
@@ -448,14 +465,16 @@ cargo run --example replay -- verify session.inputs checksums.txt
 
 ## Summary
 
-### Library Provides:
+### Library Provides
+
 - ✅ Deterministic collection iteration (BTreeMap)
 - ✅ No system time in game logic
 - ✅ No RNG in game logic
 - ✅ Stable serialization (bincode)
 - ✅ No uninitialized memory (safe Rust)
 
-### User Must Ensure:
+### User Must Ensure
+
 - ✅ Deterministic game state updates
 - ✅ Complete state serialization
 - ✅ Deterministic checksum computation
@@ -464,7 +483,8 @@ cargo run --example replay -- verify session.inputs checksums.txt
 - ✅ No unseeded RNG
 - ✅ No system time dependencies
 
-### Verification:
+### Verification
+
 - Use `SyncTestSession` for local testing
 - Enable `DesyncDetection::On` for networked testing
 - Implement replay testing for cross-platform verification

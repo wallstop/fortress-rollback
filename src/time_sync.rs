@@ -79,6 +79,29 @@ impl TimeSyncConfig {
     pub fn lan() -> Self {
         Self { window_size: 10 }
     }
+
+    /// Configuration preset for mobile/cellular networks.
+    ///
+    /// Uses a very large window to smooth out the high jitter and
+    /// variability typical of mobile connections. This prevents
+    /// constant speed adjustments that would feel jarring to players.
+    ///
+    /// Trade-off: Slower adaptation to actual network condition changes,
+    /// but much smoother gameplay during normal mobile network variance.
+    #[must_use]
+    pub fn mobile() -> Self {
+        Self { window_size: 90 }
+    }
+
+    /// Configuration preset for competitive/esports scenarios.
+    ///
+    /// Uses a smaller window for faster adaptation to network changes,
+    /// prioritizing accurate sync over smooth speed transitions.
+    /// Assumes good, stable network conditions.
+    #[must_use]
+    pub fn competitive() -> Self {
+        Self { window_size: 20 }
+    }
 }
 
 /// Handles time synchronization between peers.

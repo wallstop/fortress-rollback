@@ -36,28 +36,33 @@ This directory contains TLA+ specifications for formally verifying the correctne
 ### NetworkProtocol.tla
 
 **Safety:**
+
 - Valid state transitions only (Initializing → Synchronizing → Running → etc.)
 - Sync remaining counter never negative
 - Only Running state processes game inputs
 
 **Liveness:**
+
 - Eventually synchronized (under fair scheduling)
 - No deadlock
 
 ### InputQueue.tla
 
 **Safety (from formal-spec.md):**
+
 - INV-4: Queue length bounded by `QUEUE_LENGTH` (128)
 - INV-5: Head and tail indices always valid
 - FIFO ordering preserved
 - No frame gaps in queue
 
 **Liveness:**
+
 - Predictions eventually confirmed (with rollback)
 
 ### Rollback.tla
 
 **Safety (from formal-spec.md):**
+
 - INV-1: Frame monotonicity (except during rollback)
 - INV-2: Rollback target is valid frame
 - INV-7: Confirmed frame in valid range
@@ -65,11 +70,13 @@ This directory contains TLA+ specifications for formally verifying the correctne
 - SAFE-4: Rollback restores correct state (state exists for rollback target)
 
 **Liveness (disabled for CI due to state space):**
+
 - LIVE-4: Rollback completes
 
 ### Concurrency.tla
 
 **Safety:**
+
 - Mutual exclusion: At most one thread holds lock at a time
 - No data races: Only lock holder can modify cell state
 - Frame consistency: After save, cell frame matches saved frame
@@ -78,11 +85,13 @@ This directory contains TLA+ specifications for formally verifying the correctne
 - Wait queue FIFO: Threads acquire lock in request order
 
 **Liveness:**
+
 - No deadlock: Some action always enabled
 - Operations complete: Every started operation eventually completes
 - Fair lock acquisition: Waiting threads eventually get the lock
 
 **Linearizability:**
+
 - Operations appear atomic (guaranteed by mutex)
 
 ## Running the Specifications
@@ -110,7 +119,7 @@ The script automatically downloads TLC tools if needed.
 ### Prerequisites for Manual Verification
 
 1. Install TLA+ Toolbox or TLC command-line tools
-2. Download from: https://lamport.azurewebsites.net/tla/tools.html
+2. Download from: <https://lamport.azurewebsites.net/tla/tools.html>
 
 ### Using TLA+ Toolbox
 
@@ -140,6 +149,7 @@ so we use `NULL_FRAME = 999` as a sentinel value instead of -1.
 For TLA+ Toolbox or custom model checking:
 
 #### NetworkProtocol.tla
+
 ```
 CONSTANTS
     NUM_SYNC_PACKETS = 3    \* Reduced from 5 for faster checking
@@ -154,6 +164,7 @@ PROPERTY
 ```
 
 #### InputQueue.tla
+
 ```
 CONSTANTS
     QUEUE_LENGTH = 8        \* Reduced from 128 for faster checking
@@ -165,6 +176,7 @@ INVARIANT
 ```
 
 #### Rollback.tla
+
 ```
 CONSTANTS
     MAX_PREDICTION = 4      \* Reduced from 8 for faster checking
@@ -180,6 +192,7 @@ PROPERTY
 ```
 
 #### Concurrency.tla
+
 ```
 CONSTANTS
     THREADS = {t1, t2}      \* Two threads for basic checking
