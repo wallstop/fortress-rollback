@@ -260,21 +260,30 @@ run_kani() {
     output_file=$(mktemp)
     
     local exit_code=0
+    # Disable colors in Kani output to ensure reliable parsing
+    export NO_COLOR=1
+    export TERM=dumb
     if [[ "$verbose" == "true" ]]; then
         "${kani_cmd[@]}" 2>&1 | tee "$output_file" || exit_code=$?
     else
         "${kani_cmd[@]}" > "$output_file" 2>&1 || exit_code=$?
     fi
-    
+
     local end_time
     end_time=$(date +%s)
     local duration=$((end_time - start_time))
-    
+
+    # Strip ANSI color codes from output before parsing
+    # This is necessary because Kani may output colored text
+    local clean_output
+    clean_output=$(mktemp)
+    sed 's/\x1b\[[0-9;]*m//g' "$output_file" > "$clean_output" 2>/dev/null || cp "$output_file" "$clean_output"
+
     # Parse results - look for summary line which has the format:
     # Complete - N successfully verified harnesses, M failures, T total.
     local summary_line
-    summary_line=$(grep "Complete - " "$output_file" 2>/dev/null | tail -1 || echo "")
-    
+    summary_line=$(grep "Complete - " "$clean_output" 2>/dev/null | tail -1 || echo "")
+
     if [[ -n "$summary_line" ]]; then
         # Extract numbers using sed for better portability (grep -P not available everywhere)
         # Use tr -d to strip any whitespace/newlines from extracted values
@@ -290,8 +299,9 @@ run_kani() {
         # Note: grep -c returns exit code 1 when no matches (but still outputs "0")
         # Using || VARNAME=0 pattern to handle this correctly
         # Use tr -d to strip any whitespace/newlines from grep output
-        PASSED=$(grep -c "VERIFICATION:- SUCCESSFUL" "$output_file" 2>/dev/null | tr -d '[:space:]') || PASSED=0
-        FAILED=$(grep -c "VERIFICATION:- FAILED" "$output_file" 2>/dev/null | tr -d '[:space:]') || FAILED=0
+        # Try multiple patterns to handle different Kani output formats
+        PASSED=$(grep -c -E "VERIFICATION:- SUCCESSFUL|Verification succeeded" "$clean_output" 2>/dev/null | tr -d '[:space:]') || PASSED=0
+        FAILED=$(grep -c -E "VERIFICATION:- FAILED|Verification failed|VERIFICATION RESULT.*FAILURE" "$clean_output" 2>/dev/null | tr -d '[:space:]') || FAILED=0
         # Ensure values are clean integers before arithmetic
         PASSED=${PASSED%%[^0-9]*}
         FAILED=${FAILED%%[^0-9]*}
@@ -299,7 +309,47 @@ run_kani() {
         FAILED=${FAILED:-0}
         TOTAL=$((PASSED + FAILED))
     fi
-    
+
+    # If we got no results, something went wrong - diagnose the issue
+    if [[ $TOTAL -eq 0 ]]; then
+        if [[ $exit_code -ne 0 ]]; then
+            # Kani failed with an error - show what went wrong
+            echo -e "${RED}Kani exited with error code $exit_code${NC}"
+            echo ""
+            # Check for common errors
+            if grep -q -i "error\[E" "$clean_output" 2>/dev/null; then
+                echo "Compilation errors detected:"
+                grep -E "error\[E[0-9]+\]" "$clean_output" | head -5
+            elif grep -q "no harnesses\|No proof harness\|no proof harness" "$clean_output" 2>/dev/null; then
+                echo -e "${RED}Error: Harness not found by Kani${NC}"
+            elif grep -q "unsupported\|not supported" "$clean_output" 2>/dev/null; then
+                echo "Unsupported feature detected:"
+                grep -i "unsupported\|not supported" "$clean_output" | head -3
+            fi
+            if [[ "$verbose" != "true" ]]; then
+                echo ""
+                echo "Last 30 lines of Kani output:"
+                tail -30 "$clean_output"
+                echo ""
+                echo "Run with --verbose for full output"
+            fi
+        elif grep -q "Checking harness" "$clean_output" 2>/dev/null; then
+            # Harness was found but no verification result detected - parsing issue
+            echo -e "${YELLOW}Warning: Could not parse Kani output. Check output format.${NC}"
+            if [[ "$verbose" != "true" ]]; then
+                echo "Last 20 lines of Kani output:"
+                tail -20 "$clean_output"
+            fi
+        else
+            # No "Checking harness" found and exit code is 0 - very strange
+            echo -e "${YELLOW}Warning: Kani completed but no harness was processed${NC}"
+            if [[ "$verbose" != "true" ]]; then
+                echo "Last 20 lines of Kani output:"
+                tail -20 "$clean_output"
+            fi
+        fi
+    fi
+
     # Show summary
     echo ""
     echo "=========================================="
@@ -310,19 +360,20 @@ run_kani() {
     echo -e "  ${RED}Failed: $FAILED${NC}"
     echo "  Total:  $TOTAL"
     echo "=========================================="
-    
+
     if [[ $FAILED -gt 0 ]]; then
         echo ""
         echo -e "${RED}Failed proofs:${NC}"
-        grep -B 5 "VERIFICATION:- FAILED" "$output_file" | grep "Checking harness" || true
-        
+        # Try both old and new Kani output formats
+        grep -E -B 5 "VERIFICATION:- FAILED|Verification failed" "$clean_output" | grep -E "Checking harness|harness" || true
+
         if [[ "$verbose" != "true" ]]; then
             echo ""
             echo "Run with --verbose for detailed output"
         fi
     fi
-    
-    rm -f "$output_file"
+
+    rm -f "$output_file" "$clean_output"
     
     if [[ $exit_code -ne 0 ]] || [[ $FAILED -gt 0 ]]; then
         return 1

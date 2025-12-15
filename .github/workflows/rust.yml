@@ -76,17 +76,34 @@ jobs:
 
   build:
     runs-on: windows-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
+
       - name: Update rust
         run: rustup update stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: build-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            build-${{ runner.os }}-cargo-
+
       - name: Build
         run: cargo build --verbose
+
       - name: Run tests
         run: cargo test --verbose
+
       - name: Build docs
         run: cargo doc --verbose
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -189,7 +206,6 @@ jobs:
   # Z3 SMT Solver Verification
   z3-verification:
     runs-on: ubuntu-latest
-    needs: build
 
     steps:
       - uses: actions/checkout@v4
@@ -199,23 +215,23 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Install Z3 build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake libclang-dev
-
-      - name: Cache Z3 build
+      - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target/debug/.fingerprint/*z3*
-            target/debug/build/*z3*
-            target/debug/deps/*z3*
-          key: z3-bundled-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+            target
+          key: z3-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            z3-${{ runner.os }}-cargo-
+
+      - name: Install Z3 library
+        run: sudo apt-get update && sudo apt-get install -y libz3-dev
 
       - name: Run Z3 verification tests
         run: cargo test --test verification --features z3-verification -- z3 --verbose
-        timeout-minutes: 15
+        timeout-minutes: 10
 
   # Kani Formal Verification (Tier 1 - Fast proofs)
   kani-verification-tier1:
@@ -247,8 +263,8 @@ jobs:
           fi
 
       - name: Run Kani verification (Tier 1 - Fast)
-        run: ./scripts/verify-kani.sh --quick --tier 1
-        timeout-minutes: 5
+        run: ./scripts/verify-kani.sh --quick --tier 1 --verbose
+        timeout-minutes: 10
 
   # Kani Formal Verification (Tier 2 - Medium proofs)
   kani-verification-tier2:
@@ -364,7 +380,7 @@ jobs:
         run: cargo install cargo-hack --locked
 
       - name: Check feature powerset (excluding slow features)
-        run: cargo hack check --feature-powerset --exclude-features z3-verification,graphical-examples
+        run: cargo hack check --feature-powerset --exclude-features z3-verification,z3-verification-bundled,graphical-examples
 
   # Unsafe code audit via cargo-geiger
   unsafe-audit:

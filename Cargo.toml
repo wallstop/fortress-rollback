@@ -126,8 +126,11 @@ paranoid = []
 # Enable loom-compatible synchronization primitives for concurrency testing
 # NOTE: This changes the internal sync primitives from parking_lot to std/loom
 loom = []
-# Enable Z3 formal verification tests (slow to compile - builds Z3 from source)
+# Enable Z3 formal verification tests (requires system Z3: apt install libz3-dev)
 z3-verification = ["dep:z3"]
+# Enable Z3 with bundled build (slow - builds Z3 from source, ~30+ minutes)
+# Use this only if you don't have Z3 installed system-wide
+z3-verification-bundled = ["z3-verification", "z3?/bundled"]
 # Enable graphical examples (ex_game_*) - requires system audio/graphics libraries
 # On Linux: sudo apt-get install libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
 graphical-examples = ["dep:macroquad"]
@@ -139,9 +142,10 @@ bincode = { version = "2.0", features = ["serde"] }
 parking_lot = "0.12"
 web-time = "1.1"
 tracing = "0.1"
-# SMT solver for formal verification (builds Z3 from source - SLOW)
+# SMT solver for formal verification
 # Only compiled when z3-verification feature is enabled
-z3 = { version = "0.19", features = ["bundled"], optional = true }
+# For bundled build (slow), use z3-verification-bundled feature instead
+z3 = { version = "0.19", optional = true }
 # Graphical examples dependency (requires system audio/graphics libraries)
 # On Linux: sudo apt-get install libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
 macroquad = { version = "0.4", optional = true }
