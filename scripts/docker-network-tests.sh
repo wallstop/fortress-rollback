@@ -118,31 +118,46 @@ run_test() {
     if env $env_string docker compose -f "$COMPOSE_FILE" up \
         --abort-on-container-exit \
         --exit-code-from peer1 \
-        --timeout 120 \
+        --timeout 180 \
         > "$log_file" 2>&1; then
 
         local end_time=$(date +%s)
         local duration=$((end_time - start_time))
 
-        # Check for success in output
-        if grep -q '"success": true' "$log_file" && \
-           grep -q '"success": true' "$log_file" | wc -l | grep -q "2"; then
+        # Parse results in a single pass using awk (much faster than multiple greps)
+        # Uses POSIX-compatible awk (no gawk extensions)
+        local result
+        result=$(awk '
+            /"success": true/ { success_count++ }
+            /"checksum":/ { 
+                # Extract checksum value using gsub to strip non-digits
+                gsub(/.*"checksum": */, "")
+                gsub(/[^0-9].*/, "")
+                if ($0 != "") checksums[++checksum_count] = $0
+            }
+            END {
+                printf "%d %s %s", success_count+0, checksums[1], checksums[2]
+            }
+        ' "$log_file")
+
+        local success_count checksum1 checksum2
+        read -r success_count checksum1 checksum2 <<< "$result"
+
+        # Both peers must report success
+        if [ "$success_count" -ge 2 ]; then
             log_success "$test_name passed (${duration}s)"
 
-            # Extract and compare checksums
-            local checksums=$(grep -o '"checksum": [0-9]*' "$log_file" | awk '{print $2}')
-            local checksum1=$(echo "$checksums" | head -1)
-            local checksum2=$(echo "$checksums" | tail -1)
-
-            if [ "$checksum1" = "$checksum2" ]; then
-                log_success "  Checksums match: $checksum1"
-            else
-                log_warning "  Checksums differ: $checksum1 vs $checksum2 (possible desync)"
+            if [ -n "$checksum1" ] && [ -n "$checksum2" ]; then
+                if [ "$checksum1" = "$checksum2" ]; then
+                    log_success "  Checksums match: $checksum1"
+                else
+                    log_warning "  Checksums differ: $checksum1 vs $checksum2 (possible desync)"
+                fi
             fi
 
             TESTS_PASSED=$((TESTS_PASSED + 1))
         else
-            log_error "$test_name failed - check $log_file"
+            log_error "$test_name failed (only $success_count peers succeeded) - check $log_file"
             TESTS_FAILED=$((TESTS_FAILED + 1))
             FAILED_TESTS="$FAILED_TESTS $test_name"
         fi
@@ -157,22 +172,23 @@ run_test() {
 }
 
 # Test scenarios
+# Note: Timeouts are set generously to accommodate slow CI VMs
 test_basic() {
     run_test "basic_connectivity" \
         "TEST_FRAMES=100" \
-        "TEST_TIMEOUT=30"
+        "TEST_TIMEOUT=90"
 }
 
 test_extended() {
     run_test "extended_session" \
         "TEST_FRAMES=500" \
-        "TEST_TIMEOUT=120"
+        "TEST_TIMEOUT=180"
 }
 
 test_latency_50ms() {
     run_test "latency_50ms" \
         "TEST_FRAMES=100" \
-        "TEST_TIMEOUT=60" \
+        "TEST_TIMEOUT=120" \
         "NETEM_DELAY=50ms"
 }
 
@@ -194,7 +210,7 @@ test_latency_with_jitter() {
 test_packet_loss_5() {
     run_test "packet_loss_5_percent" \
         "TEST_FRAMES=100" \
-        "TEST_TIMEOUT=60" \
+        "TEST_TIMEOUT=120" \
         "NETEM_LOSS=5%"
 }
 
@@ -215,7 +231,7 @@ test_packet_loss_20() {
 test_poor_network() {
     run_test "poor_network" \
         "TEST_FRAMES=100" \
-        "TEST_TIMEOUT=120" \
+        "TEST_TIMEOUT=180" \
         "NETEM_DELAY=80ms" \
         "NETEM_JITTER=30ms" \
         "NETEM_LOSS=5%"
@@ -247,7 +263,7 @@ test_extreme_latency() {
 test_packet_duplication() {
     run_test "packet_duplication" \
         "TEST_FRAMES=100" \
-        "TEST_TIMEOUT=60" \
+        "TEST_TIMEOUT=120" \
         "NETEM_DUPLICATE=10%"
 }
 

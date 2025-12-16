@@ -32,6 +32,8 @@ services:
       - PEER1_NETEM_DELAY=${PEER1_NETEM_DELAY:-}
       - PEER1_NETEM_LOSS=${PEER1_NETEM_LOSS:-}
       - DEBUG=${DEBUG:-0}
+      # Small startup delay to ensure peer2 is ready (helps on slow CI VMs)
+      - STARTUP_DELAY_MS=${STARTUP_DELAY_MS:-500}
     command:
       - "--local-port"
       - "9001"
@@ -46,7 +48,8 @@ services:
       - "--input-delay"
       - "${INPUT_DELAY:-2}"
     depends_on:
-      - peer2
+      peer2:
+        condition: service_started
 
   peer2:
     build:

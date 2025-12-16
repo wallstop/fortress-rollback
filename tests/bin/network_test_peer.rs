@@ -563,8 +563,9 @@ fn run_test(args: &Args) -> TestResult {
             // Continue polling for a settle period to ensure rollbacks complete.
             // During settle, we ONLY poll for network messages - we don't advance new frames.
             // This ensures both peers end up at the same final state.
+            // Note: 500ms is generous to handle slow CI VMs where scheduling delays can be significant.
             let settle_start = Instant::now();
-            let settle_duration = Duration::from_millis(200); // 200ms settle
+            let settle_duration = Duration::from_millis(500);
 
             while settle_start.elapsed() < settle_duration {
                 session.poll_remote_clients();

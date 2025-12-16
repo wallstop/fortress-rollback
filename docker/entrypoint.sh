@@ -11,8 +11,17 @@
 #   NETEM_DUPLICATE - Packet duplication percentage (e.g., "1%")
 #   NETEM_REORDER   - Packet reorder percentage (e.g., "25%")
 #   NETEM_CORRUPT   - Packet corruption percentage (e.g., "0.1%")
+#   STARTUP_DELAY_MS - Delay in ms before starting the test peer (for peer synchronization)
 
 set -e
+
+# Apply startup delay if configured (helps ensure both peers are ready)
+if [ -n "$STARTUP_DELAY_MS" ] && [ "$STARTUP_DELAY_MS" -gt 0 ]; then
+    # Convert ms to seconds using awk (available in base image)
+    delay_secs=$(awk "BEGIN {printf \"%.3f\", $STARTUP_DELAY_MS / 1000}")
+    echo "Waiting ${delay_secs}s for peer synchronization..."
+    sleep "$delay_secs"
+fi
 
 # Function to configure tc/netem
 configure_netem() {
