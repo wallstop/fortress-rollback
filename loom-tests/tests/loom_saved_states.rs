@@ -11,8 +11,8 @@
 
 #![cfg(loom)]
 
-use fortress_rollback::{Frame, GameStateCell};
 use fortress_rollback::__internal::SavedStates;
+use fortress_rollback::{Frame, GameStateCell};
 use loom::sync::Arc;
 use loom::thread;
 
@@ -25,7 +25,7 @@ fn test_saved_states_concurrent_cell_access() {
     loom::model(|| {
         // Create SavedStates with max_pred=2 (3 cells total)
         let states: SavedStates<u64> = SavedStates::new(2);
-        
+
         // Get cells for different frames (different slots)
         let cell0 = states.get_cell(Frame::new(0)).unwrap();
         let cell1 = states.get_cell(Frame::new(1)).unwrap();
@@ -66,7 +66,7 @@ fn test_saved_states_concurrent_cell_access() {
 fn test_saved_states_frame_wrapping() {
     loom::model(|| {
         let states: SavedStates<u64> = SavedStates::new(2); // 3 cells
-        
+
         // Frame 0 and Frame 3 map to the same cell (slot 0)
         let cell_frame0 = states.get_cell(Frame::new(0)).unwrap();
         let cell_frame3 = states.get_cell(Frame::new(3)).unwrap();
@@ -98,7 +98,7 @@ fn test_saved_states_frame_wrapping() {
 fn test_saved_states_concurrent_overwrite() {
     loom::model(|| {
         let states: SavedStates<u64> = SavedStates::new(2); // 3 cells
-        
+
         // Both map to slot 0
         let cell_frame0 = states.get_cell(Frame::new(0)).unwrap();
         let cell_frame3 = states.get_cell(Frame::new(3)).unwrap();
@@ -148,9 +148,7 @@ fn test_rollback_save_load_pattern() {
 
         // Concurrent: main thread advances and saves frame 2
         //            rollback thread loads frame 1
-        let rollback = thread::spawn(move || {
-            cell1_for_rollback.load()
-        });
+        let rollback = thread::spawn(move || cell1_for_rollback.load());
 
         let advance = thread::spawn(move || {
             cell2_for_advance.save(Frame::new(2), Some(200), Some(2));

@@ -1694,6 +1694,91 @@ mod tests {
         assert_eq!(standard, InputQueueConfig::default());
     }
 
+    /// Test that standard() explicitly equals INPUT_QUEUE_LENGTH.
+    ///
+    /// This test catches any accidental hardcoding of the queue length value.
+    /// Under Kani, INPUT_QUEUE_LENGTH is 8; in production it's 128.
+    /// The test should pass in both environments.
+    #[test]
+    fn test_standard_preset_uses_input_queue_length_constant() {
+        use crate::input_queue::INPUT_QUEUE_LENGTH;
+
+        let standard = InputQueueConfig::standard();
+        assert_eq!(
+            standard.queue_length, INPUT_QUEUE_LENGTH,
+            "standard() should return INPUT_QUEUE_LENGTH ({}), but got {}. \
+             This may indicate a hardcoded value that doesn't account for \
+             different build configurations (e.g., Kani vs production).",
+            INPUT_QUEUE_LENGTH, standard.queue_length
+        );
+    }
+
+    /// Data-driven test: all presets should pass validation.
+    ///
+    /// Uses a table-driven approach to test all presets consistently.
+    #[test]
+    fn test_all_presets_are_valid_configurations() {
+        let presets: &[(&str, InputQueueConfig)] = &[
+            ("standard", InputQueueConfig::standard()),
+            ("high_latency", InputQueueConfig::high_latency()),
+            ("minimal", InputQueueConfig::minimal()),
+        ];
+
+        for (name, config) in presets {
+            assert!(
+                config.validate().is_ok(),
+                "Preset '{}' with queue_length={} should be valid, but validation failed: {:?}",
+                name,
+                config.queue_length,
+                config.validate()
+            );
+        }
+    }
+
+    /// Data-driven test: all presets should have valid max_frame_delay.
+    #[test]
+    fn test_all_presets_max_frame_delay_is_valid() {
+        let presets: &[(&str, InputQueueConfig)] = &[
+            ("standard", InputQueueConfig::standard()),
+            ("high_latency", InputQueueConfig::high_latency()),
+            ("minimal", InputQueueConfig::minimal()),
+        ];
+
+        for (name, config) in presets {
+            let max_delay = config.max_frame_delay();
+            assert!(
+                config.validate_frame_delay(max_delay).is_ok(),
+                "Preset '{}': max_frame_delay() returned {}, but this is not a valid frame delay \
+                 for queue_length={}",
+                name,
+                max_delay,
+                config.queue_length
+            );
+        }
+    }
+
+    /// Test that hardcoded preset values match their documented values.
+    ///
+    /// Note: This test uses hardcoded values intentionally for high_latency and minimal
+    /// because those presets ARE hardcoded in the implementation. This test documents
+    /// and verifies that contract.
+    #[test]
+    fn test_hardcoded_preset_values() {
+        // high_latency() is hardcoded to 256 (documented: ~4.3 seconds at 60 FPS)
+        assert_eq!(
+            InputQueueConfig::high_latency().queue_length,
+            256,
+            "high_latency() is documented to return queue_length=256"
+        );
+
+        // minimal() is hardcoded to 32 (documented: ~0.5 seconds at 60 FPS)
+        assert_eq!(
+            InputQueueConfig::minimal().queue_length,
+            32,
+            "minimal() is documented to return queue_length=32"
+        );
+    }
+
     #[test]
     fn test_input_queue_config_max_frame_delay() {
         let config = InputQueueConfig { queue_length: 64 };
@@ -1817,7 +1902,7 @@ mod kani_config_proofs {
     /// Verifies that validate_frame_delay returns Ok when frame_delay < queue_length
     /// and Err when frame_delay >= queue_length.
     #[kani::proof]
-    #[kani::unwind(2)]
+    #[kani::unwind(10)]
     fn proof_validate_frame_delay_constraint() {
         let queue_length: usize = kani::any();
         let frame_delay: usize = kani::any();
@@ -1910,22 +1995,30 @@ mod kani_config_proofs {
 
     /// Proof: Presets have correct queue_length values
     ///
-    /// Verifies the documented preset values.
+    /// Verifies that preset implementations return their expected values.
+    /// Note: `standard()` uses `INPUT_QUEUE_LENGTH` which varies between
+    /// Kani (8) and production (128) builds. The other presets use
+    /// hardcoded values that don't change.
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_preset_values() {
+        use crate::input_queue::INPUT_QUEUE_LENGTH;
+
         let standard = InputQueueConfig::standard();
         let high_latency = InputQueueConfig::high_latency();
         let minimal = InputQueueConfig::minimal();
 
+        // standard() uses Self::default() which returns INPUT_QUEUE_LENGTH
         kani::assert(
-            standard.queue_length == 128,
-            "standard() should have queue_length=128",
+            standard.queue_length == INPUT_QUEUE_LENGTH,
+            "standard() should have queue_length=INPUT_QUEUE_LENGTH",
         );
+        // high_latency() returns a hardcoded value
         kani::assert(
             high_latency.queue_length == 256,
             "high_latency() should have queue_length=256",
         );
+        // minimal() returns a hardcoded value
         kani::assert(
             minimal.queue_length == 32,
             "minimal() should have queue_length=32",

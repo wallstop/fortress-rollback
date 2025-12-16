@@ -16,8 +16,8 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use fortress_rollback::__internal::SavedStates;
 use fortress_rollback::Frame;
+use fortress_rollback::__internal::SavedStates;
 use libfuzzer_sys::fuzz_target;
 use serde::{Deserialize, Serialize};
 
@@ -74,7 +74,7 @@ fuzz_target!(|fuzz_input: FuzzInput| {
                 let result = saved_states.get_cell(frame_obj);
                 // Just verify it doesn't panic
                 let _ = result;
-            }
+            },
 
             SavedStatesOp::SaveState { frame, value } => {
                 let frame_val = (*frame as i32).max(0);
@@ -88,7 +88,7 @@ fuzz_target!(|fuzz_input: FuzzInput| {
                     };
                     cell.save(frame_obj, Some(state), Some(*value as u128));
                 }
-            }
+            },
 
             SavedStatesOp::LoadState { frame } => {
                 let frame_val = (*frame as i32).max(0);
@@ -100,8 +100,7 @@ fuzz_target!(|fuzz_input: FuzzInput| {
                     // Just verify load doesn't panic
                     let _ = loaded;
                 }
-            }
+            },
         }
     }
 });
-

@@ -106,7 +106,6 @@ name = "fortress-rollback-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
- "bincode",
  "fortress-rollback",
  "libfuzzer-sys",
  "serde",

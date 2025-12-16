@@ -36,7 +36,7 @@ struct FuzzConfig {
 fuzz_target!(|config: FuzzConfig| {
     // Test InputQueueConfig with arbitrary queue_length
     // Clamp to valid range to avoid expected panics during init-time validation
-    let queue_length = (config.queue_length as usize).max(2).min(1024);
+    let queue_length = (config.queue_length as usize).clamp(2, 1024);
     let queue_config = InputQueueConfig { queue_length };
 
     // Test validation - should return Ok/Err without panicking
@@ -79,8 +79,12 @@ fuzz_target!(|config: FuzzConfig| {
         config.disconnect_timeout_ms as u64,
     ));
 
-    // Test with_sparse_saving_mode
-    builder = builder.with_sparse_saving_mode(config.sparse_saving);
+    // Test with_save_mode
+    if config.sparse_saving {
+        builder = builder.with_save_mode(fortress_rollback::SaveMode::Sparse);
+    } else {
+        builder = builder.with_save_mode(fortress_rollback::SaveMode::EveryFrame);
+    }
 
     // Don't actually start sessions - that requires valid network addresses
     // The point is to ensure configuration doesn't panic

@@ -87,10 +87,10 @@ fn test_save_load_consistency() {
 fn test_multiple_readers_single_writer() {
     loom::model(|| {
         let cell: Arc<GameStateCell<u64>> = Arc::new(GameStateCell::default());
-        
+
         // Pre-save initial value
         cell.save(Frame::new(0), Some(0), Some(0));
-        
+
         let cell1 = cell.clone();
         let cell2 = cell.clone();
         let cell3 = cell.clone();

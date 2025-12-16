@@ -1626,7 +1626,7 @@ mod kani_sync_layer_proofs {
     /// Verifies all invariants hold at initialization.
     /// Note: Bounds are reduced for Kani verification tractability.
     #[kani::proof]
-    #[kani::unwind(4)]
+    #[kani::unwind(12)]
     fn proof_new_sync_layer_valid() {
         let num_players: usize = kani::any();
         let max_prediction: usize = kani::any();
@@ -1673,7 +1673,7 @@ mod kani_sync_layer_proofs {
     ///
     /// Verifies that advance_frame always increases current_frame.
     #[kani::proof]
-    #[kani::unwind(2)]
+    #[kani::unwind(12)]
     fn proof_advance_frame_monotonic() {
         let mut sync_layer = SyncLayer::<TestConfig>::new(2, 3);
 
@@ -1835,7 +1835,7 @@ mod kani_sync_layer_proofs {
 
     /// Proof: Saved states count is correct
     #[kani::proof]
-    #[kani::unwind(5)]
+    #[kani::unwind(12)]
     fn proof_saved_states_count() {
         let max_prediction: usize = kani::any();
         kani::assume(max_prediction > 0 && max_prediction <= 3);
@@ -1851,7 +1851,7 @@ mod kani_sync_layer_proofs {
 
     /// Proof: SavedStates get_cell validates frame
     #[kani::proof]
-    #[kani::unwind(2)]
+    #[kani::unwind(10)]
     fn proof_get_cell_validates_frame() {
         let saved_states: SavedStates<u8> = SavedStates::new(3);
 
@@ -1868,12 +1868,13 @@ mod kani_sync_layer_proofs {
 
     /// Proof: SavedStates uses circular indexing correctly
     #[kani::proof]
-    #[kani::unwind(2)]
+    #[kani::unwind(10)]
     fn proof_saved_states_circular_index() {
         let max_prediction: usize = kani::any();
         kani::assume(max_prediction > 0 && max_prediction <= 3);
 
-        let saved_states: SavedStates<u8> = SavedStates::new(max_prediction);
+        // Create SavedStates to verify num_cells calculation matches
+        let _saved_states: SavedStates<u8> = SavedStates::new(max_prediction);
         let num_cells = max_prediction + 1;
 
         let frame: i32 = kani::any();

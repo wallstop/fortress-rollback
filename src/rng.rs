@@ -432,7 +432,7 @@ fn timing_entropy_seed() -> u64 {
 
     // Use the instant's internal representation for entropy
     let now = Instant::now();
-    let ptr = &now as *const _ as usize;
+    let ptr = std::ptr::from_ref(&now) as usize;
 
     // Mix in thread ID for additional entropy across threads
     let thread_id = std::thread::current().id();

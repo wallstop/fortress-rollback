@@ -1348,8 +1348,7 @@ mod kani_proofs {
 
         let (value, consumed) = varint::decode(&buf, 0);
 
-        // Consumed must be in valid range
-        kani::assert(consumed >= 0, "consumed must be non-negative");
+        // Consumed must be in valid range (consumed is usize, always non-negative)
         kani::assert(
             consumed <= buf.len(),
             "consumed must not exceed buffer length",

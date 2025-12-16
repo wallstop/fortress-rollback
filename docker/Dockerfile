@@ -9,8 +9,11 @@
 # Run manually:
 #   docker run --rm --cap-add NET_ADMIN fortress-test-peer \
 #     --local-port 9001 --player-index 0 --peer 172.20.0.3:9001 --frames 100
+#
+# NOTE: The Rust version must be >= 1.85 due to bincode 2.0.1 dependency.
+# Update this when dependencies change their MSRV requirements.
 
-FROM rust:1.83-slim-bookworm AS builder
+FROM rust:1.85-slim-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \

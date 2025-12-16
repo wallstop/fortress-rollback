@@ -1830,7 +1830,7 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies INV-4 (length = 0) and INV-5 (head = tail = 0) at initialization.
     #[kani::proof]
-    #[kani::unwind(2)]
+    #[kani::unwind(10)]
     fn proof_new_queue_valid() {
         let queue = test_queue(0);
 
@@ -2175,7 +2175,9 @@ mod kani_input_queue_proofs {
         let request_frame: i32 = kani::any();
         kani::assume(request_frame >= 0 && request_frame < count as i32);
 
-        let result = queue.confirmed_input(Frame::new(request_frame));
+        // Call confirmed_input to trigger internal index calculations
+        // The result itself isn't checked - we're verifying the math below
+        let _result = queue.confirmed_input(Frame::new(request_frame));
 
         // Index calculation should be valid
         let offset = request_frame as usize % INPUT_QUEUE_LENGTH;

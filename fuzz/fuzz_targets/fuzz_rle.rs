@@ -86,13 +86,13 @@ fuzz_target!(|input: RleInput| {
                     data.len(), encoded.len(), decoded.len()
                 );
             }
-        }
+        },
 
         TestMode::DecodeArbitrary { bytes } => {
             // Decoding arbitrary bytes should not panic
             // Result may be Ok or Err, but should never crash
             let _result = decode(&bytes);
-        }
+        },
 
         TestMode::StressPattern { pattern } => {
             let data = generate_stress_pattern(pattern);
@@ -107,7 +107,7 @@ fuzz_target!(|input: RleInput| {
                     data.len()
                 );
             }
-        }
+        },
     }
 });
 
@@ -116,14 +116,14 @@ fn generate_stress_pattern(pattern: StressPattern) -> Vec<u8> {
     match pattern {
         StressPattern::CompressibleRun { len, byte } => {
             vec![byte.value(); len as usize]
-        }
+        },
 
         StressPattern::Alternating { len } => {
             // Worst case: alternating 0x00 and non-compressible byte
             (0..len)
                 .map(|i| if i % 2 == 0 { 0x00 } else { 0x42 })
                 .collect()
-        }
+        },
 
         StressPattern::Mixed {
             zero_run,
@@ -131,13 +131,12 @@ fn generate_stress_pattern(pattern: StressPattern) -> Vec<u8> {
             one_run,
             trailing,
         } => {
-            let mut data = Vec::new();
-            data.extend(std::iter::repeat(0x00).take(zero_run as usize));
+            let mut data = vec![0x00; zero_run as usize];
             data.extend(&random);
-            data.extend(std::iter::repeat(0xFF).take(one_run as usize));
+            data.extend(std::iter::repeat_n(0xFF, one_run as usize));
             data.extend(&trailing);
             data
-        }
+        },
 
         StressPattern::SparseGameState {
             positions,
@@ -152,6 +151,6 @@ fn generate_stress_pattern(pattern: StressPattern) -> Vec<u8> {
                 data[idx] = (pos % 255).max(1) as u8;
             }
             data
-        }
+        },
     }
 }

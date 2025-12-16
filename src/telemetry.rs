@@ -1753,6 +1753,9 @@ mod tests {
         assert_invariants!(checker, "with context");
     }
 
+    // Note: These tests are gated to debug_assertions because assert_invariants!
+    // is a no-op in release mode for performance reasons.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "Invariant violation")]
     fn test_assert_invariants_macro_fail() {
@@ -1762,6 +1765,7 @@ mod tests {
         assert_invariants!(checker);
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "test context")]
     fn test_assert_invariants_macro_fail_with_context() {
