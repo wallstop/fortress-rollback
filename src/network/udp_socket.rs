@@ -183,6 +183,7 @@ impl UdpNonBlockingSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(miri))]
     use crate::network::messages::{MessageBody, MessageHeader};
 
     // Helper function to wait for messages with retry logic

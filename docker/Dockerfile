@@ -33,13 +33,13 @@ RUN mkdir -p src tests/bin && \
 # Build dependencies only (this layer will be cached)
 RUN cargo build --release --bin network_test_peer 2>/dev/null || true
 
-# Now copy the real source code
+# Now copy the real source code (this overwrites the dummy files)
 COPY src ./src
 COPY tests ./tests
 COPY benches ./benches
 
-# Remove dummy files and rebuild
-RUN rm -f src/lib.rs tests/bin/network_test_peer.rs
+# Touch source files to ensure they're newer than cached dependencies
+# (the COPY above already overwrote the dummy files with real content)
 RUN touch src/lib.rs tests/bin/network_test_peer.rs
 
 # Build the actual binary
