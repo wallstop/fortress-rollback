@@ -85,7 +85,7 @@ jobs:
       - name: Extract MSRV from Cargo.toml
         id: cargo-msrv
         run: |
-          MSRV=$(grep -E '^rust-version\s*=' Cargo.toml | sed 's/.*/"\([^"]*\)".*/\1/')
+          MSRV=$(grep -E '^rust-version\s*=' Cargo.toml | sed 's/.*"\([^"]*\)".*/\1/')
           echo "msrv=$MSRV" >> "$GITHUB_OUTPUT"
           echo "Cargo.toml MSRV: $MSRV"
 
