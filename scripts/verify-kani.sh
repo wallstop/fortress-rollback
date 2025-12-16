@@ -59,6 +59,9 @@ TIER1_PROOFS=(
     "proof_max_frame_delay_derivation"
     "proof_all_presets_valid"
     "proof_preset_values"
+    "proof_preset_configs_valid"
+    "proof_zero_window_size_corrected"
+    "proof_negative_frame_safe"
 )
 
 # Tier 2: Medium proofs (30s-2min each) - moderate complexity
@@ -86,6 +89,7 @@ TIER2_PROOFS=(
     "proof_saved_states_count"
     "proof_get_cell_validates_frame"
     "proof_saved_states_circular_index"
+    "proof_index_wrapping_consistent"
 )
 
 # Tier 3: Slow proofs (>2min each) - complex state verification
@@ -117,6 +121,7 @@ print_usage() {
     echo "  --tier N        Run only tier N proofs (1=fast, 2=medium, 3=slow)"
     echo "  --verbose       Show detailed Kani output"
     echo "  --jobs N        Run N harnesses in parallel (default: 1)"
+    echo "  --fail-fast     Stop immediately when any proof fails (useful for CI)"
     echo "  --help          Show this help message"
     echo ""
     echo "Environment Variables:"
@@ -134,6 +139,7 @@ print_usage() {
     echo "  $0 --tier 1 --tier 2            # Run fast and medium proofs"
     echo "  $0 --harness proof_frame_new_valid  # Run single proof"
     echo "  $0 --quick --jobs 4             # Fast mode with parallel execution"
+    echo "  $0 --quick --fail-fast          # CI mode: fast bounds, stop on first failure"
     echo "  $0 --list                       # List available proofs"
 }
 
@@ -387,6 +393,7 @@ run_tier_proofs() {
     local quick=$2
     local verbose=$3
     local jobs=$4
+    local fail_fast=$5
     
     local proofs
     case "$tier" in
@@ -409,6 +416,12 @@ run_tier_proofs() {
         else
             any_failed=true
             ((tier_failed++))
+            if [[ "$fail_fast" == "true" ]]; then
+                echo -e "${RED}Stopping early due to --fail-fast${NC}"
+                echo ""
+                echo "Tier $tier Results: $tier_passed passed, $tier_failed failed (stopped early)"
+                return 1
+            fi
         fi
     done
     
@@ -425,6 +438,7 @@ main() {
     local quick=false
     local verbose=false
     local list_only=false
+    local fail_fast=false
     local harnesses=()
     local tiers=()
     local jobs=1
@@ -442,6 +456,10 @@ main() {
                 ;;
             --list)
                 list_only=true
+                shift
+                ;;
+            --fail-fast)
+                fail_fast=true
                 shift
                 ;;
             --harness)
@@ -511,13 +529,20 @@ main() {
             echo -e "${BLUE}Verifying harness: $harness${NC}"
             if ! run_kani "$harness" "$quick" "$verbose" "$jobs"; then
                 any_failed=true
+                if [[ "$fail_fast" == "true" ]]; then
+                    echo -e "${RED}Stopping early due to --fail-fast${NC}"
+                    break
+                fi
             fi
         done
     elif [[ ${#tiers[@]} -gt 0 ]]; then
         # Run specific tiers
         for tier in "${tiers[@]}"; do
-            if ! run_tier_proofs "$tier" "$quick" "$verbose" "$jobs"; then
+            if ! run_tier_proofs "$tier" "$quick" "$verbose" "$jobs" "$fail_fast"; then
                 any_failed=true
+                if [[ "$fail_fast" == "true" ]]; then
+                    break
+                fi
             fi
         done
     else

@@ -57,6 +57,7 @@ print_usage() {
     echo "Options:"
     echo "  --quick     Use smaller bounds for faster verification"
     echo "  --list      List available specifications"
+    echo "  --fail-fast Stop immediately when any spec fails"
     echo "  --help      Show this help message"
     echo "  --verbose   Show detailed TLC output"
     echo ""
@@ -64,6 +65,7 @@ print_usage() {
     echo "  $0                      # Verify all specs"
     echo "  $0 NetworkProtocol      # Verify single spec"
     echo "  $0 --quick              # Quick verification"
+    echo "  $0 --quick --fail-fast  # CI mode: quick, stop on first failure"
 }
 
 print_specs() {
@@ -243,6 +245,7 @@ print_summary() {
 main() {
     local quick=false
     local verbose=false
+    local fail_fast=false
     local target_spec=""
     
     # Parse arguments
@@ -254,6 +257,10 @@ main() {
                 ;;
             --verbose)
                 verbose=true
+                shift
+                ;;
+            --fail-fast)
+                fail_fast=true
                 shift
                 ;;
             --list)
@@ -318,6 +325,10 @@ main() {
     for spec in "${specs_to_verify[@]}"; do
         if ! verify_spec "$spec" "$quick" "$verbose"; then
             any_failed=true
+            if [[ "$fail_fast" == "true" ]]; then
+                echo -e "${RED}Stopping early due to --fail-fast${NC}"
+                break
+            fi
         fi
         echo ""
     done

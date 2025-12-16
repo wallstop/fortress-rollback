@@ -27,6 +27,7 @@ TEMP_DIR=""
 VERBOSE=false
 FIX_MODE=false
 STRICT_MODE=false
+FAIL_FAST=false
 SPECIFIC_FILE=""
 
 # Colors
@@ -57,6 +58,7 @@ print_usage() {
     echo "  --verbose, -v   Show detailed output including extracted code"
     echo "  --fix           Show suggestions for fixing failing samples"
     echo "  --strict        Don't auto-skip incomplete snippets (diff-style, placeholders)"
+    echo "  --fail-fast     Stop immediately when any code block fails"
     echo "  --help, -h      Show this help message"
     echo ""
     echo "Examples:"
@@ -65,6 +67,7 @@ print_usage() {
     echo "  $0 docs/user-guide.md       # Verify specific file"
     echo "  $0 --fix docs/user-guide.md # Show fix suggestions"
     echo "  $0 --strict                 # Don't auto-skip incomplete code"
+    echo "  $0 --fail-fast              # CI mode: stop on first failure"
 }
 
 print_header() {
@@ -540,7 +543,12 @@ process_markdown_file() {
                     if ! $STRICT_MODE && incomplete_reason=$(is_incomplete_snippet "$block_content"); then
                         log_auto_skip "Block $block_num at line $block_line ($incomplete_reason)"
                     else
-                        compile_code_sample "$relative_file" "$block_line" "$block_num" "$block_content" || true
+                        if ! compile_code_sample "$relative_file" "$block_line" "$block_num" "$block_content"; then
+                            if $FAIL_FAST; then
+                                echo -e "${RED}Stopping early due to --fail-fast${NC}"
+                                return 1
+                            fi
+                        fi
                     fi
                 fi
                 
@@ -639,6 +647,10 @@ while [[ $# -gt 0 ]]; do
             STRICT_MODE=true
             shift
             ;;
+        --fail-fast)
+            FAIL_FAST=true
+            shift
+            ;;
         --help|-h)
             print_usage
             exit 0
@@ -667,11 +679,17 @@ main() {
     print_header
     setup_temp_crate
     
+    local process_result=0
     if [[ -n "$SPECIFIC_FILE" ]]; then
-        process_markdown_file "$SPECIFIC_FILE"
+        process_markdown_file "$SPECIFIC_FILE" || process_result=$?
     else
         while IFS= read -r file; do
-            process_markdown_file "$file"
+            if ! process_markdown_file "$file"; then
+                process_result=1
+                if $FAIL_FAST; then
+                    break
+                fi
+            fi
         done < <(find_markdown_files)
     fi
     

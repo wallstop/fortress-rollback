@@ -3,7 +3,7 @@
 
 # Minimum Supported Rust Version
 # This should match rust-version in Cargo.toml
-msrv = "1.85"
+msrv = "1.86"
 
 # Cognitive complexity threshold for clippy::cognitive_complexity
 # Default is 25, keeping it reasonable for complex rollback logic

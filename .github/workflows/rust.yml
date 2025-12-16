@@ -100,7 +100,7 @@ jobs:
         run: |
           CARGO_MSRV="${{ steps.cargo-msrv.outputs.msrv }}"
           DOCKER_RUST="${{ steps.docker-rust.outputs.docker_rust }}"
-          
+
           if [ "$CARGO_MSRV" != "$DOCKER_RUST" ]; then
             echo "❌ ERROR: MSRV mismatch!"
             echo "  Cargo.toml rust-version: $CARGO_MSRV"
@@ -110,7 +110,7 @@ jobs:
             echo "Update either docker/Dockerfile or Cargo.toml to fix this."
             exit 1
           fi
-          
+
           echo "✅ MSRV versions match: $CARGO_MSRV"
 
       - name: Install MSRV toolchain
@@ -249,7 +249,7 @@ jobs:
           key: tla-tools-v1.8.0
 
       - name: Run TLA+ verification
-        run: ./scripts/verify-tla.sh
+        run: ./scripts/verify-tla.sh --fail-fast
         timeout-minutes: 30
 
   # Z3 SMT Solver Verification
@@ -312,7 +312,7 @@ jobs:
           fi
 
       - name: Run Kani verification (Tier 1 - Fast)
-        run: ./scripts/verify-kani.sh --quick --tier 1 --verbose
+        run: ./scripts/verify-kani.sh --quick --tier 1 --fail-fast --verbose
         timeout-minutes: 15
 
   # Kani Formal Verification (Tier 2 - Medium proofs)
@@ -345,7 +345,7 @@ jobs:
           fi
 
       - name: Run Kani verification (Tier 2 - Medium)
-        run: ./scripts/verify-kani.sh --quick --tier 2
+        run: ./scripts/verify-kani.sh --quick --tier 2 --fail-fast
         timeout-minutes: 30
 
   # Kani Formal Verification (Tier 3 - Slow proofs)
@@ -378,7 +378,7 @@ jobs:
           fi
 
       - name: Run Kani verification (Tier 3 - Slow)
-        run: ./scripts/verify-kani.sh --quick --tier 3
+        run: ./scripts/verify-kani.sh --quick --tier 3 --fail-fast
         timeout-minutes: 45
 
   package-dry-run:
@@ -491,5 +491,5 @@ jobs:
           toolchain: stable
 
       - name: Verify markdown code samples compile
-        run: ./scripts/verify-markdown-code.sh
+        run: ./scripts/verify-markdown-code.sh --fail-fast
         continue-on-error: true  # Warn but don't fail - documentation may have intentionally incomplete examples

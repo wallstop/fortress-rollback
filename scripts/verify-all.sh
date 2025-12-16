@@ -39,6 +39,7 @@ RUN_Z3=false  # Not yet implemented
 QUICK_MODE=false
 PARALLEL=false
 VERBOSE=false
+FAIL_FAST=false
 
 # Results tracking
 TLA_RESULT=""
@@ -54,6 +55,7 @@ print_usage() {
     echo "  --z3        Run Z3 verification only (not yet implemented)"
     echo "  --quick     Use reduced bounds for faster verification"
     echo "  --parallel  Run verifiers in parallel (faster but more output)"
+    echo "  --fail-fast Stop immediately when any verification fails"
     echo "  --verbose   Show detailed output from all tools"
     echo "  --help      Show this help message"
     echo ""
@@ -62,6 +64,7 @@ print_usage() {
     echo "  $0 --quick          # Quick verification for development"
     echo "  $0 --tla --verbose  # TLA+ only with detailed output"
     echo "  $0 --parallel       # Run all verifiers in parallel"
+    echo "  $0 --quick --fail-fast  # CI mode: quick, stop on first failure"
 }
 
 print_header() {
@@ -103,6 +106,7 @@ run_kani() {
     
     local kani_args=()
     [[ "$QUICK_MODE" == "true" ]] && kani_args+=(--quick)
+    [[ "$FAIL_FAST" == "true" ]] && kani_args+=(--fail-fast)
     [[ "$VERBOSE" == "true" ]] && kani_args+=(--verbose)
     
     local start_time
@@ -229,6 +233,10 @@ main() {
                 VERBOSE=true
                 shift
                 ;;
+            --fail-fast)
+                FAIL_FAST=true
+                shift
+                ;;
             --help|-h)
                 print_usage
                 exit 0
@@ -294,9 +302,26 @@ main() {
         rm -f "$tla_log" "$kani_log"
     else
         # Run sequentially
-        [[ "$RUN_TLA" == "true" ]] && run_tla
-        [[ "$RUN_KANI" == "true" ]] && run_kani
-        [[ "$RUN_Z3" == "true" ]] && run_z3
+        if [[ "$RUN_TLA" == "true" ]]; then
+            run_tla
+            if [[ "$FAIL_FAST" == "true" ]] && [[ "$TLA_RESULT" == "FAIL" ]]; then
+                echo -e "${RED}Stopping early due to --fail-fast${NC}"
+            fi
+        fi
+        if [[ "$RUN_KANI" == "true" ]]; then
+            if [[ "$FAIL_FAST" == "true" ]] && [[ "$TLA_RESULT" == "FAIL" ]]; then
+                KANI_RESULT="SKIP"
+            else
+                run_kani
+            fi
+        fi
+        if [[ "$RUN_Z3" == "true" ]]; then
+            if [[ "$FAIL_FAST" == "true" ]] && { [[ "$TLA_RESULT" == "FAIL" ]] || [[ "$KANI_RESULT" == "FAIL" ]]; }; then
+                Z3_RESULT="SKIP"
+            else
+                run_z3
+            fi
+        fi
     fi
     
     local end_time

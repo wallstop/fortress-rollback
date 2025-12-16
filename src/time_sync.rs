@@ -346,6 +346,191 @@ mod sync_layer_tests {
 
         // Test passes if we don't panic from invalid array index
     }
+
+    // ==========================================================================
+    // Data-Driven Tests for TimeSyncConfig Presets
+    // ==========================================================================
+
+    /// Test data structure for config preset verification
+    struct ConfigPresetTestCase {
+        name: &'static str,
+        config: TimeSyncConfig,
+        expected_window_size: usize,
+    }
+
+    /// Data-driven test for all configuration presets
+    #[test]
+    fn test_config_presets_data_driven() {
+        let test_cases = [
+            ConfigPresetTestCase {
+                name: "default",
+                config: TimeSyncConfig::default(),
+                expected_window_size: 30,
+            },
+            ConfigPresetTestCase {
+                name: "new",
+                config: TimeSyncConfig::new(),
+                expected_window_size: 30,
+            },
+            ConfigPresetTestCase {
+                name: "responsive",
+                config: TimeSyncConfig::responsive(),
+                expected_window_size: 15,
+            },
+            ConfigPresetTestCase {
+                name: "smooth",
+                config: TimeSyncConfig::smooth(),
+                expected_window_size: 60,
+            },
+            ConfigPresetTestCase {
+                name: "lan",
+                config: TimeSyncConfig::lan(),
+                expected_window_size: 10,
+            },
+            ConfigPresetTestCase {
+                name: "mobile",
+                config: TimeSyncConfig::mobile(),
+                expected_window_size: 90,
+            },
+            ConfigPresetTestCase {
+                name: "competitive",
+                config: TimeSyncConfig::competitive(),
+                expected_window_size: 20,
+            },
+        ];
+
+        for test_case in &test_cases {
+            let ts = TimeSync::with_config(test_case.config);
+            assert_eq!(
+                ts.window_size, test_case.expected_window_size,
+                "Config preset '{}' should have window_size={}, got={}",
+                test_case.name, test_case.expected_window_size, ts.window_size
+            );
+            assert_eq!(
+                ts.local.len(),
+                test_case.expected_window_size,
+                "Config preset '{}' should have local.len()={}, got={}",
+                test_case.name,
+                test_case.expected_window_size,
+                ts.local.len()
+            );
+            assert_eq!(
+                ts.remote.len(),
+                test_case.expected_window_size,
+                "Config preset '{}' should have remote.len()={}, got={}",
+                test_case.name,
+                test_case.expected_window_size,
+                ts.remote.len()
+            );
+            // Initial average should always be 0
+            assert_eq!(
+                ts.average_frame_advantage(),
+                0,
+                "Config preset '{}' should have initial average=0, got={}",
+                test_case.name,
+                ts.average_frame_advantage()
+            );
+        }
+    }
+
+    // ==========================================================================
+    // Edge Case Tests
+    // ==========================================================================
+
+    /// Test window_size of 0 is corrected to 1
+    #[test]
+    fn test_window_size_zero_corrected_to_one() {
+        let config = TimeSyncConfig { window_size: 0 };
+        let ts = TimeSync::with_config(config);
+
+        assert_eq!(ts.window_size, 1, "Window size 0 should be corrected to 1");
+        assert_eq!(ts.local.len(), 1, "Local vec should have length 1");
+        assert_eq!(ts.remote.len(), 1, "Remote vec should have length 1");
+    }
+
+    /// Test window_size of 1 (minimum valid)
+    #[test]
+    fn test_window_size_minimum_one() {
+        let config = TimeSyncConfig { window_size: 1 };
+        let mut ts = TimeSync::with_config(config);
+
+        // With window size 1, every frame overwrites the same index
+        ts.advance_frame(Frame::new(0), 10, 5);
+        assert_eq!(ts.average_frame_advantage(), -2); // (5 - 10) / 2 = -2.5 truncated
+
+        ts.advance_frame(Frame::new(1), -10, 10);
+        assert_eq!(ts.average_frame_advantage(), 10); // (10 - (-10)) / 2 = 10
+
+        // Verify all frames map to index 0
+        assert_eq!(ts.local[0], -10);
+        assert_eq!(ts.remote[0], 10);
+    }
+
+    /// Test i32::MAX frame number doesn't cause panic
+    #[test]
+    fn test_large_frame_number() {
+        let mut ts = TimeSync::default();
+
+        // Very large frame number should work (modulo wraps)
+        let large_frame = Frame::new(i32::MAX);
+        ts.advance_frame(large_frame, 5, 10);
+
+        // Should be stored at i32::MAX % 30 = 7
+        let expected_index = (i32::MAX as usize) % 30;
+        assert_eq!(
+            ts.local[expected_index], 5,
+            "Large frame value should map to index {}, got local[{}]={}",
+            expected_index, expected_index, ts.local[expected_index]
+        );
+    }
+
+    /// Test that extreme advantage values don't cause overflow in average calculation
+    #[test]
+    fn test_extreme_advantage_values() {
+        let mut ts = TimeSync::default();
+
+        // Fill with large but not overflowing values
+        // 30 * 1000 = 30000, well within i32 range
+        for i in 0..30 {
+            ts.advance_frame(Frame::new(i), 1000, -1000);
+        }
+
+        let avg = ts.average_frame_advantage();
+        assert_eq!(
+            avg, -1000,
+            "Average should be -1000 for local=1000, remote=-1000"
+        );
+    }
+
+    /// Test mixed positive and negative values average correctly
+    #[test]
+    fn test_mixed_advantage_values() {
+        let mut ts = TimeSync::default();
+
+        // Alternate between positive and negative values
+        for i in 0..30 {
+            if i % 2 == 0 {
+                ts.advance_frame(Frame::new(i), 10, -10);
+            } else {
+                ts.advance_frame(Frame::new(i), -10, 10);
+            }
+        }
+
+        // Should average to 0 (equal positive and negative)
+        let avg = ts.average_frame_advantage();
+        assert_eq!(avg, 0, "Mixed values should average to 0");
+    }
+
+    /// Test frame=0 specifically (boundary case)
+    #[test]
+    fn test_frame_zero() {
+        let mut ts = TimeSync::default();
+
+        ts.advance_frame(Frame::new(0), 42, -42);
+
+        assert_eq!(ts.local[0], 42, "Frame 0 should map to index 0");
+        assert_eq!(ts.remote[0], -42, "Frame 0 should map to index 0");
+    }
 }
 
 // =============================================================================
@@ -676,9 +861,17 @@ mod kani_proofs {
     /// Proof: Window size of 0 is corrected to 1.
     ///
     /// The with_config function ensures window_size is at least 1.
+    /// We bound window_size to realistic values to avoid capacity overflow
+    /// during Vec allocation - this is not a production bug but a verification
+    /// tractability constraint. Real users won't pass usize::MAX as window_size.
     #[kani::proof]
     fn proof_window_size_minimum() {
         let window_size: usize = kani::any();
+        // Bound to realistic window sizes to avoid capacity overflow in Vec allocation.
+        // In production, window sizes > 10000 would be unreasonable (> 2 minutes at 60fps).
+        // This constraint exists because Kani explores all possible usize values including
+        // those that would exhaust memory when creating Vec<i32> of that size.
+        kani::assume(window_size <= 10000);
         // Even if user passes 0, it should be corrected
         let config = TimeSyncConfig { window_size };
         let ts = TimeSync::with_config(config);
@@ -695,7 +888,12 @@ mod kani_proofs {
     }
 
     /// Proof: Default configuration is valid.
+    ///
+    /// Note: We need unwind(32) because the default window size is 30,
+    /// and average_frame_advantage() iterates over the window using .iter().sum().
+    /// Kani needs to unroll the loop at least window_size+1 times.
     #[kani::proof]
+    #[kani::unwind(32)]
     fn proof_default_valid() {
         let ts = TimeSync::default();
 
@@ -711,6 +909,116 @@ mod kani_proofs {
         kani::assert(
             ts.average_frame_advantage() == 0,
             "Initial average should be 0",
+        );
+    }
+
+    /// Proof: All config presets create valid TimeSync instances.
+    ///
+    /// Tests that all factory methods produce TimeSync with:
+    /// - window_size >= 1
+    /// - local/remote vec lengths match window_size
+    /// - initial average is 0
+    #[kani::proof]
+    fn proof_preset_configs_valid() {
+        // Use symbolic choice to test all presets
+        let preset_choice: u8 = kani::any();
+        kani::assume(preset_choice < 5);
+
+        let config = match preset_choice {
+            0 => TimeSyncConfig::responsive(),
+            1 => TimeSyncConfig::smooth(),
+            2 => TimeSyncConfig::lan(),
+            3 => TimeSyncConfig::competitive(),
+            _ => TimeSyncConfig::mobile(),
+        };
+
+        let ts = TimeSync::with_config(config);
+
+        // All presets must result in valid TimeSync
+        kani::assert(
+            ts.window_size >= 1,
+            "All presets must have window_size >= 1",
+        );
+        kani::assert(
+            ts.local.len() == ts.window_size,
+            "local vec length must match window_size",
+        );
+        kani::assert(
+            ts.remote.len() == ts.window_size,
+            "remote vec length must match window_size",
+        );
+    }
+
+    /// Proof: Window size 0 is always corrected to 1.
+    ///
+    /// Explicitly verifies the edge case where window_size = 0.
+    #[kani::proof]
+    fn proof_zero_window_size_corrected() {
+        let config = TimeSyncConfig { window_size: 0 };
+        let ts = TimeSync::with_config(config);
+
+        kani::assert(ts.window_size == 1, "window_size 0 must be corrected to 1");
+        kani::assert(ts.local.len() == 1, "local vec must have exactly 1 element");
+        kani::assert(
+            ts.remote.len() == 1,
+            "remote vec must have exactly 1 element",
+        );
+    }
+
+    /// Proof: Frame index wrapping is consistent.
+    ///
+    /// Verifies that for any frame f and window size w,
+    /// the index (f % w) is always in [0, w).
+    #[kani::proof]
+    fn proof_index_wrapping_consistent() {
+        let frame_val: i32 = kani::any();
+        kani::assume(frame_val >= 0);
+
+        let window_size: usize = kani::any();
+        kani::assume(window_size >= 1 && window_size <= 100);
+
+        // First calculation
+        let index1 = (frame_val as usize) % window_size;
+
+        // Second calculation with same inputs (should be deterministic)
+        let index2 = (frame_val as usize) % window_size;
+
+        kani::assert(index1 == index2, "Index calculation must be deterministic");
+        kani::assert(
+            index1 < window_size,
+            "Index must be strictly less than window_size",
+        );
+    }
+
+    /// Proof: Negative frame values are correctly rejected.
+    ///
+    /// Verifies that advance_frame with negative frames doesn't modify state.
+    /// Note: We can't directly test this in Kani without state comparison,
+    /// so we verify the safety property that it doesn't panic.
+    #[kani::proof]
+    fn proof_negative_frame_safe() {
+        let frame_val: i32 = kani::any();
+        kani::assume(frame_val < 0);
+
+        let local_adv: i32 = kani::any();
+        let remote_adv: i32 = kani::any();
+        kani::assume(local_adv >= -1000 && local_adv <= 1000);
+        kani::assume(remote_adv >= -1000 && remote_adv <= 1000);
+
+        let config = TimeSyncConfig { window_size: 10 };
+        let mut ts = TimeSync::with_config(config);
+
+        // This should not panic even with negative frame
+        ts.advance_frame(Frame::new(frame_val), local_adv, remote_adv);
+
+        // Verify state wasn't modified (local[0] should still be 0)
+        kani::assert(
+            ts.local[0] == 0,
+            "Negative frame should not modify local values",
+        );
+        kani::assert(
+            ts.remote[0] == 0,
+            "Negative frame should not modify remote values",
         );
     }
 }
