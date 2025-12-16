@@ -85,15 +85,15 @@ jobs:
       - name: Extract MSRV from Cargo.toml
         id: cargo-msrv
         run: |
-          MSRV=$(grep -E '^rust-version\s*=' Cargo.toml | sed 's/.*"\([^"]*\)".*/\1/')
-          echo "msrv=$MSRV" >> $GITHUB_OUTPUT
+          MSRV=$(grep -E '^rust-version\s*=' Cargo.toml | sed 's/.*/"\([^"]*\)".*/\1/')
+          echo "msrv=$MSRV" >> "$GITHUB_OUTPUT"
           echo "Cargo.toml MSRV: $MSRV"
 
       - name: Extract Rust version from Dockerfile
         id: docker-rust
         run: |
           DOCKER_RUST=$(grep -E '^FROM rust:' docker/Dockerfile | sed 's/FROM rust:\([0-9.]*\).*/\1/')
-          echo "docker_rust=$DOCKER_RUST" >> $GITHUB_OUTPUT
+          echo "docker_rust=$DOCKER_RUST" >> "$GITHUB_OUTPUT"
           echo "Dockerfile Rust: $DOCKER_RUST"
 
       - name: Verify MSRV matches Dockerfile
