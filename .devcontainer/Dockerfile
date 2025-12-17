@@ -54,6 +54,14 @@ RUN apt-get update && apt-get install -y \
     wget \
     git \
     jq \
+    # High-performance CLI tools available in apt
+    ripgrep \
+    fd-find \
+    fzf \
+    bat \
+    htop \
+    ncdu \
+    # Note: eza, git-delta, dust, duf, procs, sd, etc. are installed via cargo below
     && rm -rf /var/lib/apt/lists/*
 
 # Install linux-perf if available (architecture dependent)
@@ -93,7 +101,19 @@ RUN cargo install cargo-audit && \
     cargo install cargo-fuzz || echo "cargo-fuzz requires nightly" && \
     cargo install flamegraph && \
     cargo install cargo-nextest && \
-    cargo install cargo-watch
+    cargo install cargo-watch && \
+    cargo install sccache && \
+    # High-performance CLI tools (Rust-based, not available in Debian apt)
+    cargo install eza && \
+    cargo install git-delta && \
+    cargo install du-dust && \
+    cargo install duf && \
+    cargo install procs && \
+    cargo install sd && \
+    cargo install hyperfine && \
+    cargo install tokei && \
+    cargo install zoxide && \
+    cargo install bottom || echo "bottom (btm) optional"
 
 # Install Node.js and markdown tools (for pre-commit hooks)
 USER root
@@ -123,6 +143,11 @@ RUN echo '#!/bin/bash\njava -cp /opt/tla/tla2tools.jar tla2sany.SANY "$@"' > /us
 USER vscode
 
 WORKDIR /workspaces/ggrs
+
+# Set up aliases for high-performance tools
+# Note: fd-find installs as 'fdfind' on Debian, bat as 'batcat'
+# eza, delta, dust, duf, procs are installed via cargo and have standard names
+RUN echo '\n# High-performance tool aliases\nalias fd="fdfind"\nalias bat="batcat"\nalias ls="eza"\nalias ll="eza -la"\nalias la="eza -la"\nalias tree="eza --tree"\nalias cat="batcat --paging=never"\nalias diff="delta"\nalias du="dust"\nalias df="duf"\nalias ps="procs"\nalias top="htop"\nalias sed="sd"\n\n# Initialize zoxide (smart cd)\neval "$(zoxide init bash)"\n\n# Conditionally enable sccache if available\nif command -v sccache &> /dev/null; then\n  export RUSTC_WRAPPER=sccache\nfi\n' >> ~/.bashrc
 
 # Print tool versions on first login (via .bashrc)
 RUN echo '\n# Fortress Rollback Development Environment\nif [ -f /workspaces/ggrs/.devcontainer/welcome.sh ]; then\n  source /workspaces/ggrs/.devcontainer/welcome.sh\nfi' >> ~/.bashrc

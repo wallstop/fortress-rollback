@@ -23,7 +23,7 @@ use serde::{de::DeserializeOwned, Serialize};
 pub use sessions::builder::{
     InputQueueConfig, ProtocolConfig, SaveMode, SessionBuilder, SpectatorConfig, SyncConfig,
 };
-pub use sessions::p2p_session::P2PSession;
+pub use sessions::p2p_session::{P2PSession, SyncHealth};
 pub use sessions::p2p_spectator_session::SpectatorSession;
 pub use sessions::sync_test_session::SyncTestSession;
 pub use sync_layer::{GameStateAccessor, GameStateCell};
@@ -890,6 +890,513 @@ where
     /// This method should return all messages received since the last time this method was called.
     /// The pairs `(A, Message)` indicate from which address each packet was received.
     fn receive_all_messages(&mut self) -> Vec<(A, Message)>;
+}
+
+// ###################
+// # UNIT TESTS      #
+// ###################
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    /// A minimal test configuration for unit testing.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct TestConfig;
+
+    impl Config for TestConfig {
+        type Input = u8;
+        type State = Vec<u8>;
+        type Address = SocketAddr;
+    }
+
+    fn test_addr(port: u16) -> SocketAddr {
+        use std::net::{IpAddr, Ipv4Addr};
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+    }
+
+    // ==========================================
+    // SessionState Tests
+    // ==========================================
+
+    #[test]
+    fn session_state_default_values_exist() {
+        // Verify both variants are constructible
+        assert!(matches!(
+            SessionState::Synchronizing,
+            SessionState::Synchronizing
+        ));
+        assert!(matches!(SessionState::Running, SessionState::Running));
+    }
+
+    #[test]
+    fn session_state_equality() {
+        assert_eq!(SessionState::Synchronizing, SessionState::Synchronizing);
+        assert_eq!(SessionState::Running, SessionState::Running);
+        assert_ne!(SessionState::Synchronizing, SessionState::Running);
+    }
+
+    #[test]
+    fn session_state_clone() {
+        let state = SessionState::Running;
+        let cloned = state;
+        assert_eq!(state, cloned);
+    }
+
+    #[test]
+    fn session_state_copy() {
+        let state = SessionState::Synchronizing;
+        let copied: SessionState = state;
+        assert_eq!(state, copied);
+    }
+
+    #[test]
+    fn session_state_debug_format() {
+        let sync = SessionState::Synchronizing;
+        let running = SessionState::Running;
+        assert_eq!(format!("{:?}", sync), "Synchronizing");
+        assert_eq!(format!("{:?}", running), "Running");
+    }
+
+    // ==========================================
+    // InputStatus Tests
+    // ==========================================
+
+    #[test]
+    fn input_status_variants_exist() {
+        // Verify all variants are constructible
+        assert!(matches!(InputStatus::Confirmed, InputStatus::Confirmed));
+        assert!(matches!(InputStatus::Predicted, InputStatus::Predicted));
+        assert!(matches!(
+            InputStatus::Disconnected,
+            InputStatus::Disconnected
+        ));
+    }
+
+    #[test]
+    fn input_status_equality() {
+        assert_eq!(InputStatus::Confirmed, InputStatus::Confirmed);
+        assert_eq!(InputStatus::Predicted, InputStatus::Predicted);
+        assert_eq!(InputStatus::Disconnected, InputStatus::Disconnected);
+        assert_ne!(InputStatus::Confirmed, InputStatus::Predicted);
+        assert_ne!(InputStatus::Confirmed, InputStatus::Disconnected);
+        assert_ne!(InputStatus::Predicted, InputStatus::Disconnected);
+    }
+
+    #[test]
+    fn input_status_clone() {
+        let status = InputStatus::Predicted;
+        let cloned = status;
+        assert_eq!(status, cloned);
+    }
+
+    #[test]
+    fn input_status_copy() {
+        let status = InputStatus::Confirmed;
+        let copied: InputStatus = status;
+        assert_eq!(status, copied);
+    }
+
+    #[test]
+    fn input_status_debug_format() {
+        assert_eq!(format!("{:?}", InputStatus::Confirmed), "Confirmed");
+        assert_eq!(format!("{:?}", InputStatus::Predicted), "Predicted");
+        assert_eq!(format!("{:?}", InputStatus::Disconnected), "Disconnected");
+    }
+
+    // ==========================================
+    // FortressEvent Tests
+    // ==========================================
+
+    #[test]
+    fn fortress_event_synchronizing() {
+        let event: FortressEvent<TestConfig> = FortressEvent::Synchronizing {
+            addr: test_addr(8080),
+            total: 5,
+            count: 2,
+            total_requests_sent: 3,
+            elapsed_ms: 100,
+        };
+
+        if let FortressEvent::Synchronizing {
+            total,
+            count,
+            total_requests_sent,
+            elapsed_ms,
+            ..
+        } = event
+        {
+            assert_eq!(total, 5);
+            assert_eq!(count, 2);
+            assert_eq!(total_requests_sent, 3);
+            assert_eq!(elapsed_ms, 100);
+        } else {
+            panic!("Expected Synchronizing event");
+        }
+    }
+
+    #[test]
+    fn fortress_event_synchronized() {
+        let addr = test_addr(8080);
+        let event: FortressEvent<TestConfig> = FortressEvent::Synchronized { addr };
+
+        if let FortressEvent::Synchronized { addr: received } = event {
+            assert_eq!(received, addr);
+        } else {
+            panic!("Expected Synchronized event");
+        }
+    }
+
+    #[test]
+    fn fortress_event_disconnected() {
+        let addr = test_addr(9000);
+        let event: FortressEvent<TestConfig> = FortressEvent::Disconnected { addr };
+
+        if let FortressEvent::Disconnected { addr: received } = event {
+            assert_eq!(received, addr);
+        } else {
+            panic!("Expected Disconnected event");
+        }
+    }
+
+    #[test]
+    fn fortress_event_network_interrupted() {
+        let event: FortressEvent<TestConfig> = FortressEvent::NetworkInterrupted {
+            addr: test_addr(8080),
+            disconnect_timeout: 5000,
+        };
+
+        if let FortressEvent::NetworkInterrupted {
+            disconnect_timeout, ..
+        } = event
+        {
+            assert_eq!(disconnect_timeout, 5000);
+        } else {
+            panic!("Expected NetworkInterrupted event");
+        }
+    }
+
+    #[test]
+    fn fortress_event_network_resumed() {
+        let addr = test_addr(8080);
+        let event: FortressEvent<TestConfig> = FortressEvent::NetworkResumed { addr };
+
+        if let FortressEvent::NetworkResumed { addr: received } = event {
+            assert_eq!(received, addr);
+        } else {
+            panic!("Expected NetworkResumed event");
+        }
+    }
+
+    #[test]
+    fn fortress_event_wait_recommendation() {
+        let event: FortressEvent<TestConfig> = FortressEvent::WaitRecommendation { skip_frames: 3 };
+
+        if let FortressEvent::WaitRecommendation { skip_frames } = event {
+            assert_eq!(skip_frames, 3);
+        } else {
+            panic!("Expected WaitRecommendation event");
+        }
+    }
+
+    #[test]
+    fn fortress_event_desync_detected() {
+        let event: FortressEvent<TestConfig> = FortressEvent::DesyncDetected {
+            frame: Frame::new(100),
+            local_checksum: 0x1234,
+            remote_checksum: 0x5678,
+            addr: test_addr(8080),
+        };
+
+        if let FortressEvent::DesyncDetected {
+            frame,
+            local_checksum,
+            remote_checksum,
+            ..
+        } = event
+        {
+            assert_eq!(frame, Frame::new(100));
+            assert_eq!(local_checksum, 0x1234);
+            assert_eq!(remote_checksum, 0x5678);
+        } else {
+            panic!("Expected DesyncDetected event");
+        }
+    }
+
+    #[test]
+    fn fortress_event_sync_timeout() {
+        let event: FortressEvent<TestConfig> = FortressEvent::SyncTimeout {
+            addr: test_addr(8080),
+            elapsed_ms: 10000,
+        };
+
+        if let FortressEvent::SyncTimeout { elapsed_ms, .. } = event {
+            assert_eq!(elapsed_ms, 10000);
+        } else {
+            panic!("Expected SyncTimeout event");
+        }
+    }
+
+    #[test]
+    fn fortress_event_equality() {
+        let event1: FortressEvent<TestConfig> =
+            FortressEvent::WaitRecommendation { skip_frames: 5 };
+        let event2: FortressEvent<TestConfig> =
+            FortressEvent::WaitRecommendation { skip_frames: 5 };
+        let event3: FortressEvent<TestConfig> =
+            FortressEvent::WaitRecommendation { skip_frames: 10 };
+
+        assert_eq!(event1, event2);
+        assert_ne!(event1, event3);
+    }
+
+    #[test]
+    fn fortress_event_clone() {
+        let event: FortressEvent<TestConfig> = FortressEvent::Synchronized {
+            addr: test_addr(8080),
+        };
+        let cloned = event;
+        assert_eq!(event, cloned);
+    }
+
+    #[test]
+    fn fortress_event_debug_format() {
+        let event: FortressEvent<TestConfig> = FortressEvent::WaitRecommendation { skip_frames: 3 };
+        let debug = format!("{:?}", event);
+        assert!(debug.contains("WaitRecommendation"));
+        assert!(debug.contains('3'));
+    }
+
+    // ==========================================
+    // PlayerType Tests
+    // ==========================================
+
+    #[test]
+    fn player_type_local() {
+        let player_type: PlayerType<SocketAddr> = PlayerType::Local;
+        assert!(matches!(player_type, PlayerType::Local));
+    }
+
+    #[test]
+    fn player_type_remote() {
+        let addr = test_addr(8080);
+        let player_type: PlayerType<SocketAddr> = PlayerType::Remote(addr);
+
+        if let PlayerType::Remote(received) = player_type {
+            assert_eq!(received, addr);
+        } else {
+            panic!("Expected Remote player type");
+        }
+    }
+
+    #[test]
+    fn player_type_spectator() {
+        let addr = test_addr(9000);
+        let player_type: PlayerType<SocketAddr> = PlayerType::Spectator(addr);
+
+        if let PlayerType::Spectator(received) = player_type {
+            assert_eq!(received, addr);
+        } else {
+            panic!("Expected Spectator player type");
+        }
+    }
+
+    #[test]
+    fn player_type_equality() {
+        let addr1 = test_addr(8080);
+        let addr2 = test_addr(9000);
+
+        assert_eq!(
+            PlayerType::<SocketAddr>::Local,
+            PlayerType::<SocketAddr>::Local
+        );
+        assert_eq!(PlayerType::Remote(addr1), PlayerType::Remote(addr1));
+        assert_ne!(PlayerType::Remote(addr1), PlayerType::Remote(addr2));
+        assert_ne!(PlayerType::<SocketAddr>::Local, PlayerType::Remote(addr1));
+    }
+
+    #[test]
+    fn player_type_clone() {
+        let player_type: PlayerType<SocketAddr> = PlayerType::Remote(test_addr(8080));
+        let cloned = player_type; // PlayerType is Copy
+        assert_eq!(player_type, cloned);
+    }
+
+    #[test]
+    fn player_type_debug_format() {
+        let local: PlayerType<SocketAddr> = PlayerType::Local;
+        assert_eq!(format!("{:?}", local), "Local");
+
+        let remote: PlayerType<SocketAddr> = PlayerType::Remote(test_addr(8080));
+        let debug = format!("{:?}", remote);
+        assert!(debug.contains("Remote"));
+    }
+
+    // ==========================================
+    // PlayerHandle Tests
+    // ==========================================
+
+    #[test]
+    fn player_handle_new() {
+        let handle = PlayerHandle::new(0);
+        assert_eq!(handle.as_usize(), 0);
+
+        let handle = PlayerHandle::new(5);
+        assert_eq!(handle.as_usize(), 5);
+    }
+
+    #[test]
+    fn player_handle_is_valid_player_for() {
+        let handle = PlayerHandle::new(0);
+        assert!(handle.is_valid_player_for(2));
+        assert!(handle.is_valid_player_for(1));
+        assert!(!handle.is_valid_player_for(0));
+
+        let handle = PlayerHandle::new(5);
+        assert!(handle.is_valid_player_for(6));
+        assert!(!handle.is_valid_player_for(5));
+        assert!(!handle.is_valid_player_for(4));
+    }
+
+    #[test]
+    fn player_handle_is_spectator_for() {
+        let handle = PlayerHandle::new(0);
+        assert!(!handle.is_spectator_for(2));
+
+        let handle = PlayerHandle::new(2);
+        assert!(handle.is_spectator_for(2));
+        assert!(!handle.is_spectator_for(3));
+    }
+
+    #[test]
+    fn player_handle_equality() {
+        let handle1 = PlayerHandle::new(1);
+        let handle2 = PlayerHandle::new(1);
+        let handle3 = PlayerHandle::new(2);
+
+        assert_eq!(handle1, handle2);
+        assert_ne!(handle1, handle3);
+    }
+
+    #[test]
+    fn player_handle_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(PlayerHandle::new(0));
+        set.insert(PlayerHandle::new(1));
+        set.insert(PlayerHandle::new(0)); // duplicate
+
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn player_handle_ordering() {
+        let h0 = PlayerHandle::new(0);
+        let h1 = PlayerHandle::new(1);
+        let h2 = PlayerHandle::new(2);
+
+        assert!(h0 < h1);
+        assert!(h1 < h2);
+        assert!(h0 < h2);
+    }
+
+    #[test]
+    fn player_handle_debug_format() {
+        let handle = PlayerHandle::new(3);
+        let debug = format!("{:?}", handle);
+        assert!(debug.contains('3'));
+    }
+
+    // ==========================================
+    // Frame Tests (additional tests beyond kani)
+    // ==========================================
+
+    #[test]
+    fn frame_null_constant() {
+        assert_eq!(Frame::NULL.as_i32(), -1);
+        assert!(Frame::NULL.is_null());
+        assert!(!Frame::NULL.is_valid());
+    }
+
+    #[test]
+    fn frame_new() {
+        let frame = Frame::new(0);
+        assert_eq!(frame.as_i32(), 0);
+        assert!(!frame.is_null());
+        assert!(frame.is_valid());
+
+        let frame = Frame::new(100);
+        assert_eq!(frame.as_i32(), 100);
+    }
+
+    #[test]
+    fn frame_arithmetic() {
+        let frame = Frame::new(10);
+
+        // Addition with i32
+        assert_eq!((frame + 5).as_i32(), 15);
+
+        // Subtraction with i32
+        assert_eq!((frame - 3).as_i32(), 7);
+
+        // Subtraction between frames
+        assert_eq!(Frame::new(10) - Frame::new(5), 5);
+    }
+
+    #[test]
+    fn frame_add_assign() {
+        let mut frame = Frame::new(10);
+        frame += 5;
+        assert_eq!(frame.as_i32(), 15);
+    }
+
+    #[test]
+    fn frame_sub_assign() {
+        let mut frame = Frame::new(10);
+        frame -= 3;
+        assert_eq!(frame.as_i32(), 7);
+    }
+
+    #[test]
+    fn frame_comparison() {
+        let f1 = Frame::new(5);
+        let f2 = Frame::new(10);
+        let f3 = Frame::new(5);
+
+        assert!(f1 < f2);
+        assert!(f2 > f1);
+        assert!(f1 <= f3);
+        assert!(f1 >= f3);
+        assert_eq!(f1, f3);
+    }
+
+    #[test]
+    fn frame_modulo() {
+        let frame = Frame::new(135);
+        let remainder = frame % 128;
+        assert_eq!(remainder, 7);
+    }
+
+    #[test]
+    fn frame_to_option() {
+        assert!(Frame::NULL.to_option().is_none());
+        assert_eq!(Frame::new(5).to_option(), Some(Frame::new(5)));
+    }
+
+    #[test]
+    fn frame_from_option() {
+        assert_eq!(Frame::from_option(None), Frame::NULL);
+        assert_eq!(Frame::from_option(Some(Frame::new(5))), Frame::new(5));
+    }
+
+    #[test]
+    fn frame_debug_format() {
+        let frame = Frame::new(42);
+        let debug = format!("{:?}", frame);
+        // Use multi-char string to avoid single_char_pattern lint
+        assert!(debug.contains("42"));
+    }
 }
 
 // ###################

@@ -1,4 +1,4 @@
-# Claude Instructions for Fortress Rollback
+# Cursor Instructions for Fortress Rollback
 
 **Read [`.llm/context.md`](.llm/context.md)** — the canonical source of truth for all project context, development policies, testing guidelines, and coding standards.
 

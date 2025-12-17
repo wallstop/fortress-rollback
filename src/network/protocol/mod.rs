@@ -305,6 +305,12 @@ impl<T: Config> UdpProtocol<T> {
             kbps_sent: bps / 1024,
             local_frames_behind: self.local_frame_advantage,
             remote_frames_behind: self.remote_frame_advantage,
+            // Checksum fields are populated by P2PSession::network_stats()
+            // which has access to both local and remote checksum histories
+            last_compared_frame: None,
+            local_checksum: None,
+            remote_checksum: None,
+            checksums_match: None,
         })
     }
 

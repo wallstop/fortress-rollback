@@ -1,3 +1,5 @@
+use crate::Frame;
+
 /// The `NetworkStats` struct contains statistics about the current session.
 #[derive(Debug, Default, Clone, Copy)]
 #[must_use = "NetworkStats should be inspected or used after being queried"]
@@ -19,6 +21,44 @@ pub struct NetworkStats {
     ///
     /// [`local_frames_behind`]: #structfield.local_frames_behind
     pub remote_frames_behind: i32,
+
+    // === Checksum/Desync Detection Fields ===
+    /// The most recent frame for which checksums were compared between peers.
+    ///
+    /// This is `None` if no checksum comparison has occurred yet (e.g., early
+    /// in the session or if desync detection is disabled).
+    pub last_compared_frame: Option<Frame>,
+
+    /// The local checksum at [`last_compared_frame`].
+    ///
+    /// This is the checksum computed locally from the saved game state at that frame.
+    /// Compare with [`remote_checksum`] to check for desync.
+    ///
+    /// [`last_compared_frame`]: #structfield.last_compared_frame
+    /// [`remote_checksum`]: #structfield.remote_checksum
+    pub local_checksum: Option<u128>,
+
+    /// The remote checksum at [`last_compared_frame`].
+    ///
+    /// This is the checksum received from the remote peer for that frame.
+    /// Compare with [`local_checksum`] to check for desync.
+    ///
+    /// [`last_compared_frame`]: #structfield.last_compared_frame
+    /// [`local_checksum`]: #structfield.local_checksum
+    pub remote_checksum: Option<u128>,
+
+    /// Whether checksums matched at the most recently compared frame.
+    ///
+    /// This is a convenience field derived from comparing [`local_checksum`]
+    /// and [`remote_checksum`]. It is `None` if no comparison has occurred.
+    ///
+    /// * `Some(true)` - Checksums match, peers are synchronized
+    /// * `Some(false)` - **DESYNC DETECTED** - game state has diverged
+    /// * `None` - No comparison available yet
+    ///
+    /// [`local_checksum`]: #structfield.local_checksum
+    /// [`remote_checksum`]: #structfield.remote_checksum
+    pub checksums_match: Option<bool>,
 }
 
 impl NetworkStats {
@@ -40,6 +80,10 @@ mod tests {
         assert_eq!(stats.kbps_sent, 0);
         assert_eq!(stats.local_frames_behind, 0);
         assert_eq!(stats.remote_frames_behind, 0);
+        assert_eq!(stats.last_compared_frame, None);
+        assert_eq!(stats.local_checksum, None);
+        assert_eq!(stats.remote_checksum, None);
+        assert_eq!(stats.checksums_match, None);
     }
 
     #[test]
@@ -50,6 +94,10 @@ mod tests {
         assert_eq!(stats.kbps_sent, 0);
         assert_eq!(stats.local_frames_behind, 0);
         assert_eq!(stats.remote_frames_behind, 0);
+        assert_eq!(stats.last_compared_frame, None);
+        assert_eq!(stats.local_checksum, None);
+        assert_eq!(stats.remote_checksum, None);
+        assert_eq!(stats.checksums_match, None);
     }
 
     #[test]
@@ -60,6 +108,10 @@ mod tests {
             kbps_sent: 50,
             local_frames_behind: 2,
             remote_frames_behind: -1,
+            last_compared_frame: None,
+            local_checksum: None,
+            remote_checksum: None,
+            checksums_match: None,
         };
         let debug = format!("{:?}", stats);
         assert!(debug.contains("NetworkStats"));
@@ -76,6 +128,10 @@ mod tests {
             kbps_sent: 100,
             local_frames_behind: 3,
             remote_frames_behind: -2,
+            last_compared_frame: Some(Frame::new(42)),
+            local_checksum: Some(12345),
+            remote_checksum: Some(12345),
+            checksums_match: Some(true),
         };
         let cloned = stats;
         assert_eq!(cloned.send_queue_len, 10);
@@ -83,6 +139,10 @@ mod tests {
         assert_eq!(cloned.kbps_sent, 100);
         assert_eq!(cloned.local_frames_behind, 3);
         assert_eq!(cloned.remote_frames_behind, -2);
+        assert_eq!(cloned.last_compared_frame, Some(Frame::new(42)));
+        assert_eq!(cloned.local_checksum, Some(12345));
+        assert_eq!(cloned.remote_checksum, Some(12345));
+        assert_eq!(cloned.checksums_match, Some(true));
     }
 
     #[test]
@@ -93,8 +153,31 @@ mod tests {
             kbps_sent: 0,
             local_frames_behind: -5,
             remote_frames_behind: 5,
+            last_compared_frame: None,
+            local_checksum: None,
+            remote_checksum: None,
+            checksums_match: None,
         };
         assert_eq!(stats.local_frames_behind, -5);
         assert_eq!(stats.remote_frames_behind, 5);
+    }
+
+    #[test]
+    fn test_network_stats_checksum_fields() {
+        let stats = NetworkStats {
+            send_queue_len: 0,
+            ping: 0,
+            kbps_sent: 0,
+            local_frames_behind: 0,
+            remote_frames_behind: 0,
+            last_compared_frame: Some(Frame::new(100)),
+            local_checksum: Some(0xDEAD_BEEF),
+            remote_checksum: Some(0xCAFE_BABE),
+            checksums_match: Some(false),
+        };
+        assert_eq!(stats.last_compared_frame, Some(Frame::new(100)));
+        assert_eq!(stats.local_checksum, Some(0xDEAD_BEEF));
+        assert_eq!(stats.remote_checksum, Some(0xCAFE_BABE));
+        assert_eq!(stats.checksums_match, Some(false));
     }
 }

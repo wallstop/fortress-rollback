@@ -1,146 +1,184 @@
-# Fortress Rollback
+# Fortress Rollback — LLM Development Guide
 
-> **This is the canonical source of truth** for project context. Other LLM instruction files (CLAUDE.md, AGENTS.md, copilot-instructions.md) reference this document for shared guidelines.
+> **This is the canonical source of truth** for project context. All other LLM instruction files (CLAUDE.md, AGENTS.md, copilot-instructions.md) point here.
 
-## Project Overview
+## TL;DR — What You Need to Know
 
-Fortress Rollback is the correctness-first fork of GGRS, a reimagination of the GGPO (Good Game Peace Out) network SDK, written in 100% safe Rust. It provides peer-to-peer rollback networking capabilities for games, enabling deterministic multiplayer experiences with low-latency input prediction and rollback mechanics.
+**Fortress Rollback** is a correctness-first fork of GGRS (Good Game Rollback System), written in 100% safe Rust. It provides peer-to-peer rollback networking for deterministic multiplayer games.
 
-### Key Features
+### The Four Pillars
 
-- **100% Safe Rust**: No unsafe code, leveraging Rust's memory safety guarantees
-- **Request-Based API**: Simplified control flow replacing callback-style API
-- **P2P Rollback Networking**: Implements rollback netcode for real-time multiplayer games
-- **Multiple Session Types**: P2P sessions, spectator sessions, and sync test sessions
-- **Input Prediction & Rollback**: Handles network latency through prediction and state rollback
-- **Desync Detection**: Checksum-based verification between peers
+1. **>90% test coverage** — All code must be thoroughly tested
+2. **Formal verification** — TLA+, Z3, and Kani for critical components
+3. **Enhanced usability** — Intuitive, type-safe, hard-to-misuse APIs
+4. **Code clarity** — Readable, maintainable, well-documented
 
-### Fork Goals
-
-1. **>90% test coverage** - Comprehensive unit, integration, property-based, and determinism tests
-2. **Formal verification** - TLA+ specifications, Z3 constraints, invariant proofs
-3. **Enhanced usability** - Intuitive APIs, clear error messages, type safety
-4. **Code clarity** - Readable, maintainable, well-documented
-
-## Repository Structure
-
-```
-fortress-rollback/
-├── src/
-│   ├── lib.rs                    # Main library entry point & public API
-│   ├── error.rs                  # Error types (FortressError)
-│   ├── frame_info.rs             # Frame metadata and tracking
-│   ├── input_queue.rs            # Input buffering and management
-│   ├── hash.rs                   # Deterministic FNV-1a hashing
-│   ├── rle.rs                    # Run-length encoding for compression
-│   ├── rng.rs                    # Deterministic PCG32 random number generator
-│   ├── time_sync.rs              # Time synchronization between peers
-│   ├── sync_layer/
-│   │   ├── mod.rs                # Core synchronization logic (SyncLayer)
-│   │   ├── game_state_cell.rs    # Thread-safe game state storage
-│   │   └── saved_states.rs       # Circular buffer for rollback states
-│   ├── network/
-│   │   ├── compression.rs        # Network message compression
-│   │   ├── messages.rs           # Network protocol messages
-│   │   ├── network_stats.rs      # Network statistics tracking
-│   │   ├── chaos_socket.rs       # Testing socket with configurable chaos
-│   │   ├── udp_socket.rs         # UDP socket abstraction
-│   │   └── protocol/
-│   │       ├── mod.rs            # Network protocol implementation
-│   │       ├── event.rs          # Protocol events
-│   │       ├── state.rs          # Protocol state machine
-│   │       └── input_bytes.rs    # Input serialization helper
-│   └── sessions/
-│       ├── builder.rs            # Session builder pattern
-│       ├── p2p_session.rs        # Peer-to-peer session
-│       ├── p2p_spectator_session.rs  # Spectator session
-│       └── sync_test_session.rs  # Determinism testing session
-├── docs/                         # User documentation
-├── specs/tla/                    # TLA+ formal specifications
-├── examples/                     # Example implementations
-├── tests/                        # Integration tests (organized by category)
-├── fuzz/                         # Fuzz testing targets
-├── loom-tests/                   # Concurrency tests with Loom
-├── progress/                     # Development session notes
-└── Cargo.toml                    # Package manifest
-```
-
-## Core Concepts
-
-### Session Types
-
-- **P2PSession**: Standard peer-to-peer gameplay session
-- **SpectatorSession**: Session for spectators who observe but don't participate
-- **SyncTestSession**: Determinism verification session for testing
-
-### Player Types
-
-- **Local**: Player on the current device
-- **Remote**: Player on a remote device (identified by socket address)
-- **Spectator**: Remote observer (doesn't contribute input)
-
-### Key Technical Concepts
-
-- **Frames**: Discrete time steps in game simulation
-- **Rollback**: Restoring previous state when predictions are wrong
-- **Input Delay**: Buffer frames to smooth over network jitter
-- **Prediction**: Continuing simulation before inputs arrive
-- **Desync Detection**: Checksum verification between peers
-- **Determinism**: Same inputs → same outputs (critical requirement)
-
----
-
-## Development Policies
-
-### Breaking Changes Policy
-
-- **API compatibility is NOT required** - Breaking the public API is acceptable
-- **Safety and correctness trump compatibility** - If a breaking change improves safety, determinism, or prevents misuse, make it
-- **Document all breaking changes** - Update docs/changelog.md and docs/migration.md when APIs change
-- **This fork prioritizes production-grade quality** - We are not a drop-in replacement for upstream GGRS
-
-### Code Quality Standards
-
-- 100% safe Rust (`#![forbid(unsafe_code)]`)
-- Enable and satisfy clippy lints (all, pedantic, nursery)
-- No panics in library code (use `Result<T, FortressError>`)
-- No broken intra-doc links
-- All public items have rustdoc with examples
-
-### Build & Test Commands
-
-After every major change, run:
+### Quick Commands
 
 ```bash
-cargo fmt
-cargo clippy --all-targets
-cargo test
-```
+# Run after every change (use nextest for 12x faster tests)
+cargo fmt && cargo clippy --all-targets && cargo nextest run
 
-Note: Use `--features z3-verification` only when working on Z3 tests (compiles Z3 from source, which is slow)
+# Or use the convenient aliases defined in .cargo/config.toml
+cargo c && cargo t
+
+# Standard cargo test (slower, but useful for doc tests)
+cargo test
+
+# Z3 verification (slow — compiles Z3 from source)
+cargo test --features z3-verification
+```
 
 ---
 
-## Testing Guidelines
+## High-Performance CLI Tools
 
-### Test Coverage Requirements
+The dev container includes modern, high-performance CLI tools. **Always prefer these over their traditional counterparts** for faster, more user-friendly results.
 
-- All new features must include tests
-- Aim for >90% code coverage
-- Include both positive and negative test cases
-- Test edge cases and error conditions
-- Use integration tests for cross-component behavior
+### Tool Mapping (Always Use Left Column)
 
-### Test Structure
+| Use This | Instead Of | Why |
+|----------|------------|-----|
+| `rg` (ripgrep) | `grep` | 10-100x faster, respects .gitignore, better output |
+| `fd` / `fdfind` | `find` | Much faster, intuitive syntax, respects .gitignore |
+| `bat` / `batcat` | `cat` | Syntax highlighting, line numbers, git integration |
+| `eza` | `ls` | Colors, git status, tree view built-in |
+| `sd` | `sed` | Intuitive regex syntax, no escaping hell |
+| `delta` | `diff` | Syntax highlighting, side-by-side, git integration |
+| `dust` | `du` | Visual, sorted output, much faster |
+| `duf` | `df` | Beautiful, colored disk usage |
+| `procs` | `ps` | Colored, searchable, tree view |
+| `htop` / `btm` | `top` | Interactive, visual, better UX |
+| `hyperfine` | `time` | Statistical benchmarking, multiple runs |
+| `tokei` | `cloc`/`wc -l` | Fast code statistics |
+| `zoxide` (`z`) | `cd` | Smart directory jumping, learns your habits |
+
+### Common Usage Examples
+
+```bash
+# Search for text in code (use rg, not grep)
+rg "FortressError"                    # Search all files
+rg "impl.*Session" --type rust        # Search only Rust files
+rg -l "rollback"                      # List files containing match
+
+# Find files (use fd, not find)
+fd "\.rs$"                            # Find all Rust files
+fd -e toml                            # Find by extension
+fd test src/                          # Find files matching "test" in src/
+
+# View files with syntax highlighting (use bat, not cat)
+bat src/lib.rs                        # View with highlighting
+bat -r 10:20 src/lib.rs               # View line range
+
+# Replace text (use sd, not sed)
+sd 'old_pattern' 'new_text' file.rs   # Simple replacement
+sd -s 'literal[text]' 'new' file.rs   # Literal string mode
+
+# Directory listing (use eza, not ls)
+eza -la                               # Long listing with all files
+eza --tree --level=2                  # Tree view, 2 levels deep
+eza --git                             # Show git status
+
+# Disk usage (use dust, not du)
+dust                                  # Current directory usage
+dust -d 2 src/                        # Depth-limited
+
+# Benchmarking (use hyperfine, not time)
+hyperfine 'cargo test'                # Benchmark with stats
+hyperfine 'cargo test' 'cargo nextest run'  # Compare two commands
+
+# Code statistics
+tokei                                 # Lines of code by language
+tokei src/                            # Specific directory
+```
+
+### Shell Aliases (Pre-configured)
+
+The dev container configures these aliases automatically:
+- `fd` → `fdfind`, `bat` → `batcat` (Debian naming)
+- `ls` → `eza`, `cat` → `bat`, `diff` → `delta`
+- `du` → `dust`, `df` → `duf`, `ps` → `procs`, `top` → `htop`
+- `z` → zoxide (smart cd that learns your habits)
+
+---
+
+## How to Approach Development
+
+### Before Writing Any Code
+
+1. **Understand the context** — Read relevant source files and tests
+2. **Check for similar patterns** — See how existing code handles similar cases
+3. **Consider the impact** — Will this change affect other components?
+4. **Plan tests first** — What tests will verify correctness?
+
+### When Implementing Features
+
+1. **Write tests first** (TDD) — Define expected behavior before implementing
+2. **Keep functions focused** — Single responsibility, clear intent
+3. **Handle all errors** — No panics, use `Result<T, FortressError>`
+4. **Document as you go** — Rustdoc with examples for all public items
+5. **Consider edge cases** — Zero values, max values, empty collections
+6. **Update changelog** — Document changes in `docs/changelog.md`
+
+### When Fixing Bugs
+
+1. **Reproduce first** — Write a failing test that demonstrates the bug
+2. **Root cause analysis** — Understand *why* it fails, not just *what* fails
+3. **Fix at the right level** — Production bug vs test bug (see below)
+4. **Add regression tests** — Ensure the bug can't return
+5. **Check for similar issues** — Are there related bugs elsewhere?
+
+---
+
+## Code Quality Standards
+
+### Non-Negotiable Requirements
+
+- **100% safe Rust** — `#![forbid(unsafe_code)]`
+- **No panics in library code** — Always use `Result`
+- **All clippy lints pass** — `clippy::all`, `clippy::pedantic`, `clippy::nursery`
+- **No broken doc links** — All intra-doc links must resolve
+- **Public items documented** — Rustdoc with examples
+
+### Documentation Template
+
+```rust
+/// Brief one-line description ending with a period.
+///
+/// Longer explanation if needed, explaining the "why" not just "what".
+///
+/// # Arguments
+/// * `param1` - What this parameter represents
+///
+/// # Returns
+/// What the function returns and when.
+///
+/// # Errors
+/// * [`FortressError::Variant`] - When this specific error occurs
+///
+/// # Examples
+/// ```
+/// # use fortress_rollback::*;
+/// let result = function(arg)?;
+/// assert_eq!(result, expected);
+/// # Ok::<(), FortressError>(())
+/// ```
+pub fn function(param1: Type) -> Result<ReturnType, FortressError> {
+    // Implementation
+}
+```
+
+### Test Structure (Arrange-Act-Assert)
 
 ```rust
 #[test]
-fn descriptive_test_name_explaining_scenario() {
+fn descriptive_name_explaining_what_is_tested() {
     // Arrange: Set up test conditions
     let mut session = create_test_session();
+    let input = prepare_test_input();
     
     // Act: Execute the behavior being tested
-    let result = session.some_operation(args);
+    let result = session.some_operation(input);
     
     // Assert: Verify expected outcomes
     assert!(result.is_ok());
@@ -148,119 +186,72 @@ fn descriptive_test_name_explaining_scenario() {
 }
 ```
 
-### Root Cause Analysis for Test Failures
+---
 
-**CRITICAL: When tests fail or are flaky, always perform deep investigation**
+## Root Cause Analysis — When Tests Fail
 
-The goal is NOT to "make the test pass" — it's to understand and fix the underlying issue.
+**CRITICAL: The goal is NOT to make the test pass — it's to understand and fix the underlying issue.**
 
-#### Investigation Methodology
+### Investigation Steps
 
-1. **Reproduce and characterize** - Run test multiple times; is it consistent or flaky? Under what conditions?
-2. **Understand the assertion** - What property is the test verifying? Why should it hold?
-3. **Trace execution** - Add logging, use debugger, examine state at failure point
-4. **Form hypothesis** - What could cause this specific failure mode?
-5. **Verify hypothesis** - Confirm understanding before implementing fix
-6. **Consider scope** - Are there similar issues elsewhere in the codebase?
+1. **Reproduce** — Is it consistent or flaky? Under what conditions?
+2. **Understand** — What property is the test verifying? Why should it hold?
+3. **Trace** — Add logging, use debugger, examine state at failure
+4. **Hypothesize** — What could cause this specific failure mode?
+5. **Verify** — Confirm understanding before implementing any fix
+6. **Scope** — Are there similar issues elsewhere?
 
-#### Distinguishing Test Bug vs Production Bug
+### Production Bug vs Test Bug
 
-**Production bug indicators:**
-
-- Test expectations align with documented/intended behavior
-- Multiple tests or users depend on the same behavior
+**It's a production bug if:**
+- Test expectations align with documented behavior
+- Multiple tests depend on the same behavior
 - The test logic is simple and clearly correct
 
-**Test bug indicators:**
-
-- Test makes assumptions not guaranteed by the API contract
-- Test has inherent race conditions or timing dependencies  
-- Test uses mocking incorrectly or has setup errors
+**It's a test bug if:**
+- Test makes assumptions not guaranteed by the API
+- Test has inherent race conditions or timing issues
 - Test expectations contradict documentation
 
-#### Comprehensive Fix Requirements
+### Strictly Forbidden "Fixes"
 
-1. **Fix at the correct level**:
-   - Production bug → Fix library code, verify other tests still pass, add regression test if missing
-   - Test bug → Fix test's incorrect assumptions, document why original was wrong
-   - Timing issue → Use proper synchronization (channels, barriers, condvars) NOT sleeps
-   - Flakiness → Find and eliminate non-determinism at its source
-2. **Assess impact** - Does this fix affect other components? Run full test suite
-3. **Add protection** - If production bug, ensure test coverage prevents regression
-4. **Update docs** - If behavior was ambiguous, clarify documentation
-5. **Document the fix** - Explain root cause and why the solution is correct
-
-#### Strictly Forbidden "Fixes"
-
-- ❌ Commenting out or weakening failing assertions
-- ❌ Adding `Thread::sleep()` or arbitrary delays to "fix" timing
-- ❌ Catching and ignoring/swallowing errors in tests
-- ❌ Marking tests as `#[ignore]` without a documented fix plan
-- ❌ Relaxing numeric tolerances without understanding why original was appropriate
-- ❌ Changing expected values to match actual without root cause analysis
-- ❌ Disabling test features that exist in production code
+- ❌ Commenting out or weakening assertions
+- ❌ Adding `Thread::sleep()` to "fix" timing
+- ❌ Catching and swallowing errors
+- ❌ `#[ignore]` without a documented fix plan
+- ❌ Relaxing tolerances without understanding why
+- ❌ Changing expected values to match actual without analysis
 
 ---
 
-## Formal Verification
+## Formal Verification Philosophy
 
-### Philosophy
+- **Specs model production** — TLA+/Kani/Z3 specs represent real code behavior
+- **When verification fails, assume production bug first** — Investigate before relaxing specs
+- **Never "fix" specs just to make them pass** — That defeats the purpose
+- **Invariants represent real safety properties** — Only relax with strong justification
 
-- **Specs model production** - TLA+/Kani/Z3 specs must accurately represent production code behavior
-- **When verification fails, assume production has a bug first** - investigate before relaxing specs
-- **Never "fix" specs just to make them pass** - this defeats the purpose of verification
-- **Document all spec changes** - explain what production behavior necessitates the change
-- **Invariants represent real safety properties** - only relax with strong justification
+### After Finding a Bug via Verification
 
-### When Formal Verification Reveals Issues
+Add comprehensive test coverage:
 
-After fixing any bug discovered through formal verification, code review, or other analysis, add comprehensive test coverage:
-
-1. **Direct reproduction test** - Cover the exact scenario that was discovered
-2. **Edge case variants** - Zero values, max values, boundary conditions
-3. **Chained operations** - Multiple sequential calls that might compound issues
-4. **Full lifecycle tests** - Create-use-modify-destroy cycles  
-5. **Invariant preservation** - Verify invariants hold across all state transitions
-6. **Negative tests** - Ensure violations are properly detected
-7. **Document in tests** - Explain what was discovered and why the test matters
-
-```rust
-// Example: After discovering load_frame() didn't update last_saved_frame
-#[test]
-fn test_load_frame_updates_last_saved_frame_invariant() { /* Direct reproduction */ }
-
-#[test]  
-fn test_load_frame_zero_updates_last_saved_frame() { /* Edge case: frame 0 */ }
-
-#[test]
-fn test_multiple_rollbacks_maintain_invariants() { /* Chained operations */ }
-
-#[test]
-fn test_full_rollback_cycle_maintains_invariants() { /* Full lifecycle */ }
-
-#[test]
-fn test_invariant_checker_identifies_violations() { /* Negative test */ }
-```
-
-### Verification Tools
-
-- **TLA+**: State machine modeling, concurrency correctness, protocol verification
-- **Z3**: Algorithm correctness, invariant checking, safety properties
-- **Loom**: Concurrency testing for Rust code
+1. **Direct reproduction** — Cover the exact discovered scenario
+2. **Edge cases** — Zero, max, boundary conditions
+3. **Chained operations** — Sequential calls that might compound
+4. **Lifecycle tests** — Create-use-modify-destroy cycles
+5. **Negative tests** — Ensure violations are detected
 
 ---
 
 ## Defensive Programming Patterns
 
-Apply these patterns from [corrode.dev/blog/defensive-programming](https://corrode.dev/blog/defensive-programming/):
+### Prefer Pattern Matching Over Indexing
 
-### Slice Pattern Matching Over Indexing
-
-```rust,ignore
-// ❌ Avoid: Decoupled length check and indexing can panic
+```rust
+// ❌ Avoid: Can panic
 if !users.is_empty() { let first = &users[0]; }
 
-// ✅ Prefer: Compiler-enforced safe access
+// ✅ Prefer: Compiler-enforced safety
 match users.as_slice() {
     [] => handle_empty(),
     [single] => handle_one(single),
@@ -270,73 +261,92 @@ match users.as_slice() {
 
 ### Explicit Field Initialization
 
-```rust,ignore
+```rust
 // ❌ Avoid: New fields silently use defaults
 let config = Config { field1: value1, ..Default::default() };
 
 // ✅ Prefer: Compiler forces handling new fields
-let config = Config { field1: value1, field2: value2, field3: value3 };
-```
-
-### Destructuring in Trait Implementations
-
-```rust,ignore
-// ✅ Prefer: Compiler error when fields are added
-impl PartialEq for Order {
-    fn eq(&self, other: &Self) -> bool {
-        let Self { size, price, timestamp: _ } = self;
-        let Self { size: other_size, price: other_price, timestamp: _ } = other;
-        size == other_size && price == other_price
-    }
-}
-```
-
-### TryFrom for Fallible Conversions
-
-```rust,ignore
-// ✅ Prefer: TryFrom makes fallibility explicit
-impl TryFrom<RawData> for ProcessedData {
-    type Error = ConversionError;
-    fn try_from(raw: RawData) -> Result<Self, Self::Error> {
-        Ok(Self { value: raw.value.ok_or(ConversionError::MissingValue)? })
-    }
-}
+let config = Config { field1, field2, field3 };
 ```
 
 ### Exhaustive Match Arms
 
-```rust,ignore
+```rust
 // ❌ Avoid: Wildcard hides unhandled variants
 match state { State::Ready => {}, _ => {} }
 
-// ✅ Prefer: Explicit variants catch additions
-match state { State::Ready => {}, State::Running | State::Paused => {} }
+// ✅ Prefer: Explicit — compiler catches new variants
+match state { State::Ready => {}, State::Running => {}, State::Paused => {} }
 ```
 
 ### Enums Over Booleans
 
 ```rust
-// ❌ Avoid: process_data(&data, true, false, true);
-// ✅ Prefer: process_data(&data, Compression::Enabled, Encryption::Disabled, Validation::Strict);
-```
+// ❌ Avoid: What does true mean?
+process_data(&data, true, false, true);
 
-### Recommended Clippy Lints
-
-```toml
-[lints.clippy]
-indexing_slicing = "warn"
-fallible_impl_from = "deny"
-wildcard_enum_match_arm = "warn"
-must_use_candidate = "warn"
+// ✅ Prefer: Self-documenting
+process_data(&data, Compression::Enabled, Encryption::Disabled, Validation::Strict);
 ```
 
 ---
 
-## Code Examples
+## Project Architecture
 
-### Session Builder Pattern
+### Repository Structure
 
-```rust,ignore
+```
+src/
+├── lib.rs                    # Public API entry point
+├── error.rs                  # FortressError types
+├── frame_info.rs             # Frame metadata
+├── input_queue.rs            # Input buffering
+├── hash.rs                   # Deterministic FNV-1a hashing
+├── rle.rs                    # Run-length encoding
+├── rng.rs                    # Deterministic PCG32 RNG
+├── time_sync.rs              # Time synchronization
+├── sync_layer/
+│   ├── mod.rs                # Core synchronization (SyncLayer)
+│   ├── game_state_cell.rs    # Thread-safe game state
+│   └── saved_states.rs       # Circular buffer for rollback
+├── network/
+│   ├── compression.rs        # Message compression
+│   ├── messages.rs           # Protocol messages
+│   ├── network_stats.rs      # Statistics tracking
+│   ├── chaos_socket.rs       # Testing socket with chaos
+│   ├── udp_socket.rs         # UDP abstraction
+│   └── protocol/             # Network protocol state machine
+└── sessions/
+    ├── builder.rs            # SessionBuilder pattern
+    ├── p2p_session.rs        # P2P gameplay
+    ├── p2p_spectator_session.rs  # Spectator mode
+    └── sync_test_session.rs  # Determinism testing
+```
+
+### Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| **Frame** | Discrete time step in game simulation |
+| **Rollback** | Restoring previous state when predictions are wrong |
+| **Input Delay** | Buffer frames to smooth network jitter |
+| **Prediction** | Continue simulation before inputs arrive |
+| **Desync** | State divergence between peers (detected via checksums) |
+| **Determinism** | Same inputs → same outputs (critical requirement) |
+
+### Session Types
+
+- **P2PSession** — Standard peer-to-peer gameplay
+- **SpectatorSession** — Observe but don't participate
+- **SyncTestSession** — Verify determinism by running simulation twice
+
+---
+
+## Common Code Patterns
+
+### Session Builder
+
+```rust
 let session = SessionBuilder::<MyConfig>::new()
     .with_num_players(2)
     .with_input_delay(2)
@@ -346,16 +356,16 @@ let session = SessionBuilder::<MyConfig>::new()
     .start_p2p_session(socket)?;
 ```
 
-### Request Handling
+### Request Handling Loop
 
-```rust,ignore
+```rust
 for request in session.advance_frame()? {
     match request {
         FortressRequest::SaveGameState { frame, cell } => {
             cell.save(frame, Some(game_state.clone()), None);
         }
         FortressRequest::LoadGameState { cell, .. } => {
-            game_state = cell.load().expect("State should exist");
+            game_state = cell.load().expect("State must exist");
         }
         FortressRequest::AdvanceFrame { inputs } => {
             game_state.update(&inputs);
@@ -364,48 +374,58 @@ for request in session.advance_frame()? {
 }
 ```
 
-### Function Documentation
+### Player Types
 
 ```rust
-/// Advances the session by one frame, processing inputs and handling rollback.
-///
-/// # Errors
-/// Returns `FortressError::NotSynchronized` if session is still synchronizing.
-///
-/// # Examples
-/// ```
-/// session.advance_frame()?;
-/// ```
-pub fn advance_frame(&mut self) -> Result<(), FortressError> {
-    // Implementation
-}
+PlayerType::Local              // Local player on this device
+PlayerType::Remote(addr)       // Remote player (SocketAddr)
+PlayerType::Spectator(addr)    // Observer (no input)
 ```
 
 ---
 
-## Quality Checklist
+## Development Policies
 
-Before suggesting code, ensure it:
+### Breaking Changes Are Acceptable
 
-- [ ] Compiles with no warnings
-- [ ] Includes tests (unit and/or integration)
-- [ ] Has rustdoc comments for public items
-- [ ] Follows Rust idioms and best practices
-- [ ] Maintains 100% safe Rust
-- [ ] Handles errors appropriately (no panics)
-- [ ] Considers performance implications
-- [ ] Works toward >90% coverage goal
+- **API compatibility is NOT required** — This is a correctness-first fork
+- **Safety and correctness trump compatibility** — Make breaking changes if they improve quality
+- **Document all breaking changes** — Update `docs/changelog.md` and `docs/migration.md`
+
+### Test Coverage Requirements
+
+- All new features must include tests
+- Aim for >90% code coverage
+- Include positive and negative test cases
+- Test edge cases and error conditions
+- Use integration tests for cross-component behavior
 
 ---
 
 ## Resources
 
-- [Original GGPO SDK](https://www.ggpo.net/)
-- [GGPO Developers Discord](https://discord.com/invite/8FKKhCRCCE)
-- [Bevy GGRS Plugin](https://github.com/gschup/bevy_ggrs)
-- [TLA+ Resources](https://lamport.azurewebsites.net/tla/tla.html)
-- [Z3 Theorem Prover](https://github.com/Z3Prover/z3)
+| Resource | Link |
+|----------|------|
+| Original GGPO | <https://www.ggpo.net/> |
+| GGPO Discord | <https://discord.com/invite/8FKKhCRCCE> |
+| Bevy GGRS Plugin | <https://github.com/gschup/bevy_ggrs> |
+| TLA+ Resources | <https://lamport.azurewebsites.net/tla/tla.html> |
+| Z3 Prover | <https://github.com/Z3Prover/z3> |
 
-## License
+---
 
-Dual-licensed under MIT OR Apache-2.0
+## Quality Checklist
+
+Before submitting code:
+
+- [ ] Compiles with no warnings
+- [ ] All tests pass
+- [ ] Includes tests for new functionality
+- [ ] Rustdoc comments with examples
+- [ ] 100% safe Rust (no unsafe)
+- [ ] Handles all error cases
+- [ ] Changelog updated if user-facing
+
+---
+
+*License: MIT OR Apache-2.0*

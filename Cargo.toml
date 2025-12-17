@@ -207,6 +207,11 @@ harness = false
 # Profile for benchmarks
 [profile.bench]
 debug = true
+lto = "thin"
+
+# Profile for faster dev builds (optimized deps, unoptimized local code)
+[profile.dev.package."*"]
+opt-level = 1
 
 # Loom concurrency tests - isolated from other dev-deps
 [[test]]

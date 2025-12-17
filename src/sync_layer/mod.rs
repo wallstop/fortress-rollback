@@ -1324,6 +1324,117 @@ mod sync_layer_tests {
         assert_eq!(cell2.load(), Some(201));
     }
 
+    #[test]
+    fn test_game_state_cell_null_frame_rejected() {
+        let cell = GameStateCell::<u32>::default();
+
+        // Saving with null frame should return false
+        let result = cell.save(Frame::NULL, Some(42), None);
+        assert!(!result);
+
+        // Cell should remain empty/unchanged
+        assert!(cell.load().is_none());
+    }
+
+    #[test]
+    fn test_game_state_cell_debug_format() {
+        let cell = GameStateCell::<u32>::default();
+        cell.save(Frame::new(42), Some(12345), Some(0xDEAD_BEEF));
+
+        let debug_str = format!("{:?}", cell);
+        assert!(debug_str.contains("GameStateCell"));
+        assert!(debug_str.contains("42") || debug_str.contains("frame"));
+    }
+
+    #[test]
+    fn test_game_state_cell_empty_debug() {
+        let cell = GameStateCell::<u32>::default();
+        let debug_str = format!("{:?}", cell);
+        assert!(debug_str.contains("GameStateCell"));
+    }
+
+    #[test]
+    fn test_game_state_cell_save_none_data() {
+        let cell = GameStateCell::<u32>::default();
+
+        // Save with None data
+        let result = cell.save(Frame::new(1), None, Some(123));
+        assert!(result);
+
+        // Load returns None
+        assert!(cell.load().is_none());
+        assert!(cell.data().is_none());
+
+        // But frame and checksum are set
+        assert_eq!(cell.frame(), Frame::new(1));
+        assert_eq!(cell.checksum(), Some(123));
+    }
+
+    #[test]
+    fn test_game_state_cell_save_none_checksum() {
+        let cell = GameStateCell::<u32>::default();
+
+        // Save with None checksum
+        let result = cell.save(Frame::new(5), Some(42), None);
+        assert!(result);
+
+        assert_eq!(cell.load(), Some(42));
+        assert_eq!(cell.checksum(), None);
+    }
+
+    #[test]
+    fn test_game_state_cell_overwrite() {
+        let cell = GameStateCell::<u32>::default();
+
+        // First save
+        cell.save(Frame::new(1), Some(100), Some(1));
+        assert_eq!(cell.load(), Some(100));
+
+        // Overwrite with new data
+        cell.save(Frame::new(2), Some(200), Some(2));
+        assert_eq!(cell.load(), Some(200));
+        assert_eq!(cell.frame(), Frame::new(2));
+        assert_eq!(cell.checksum(), Some(2));
+    }
+
+    #[test]
+    fn test_game_state_cell_data_accessor_deref() {
+        let cell = GameStateCell::<Vec<i32>>::default();
+        cell.save(Frame::new(1), Some(vec![1, 2, 3]), None);
+
+        let accessor = cell.data().unwrap();
+        // Use Deref to access Vec methods
+        assert_eq!(accessor.len(), 3);
+        assert_eq!(accessor[0], 1);
+    }
+
+    #[test]
+    fn test_game_state_cell_data_accessor_mut_dangerous() {
+        let cell = GameStateCell::<Vec<i32>>::default();
+        cell.save(Frame::new(1), Some(vec![1, 2, 3]), None);
+
+        {
+            let mut accessor = cell.data().unwrap();
+            // Use the dangerous mut accessor
+            let data = accessor.as_mut_dangerous();
+            data.push(4);
+        }
+
+        // Verify the modification persisted
+        let loaded = cell.load().unwrap();
+        assert_eq!(loaded, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_game_state_cell_data_returns_none_when_empty() {
+        let cell = GameStateCell::<u32>::default();
+        assert!(cell.data().is_none());
+
+        // Save None explicitly
+        cell.save(Frame::new(1), None, None);
+        assert!(cell.data().is_none());
+    }
+
     // ==========================================
     // Invariant Checker Tests
     // ==========================================

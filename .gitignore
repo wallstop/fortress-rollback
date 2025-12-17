@@ -13,6 +13,9 @@
 
 *.zip
 
+PLAN.md
+*TTrace*
+
 # Added by cargo
 
 /target

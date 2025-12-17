@@ -6,13 +6,74 @@ use crate::network::protocol::UdpProtocol;
 use crate::report_violation;
 use crate::sessions::builder::{ProtocolConfig, SaveMode};
 use crate::sync_layer::SyncLayer;
-use crate::telemetry::{ViolationKind, ViolationObserver, ViolationSeverity};
+use crate::telemetry::{
+    InvariantChecker, InvariantViolation, ViolationKind, ViolationObserver, ViolationSeverity,
+};
 use crate::DesyncDetection;
 use crate::{
     network::protocol::Event, Config, FortressEvent, FortressRequest, Frame, NonBlockingSocket,
     PlayerHandle, PlayerType, SessionState,
 };
 use tracing::{debug, trace};
+
+/// Health status of synchronization with a remote peer.
+///
+/// This enum represents the current synchronization status between the local
+/// session and a remote peer, based on checksum comparison.
+///
+/// # Important
+///
+/// This should be the primary API for checking session synchronization status
+/// before termination. Using [`P2PSession::confirmed_frame`] alone is
+/// **not sufficient** to determine safe session termination.
+///
+/// # Example
+///
+/// ```ignore
+/// // Check sync status before terminating
+/// match session.sync_health(peer_handle) {
+///     Some(SyncHealth::InSync) => {
+///         // Safe to proceed - checksums match
+///     }
+///     Some(SyncHealth::DesyncDetected { frame, .. }) => {
+///         // Desync occurred - game state has diverged
+///         panic!("Desync at frame {}", frame);
+///     }
+///     Some(SyncHealth::Pending) | None => {
+///         // Still waiting for checksum data
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncHealth {
+    /// Checksums match at the most recently compared frame.
+    ///
+    /// This indicates that at the last checksum comparison, both peers
+    /// had identical game state. Note that this does not guarantee
+    /// synchronization at the current frame - only at the last compared frame.
+    InSync,
+
+    /// Waiting for checksum data from peer (no comparison possible yet).
+    ///
+    /// This typically occurs:
+    /// - Early in the session before enough frames have been confirmed
+    /// - When desync detection is disabled
+    /// - When the peer hasn't sent checksum data yet
+    Pending,
+
+    /// Checksums differ - game state has diverged.
+    ///
+    /// This is a critical error indicating non-determinism or a bug.
+    /// The session should typically be terminated when this occurs.
+    DesyncDetected {
+        /// The frame at which the desync was detected.
+        frame: Frame,
+        /// The checksum computed locally for this frame.
+        local_checksum: u128,
+        /// The checksum received from the remote peer for this frame.
+        remote_checksum: u128,
+    },
+}
 
 use std::collections::vec_deque::Drain;
 use std::collections::BTreeMap;
@@ -123,7 +184,7 @@ impl<T: Config> PlayerRegistry<T> {
         self.handles
             .iter()
             .filter_map(|(k, v)| match v {
-                PlayerType::Local => Some(*k),
+                PlayerType::Local => None,
                 PlayerType::Remote(_) => None,
                 PlayerType::Spectator(_) => Some(*k),
             })
@@ -215,6 +276,11 @@ where
     local_checksum_history: BTreeMap<Frame, u128>,
     /// The last frame we sent a checksum for
     last_sent_checksum_frame: Frame,
+    /// The highest frame at which checksums matched with all peers.
+    /// Used by `sync_health()` to determine if we're in sync.
+    /// `None` means no successful comparison yet, `Some(frame)` means
+    /// checksums matched at that frame (no desync detected up to that point).
+    last_verified_frame: Option<Frame>,
     /// Optional observer for specification violations.
     violation_observer: Option<Arc<dyn ViolationObserver>>,
     /// Protocol configuration for network behavior.
@@ -303,6 +369,7 @@ impl<T: Config> P2PSession<T> {
             desync_detection,
             local_checksum_history: BTreeMap::new(),
             last_sent_checksum_frame: Frame::NULL,
+            last_verified_frame: None,
             violation_observer,
             protocol_config,
         }
@@ -620,6 +687,18 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// Returns a [`NetworkStats`] struct that gives information about the quality of the network connection.
+    ///
+    /// The returned struct includes:
+    /// - Network quality metrics (ping, send queue length, bandwidth)
+    /// - Frame advantage/disadvantage relative to the peer
+    /// - **Checksum comparison data** for desync detection
+    ///
+    /// # Checksum Fields
+    ///
+    /// The checksum fields (`last_compared_frame`, `local_checksum`, `remote_checksum`,
+    /// `checksums_match`) are populated when desync detection is enabled and at least
+    /// one checksum comparison has occurred. Use these to detect game state divergence.
+    ///
     /// # Errors
     /// - Returns [`InvalidRequest`] if the handle not referring to a remote player or spectator.
     /// - Returns [`NotSynchronized`] if the session is not connected to other clients yet.
@@ -630,30 +709,126 @@ impl<T: Config> P2PSession<T> {
         &self,
         player_handle: PlayerHandle,
     ) -> Result<NetworkStats, FortressError> {
-        match self.player_reg.handles.get(&player_handle) {
+        let mut stats = match self.player_reg.handles.get(&player_handle) {
             Some(PlayerType::Remote(addr)) => match self.player_reg.remotes.get(addr) {
-                Some(endpoint) => endpoint.network_stats(),
-                None => Err(FortressError::InternalError {
-                    context: format!(
-                        "Endpoint not found for registered remote player at {:?}",
-                        addr
-                    ),
-                }),
+                Some(endpoint) => endpoint.network_stats()?,
+                None => {
+                    return Err(FortressError::InternalError {
+                        context: format!(
+                            "Endpoint not found for registered remote player at {:?}",
+                            addr
+                        ),
+                    });
+                },
             },
             Some(PlayerType::Spectator(addr)) => match self.player_reg.remotes.get(addr) {
-                Some(endpoint) => endpoint.network_stats(),
-                None => Err(FortressError::InternalError {
-                    context: format!("Endpoint not found for registered spectator at {:?}", addr),
-                }),
+                Some(endpoint) => endpoint.network_stats()?,
+                None => {
+                    return Err(FortressError::InternalError {
+                        context: format!(
+                            "Endpoint not found for registered spectator at {:?}",
+                            addr
+                        ),
+                    });
+                },
             },
-            _ => Err(FortressError::InvalidRequest {
-                info: "Given player handle not referring to a remote player or spectator"
-                    .to_owned(),
-            }),
-        }
+            _ => {
+                return Err(FortressError::InvalidRequest {
+                    info: "Given player handle not referring to a remote player or spectator"
+                        .to_owned(),
+                });
+            },
+        };
+
+        // Populate checksum fields from local history and remote pending checksums
+        self.populate_checksum_stats(&mut stats, player_handle);
+
+        Ok(stats)
     }
 
-    /// Returns the highest confirmed frame. We have received all input for this frame and it is thus correct.
+    /// Populates the checksum-related fields in NetworkStats.
+    fn populate_checksum_stats(&self, stats: &mut NetworkStats, player_handle: PlayerHandle) {
+        // Get the remote endpoint's pending checksums
+        let Some(player_type) = self.player_reg.handles.get(&player_handle) else {
+            return;
+        };
+        let addr = match player_type {
+            PlayerType::Remote(addr) => addr,
+            _ => return,
+        };
+        let Some(remote) = self.player_reg.remotes.get(addr) else {
+            return;
+        };
+
+        // Find the most recent frame where we have both local and remote checksums
+        let mut latest_compared_frame: Option<Frame> = None;
+        let mut latest_local: Option<u128> = None;
+        let mut latest_remote: Option<u128> = None;
+
+        for (&frame, &local_cs) in &self.local_checksum_history {
+            if let Some(&remote_cs) = remote.pending_checksums.get(&frame) {
+                if latest_compared_frame.is_none_or(|f| frame > f) {
+                    latest_compared_frame = Some(frame);
+                    latest_local = Some(local_cs);
+                    latest_remote = Some(remote_cs);
+                }
+            }
+        }
+
+        stats.last_compared_frame = latest_compared_frame;
+        stats.local_checksum = latest_local;
+        stats.remote_checksum = latest_remote;
+        stats.checksums_match = match (latest_local, latest_remote) {
+            (Some(local), Some(remote)) => Some(local == remote),
+            _ => None,
+        };
+    }
+
+    /// Returns the highest confirmed frame where all inputs have been received.
+    ///
+    /// A "confirmed frame" means all players' inputs for that frame have been received
+    /// and will not be rolled back. The game state at this frame is **locally correct**
+    /// based on the inputs received.
+    ///
+    /// # Important: This Does NOT Guarantee Synchronization
+    ///
+    /// **Do NOT use this method alone to determine when to terminate a session.**
+    ///
+    /// This method tells you "inputs are confirmed locally" but does **not** mean:
+    /// - Both peers have simulated to the same frame
+    /// - Game state matches between peers  
+    /// - The session is safe to terminate
+    ///
+    /// Peers run asynchronously. When peer A's `confirmed_frame()` returns 100, peer B
+    /// might still be at frame 80. If peer A terminates, peer B will continue processing
+    /// more frames, leading to different final states.
+    ///
+    /// # Correct Termination Pattern
+    ///
+    /// Use [`sync_health`](Self::sync_health) in addition to `confirmed_frame()`:
+    ///
+    /// ```ignore
+    /// // WRONG: Terminating based on confirmed_frame alone
+    /// if session.confirmed_frame() >= target_frames {
+    ///     break; // Dangerous! Peers may be at different frames!
+    /// }
+    ///
+    /// // CORRECT: Use sync_health to verify peer synchronization
+    /// if session.confirmed_frame() >= target_frames {
+    ///     match session.sync_health(peer_handle) {
+    ///         Some(SyncHealth::InSync) => break, // Safe to exit
+    ///         Some(SyncHealth::DesyncDetected { .. }) => panic!("Desync!"),
+    ///         _ => continue, // Keep polling until sync status is known
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Valid Uses
+    ///
+    /// - Knowing which frames are safe to discard from rollback history
+    /// - Computing checksums over confirmed game state
+    /// - Delta compression (older confirmed state won't change)
+    /// - Progress reporting to users
     #[must_use]
     pub fn confirmed_frame(&self) -> Frame {
         let mut confirmed_frame = Frame::new(i32::MAX);
@@ -807,6 +982,164 @@ impl<T: Config> P2PSession<T> {
     #[must_use]
     pub fn violation_observer(&self) -> Option<&Arc<dyn ViolationObserver>> {
         self.violation_observer.as_ref()
+    }
+
+    /// Returns the synchronization health status for a specific remote peer.
+    ///
+    /// This is the **primary API for checking if a session is synchronized** before
+    /// termination or for ongoing desync detection. Unlike [`confirmed_frame`], which
+    /// only indicates input confirmation, this method verifies that game state checksums
+    /// match between peers.
+    ///
+    /// # Arguments
+    ///
+    /// * `player_handle` - The handle of the remote player to check.
+    ///
+    /// # Returns
+    ///
+    /// * `Some(SyncHealth::InSync)` - Checksums match at the last compared frame.
+    /// * `Some(SyncHealth::Pending)` - No checksum comparison available yet.
+    /// * `Some(SyncHealth::DesyncDetected { .. })` - Checksums differ, indicating desync.
+    /// * `None` - The handle doesn't refer to a remote player.
+    ///
+    /// # Important Anti-Pattern Warning
+    ///
+    /// **Do NOT use [`confirmed_frame`](Self::confirmed_frame) alone to determine
+    /// when to terminate a session.** That method only indicates when rollbacks won't affect
+    /// a frame - it does NOT mean both peers have simulated to the same frame.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // WRONG: Using confirmed_frame for termination
+    /// if session.confirmed_frame() >= target_frames {
+    ///     break; // Dangerous! Peers may be at different frames!
+    /// }
+    ///
+    /// // CORRECT: Use sync_health for safe termination
+    /// if session.confirmed_frame() >= target_frames {
+    ///     match session.sync_health(peer_handle) {
+    ///         Some(SyncHealth::InSync) => break, // Safe to exit
+    ///         Some(SyncHealth::DesyncDetected { .. }) => panic!("Desync!"),
+    ///         _ => continue, // Keep polling
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// [`confirmed_frame`]: Self::confirmed_frame
+    #[must_use]
+    pub fn sync_health(&self, player_handle: PlayerHandle) -> Option<SyncHealth> {
+        // Only remote players have sync health
+        let player_type = self.player_reg.handles.get(&player_handle)?;
+        let addr = match player_type {
+            PlayerType::Remote(addr) => addr,
+            _ => return None,
+        };
+
+        // Get the remote endpoint
+        let remote = self.player_reg.remotes.get(addr)?;
+
+        // If desync detection is off, we can't determine sync health
+        if self.desync_detection == DesyncDetection::Off {
+            return Some(SyncHealth::Pending);
+        }
+
+        // Check for any pending checksums that don't match our local history
+        // This catches desyncs before they're processed by compare_local_checksums_against_peers
+        for (&remote_frame, &remote_checksum) in &remote.pending_checksums {
+            // Only compare frames that have been confirmed locally
+            if remote_frame >= self.sync_layer.last_confirmed_frame() {
+                continue;
+            }
+            if let Some(&local_checksum) = self.local_checksum_history.get(&remote_frame) {
+                if local_checksum != remote_checksum {
+                    return Some(SyncHealth::DesyncDetected {
+                        frame: remote_frame,
+                        local_checksum,
+                        remote_checksum,
+                    });
+                }
+            }
+        }
+
+        // If we have a verified frame (successful checksum comparison happened), we're in sync
+        if self.last_verified_frame.is_some() {
+            return Some(SyncHealth::InSync);
+        }
+
+        // No successful comparison yet - still pending
+        Some(SyncHealth::Pending)
+    }
+
+    /// Returns `true` if all remote peers show [`SyncHealth::InSync`].
+    ///
+    /// This is a convenience method that checks all remote peers at once.
+    /// Returns `false` if any peer is pending or has detected a desync,
+    /// or if there are no remote peers.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Wait until all peers are synchronized before exiting
+    /// if session.confirmed_frame() >= target_frames && session.is_synchronized() {
+    ///     break;
+    /// }
+    /// ```
+    #[must_use]
+    pub fn is_synchronized(&self) -> bool {
+        let remote_handles = self.player_reg.remote_player_handles();
+        if remote_handles.is_empty() {
+            // No remote peers - always synchronized with ourselves
+            return true;
+        }
+
+        remote_handles
+            .iter()
+            .all(|&handle| matches!(self.sync_health(handle), Some(SyncHealth::InSync)))
+    }
+
+    /// Returns the highest frame for which checksums have been verified to match.
+    ///
+    /// This is useful for ensuring synchronization has been verified up to a
+    /// specific point before terminating a session.
+    ///
+    /// # Returns
+    ///
+    /// * `Some(frame)` - The highest frame where checksums matched between all peers
+    /// * `None` - No checksum comparison has successfully completed yet
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Ensure we've verified sync up to the target before exiting
+    /// let target = Frame::new(100);
+    /// if let Some(verified) = session.last_verified_frame() {
+    ///     if verified >= target {
+    ///         // Safe to terminate - verified sync at target frame
+    ///     }
+    /// }
+    /// ```
+    #[must_use]
+    pub fn last_verified_frame(&self) -> Option<Frame> {
+        self.last_verified_frame
+    }
+
+    /// Returns detailed synchronization information for all remote peers.
+    ///
+    /// This method provides a comprehensive view of the synchronization status
+    /// with all connected remote players. Useful for debugging and diagnostics.
+    ///
+    /// # Returns
+    ///
+    /// A vector of tuples containing `(PlayerHandle, SyncHealth)` for each
+    /// remote player. The vector is empty if there are no remote players.
+    #[must_use]
+    pub fn all_sync_health(&self) -> Vec<(PlayerHandle, SyncHealth)> {
+        self.player_reg
+            .remote_player_handles()
+            .into_iter()
+            .filter_map(|handle| self.sync_health(handle).map(|health| (handle, health)))
+            .collect()
     }
 
     fn disconnect_player_at_frame(&mut self, player_handle: PlayerHandle, last_frame: Frame) {
@@ -1295,6 +1628,12 @@ impl<T: Config> P2PSession<T> {
                                     remote_checksum,
                                     addr: remote.peer_addr(),
                                 });
+                            } else {
+                                // Checksums match - update last verified frame
+                                self.last_verified_frame = match self.last_verified_frame {
+                                    Some(current) if current >= remote_frame => Some(current),
+                                    _ => Some(remote_frame),
+                                };
                             }
                             checked_frames.push(remote_frame);
                         }
@@ -1354,5 +1693,367 @@ impl<T: Config> P2PSession<T> {
             },
             DesyncDetection::Off => (),
         }
+    }
+}
+
+impl<T: Config> InvariantChecker for P2PSession<T> {
+    /// Checks that the session's invariants are satisfied.
+    ///
+    /// This method verifies:
+    /// 1. No desync has been detected with any remote peer
+    /// 2. The session state is consistent
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - All invariants hold
+    /// * `Err(InvariantViolation)` - A desync or other invariant violation was detected
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fortress_rollback::telemetry::InvariantChecker;
+    ///
+    /// // In tests, assert invariants after operations
+    /// session.advance_frame()?;
+    /// assert!(session.check_invariants().is_ok(), "Session invariants violated");
+    ///
+    /// // Or use the macro for debug-only checks
+    /// fortress_rollback::debug_check_invariants!(session);
+    /// ```
+    fn check_invariants(&self) -> Result<(), InvariantViolation> {
+        // Check for any desync with remote peers
+        for (handle, health) in self.all_sync_health() {
+            if let SyncHealth::DesyncDetected {
+                frame,
+                local_checksum,
+                remote_checksum,
+            } = health
+            {
+                return Err(InvariantViolation::new(
+                    "P2PSession",
+                    "checksum mismatch detected with remote peer",
+                )
+                .with_details(format!(
+                    "Desync at frame {} with player {}: local={:#x}, remote={:#x}",
+                    frame, handle, local_checksum, remote_checksum
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Config;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    /// A minimal test configuration for unit testing.
+    struct TestConfig;
+
+    impl Config for TestConfig {
+        type Input = u8;
+        type State = u8;
+        type Address = SocketAddr;
+    }
+
+    fn test_addr(port: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+    }
+
+    // ==========================================
+    // SyncHealth Tests
+    // ==========================================
+
+    #[test]
+    fn sync_health_in_sync_equality() {
+        let a = SyncHealth::InSync;
+        let b = SyncHealth::InSync;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn sync_health_pending_equality() {
+        let a = SyncHealth::Pending;
+        let b = SyncHealth::Pending;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn sync_health_desync_equality() {
+        let a = SyncHealth::DesyncDetected {
+            frame: Frame::new(10),
+            local_checksum: 0x1234,
+            remote_checksum: 0x5678,
+        };
+        let b = SyncHealth::DesyncDetected {
+            frame: Frame::new(10),
+            local_checksum: 0x1234,
+            remote_checksum: 0x5678,
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn sync_health_desync_inequality() {
+        let a = SyncHealth::DesyncDetected {
+            frame: Frame::new(10),
+            local_checksum: 0x1234,
+            remote_checksum: 0x5678,
+        };
+        let b = SyncHealth::DesyncDetected {
+            frame: Frame::new(11), // different frame
+            local_checksum: 0x1234,
+            remote_checksum: 0x5678,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn sync_health_different_variants_not_equal() {
+        let in_sync = SyncHealth::InSync;
+        let pending = SyncHealth::Pending;
+        let desync = SyncHealth::DesyncDetected {
+            frame: Frame::new(1),
+            local_checksum: 1,
+            remote_checksum: 2,
+        };
+
+        assert_ne!(in_sync, pending);
+        assert_ne!(in_sync, desync);
+        assert_ne!(pending, desync);
+    }
+
+    #[test]
+    fn sync_health_clone() {
+        let original = SyncHealth::DesyncDetected {
+            frame: Frame::new(42),
+            local_checksum: 0xDEAD,
+            remote_checksum: 0xBEEF,
+        };
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn sync_health_debug_format() {
+        let health = SyncHealth::InSync;
+        let debug_str = format!("{:?}", health);
+        assert!(debug_str.contains("InSync"));
+
+        let pending = SyncHealth::Pending;
+        let debug_str = format!("{:?}", pending);
+        assert!(debug_str.contains("Pending"));
+
+        let desync = SyncHealth::DesyncDetected {
+            frame: Frame::new(100),
+            local_checksum: 0x1234,
+            remote_checksum: 0x5678,
+        };
+        let debug_str = format!("{:?}", desync);
+        assert!(debug_str.contains("DesyncDetected"));
+        assert!(debug_str.contains("100") || debug_str.contains("Frame"));
+    }
+
+    // ==========================================
+    // PlayerRegistry Tests
+    // ==========================================
+
+    #[test]
+    fn player_registry_new_is_empty() {
+        let registry = PlayerRegistry::<TestConfig>::new();
+        assert_eq!(registry.num_players(), 0);
+        assert_eq!(registry.num_spectators(), 0);
+        assert!(registry.local_player_handles().is_empty());
+        assert!(registry.remote_player_handles().is_empty());
+        assert!(registry.spectator_handles().is_empty());
+    }
+
+    #[test]
+    fn player_registry_default_is_empty() {
+        let registry = PlayerRegistry::<TestConfig>::default();
+        assert_eq!(registry.num_players(), 0);
+        assert_eq!(registry.num_spectators(), 0);
+    }
+
+    #[test]
+    fn player_registry_with_local_player() {
+        let mut registry = PlayerRegistry::<TestConfig>::new();
+        let handle = PlayerHandle::new(0);
+        registry.handles.insert(handle, PlayerType::Local);
+
+        assert_eq!(registry.num_players(), 1);
+        assert_eq!(registry.num_spectators(), 0);
+        assert_eq!(registry.local_player_handles(), vec![handle]);
+        assert!(registry.remote_player_handles().is_empty());
+        assert!(registry.spectator_handles().is_empty());
+    }
+
+    #[test]
+    fn player_registry_with_remote_player() {
+        let mut registry = PlayerRegistry::<TestConfig>::new();
+        let handle = PlayerHandle::new(1);
+        let addr = test_addr(8080);
+        registry.handles.insert(handle, PlayerType::Remote(addr));
+
+        assert_eq!(registry.num_players(), 1);
+        assert_eq!(registry.num_spectators(), 0);
+        assert!(registry.local_player_handles().is_empty());
+        assert_eq!(registry.remote_player_handles(), vec![handle]);
+        assert!(registry.spectator_handles().is_empty());
+    }
+
+    #[test]
+    fn player_registry_with_spectator() {
+        let mut registry = PlayerRegistry::<TestConfig>::new();
+        let handle = PlayerHandle::new(10);
+        let addr = test_addr(9090);
+        registry.handles.insert(handle, PlayerType::Spectator(addr));
+
+        assert_eq!(registry.num_players(), 0);
+        assert_eq!(registry.num_spectators(), 1);
+        assert!(registry.local_player_handles().is_empty());
+        assert!(registry.remote_player_handles().is_empty());
+        let spectators = registry.spectator_handles();
+        assert_eq!(spectators, vec![handle]);
+    }
+
+    #[test]
+    fn player_registry_mixed_players() {
+        let mut registry = PlayerRegistry::<TestConfig>::new();
+
+        // Add local player
+        let local_handle = PlayerHandle::new(0);
+        registry.handles.insert(local_handle, PlayerType::Local);
+
+        // Add remote player
+        let remote_handle = PlayerHandle::new(1);
+        let remote_addr = test_addr(8080);
+        registry
+            .handles
+            .insert(remote_handle, PlayerType::Remote(remote_addr));
+
+        // Add spectator
+        let spec_handle = PlayerHandle::new(10);
+        let spec_addr = test_addr(9090);
+        registry
+            .handles
+            .insert(spec_handle, PlayerType::Spectator(spec_addr));
+
+        assert_eq!(registry.num_players(), 2); // local + remote
+        assert_eq!(registry.num_spectators(), 1);
+        assert_eq!(registry.local_player_handles(), vec![local_handle]);
+        assert_eq!(registry.remote_player_handles(), vec![remote_handle]);
+    }
+
+    #[test]
+    fn player_registry_handles_by_address_remote() {
+        let mut registry = PlayerRegistry::<TestConfig>::new();
+        let addr = test_addr(8080);
+
+        let handle1 = PlayerHandle::new(1);
+        registry.handles.insert(handle1, PlayerType::Remote(addr));
+
+        // Look up by address
+        let found = registry.handles_by_address(addr);
+        assert_eq!(found.len(), 1);
+        assert!(found.contains(&handle1));
+    }
+
+    #[test]
+    fn player_registry_handles_by_address_spectator() {
+        let mut registry = PlayerRegistry::<TestConfig>::new();
+        let addr = test_addr(9090);
+
+        let handle = PlayerHandle::new(10);
+        registry.handles.insert(handle, PlayerType::Spectator(addr));
+
+        let found = registry.handles_by_address(addr);
+        assert_eq!(found.len(), 1);
+        assert!(found.contains(&handle));
+    }
+
+    #[test]
+    fn player_registry_handles_by_address_not_found() {
+        let mut registry = PlayerRegistry::<TestConfig>::new();
+        let addr = test_addr(8080);
+        let other_addr = test_addr(9999);
+
+        let handle = PlayerHandle::new(1);
+        registry.handles.insert(handle, PlayerType::Remote(addr));
+
+        // Look up different address
+        let found = registry.handles_by_address(other_addr);
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn player_registry_handles_by_address_excludes_local() {
+        let mut registry = PlayerRegistry::<TestConfig>::new();
+
+        let handle = PlayerHandle::new(0);
+        registry.handles.insert(handle, PlayerType::Local);
+
+        // Local players don't have addresses, so any address lookup returns empty
+        let found = registry.handles_by_address(test_addr(1234));
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn player_registry_multiple_handles_same_address() {
+        let mut registry = PlayerRegistry::<TestConfig>::new();
+        let addr = test_addr(8080);
+
+        // Two players at the same address (e.g., couch co-op on remote machine)
+        let handle1 = PlayerHandle::new(1);
+        let handle2 = PlayerHandle::new(2);
+        registry.handles.insert(handle1, PlayerType::Remote(addr));
+        registry.handles.insert(handle2, PlayerType::Remote(addr));
+
+        let found = registry.handles_by_address(addr);
+        assert_eq!(found.len(), 2);
+        assert!(found.contains(&handle1));
+        assert!(found.contains(&handle2));
+    }
+
+    #[test]
+    fn player_registry_debug_format() {
+        let mut registry = PlayerRegistry::<TestConfig>::new();
+        let addr = test_addr(8080);
+
+        registry
+            .handles
+            .insert(PlayerHandle::new(0), PlayerType::Local);
+        registry
+            .handles
+            .insert(PlayerHandle::new(1), PlayerType::Remote(addr));
+
+        let debug_str = format!("{:?}", registry);
+        assert!(debug_str.contains("PlayerRegistry"));
+        assert!(debug_str.contains("handles"));
+        assert!(debug_str.contains("remotes"));
+        assert!(debug_str.contains("spectators"));
+    }
+
+    // ==========================================
+    // Constant Tests
+    // ==========================================
+
+    #[test]
+    fn recommendation_interval_is_reasonable() {
+        // 60 frames at 60fps = 1 second
+        assert_eq!(RECOMMENDATION_INTERVAL, Frame::new(60));
+    }
+
+    #[test]
+    fn min_recommendation_is_reasonable() {
+        // At least 2 frames to avoid micro-stuttering, but not more than 10
+        // Use const_assert pattern to satisfy clippy about const assertions
+        const _: () = assert!(MIN_RECOMMENDATION >= 2);
+        const _: () = assert!(MIN_RECOMMENDATION <= 10);
+        // Verify at runtime the constant is what we expect
+        assert_eq!(MIN_RECOMMENDATION, 3);
     }
 }

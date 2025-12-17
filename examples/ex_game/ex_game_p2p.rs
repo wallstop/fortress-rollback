@@ -6,6 +6,8 @@ use fortress_rollback::{
     DesyncDetection, PlayerHandle, PlayerType, SaveMode, SessionBuilder, SessionState,
     UdpNonBlockingSocket,
 };
+// Note: Import SyncHealth when implementing termination logic (see comment block below)
+// use fortress_rollback::SyncHealth;
 use macroquad::prelude::*;
 use std::net::SocketAddr;
 use web_time::{Duration, Instant};
@@ -54,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // create a Fortress Rollback session
     let mut sess_build = SessionBuilder::<FortressConfig>::new()
         .with_num_players(num_players)
-        // (optional) exchange and validate state checksums
+        // (optional) customize desync detection interval (default: 60 frames)
         .with_desync_detection_mode(DesyncDetection::On { interval: 100 })
         // (optional) set expected update frequency
         .with_fps(FPS as usize)?
@@ -110,6 +112,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for event in sess.events() {
             info!("Event: {:?}", event);
         }
+
+        // -----------------------------------------------------------------------
+        // Session Termination Pattern (Example)
+        // -----------------------------------------------------------------------
+        // If you need to terminate the session (e.g., game over), DO NOT use
+        // confirmed_frame() alone! Peers may be at different frames.
+        //
+        // CORRECT termination pattern:
+        //
+        //   let target_frames = Frame::new(1000);  // Your end condition
+        //   if sess.confirmed_frame() >= target_frames {
+        //       // Check sync health before terminating
+        //       for handle in sess.remote_player_handles() {
+        //           match sess.sync_health(handle) {
+        //               Some(SyncHealth::InSync) => {
+        //                   // Safe to exit - checksums match
+        //               }
+        //               Some(SyncHealth::DesyncDetected { frame, .. }) => {
+        //                   panic!("Desync detected at frame {}!", frame);
+        //               }
+        //               Some(SyncHealth::Pending) | None => {
+        //                   // Keep polling until we have checksum verification
+        //                   continue;
+        //               }
+        //           }
+        //       }
+        //       break;  // All peers verified, safe to terminate
+        //   }
+        //
+        // See docs/user-guide.md "Common Pitfalls" for more details.
+        // -----------------------------------------------------------------------
 
         // this is to keep ticks between clients synchronized.
         // if a client is ahead, it will run frames slightly slower to allow catching up

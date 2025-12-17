@@ -13,12 +13,13 @@ This document provides a comprehensive overview of Fortress Rollback's internal 
 3. [Component Architecture](#component-architecture)
 4. [Data Flow](#data-flow)
 5. [Session Types](#session-types)
-6. [Synchronization Protocol](#synchronization-protocol)
-7. [Rollback Mechanics](#rollback-mechanics)
-8. [State Management](#state-management)
-9. [Network Protocol](#network-protocol)
-10. [Error Handling](#error-handling)
-11. [Type Safety Features](#type-safety-features)
+6. [Session Lifecycle](#session-lifecycle)
+7. [Synchronization Protocol](#synchronization-protocol)
+8. [Rollback Mechanics](#rollback-mechanics)
+9. [State Management](#state-management)
+10. [Network Protocol](#network-protocol)
+11. [Error Handling](#error-handling)
+12. [Type Safety Features](#type-safety-features)
 
 ---
 
@@ -342,6 +343,266 @@ let session = SessionBuilder::<MyConfig>::new()
 - Simulates rollback every frame
 - Compares checksums after resimulation
 - Detects non-deterministic behavior
+
+---
+
+## Session Lifecycle
+
+Understanding the full lifecycle of a session is critical for proper integration. A `P2PSession` progresses through distinct phases, and improper handling—especially during termination—can cause determinism failures.
+
+### Lifecycle Phases
+
+```
+┌──────────────┐    ┌──────────────────┐    ┌─────────────┐    ┌──────────────┐
+│   Creation   │───►│  Synchronizing   │───►│   Running   │───►│  Terminated  │
+│  (Builder)   │    │ (Handshake)      │    │ (Gameplay)  │    │  (Cleanup)   │
+└──────────────┘    └──────────────────┘    └─────────────┘    └──────────────┘
+```
+
+### Phase 1: Creation (Builder Pattern)
+
+Sessions are created using `SessionBuilder`:
+
+```rust
+let session = SessionBuilder::<MyConfig>::new()
+    .with_num_players(2)
+    .with_input_delay(2)
+    .with_max_prediction_window(8)
+    .with_fps(60)?
+    .with_desync_detection_mode(DesyncDetection::On { interval: 60 })
+    .add_player(PlayerType::Local, PlayerHandle::new(0))?
+    .add_player(PlayerType::Remote(peer_addr), PlayerHandle::new(1))?
+    .start_p2p_session(socket)?;
+```
+
+**State after creation:** `SessionState::Synchronizing`
+
+At this point:
+- Network connections are initialized but not yet established
+- Input queues are empty
+- No game state has been saved
+
+### Phase 2: Synchronizing (Handshake)
+
+During synchronization, peers exchange packets to establish:
+- Round-trip time measurements
+- Magic number for session identification
+- Confirmation both peers are ready
+
+```rust
+// Poll until synchronized
+loop {
+    session.poll_remote_clients();
+    
+    // Check synchronization events
+    for event in session.events() {
+        match event {
+            FortressEvent::Synchronizing { addr, count, total, .. } => {
+                println!("Syncing with {}: {}/{}", addr, count, total);
+            }
+            FortressEvent::Synchronized { addr } => {
+                println!("Fully synchronized with {}", addr);
+            }
+            _ => {}
+        }
+    }
+    
+    // Session transitions to Running when all peers synchronized
+    if session.current_state() == SessionState::Running {
+        break;
+    }
+    
+    std::thread::sleep(Duration::from_millis(16));
+}
+```
+
+**Events during synchronization:**
+- `Synchronizing { count, total }` — Progress updates
+- `Synchronized { addr }` — Peer fully synchronized
+
+**Transition to Running:** Automatic when all remote peers complete handshake
+
+### Phase 3: Running (Gameplay)
+
+This is the main gameplay phase where frames are processed:
+
+```rust
+while game_running {
+    // 1. Poll network (critical - do this frequently)
+    session.poll_remote_clients();
+    
+    // 2. Handle events
+    for event in session.events() {
+        handle_event(event);
+    }
+    
+    // 3. Only advance frames when Running
+    if session.current_state() == SessionState::Running {
+        // Add local input
+        session.add_local_input(local_handle, input)?;
+        
+        // Process frame
+        for request in session.advance_frame()? {
+            match request {
+                FortressRequest::SaveGameState { cell, frame } => {
+                    cell.save(frame, Some(state.clone()), Some(checksum));
+                }
+                FortressRequest::LoadGameState { cell, .. } => {
+                    state = cell.load().expect("State must exist");
+                }
+                FortressRequest::AdvanceFrame { inputs } => {
+                    state.update(&inputs);
+                }
+            }
+        }
+    }
+}
+```
+
+**Key invariants during Running:**
+- `add_local_input()` must be called for all local players before `advance_frame()`
+- Requests must be processed in order
+- Game state must be deterministic
+
+### Phase 4: Termination (Critical!)
+
+**⚠️ WARNING: Improper termination is the #1 cause of multiplayer bugs.**
+
+#### The Anti-Pattern (DON'T DO THIS)
+
+```rust
+// ❌ WRONG: This causes race conditions and flaky behavior
+while session.confirmed_frame() < target_frame {
+    session.poll_remote_clients();
+    if session.current_state() == SessionState::Running {
+        session.add_local_input(handle, input)?;
+        session.advance_frame()?;
+    }
+}
+// Session dropped here - but sync status unknown!
+```
+
+The problem: `confirmed_frame()` reaching your target does NOT mean:
+- Both peers have the same game state
+- All rollbacks have completed
+- Checksums have been verified
+
+#### The Correct Pattern
+
+```rust
+// ✅ CORRECT: Use sync_health() to verify synchronization
+use fortress_rollback::SyncHealth;
+
+// Continue until sync verified
+loop {
+    session.poll_remote_clients();
+    
+    // Check if synchronized
+    let all_synced = session.local_player_handles()
+        .iter()
+        .filter_map(|h| session.sync_health(*h))
+        .all(|health| matches!(health, SyncHealth::InSync));
+    
+    if all_synced && session.confirmed_frame() >= target_frame {
+        // Safe to terminate - checksums match
+        break;
+    }
+    
+    // Check for desync
+    for handle in session.local_player_handles() {
+        if let Some(SyncHealth::DesyncDetected { frame, .. }) = session.sync_health(handle) {
+            panic!("Desync detected at frame {}!", frame);
+        }
+    }
+    
+    // Continue processing
+    if session.current_state() == SessionState::Running {
+        session.add_local_input(handle, input)?;
+        for request in session.advance_frame()? {
+            handle_request(request, &mut state);
+        }
+    }
+    
+    std::thread::sleep(Duration::from_millis(1));
+}
+```
+
+#### Termination Checklist
+
+Before dropping a session, verify:
+
+1. ✅ `sync_health()` returns `InSync` for all remote peers
+2. ✅ `confirmed_frame()` has reached your target
+3. ✅ No pending `DesyncDetected` events
+4. ✅ Final game state has been synchronized
+
+### Session State Machine
+
+```
+                              ┌─────────────────┐
+                              │  Synchronizing  │
+                              │                 │
+                              │  - Exchanging   │
+                         ┌───►│    sync pkts    │
+                         │    │  - Measuring    │
+                         │    │    RTT          │
+                         │    └────────┬────────┘
+                         │             │ All peers
+                         │             │ synchronized
+    ┌────────────────────┤             ▼
+    │  NetworkInterrupted│    ┌─────────────────┐
+    │  (timeout not      │    │     Running     │
+    │   exceeded)        │    │                 │
+    │                    │    │  - Processing   │
+    │                    │    │    frames       │
+    │                    │    │  - Rollbacks    │
+    │                    │    │  - Checksums    │
+    │                    └────┤                 │
+    │                         └────────┬────────┘
+    │                                  │ Peer disconnected
+    │                                  │ or timeout
+    │                                  ▼
+    │                         ┌─────────────────┐
+    │                         │  Disconnected   │
+    │                         │  (per-peer)     │
+    │                         └─────────────────┘
+    │
+    │  NetworkResumed
+    └─────────────────────────────────────────────
+```
+
+### FortressRequest Semantics
+
+Each request type has specific implications for game state:
+
+| Request | When Generated | Game State Impact |
+|---------|----------------|-------------------|
+| `SaveGameState` | Before advancing a frame | Clone current state to cell |
+| `LoadGameState` | Rollback triggered | Replace state with saved version |
+| `AdvanceFrame` | Each simulation step | Apply inputs, increment frame |
+
+**Request Ordering Guarantees:**
+
+1. `LoadGameState` always precedes re-simulation `AdvanceFrame` requests
+2. `SaveGameState` comes before its corresponding `AdvanceFrame`
+3. A rollback sequence looks like: `Load → (Save → Advance)* → Save → Advance`
+
+**Example Rollback Sequence:**
+
+```
+Current frame: 10, rollback to frame 7
+
+Requests generated:
+1. LoadGameState { frame: 7 }     // Restore state at frame 7
+2. SaveGameState { frame: 7 }     // Re-save (sparse mode skips this)
+3. AdvanceFrame { inputs: [...] } // Resimulate frame 7→8
+4. SaveGameState { frame: 8 }
+5. AdvanceFrame { inputs: [...] } // Resimulate frame 8→9
+6. SaveGameState { frame: 9 }
+7. AdvanceFrame { inputs: [...] } // Resimulate frame 9→10
+8. SaveGameState { frame: 10 }
+9. AdvanceFrame { inputs: [...] } // New frame 10→11
+```
 
 ---
 

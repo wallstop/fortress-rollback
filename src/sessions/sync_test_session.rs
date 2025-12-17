@@ -327,3 +327,333 @@ impl<T: Config> SyncTestSession<T> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::telemetry::CollectingObserver;
+    use std::net::SocketAddr;
+
+    /// A minimal test configuration for unit testing.
+    struct TestConfig;
+
+    impl Config for TestConfig {
+        type Input = u32;
+        type State = Vec<u8>;
+        type Address = SocketAddr;
+    }
+
+    // ==========================================
+    // Constructor Tests
+    // ==========================================
+
+    #[test]
+    fn sync_test_session_new_creates_valid_session() {
+        let session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 2, 2, None);
+
+        assert_eq!(session.num_players(), 2);
+        assert_eq!(session.max_prediction(), 8);
+        assert_eq!(session.check_distance(), 2);
+        assert_eq!(session.current_frame(), Frame::new(0));
+        assert!(session.violation_observer().is_none());
+    }
+
+    #[test]
+    fn sync_test_session_with_queue_length_creates_valid_session() {
+        let session: SyncTestSession<TestConfig> =
+            SyncTestSession::with_queue_length(4, 16, 3, 1, None, 64);
+
+        assert_eq!(session.num_players(), 4);
+        assert_eq!(session.max_prediction(), 16);
+        assert_eq!(session.check_distance(), 3);
+        assert_eq!(session.current_frame(), Frame::new(0));
+    }
+
+    #[test]
+    fn sync_test_session_with_violation_observer() {
+        let observer = Arc::new(CollectingObserver::new());
+        let session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 2, 2, Some(observer));
+
+        assert!(session.violation_observer().is_some());
+    }
+
+    #[test]
+    fn sync_test_session_single_player() {
+        let session: SyncTestSession<TestConfig> = SyncTestSession::new(1, 8, 2, 0, None);
+
+        assert_eq!(session.num_players(), 1);
+    }
+
+    #[test]
+    fn sync_test_session_zero_check_distance() {
+        let session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 0, 2, None);
+
+        assert_eq!(session.check_distance(), 0);
+    }
+
+    #[test]
+    fn sync_test_session_zero_input_delay() {
+        let session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 2, 0, None);
+
+        // Just ensure construction succeeds
+        assert_eq!(session.current_frame(), Frame::new(0));
+    }
+
+    // ==========================================
+    // add_local_input Tests
+    // ==========================================
+
+    #[test]
+    fn add_local_input_valid_handle_succeeds() {
+        let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 0, 0, None);
+
+        let result = session.add_local_input(PlayerHandle::new(0), 42);
+        assert!(result.is_ok());
+
+        let result = session.add_local_input(PlayerHandle::new(1), 100);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn add_local_input_invalid_handle_fails() {
+        let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 0, 0, None);
+
+        let result = session.add_local_input(PlayerHandle::new(2), 42);
+        assert!(result.is_err());
+
+        match result {
+            Err(FortressError::InvalidRequest { info }) => {
+                assert!(info.contains("not valid"));
+            },
+            _ => panic!("Expected InvalidRequest error"),
+        }
+    }
+
+    #[test]
+    fn add_local_input_overwrites_previous_input() {
+        let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(1, 8, 0, 0, None);
+
+        // Add first input
+        session
+            .add_local_input(PlayerHandle::new(0), 42)
+            .expect("should succeed");
+
+        // Overwrite with second input
+        session
+            .add_local_input(PlayerHandle::new(0), 100)
+            .expect("should succeed");
+
+        // Advance frame to verify the latest input is used
+        let requests = session.advance_frame().expect("should advance");
+
+        // Find the AdvanceFrame request
+        let advance_request = requests
+            .iter()
+            .find(|r| matches!(r, FortressRequest::AdvanceFrame { .. }));
+        assert!(advance_request.is_some());
+
+        if let Some(FortressRequest::AdvanceFrame { inputs }) = advance_request {
+            assert_eq!(inputs[0].0, 100); // Second input should be used
+        }
+    }
+
+    // ==========================================
+    // advance_frame Tests
+    // ==========================================
+
+    #[test]
+    fn advance_frame_requires_all_inputs() {
+        let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 0, 0, None);
+
+        // Only add input for player 0
+        session
+            .add_local_input(PlayerHandle::new(0), 42)
+            .expect("should succeed");
+
+        let result = session.advance_frame();
+        assert!(result.is_err());
+
+        match result {
+            Err(FortressError::InvalidRequest { info }) => {
+                assert!(info.contains("Missing local input"));
+            },
+            _ => panic!("Expected InvalidRequest error"),
+        }
+    }
+
+    #[test]
+    fn advance_frame_with_all_inputs_succeeds() {
+        let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 0, 0, None);
+
+        session
+            .add_local_input(PlayerHandle::new(0), 42)
+            .expect("should succeed");
+        session
+            .add_local_input(PlayerHandle::new(1), 100)
+            .expect("should succeed");
+
+        let requests = session.advance_frame();
+        assert!(requests.is_ok());
+
+        let requests = requests.unwrap();
+        // With check_distance 0, we should only get AdvanceFrame
+        assert!(requests
+            .iter()
+            .any(|r| matches!(r, FortressRequest::AdvanceFrame { .. })));
+    }
+
+    #[test]
+    fn advance_frame_increments_current_frame() {
+        let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(1, 8, 0, 0, None);
+
+        assert_eq!(session.current_frame(), Frame::new(0));
+
+        session
+            .add_local_input(PlayerHandle::new(0), 42)
+            .expect("should succeed");
+        session.advance_frame().expect("should advance");
+
+        assert_eq!(session.current_frame(), Frame::new(1));
+    }
+
+    #[test]
+    fn advance_frame_clears_inputs() {
+        let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(1, 8, 0, 0, None);
+
+        session
+            .add_local_input(PlayerHandle::new(0), 42)
+            .expect("should succeed");
+        session.advance_frame().expect("should advance");
+
+        // Next advance should fail because inputs are cleared
+        let result = session.advance_frame();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn advance_frame_with_check_distance_produces_save_request() {
+        let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(1, 8, 2, 0, None);
+
+        session
+            .add_local_input(PlayerHandle::new(0), 42)
+            .expect("should succeed");
+
+        let requests = session.advance_frame().expect("should advance");
+
+        // With check_distance > 0, we should get a SaveGameState request
+        assert!(requests
+            .iter()
+            .any(|r| matches!(r, FortressRequest::SaveGameState { .. })));
+    }
+
+    #[test]
+    fn advance_frame_multiple_times() {
+        let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(1, 8, 0, 0, None);
+
+        for frame in 1..=10 {
+            session
+                .add_local_input(PlayerHandle::new(0), frame as u32)
+                .expect("should succeed");
+            session.advance_frame().expect("should advance");
+            assert_eq!(session.current_frame(), Frame::new(frame));
+        }
+    }
+
+    #[test]
+    fn advance_frame_no_input_for_any_player() {
+        let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 0, 0, None);
+
+        // Don't add any inputs
+        let result = session.advance_frame();
+        assert!(result.is_err());
+
+        match result {
+            Err(FortressError::InvalidRequest { info }) => {
+                assert!(info.contains("Missing local input"));
+            },
+            _ => panic!("Expected InvalidRequest error"),
+        }
+    }
+
+    // ==========================================
+    // Getter Tests
+    // ==========================================
+
+    #[test]
+    fn current_frame_starts_at_zero() {
+        let session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 2, 2, None);
+        assert_eq!(session.current_frame(), Frame::new(0));
+    }
+
+    #[test]
+    fn num_players_returns_correct_value() {
+        for num_players in 1..=4 {
+            let session: SyncTestSession<TestConfig> =
+                SyncTestSession::new(num_players, 8, 2, 2, None);
+            assert_eq!(session.num_players(), num_players);
+        }
+    }
+
+    #[test]
+    fn max_prediction_returns_correct_value() {
+        for max_prediction in [4, 8, 16, 32] {
+            let session: SyncTestSession<TestConfig> =
+                SyncTestSession::new(2, max_prediction, 2, 2, None);
+            assert_eq!(session.max_prediction(), max_prediction);
+        }
+    }
+
+    #[test]
+    fn check_distance_returns_correct_value() {
+        for check_distance in 0..=10 {
+            let session: SyncTestSession<TestConfig> =
+                SyncTestSession::new(2, 8, check_distance, 2, None);
+            assert_eq!(session.check_distance(), check_distance);
+        }
+    }
+
+    #[test]
+    fn violation_observer_none_when_not_set() {
+        let session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 2, 2, None);
+        assert!(session.violation_observer().is_none());
+    }
+
+    #[test]
+    fn violation_observer_some_when_set() {
+        let observer = Arc::new(CollectingObserver::new());
+        let session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 2, 2, Some(observer));
+
+        let stored_observer = session.violation_observer();
+        assert!(stored_observer.is_some());
+    }
+
+    // ==========================================
+    // Edge Case Tests
+    // ==========================================
+
+    #[test]
+    fn many_players_construction() {
+        // Test with a larger number of players
+        let session: SyncTestSession<TestConfig> = SyncTestSession::new(8, 16, 4, 2, None);
+
+        assert_eq!(session.num_players(), 8);
+        assert_eq!(session.max_prediction(), 16);
+    }
+
+    #[test]
+    fn large_check_distance() {
+        // Test with a check distance larger than typical
+        let session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 64, 32, 2, None);
+
+        assert_eq!(session.check_distance(), 32);
+        assert_eq!(session.max_prediction(), 64);
+    }
+
+    #[test]
+    fn small_queue_length() {
+        let session: SyncTestSession<TestConfig> =
+            SyncTestSession::with_queue_length(2, 8, 2, 2, None, 16);
+
+        assert_eq!(session.num_players(), 2);
+    }
+}

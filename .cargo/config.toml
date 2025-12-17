@@ -1,0 +1,36 @@
+# Cargo build configuration for faster compilation
+# See: https://doc.rust-lang.org/cargo/reference/config.html
+
+[target.x86_64-unknown-linux-gnu]
+# Use lld linker for faster linking (installed in devcontainer)
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[target.aarch64-unknown-linux-gnu]
+# Also support ARM64 (e.g., Apple Silicon via Rosetta or native ARM)
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[build]
+# Use all available CPU cores for parallel compilation
+# Adjust if you want to leave cores free for other work
+# jobs = 24
+
+# Note: sccache is configured via RUSTC_WRAPPER environment variable
+# instead of here, so it's automatically used when available.
+# The devcontainer sets this up in .bashrc when sccache is installed.
+
+[profile.dev]
+# Split debug info for faster incremental linking
+split-debuginfo = "unpacked"
+
+# Note: [profile.dev.package."*"] with opt-level=1 is defined in Cargo.toml
+# to optimize dependencies while keeping local code unoptimized for faster builds
+
+[alias]
+# Convenient aliases for common operations
+t = "nextest run"
+qt = "nextest run --no-fail-fast"
+ci = "nextest run --profile ci"
+c = "clippy --all-targets"
+b = "build --all-targets"

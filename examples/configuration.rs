@@ -57,7 +57,7 @@ fn basic_configuration() {
         // Optional: Set expected framerate for timing calculations
         .with_fps(60)
         .expect("FPS must be > 0")
-        // Optional: Enable desync detection every 100 frames
+        // Optional: Customize desync detection interval (default: 60 frames)
         .with_desync_detection_mode(DesyncDetection::On { interval: 100 })
         // Optional: Control how far ahead the game can predict (0 = lockstep)
         .with_max_prediction_window(8);

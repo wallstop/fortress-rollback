@@ -164,6 +164,109 @@ if !observer.is_empty() {
 
 See the [User Guide - Complete Configuration Reference](user-guide.md#complete-configuration-reference) for full documentation.
 
+## New Desync Detection APIs
+
+Fortress Rollback adds new APIs for detecting and monitoring desynchronization:
+
+### SyncHealth API
+
+The new `SyncHealth` enum and associated methods provide proper synchronization status checking:
+
+```rust
+use fortress_rollback::SyncHealth;
+
+// Check sync status with a specific peer
+match session.sync_health(peer_handle) {
+    Some(SyncHealth::InSync) => println!("Synchronized"),
+    Some(SyncHealth::Pending) => println!("Waiting for checksum data"),
+    Some(SyncHealth::DesyncDetected { frame, .. }) => {
+        panic!("Desync detected at frame {}", frame)
+    }
+    None => {} // Not a remote player
+}
+
+// Check all peers at once
+if session.is_synchronized() {
+    println!("All peers in sync");
+}
+
+// Get the highest verified frame
+if let Some(frame) = session.last_verified_frame() {
+    println!("Verified sync up to frame {}", frame);
+}
+```
+
+### NetworkStats Checksum Fields
+
+`NetworkStats` now includes desync detection fields:
+
+```rust
+let stats = session.network_stats(peer_handle)?;
+println!("Last compared: {:?}", stats.last_compared_frame);
+println!("Checksums match: {:?}", stats.checksums_match);
+```
+
+## Important Behavioral Differences
+
+### Session Termination Pattern
+
+**⚠️ Warning for GGRS users:** If you were using `confirmed_frame()` or `last_confirmed_frame()` to determine when to terminate a session, this pattern is incorrect and can lead to subtle bugs.
+
+```rust
+// ⚠️ WRONG: This was a common GGRS pattern that doesn't work correctly
+if session.confirmed_frame() >= target_frames {
+    break; // Dangerous! Peers may be at different frames!
+}
+```
+
+The correct pattern uses the new `SyncHealth` API:
+
+```rust
+// ✓ CORRECT: Use sync_health() to verify peer synchronization
+if session.confirmed_frame() >= target_frames {
+    match session.sync_health(peer_handle) {
+        Some(SyncHealth::InSync) => break, // Safe to exit
+        Some(SyncHealth::DesyncDetected { .. }) => panic!("Desync!"),
+        _ => continue, // Keep polling until verified
+    }
+}
+```
+
+See [Common Pitfalls](user-guide.md#common-pitfalls) in the User Guide for full details.
+
+### Desync Detection Default
+
+**⚠️ Breaking Change:** Desync detection is now **enabled by default** with `DesyncDetection::On { interval: 60 }` (once per second at 60fps).
+
+This is a deliberate departure from GGRS, which defaulted to `Off`. Fortress Rollback enables detection by default because:
+
+- Silent desync is a correctness bug that's extremely difficult to debug
+- The overhead is minimal (one checksum comparison per second)
+- Early detection prevents subtle multiplayer issues from reaching production
+- This aligns with our correctness-first philosophy
+
+If you need to disable desync detection (e.g., for performance benchmarking), explicitly opt out:
+
+```rust
+use fortress_rollback::DesyncDetection;
+
+let session = SessionBuilder::<GameConfig>::new()
+    .with_desync_detection_mode(DesyncDetection::Off) // Explicit opt-out
+    // ...
+    .start_p2p_session(socket)?;
+```
+
+For tighter detection (e.g., competitive games with anti-cheat needs), reduce the interval:
+
+```rust
+use fortress_rollback::DesyncDetection;
+
+let session = SessionBuilder::<GameConfig>::new()
+    .with_desync_detection_mode(DesyncDetection::On { interval: 10 }) // 6 checks/sec at 60fps
+    // ...
+    .start_p2p_session(socket)?;
+```
+
 ## More Information
 
 For a complete comparison of features, bug fixes, and improvements, see [Fortress vs GGRS](fortress-vs-ggrs.md).

@@ -727,3 +727,299 @@ mod property_metamorphic {
         }
     }
 }
+
+// ============================================================================
+// Termination Metamorphic Tests (Phase 4)
+// ============================================================================
+//
+// These tests verify that:
+// 1. Same inputs + same confirmed frame → same checksum regardless of arrival timing
+// 2. Determinism is maintained through save/load cycles
+
+mod termination_tests {
+    use super::*;
+
+    /// Run a synctest session and verify checksum determinism.
+    ///
+    /// The key metamorphic property is: given the same inputs processed in the same order,
+    /// the checksum at any given frame should be identical regardless of when during
+    /// the simulation it is computed.
+    fn run_checksum_determinism_test(
+        num_players: usize,
+        num_frames: usize,
+        seed: u64,
+    ) -> Vec<(Frame, u128)> {
+        let inputs = generate_input_sequence(num_players, num_frames, seed);
+        let mut sess = SessionBuilder::<MetaConfig>::new()
+            .with_num_players(num_players)
+            .with_max_prediction_window(8)
+            .with_input_delay(0)
+            .start_synctest_session()
+            .expect("Failed to create session");
+
+        let mut state = MetaGameState::new(num_players);
+        let mut checksums = Vec::new();
+
+        for frame in 0..num_frames {
+            // Add inputs for all players
+            for player in 0..num_players {
+                let input = *inputs.get(&(player, frame)).unwrap();
+                sess.add_local_input(PlayerHandle::new(player), input)
+                    .expect("Failed to add input");
+            }
+
+            // Process requests
+            for request in sess.advance_frame().expect("Failed to advance frame") {
+                match request {
+                    FortressRequest::SaveGameState { cell, frame } => {
+                        let checksum = state.checksum();
+                        cell.save(frame, Some(state.clone()), Some(checksum));
+                        checksums.push((frame, checksum));
+                    },
+                    FortressRequest::LoadGameState { cell, .. } => {
+                        state = cell.load().expect("Failed to load state");
+                    },
+                    FortressRequest::AdvanceFrame { inputs } => {
+                        state.apply_inputs(&inputs);
+                    },
+                    _ => unreachable!("Unknown request type"),
+                }
+            }
+        }
+
+        checksums
+    }
+
+    /// Metamorphic test: Same inputs produce same checksums
+    ///
+    /// This verifies the fundamental determinism property: running the same
+    /// input sequence twice should produce identical checksums at every frame.
+    #[test]
+    fn test_checksum_determinism_across_runs() {
+        let num_players = 2;
+        let num_frames = 50;
+        let seed = 12345u64;
+
+        let checksums1 = run_checksum_determinism_test(num_players, num_frames, seed);
+        let checksums2 = run_checksum_determinism_test(num_players, num_frames, seed);
+
+        assert_eq!(
+            checksums1.len(),
+            checksums2.len(),
+            "Both runs should produce same number of checksums"
+        );
+
+        for ((frame1, cs1), (frame2, cs2)) in checksums1.iter().zip(checksums2.iter()) {
+            assert_eq!(frame1, frame2, "Frames should match");
+            assert_eq!(
+                cs1, cs2,
+                "Checksums should match at frame {}: got {} vs {}",
+                frame1, cs1, cs2
+            );
+        }
+    }
+
+    /// Metamorphic test: Synctest detects checksum mismatch when state differs
+    ///
+    /// When a synctest session runs with correct checksums, it should NOT detect desync.
+    #[test]
+    fn test_synctest_no_desync_with_correct_checksums() {
+        let num_players = 2;
+        let num_frames = 30;
+        let inputs = generate_input_sequence(num_players, num_frames, 54321);
+
+        let mut sess = SessionBuilder::<MetaConfig>::new()
+            .with_num_players(num_players)
+            .with_max_prediction_window(8)
+            .with_input_delay(0)
+            .start_synctest_session()
+            .expect("Failed to create session");
+
+        let mut state = MetaGameState::new(num_players);
+        let mut desync_detected = false;
+
+        for frame in 0..num_frames {
+            for player in 0..num_players {
+                let input = *inputs.get(&(player, frame)).unwrap();
+                sess.add_local_input(PlayerHandle::new(player), input)
+                    .expect("Failed to add input");
+            }
+
+            let result = sess.advance_frame();
+            if result.is_err() {
+                // SyncTestSession returns error on mismatch
+                desync_detected = true;
+                break;
+            }
+
+            for request in result.expect("Failed to advance frame") {
+                match request {
+                    FortressRequest::SaveGameState { cell, frame } => {
+                        // Save with correct checksum - should not trigger desync
+                        cell.save(frame, Some(state.clone()), Some(state.checksum()));
+                    },
+                    FortressRequest::LoadGameState { cell, .. } => {
+                        state = cell.load().expect("Failed to load state");
+                    },
+                    FortressRequest::AdvanceFrame { inputs } => {
+                        state.apply_inputs(&inputs);
+                    },
+                    _ => unreachable!("Unknown request type"),
+                }
+            }
+        }
+
+        // This test verifies that CORRECT code does NOT trigger desync
+        assert!(
+            !desync_detected,
+            "Deterministic session should not detect desync"
+        );
+    }
+
+    /// Metamorphic test: Different seeds produce different checksums
+    ///
+    /// This is the contrapositive of determinism: different inputs should
+    /// generally produce different checksums (with high probability).
+    #[test]
+    fn test_different_inputs_different_checksums() {
+        let num_players = 2;
+        let num_frames = 30;
+
+        let checksums1 = run_checksum_determinism_test(num_players, num_frames, 11111);
+        let checksums2 = run_checksum_determinism_test(num_players, num_frames, 22222);
+
+        // The final checksums should differ (with very high probability)
+        // We compare the last few checksums since early frames may match by chance
+        if checksums1.len() > 5 && checksums2.len() > 5 {
+            let late_cs1: Vec<_> = checksums1.iter().rev().take(5).collect();
+            let late_cs2: Vec<_> = checksums2.iter().rev().take(5).collect();
+
+            let all_match = late_cs1
+                .iter()
+                .zip(late_cs2.iter())
+                .all(|((_, cs1), (_, cs2))| cs1 == cs2);
+
+            assert!(
+                !all_match,
+                "Different seeds should produce different late-game checksums"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod termination_property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(20))]
+
+        /// Property: Checksum at frame N is deterministic regardless of seed
+        /// as long as the generated inputs are the same.
+        #[test]
+        fn prop_checksum_determinism(
+            num_players in 1usize..=3,
+            num_frames in 10usize..=40,
+            seed in any::<u64>(),
+        ) {
+            let checksums1 = run_checksum_determinism_test(num_players, num_frames, seed);
+            let checksums2 = run_checksum_determinism_test(num_players, num_frames, seed);
+
+            prop_assert_eq!(
+                checksums1.len(),
+                checksums2.len(),
+                "Both runs should produce same number of checksums"
+            );
+
+            for (i, ((frame1, cs1), (frame2, cs2))) in
+                checksums1.iter().zip(checksums2.iter()).enumerate()
+            {
+                prop_assert_eq!(
+                    frame1, frame2,
+                    "Frame mismatch at index {}", i
+                );
+                prop_assert_eq!(
+                    cs1, cs2,
+                    "Checksum mismatch at frame {}", frame1
+                );
+            }
+        }
+
+        /// Property: Final state value is deterministic
+        #[test]
+        fn prop_final_state_determinism(
+            num_players in 1usize..=3,
+            num_frames in 5usize..=25,
+            seed in any::<u64>(),
+        ) {
+            let inputs = generate_input_sequence(num_players, num_frames, seed);
+
+            let state1 = run_synctest_session(num_players, num_frames, |player, frame| {
+                *inputs.get(&(player, frame)).unwrap()
+            });
+
+            let state2 = run_synctest_session(num_players, num_frames, |player, frame| {
+                *inputs.get(&(player, frame)).unwrap()
+            });
+
+            prop_assert_eq!(state1.frame, state2.frame, "Frame should match");
+            prop_assert_eq!(state1.input_sum, state2.input_sum, "input_sum should match");
+            prop_assert_eq!(
+                state1.player_positions,
+                state2.player_positions,
+                "player_positions should match"
+            );
+            prop_assert_eq!(
+                state1.action_count,
+                state2.action_count,
+                "action_count should match"
+            );
+        }
+    }
+
+    /// Helper function used by termination property tests
+    fn run_checksum_determinism_test(
+        num_players: usize,
+        num_frames: usize,
+        seed: u64,
+    ) -> Vec<(Frame, u128)> {
+        let inputs = generate_input_sequence(num_players, num_frames, seed);
+        let mut sess = SessionBuilder::<MetaConfig>::new()
+            .with_num_players(num_players)
+            .with_max_prediction_window(8)
+            .with_input_delay(0)
+            .start_synctest_session()
+            .expect("Failed to create session");
+
+        let mut state = MetaGameState::new(num_players);
+        let mut checksums = Vec::new();
+
+        for frame in 0..num_frames {
+            for player in 0..num_players {
+                let input = *inputs.get(&(player, frame)).unwrap();
+                sess.add_local_input(PlayerHandle::new(player), input)
+                    .expect("Failed to add input");
+            }
+
+            for request in sess.advance_frame().expect("Failed to advance frame") {
+                match request {
+                    FortressRequest::SaveGameState { cell, frame } => {
+                        let checksum = state.checksum();
+                        cell.save(frame, Some(state.clone()), Some(checksum));
+                        checksums.push((frame, checksum));
+                    },
+                    FortressRequest::LoadGameState { cell, .. } => {
+                        state = cell.load().expect("Failed to load state");
+                    },
+                    FortressRequest::AdvanceFrame { inputs } => {
+                        state.apply_inputs(&inputs);
+                    },
+                    _ => unreachable!("Unknown request type"),
+                }
+            }
+        }
+
+        checksums
+    }
+}

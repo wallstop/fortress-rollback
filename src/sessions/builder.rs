@@ -662,7 +662,19 @@ impl InputQueueConfig {
 }
 
 const DEFAULT_PLAYERS: usize = 2;
-const DEFAULT_DETECTION_MODE: DesyncDetection = DesyncDetection::Off;
+/// Default desync detection mode.
+///
+/// Defaults to `On { interval: 60 }` to catch state divergence early (once per second at 60fps).
+/// This aligns with Fortress Rollback's correctness-first philosophy. Users who want to disable
+/// desync detection for performance reasons can explicitly set `DesyncDetection::Off`.
+///
+/// # Breaking Change from GGRS
+///
+/// GGRS defaulted to `DesyncDetection::Off`. Fortress Rollback enables it by default because:
+/// - Silent desync is a correctness bug that's hard to debug
+/// - The overhead is minimal (one checksum comparison per second)
+/// - Early detection prevents subtle multiplayer issues from reaching production
+const DEFAULT_DETECTION_MODE: DesyncDetection = DesyncDetection::On { interval: 60 };
 
 /// Controls how game states are saved for rollback.
 ///
@@ -1836,6 +1848,273 @@ mod tests {
             .with_input_queue_config(InputQueueConfig::minimal())
             .with_input_delay(32);
         assert_eq!(builder.input_delay, 31);
+    }
+
+    // ========================================================================
+    // SyncConfig Tests
+    // ========================================================================
+
+    #[test]
+    fn sync_config_default_values() {
+        let config = SyncConfig::default();
+        assert_eq!(config.num_sync_packets, 5);
+        assert_eq!(config.sync_retry_interval, Duration::from_millis(200));
+        assert!(config.sync_timeout.is_none());
+        assert_eq!(config.running_retry_interval, Duration::from_millis(200));
+        assert_eq!(config.keepalive_interval, Duration::from_millis(200));
+    }
+
+    #[test]
+    fn sync_config_new_equals_default() {
+        let new_config = SyncConfig::new();
+        let default_config = SyncConfig::default();
+        assert_eq!(new_config, default_config);
+    }
+
+    #[test]
+    fn sync_config_high_latency_preset() {
+        let config = SyncConfig::high_latency();
+        assert_eq!(config.num_sync_packets, 5);
+        assert_eq!(config.sync_retry_interval, Duration::from_millis(400));
+        assert_eq!(config.sync_timeout, Some(Duration::from_secs(10)));
+        assert_eq!(config.running_retry_interval, Duration::from_millis(400));
+        assert_eq!(config.keepalive_interval, Duration::from_millis(400));
+    }
+
+    #[test]
+    fn sync_config_lossy_preset() {
+        let config = SyncConfig::lossy();
+        assert_eq!(config.num_sync_packets, 8);
+        assert_eq!(config.sync_retry_interval, Duration::from_millis(200));
+        assert_eq!(config.sync_timeout, Some(Duration::from_secs(10)));
+        assert_eq!(config.running_retry_interval, Duration::from_millis(200));
+        assert_eq!(config.keepalive_interval, Duration::from_millis(200));
+    }
+
+    #[test]
+    fn sync_config_lan_preset() {
+        let config = SyncConfig::lan();
+        assert_eq!(config.num_sync_packets, 3);
+        assert_eq!(config.sync_retry_interval, Duration::from_millis(100));
+        assert_eq!(config.sync_timeout, Some(Duration::from_secs(5)));
+        assert_eq!(config.running_retry_interval, Duration::from_millis(100));
+        assert_eq!(config.keepalive_interval, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn sync_config_mobile_preset() {
+        let config = SyncConfig::mobile();
+        assert_eq!(config.num_sync_packets, 10);
+        assert_eq!(config.sync_retry_interval, Duration::from_millis(350));
+        assert_eq!(config.sync_timeout, Some(Duration::from_secs(15)));
+        assert_eq!(config.running_retry_interval, Duration::from_millis(350));
+        assert_eq!(config.keepalive_interval, Duration::from_millis(300));
+    }
+
+    #[test]
+    fn sync_config_competitive_preset() {
+        let config = SyncConfig::competitive();
+        assert_eq!(config.num_sync_packets, 4);
+        assert_eq!(config.sync_retry_interval, Duration::from_millis(100));
+        assert_eq!(config.sync_timeout, Some(Duration::from_secs(3)));
+        assert_eq!(config.running_retry_interval, Duration::from_millis(100));
+        assert_eq!(config.keepalive_interval, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn sync_config_equality() {
+        let config1 = SyncConfig::default();
+        let config2 = SyncConfig::default();
+        let config3 = SyncConfig::lan();
+        assert_eq!(config1, config2);
+        assert_ne!(config1, config3);
+    }
+
+    #[test]
+    #[allow(clippy::clone_on_copy)] // Testing Clone trait implementation explicitly
+    fn sync_config_clone() {
+        let config = SyncConfig::high_latency();
+        let cloned = config.clone();
+        assert_eq!(config, cloned);
+    }
+
+    #[test]
+    fn sync_config_copy() {
+        let config = SyncConfig::lossy();
+        let copied: SyncConfig = config; // Copy trait
+        assert_eq!(config, copied);
+    }
+
+    #[test]
+    fn sync_config_debug_format() {
+        let config = SyncConfig::default();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("SyncConfig"));
+        assert!(debug_str.contains("num_sync_packets"));
+        assert!(debug_str.contains("sync_retry_interval"));
+    }
+
+    #[test]
+    fn sync_config_presets_differ() {
+        // Ensure all presets are distinct configurations
+        let presets = [
+            SyncConfig::default(),
+            SyncConfig::high_latency(),
+            SyncConfig::lossy(),
+            SyncConfig::lan(),
+            SyncConfig::mobile(),
+            SyncConfig::competitive(),
+        ];
+
+        // Check that no two presets are equal (except default and new)
+        for (i, preset_a) in presets.iter().enumerate() {
+            for (j, preset_b) in presets.iter().enumerate() {
+                if i != j {
+                    assert_ne!(
+                        preset_a, preset_b,
+                        "Presets at index {} and {} should differ",
+                        i, j
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn with_sync_config_applies_to_builder() {
+        let builder =
+            SessionBuilder::<TestConfig>::new().with_sync_config(SyncConfig::high_latency());
+        assert_eq!(builder.sync_config, SyncConfig::high_latency());
+    }
+
+    // ========================================================================
+    // ProtocolConfig Tests
+    // ========================================================================
+
+    #[test]
+    fn protocol_config_default_values() {
+        let config = ProtocolConfig::default();
+        assert_eq!(config.quality_report_interval, Duration::from_millis(200));
+        assert_eq!(config.shutdown_delay, Duration::from_millis(5000));
+        assert_eq!(config.max_checksum_history, 32);
+        assert_eq!(config.pending_output_limit, 128);
+        assert_eq!(config.sync_retry_warning_threshold, 10);
+        assert_eq!(config.sync_duration_warning_ms, 3000);
+    }
+
+    #[test]
+    fn protocol_config_new_equals_default() {
+        let new_config = ProtocolConfig::new();
+        let default_config = ProtocolConfig::default();
+        assert_eq!(new_config, default_config);
+    }
+
+    #[test]
+    fn protocol_config_competitive_preset() {
+        let config = ProtocolConfig::competitive();
+        assert_eq!(config.quality_report_interval, Duration::from_millis(100));
+        assert_eq!(config.shutdown_delay, Duration::from_millis(3000));
+        assert_eq!(config.max_checksum_history, 32);
+        assert_eq!(config.pending_output_limit, 128);
+        assert_eq!(config.sync_retry_warning_threshold, 10);
+        assert_eq!(config.sync_duration_warning_ms, 2000);
+    }
+
+    #[test]
+    fn protocol_config_high_latency_preset() {
+        let config = ProtocolConfig::high_latency();
+        assert_eq!(config.quality_report_interval, Duration::from_millis(400));
+        assert_eq!(config.shutdown_delay, Duration::from_millis(10000));
+        assert_eq!(config.max_checksum_history, 64);
+        assert_eq!(config.pending_output_limit, 256);
+        assert_eq!(config.sync_retry_warning_threshold, 20);
+        assert_eq!(config.sync_duration_warning_ms, 10000);
+    }
+
+    #[test]
+    fn protocol_config_debug_preset() {
+        let config = ProtocolConfig::debug();
+        assert_eq!(config.quality_report_interval, Duration::from_millis(500));
+        assert_eq!(config.shutdown_delay, Duration::from_millis(30000));
+        assert_eq!(config.max_checksum_history, 128);
+        assert_eq!(config.pending_output_limit, 64);
+        assert_eq!(config.sync_retry_warning_threshold, 5);
+        assert_eq!(config.sync_duration_warning_ms, 1000);
+    }
+
+    #[test]
+    fn protocol_config_mobile_preset() {
+        let config = ProtocolConfig::mobile();
+        assert_eq!(config.quality_report_interval, Duration::from_millis(350));
+        assert_eq!(config.shutdown_delay, Duration::from_millis(15000));
+        assert_eq!(config.max_checksum_history, 64);
+        assert_eq!(config.pending_output_limit, 256);
+        assert_eq!(config.sync_retry_warning_threshold, 25);
+        assert_eq!(config.sync_duration_warning_ms, 12000);
+    }
+
+    #[test]
+    fn protocol_config_equality() {
+        let config1 = ProtocolConfig::default();
+        let config2 = ProtocolConfig::default();
+        let config3 = ProtocolConfig::competitive();
+        assert_eq!(config1, config2);
+        assert_ne!(config1, config3);
+    }
+
+    #[test]
+    #[allow(clippy::clone_on_copy)] // Testing Clone trait implementation explicitly
+    fn protocol_config_clone() {
+        let config = ProtocolConfig::high_latency();
+        let cloned = config.clone();
+        assert_eq!(config, cloned);
+    }
+
+    #[test]
+    fn protocol_config_copy() {
+        let config = ProtocolConfig::mobile();
+        let copied: ProtocolConfig = config; // Copy trait
+        assert_eq!(config, copied);
+    }
+
+    #[test]
+    fn protocol_config_debug_format() {
+        let config = ProtocolConfig::default();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("ProtocolConfig"));
+        assert!(debug_str.contains("quality_report_interval"));
+        assert!(debug_str.contains("shutdown_delay"));
+    }
+
+    #[test]
+    fn protocol_config_presets_differ() {
+        // Ensure all presets are distinct configurations
+        let presets = [
+            ProtocolConfig::default(),
+            ProtocolConfig::competitive(),
+            ProtocolConfig::high_latency(),
+            ProtocolConfig::debug(),
+            ProtocolConfig::mobile(),
+        ];
+
+        for (i, preset_a) in presets.iter().enumerate() {
+            for (j, preset_b) in presets.iter().enumerate() {
+                if i != j {
+                    assert_ne!(
+                        preset_a, preset_b,
+                        "ProtocolConfig presets at index {} and {} should differ",
+                        i, j
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn with_protocol_config_applies_to_builder() {
+        let builder =
+            SessionBuilder::<TestConfig>::new().with_protocol_config(ProtocolConfig::competitive());
+        assert_eq!(builder.protocol_config, ProtocolConfig::competitive());
     }
 }
 

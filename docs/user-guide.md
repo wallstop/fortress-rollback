@@ -28,7 +28,11 @@ This guide walks you through integrating Fortress Rollback into your game. By th
 10. [Spectator Sessions](#spectator-sessions)
 11. [Testing with SyncTest](#testing-with-synctest)
 12. [Common Patterns](#common-patterns)
-13. [Troubleshooting](#troubleshooting)
+13. [Common Pitfalls](#common-pitfalls)
+    - [Session Termination Anti-Pattern](#session-termination-the-last_confirmed_frame-anti-pattern)
+    - [Desync Detection Disabled by Default](#desync-detection-disabled-by-default)
+    - [NetworkStats Checksum Fields](#networkstats-checksum-fields-for-desync-detection)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -1293,6 +1297,161 @@ let adjusted_time = if session.frames_ahead() > 2 {
 
 ---
 
+## Common Pitfalls
+
+This section covers subtle API misuses that can lead to hard-to-debug issues. These patterns may _appear_ to work in many cases but will fail under specific conditions.
+
+### Session Termination: The `last_confirmed_frame()` Anti-Pattern
+
+**The Problem:**
+
+A common mistake is using `last_confirmed_frame()` or `confirmed_frame()` to determine when a session is "complete":
+
+```rust
+// ⚠️ WRONG: This is a pit of failure!
+if session.last_confirmed_frame() >= target_frames {
+    break;  // Stop simulation
+}
+```
+
+This seems logical but is **fundamentally incorrect** because:
+
+1. **`last_confirmed_frame()` means "no more rollbacks will affect this frame"** - It does NOT mean "both peers have simulated to the same frame"
+2. **Peers run asynchronously** - Peer 1 may confirm frame 100 while Peer 2 is still at frame 80
+3. **There's no synchronization point** - When Peer 1 stops, Peer 2 continues, accumulating more state changes
+4. **Final values diverge** - Not due to non-determinism, but because peers simulate different total frames
+
+**The Symptom:**
+
+Both peers show different final values even though game logic is perfectly deterministic. The frame counts differ (e.g., 179 vs 184), and checksums differ because they represent _different frames_.
+
+**The Solution:**
+
+Use the `SyncHealth` API to verify both peers agree before termination:
+
+```rust
+use fortress_rollback::SyncHealth;
+
+let mut my_done = false;
+let mut peer_done = false;
+
+loop {
+    // Normal frame advance
+    session.poll_remote_clients();
+    
+    if session.current_state() == SessionState::Running {
+        session.add_local_input(local_handle, input)?;
+        
+        for request in session.advance_frame()? {
+            match request {
+                // Handle requests normally...
+                # FortressRequest::SaveGameState { cell, frame } => {
+                #     cell.save(frame, Some(game_state.clone()), None);
+                # }
+                # FortressRequest::LoadGameState { cell, .. } => {
+                #     game_state = cell.load().expect("State should exist");
+                # }
+                # FortressRequest::AdvanceFrame { inputs } => {
+                #     game_state.update(&inputs);
+                # }
+            }
+        }
+    }
+    
+    // Check if WE think we're done
+    if !my_done && session.confirmed_frame() >= target_frames {
+        my_done = true;
+        send_done_message_to_peer();  // Application-level protocol
+    }
+    
+    // Check if peer says they're done (via your application protocol)
+    if received_done_from_peer() {
+        peer_done = true;
+    }
+    
+    // Only exit when BOTH are done AND sync health is verified
+    if my_done && peer_done {
+        match session.sync_health(peer_handle) {
+            Some(SyncHealth::InSync) => break,  // Safe to exit
+            Some(SyncHealth::DesyncDetected { frame, .. }) => {
+                panic!("Desync detected at frame {}", frame);
+            }
+            _ => continue,  // Still waiting for checksum verification
+        }
+    }
+}
+```
+
+**Key Points:**
+
+- Use `sync_health()` to verify checksums match before termination
+- Implement application-level "done" messaging between peers
+- Don't trust `confirmed_frame()` alone for termination decisions
+- Consider using `last_verified_frame()` to ensure checksum verification has occurred
+
+### Understanding Desync Detection Defaults
+
+Desync detection is **enabled by default** with `DesyncDetection::On { interval: 60 }` (once per second at 60fps). This means:
+
+- Checksums are computed and exchanged automatically
+- `sync_health()` will report `SyncHealth::InSync` or `SyncHealth::DesyncDetected`
+- Desync bugs are detected early, before they cause visible gameplay issues
+
+If you need to disable detection (e.g., for performance benchmarking):
+
+```rust
+use fortress_rollback::DesyncDetection;
+
+let session = SessionBuilder::<GameConfig>::new()
+    .with_desync_detection_mode(DesyncDetection::Off) // Explicit opt-out
+    // ... other configuration
+    .start_p2p_session(socket)?;
+```
+
+For tighter detection (competitive games, anti-cheat), reduce the interval:
+
+```rust
+use fortress_rollback::DesyncDetection;
+
+let session = SessionBuilder::<GameConfig>::new()
+    .with_desync_detection_mode(DesyncDetection::On { interval: 10 }) // 6x per second at 60fps
+    // ... other configuration
+    .start_p2p_session(socket)?;
+```
+
+The `interval` parameter determines how many frames between checksum exchanges. Lower values detect desyncs faster but increase network overhead.
+
+### NetworkStats Checksum Fields for Desync Detection
+
+`NetworkStats` now includes fields for monitoring desync status:
+
+```rust
+let stats = session.network_stats(peer_handle)?;
+
+// Check the most recent checksum comparison
+if let Some(last_frame) = stats.last_compared_frame {
+    println!("Last compared frame: {}", last_frame);
+    println!("Local checksum: {:?}", stats.local_checksum);
+    println!("Remote checksum: {:?}", stats.remote_checksum);
+    
+    // Quick check using the convenience field
+    match stats.checksums_match {
+        Some(true) => println!("✓ Synchronized"),
+        Some(false) => println!("✗ DESYNC DETECTED"),
+        None => println!("? No comparison yet"),
+    }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `last_compared_frame` | `Option<Frame>` | Most recent frame where checksums were compared |
+| `local_checksum` | `Option<u128>` | Local checksum at that frame |
+| `remote_checksum` | `Option<u128>` | Remote checksum at that frame |
+| `checksums_match` | `Option<bool>` | `true` if in sync, `false` if desync, `None` if no comparison |
+
+---
+
 ## Troubleshooting
 
 ### "NotSynchronized" Error
@@ -1506,10 +1665,13 @@ Configure checksum comparison with `with_desync_detection_mode()`:
 ```rust
 use fortress_rollback::DesyncDetection;
 
-// Enable with interval (compare checksums every N frames)
-builder.with_desync_detection_mode(DesyncDetection::On { interval: 100 });
+// Default: enabled with interval 60 (once per second at 60fps)
+// No configuration needed unless you want to change it
 
-// Disable (default)
+// Tighter detection for competitive games
+builder.with_desync_detection_mode(DesyncDetection::On { interval: 10 });
+
+// Disable for performance benchmarking (not recommended for production)
 builder.with_desync_detection_mode(DesyncDetection::Off);
 ```
 

@@ -66,10 +66,6 @@ Initial release of Fortress Rollback, a correctness-first fork of GGRS v0.11.0.
 - `Config::Address` now requires `Ord` + `PartialOrd` trait bounds (see Migration section)
 - Test infrastructure uses `fnv1a_hash` instead of `DefaultHasher`
 
-#### Default Behavior
-
-- **Desync detection now enabled by default**: `DesyncDetection::On { interval: 60 }` (once per second at 60fps). This catches state divergence early. Users needing to disable detection can explicitly set `DesyncDetection::Off`.
-
 #### Branding
 
 - Crate renamed to `fortress-rollback` (import as `fortress_rollback`)
@@ -88,7 +84,6 @@ Initial release of Fortress Rollback, a correctness-first fork of GGRS v0.11.0.
 
 - Crash when misprediction detected at frame 0 (first frame): `adjust_gamestate()` no longer attempts to load the current frame when receiving early corrections
 - Multi-process rollback desync (BUG-001): Window-based checksum computation using last 64 frames ensures frames are always available for comparison between peers
-- `PlayerRegistry::spectator_handles()` incorrectly returned local player handles in addition to spectators
 - All 35 multi-process network tests now pass reliably
 
 ### Removed
@@ -148,7 +143,7 @@ struct MyAddress { /* ... */ }
 ### Behavioral Notes
 
 - Session termination using `confirmed_frame()` alone is incorrect; use the new `SyncHealth` API for proper synchronization verification. See [migration.md](migration.md) for details.
-- **Desync detection is now enabled by default** (`DesyncDetection::On { interval: 60 }`). GGRS defaulted to `Off`. Explicitly set `DesyncDetection::Off` if you need the old behavior.
+- Desync detection remains disabled by default; enable it explicitly for production use.
 
 ---
 

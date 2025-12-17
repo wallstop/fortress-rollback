@@ -47,8 +47,8 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use fortress_rollback::{
-    ChaosConfig, ChaosSocket, Config, FortressRequest, Frame, InputStatus, PlayerHandle,
-    PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket,
+    hash::DeterministicHasher, ChaosConfig, ChaosSocket, Config, FortressRequest, Frame,
+    InputStatus, PlayerHandle, PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket,
 };
 use serde::{Deserialize, Serialize};
 
@@ -130,39 +130,6 @@ impl DebugLog {
             value,
             inputs: Vec::new(),
         });
-    }
-}
-
-/// A simple deterministic hasher that produces consistent results across processes.
-/// DefaultHasher uses a random key, so we need this for cross-process comparison.
-struct DeterministicHasher {
-    state: u64,
-}
-
-impl DeterministicHasher {
-    fn new() -> Self {
-        Self { state: 0 }
-    }
-}
-
-impl Hasher for DeterministicHasher {
-    fn finish(&self) -> u64 {
-        self.state
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        // FNV-1a hash algorithm - simple and deterministic
-        const FNV_PRIME: u64 = 0x00000100000001B3;
-        const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-
-        if self.state == 0 {
-            self.state = FNV_OFFSET;
-        }
-
-        for &byte in bytes {
-            self.state ^= u64::from(byte);
-            self.state = self.state.wrapping_mul(FNV_PRIME);
-        }
     }
 }
 
