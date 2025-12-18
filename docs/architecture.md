@@ -378,6 +378,7 @@ let session = SessionBuilder::<MyConfig>::new()
 **State after creation:** `SessionState::Synchronizing`
 
 At this point:
+
 - Network connections are initialized but not yet established
 - Input queues are empty
 - No game state has been saved
@@ -385,6 +386,7 @@ At this point:
 ### Phase 2: Synchronizing (Handshake)
 
 During synchronization, peers exchange packets to establish:
+
 - Round-trip time measurements
 - Magic number for session identification
 - Confirmation both peers are ready
@@ -417,6 +419,7 @@ loop {
 ```
 
 **Events during synchronization:**
+
 - `Synchronizing { count, total }` — Progress updates
 - `Synchronized { addr }` — Peer fully synchronized
 
@@ -460,6 +463,7 @@ while game_running {
 ```
 
 **Key invariants during Running:**
+
 - `add_local_input()` must be called for all local players before `advance_frame()`
 - Requests must be processed in order
 - Game state must be deterministic
@@ -483,6 +487,7 @@ while session.confirmed_frame() < target_frame {
 ```
 
 The problem: `confirmed_frame()` reaching your target does NOT mean:
+
 - Both peers have the same game state
 - All rollbacks have completed
 - Checksums have been verified

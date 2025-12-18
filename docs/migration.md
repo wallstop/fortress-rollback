@@ -113,6 +113,7 @@ fn process_inputs(inputs: impl Into<Vec<(MyInput, InputStatus)>>) {
 ```
 
 The `InputVec` type alias is re-exported for convenience:
+
 ```rust
 use fortress_rollback::InputVec;
 ```

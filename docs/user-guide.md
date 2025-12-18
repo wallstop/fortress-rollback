@@ -460,6 +460,7 @@ cell.save(frame, Some(game_state.clone()), Some(checksum));
 ```
 
 The `compute_checksum` function:
+
 1. Serializes your state using bincode with fixed-integer encoding (platform-independent)
 2. Hashes the bytes using FNV-1a (deterministic, no random seeds)
 3. Returns a `u128` checksum matching the `cell.save()` signature
@@ -1738,6 +1739,7 @@ Fortress Rollback provides comprehensive APIs for detecting and monitoring synch
 Desync (desynchronization) occurs when peers' game states diverge, typically due to non-deterministic code. Without detection, desyncs cause subtle bugs that are extremely difficult to debug—players see different game states while believing everything is working correctly.
 
 **Key Points:**
+
 - Desync detection is **enabled by default** with `DesyncDetection::On { interval: 60 }` (once per second at 60fps)
 - Detection works by periodically comparing game state checksums between peers
 - Early detection prevents subtle multiplayer issues from reaching production
