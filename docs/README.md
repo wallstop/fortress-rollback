@@ -15,7 +15,7 @@ This directory contains the user-facing documentation for the Fortress Rollback 
 | Document | Description |
 |----------|-------------|
 | [Architecture](architecture.md) | Internal architecture, data flow, and design |
-| [Changelog](changelog.md) | Version history and breaking changes |
+| [Changelog](../CHANGELOG.md) | Version history and breaking changes |
 
 ### Network Layer Reference
 

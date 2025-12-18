@@ -469,7 +469,7 @@ The `compute_checksum` function:
 
 For a faster but weaker checksum, use `compute_checksum_fletcher16`:
 
-```rust
+```rust,ignore
 use fortress_rollback::compute_checksum_fletcher16;
 
 // Faster, simpler checksum (16-bit result stored as u128)
@@ -481,7 +481,7 @@ let checksum = compute_checksum_fletcher16(&game_state)
 
 For advanced use cases, you can compute checksums manually using the lower-level utilities:
 
-```rust
+```rust,ignore
 use fortress_rollback::checksum::{hash_bytes_fnv1a, fletcher16};
 use fortress_rollback::network::codec::encode;
 
@@ -1248,6 +1248,7 @@ Fortress Rollback provides several Cargo feature flags to customize behavior for
 | Feature | Description | Use Case | Dependencies |
 |---------|-------------|----------|--------------|
 | `sync-send` | Adds `Send + Sync` bounds to core traits | Multi-threaded game engines | None |
+| `tokio` | Enables `TokioUdpSocket` for async Tokio applications | Async game servers | `tokio` crate |
 | `wasm-bindgen` | Placeholder for WASM compatibility | Browser-based games | None |
 | `paranoid` | Enables runtime invariant checking in release builds | Debugging production issues | None |
 | `loom` | Enables Loom-compatible synchronization primitives | Concurrency testing | `loom` crate |
@@ -1268,7 +1269,7 @@ fortress-rollback = { version = "0.1", features = ["sync-send"] }
 
 **Without `sync-send`:**
 
-```rust
+```rust,ignore
 pub trait Config: 'static {
     type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned;
     type State;
@@ -1278,13 +1279,46 @@ pub trait Config: 'static {
 
 **With `sync-send`:**
 
-```rust
+```rust,ignore
 pub trait Config: 'static + Send + Sync {
     type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned + Send + Sync;
     type State: Clone + Send + Sync;
     type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Send + Sync + Debug;
 }
 ```
+
+#### `tokio`
+
+Enables `TokioUdpSocket`, an adapter that wraps a Tokio async UDP socket and implements `NonBlockingSocket` for use with Fortress Rollback sessions in async Tokio applications.
+
+```toml
+[dependencies]
+fortress-rollback = { version = "0.1", features = ["tokio"] }
+```
+
+**Example usage:**
+
+```rust,ignore
+use fortress_rollback::tokio_socket::TokioUdpSocket;
+use fortress_rollback::{SessionBuilder, PlayerType, PlayerHandle};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create and bind a Tokio UDP socket adapter
+    let socket = TokioUdpSocket::bind_to_port(7000).await?;
+
+    // Use with SessionBuilder
+    let session = SessionBuilder::<MyConfig>::new()
+        .with_num_players(2)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
+        .start_p2p_session(socket)?;
+
+    Ok(())
+}
+```
+
+**Note:** When used with the `sync-send` feature, `TokioUdpSocket` automatically implements `Send + Sync`.
 
 #### `wasm-bindgen`
 
@@ -1748,7 +1782,7 @@ Desync (desynchronization) occurs when peers' game states diverge, typically due
 
 The `SyncHealth` enum represents the synchronization state with a specific peer:
 
-```rust
+```rust,ignore
 use fortress_rollback::SyncHealth;
 
 pub enum SyncHealth {
@@ -2026,7 +2060,7 @@ This section documents all configuration options available when building a sessi
 | `with_max_prediction_window(frames)` | 8 | Max frames ahead without confirmed inputs (0 = lockstep) |
 | `with_fps(fps)` | 60 | Expected frames per second for timing |
 | `with_save_mode(mode)` | `EveryFrame` | How often to save state for rollback |
-| `with_desync_detection_mode(mode)` | `Off` | Checksum comparison between peers |
+| `with_desync_detection_mode(mode)` | `On { interval: 60 }` | Checksum comparison between peers |
 | `with_disconnect_timeout(duration)` | 2000ms | Time before disconnecting unresponsive peer |
 | `with_disconnect_notify_delay(duration)` | 500ms | Time before warning about potential disconnect |
 | `with_check_distance(frames)` | 2 | Frames to resimulate in SyncTestSession |

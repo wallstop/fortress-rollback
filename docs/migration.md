@@ -138,6 +138,7 @@ Existing feature flags (`sync-send`, `wasm-bindgen`) remain compatible. Fortress
 |---------|-------------|-----------------|
 | `sync-send` | Multi-threaded trait bounds | ❌ (existing) |
 | `wasm-bindgen` | WASM compatibility | ❌ (existing) |
+| `tokio` | Async Tokio UDP socket adapter | ✅ |
 | `paranoid` | Runtime invariant checking | ✅ |
 | `loom` | Concurrency testing | ✅ |
 | `z3-verification` | Formal verification tests | ✅ |

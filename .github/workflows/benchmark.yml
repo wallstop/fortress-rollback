@@ -34,6 +34,9 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Configure sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+
       - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
@@ -48,6 +51,20 @@ jobs:
       # Run all criterion benchmarks
       - name: Run benchmarks
         run: cargo bench --bench input_queue --bench p2p_session --bench sync_layer -- --output-format bencher | tee benchmark-results.txt
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+
+      # Check if gh-pages branch exists
+      - name: Check if gh-pages branch exists
+        id: gh-pages-check
+        run: |
+          if git ls-remote --exit-code --heads origin gh-pages > /dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "::notice::gh-pages branch does not exist yet. It will be created on the first push to main."
+          fi
 
       # Store benchmark results and detect regressions
       # Uses github-action-benchmark: https://github.com/benchmark-action/github-action-benchmark
@@ -72,10 +89,12 @@ jobs:
           # Only update on push to main (not PRs) to avoid benchmark pollution
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: bench
+          # Skip fetching gh-pages if it doesn't exist (bootstrap case)
+          skip-fetch-gh-pages: ${{ steps.gh-pages-check.outputs.exists == 'false' }}
 
-      # On PRs, compare with main branch baseline
+      # On PRs, compare with main branch baseline (only if gh-pages exists)
       - name: Compare PR benchmarks with main
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.gh-pages-check.outputs.exists == 'true'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Fortress Rollback Benchmarks
@@ -90,6 +109,12 @@ jobs:
           external-data-json-path: ./cache/benchmark-data.json
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: bench
+
+      - name: Skip PR comparison (no baseline)
+        if: github.event_name == 'pull_request' && steps.gh-pages-check.outputs.exists == 'false'
+        run: |
+          echo "::notice::Skipping PR benchmark comparison - no baseline data available yet."
+          echo "Baseline will be established after first merge to main."
 
       # Upload raw benchmark results as artifact for debugging
       - name: Upload benchmark results
@@ -113,6 +138,9 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Configure sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+
       - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
@@ -131,3 +159,6 @@ jobs:
           cargo bench --bench p2p_session -- --sample-size 10 --warm-up-time 1 --measurement-time 1
           cargo bench --bench sync_layer -- --sample-size 10 --warm-up-time 1 --measurement-time 1
         timeout-minutes: 10
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"

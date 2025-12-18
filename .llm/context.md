@@ -255,7 +255,7 @@ z network                                       # Jump to dir matching "network"
 3. **Handle all errors** — No panics, use `Result<T, FortressError>`
 4. **Document as you go** — Rustdoc with examples for all public items
 5. **Consider edge cases** — Zero values, max values, empty collections
-6. **Update changelog** — Document changes in `docs/changelog.md`
+6. **Update changelog** — Document changes in `CHANGELOG.md`
 
 ### When Fixing Bugs
 
@@ -527,7 +527,7 @@ PlayerType::Spectator(addr)    // Observer (no input)
 
 - **API compatibility is NOT required** — This is a correctness-first fork
 - **Safety and correctness trump compatibility** — Make breaking changes if they improve quality
-- **Document all breaking changes** — Update `docs/changelog.md` and `docs/migration.md`
+- **Document all breaking changes** — Update `CHANGELOG.md` and `docs/migration.md`
 
 ### Test Coverage Requirements
 

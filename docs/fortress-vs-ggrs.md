@@ -12,7 +12,7 @@ This document summarizes the key differences between **Fortress Rollback** (this
 |----------|------|-------------------|
 | **Determinism** | `HashMap`/`HashSet` (non-deterministic iteration) | `BTreeMap`/`BTreeSet` (guaranteed order) |
 | **Panic Safety** | Some `assert!` and `panic!` in library code | All converted to recoverable errors |
-| **Test Coverage** | Basic test suite | 620+ tests (~92% coverage) |
+| **Test Coverage** | Basic test suite | 1100+ tests (~92% coverage) |
 | **Formal Verification** | None | TLA+, Z3 SMT proofs, Kani proofs |
 | **Hashing** | `DefaultHasher` (random seed per process) | FNV-1a deterministic hashing |
 | **Dependencies** | `bitfield-rle`, `varinteger`, `rand` | Internal implementations (fewer deps) |
@@ -316,7 +316,7 @@ ChaosConfig::intercontinental() // High-latency stable connection
 
 ### Testing
 
-- **620+ tests** (419 unit + 206 integration)
+- **1100+ tests** (unit + integration + property-based)
 - **~92% code coverage**
 - Property-based tests with proptest
 - Mutation testing (95% detection rate)
@@ -356,7 +356,7 @@ Fortress Rollback is a **correctness-first fork** of GGRS. The main benefits are
 
 1. **Determinism guaranteed** - No more subtle desyncs from collection iteration order
 2. **Panic-free** - All library code returns `Result` types
-3. **Battle-tested** - 620+ tests and formal verification
+3. **Battle-tested** - 1100+ tests and formal verification
 4. **Better debugging** - Violation observers and deterministic hashing
 
 For most users, migration is straightforward: rename imports, add `Ord` to your address type, and enjoy more reliable netcode.

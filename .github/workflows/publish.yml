@@ -28,6 +28,20 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Configure sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: publish-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            publish-${{ runner.os }}-cargo-
+
       - name: Verify version matches tag (if tag push)
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -40,6 +54,9 @@ jobs:
 
       - name: Publish (dry-run)
         run: cargo publish --dry-run
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
 
       - name: Publish to crates.io
         env:
