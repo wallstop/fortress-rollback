@@ -28,9 +28,6 @@ jobs:
       - name: Install cargo-tarpaulin
         uses: taiki-e/install-action@cargo-tarpaulin
 
-      - name: Configure sccache
-        uses: mozilla-actions/sccache-action@v0.0.7
-
       - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
@@ -42,11 +39,11 @@ jobs:
           restore-keys: |
             coverage-${{ runner.os }}-cargo-
 
+      # Note: sccache is intentionally NOT used here because cargo-tarpaulin
+      # needs direct control over the compilation process to instrument code
+      # for coverage collection. Using RUSTC_WRAPPER breaks tarpaulin.
       - name: Run coverage (tarpaulin)
         run: cargo tarpaulin --out Xml --exclude-files 'tests/network/multi_process.rs'
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
