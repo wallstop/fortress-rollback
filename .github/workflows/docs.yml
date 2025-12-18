@@ -57,6 +57,9 @@ jobs:
     name: Rustdoc Link Check
     runs-on: ubuntu-latest
 
+    env:
+      CARGO_INCREMENTAL: 0
+
     steps:
       - uses: actions/checkout@v4
 
@@ -79,23 +82,11 @@ jobs:
           restore-keys: |
             docs-${{ runner.os }}-cargo-
 
-      - name: Check rustdoc links
-        run: |
-          # Build docs and capture warnings
-          OUTPUT=$(cargo doc --no-deps 2>&1)
-          echo "$OUTPUT"
-
-          # Check for unresolved link warnings
-          if echo "$OUTPUT" | grep -E "warning: .*unresolved link"; then
-            echo "::error::Found broken rustdoc links"
-            exit 1
-          fi
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-
       - name: Check for broken intra-doc links
         run: |
+          # Clean any stale doc artifacts that might cause issues
+          rm -rf target/doc
+
           # Run with RUSTDOCFLAGS to treat warnings as errors for links
           RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --no-deps
         env:
