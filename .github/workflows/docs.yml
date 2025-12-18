@@ -76,13 +76,7 @@ jobs:
       - name: Verify sccache is working
         id: sccache-check
         if: steps.sccache.outcome == 'success'
-        shell: bash
-        run: |
-          if sccache --version && sccache --show-stats; then
-            echo "working=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "working=false" >> "$GITHUB_OUTPUT"
-          fi
+        run: ./scripts/verify-sccache.sh
         continue-on-error: true
 
       - name: Cache cargo registry and build
