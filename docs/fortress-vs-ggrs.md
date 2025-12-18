@@ -17,6 +17,7 @@ This document summarizes the key differences between **Fortress Rollback** (this
 | **Hashing** | `DefaultHasher` (random seed per process) | FNV-1a deterministic hashing |
 | **Dependencies** | `bitfield-rle`, `varinteger`, `rand` | Internal implementations (fewer deps) |
 | **Type Safety** | `Config::Address` requires `Hash` | `Config::Address` requires `Hash` + `Ord` |
+| **Desync Detection** | Off by default (opt-in) | On by default (`interval: 60`) |
 
 ---
 
