@@ -160,7 +160,9 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Configure sccache
+        id: sccache
         uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -176,14 +178,14 @@ jobs:
       - name: Build
         run: cargo build --verbose
         env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache.outcome == 'success' && 'true' || 'false' }}
 
       - name: Run tests (nextest)
         run: cargo nextest run --profile ci --verbose
         env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache.outcome == 'success' && 'true' || 'false' }}
 
       - name: Build docs
         run: cargo doc --verbose
@@ -204,7 +206,9 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Configure sccache
+        id: sccache
         uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -220,8 +224,8 @@ jobs:
       - name: Check wasm
         run: cargo check --target wasm32-unknown-unknown --features wasm-bindgen
         env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache.outcome == 'success' && 'true' || 'false' }}
 
   miri:
     runs-on: ubuntu-latest
@@ -271,7 +275,9 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Configure sccache
+        id: sccache
         uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -287,15 +293,15 @@ jobs:
       - name: Build network test peer
         run: cargo build --release --bin network_test_peer
         env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache.outcome == 'success' && 'true' || 'false' }}
 
       - name: Run multi-process network tests (nextest)
         run: cargo nextest run --profile ci --release -E 'test(multi_process)' --test network
         timeout-minutes: 10
         env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache.outcome == 'success' && 'true' || 'false' }}
 
   # Docker-based network tests with tc/netem
   docker-network-tests:
@@ -362,7 +368,9 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Configure sccache
+        id: sccache
         uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -382,8 +390,8 @@ jobs:
         run: cargo nextest run --profile ci --test verification --features z3-verification -E 'test(z3)'
         timeout-minutes: 10
         env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache.outcome == 'success' && 'true' || 'false' }}
 
   # Kani Formal Verification (Tier 1 - Fast proofs)
   kani-verification-tier1:
@@ -513,7 +521,9 @@ jobs:
         uses: taiki-e/install-action@cargo-semver-checks
 
       - name: Configure sccache
+        id: sccache
         uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -530,8 +540,8 @@ jobs:
         run: cargo semver-checks check-release
         continue-on-error: true  # Warn but don't fail - breaking changes are acceptable if documented
         env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache.outcome == 'success' && 'true' || 'false' }}
 
   # Feature flag combinations check
   feature-checks:
@@ -549,7 +559,9 @@ jobs:
         uses: taiki-e/install-action@cargo-hack
 
       - name: Configure sccache
+        id: sccache
         uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -565,8 +577,8 @@ jobs:
       - name: Check feature powerset (excluding slow features)
         run: cargo hack check --feature-powerset --exclude-features z3-verification,z3-verification-bundled,graphical-examples
         env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache.outcome == 'success' && 'true' || 'false' }}
 
   # Unsafe code audit via cargo-geiger
   unsafe-audit:
@@ -584,7 +596,9 @@ jobs:
         run: cargo install cargo-geiger --locked
 
       - name: Configure sccache
+        id: sccache
         uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -600,8 +614,8 @@ jobs:
       - name: Audit unsafe code in dependencies
         run: cargo geiger --all-features --lib 2>&1 | tee geiger-report.txt || true
         env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache.outcome == 'success' && 'true' || 'false' }}
 
       - name: Verify no unsafe in library code
         run: |
@@ -628,7 +642,9 @@ jobs:
         uses: taiki-e/install-action@cargo-udeps
 
       - name: Configure sccache
+        id: sccache
         uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -645,8 +661,8 @@ jobs:
         run: cargo +nightly udeps --all-targets
         continue-on-error: true  # Warn but don't fail build
         env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache.outcome == 'success' && 'true' || 'false' }}
 
   # Markdown code sample verification
   markdown-code-verification:
@@ -662,7 +678,9 @@ jobs:
           toolchain: stable
 
       - name: Configure sccache
+        id: sccache
         uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -679,5 +697,5 @@ jobs:
         run: ./scripts/verify-markdown-code.sh --fail-fast
         continue-on-error: true  # Warn but don't fail - documentation may have intentionally incomplete examples
         env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache.outcome == 'success' && 'true' || 'false' }}
