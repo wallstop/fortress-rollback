@@ -39,6 +39,18 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.7
         continue-on-error: true
 
+      - name: Verify sccache is working
+        id: sccache-check
+        if: steps.sccache.outcome == 'success'
+        shell: bash
+        run: |
+          if sccache --version && sccache --show-stats; then
+            echo "working=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "working=false" >> "$GITHUB_OUTPUT"
+          fi
+        continue-on-error: true
+
       - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
@@ -54,17 +66,18 @@ jobs:
       - name: Run benchmarks
         run: cargo bench --bench input_queue --bench p2p_session --bench sync_layer -- --output-format bencher | tee benchmark-results.txt
         env:
-          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
-          SCCACHE_GHA_ENABLED: ${{ steps.sccache.outcome == 'success' && 'true' || 'false' }}
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
 
       # Check if gh-pages branch exists
       - name: Check if gh-pages branch exists
         id: gh-pages-check
         run: |
           if git ls-remote --exit-code --heads origin gh-pages > /dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "::notice::gh-pages branch does not exist yet. It will be created on the first push to main."
           fi
 
@@ -145,6 +158,18 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.7
         continue-on-error: true
 
+      - name: Verify sccache is working
+        id: sccache-check
+        if: steps.sccache.outcome == 'success'
+        shell: bash
+        run: |
+          if sccache --version && sccache --show-stats; then
+            echo "working=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "working=false" >> "$GITHUB_OUTPUT"
+          fi
+        continue-on-error: true
+
       - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
@@ -164,5 +189,6 @@ jobs:
           cargo bench --bench sync_layer -- --sample-size 10 --warm-up-time 1 --measurement-time 1
         timeout-minutes: 10
         env:
-          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
-          SCCACHE_GHA_ENABLED: ${{ steps.sccache.outcome == 'success' && 'true' || 'false' }}
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
