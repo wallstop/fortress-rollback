@@ -175,5 +175,5 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/wallstop/fortress-rollback/releases/tag/v0.1.0
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/main...HEAD
+[0.1.0]: https://github.com/wallstop/fortress-rollback/tree/main

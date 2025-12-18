@@ -357,21 +357,26 @@ fn main() {
 
     if args.local_port == 0 {
         output_error("--local-port is required");
-        return;
+        std::process::exit(1);
     }
     if args.peer_addr.is_none() {
         output_error("--peer is required");
-        return;
+        std::process::exit(1);
     }
     if args.target_frames == 0 {
         output_error("--frames is required");
-        return;
+        std::process::exit(1);
     }
 
     let result = run_test(&args);
     let json = serde_json::to_string(&result).unwrap();
     println!("{}", json);
     io::stdout().flush().unwrap();
+
+    // Exit with non-zero code on failure so docker compose can detect it
+    if !result.success {
+        std::process::exit(1);
+    }
 }
 
 fn output_error(msg: &str) {

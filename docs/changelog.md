@@ -8,4 +8,5 @@ This location (`CHANGELOG.md` at the repository root) is the standard location e
 - GitHub releases
 - Dependabot and other tooling
 
-For historical changes from the original GGRS project, see [ggrs-changelog-archive.md](ggrs-changelog-archive.md).
+For historical changes from the original GGRS project, see
+[ggrs-changelog-archive.md](ggrs-changelog-archive.md).

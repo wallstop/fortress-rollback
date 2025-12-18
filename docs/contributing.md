@@ -9,8 +9,10 @@ If you have a cool example or showcase of Fortress Rollback in use, let me know 
 
 ## Create an issue
 
-- [Bug report](https://github.com/wallstop/fortress-rollback/issues/new/choose)
-- [Feature request](https://github.com/wallstop/fortress-rollback/issues/new/choose)
+Visit [GitHub Issues](https://github.com/wallstop/fortress-rollback/issues) to:
+
+- Report a bug
+- Request a feature
 
 ## Contribute to Fortress Rollback
 
