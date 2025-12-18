@@ -74,7 +74,7 @@ jobs:
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Fortress Rollback Benchmarks
-          tool: 'bencher'
+          tool: 'cargo'
           output-file-path: benchmark-results.txt
           # Store results in gh-pages branch under bench/
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -100,7 +100,7 @@ jobs:
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Fortress Rollback Benchmarks
-          tool: 'bencher'
+          tool: 'cargo'
           output-file-path: benchmark-results.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
           # Compare against main but don't push
