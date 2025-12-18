@@ -50,3 +50,353 @@ where
         elapsed_ms: u128,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frame_info::PlayerInput;
+    use crate::Frame;
+    use std::net::SocketAddr;
+
+    /// A minimal test config for testing Event.
+    #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+    struct TestInput(u32);
+
+    #[derive(Debug, Clone, Default)]
+    struct TestState;
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct TestConfig;
+    impl Config for TestConfig {
+        type Input = TestInput;
+        type State = TestState;
+        type Address = SocketAddr;
+    }
+
+    // ==========================================================================
+    // Event Variant Construction Tests
+    // ==========================================================================
+
+    #[test]
+    fn event_synchronizing_construction() {
+        let event: Event<TestConfig> = Event::Synchronizing {
+            total: 10,
+            count: 5,
+            total_requests_sent: 7,
+            elapsed_ms: 1234,
+        };
+
+        match event {
+            Event::Synchronizing {
+                total,
+                count,
+                total_requests_sent,
+                elapsed_ms,
+            } => {
+                assert_eq!(total, 10);
+                assert_eq!(count, 5);
+                assert_eq!(total_requests_sent, 7);
+                assert_eq!(elapsed_ms, 1234);
+            },
+            _ => panic!("Expected Synchronizing variant"),
+        }
+    }
+
+    #[test]
+    fn event_synchronized_construction() {
+        let event: Event<TestConfig> = Event::Synchronized;
+
+        assert!(matches!(event, Event::Synchronized));
+    }
+
+    #[test]
+    fn event_input_construction() {
+        let input = PlayerInput::new(Frame::new(42), TestInput(123));
+        let player = PlayerHandle::new(1);
+        let event: Event<TestConfig> = Event::Input { input, player };
+
+        match event {
+            Event::Input {
+                input: ev_input,
+                player: ev_player,
+            } => {
+                assert_eq!(ev_input.frame, Frame::new(42));
+                assert_eq!(ev_input.input, TestInput(123));
+                assert_eq!(ev_player, PlayerHandle::new(1));
+            },
+            _ => panic!("Expected Input variant"),
+        }
+    }
+
+    #[test]
+    fn event_disconnected_construction() {
+        let event: Event<TestConfig> = Event::Disconnected;
+
+        assert!(matches!(event, Event::Disconnected));
+    }
+
+    #[test]
+    fn event_network_interrupted_construction() {
+        let event: Event<TestConfig> = Event::NetworkInterrupted {
+            disconnect_timeout: 5000,
+        };
+
+        match event {
+            Event::NetworkInterrupted { disconnect_timeout } => {
+                assert_eq!(disconnect_timeout, 5000);
+            },
+            _ => panic!("Expected NetworkInterrupted variant"),
+        }
+    }
+
+    #[test]
+    fn event_network_resumed_construction() {
+        let event: Event<TestConfig> = Event::NetworkResumed;
+
+        assert!(matches!(event, Event::NetworkResumed));
+    }
+
+    #[test]
+    fn event_sync_timeout_construction() {
+        let event: Event<TestConfig> = Event::SyncTimeout { elapsed_ms: 10000 };
+
+        match event {
+            Event::SyncTimeout { elapsed_ms } => {
+                assert_eq!(elapsed_ms, 10000);
+            },
+            _ => panic!("Expected SyncTimeout variant"),
+        }
+    }
+
+    // ==========================================================================
+    // Clone Trait Tests
+    // ==========================================================================
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn event_clone_synchronizing() {
+        let event: Event<TestConfig> = Event::Synchronizing {
+            total: 10,
+            count: 5,
+            total_requests_sent: 7,
+            elapsed_ms: 1234,
+        };
+        let cloned = event.clone();
+        assert_eq!(event, cloned);
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn event_clone_input() {
+        let input = PlayerInput::new(Frame::new(42), TestInput(123));
+        let player = PlayerHandle::new(1);
+        let event: Event<TestConfig> = Event::Input { input, player };
+        let cloned = event.clone();
+        assert_eq!(event, cloned);
+    }
+
+    // ==========================================================================
+    // PartialEq Trait Tests
+    // ==========================================================================
+
+    #[test]
+    fn event_equality_same_variant_same_values() {
+        let event1: Event<TestConfig> = Event::Synchronizing {
+            total: 10,
+            count: 5,
+            total_requests_sent: 7,
+            elapsed_ms: 1234,
+        };
+        let event2: Event<TestConfig> = Event::Synchronizing {
+            total: 10,
+            count: 5,
+            total_requests_sent: 7,
+            elapsed_ms: 1234,
+        };
+        assert_eq!(event1, event2);
+    }
+
+    #[test]
+    fn event_equality_same_variant_different_values() {
+        let event1: Event<TestConfig> = Event::Synchronizing {
+            total: 10,
+            count: 5,
+            total_requests_sent: 7,
+            elapsed_ms: 1234,
+        };
+        let event2: Event<TestConfig> = Event::Synchronizing {
+            total: 10,
+            count: 6, // different
+            total_requests_sent: 7,
+            elapsed_ms: 1234,
+        };
+        assert_ne!(event1, event2);
+    }
+
+    #[test]
+    fn event_equality_different_variants() {
+        let event1: Event<TestConfig> = Event::Synchronized;
+        let event2: Event<TestConfig> = Event::Disconnected;
+        assert_ne!(event1, event2);
+    }
+
+    #[test]
+    fn event_equality_network_interrupted() {
+        let event1: Event<TestConfig> = Event::NetworkInterrupted {
+            disconnect_timeout: 5000,
+        };
+        let event2: Event<TestConfig> = Event::NetworkInterrupted {
+            disconnect_timeout: 5000,
+        };
+        let event3: Event<TestConfig> = Event::NetworkInterrupted {
+            disconnect_timeout: 6000,
+        };
+        assert_eq!(event1, event2);
+        assert_ne!(event1, event3);
+    }
+
+    // ==========================================================================
+    // Debug Trait Tests
+    // ==========================================================================
+
+    #[test]
+    fn event_debug_format_synchronized() {
+        let event: Event<TestConfig> = Event::Synchronized;
+        let debug = format!("{:?}", event);
+        assert!(debug.contains("Synchronized"));
+    }
+
+    #[test]
+    fn event_debug_format_synchronizing() {
+        let event: Event<TestConfig> = Event::Synchronizing {
+            total: 10,
+            count: 5,
+            total_requests_sent: 7,
+            elapsed_ms: 1234,
+        };
+        let debug = format!("{:?}", event);
+        assert!(debug.contains("Synchronizing"));
+        assert!(debug.contains("10"));
+        assert!(debug.contains("1234"));
+    }
+
+    #[test]
+    fn event_debug_format_disconnected() {
+        let event: Event<TestConfig> = Event::Disconnected;
+        let debug = format!("{:?}", event);
+        assert!(debug.contains("Disconnected"));
+    }
+
+    #[test]
+    fn event_debug_format_network_interrupted() {
+        let event: Event<TestConfig> = Event::NetworkInterrupted {
+            disconnect_timeout: 5000,
+        };
+        let debug = format!("{:?}", event);
+        assert!(debug.contains("NetworkInterrupted"));
+        assert!(debug.contains("5000"));
+    }
+
+    #[test]
+    fn event_debug_format_network_resumed() {
+        let event: Event<TestConfig> = Event::NetworkResumed;
+        let debug = format!("{:?}", event);
+        assert!(debug.contains("NetworkResumed"));
+    }
+
+    #[test]
+    fn event_debug_format_sync_timeout() {
+        let event: Event<TestConfig> = Event::SyncTimeout { elapsed_ms: 10000 };
+        let debug = format!("{:?}", event);
+        assert!(debug.contains("SyncTimeout"));
+        assert!(debug.contains("10000"));
+    }
+
+    // ==========================================================================
+    // Edge Case Tests
+    // ==========================================================================
+
+    #[test]
+    fn event_synchronizing_zero_count() {
+        let event: Event<TestConfig> = Event::Synchronizing {
+            total: 10,
+            count: 0,
+            total_requests_sent: 0,
+            elapsed_ms: 0,
+        };
+
+        match event {
+            Event::Synchronizing { count, .. } => {
+                assert_eq!(count, 0);
+            },
+            _ => panic!("Expected Synchronizing"),
+        }
+    }
+
+    #[test]
+    fn event_synchronizing_max_values() {
+        let event: Event<TestConfig> = Event::Synchronizing {
+            total: u32::MAX,
+            count: u32::MAX,
+            total_requests_sent: u32::MAX,
+            elapsed_ms: u128::MAX,
+        };
+
+        match event {
+            Event::Synchronizing {
+                total,
+                count,
+                total_requests_sent,
+                elapsed_ms,
+            } => {
+                assert_eq!(total, u32::MAX);
+                assert_eq!(count, u32::MAX);
+                assert_eq!(total_requests_sent, u32::MAX);
+                assert_eq!(elapsed_ms, u128::MAX);
+            },
+            _ => panic!("Expected Synchronizing"),
+        }
+    }
+
+    #[test]
+    fn event_network_interrupted_zero_timeout() {
+        let event: Event<TestConfig> = Event::NetworkInterrupted {
+            disconnect_timeout: 0,
+        };
+
+        match event {
+            Event::NetworkInterrupted { disconnect_timeout } => {
+                assert_eq!(disconnect_timeout, 0);
+            },
+            _ => panic!("Expected NetworkInterrupted"),
+        }
+    }
+
+    #[test]
+    fn event_sync_timeout_zero() {
+        let event: Event<TestConfig> = Event::SyncTimeout { elapsed_ms: 0 };
+
+        match event {
+            Event::SyncTimeout { elapsed_ms } => {
+                assert_eq!(elapsed_ms, 0);
+            },
+            _ => panic!("Expected SyncTimeout"),
+        }
+    }
+
+    #[test]
+    fn event_input_with_null_frame() {
+        let input = PlayerInput::new(Frame::NULL, TestInput(0));
+        let player = PlayerHandle::new(0);
+        let event: Event<TestConfig> = Event::Input { input, player };
+
+        match event {
+            Event::Input {
+                input: ev_input, ..
+            } => {
+                assert!(ev_input.frame.is_null());
+            },
+            _ => panic!("Expected Input"),
+        }
+    }
+}

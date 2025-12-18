@@ -1,0 +1,133 @@
+name: Benchmark CI
+
+# Run benchmarks and track regressions
+# Results are stored in GitHub Pages at gh-pages branch (bench/)
+# Alerts are posted as commit comments when performance regresses
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:  # Allow manual runs
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  # Required for github-pages deployment
+  contents: write
+  # Required for posting benchmark comments on commits
+  deployments: write
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    # Use a consistent runner for reproducible results
+    # Note: Performance may vary between runner hardware revisions
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: bench-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            bench-${{ runner.os }}-cargo-
+
+      # Run all criterion benchmarks
+      - name: Run benchmarks
+        run: cargo bench --bench input_queue --bench p2p_session --bench sync_layer -- --output-format bencher | tee benchmark-results.txt
+
+      # Store benchmark results and detect regressions
+      # Uses github-action-benchmark: https://github.com/benchmark-action/github-action-benchmark
+      - name: Store benchmark results
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Fortress Rollback Benchmarks
+          tool: 'cargo'
+          output-file-path: benchmark-results.txt
+          # Store results in gh-pages branch under bench/
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: ${{ github.event_name != 'pull_request' }}
+          # Alert if performance regresses by more than 15%
+          alert-threshold: '115%'
+          # Post alert as commit comment when regression detected
+          comment-on-alert: true
+          # Fail workflow if regression exceeds 30%
+          fail-on-alert: true
+          fail-threshold: '130%'
+          # Keep benchmark history for trend analysis
+          max-items-in-chart: 50
+          # Only update on push to main (not PRs) to avoid benchmark pollution
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: bench
+
+      # On PRs, compare with main branch baseline
+      - name: Compare PR benchmarks with main
+        if: github.event_name == 'pull_request'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Fortress Rollback Benchmarks
+          tool: 'cargo'
+          output-file-path: benchmark-results.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Compare against main but don't push
+          auto-push: false
+          # Summary comparison comment on PR
+          comment-always: true
+          # External JSON for baseline comparison
+          external-data-json-path: ./cache/benchmark-data.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: bench
+
+      # Upload raw benchmark results as artifact for debugging
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results.txt
+          retention-days: 30
+
+  # Quick benchmark sanity check (runs on every PR)
+  benchmark-quick:
+    runs-on: ubuntu-latest
+    # Quick benchmarks run even if full benchmark fails
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: bench-quick-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            bench-quick-${{ runner.os }}-cargo-
+
+      # Run a quick smoke test of benchmarks (1 sample each)
+      - name: Smoke test benchmarks
+        run: |
+          cargo bench --bench input_queue -- --sample-size 10 --warm-up-time 1 --measurement-time 1
+          cargo bench --bench p2p_session -- --sample-size 10 --warm-up-time 1 --measurement-time 1
+          cargo bench --bench sync_layer -- --sample-size 10 --warm-up-time 1 --measurement-time 1
+        timeout-minutes: 10

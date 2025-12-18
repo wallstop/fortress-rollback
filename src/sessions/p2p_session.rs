@@ -2,9 +2,10 @@ use crate::error::FortressError;
 use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::network::network_stats::NetworkStats;
-use crate::network::protocol::UdpProtocol;
 use crate::report_violation;
-use crate::sessions::builder::{ProtocolConfig, SaveMode};
+use crate::sessions::config::{ProtocolConfig, SaveMode};
+use crate::sessions::player_registry::PlayerRegistry;
+use crate::sessions::sync_health::SyncHealth;
 use crate::sync_layer::SyncLayer;
 use crate::telemetry::{
     InvariantChecker, InvariantViolation, ViolationKind, ViolationObserver, ViolationSeverity,
@@ -15,65 +16,6 @@ use crate::{
     PlayerHandle, PlayerType, SessionState,
 };
 use tracing::{debug, trace};
-
-/// Health status of synchronization with a remote peer.
-///
-/// This enum represents the current synchronization status between the local
-/// session and a remote peer, based on checksum comparison.
-///
-/// # Important
-///
-/// This should be the primary API for checking session synchronization status
-/// before termination. Using [`P2PSession::confirmed_frame`] alone is
-/// **not sufficient** to determine safe session termination.
-///
-/// # Example
-///
-/// ```ignore
-/// // Check sync status before terminating
-/// match session.sync_health(peer_handle) {
-///     Some(SyncHealth::InSync) => {
-///         // Safe to proceed - checksums match
-///     }
-///     Some(SyncHealth::DesyncDetected { frame, .. }) => {
-///         // Desync occurred - game state has diverged
-///         panic!("Desync at frame {}", frame);
-///     }
-///     Some(SyncHealth::Pending) | None => {
-///         // Still waiting for checksum data
-///     }
-/// }
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SyncHealth {
-    /// Checksums match at the most recently compared frame.
-    ///
-    /// This indicates that at the last checksum comparison, both peers
-    /// had identical game state. Note that this does not guarantee
-    /// synchronization at the current frame - only at the last compared frame.
-    InSync,
-
-    /// Waiting for checksum data from peer (no comparison possible yet).
-    ///
-    /// This typically occurs:
-    /// - Early in the session before enough frames have been confirmed
-    /// - When desync detection is disabled
-    /// - When the peer hasn't sent checksum data yet
-    Pending,
-
-    /// Checksums differ - game state has diverged.
-    ///
-    /// This is a critical error indicating non-determinism or a bug.
-    /// The session should typically be terminated when this occurs.
-    DesyncDetected {
-        /// The frame at which the desync was detected.
-        frame: Frame,
-        /// The checksum computed locally for this frame.
-        local_checksum: u128,
-        /// The checksum received from the remote peer for this frame.
-        remote_checksum: u128,
-    },
-}
 
 use std::collections::vec_deque::Drain;
 use std::collections::BTreeMap;
@@ -102,134 +44,6 @@ const MIN_RECOMMENDATION: u32 = 3;
 /// At 100 events, there's ample buffer for typical network jitter while
 /// providing backpressure if the application isn't processing events.
 const MAX_EVENT_QUEUE_SIZE: usize = 100;
-
-/// Registry tracking all players and their connection states.
-///
-/// # Note
-///
-/// This type is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
-/// It is not part of the stable public API.
-pub struct PlayerRegistry<T>
-where
-    T: Config,
-{
-    /// Map from player handles to their types.
-    pub handles: BTreeMap<PlayerHandle, PlayerType<T::Address>>,
-    /// Map from addresses to protocol handlers for remote players.
-    pub remotes: BTreeMap<T::Address, UdpProtocol<T>>,
-    /// Map from addresses to protocol handlers for spectators.
-    pub spectators: BTreeMap<T::Address, UdpProtocol<T>>,
-}
-
-impl<T> std::fmt::Debug for PlayerRegistry<T>
-where
-    T: Config,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Destructure to ensure all fields are included when new fields are added.
-        let Self {
-            handles,
-            remotes,
-            spectators,
-        } = self;
-
-        f.debug_struct("PlayerRegistry")
-            .field("handles", handles)
-            .field("remotes", &remotes.keys())
-            .field("spectators", &spectators.keys())
-            .finish()
-    }
-}
-
-impl<T: Config> PlayerRegistry<T> {
-    /// Creates a new empty player registry.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            handles: BTreeMap::new(),
-            remotes: BTreeMap::new(),
-            spectators: BTreeMap::new(),
-        }
-    }
-
-    /// Returns handles for all local players.
-    #[must_use]
-    pub fn local_player_handles(&self) -> Vec<PlayerHandle> {
-        self.handles
-            .iter()
-            .filter_map(|(k, v)| match v {
-                PlayerType::Local => Some(*k),
-                PlayerType::Remote(_) => None,
-                PlayerType::Spectator(_) => None,
-            })
-            .collect()
-    }
-
-    /// Returns handles for all remote players.
-    #[must_use]
-    pub fn remote_player_handles(&self) -> Vec<PlayerHandle> {
-        self.handles
-            .iter()
-            .filter_map(|(k, v)| match v {
-                PlayerType::Local => None,
-                PlayerType::Remote(_) => Some(*k),
-                PlayerType::Spectator(_) => None,
-            })
-            .collect()
-    }
-
-    /// Returns handles for all spectators.
-    #[must_use]
-    pub fn spectator_handles(&self) -> Vec<PlayerHandle> {
-        self.handles
-            .iter()
-            .filter_map(|(k, v)| match v {
-                PlayerType::Local => None,
-                PlayerType::Remote(_) => None,
-                PlayerType::Spectator(_) => Some(*k),
-            })
-            .collect()
-    }
-
-    /// Returns the number of players (local + remote, excluding spectators).
-    #[must_use]
-    pub fn num_players(&self) -> usize {
-        self.handles
-            .iter()
-            .filter(|(_, v)| matches!(v, PlayerType::Local | PlayerType::Remote(_)))
-            .count()
-    }
-
-    /// Returns the number of spectators.
-    #[must_use]
-    pub fn num_spectators(&self) -> usize {
-        self.handles
-            .iter()
-            .filter(|(_, v)| matches!(v, PlayerType::Spectator(_)))
-            .count()
-    }
-
-    /// Returns all handles associated with a given address.
-    pub fn handles_by_address(&self, addr: T::Address) -> Vec<PlayerHandle> {
-        let handles: Vec<PlayerHandle> = self
-            .handles
-            .iter()
-            .filter_map(|(h, player_type)| match player_type {
-                PlayerType::Local => None,
-                PlayerType::Remote(a) => Some((h, a)),
-                PlayerType::Spectator(a) => Some((h, a)),
-            })
-            .filter_map(|(h, a)| if addr == *a { Some(*h) } else { None })
-            .collect();
-        handles
-    }
-}
-
-impl<T: Config> Default for PlayerRegistry<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// A [`P2PSession`] provides all functionality to connect to remote clients in a peer-to-peer fashion, exchange inputs and handle the gamestate by saving, loading and advancing.
 pub struct P2PSession<T>
@@ -1747,7 +1561,9 @@ impl<T: Config> InvariantChecker for P2PSession<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Config;
+    use crate::network::messages::Message;
+    use crate::sessions::builder::SessionBuilder;
+    use crate::{Config, NonBlockingSocket};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     /// A minimal test configuration for unit testing.
@@ -1763,278 +1579,49 @@ mod tests {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
     }
 
-    // ==========================================
-    // SyncHealth Tests
-    // ==========================================
+    /// A dummy socket that doesn't actually send or receive messages.
+    /// Used for unit testing without network dependencies.
+    struct DummySocket;
 
-    #[test]
-    fn sync_health_in_sync_equality() {
-        let a = SyncHealth::InSync;
-        let b = SyncHealth::InSync;
-        assert_eq!(a, b);
+    impl NonBlockingSocket<SocketAddr> for DummySocket {
+        fn send_to(&mut self, _msg: &Message, _addr: &SocketAddr) {}
+        fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
+            Vec::new()
+        }
     }
 
-    #[test]
-    fn sync_health_pending_equality() {
-        let a = SyncHealth::Pending;
-        let b = SyncHealth::Pending;
-        assert_eq!(a, b);
+    // Helper function to create a local-only P2P session for testing (no network)
+    fn create_local_only_session() -> P2PSession<TestConfig> {
+        SessionBuilder::new()
+            .with_num_players(1)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("Failed to add player")
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session")
     }
 
-    #[test]
-    fn sync_health_desync_equality() {
-        let a = SyncHealth::DesyncDetected {
-            frame: Frame::new(10),
-            local_checksum: 0x1234,
-            remote_checksum: 0x5678,
-        };
-        let b = SyncHealth::DesyncDetected {
-            frame: Frame::new(10),
-            local_checksum: 0x1234,
-            remote_checksum: 0x5678,
-        };
-        assert_eq!(a, b);
+    // Helper function to create a 2-player P2P session with one remote
+    fn create_two_player_session() -> P2PSession<TestConfig> {
+        SessionBuilder::new()
+            .with_num_players(2)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("Failed to add local player")
+            .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(1))
+            .expect("Failed to add remote player")
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session")
     }
 
-    #[test]
-    fn sync_health_desync_inequality() {
-        let a = SyncHealth::DesyncDetected {
-            frame: Frame::new(10),
-            local_checksum: 0x1234,
-            remote_checksum: 0x5678,
-        };
-        let b = SyncHealth::DesyncDetected {
-            frame: Frame::new(11), // different frame
-            local_checksum: 0x1234,
-            remote_checksum: 0x5678,
-        };
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn sync_health_different_variants_not_equal() {
-        let in_sync = SyncHealth::InSync;
-        let pending = SyncHealth::Pending;
-        let desync = SyncHealth::DesyncDetected {
-            frame: Frame::new(1),
-            local_checksum: 1,
-            remote_checksum: 2,
-        };
-
-        assert_ne!(in_sync, pending);
-        assert_ne!(in_sync, desync);
-        assert_ne!(pending, desync);
-    }
-
-    #[test]
-    fn sync_health_clone() {
-        let original = SyncHealth::DesyncDetected {
-            frame: Frame::new(42),
-            local_checksum: 0xDEAD,
-            remote_checksum: 0xBEEF,
-        };
-        let cloned = original.clone();
-        assert_eq!(original, cloned);
-    }
-
-    #[test]
-    fn sync_health_debug_format() {
-        let health = SyncHealth::InSync;
-        let debug_str = format!("{:?}", health);
-        assert!(debug_str.contains("InSync"));
-
-        let pending = SyncHealth::Pending;
-        let debug_str = format!("{:?}", pending);
-        assert!(debug_str.contains("Pending"));
-
-        let desync = SyncHealth::DesyncDetected {
-            frame: Frame::new(100),
-            local_checksum: 0x1234,
-            remote_checksum: 0x5678,
-        };
-        let debug_str = format!("{:?}", desync);
-        assert!(debug_str.contains("DesyncDetected"));
-        assert!(debug_str.contains("100") || debug_str.contains("Frame"));
-    }
-
-    // ==========================================
-    // PlayerRegistry Tests
-    // ==========================================
-
-    #[test]
-    fn player_registry_new_is_empty() {
-        let registry = PlayerRegistry::<TestConfig>::new();
-        assert_eq!(registry.num_players(), 0);
-        assert_eq!(registry.num_spectators(), 0);
-        assert!(registry.local_player_handles().is_empty());
-        assert!(registry.remote_player_handles().is_empty());
-        assert!(registry.spectator_handles().is_empty());
-    }
-
-    #[test]
-    fn player_registry_default_is_empty() {
-        let registry = PlayerRegistry::<TestConfig>::default();
-        assert_eq!(registry.num_players(), 0);
-        assert_eq!(registry.num_spectators(), 0);
-    }
-
-    #[test]
-    fn player_registry_with_local_player() {
-        let mut registry = PlayerRegistry::<TestConfig>::new();
-        let handle = PlayerHandle::new(0);
-        registry.handles.insert(handle, PlayerType::Local);
-
-        assert_eq!(registry.num_players(), 1);
-        assert_eq!(registry.num_spectators(), 0);
-        assert_eq!(registry.local_player_handles(), vec![handle]);
-        assert!(registry.remote_player_handles().is_empty());
-        assert!(registry.spectator_handles().is_empty());
-    }
-
-    #[test]
-    fn player_registry_with_remote_player() {
-        let mut registry = PlayerRegistry::<TestConfig>::new();
-        let handle = PlayerHandle::new(1);
-        let addr = test_addr(8080);
-        registry.handles.insert(handle, PlayerType::Remote(addr));
-
-        assert_eq!(registry.num_players(), 1);
-        assert_eq!(registry.num_spectators(), 0);
-        assert!(registry.local_player_handles().is_empty());
-        assert_eq!(registry.remote_player_handles(), vec![handle]);
-        assert!(registry.spectator_handles().is_empty());
-    }
-
-    #[test]
-    fn player_registry_with_spectator() {
-        let mut registry = PlayerRegistry::<TestConfig>::new();
-        let handle = PlayerHandle::new(10);
-        let addr = test_addr(9090);
-        registry.handles.insert(handle, PlayerType::Spectator(addr));
-
-        assert_eq!(registry.num_players(), 0);
-        assert_eq!(registry.num_spectators(), 1);
-        assert!(registry.local_player_handles().is_empty());
-        assert!(registry.remote_player_handles().is_empty());
-        let spectators = registry.spectator_handles();
-        assert_eq!(spectators, vec![handle]);
-    }
-
-    #[test]
-    fn player_registry_mixed_players() {
-        let mut registry = PlayerRegistry::<TestConfig>::new();
-
-        // Add local player
-        let local_handle = PlayerHandle::new(0);
-        registry.handles.insert(local_handle, PlayerType::Local);
-
-        // Add remote player
-        let remote_handle = PlayerHandle::new(1);
-        let remote_addr = test_addr(8080);
-        registry
-            .handles
-            .insert(remote_handle, PlayerType::Remote(remote_addr));
-
-        // Add spectator
-        let spec_handle = PlayerHandle::new(10);
-        let spec_addr = test_addr(9090);
-        registry
-            .handles
-            .insert(spec_handle, PlayerType::Spectator(spec_addr));
-
-        assert_eq!(registry.num_players(), 2); // local + remote
-        assert_eq!(registry.num_spectators(), 1);
-        assert_eq!(registry.local_player_handles(), vec![local_handle]);
-        assert_eq!(registry.remote_player_handles(), vec![remote_handle]);
-    }
-
-    #[test]
-    fn player_registry_handles_by_address_remote() {
-        let mut registry = PlayerRegistry::<TestConfig>::new();
-        let addr = test_addr(8080);
-
-        let handle1 = PlayerHandle::new(1);
-        registry.handles.insert(handle1, PlayerType::Remote(addr));
-
-        // Look up by address
-        let found = registry.handles_by_address(addr);
-        assert_eq!(found.len(), 1);
-        assert!(found.contains(&handle1));
-    }
-
-    #[test]
-    fn player_registry_handles_by_address_spectator() {
-        let mut registry = PlayerRegistry::<TestConfig>::new();
-        let addr = test_addr(9090);
-
-        let handle = PlayerHandle::new(10);
-        registry.handles.insert(handle, PlayerType::Spectator(addr));
-
-        let found = registry.handles_by_address(addr);
-        assert_eq!(found.len(), 1);
-        assert!(found.contains(&handle));
-    }
-
-    #[test]
-    fn player_registry_handles_by_address_not_found() {
-        let mut registry = PlayerRegistry::<TestConfig>::new();
-        let addr = test_addr(8080);
-        let other_addr = test_addr(9999);
-
-        let handle = PlayerHandle::new(1);
-        registry.handles.insert(handle, PlayerType::Remote(addr));
-
-        // Look up different address
-        let found = registry.handles_by_address(other_addr);
-        assert!(found.is_empty());
-    }
-
-    #[test]
-    fn player_registry_handles_by_address_excludes_local() {
-        let mut registry = PlayerRegistry::<TestConfig>::new();
-
-        let handle = PlayerHandle::new(0);
-        registry.handles.insert(handle, PlayerType::Local);
-
-        // Local players don't have addresses, so any address lookup returns empty
-        let found = registry.handles_by_address(test_addr(1234));
-        assert!(found.is_empty());
-    }
-
-    #[test]
-    fn player_registry_multiple_handles_same_address() {
-        let mut registry = PlayerRegistry::<TestConfig>::new();
-        let addr = test_addr(8080);
-
-        // Two players at the same address (e.g., couch co-op on remote machine)
-        let handle1 = PlayerHandle::new(1);
-        let handle2 = PlayerHandle::new(2);
-        registry.handles.insert(handle1, PlayerType::Remote(addr));
-        registry.handles.insert(handle2, PlayerType::Remote(addr));
-
-        let found = registry.handles_by_address(addr);
-        assert_eq!(found.len(), 2);
-        assert!(found.contains(&handle1));
-        assert!(found.contains(&handle2));
-    }
-
-    #[test]
-    fn player_registry_debug_format() {
-        let mut registry = PlayerRegistry::<TestConfig>::new();
-        let addr = test_addr(8080);
-
-        registry
-            .handles
-            .insert(PlayerHandle::new(0), PlayerType::Local);
-        registry
-            .handles
-            .insert(PlayerHandle::new(1), PlayerType::Remote(addr));
-
-        let debug_str = format!("{:?}", registry);
-        assert!(debug_str.contains("PlayerRegistry"));
-        assert!(debug_str.contains("handles"));
-        assert!(debug_str.contains("remotes"));
-        assert!(debug_str.contains("spectators"));
+    // Helper function to create a 2-player local-only session
+    fn create_two_local_players_session() -> P2PSession<TestConfig> {
+        SessionBuilder::new()
+            .with_num_players(2)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("Failed to add player 0")
+            .add_player(PlayerType::Local, PlayerHandle::new(1))
+            .expect("Failed to add player 1")
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session")
     }
 
     // ==========================================
@@ -2055,5 +1642,610 @@ mod tests {
         const _: () = assert!(MIN_RECOMMENDATION <= 10);
         // Verify at runtime the constant is what we expect
         assert_eq!(MIN_RECOMMENDATION, 3);
+    }
+
+    #[test]
+    fn max_event_queue_size_is_reasonable() {
+        // Should be large enough to buffer network events (at least 50)
+        // but not so large as to consume excessive memory (at most 1000)
+        const _: () = assert!(MAX_EVENT_QUEUE_SIZE >= 50);
+        const _: () = assert!(MAX_EVENT_QUEUE_SIZE <= 1000);
+        // Verify at runtime the constant is what we expect
+        assert_eq!(MAX_EVENT_QUEUE_SIZE, 100);
+    }
+
+    // ==========================================
+    // P2PSession Constructor and Initial State Tests
+    // ==========================================
+
+    #[test]
+    fn p2p_session_local_only_starts_running() {
+        let session = create_local_only_session();
+        // With no remote players, session starts running immediately
+        assert_eq!(session.current_state(), SessionState::Running);
+    }
+
+    #[test]
+    fn p2p_session_with_remote_starts_synchronizing() {
+        let session = create_two_player_session();
+        // With remote players, session starts in synchronizing state
+        assert_eq!(session.current_state(), SessionState::Synchronizing);
+    }
+
+    #[test]
+    fn p2p_session_initial_frame_is_zero() {
+        let session = create_local_only_session();
+        assert_eq!(session.current_frame(), Frame::new(0));
+    }
+
+    #[test]
+    fn p2p_session_initial_confirmed_frame_is_null() {
+        let session = create_local_only_session();
+        // Initially, confirmed frame is NULL (no frames confirmed yet)
+        assert_eq!(session.confirmed_frame(), Frame::NULL);
+    }
+
+    #[test]
+    fn p2p_session_num_players_returns_correct_count() {
+        let session = create_two_local_players_session();
+        assert_eq!(session.num_players(), 2);
+    }
+
+    #[test]
+    fn p2p_session_num_spectators_initially_zero() {
+        let session = create_local_only_session();
+        assert_eq!(session.num_spectators(), 0);
+    }
+
+    #[test]
+    fn p2p_session_local_player_handles_returns_correct_handles() {
+        let session = create_two_local_players_session();
+        let handles = session.local_player_handles();
+        assert_eq!(handles.len(), 2);
+        assert!(handles.contains(&PlayerHandle::new(0)));
+        assert!(handles.contains(&PlayerHandle::new(1)));
+    }
+
+    #[test]
+    fn p2p_session_remote_player_handles_with_remotes() {
+        let session = create_two_player_session();
+        let handles = session.remote_player_handles();
+        assert_eq!(handles.len(), 1);
+        assert!(handles.contains(&PlayerHandle::new(1)));
+    }
+
+    #[test]
+    fn p2p_session_spectator_handles_initially_empty() {
+        let session = create_two_player_session();
+        assert!(session.spectator_handles().is_empty());
+    }
+
+    #[test]
+    fn p2p_session_max_prediction_returns_configured_value() {
+        let session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(1)
+            .with_max_prediction_window(4)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("Failed to add player")
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session");
+        assert_eq!(session.max_prediction(), 4);
+    }
+
+    #[test]
+    fn p2p_session_frames_ahead_initially_zero() {
+        let session = create_local_only_session();
+        assert_eq!(session.frames_ahead(), 0);
+    }
+
+    #[test]
+    fn p2p_session_desync_detection_returns_configured_value() {
+        let session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(1)
+            .with_desync_detection_mode(DesyncDetection::Off)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("Failed to add player")
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session");
+        assert_eq!(session.desync_detection(), DesyncDetection::Off);
+    }
+
+    #[test]
+    fn p2p_session_violation_observer_none_by_default() {
+        let session = create_local_only_session();
+        assert!(session.violation_observer().is_none());
+    }
+
+    // ==========================================
+    // add_local_input Tests
+    // ==========================================
+
+    #[test]
+    fn add_local_input_for_valid_handle_succeeds() {
+        let mut session = create_local_only_session();
+        let result = session.add_local_input(PlayerHandle::new(0), 42u8);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn add_local_input_for_remote_handle_fails() {
+        let mut session = create_two_player_session();
+        // Handle 1 is remote
+        let result = session.add_local_input(PlayerHandle::new(1), 42u8);
+        assert!(result.is_err());
+        match result {
+            Err(FortressError::InvalidRequest { info }) => {
+                assert!(info.contains("local player"));
+            },
+            _ => panic!("Expected InvalidRequest error"),
+        }
+    }
+
+    #[test]
+    fn add_local_input_for_invalid_handle_fails() {
+        let mut session = create_local_only_session();
+        // Handle 99 doesn't exist
+        let result = session.add_local_input(PlayerHandle::new(99), 42u8);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_local_input_multiple_times_overwrites() {
+        let mut session = create_local_only_session();
+        session
+            .add_local_input(PlayerHandle::new(0), 10u8)
+            .expect("First input failed");
+        session
+            .add_local_input(PlayerHandle::new(0), 20u8)
+            .expect("Second input failed");
+        // Should succeed without error - second input overwrites first
+    }
+
+    // ==========================================
+    // advance_frame Tests
+    // ==========================================
+
+    #[test]
+    fn advance_frame_without_input_fails() {
+        let mut session = create_local_only_session();
+        let result = session.advance_frame();
+        assert!(result.is_err());
+        match result {
+            Err(FortressError::InvalidRequest { info }) => {
+                assert!(info.contains("Missing local input"));
+            },
+            _ => panic!("Expected InvalidRequest error"),
+        }
+    }
+
+    #[test]
+    fn advance_frame_when_not_synchronized_fails() {
+        let mut session = create_two_player_session();
+        // Session is in Synchronizing state
+        assert_eq!(session.current_state(), SessionState::Synchronizing);
+        session
+            .add_local_input(PlayerHandle::new(0), 42u8)
+            .expect("Input failed");
+        let result = session.advance_frame();
+        assert!(result.is_err());
+        match result {
+            Err(FortressError::NotSynchronized) => {},
+            _ => panic!("Expected NotSynchronized error"),
+        }
+    }
+
+    #[test]
+    fn advance_frame_with_input_succeeds() {
+        let mut session = create_local_only_session();
+        session
+            .add_local_input(PlayerHandle::new(0), 42u8)
+            .expect("Input failed");
+        let requests = session.advance_frame().expect("Advance failed");
+        // Should have at least one request (likely SaveGameState and AdvanceFrame)
+        assert!(!requests.is_empty());
+    }
+
+    #[test]
+    fn advance_frame_increments_current_frame() {
+        let mut session = create_local_only_session();
+        assert_eq!(session.current_frame(), Frame::new(0));
+        session
+            .add_local_input(PlayerHandle::new(0), 42u8)
+            .expect("Input failed");
+        let _ = session.advance_frame();
+        assert_eq!(session.current_frame(), Frame::new(1));
+    }
+
+    #[test]
+    fn advance_frame_clears_local_inputs() {
+        let mut session = create_local_only_session();
+        session
+            .add_local_input(PlayerHandle::new(0), 42u8)
+            .expect("Input failed");
+        let _ = session.advance_frame();
+        // Now trying to advance again without input should fail
+        let result = session.advance_frame();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn advance_frame_multiple_local_players_requires_all_inputs() {
+        let mut session = create_two_local_players_session();
+        // Add input for player 0 only
+        session
+            .add_local_input(PlayerHandle::new(0), 42u8)
+            .expect("Input failed");
+        let result = session.advance_frame();
+        assert!(result.is_err());
+        match result {
+            Err(FortressError::InvalidRequest { info }) => {
+                assert!(info.contains("Missing local input"));
+            },
+            _ => panic!("Expected InvalidRequest error"),
+        }
+    }
+
+    #[test]
+    fn advance_frame_multiple_local_players_succeeds_with_all_inputs() {
+        let mut session = create_two_local_players_session();
+        session
+            .add_local_input(PlayerHandle::new(0), 1u8)
+            .expect("Input 0 failed");
+        session
+            .add_local_input(PlayerHandle::new(1), 2u8)
+            .expect("Input 1 failed");
+        let requests = session.advance_frame().expect("Advance failed");
+        assert!(!requests.is_empty());
+    }
+
+    // ==========================================
+    // poll_remote_clients Tests
+    // ==========================================
+
+    #[test]
+    fn poll_remote_clients_does_not_panic() {
+        let mut session = create_two_player_session();
+        // Should not panic even with no messages
+        session.poll_remote_clients();
+    }
+
+    #[test]
+    fn poll_remote_clients_multiple_times() {
+        let mut session = create_local_only_session();
+        for _ in 0..10 {
+            session.poll_remote_clients();
+        }
+        // Should complete without issues
+    }
+
+    // ==========================================
+    // disconnect_player Tests
+    // ==========================================
+
+    #[test]
+    fn disconnect_player_local_fails() {
+        let mut session = create_local_only_session();
+        let result = session.disconnect_player(PlayerHandle::new(0));
+        assert!(result.is_err());
+        match result {
+            Err(FortressError::InvalidRequest { info }) => {
+                assert!(info.contains("Local Player cannot be disconnected"));
+            },
+            _ => panic!("Expected InvalidRequest error"),
+        }
+    }
+
+    #[test]
+    fn disconnect_player_invalid_handle_fails() {
+        let mut session = create_local_only_session();
+        let result = session.disconnect_player(PlayerHandle::new(99));
+        assert!(result.is_err());
+        match result {
+            Err(FortressError::InvalidRequest { info }) => {
+                assert!(info.contains("Invalid Player Handle"));
+            },
+            _ => panic!("Expected InvalidRequest error"),
+        }
+    }
+
+    #[test]
+    fn disconnect_player_remote_succeeds() {
+        let mut session = create_two_player_session();
+        // Disconnect remote player (handle 1)
+        let result = session.disconnect_player(PlayerHandle::new(1));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn disconnect_player_already_disconnected_fails() {
+        let mut session = create_two_player_session();
+        session
+            .disconnect_player(PlayerHandle::new(1))
+            .expect("First disconnect failed");
+        let result = session.disconnect_player(PlayerHandle::new(1));
+        assert!(result.is_err());
+        match result {
+            Err(FortressError::InvalidRequest { info }) => {
+                assert!(info.contains("already disconnected"));
+            },
+            _ => panic!("Expected InvalidRequest error"),
+        }
+    }
+
+    // ==========================================
+    // network_stats Tests
+    // ==========================================
+
+    #[test]
+    fn network_stats_local_player_fails() {
+        let session = create_local_only_session();
+        let result = session.network_stats(PlayerHandle::new(0));
+        assert!(result.is_err());
+        match result {
+            Err(FortressError::InvalidRequest { info }) => {
+                assert!(info.contains("not referring to a remote player"));
+            },
+            _ => panic!("Expected InvalidRequest error"),
+        }
+    }
+
+    #[test]
+    fn network_stats_invalid_handle_fails() {
+        let session = create_local_only_session();
+        let result = session.network_stats(PlayerHandle::new(99));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn network_stats_remote_not_synchronized_fails() {
+        let session = create_two_player_session();
+        // Session is not yet synchronized
+        let result = session.network_stats(PlayerHandle::new(1));
+        assert!(result.is_err());
+        match result {
+            Err(FortressError::NotSynchronized) => {},
+            _ => panic!("Expected NotSynchronized error"),
+        }
+    }
+
+    // ==========================================
+    // confirmed_inputs_for_frame Tests
+    // ==========================================
+
+    #[test]
+    fn confirmed_inputs_for_frame_future_frame_fails() {
+        let session = create_local_only_session();
+        let result = session.confirmed_inputs_for_frame(Frame::new(100));
+        assert!(result.is_err());
+        match result {
+            Err(FortressError::InvalidFrame { frame, reason }) => {
+                assert_eq!(frame, Frame::new(100));
+                assert!(reason.contains("not confirmed"));
+            },
+            _ => panic!("Expected InvalidFrame error"),
+        }
+    }
+
+    // ==========================================
+    // handles_by_address Tests
+    // ==========================================
+
+    #[test]
+    fn handles_by_address_returns_correct_handles() {
+        let session = create_two_player_session();
+        let addr = test_addr(8080);
+        let handles = session.handles_by_address(addr);
+        assert_eq!(handles.len(), 1);
+        assert!(handles.contains(&PlayerHandle::new(1)));
+    }
+
+    #[test]
+    fn handles_by_address_unknown_returns_empty() {
+        let session = create_two_player_session();
+        let unknown_addr = test_addr(9999);
+        let handles = session.handles_by_address(unknown_addr);
+        assert!(handles.is_empty());
+    }
+
+    // ==========================================
+    // events Tests
+    // ==========================================
+
+    #[test]
+    fn events_initially_empty() {
+        let mut session = create_local_only_session();
+        let events: Vec<_> = session.events().collect();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn events_drains_queue() {
+        let mut session = create_local_only_session();
+        // First drain
+        let _: Vec<_> = session.events().collect();
+        // Second drain should also be empty
+        let events: Vec<_> = session.events().collect();
+        assert!(events.is_empty());
+    }
+
+    // ==========================================
+    // in_lockstep_mode Tests
+    // ==========================================
+
+    #[test]
+    fn in_lockstep_mode_false_with_default_prediction() {
+        let mut session = create_local_only_session();
+        assert!(!session.in_lockstep_mode());
+    }
+
+    #[test]
+    fn in_lockstep_mode_true_with_zero_prediction() {
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(1)
+            .with_max_prediction_window(0)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("Failed to add player")
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session");
+        assert!(session.in_lockstep_mode());
+    }
+
+    // ==========================================
+    // sync_health Tests (with session)
+    // ==========================================
+
+    #[test]
+    fn sync_health_local_player_returns_none() {
+        let session = create_local_only_session();
+        // Local player doesn't have sync health
+        assert!(session.sync_health(PlayerHandle::new(0)).is_none());
+    }
+
+    #[test]
+    fn sync_health_invalid_handle_returns_none() {
+        let session = create_local_only_session();
+        assert!(session.sync_health(PlayerHandle::new(99)).is_none());
+    }
+
+    #[test]
+    fn sync_health_remote_with_desync_off_returns_pending() {
+        let session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .with_desync_detection_mode(DesyncDetection::Off)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("Failed to add local player")
+            .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(1))
+            .expect("Failed to add remote player")
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session");
+        // With desync detection off, sync_health returns Pending
+        match session.sync_health(PlayerHandle::new(1)) {
+            Some(SyncHealth::Pending) => {},
+            other => panic!("Expected Pending, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sync_health_remote_initially_pending() {
+        let session = create_two_player_session();
+        // Initially, no checksums compared, so should be Pending
+        match session.sync_health(PlayerHandle::new(1)) {
+            Some(SyncHealth::Pending) => {},
+            other => panic!("Expected Pending, got {:?}", other),
+        }
+    }
+
+    // ==========================================
+    // is_synchronized Tests
+    // ==========================================
+
+    #[test]
+    fn is_synchronized_no_remotes_returns_true() {
+        let session = create_local_only_session();
+        assert!(session.is_synchronized());
+    }
+
+    #[test]
+    fn is_synchronized_with_pending_returns_false() {
+        let session = create_two_player_session();
+        // Remote player is pending, so not synchronized
+        assert!(!session.is_synchronized());
+    }
+
+    // ==========================================
+    // last_verified_frame Tests
+    // ==========================================
+
+    #[test]
+    fn last_verified_frame_initially_none() {
+        let session = create_local_only_session();
+        assert!(session.last_verified_frame().is_none());
+    }
+
+    #[test]
+    fn last_verified_frame_with_remote_initially_none() {
+        let session = create_two_player_session();
+        assert!(session.last_verified_frame().is_none());
+    }
+
+    // ==========================================
+    // all_sync_health Tests
+    // ==========================================
+
+    #[test]
+    fn all_sync_health_no_remotes_returns_empty() {
+        let session = create_local_only_session();
+        let health = session.all_sync_health();
+        assert!(health.is_empty());
+    }
+
+    #[test]
+    fn all_sync_health_with_remote_returns_entry() {
+        let session = create_two_player_session();
+        let health = session.all_sync_health();
+        assert_eq!(health.len(), 1);
+        assert_eq!(health[0].0, PlayerHandle::new(1));
+        assert_eq!(health[0].1, SyncHealth::Pending);
+    }
+
+    // ==========================================
+    // InvariantChecker Tests
+    // ==========================================
+
+    #[test]
+    fn check_invariants_no_desync_passes() {
+        let session = create_local_only_session();
+        assert!(session.check_invariants().is_ok());
+    }
+
+    #[test]
+    fn check_invariants_with_remote_no_desync_passes() {
+        let session = create_two_player_session();
+        // No desync detected yet
+        assert!(session.check_invariants().is_ok());
+    }
+
+    // ==========================================
+    // Full Session Lifecycle Tests
+    // ==========================================
+
+    #[test]
+    fn full_session_lifecycle_local_only() {
+        let mut session = create_local_only_session();
+
+        // Initial state
+        assert_eq!(session.current_state(), SessionState::Running);
+        assert_eq!(session.current_frame(), Frame::new(0));
+
+        // Advance a few frames
+        for i in 0..5 {
+            session
+                .add_local_input(PlayerHandle::new(0), i as u8)
+                .expect("Input failed");
+            let requests = session.advance_frame().expect("Advance failed");
+            assert!(!requests.is_empty());
+        }
+
+        // Verify frame advancement
+        assert_eq!(session.current_frame(), Frame::new(5));
+    }
+
+    #[test]
+    fn session_with_spectator() {
+        let session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(1)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("Failed to add local player")
+            .add_player(
+                PlayerType::Spectator(test_addr(9090)),
+                PlayerHandle::new(10),
+            )
+            .expect("Failed to add spectator")
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session");
+
+        assert_eq!(session.num_players(), 1);
+        assert_eq!(session.num_spectators(), 1);
+        assert!(!session.spectator_handles().is_empty());
     }
 }

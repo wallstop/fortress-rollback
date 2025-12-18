@@ -76,6 +76,47 @@ match request {
 }
 ```
 
+## Input Vector Type Change (Breaking Change)
+
+The `inputs` field in `FortressRequest::AdvanceFrame` now uses `InputVec<T::Input>` (a `SmallVec`)
+instead of `Vec<(T::Input, InputStatus)>`. This avoids heap allocations for games with 1-4 players.
+
+**Most code will work unchanged** since `InputVec` implements `Deref<Target = [(T::Input, InputStatus)]>`:
+
+```rust
+// These all work unchanged:
+for (input, status) in inputs.iter() { ... }
+let first_input = inputs[0];
+let len = inputs.len();
+```
+
+If you explicitly typed the inputs as `Vec`, update the signature:
+
+```rust
+// Before
+fn process_inputs(inputs: Vec<(MyInput, InputStatus)>) { ... }
+
+// After (two options)
+use fortress_rollback::InputVec;
+
+// Option 1: Use InputVec directly
+fn process_inputs(inputs: InputVec<MyInput>) { ... }
+
+// Option 2: Accept any slice-like type (most flexible)
+fn process_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
+
+// Option 3: Convert to Vec if needed (allocates)
+fn process_inputs(inputs: impl Into<Vec<(MyInput, InputStatus)>>) {
+    let inputs = inputs.into_iter().collect::<Vec<_>>();
+    ...
+}
+```
+
+The `InputVec` type alias is re-exported for convenience:
+```rust
+use fortress_rollback::InputVec;
+```
+
 ## Address Trait Bounds (Breaking Change)
 
 `Config::Address` now requires `Ord` + `PartialOrd` so deterministic collections can be used internally.
@@ -90,7 +131,18 @@ struct MyAddress {
 
 ## Features
 
-Feature flags remain the same (`sync-send`, `wasm-bindgen`). Enable them as before.
+Existing feature flags (`sync-send`, `wasm-bindgen`) remain compatible. Fortress Rollback adds several new features:
+
+| Feature | Description | New in Fortress |
+|---------|-------------|-----------------|
+| `sync-send` | Multi-threaded trait bounds | ❌ (existing) |
+| `wasm-bindgen` | WASM compatibility | ❌ (existing) |
+| `paranoid` | Runtime invariant checking | ✅ |
+| `loom` | Concurrency testing | ✅ |
+| `z3-verification` | Formal verification tests | ✅ |
+| `graphical-examples` | Interactive demos | ✅ |
+
+For detailed feature documentation, see the [User Guide](user-guide.md#feature-flags).
 
 ## What Stayed the Same
 

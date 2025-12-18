@@ -19,9 +19,9 @@ use crate::frame_info::PlayerInput;
 use crate::input_queue::InputQueue;
 use crate::network::messages::ConnectionStatus;
 use crate::report_violation;
-use crate::sessions::builder::SaveMode;
+use crate::sessions::config::SaveMode;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
-use crate::{Config, FortressError, FortressRequest, Frame, InputStatus, PlayerHandle};
+use crate::{Config, FortressError, FortressRequest, Frame, InputStatus, InputVec, PlayerHandle};
 
 /// The synchronization layer manages game state, input queues, and rollback operations.
 ///
@@ -324,11 +324,19 @@ impl<T: Config> SyncLayer<T> {
     ///
     /// # Returns
     /// Returns `None` if any input queue operation fails (indicates a severe internal error).
+    ///
+    /// # Performance
+    /// Uses [`InputVec`] (a [`SmallVec`]) to avoid heap allocation for games with 1-4 players.
     pub(crate) fn synchronized_inputs(
         &mut self,
         connect_status: &[ConnectionStatus],
-    ) -> Option<Vec<(T::Input, InputStatus)>> {
-        let mut inputs = Vec::new();
+    ) -> Option<InputVec<T::Input>> {
+        let num_players = connect_status.len();
+        let mut inputs = if num_players <= 4 {
+            InputVec::new()
+        } else {
+            InputVec::with_capacity(num_players)
+        };
         for (i, con_stat) in connect_status.iter().enumerate() {
             if con_stat.disconnected && con_stat.last_frame < self.current_frame {
                 inputs.push((T::Input::default(), InputStatus::Disconnected));

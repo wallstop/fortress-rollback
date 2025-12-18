@@ -25,14 +25,19 @@ This guide walks you through integrating Fortress Rollback into your game. By th
      - [Casual Multiplayer](#casual-multiplayer-4-players)
      - [Spectator Streaming](#spectator-streaming)
 9. [Advanced Configuration](#advanced-configuration)
-10. [Spectator Sessions](#spectator-sessions)
-11. [Testing with SyncTest](#testing-with-synctest)
-12. [Common Patterns](#common-patterns)
-13. [Common Pitfalls](#common-pitfalls)
+10. [Feature Flags](#feature-flags)
+    - [Feature Flag Reference](#feature-flag-reference)
+    - [Feature Flag Combinations](#feature-flag-combinations)
+    - [Platform-Specific Features](#platform-specific-features)
+11. [Spectator Sessions](#spectator-sessions)
+12. [Testing with SyncTest](#testing-with-synctest)
+13. [Common Patterns](#common-patterns)
+14. [Common Pitfalls](#common-pitfalls)
     - [Session Termination Anti-Pattern](#session-termination-the-last_confirmed_frame-anti-pattern)
-    - [Desync Detection Disabled by Default](#desync-detection-disabled-by-default)
+    - [Desync Detection Defaults](#understanding-desync-detection-defaults)
     - [NetworkStats Checksum Fields](#networkstats-checksum-fields-for-desync-detection)
-14. [Troubleshooting](#troubleshooting)
+15. [Desync Detection and SyncHealth API](#desync-detection-and-synchealth-api)
+16. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -331,6 +336,8 @@ loop {
 Requests are returned by `advance_frame()` and must be processed in order:
 
 ```rust
+use fortress_rollback::{FortressRequest, compute_checksum};
+
 fn handle_requests(
     requests: Vec<FortressRequest<GameConfig>>,
     game_state: &mut GameState,
@@ -344,11 +351,11 @@ fn handle_requests(
                 // Clone your state
                 let state_copy = game_state.clone();
 
-                // Optionally compute a checksum
-                let checksum = compute_checksum(game_state);
+                // Compute a checksum for desync detection
+                let checksum = compute_checksum(game_state).ok();
 
                 // Save it
-                cell.save(frame, Some(state_copy), Some(checksum));
+                cell.save(frame, Some(state_copy), checksum);
             }
 
             FortressRequest::LoadGameState { cell, frame } => {
@@ -385,27 +392,106 @@ fn handle_requests(
 }
 ```
 
-### Computing Checksums
+### Using the `handle_requests!` Macro
 
-Checksums enable desync detection. Serialize your state and hash it using the library's codec module:
+For simpler cases, you can use the `handle_requests!` macro to reduce boilerplate:
 
 ```rust
+use fortress_rollback::{
+    handle_requests, compute_checksum, FortressRequest, Frame, GameStateCell, InputVec,
+};
+
+fn handle_requests_simple(
+    requests: Vec<FortressRequest<GameConfig>>,
+    game_state: &mut GameState,
+) {
+    handle_requests!(
+        requests,
+        save: |cell: GameStateCell<GameState>, frame: Frame| {
+            let checksum = compute_checksum(game_state).ok();
+            cell.save(frame, Some(game_state.clone()), checksum);
+        },
+        load: |cell: GameStateCell<GameState>, _frame: Frame| {
+            *game_state = cell.load().expect("State must exist");
+        },
+        advance: |inputs: InputVec<Input>| {
+            for (_input, _status) in inputs.iter() {
+                // Apply input
+            }
+            game_state.frame += 1;
+        }
+    );
+}
+```
+
+The macro handles all three request types and processes them in order. For lockstep mode (where save/load never occur), you can provide empty handlers:
+
+```rust
+handle_requests!(
+    requests,
+    save: |_, _| { /* Never called in lockstep */ },
+    load: |_, _| { /* Never called in lockstep */ },
+    advance: |inputs: InputVec<Input>| {
+        game_state.frame += 1;
+    }
+);
+```
+
+### Computing Checksums
+
+Checksums enable desync detection. Fortress Rollback provides built-in functions
+for deterministic checksum computation:
+
+```rust
+use fortress_rollback::compute_checksum;
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct GameState {
+    frame: u32,
+    players: Vec<Player>,
+}
+
+// One-liner checksum computation
+let checksum = compute_checksum(&game_state).expect("Serialization failed");
+
+// Use in SaveGameState handler
+cell.save(frame, Some(game_state.clone()), Some(checksum));
+```
+
+The `compute_checksum` function:
+1. Serializes your state using bincode with fixed-integer encoding (platform-independent)
+2. Hashes the bytes using FNV-1a (deterministic, no random seeds)
+3. Returns a `u128` checksum matching the `cell.save()` signature
+
+#### Alternative: Fletcher-16
+
+For a faster but weaker checksum, use `compute_checksum_fletcher16`:
+
+```rust
+use fortress_rollback::compute_checksum_fletcher16;
+
+// Faster, simpler checksum (16-bit result stored as u128)
+let checksum = compute_checksum_fletcher16(&game_state)
+    .expect("Serialization failed");
+```
+
+#### Manual Checksumming
+
+For advanced use cases, you can compute checksums manually using the lower-level utilities:
+
+```rust
+use fortress_rollback::checksum::{hash_bytes_fnv1a, fletcher16};
 use fortress_rollback::network::codec::encode;
 
-fn compute_checksum(state: &GameState) -> u128 {
-    let bytes = encode(state).expect("Serialization failed");
-    fletcher16(&bytes) as u128
-}
+// Serialize state to bytes
+let bytes = encode(&game_state).expect("Serialization failed");
 
-fn fletcher16(data: &[u8]) -> u16 {
-    let mut sum1: u16 = 0;
-    let mut sum2: u16 = 0;
-    for byte in data {
-        sum1 = (sum1 + *byte as u16) % 255;
-        sum2 = (sum2 + sum1) % 255;
-    }
-    (sum2 << 8) | sum1
-}
+// Hash with FNV-1a (64-bit hash as u128)
+let fnv_checksum = hash_bytes_fnv1a(&bytes);
+
+// Or use Fletcher-16 (16-bit checksum)
+let fletcher_checksum = u128::from(fletcher16(&bytes));
 ```
 
 > **Note:** The `network::codec` module uses a fixed-integer bincode configuration that ensures deterministic serialization across platforms. This is the same configuration used internally for network messages.
@@ -1152,6 +1238,197 @@ let socket = ChaosSocket::new(inner_socket, chaos_config);
 
 ---
 
+## Feature Flags
+
+Fortress Rollback provides several Cargo feature flags to customize behavior for different use cases. This section documents all available features, their purposes, and valid combinations.
+
+### Feature Flag Reference
+
+| Feature | Description | Use Case | Dependencies |
+|---------|-------------|----------|--------------|
+| `sync-send` | Adds `Send + Sync` bounds to core traits | Multi-threaded game engines | None |
+| `wasm-bindgen` | Placeholder for WASM compatibility | Browser-based games | None |
+| `paranoid` | Enables runtime invariant checking in release builds | Debugging production issues | None |
+| `loom` | Enables Loom-compatible synchronization primitives | Concurrency testing | `loom` crate |
+| `z3-verification` | Enables Z3 formal verification tests | Development/CI verification | `z3` crate (system) |
+| `z3-verification-bundled` | Z3 with bundled build (builds from source) | CI environments without system Z3 | `z3` crate |
+| `graphical-examples` | Enables the ex_game graphical examples | Running visual demos | `macroquad` crate |
+
+### Feature Details
+
+#### `sync-send`
+
+When enabled, the `Config` and `NonBlockingSocket` traits require their associated types to be `Send + Sync`. This is necessary for multi-threaded game engines like Bevy that may access session data from multiple threads.
+
+```toml
+[dependencies]
+fortress-rollback = { version = "0.1", features = ["sync-send"] }
+```
+
+**Without `sync-send`:**
+
+```rust
+pub trait Config: 'static {
+    type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned;
+    type State;
+    type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Debug;
+}
+```
+
+**With `sync-send`:**
+
+```rust
+pub trait Config: 'static + Send + Sync {
+    type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned + Send + Sync;
+    type State: Clone + Send + Sync;
+    type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Send + Sync + Debug;
+}
+```
+
+#### `wasm-bindgen`
+
+Placeholder feature for WebAssembly compatibility. Fortress Rollback automatically detects `target_arch = "wasm32"` and uses `js-sys` for time functions when compiling for WebAssembly.
+
+```toml
+[dependencies]
+fortress-rollback = { version = "0.1", features = ["wasm-bindgen"] }
+```
+
+For browser games using WebRTC, combine with [Matchbox](https://github.com/johanhelsing/matchbox) sockets.
+
+#### `paranoid`
+
+Enables runtime invariant checking in release builds. Normally, invariant checks (using the internal `invariant_assert!` macro) only run in debug builds. With `paranoid` enabled, these checks also run in release mode, which is useful for debugging production issues.
+
+```toml
+[dependencies]
+fortress-rollback = { version = "0.1", features = ["paranoid"] }
+```
+
+**Use cases:**
+
+- Debugging desync issues in production
+- Verifying invariants under real-world conditions
+- Running integration tests with production-like builds
+
+**Performance note:** Enabling `paranoid` may impact performance due to additional runtime checks. Use it temporarily for debugging rather than in shipped builds.
+
+#### `loom`
+
+Enables [Loom](https://github.com/tokio-rs/loom)-compatible synchronization primitives for deterministic concurrency testing. When enabled, internal synchronization primitives switch from `parking_lot` to Loom's equivalents.
+
+**Note:** This is a compile-time flag (`cfg(loom)`) and should not be enabled in Cargo.toml. Instead, it's used via `RUSTFLAGS`:
+
+```bash
+# Run loom tests
+cd loom-tests
+RUSTFLAGS="--cfg loom" cargo test --release
+```
+
+See `loom-tests/README.md` for details on running concurrency tests.
+
+#### `z3-verification`
+
+Enables Z3 formal verification tests. Requires the Z3 SMT solver library to be installed on your system.
+
+**System installation (recommended):**
+
+```bash
+# Debian/Ubuntu
+sudo apt install libz3-dev
+
+# macOS
+brew install z3
+
+# Then run verification tests
+cargo test --features z3-verification
+```
+
+**What it tests:**
+
+- Frame arithmetic invariants
+- Buffer bounds safety
+- Desync detection correctness
+- Input queue safety properties
+
+#### `z3-verification-bundled`
+
+Like `z3-verification`, but builds Z3 from source. This is useful for CI environments where system Z3 is not available.
+
+```toml
+# In CI or when Z3 is not installed
+cargo test --features z3-verification-bundled
+```
+
+**Warning:** Building Z3 from source takes 30+ minutes. Use `z3-verification` with system Z3 when possible.
+
+#### `graphical-examples`
+
+Enables the interactive game examples that use [macroquad](https://github.com/not-fl3/macroquad) for graphics and audio.
+
+**System dependencies (Linux):**
+
+```bash
+sudo apt-get install libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
+```
+
+**Running examples:**
+
+```bash
+cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7000 --players localhost 127.0.0.1:7001
+```
+
+### Feature Flag Combinations
+
+Most features are independent and can be combined freely. Here's a matrix showing valid combinations:
+
+| Combination | Valid | Notes |
+|-------------|-------|-------|
+| `sync-send` + `wasm-bindgen` | ✅ | Common for browser games |
+| `sync-send` + `paranoid` | ✅ | Debug multi-threaded issues |
+| `paranoid` + `z3-verification` | ✅ | Maximum verification |
+| `z3-verification` + `z3-verification-bundled` | ⚠️ | Redundant (bundled implies base) |
+| `loom` + any other | ⚠️ | Loom tests should run in isolation |
+| `graphical-examples` + any | ✅ | Examples are independent |
+
+**Recommended combinations:**
+
+```toml
+# Standard multi-threaded game
+[dependencies]
+fortress-rollback = { version = "0.1", features = ["sync-send"] }
+
+# Browser game with matchbox
+[dependencies]
+fortress-rollback = { version = "0.1", features = ["sync-send", "wasm-bindgen"] }
+
+# Debugging production issues
+[dependencies]
+fortress-rollback = { version = "0.1", features = ["sync-send", "paranoid"] }
+
+# Development with examples
+[dependencies]
+fortress-rollback = { version = "0.1", features = ["sync-send", "graphical-examples"] }
+```
+
+### Platform-Specific Features
+
+Fortress Rollback automatically adapts to different platforms:
+
+| Platform | Time Source | Socket Support | Notes |
+|----------|-------------|----------------|-------|
+| Native (Linux/macOS/Windows) | `std::time::SystemTime` | UDP via `std::net` | Full support |
+| WebAssembly | `js_sys::Date` | Custom via `NonBlockingSocket` | Use Matchbox for WebRTC |
+| No-std | ❌ Not supported | ❌ | Requires allocator |
+
+**WASM considerations:**
+
+- The library automatically uses JavaScript's `Date.getTime()` for time functions
+- Implement `NonBlockingSocket` using WebRTC (see [Matchbox](https://github.com/johanhelsing/matchbox))
+- Determinism is maintained across platforms with the same inputs
+
+---
+
 ## Spectator Sessions
 
 Spectators observe gameplay without contributing inputs:
@@ -1449,6 +1726,225 @@ if let Some(last_frame) = stats.last_compared_frame {
 | `local_checksum` | `Option<u128>` | Local checksum at that frame |
 | `remote_checksum` | `Option<u128>` | Remote checksum at that frame |
 | `checksums_match` | `Option<bool>` | `true` if in sync, `false` if desync, `None` if no comparison |
+
+---
+
+## Desync Detection and SyncHealth API
+
+Fortress Rollback provides comprehensive APIs for detecting and monitoring synchronization state between peers. This section covers the `SyncHealth` API, which is essential for proper session management and termination.
+
+### Understanding Desync Detection
+
+Desync (desynchronization) occurs when peers' game states diverge, typically due to non-deterministic code. Without detection, desyncs cause subtle bugs that are extremely difficult to debug—players see different game states while believing everything is working correctly.
+
+**Key Points:**
+- Desync detection is **enabled by default** with `DesyncDetection::On { interval: 60 }` (once per second at 60fps)
+- Detection works by periodically comparing game state checksums between peers
+- Early detection prevents subtle multiplayer issues from reaching production
+
+### The SyncHealth Enum
+
+The `SyncHealth` enum represents the synchronization state with a specific peer:
+
+```rust
+use fortress_rollback::SyncHealth;
+
+pub enum SyncHealth {
+    /// Checksums have been compared and match - peers are synchronized.
+    InSync,
+    
+    /// Waiting for checksum data from the peer - status unknown.
+    Pending,
+    
+    /// Checksums were compared and differ - desync detected!
+    DesyncDetected {
+        frame: Frame,
+        local_checksum: u128,
+        remote_checksum: u128,
+    },
+}
+```
+
+### SyncHealth API Methods
+
+#### `sync_health(player_handle)` — Check Specific Peer Status
+
+Returns the synchronization status for a specific remote peer:
+
+```rust
+match session.sync_health(peer_handle) {
+    Some(SyncHealth::InSync) => {
+        // Checksums match - peers are synchronized
+        println!("✓ Peer {} is in sync", peer_handle);
+    }
+    Some(SyncHealth::Pending) => {
+        // Waiting for checksum exchange - status unknown
+        println!("⏳ Waiting for checksum from peer {}", peer_handle);
+    }
+    Some(SyncHealth::DesyncDetected { frame, local_checksum, remote_checksum }) => {
+        // CRITICAL: Checksums differ - game states diverged!
+        eprintln!("✗ DESYNC at frame {} with peer {}", frame, peer_handle);
+        eprintln!("  Local:  {:#034x}", local_checksum);
+        eprintln!("  Remote: {:#034x}", remote_checksum);
+        // You should probably panic or disconnect here
+    }
+    None => {
+        // Not a remote player (local player or invalid handle)
+    }
+}
+```
+
+#### `is_synchronized()` — Quick All-Peers Check
+
+Returns `true` only if ALL remote peers report `InSync`:
+
+```rust
+if session.is_synchronized() {
+    println!("All peers verified in sync");
+} else {
+    // Either waiting for checksums (Pending) or desync detected
+}
+```
+
+#### `last_verified_frame()` — Highest Verified Frame
+
+Returns the highest frame where checksums were verified to match:
+
+```rust
+if let Some(frame) = session.last_verified_frame() {
+    println!("Verified sync up to frame {}", frame);
+} else {
+    // No checksum verification has occurred yet
+}
+```
+
+#### `all_sync_health()` — Detailed Status for All Peers
+
+Returns a vector of `(PlayerHandle, SyncHealth)` for all remote peers:
+
+```rust
+for (handle, health) in session.all_sync_health() {
+    match health {
+        SyncHealth::InSync => println!("Peer {}: ✓ In Sync", handle),
+        SyncHealth::Pending => println!("Peer {}: ⏳ Pending", handle),
+        SyncHealth::DesyncDetected { frame, .. } => {
+            println!("Peer {}: ✗ DESYNC at frame {}", handle, frame);
+        }
+    }
+}
+```
+
+### Common Usage Patterns
+
+#### Safe Session Termination
+
+The most critical use of `SyncHealth` is ensuring proper session termination:
+
+```rust
+// Application-level done tracking
+let mut my_done = false;
+let mut peer_done = false;
+
+loop {
+    session.poll_remote_clients();
+    
+    if session.current_state() == SessionState::Running {
+        // Normal frame processing...
+    }
+    
+    // Mark ourselves done when we reach target
+    if !my_done && session.confirmed_frame() >= target_frames {
+        my_done = true;
+        // Send "I'm done" to peer via your application protocol
+    }
+    
+    // Update when peer says they're done
+    if received_done_from_peer() {
+        peer_done = true;
+    }
+    
+    // Only exit when BOTH done AND verified in sync
+    if my_done && peer_done {
+        match session.sync_health(peer_handle) {
+            Some(SyncHealth::InSync) => {
+                println!("Session complete and verified!");
+                break;
+            }
+            Some(SyncHealth::DesyncDetected { frame, .. }) => {
+                panic!("Cannot terminate: desync at frame {}", frame);
+            }
+            _ => continue,  // Keep polling for verification
+        }
+    }
+}
+```
+
+#### Monitoring During Gameplay
+
+Use `all_sync_health()` for debug overlays or logging:
+
+```rust
+// Every N frames, log sync status
+if frame % 300 == 0 {  // Every 5 seconds at 60fps
+    for (handle, health) in session.all_sync_health() {
+        log::debug!("Peer {} sync status: {:?}", handle, health);
+    }
+}
+```
+
+#### Desync Response Strategies
+
+Different games may want different responses to desyncs:
+
+```rust
+match session.sync_health(peer_handle) {
+    Some(SyncHealth::DesyncDetected { frame, .. }) => {
+        // Strategy 1: Graceful termination
+        show_desync_error_to_user(frame);
+        disconnect_and_return_to_menu();
+        
+        // Strategy 2: Log and continue (debugging)
+        log::error!("Desync detected at frame {}", frame);
+        // Continue running to gather more diagnostic data
+        
+        // Strategy 3: Competitive anti-cheat
+        report_to_server(peer_handle, frame);
+        mark_match_as_invalid();
+    }
+    _ => {}
+}
+```
+
+### Configuration
+
+#### Adjusting Detection Interval
+
+```rust
+use fortress_rollback::DesyncDetection;
+
+// Default: once per second at 60fps
+SessionBuilder::<GameConfig>::new()
+    .with_desync_detection_mode(DesyncDetection::On { interval: 60 })
+    // ...
+
+// Competitive: 6 times per second (tighter detection)
+SessionBuilder::<GameConfig>::new()
+    .with_desync_detection_mode(DesyncDetection::On { interval: 10 })
+    // ...
+
+// Disabled (not recommended for production)
+SessionBuilder::<GameConfig>::new()
+    .with_desync_detection_mode(DesyncDetection::Off)
+    // ...
+```
+
+| Interval | Checks/sec @ 60fps | Latency to Detect | Use Case |
+|----------|-------------------|-------------------|----------|
+| 10 | 6 | ~166ms | Competitive, anti-cheat |
+| 30 | 2 | ~500ms | Responsive detection |
+| 60 | 1 | ~1s | Default, balanced |
+| 120 | 0.5 | ~2s | Low-overhead |
+| 300 | 0.2 | ~5s | Development testing |
 
 ---
 

@@ -1,3 +1,21 @@
+//! Input queue management for rollback networking.
+//!
+//! This module provides [`InputQueue`] for managing player inputs in a circular buffer,
+//! along with prediction strategies for handling missing inputs during rollback.
+//!
+//! # Prediction Strategies
+//!
+//! Prediction strategies determine what input to use when a player's confirmed input
+//! hasn't arrived yet. The following strategies are available:
+//!
+//! - [`PredictionStrategy`] - Trait for custom prediction strategies
+//! - [`RepeatLastConfirmed`] - Default strategy (repeats last confirmed input)
+//! - [`BlankPrediction`] - Strategy that returns default input
+
+mod prediction;
+
+pub use prediction::{BlankPrediction, PredictionStrategy, RepeatLastConfirmed};
+
 use crate::frame_info::PlayerInput;
 use crate::report_violation;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
@@ -56,81 +74,6 @@ pub const INPUT_QUEUE_LENGTH: usize = 128;
 /// the configurable `max_frame_delay()` method on `InputQueueConfig` or `InputQueue`.
 #[allow(dead_code)]
 pub const MAX_FRAME_DELAY: usize = INPUT_QUEUE_LENGTH - 1;
-
-/// Defines the strategy used to predict inputs when we haven't received the actual input yet.
-///
-/// Input prediction is crucial for rollback networking - when we need to advance the game
-/// but haven't received a remote player's input, we must predict what they will do.
-///
-/// # Determinism Requirement
-///
-/// **CRITICAL**: The prediction strategy MUST be deterministic across all peers.
-/// Both peers must produce the exact same predicted input given the same arguments.
-/// If predictions differ between peers, they will desync during rollback.
-///
-/// The default implementation (`RepeatLastConfirmed`) is deterministic because:
-/// - `last_confirmed_input` is synchronized across all peers via the network protocol
-/// - Both peers will have received and confirmed the same input before using it for prediction
-///
-/// # Custom Strategies
-///
-/// You can implement custom prediction strategies for game-specific behavior:
-///
-/// ```ignore
-/// struct MyPrediction;
-///
-/// impl<I: Copy + Default> PredictionStrategy<I> for MyPrediction {
-///     fn predict(&self, frame: Frame, last_confirmed_input: Option<I>, _player_index: usize) -> I {
-///         // For a fighting game, you might predict "hold block" as a safe default
-///         // This MUST be deterministic - don't use random values or timing-dependent data!
-///         last_confirmed_input.unwrap_or_default()
-///     }
-/// }
-/// ```
-pub trait PredictionStrategy<I: Copy + Default>: Send + Sync {
-    /// Predicts the input for a player when their actual input hasn't arrived yet.
-    ///
-    /// # Arguments
-    ///
-    /// * `frame` - The frame number we're predicting for
-    /// * `last_confirmed_input` - The most recent confirmed input from this player, if any.
-    ///   This is deterministic across all peers since confirmed inputs are synchronized.
-    /// * `player_index` - The index of the player we're predicting for
-    ///
-    /// # Returns
-    ///
-    /// The predicted input to use. Must be deterministic across all peers.
-    fn predict(&self, frame: Frame, last_confirmed_input: Option<I>, player_index: usize) -> I;
-}
-
-/// The default prediction strategy: repeat the last confirmed input.
-///
-/// This strategy is deterministic because `last_confirmed_input` is guaranteed
-/// to be the same across all peers after synchronization.
-///
-/// If there is no confirmed input yet (e.g., at the start of the game),
-/// this returns the default input value.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RepeatLastConfirmed;
-
-impl<I: Copy + Default> PredictionStrategy<I> for RepeatLastConfirmed {
-    fn predict(&self, _frame: Frame, last_confirmed_input: Option<I>, _player_index: usize) -> I {
-        last_confirmed_input.unwrap_or_default()
-    }
-}
-
-/// A prediction strategy that always returns the default (blank) input.
-///
-/// This is useful when you want a "do nothing" prediction, which can be
-/// safer for some game types where repeating the last input could be dangerous.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct BlankPrediction;
-
-impl<I: Copy + Default> PredictionStrategy<I> for BlankPrediction {
-    fn predict(&self, _frame: Frame, _last_confirmed: Option<I>, _player_index: usize) -> I {
-        I::default()
-    }
-}
 
 /// `InputQueue` handles inputs for a single player and saves them in a circular array.
 /// Valid inputs are between `head` and `tail`.
@@ -758,11 +701,12 @@ mod input_queue_tests {
     use super::*;
 
     #[repr(C)]
-    #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+    #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize, Debug)]
     struct TestInput {
         inp: u8,
     }
 
+    #[derive(Clone, Debug)]
     struct TestConfig;
 
     impl Config for TestConfig {
@@ -1483,6 +1427,212 @@ mod input_queue_tests {
             INPUT_QUEUE_LENGTH - 1,
             "MAX_FRAME_DELAY should be INPUT_QUEUE_LENGTH - 1"
         );
+    }
+
+    // ==========================================
+    // Queue Length Configuration Tests
+    // ==========================================
+
+    #[test]
+    fn test_with_queue_length_minimum() {
+        // Queue length of 2 is the minimum
+        let queue = InputQueue::<TestConfig>::with_queue_length(0, 2);
+        assert!(queue.is_some());
+        let queue = queue.unwrap();
+        assert_eq!(queue.queue_length(), 2);
+    }
+
+    #[test]
+    fn test_with_queue_length_below_minimum_fails() {
+        // Queue length of 1 should fail
+        let queue = InputQueue::<TestConfig>::with_queue_length(0, 1);
+        assert!(queue.is_none());
+
+        // Queue length of 0 should fail
+        let queue = InputQueue::<TestConfig>::with_queue_length(0, 0);
+        assert!(queue.is_none());
+    }
+
+    #[test]
+    fn test_with_queue_length_custom() {
+        let queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
+        assert!(queue.is_some());
+        let queue = queue.unwrap();
+        assert_eq!(queue.queue_length(), 64);
+        assert_eq!(queue.max_frame_delay(), 63);
+    }
+
+    #[test]
+    fn test_max_frame_delay_depends_on_queue_length() {
+        let queue = InputQueue::<TestConfig>::with_queue_length(0, 16).unwrap();
+        assert_eq!(queue.max_frame_delay(), 15);
+
+        let queue = InputQueue::<TestConfig>::with_queue_length(0, 256).unwrap();
+        assert_eq!(queue.max_frame_delay(), 255);
+    }
+
+    // ==========================================
+    // Edge Cases in input() Method
+    // ==========================================
+
+    #[test]
+    fn test_input_returns_none_when_prediction_error_exists() {
+        let mut queue = test_queue(0);
+
+        // Add inputs and trigger a prediction error
+        for i in 0..3i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: 0 });
+            queue.add_input(input);
+        }
+
+        // Request frame 3 (triggers prediction of 0)
+        let _ = queue.input(Frame::new(3)).expect("prediction");
+
+        // Add actual input with different value to trigger mismatch
+        let actual = PlayerInput::new(Frame::new(3), TestInput { inp: 99 });
+        queue.add_input(actual);
+
+        // Now first_incorrect_frame should be set
+        assert_eq!(queue.first_incorrect_frame(), Frame::new(3));
+
+        // Calling input() when prediction error exists should return None
+        let result = queue.input(Frame::new(4));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_input_returns_none_when_frame_before_tail() {
+        let mut queue = test_queue(0);
+
+        // Add inputs for frames 0-9
+        for i in 0..10i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            queue.add_input(input);
+        }
+
+        // Discard frames 0-4 (keep 5-9)
+        queue.discard_confirmed_frames(Frame::new(5));
+
+        // Try to get frame 3 which was discarded - should return None
+        let result = queue.input(Frame::new(3));
+        assert!(result.is_none());
+    }
+
+    // ==========================================
+    // Multiple Prediction Continuations
+    // ==========================================
+
+    #[test]
+    fn test_consecutive_predictions_advance_frame() {
+        let mut queue = test_queue(0);
+
+        // Add initial inputs
+        for i in 0..3i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: 10 });
+            queue.add_input(input);
+        }
+
+        // Request multiple predicted frames
+        let (_pred1, status1) = queue.input(Frame::new(5)).expect("prediction 1");
+        assert_eq!(status1, InputStatus::Predicted);
+
+        // Now add the actual input for frame 3 (correct prediction)
+        let input3 = PlayerInput::new(Frame::new(3), TestInput { inp: 10 }); // Same as prediction
+        queue.add_input(input3);
+
+        // Prediction should advance
+        assert!(queue.prediction.frame > Frame::new(3) || queue.prediction.frame.is_null());
+    }
+
+    // ==========================================
+    // confirmed_input Edge Cases
+    // ==========================================
+
+    #[test]
+    fn test_confirmed_input_at_tail() {
+        let mut queue = test_queue(0);
+
+        // Add frames 0-9
+        for i in 0..10i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            queue.add_input(input);
+        }
+
+        // Discard frames before 5
+        queue.discard_confirmed_frames(Frame::new(5));
+
+        // Frame 5 (now at tail) should be retrievable
+        let result = queue.confirmed_input(Frame::new(5));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().input.inp, 5);
+    }
+
+    #[test]
+    fn test_confirmed_input_at_head() {
+        let mut queue = test_queue(0);
+
+        // Add frames 0-9
+        for i in 0..10i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            queue.add_input(input);
+        }
+
+        // Frame 9 (most recent, at head-1) should be retrievable
+        let result = queue.confirmed_input(Frame::new(9));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().input.inp, 9);
+    }
+
+    // ==========================================
+    // Debug Trait Tests
+    // ==========================================
+
+    #[test]
+    fn test_input_queue_debug() {
+        let queue = test_queue(0);
+        let debug_str = format!("{:?}", queue);
+        assert!(debug_str.contains("InputQueue"));
+        assert!(debug_str.contains("head"));
+        assert!(debug_str.contains("tail"));
+    }
+
+    // ==========================================
+    // Clone and Copy Trait Tests
+    // ==========================================
+
+    #[test]
+    fn test_input_queue_clone() {
+        let mut original = test_queue(0);
+
+        // Add some data
+        for i in 0..5i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            original.add_input(input);
+        }
+
+        let cloned = original.clone();
+
+        // Verify clone has same state
+        assert_eq!(cloned.length, original.length);
+        assert_eq!(cloned.head, original.head);
+        assert_eq!(cloned.tail, original.tail);
+        assert_eq!(cloned.last_added_frame, original.last_added_frame);
+    }
+
+    // ==========================================
+    // Constant Value Tests
+    // ==========================================
+
+    #[test]
+    fn test_input_queue_length_constant() {
+        // Verify INPUT_QUEUE_LENGTH is the expected value (128 in production)
+        assert_eq!(INPUT_QUEUE_LENGTH, 128);
+    }
+
+    #[test]
+    fn test_input_queue_length_is_power_of_two() {
+        // Power of two is beneficial for modular arithmetic
+        assert!(INPUT_QUEUE_LENGTH.is_power_of_two());
     }
 }
 

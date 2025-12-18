@@ -271,3 +271,331 @@ impl<'c, T> GameStateAccessor<'c, T> {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==========================================
+    // GameStateCell Basic Tests
+    // ==========================================
+
+    #[test]
+    fn game_state_cell_default_has_null_frame() {
+        let cell = GameStateCell::<u8>::default();
+        assert!(cell.frame().is_null());
+    }
+
+    #[test]
+    fn game_state_cell_default_has_no_data() {
+        let cell = GameStateCell::<String>::default();
+        assert!(cell.load().is_none());
+    }
+
+    #[test]
+    fn game_state_cell_default_has_no_checksum() {
+        let cell = GameStateCell::<u32>::default();
+        assert!(cell.checksum().is_none());
+    }
+
+    #[test]
+    fn game_state_cell_save_and_load() {
+        let cell = GameStateCell::<String>::default();
+        let frame = Frame::new(42);
+        let data = "test_data".to_string();
+
+        let saved = cell.save(frame, Some(data.clone()), None);
+        assert!(saved);
+
+        let loaded = cell.load();
+        assert_eq!(loaded, Some(data));
+    }
+
+    #[test]
+    fn game_state_cell_save_updates_frame() {
+        let cell = GameStateCell::<u8>::default();
+        let frame = Frame::new(100);
+
+        cell.save(frame, Some(42), None);
+
+        assert_eq!(cell.frame(), frame);
+    }
+
+    #[test]
+    fn game_state_cell_save_updates_checksum() {
+        let cell = GameStateCell::<u8>::default();
+        let frame = Frame::new(1);
+        let checksum = Some(0xDEADBEEF_u128);
+
+        cell.save(frame, Some(1), checksum);
+
+        assert_eq!(cell.checksum(), checksum);
+    }
+
+    #[test]
+    fn game_state_cell_save_with_null_frame_returns_false() {
+        let cell = GameStateCell::<u8>::default();
+        let result = cell.save(Frame::NULL, Some(42), None);
+        assert!(!result);
+    }
+
+    #[test]
+    fn game_state_cell_save_with_null_frame_does_not_modify_state() {
+        let cell = GameStateCell::<u8>::default();
+        let original_frame = Frame::new(10);
+        cell.save(original_frame, Some(1), Some(100));
+
+        // Try saving with null frame - should fail
+        let result = cell.save(Frame::NULL, Some(99), Some(999));
+        assert!(!result);
+
+        // Original state should be preserved
+        assert_eq!(cell.frame(), original_frame);
+        assert_eq!(cell.load(), Some(1));
+        assert_eq!(cell.checksum(), Some(100));
+    }
+
+    #[test]
+    fn game_state_cell_save_none_data() {
+        let cell = GameStateCell::<u8>::default();
+        let frame = Frame::new(5);
+
+        let saved = cell.save(frame, None, None);
+        assert!(saved);
+
+        assert_eq!(cell.frame(), frame);
+        assert!(cell.load().is_none());
+    }
+
+    #[test]
+    fn game_state_cell_overwrite() {
+        let cell = GameStateCell::<String>::default();
+
+        // First save
+        cell.save(Frame::new(1), Some("first".to_string()), Some(1));
+        assert_eq!(cell.load(), Some("first".to_string()));
+
+        // Overwrite with new data
+        cell.save(Frame::new(2), Some("second".to_string()), Some(2));
+        assert_eq!(cell.load(), Some("second".to_string()));
+        assert_eq!(cell.frame(), Frame::new(2));
+        assert_eq!(cell.checksum(), Some(2));
+    }
+
+    // ==========================================
+    // GameStateCell Clone Tests
+    // ==========================================
+
+    #[test]
+    fn game_state_cell_clone_shares_underlying_data() {
+        let cell1 = GameStateCell::<u32>::default();
+        cell1.save(Frame::new(10), Some(42), None);
+
+        let cell2 = cell1.clone();
+
+        // Both cells should see the same data
+        assert_eq!(cell1.load(), Some(42));
+        assert_eq!(cell2.load(), Some(42));
+    }
+
+    #[test]
+    fn game_state_cell_clone_modifications_visible() {
+        let cell1 = GameStateCell::<u32>::default();
+        let cell2 = cell1.clone();
+
+        // Modify through cell1
+        cell1.save(Frame::new(1), Some(100), Some(0xABC));
+
+        // Should be visible through cell2
+        assert_eq!(cell2.frame(), Frame::new(1));
+        assert_eq!(cell2.load(), Some(100));
+        assert_eq!(cell2.checksum(), Some(0xABC));
+    }
+
+    // ==========================================
+    // GameStateCell Debug Tests
+    // ==========================================
+
+    #[test]
+    fn game_state_cell_debug_format() {
+        let cell = GameStateCell::<u8>::default();
+        cell.save(Frame::new(42), Some(1), Some(0x123));
+
+        let debug_str = format!("{:?}", cell);
+        assert!(debug_str.contains("GameStateCell"));
+        assert!(debug_str.contains("frame"));
+        assert!(debug_str.contains("checksum"));
+    }
+
+    #[test]
+    fn game_state_cell_debug_with_null_frame() {
+        let cell = GameStateCell::<u8>::default();
+        let debug_str = format!("{:?}", cell);
+        assert!(debug_str.contains("GameStateCell"));
+    }
+
+    // ==========================================
+    // GameStateCell Data Access Tests
+    // ==========================================
+
+    #[test]
+    fn game_state_cell_data_returns_accessor() {
+        let cell = GameStateCell::<String>::default();
+        cell.save(Frame::new(1), Some("test".to_string()), None);
+
+        let accessor = cell.data();
+        assert!(accessor.is_some());
+
+        let accessor = accessor.unwrap();
+        assert_eq!(*accessor, "test");
+    }
+
+    #[test]
+    fn game_state_cell_data_returns_none_when_empty() {
+        let cell = GameStateCell::<String>::default();
+        // Cell has no data saved
+
+        let accessor = cell.data();
+        assert!(accessor.is_none());
+    }
+
+    #[test]
+    fn game_state_cell_data_returns_none_when_none_saved() {
+        let cell = GameStateCell::<String>::default();
+        cell.save(Frame::new(1), None, None);
+
+        let accessor = cell.data();
+        assert!(accessor.is_none());
+    }
+
+    #[test]
+    fn game_state_accessor_deref() {
+        let cell = GameStateCell::<Vec<i32>>::default();
+        cell.save(Frame::new(1), Some(vec![1, 2, 3]), None);
+
+        let accessor = cell.data().unwrap();
+        // Deref to access the underlying Vec
+        assert_eq!(accessor.len(), 3);
+        assert_eq!(accessor[0], 1);
+        assert_eq!(accessor[1], 2);
+        assert_eq!(accessor[2], 3);
+    }
+
+    #[test]
+    fn game_state_accessor_as_mut_dangerous() {
+        let cell = GameStateCell::<Vec<i32>>::default();
+        cell.save(Frame::new(1), Some(vec![1, 2, 3]), None);
+
+        {
+            let mut accessor = cell.data().unwrap();
+            // Use dangerous mutable access
+            let data = accessor.as_mut_dangerous();
+            data.push(4);
+        }
+
+        // Verify mutation persisted
+        let loaded = cell.load().unwrap();
+        assert_eq!(loaded, vec![1, 2, 3, 4]);
+    }
+
+    // ==========================================
+    // GameStateCell Edge Cases
+    // ==========================================
+
+    #[test]
+    fn game_state_cell_frame_zero() {
+        let cell = GameStateCell::<u8>::default();
+        let frame = Frame::new(0);
+
+        let saved = cell.save(frame, Some(42), None);
+        assert!(saved);
+        assert_eq!(cell.frame(), frame);
+    }
+
+    #[test]
+    fn game_state_cell_large_frame() {
+        let cell = GameStateCell::<u8>::default();
+        let frame = Frame::new(i32::MAX);
+
+        let saved = cell.save(frame, Some(1), None);
+        assert!(saved);
+        assert_eq!(cell.frame(), frame);
+    }
+
+    #[test]
+    fn game_state_cell_large_checksum() {
+        let cell = GameStateCell::<u8>::default();
+        let checksum = Some(u128::MAX);
+
+        cell.save(Frame::new(1), Some(1), checksum);
+        assert_eq!(cell.checksum(), checksum);
+    }
+
+    #[test]
+    fn game_state_cell_zero_checksum() {
+        let cell = GameStateCell::<u8>::default();
+        let checksum = Some(0_u128);
+
+        cell.save(Frame::new(1), Some(1), checksum);
+        assert_eq!(cell.checksum(), checksum);
+    }
+
+    #[test]
+    fn game_state_cell_complex_type() {
+        #[derive(Clone, Debug, PartialEq)]
+        struct ComplexState {
+            position: (f64, f64),
+            velocity: (f64, f64),
+            health: u32,
+            name: String,
+        }
+
+        let cell = GameStateCell::<ComplexState>::default();
+        let state = ComplexState {
+            position: (10.5, 20.5),
+            velocity: (-1.0, 0.5),
+            health: 100,
+            name: "Player1".to_string(),
+        };
+
+        cell.save(Frame::new(1), Some(state.clone()), Some(0xABC123));
+
+        let loaded = cell.load().unwrap();
+        assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn game_state_cell_multiple_clones_all_share_state() {
+        let cell1 = GameStateCell::<u32>::default();
+        let cell2 = cell1.clone();
+        let cell3 = cell1.clone();
+        let cell4 = cell2.clone();
+
+        // Save through cell3
+        cell3.save(Frame::new(99), Some(12345), Some(0xFFFF));
+
+        // All should see the same state
+        assert_eq!(cell1.load(), Some(12345));
+        assert_eq!(cell2.load(), Some(12345));
+        assert_eq!(cell3.load(), Some(12345));
+        assert_eq!(cell4.load(), Some(12345));
+
+        assert_eq!(cell1.frame(), Frame::new(99));
+        assert_eq!(cell4.checksum(), Some(0xFFFF));
+    }
+
+    #[test]
+    fn game_state_cell_repeated_saves_same_frame() {
+        let cell = GameStateCell::<u32>::default();
+        let frame = Frame::new(10);
+
+        // Multiple saves to same frame
+        cell.save(frame, Some(1), None);
+        cell.save(frame, Some(2), None);
+        cell.save(frame, Some(3), None);
+
+        // Last save wins
+        assert_eq!(cell.load(), Some(3));
+        assert_eq!(cell.frame(), frame);
+    }
+}

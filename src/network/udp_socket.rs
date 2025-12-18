@@ -326,4 +326,148 @@ mod tests {
         // Compile-time assertion that send buffer is larger than ideal packet size
         const _: () = assert!(SEND_BUFFER_SIZE > IDEAL_MAX_UDP_PACKET_SIZE);
     }
+
+    // ==========================================
+    // Edge Case and Error Path Tests
+    // ==========================================
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)] // Intentional: verifying constant relationships
+    fn test_buffer_sizes_relationship() {
+        // SEND_BUFFER_SIZE should be at least as large as IDEAL_MAX_UDP_PACKET_SIZE
+        // to handle normal messages without fallback allocation
+        assert!(
+            SEND_BUFFER_SIZE >= IDEAL_MAX_UDP_PACKET_SIZE,
+            "SEND_BUFFER_SIZE must be >= IDEAL_MAX_UDP_PACKET_SIZE"
+        );
+        // RECV_BUFFER_SIZE should be larger to handle any incoming UDP packet
+        assert!(
+            RECV_BUFFER_SIZE >= SEND_BUFFER_SIZE,
+            "RECV_BUFFER_SIZE must be >= SEND_BUFFER_SIZE"
+        );
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn test_udp_socket_receive_no_messages() {
+        let mut socket = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        // Should return empty vec immediately (non-blocking)
+        let messages = socket.receive_all_messages();
+        assert!(messages.is_empty());
+        // Call again - should still be empty and not panic
+        let messages2 = socket.receive_all_messages();
+        assert!(messages2.is_empty());
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn test_udp_socket_send_to_invalid_address() {
+        let mut socket = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        // Sending to an unreachable address should not panic
+        // Note: 0.0.0.0:0 is an invalid destination address
+        let invalid_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+        let msg = Message {
+            header: MessageHeader { magic: 0x1234 },
+            body: MessageBody::KeepAlive,
+        };
+        // This should log an error but not panic
+        socket.send_to(&msg, &invalid_addr);
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn test_udp_socket_bind_to_specific_port() {
+        // Test binding to port 0 (let OS pick)
+        let socket = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        let local_addr = socket.socket.local_addr().unwrap();
+        // Port should be non-zero (OS assigned)
+        assert_ne!(local_addr.port(), 0);
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn test_udp_socket_recv_buffer_initialized() {
+        let socket = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        // Verify recv_buffer is initialized to zeros
+        assert!(socket.recv_buffer.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn test_udp_socket_send_buffer_initialized() {
+        let socket = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        // Verify send_buffer is initialized to zeros
+        assert!(socket.send_buffer.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn test_udp_socket_local_addr_is_unspecified() {
+        let socket = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        let local = socket.socket.local_addr().unwrap();
+        // Should be bound to 0.0.0.0 (UNSPECIFIED)
+        assert!(local.ip().is_unspecified());
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn test_udp_socket_multiple_sends_reuse_buffer() {
+        let mut socket1 = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        let mut socket2 = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        let addr2 = to_loopback_addr(&socket2);
+
+        // Send multiple messages - buffer should be reused
+        for i in 0..5u16 {
+            let msg = Message {
+                header: MessageHeader { magic: i },
+                body: MessageBody::KeepAlive,
+            };
+            socket1.send_to(&msg, &addr2);
+        }
+
+        // Receive all messages
+        let received = wait_for_messages(&mut socket2, 5, 20);
+        // Some messages might be lost (UDP), but we should get at least 1
+        assert!(!received.is_empty(), "Should receive at least one message");
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn test_udp_socket_keepalive_message_roundtrip() {
+        let mut socket1 = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        let mut socket2 = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        let addr2 = to_loopback_addr(&socket2);
+
+        let msg = Message {
+            header: MessageHeader { magic: 0xDEAD },
+            body: MessageBody::KeepAlive,
+        };
+
+        socket1.send_to(&msg, &addr2);
+        let received = wait_for_messages(&mut socket2, 1, 20);
+
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].1.header.magic, 0xDEAD);
+        assert!(matches!(received[0].1.body, MessageBody::KeepAlive));
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn test_udp_socket_handles_self_send() {
+        let mut socket = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        let self_addr = to_loopback_addr(&socket);
+
+        let msg = Message {
+            header: MessageHeader { magic: 0xBEEF },
+            body: MessageBody::KeepAlive,
+        };
+
+        // Send to self
+        socket.send_to(&msg, &self_addr);
+
+        // Should be able to receive our own message
+        let received = wait_for_messages(&mut socket, 1, 20);
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].1.header.magic, 0xBEEF);
+    }
 }

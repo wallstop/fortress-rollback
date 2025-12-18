@@ -4,7 +4,7 @@ use std::hash::Hash;
 use std::net::SocketAddr;
 
 use fortress_rollback::hash::fnv1a_hash;
-use fortress_rollback::{Config, FortressRequest, Frame, GameStateCell, InputStatus};
+use fortress_rollback::{Config, FortressRequest, Frame, GameStateCell, InputVec};
 use serde::{Deserialize, Serialize};
 
 fn calculate_hash<T: Hash>(t: &T) -> u64 {
@@ -69,7 +69,7 @@ impl GameStubEnum {
         self.gs = cell.load().unwrap();
     }
 
-    fn advance_frame(&mut self, inputs: Vec<(EnumInput, InputStatus)>) {
+    fn advance_frame(&mut self, inputs: InputVec<EnumInput>) {
         self.gs.advance_frame(inputs);
     }
 }
@@ -81,7 +81,7 @@ pub struct StateStubEnum {
 }
 
 impl StateStubEnum {
-    fn advance_frame(&mut self, inputs: Vec<(EnumInput, InputStatus)>) {
+    fn advance_frame(&mut self, inputs: InputVec<EnumInput>) {
         let p0_inputs = inputs[0];
         let p1_inputs = inputs[1];
 

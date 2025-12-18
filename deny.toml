@@ -2,13 +2,17 @@
 # See https://embarkstudios.github.io/cargo-deny/
 
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+# Unmaintained advisories will only fail for direct workspace dependencies
+# (transitives are too noisy but we still want to know about direct deps)
+unmaintained = "workspace"
+# Warn about yanked crate versions
 yanked = "warn"
-notice = "warn"
+# Ignore specific advisories (add RUSTSEC IDs here if needed)
+ignore = []
 
 [licenses]
-unlicensed = "deny"
+# All licenses are denied by default unless explicitly allowed
+# We allow common permissive licenses and keep extras for future-proofing
 allow = [
     "MIT",
     "Apache-2.0",
@@ -18,8 +22,14 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "Unicode-DFS-2016",
+    "Unicode-3.0",
 ]
-copyleft = "warn"
+# Allow unused licenses (we keep extras for future compatibility)
+unused-allowed-license = "allow"
+
+# Ignore private workspace crates (they don't need license checks)
+[licenses.private]
+ignore = true
 
 [bans]
 multiple-versions = "warn"

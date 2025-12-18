@@ -7,6 +7,7 @@
   <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/rust.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/rust.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
   <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/publish.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/publish.yml?branch=main&style=for-the-badge&label=Publish" alt="Publish"></a>
   <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/coverage.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/coverage.yml?branch=main&style=for-the-badge&label=Coverage" alt="Coverage"></a>
+  <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/benchmark.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/benchmark.yml?branch=main&style=for-the-badge&label=Benchmark" alt="Benchmark"></a>
 </p>
 
 ---
@@ -86,6 +87,18 @@ Alpha / experimental only.
 | Jitter | <50ms | <20ms |
 
 For detailed configuration guidance, see the [User Guide](./docs/user-guide.md#network-requirements).
+
+### Feature Flags
+
+| Feature | Description |
+|---------|-------------|
+| `sync-send` | Adds `Send + Sync` bounds for multi-threaded game engines (e.g., Bevy) |
+| `wasm-bindgen` | WASM compatibility for browser games |
+| `paranoid` | Runtime invariant checking in release builds |
+| `graphical-examples` | Enables ex_game graphical examples (requires macroquad deps) |
+| `z3-verification` | Z3 formal verification tests (requires system Z3) |
+
+For detailed feature documentation, see the [User Guide](./docs/user-guide.md#feature-flags).
 
 ## Migration from ggrs
 

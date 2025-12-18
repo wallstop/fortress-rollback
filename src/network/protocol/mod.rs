@@ -19,7 +19,7 @@ use crate::network::messages::{
 };
 use crate::report_violation;
 use crate::rng::random;
-use crate::sessions::builder::{ProtocolConfig, SyncConfig};
+use crate::sessions::config::{ProtocolConfig, SyncConfig};
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::time_sync::TimeSync;
 use crate::{Config, DesyncDetection, FortressError, Frame, NonBlockingSocket, PlayerHandle};

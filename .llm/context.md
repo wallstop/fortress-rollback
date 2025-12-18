@@ -33,72 +33,209 @@ cargo test --features z3-verification
 
 ## High-Performance CLI Tools
 
-The dev container includes modern, high-performance CLI tools. **Always prefer these over their traditional counterparts** for faster, more user-friendly results.
+The dev container includes modern, high-performance CLI tools. **Always use these tools instead of their traditional counterparts** — they are faster, more intuitive, and provide better output.
 
-### Tool Mapping (Always Use Left Column)
+### Tool Reference
 
-| Use This | Instead Of | Why |
-|----------|------------|-----|
-| `rg` (ripgrep) | `grep` | 10-100x faster, respects .gitignore, better output |
-| `fd` / `fdfind` | `find` | Much faster, intuitive syntax, respects .gitignore |
-| `bat` / `batcat` | `cat` | Syntax highlighting, line numbers, git integration |
-| `eza` | `ls` | Colors, git status, tree view built-in |
-| `sd` | `sed` | Intuitive regex syntax, no escaping hell |
-| `delta` | `diff` | Syntax highlighting, side-by-side, git integration |
-| `dust` | `du` | Visual, sorted output, much faster |
-| `duf` | `df` | Beautiful, colored disk usage |
-| `procs` | `ps` | Colored, searchable, tree view |
-| `htop` / `btm` | `top` | Interactive, visual, better UX |
-| `hyperfine` | `time` | Statistical benchmarking, multiple runs |
-| `tokei` | `cloc`/`wc -l` | Fast code statistics |
-| `zoxide` (`z`) | `cd` | Smart directory jumping, learns your habits |
-
-### Common Usage Examples
-
-```bash
-# Search for text in code (use rg, not grep)
-rg "FortressError"                    # Search all files
-rg "impl.*Session" --type rust        # Search only Rust files
-rg -l "rollback"                      # List files containing match
-
-# Find files (use fd, not find)
-fd "\.rs$"                            # Find all Rust files
-fd -e toml                            # Find by extension
-fd test src/                          # Find files matching "test" in src/
-
-# View files with syntax highlighting (use bat, not cat)
-bat src/lib.rs                        # View with highlighting
-bat -r 10:20 src/lib.rs               # View line range
-
-# Replace text (use sd, not sed)
-sd 'old_pattern' 'new_text' file.rs   # Simple replacement
-sd -s 'literal[text]' 'new' file.rs   # Literal string mode
-
-# Directory listing (use eza, not ls)
-eza -la                               # Long listing with all files
-eza --tree --level=2                  # Tree view, 2 levels deep
-eza --git                             # Show git status
-
-# Disk usage (use dust, not du)
-dust                                  # Current directory usage
-dust -d 2 src/                        # Depth-limited
-
-# Benchmarking (use hyperfine, not time)
-hyperfine 'cargo test'                # Benchmark with stats
-hyperfine 'cargo test' 'cargo nextest run'  # Compare two commands
-
-# Code statistics
-tokei                                 # Lines of code by language
-tokei src/                            # Specific directory
-```
+| Modern Tool           | Replaces     | Why Better                                                              |
+|-----------------------|--------------|-------------------------------------------------------------------------|
+| `rg` (ripgrep)        | `grep`       | 10-100x faster, respects `.gitignore`, better regex, colored output     |
+| `fd` / `fdfind`       | `find`       | 5x faster, intuitive syntax, respects `.gitignore`, colored output      |
+| `bat` / `batcat`      | `cat`/`less` | Syntax highlighting, line numbers, git integration                      |
+| `eza`                 | `ls`         | Icons, git status, tree view, better defaults                           |
+| `delta`               | `diff`       | Side-by-side diffs, syntax highlighting (auto-configured for git)       |
+| `sd`                  | `sed`        | Intuitive syntax, regex support, no escaping headaches                  |
+| `dust`                | `du`         | Visual directory size with percentages, sorted output                   |
+| `duf`                 | `df`         | Better disk usage display                                               |
+| `procs`               | `ps`         | Colored output, tree view, searchable, better defaults                  |
+| `htop` / `btm`        | `top`        | Interactive process viewer                                              |
+| `hyperfine`           | `time`       | Statistical benchmarking, multiple runs                                 |
+| `tokei`               | `cloc`/`wc`  | Fast code statistics by language, accurate line counts                  |
+| `zoxide` (`z`)        | `cd`         | Learns your habits, jump to frequent directories                        |
+| `fzf`                 | —            | Fuzzy finder for files, history, anything                               |
+| `jq`                  | —            | JSON processor and pretty-printer                                       |
+| `yq`                  | —            | YAML processor (like jq for YAML)                                       |
+| `ncdu`                | `du`         | Interactive disk usage analyzer                                         |
+| `tldr` (tealdeer)     | `man`        | Simplified man pages with examples (Rust-based)                         |
+| `ag` (silversearcher) | `grep`       | Fast code search (alternative to rg)                                    |
 
 ### Shell Aliases (Pre-configured)
 
-The dev container configures these aliases automatically:
-- `fd` → `fdfind`, `bat` → `batcat` (Debian naming)
-- `ls` → `eza`, `cat` → `bat`, `diff` → `delta`
-- `du` → `dust`, `df` → `duf`, `ps` → `procs`, `top` → `htop`
-- `z` → zoxide (smart cd that learns your habits)
+The following aliases are configured in the dev container, so traditional commands automatically use modern tools:
+
+```bash
+fd   → fdfind      # fd-find (Debian naming)
+bat  → batcat      # bat (Debian naming)
+ls   → eza         # eza with icons
+cat  → bat         # bat with syntax highlighting (--paging=never)
+diff → delta       # syntax highlighting
+du   → dust        # visual disk usage
+df   → duf         # disk usage
+ps   → procs       # modern process viewer
+top  → htop        # interactive
+sed  → sd          # intuitive find-and-replace
+z    → zoxide      # smart cd navigation
+```
+
+### Mandatory Tool Usage Rules
+
+**ALWAYS use `rg` (ripgrep) instead of `grep`:**
+
+```bash
+# ✅ CORRECT - Use ripgrep
+rg "FortressError"                              # Search all files
+rg "impl.*Session" --type rust                  # Search only Rust files
+rg -l "rollback"                                # List files containing match
+rg "pattern" -C 3                               # Show 3 lines of context
+rg "error" -i                                   # Case-insensitive search
+rg "pattern" -A 5 -B 2                          # 5 lines after, 2 before
+rg "pattern" --no-ignore                        # Include gitignored files
+
+# ❌ NEVER use grep
+grep -r "pattern" .                             # Slow, no syntax highlighting
+grep -rn "pattern" --include="*.rs" .           # Verbose, slower
+```
+
+**ALWAYS use `fd` instead of `find`:**
+
+```bash
+# ✅ CORRECT - Use fd
+fd "\.rs$"                                      # Find all Rust files
+fd -e toml                                      # Find by extension
+fd test src/                                    # Find files matching "test" in src/
+fd "Tests" --type d                             # Find directories named Tests
+fd "pattern" --hidden                           # Include hidden files
+fd "pattern" --no-ignore                        # Include gitignored files
+fd "pattern" -x echo {}                         # Execute command on results
+
+# ❌ NEVER use find
+find . -name "*.rs"                             # Slow, verbose syntax
+find . -type d -name "Tests"                    # More typing, slower
+```
+
+**ALWAYS use `bat` with `--paging=never` instead of `cat`:**
+
+```bash
+# ✅ CORRECT - Use bat with --paging=never
+bat --paging=never src/lib.rs                   # View with syntax highlighting
+bat --paging=never -n src/lib.rs                # Show line numbers only
+bat --paging=never -r 10:20 src/lib.rs          # Show lines 10-20
+bat --paging=never -p src/lib.rs                # Plain output (no decorations)
+bat --paging=never -l rust file.txt             # Force Rust syntax highlighting
+bat --paging=never --style=plain src/lib.rs     # No line numbers or decorations
+
+# ✅ CORRECT - Combining with other tools
+head -n 50 src/lib.rs | bat --paging=never -l rust   # First 50 lines with highlighting
+tail -n 50 src/lib.rs | bat --paging=never -l rust   # Last 50 lines with highlighting
+rg "pattern" -C 3 | bat --paging=never -l rust       # Search results with highlighting
+
+# ❌ NEVER use bare bat without --paging=never - it will block
+bat src/lib.rs                                  # BLOCKS waiting for pager input!
+bat -n src/lib.rs                               # BLOCKS!
+
+# ❌ NEVER use cat - no syntax highlighting
+cat src/lib.rs                                  # No highlighting, harder to read
+```
+
+**ALWAYS use `eza` instead of `ls`:**
+
+```bash
+# ✅ CORRECT - Use eza
+eza -la                                         # List all with details
+eza --tree                                      # Tree view
+eza --tree --level=2                            # Tree with depth limit
+eza -la --git                                   # Show git status
+eza --icons                                     # Show file type icons
+
+# ❌ NEVER use ls
+ls -la                                          # No icons, no git status
+```
+
+**ALWAYS use `sd` instead of `sed` for find-and-replace:**
+
+```bash
+# ✅ CORRECT - Use sd
+sd 'old_pattern' 'new_text' file.rs             # Simple replacement
+sd 'foo(\d+)' 'bar$1' file.rs                   # Regex with capture groups
+sd -F 'literal.string' 'replacement' file.rs   # Fixed string (no regex)
+echo "hello world" | sd 'world' 'universe'      # Pipe support
+fd -e rs | xargs sd 'OldStruct' 'NewStruct'     # Bulk replace in files
+
+# ❌ NEVER use sed
+sed -i 's/old/new/g' file.rs                    # Escape nightmare
+sed -E 's/foo([0-9]+)/bar\1/g' file.rs          # Confusing syntax
+```
+
+**ALWAYS use `dust` instead of `du` for disk usage:**
+
+```bash
+# ✅ CORRECT - Use dust
+dust                                            # Visual size breakdown of current dir
+dust -r                                         # Reverse order (largest last)
+dust -d 2                                       # Limit depth to 2 levels
+dust -n 20 src/                                 # Show top 20 entries in src/
+
+# ❌ NEVER use du
+du -sh *                                        # No visual breakdown, unsorted
+du -h --max-depth=2                             # Harder to read output
+```
+
+**ALWAYS use `procs` instead of `ps` for process viewing:**
+
+```bash
+# ✅ CORRECT - Use procs
+procs                                           # List all processes (colored, sorted)
+procs --tree                                    # Show process tree
+procs cargo                                     # Filter by name
+procs --sortd cpu                               # Sort by CPU descending
+procs --watch                                   # Watch mode (auto-refresh)
+
+# ❌ NEVER use ps
+ps aux                                          # Hard to read, no colors
+ps aux | grep cargo                             # Awkward filtering
+```
+
+**Use `tokei` for code statistics:**
+
+```bash
+# ✅ CORRECT - Use tokei
+tokei                                           # Statistics for current project
+tokei src/                                      # Statistics for specific directory
+tokei -e tests                                  # Exclude directory
+tokei -t Rust                                   # Only count Rust files
+tokei --sort code                               # Sort by lines of code
+```
+
+**Use `hyperfine` for benchmarking:**
+
+```bash
+# ✅ CORRECT - Use hyperfine
+hyperfine 'cargo test'                                # Benchmark with stats
+hyperfine 'cargo test' 'cargo nextest run'            # Compare two commands
+hyperfine --warmup 3 'cargo build --release'          # With warmup runs
+
+# ❌ NEVER use time for benchmarking
+time cargo test                                       # No statistics, single run
+```
+
+**Use other modern tools:**
+
+```bash
+# duf - disk free space
+duf                                             # Show disk usage beautifully
+
+# jq - JSON processing
+cat file.json | jq '.field'                     # Extract field
+curl -s api/endpoint | jq '.'                   # Pretty-print JSON
+
+# fzf - fuzzy finder
+fd -e rs | fzf                                  # Fuzzy find Rust files
+history | fzf                                   # Search command history
+
+# z (zoxide) - smart directory jumping
+z src                                           # Jump to most-used dir matching "src"
+z network                                       # Jump to dir matching "network"
+```
 
 ---
 

@@ -79,6 +79,11 @@ Initial release of Fortress Rollback, a correctness-first fork of GGRS v0.11.0.
   - `GgrsRequest<T>` → `FortressRequest<T>`
 - All documentation updated to reference "Fortress Rollback"
 
+#### Performance Improvements
+
+- `FortressRequest::AdvanceFrame { inputs }` now uses `InputVec<T::Input>` (a `SmallVec<[(T::Input, InputStatus); 4]>`) instead of `Vec`. This avoids heap allocations for games with 1-4 players.
+- `synchronized_inputs()` returns `InputVec` for stack-allocated inputs in the common case
+
 #### Safety Improvements
 
 - `InputQueue::confirmed_input` now returns `Result` instead of panicking
@@ -143,6 +148,22 @@ struct MyAddress { /* ... */ }
 // After
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 struct MyAddress { /* ... */ }
+```
+
+### Input Vector Type
+
+The `inputs` field in `FortressRequest::AdvanceFrame` is now `InputVec<T::Input>` (a `SmallVec`) instead of `Vec`:
+
+```rust
+// If you have explicit type annotations:
+// Before
+fn handle_inputs(inputs: Vec<(MyInput, InputStatus)>) { ... }
+
+// After
+use fortress_rollback::InputVec;
+fn handle_inputs(inputs: InputVec<MyInput>) { ... }
+// Or accept a slice for flexibility:
+fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 ```
 
 ### Behavioral Notes

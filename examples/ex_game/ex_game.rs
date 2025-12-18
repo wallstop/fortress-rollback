@@ -1,6 +1,9 @@
 use std::net::SocketAddr;
 
-use fortress_rollback::{Config, FortressRequest, Frame, GameStateCell, InputStatus, PlayerHandle};
+use fortress_rollback::{
+    compute_checksum_fletcher16, fletcher16, handle_requests, Config, FortressRequest, Frame,
+    GameStateCell, InputStatus, InputVec, PlayerHandle,
+};
 use macroquad::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -35,19 +38,6 @@ impl Config for FortressConfig {
     type Input = Input;
     type State = State;
     type Address = SocketAddr;
-}
-
-/// computes the fletcher16 checksum, copied from wikipedia: <https://en.wikipedia.org/wiki/Fletcher%27s_checksum>
-fn fletcher16(data: &[u8]) -> u16 {
-    let mut sum1: u16 = 0;
-    let mut sum2: u16 = 0;
-
-    for &byte in data {
-        sum1 = (sum1 + byte as u16) % 255;
-        sum2 = (sum2 + sum1) % 255;
-    }
-
-    (sum2 << 8) | sum1
 }
 
 // BoxGame will handle rendering, gamestate, inputs and Fortress Rollback requests
@@ -99,17 +89,42 @@ impl Game {
         }
     }
 
+    /// Alternative request handling using the `handle_requests!` macro.
+    ///
+    /// This method shows how to use the macro for cleaner code when you don't
+    /// need special lockstep handling.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// match sess.advance_frame() {
+    ///     Ok(requests) => game.handle_requests_with_macro(requests),
+    ///     Err(e) => return Err(Box::new(e)),
+    /// }
+    /// ```
+    #[allow(dead_code)]
+    pub fn handle_requests_with_macro(&mut self, requests: Vec<FortressRequest<FortressConfig>>) {
+        handle_requests!(
+            requests,
+            save: |cell: GameStateCell<State>, frame: Frame| {
+                self.save_game_state(cell, frame);
+            },
+            load: |cell: GameStateCell<State>, _frame: Frame| {
+                self.load_game_state(cell);
+            },
+            advance: |inputs: InputVec<Input>| {
+                self.advance_frame(inputs);
+            }
+        );
+    }
+
     // save current gamestate, create a checksum
     // creating a checksum here is only relevant for SyncTestSessions
     fn save_game_state(&mut self, cell: GameStateCell<State>, frame: Frame) {
         assert_eq!(self.game_state.frame, frame.as_i32());
-        let buffer = bincode::serde::encode_to_vec(
-            &self.game_state,
-            bincode::config::standard().with_fixed_int_encoding(),
-        )
-        .unwrap();
-        let checksum = fletcher16(&buffer) as u128;
-        cell.save(frame, Some(self.game_state.clone()), Some(checksum));
+        // Use the built-in checksum helper for deterministic serialization + hashing
+        let checksum = compute_checksum_fletcher16(&self.game_state).ok();
+        cell.save(frame, Some(self.game_state.clone()), checksum);
     }
 
     // load gamestate and overwrite
@@ -117,18 +132,16 @@ impl Game {
         self.game_state = cell.load().expect("No data found.");
     }
 
-    fn advance_frame(&mut self, inputs: Vec<(Input, InputStatus)>) {
+    fn advance_frame(&mut self, inputs: InputVec<Input>) {
         // advance the game state
         self.game_state.advance(inputs);
 
         // remember checksum to render it later
-        // it is very inefficient to serialize the gamestate here just for the checksum
-        let buffer = bincode::serde::encode_to_vec(
-            &self.game_state,
-            bincode::config::standard().with_fixed_int_encoding(),
-        )
-        .unwrap();
-        let checksum = fletcher16(&buffer) as u64;
+        // Note: it's more efficient to only compute checksums periodically for display
+        // For actual desync detection, use the checksum passed to cell.save() in SaveGameState
+        let buffer = fortress_rollback::network::codec::encode(&self.game_state)
+            .expect("serialization should succeed");
+        let checksum = u64::from(fletcher16(&buffer));
         self.last_checksum = (Frame::new(self.game_state.frame), checksum);
         if self.game_state.frame % CHECKSUM_PERIOD == 0 {
             self.periodic_checksum = (Frame::new(self.game_state.frame), checksum);
@@ -278,7 +291,7 @@ impl State {
         }
     }
 
-    pub fn advance(&mut self, inputs: Vec<(Input, InputStatus)>) {
+    pub fn advance(&mut self, inputs: InputVec<Input>) {
         // increase the frame counter
         self.frame += 1;
 

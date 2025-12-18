@@ -54,6 +54,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     git \
     jq \
+    yq \
     # High-performance CLI tools available in apt
     ripgrep \
     fd-find \
@@ -61,6 +62,8 @@ RUN apt-get update && apt-get install -y \
     bat \
     htop \
     ncdu \
+    silversearcher-ag \
+    # Note: tldr is not available in Debian Trixie, installed via cargo below
     # Note: eza, git-delta, dust, duf, procs, sd, etc. are installed via cargo below
     && rm -rf /var/lib/apt/lists/*
 
@@ -113,6 +116,7 @@ RUN cargo install cargo-audit && \
     cargo install hyperfine && \
     cargo install tokei && \
     cargo install zoxide && \
+    cargo install tealdeer && \
     cargo install bottom || echo "bottom (btm) optional"
 
 # Install Node.js and markdown tools (for pre-commit hooks)
@@ -147,6 +151,7 @@ WORKDIR /workspaces/ggrs
 # Set up aliases for high-performance tools
 # Note: fd-find installs as 'fdfind' on Debian, bat as 'batcat'
 # eza, delta, dust, duf, procs are installed via cargo and have standard names
+# tealdeer installs as 'tldr'
 RUN echo '\n# High-performance tool aliases\nalias fd="fdfind"\nalias bat="batcat"\nalias ls="eza"\nalias ll="eza -la"\nalias la="eza -la"\nalias tree="eza --tree"\nalias cat="batcat --paging=never"\nalias diff="delta"\nalias du="dust"\nalias df="duf"\nalias ps="procs"\nalias top="htop"\nalias sed="sd"\n\n# Initialize zoxide (smart cd)\neval "$(zoxide init bash)"\n\n# Conditionally enable sccache if available\nif command -v sccache &> /dev/null; then\n  export RUSTC_WRAPPER=sccache\nfi\n' >> ~/.bashrc
 
 # Print tool versions on first login (via .bashrc)

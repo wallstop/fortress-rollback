@@ -134,6 +134,9 @@ z3-verification-bundled = ["z3-verification", "z3?/bundled"]
 # Enable graphical examples (ex_game_*) - requires system audio/graphics libraries
 # On Linux: sudo apt-get install libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
 graphical-examples = ["dep:macroquad"]
+# Enable tokio async runtime integration for async socket adapters
+# Provides TokioUdpSocket for use with async networking code
+tokio = ["dep:tokio"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -142,6 +145,8 @@ bincode = { version = "2.0", features = ["serde"] }
 parking_lot = "0.12"
 web-time = "1.1"
 tracing = "0.1"
+# SmallVec for stack-allocated small vectors (avoids heap allocation for 1-4 players)
+smallvec = { version = "1.13", features = ["serde"] }
 # SMT solver for formal verification
 # Only compiled when z3-verification feature is enabled
 # For bundled build (slow), use z3-verification-bundled feature instead
@@ -149,6 +154,9 @@ z3 = { version = "0.19", optional = true }
 # Graphical examples dependency (requires system audio/graphics libraries)
 # On Linux: sudo apt-get install libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
 macroquad = { version = "0.4", optional = true }
+# Tokio async runtime for async socket adapters
+# Only compiled when tokio feature is enabled
+tokio = { version = "1.43", features = ["net", "io-util", "sync", "rt", "macros", "time"], optional = true }
 
 # Loom for concurrency testing - only used when cfg(loom) is set
 [target.'cfg(loom)'.dependencies]
@@ -202,6 +210,10 @@ harness = false
 
 [[bench]]
 name = "p2p_session"
+harness = false
+
+[[bench]]
+name = "compression"
 harness = false
 
 # Profile for benchmarks

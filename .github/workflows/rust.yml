@@ -123,6 +123,29 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: ${{ steps.cargo-msrv.outputs.msrv }}
 
+  # Supply chain security check using cargo-deny
+  # Checks for security advisories, banned licenses, and dependency issues
+  supply-chain-security:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Check advisories
+        run: cargo deny check advisories
+
+      - name: Check licenses
+        run: cargo deny check licenses
+
+      - name: Check bans
+        run: cargo deny check bans
+
+      - name: Check sources
+        run: cargo deny check sources
+
   build:
     runs-on: windows-latest
     timeout-minutes: 30

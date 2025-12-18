@@ -20,17 +20,91 @@ pub use network::messages::Message;
 pub use network::network_stats::NetworkStats;
 pub use network::udp_socket::UdpNonBlockingSocket;
 use serde::{de::DeserializeOwned, Serialize};
-pub use sessions::builder::{
-    InputQueueConfig, ProtocolConfig, SaveMode, SessionBuilder, SpectatorConfig, SyncConfig,
+pub use sessions::builder::SessionBuilder;
+pub use sessions::config::{
+    InputQueueConfig, ProtocolConfig, SaveMode, SpectatorConfig, SyncConfig,
 };
-pub use sessions::p2p_session::{P2PSession, SyncHealth};
+pub use sessions::p2p_session::P2PSession;
 pub use sessions::p2p_spectator_session::SpectatorSession;
+pub use sessions::player_registry::PlayerRegistry;
+pub use sessions::sync_health::SyncHealth;
 pub use sessions::sync_test_session::SyncTestSession;
+// Re-export smallvec for users who need to work with InputVec directly
+pub use smallvec::SmallVec;
 pub use sync_layer::{GameStateAccessor, GameStateCell};
 pub use time_sync::TimeSyncConfig;
 
 // Re-export prediction strategies
 pub use crate::input_queue::{BlankPrediction, PredictionStrategy, RepeatLastConfirmed};
+
+// Re-export checksum utilities for easy access
+pub use checksum::{compute_checksum, compute_checksum_fletcher16, fletcher16, hash_bytes_fnv1a};
+
+/// Tokio async runtime integration for Fortress Rollback.
+///
+/// This module provides [`TokioUdpSocket`], an adapter that wraps a Tokio async UDP socket
+/// and implements the [`NonBlockingSocket`] trait for use with Fortress Rollback sessions
+/// in async Tokio applications.
+///
+/// # Feature Flag
+///
+/// This module requires the `tokio` feature flag:
+///
+/// ```toml
+/// [dependencies]
+/// fortress-rollback = { version = "0.1", features = ["tokio"] }
+/// ```
+///
+/// # Example
+///
+/// ```ignore
+/// use fortress_rollback::tokio_socket::TokioUdpSocket;
+/// use fortress_rollback::{SessionBuilder, PlayerType, PlayerHandle};
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     // Create and bind a Tokio UDP socket adapter
+///     let socket = TokioUdpSocket::bind_to_port(7000).await?;
+///
+///     // Use with SessionBuilder
+///     let session = SessionBuilder::<MyConfig>::new()
+///         .with_num_players(2)
+///         .add_player(PlayerType::Local, PlayerHandle::new(0))?
+///         .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
+///         .start_p2p_session(socket)?;
+///
+///     // Game loop...
+///     Ok(())
+/// }
+/// ```
+///
+/// [`TokioUdpSocket`]: crate::tokio_socket::TokioUdpSocket
+/// [`NonBlockingSocket`]: crate::NonBlockingSocket
+#[cfg(feature = "tokio")]
+pub mod tokio_socket {
+    pub use crate::network::tokio_socket::TokioUdpSocket;
+}
+
+/// State checksum utilities for rollback networking.
+///
+/// Provides deterministic checksum computation for game states, essential for
+/// desync detection in peer-to-peer rollback networking.
+///
+/// # Quick Start
+///
+/// ```
+/// use fortress_rollback::checksum::compute_checksum;
+/// use serde::Serialize;
+///
+/// #[derive(Serialize)]
+/// struct GameState { frame: u32, x: f32, y: f32 }
+///
+/// let state = GameState { frame: 100, x: 1.0, y: 2.0 };
+/// let checksum = compute_checksum(&state).expect("serialization failed");
+/// ```
+///
+/// See module documentation for detailed usage and performance considerations.
+pub mod checksum;
 
 // Internal modules - made pub for re-export in __internal, but doc(hidden) for API cleanliness
 #[doc(hidden)]
@@ -61,10 +135,17 @@ pub mod time_sync;
 pub mod sessions {
     #[doc(hidden)]
     pub mod builder;
+    /// Configuration types for session behavior.
+    #[doc(hidden)]
+    pub mod config;
     #[doc(hidden)]
     pub mod p2p_session;
     #[doc(hidden)]
     pub mod p2p_spectator_session;
+    #[doc(hidden)]
+    pub mod player_registry;
+    #[doc(hidden)]
+    pub mod sync_health;
     #[doc(hidden)]
     pub mod sync_test_session;
 }
@@ -84,6 +165,8 @@ pub mod network {
     pub mod network_stats;
     #[doc(hidden)]
     pub mod protocol;
+    #[cfg(feature = "tokio")]
+    pub mod tokio_socket;
     #[doc(hidden)]
     pub mod udp_socket;
 }
@@ -156,7 +239,7 @@ pub mod __internal {
     pub use crate::rle::{decode as rle_decode, encode as rle_encode};
 
     // Session internals
-    pub use crate::sessions::p2p_session::PlayerRegistry;
+    pub use crate::sessions::player_registry::PlayerRegistry;
 }
 
 // #############
@@ -603,6 +686,36 @@ pub enum InputStatus {
     Disconnected,
 }
 
+/// Stack-allocated vector type for player inputs.
+///
+/// This type uses [`SmallVec`] to avoid heap allocations for the common case of
+/// 2-4 players. Games with more than 4 players will spill to the heap automatically.
+///
+/// # Performance
+///
+/// For games with 1-4 players, input vectors are stack-allocated, avoiding the
+/// overhead of heap allocation and deallocation on every frame. This provides
+/// measurable performance improvements in the hot path of `advance_frame()`.
+///
+/// # Usage
+///
+/// `InputVec` is used in [`FortressRequest::AdvanceFrame`] and can be iterated
+/// like a regular slice:
+///
+/// ```ignore
+/// let FortressRequest::AdvanceFrame { inputs } = request else { return };
+/// for (input, status) in inputs.iter() {
+///     // Process each player's input
+/// }
+/// ```
+///
+/// # Migration from `Vec`
+///
+/// `InputVec` implements `Deref<Target = [(T::Input, InputStatus)]>`, so most code
+/// using `.iter()`, `.len()`, indexing, or other slice methods will work unchanged.
+/// If you need a `Vec`, use `.to_vec()`.
+pub type InputVec<I> = SmallVec<[(I, InputStatus); 4]>;
+
 /// Notifications that you can receive from the session. Handling them is up to the user.
 ///
 /// # Forward Compatibility
@@ -773,8 +886,142 @@ where
     /// Disconnected players are indicated by having [`NULL_FRAME`] instead of the correct current frame in their input.
     AdvanceFrame {
         /// Contains inputs and input status for each player.
-        inputs: Vec<(T::Input, InputStatus)>,
+        ///
+        /// This uses [`InputVec`] (a [`SmallVec`]) instead of [`Vec`] for better performance.
+        /// For 1-4 players, inputs are stack-allocated (no heap allocation).
+        /// The collection implements `Deref<Target = [T]>`, so `.iter()` and indexing work normally.
+        inputs: InputVec<T::Input>,
     },
+}
+
+/// Macro to simplify handling [`FortressRequest`] variants in a game loop.
+///
+/// This macro eliminates the boilerplate of matching on request variants, providing
+/// a concise way to handle save, load, and advance operations.
+///
+/// # Usage
+///
+/// ```
+/// # use fortress_rollback::{Config, Frame, FortressRequest, GameStateCell, InputVec, handle_requests};
+/// # use serde::{Deserialize, Serialize};
+/// # use std::net::SocketAddr;
+/// #
+/// # #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+/// # struct MyInput(u8);
+/// #
+/// # #[derive(Clone, Default)]
+/// # struct MyState { frame: i32, data: u64 }
+/// #
+/// # struct MyConfig;
+/// # impl Config for MyConfig {
+/// #     type Input = MyInput;
+/// #     type State = MyState;
+/// #     type Address = SocketAddr;
+/// # }
+/// #
+/// # fn compute_checksum(_: &MyState) -> u128 { 0 }
+/// #
+/// # fn example(mut state: MyState, requests: Vec<FortressRequest<MyConfig>>) {
+/// handle_requests!(
+///     requests,
+///     save: |cell: GameStateCell<MyState>, frame: Frame| {
+///         let checksum = compute_checksum(&state);
+///         cell.save(frame, Some(state.clone()), Some(checksum));
+///     },
+///     load: |cell: GameStateCell<MyState>, _frame: Frame| {
+///         state = cell.load().expect("State must exist");
+///     },
+///     advance: |inputs: InputVec<MyInput>| {
+///         state.frame += 1;
+///         // Apply inputs...
+///     }
+/// );
+/// # }
+/// ```
+///
+/// # Parameters
+///
+/// - `requests`: An iterable of [`FortressRequest<T>`] (usually `Vec<FortressRequest<T>>`)
+/// - `save`: Closure taking `(cell: GameStateCell<State>, frame: Frame)` — called for [`FortressRequest::SaveGameState`]
+/// - `load`: Closure taking `(cell: GameStateCell<State>, frame: Frame)` — called for [`FortressRequest::LoadGameState`]
+/// - `advance`: Closure taking `(inputs: InputVec<Input>)` — called for [`FortressRequest::AdvanceFrame`]
+///
+/// # Order Preservation
+///
+/// Requests are processed in iteration order, which matches the order returned by
+/// [`P2PSession::advance_frame`]. This order is critical for correctness — do not
+/// sort, filter, or reorder the requests.
+///
+/// # Lockstep Mode
+///
+/// In lockstep mode (prediction window = 0), you will never receive `SaveGameState`
+/// or `LoadGameState` requests. You can provide empty closures:
+///
+/// ```
+/// # use fortress_rollback::{Config, Frame, FortressRequest, GameStateCell, InputVec, handle_requests};
+/// # use serde::{Deserialize, Serialize};
+/// # use std::net::SocketAddr;
+/// #
+/// # #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+/// # struct MyInput(u8);
+/// # #[derive(Clone, Default)]
+/// # struct MyState { frame: i32 }
+/// # struct MyConfig;
+/// # impl Config for MyConfig {
+/// #     type Input = MyInput;
+/// #     type State = MyState;
+/// #     type Address = SocketAddr;
+/// # }
+/// #
+/// # fn example(mut state: MyState, requests: Vec<FortressRequest<MyConfig>>) {
+/// handle_requests!(
+///     requests,
+///     save: |_, _| { /* Never called in lockstep */ },
+///     load: |_, _| { /* Never called in lockstep */ },
+///     advance: |inputs: InputVec<MyInput>| {
+///         state.frame += 1;
+///     }
+/// );
+/// # }
+/// ```
+///
+/// # Forward Compatibility
+///
+/// This macro handles unknown future request types by ignoring them, ensuring
+/// your code continues to work when new request types are added.
+///
+/// [`P2PSession::advance_frame`]: crate::P2PSession::advance_frame
+/// [`FortressRequest::SaveGameState`]: crate::FortressRequest::SaveGameState
+/// [`FortressRequest::LoadGameState`]: crate::FortressRequest::LoadGameState
+/// [`FortressRequest::AdvanceFrame`]: crate::FortressRequest::AdvanceFrame
+#[macro_export]
+macro_rules! handle_requests {
+    (
+        $requests:expr,
+        save: $save:expr,
+        load: $load:expr,
+        advance: $advance:expr
+        $(,)?
+    ) => {{
+        for request in $requests {
+            match request {
+                $crate::FortressRequest::SaveGameState { cell, frame } => {
+                    #[allow(clippy::redundant_closure_call)]
+                    ($save)(cell, frame);
+                },
+                $crate::FortressRequest::LoadGameState { cell, frame } => {
+                    #[allow(clippy::redundant_closure_call)]
+                    ($load)(cell, frame);
+                },
+                $crate::FortressRequest::AdvanceFrame { inputs } => {
+                    #[allow(clippy::redundant_closure_call)]
+                    ($advance)(inputs);
+                },
+                // Handle unknown future variants gracefully
+                _ => {},
+            }
+        }
+    }};
 }
 
 // #############

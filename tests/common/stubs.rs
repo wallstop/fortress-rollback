@@ -6,7 +6,7 @@ use std::hash::Hash;
 use std::net::SocketAddr;
 
 use fortress_rollback::hash::fnv1a_hash;
-use fortress_rollback::{Config, FortressRequest, Frame, GameStateCell, InputStatus};
+use fortress_rollback::{Config, FortressRequest, Frame, GameStateCell, InputVec};
 
 fn calculate_hash<T: Hash>(t: &T) -> u64 {
     fnv1a_hash(t)
@@ -67,7 +67,7 @@ impl GameStub {
         self.gs = cell.load().unwrap();
     }
 
-    fn advance_frame(&mut self, inputs: Vec<(StubInput, InputStatus)>) {
+    fn advance_frame(&mut self, inputs: InputVec<StubInput>) {
         self.gs.advance_frame(inputs);
     }
 }
@@ -116,7 +116,7 @@ impl RandomChecksumGameStub {
         self.gs = cell.load().expect("No data found.");
     }
 
-    fn advance_frame(&mut self, inputs: Vec<(StubInput, InputStatus)>) {
+    fn advance_frame(&mut self, inputs: InputVec<StubInput>) {
         self.gs.advance_frame(inputs);
     }
 }
@@ -128,7 +128,7 @@ pub struct StateStub {
 }
 
 impl StateStub {
-    fn advance_frame(&mut self, inputs: Vec<(StubInput, InputStatus)>) {
+    fn advance_frame(&mut self, inputs: InputVec<StubInput>) {
         // Sum all player inputs for deterministic state update
         let total_inputs: u32 = inputs.iter().map(|(input, _)| input.inp).sum();
 
