@@ -1,4 +1,4 @@
-name: Benchmark CI
+name: CI - Benchmarks
 
 # Run benchmarks and track regressions
 # Results are stored in GitHub Pages at gh-pages branch (bench/)
@@ -7,8 +7,20 @@ name: Benchmark CI
 on:
   push:
     branches: [main]
+    paths:
+      - '**.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'benches/**'
+      - '.github/workflows/benchmark.yml'
   pull_request:
     branches: [main]
+    paths:
+      - '**.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'benches/**'
+      - '.github/workflows/benchmark.yml'
   workflow_dispatch:  # Allow manual runs
 
 env:

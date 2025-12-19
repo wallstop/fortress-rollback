@@ -1,0 +1,341 @@
+name: CI - Rust
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
+      - 'clippy.toml'
+      - 'rustfmt.toml'
+      - '.github/workflows/ci-rust.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
+      - 'clippy.toml'
+      - 'rustfmt.toml'
+      - '.github/workflows/ci-rust.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Primary build and test job (Windows)
+  build-windows:
+    name: Build & Test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update Rust
+        run: rustup update stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Configure sccache
+        id: sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
+
+      - name: Verify sccache is working
+        id: sccache-check
+        if: steps.sccache.outcome == 'success'
+        run: ./scripts/verify-sccache.sh
+        continue-on-error: true
+
+      - name: Clear sccache env on failure
+        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
+        run: |
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: build-windows-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            build-windows-${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --verbose
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+
+      - name: Run tests (nextest)
+        run: cargo nextest run --profile ci --verbose
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+
+      - name: Build docs
+        run: cargo doc --verbose
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+  # WASM compatibility check
+  check-wasm:
+    name: Check WASM Target
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable wasm toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Configure sccache
+        id: sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
+
+      - name: Verify sccache is working
+        id: sccache-check
+        if: steps.sccache.outcome == 'success'
+        run: ./scripts/verify-sccache.sh
+        continue-on-error: true
+
+      - name: Clear sccache env on failure
+        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
+        run: |
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: wasm-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            wasm-${{ runner.os }}-cargo-
+
+      - name: Check WASM target
+        run: cargo check --target wasm32-unknown-unknown --features wasm-bindgen
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+
+  # Miri undefined behavior check
+  miri:
+    name: Miri UB Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly with Miri
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: miri
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: miri-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            miri-${{ runner.os }}-cargo-
+
+      - name: Setup Miri
+        run: cargo miri setup
+
+      - name: Run Miri tests (library)
+        run: cargo miri test --lib -- --skip property_tests
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+
+  # MSRV (Minimum Supported Rust Version) verification
+  msrv-check:
+    name: MSRV Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract MSRV from Cargo.toml
+        id: cargo-msrv
+        run: |
+          MSRV=$(grep -E '^rust-version\s*=' Cargo.toml | sed 's/.*"\([^"]*\)".*/\1/')
+          echo "msrv=$MSRV" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml MSRV: $MSRV"
+
+      - name: Extract Rust version from Dockerfile
+        id: docker-rust
+        run: |
+          DOCKER_RUST=$(grep -E '^FROM rust:' docker/Dockerfile | sed 's/FROM rust:\([0-9.]*\).*/\1/')
+          echo "docker_rust=$DOCKER_RUST" >> "$GITHUB_OUTPUT"
+          echo "Dockerfile Rust: $DOCKER_RUST"
+
+      - name: Verify MSRV matches Dockerfile
+        run: |
+          CARGO_MSRV="${{ steps.cargo-msrv.outputs.msrv }}"
+          DOCKER_RUST="${{ steps.docker-rust.outputs.docker_rust }}"
+
+          if [ "$CARGO_MSRV" != "$DOCKER_RUST" ]; then
+            echo "❌ ERROR: MSRV mismatch!"
+            echo "  Cargo.toml rust-version: $CARGO_MSRV"
+            echo "  Dockerfile Rust version: $DOCKER_RUST"
+            echo ""
+            echo "The Dockerfile Rust version must match the Cargo.toml rust-version."
+            echo "Update either docker/Dockerfile or Cargo.toml to fix this."
+            exit 1
+          fi
+
+          echo "✅ MSRV versions match: $CARGO_MSRV"
+
+      - name: Install MSRV toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.cargo-msrv.outputs.msrv }}
+
+      - name: Verify build with MSRV
+        run: cargo check --all-targets
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.cargo-msrv.outputs.msrv }}
+
+  # Feature flag combinations check
+  feature-checks:
+    name: Feature Flag Matrix
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@cargo-hack
+
+      - name: Configure sccache
+        id: sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
+
+      - name: Verify sccache is working
+        id: sccache-check
+        if: steps.sccache.outcome == 'success'
+        run: ./scripts/verify-sccache.sh
+        continue-on-error: true
+
+      - name: Clear sccache env on failure
+        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
+        run: |
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: feature-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            feature-${{ runner.os }}-cargo-
+
+      - name: Check feature powerset (excluding slow features)
+        run: cargo hack check --feature-powerset --exclude-features z3-verification,z3-verification-bundled,graphical-examples
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+
+  # Package dry-run
+  package-dry-run:
+    name: Package Dry Run
+    runs-on: ubuntu-latest
+    needs: build-windows
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure crate is publishable (dry-run)
+        run: cargo publish --dry-run
+
+  # Semver compatibility check
+  semver-checks:
+    name: Semver Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@cargo-semver-checks
+
+      - name: Configure sccache
+        id: sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
+
+      - name: Verify sccache is working
+        id: sccache-check
+        if: steps.sccache.outcome == 'success'
+        run: ./scripts/verify-sccache.sh
+        continue-on-error: true
+
+      - name: Clear sccache env on failure
+        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
+        run: |
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: semver-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            semver-${{ runner.os }}-cargo-
+
+      - name: Check semver compatibility
+        run: cargo semver-checks check-release
+        continue-on-error: true  # Warn but don't fail - breaking changes are acceptable if documented
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
