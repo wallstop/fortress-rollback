@@ -173,8 +173,8 @@ jobs:
       - name: Clear sccache env on failure
         if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
         run: |
-          echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -233,8 +233,8 @@ jobs:
       - name: Clear sccache env on failure
         if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
         run: |
-          echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -315,8 +315,8 @@ jobs:
       - name: Clear sccache env on failure
         if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
         run: |
-          echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -422,8 +422,8 @@ jobs:
       - name: Clear sccache env on failure
         if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
         run: |
-          echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -588,8 +588,8 @@ jobs:
       - name: Clear sccache env on failure
         if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
         run: |
-          echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -639,8 +639,8 @@ jobs:
       - name: Clear sccache env on failure
         if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
         run: |
-          echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -689,8 +689,8 @@ jobs:
       - name: Clear sccache env on failure
         if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
         run: |
-          echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -748,8 +748,8 @@ jobs:
       - name: Clear sccache env on failure
         if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
         run: |
-          echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -797,8 +797,8 @@ jobs:
       - name: Clear sccache env on failure
         if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
         run: |
-          echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4

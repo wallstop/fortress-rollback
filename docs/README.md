@@ -40,7 +40,6 @@ The architecture guide includes detailed documentation of the network serializat
 |----------|-------------|
 | [Contributing](contributing.md) | Guidelines for contributors |
 | [Code of Conduct](code-of-conduct.md) | Community standards |
-| [Release Process](release.md) | How releases are managed |
 
 ## Related Resources
 
