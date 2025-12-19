@@ -58,7 +58,7 @@ jobs:
       # 1. They spawn external processes which doesn't work well under instrumentation
       # 2. The overhead causes timeouts (default 60s is insufficient)
       # 3. These tests are thoroughly exercised in ci-network.yml with proper timeouts
-      # 
+      #
       # --exclude-files removes code from coverage report
       # -- --skip multi_process passes skip argument to test executable
       - name: Run coverage (tarpaulin)
