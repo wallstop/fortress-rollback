@@ -5,20 +5,22 @@ on:
     branches: [main]
     paths:
       - '**.md'
+      - '**.rs'
       - 'docs/**'
       - '.markdownlint.json'
       - '.markdown-link-check.json'
       - 'scripts/check-links.sh'
-      - '.github/workflows/ci-docs.yml'
+      - '.github/workflows/docs.yml'
   pull_request:
     branches: [main]
     paths:
       - '**.md'
+      - '**.rs'
       - 'docs/**'
       - '.markdownlint.json'
       - '.markdown-link-check.json'
       - 'scripts/check-links.sh'
-      - '.github/workflows/ci-docs.yml'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 jobs:

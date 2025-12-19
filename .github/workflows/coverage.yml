@@ -7,14 +7,14 @@ on:
       - '**.rs'
       - '**/Cargo.toml'
       - '**/Cargo.lock'
-      - '.github/workflows/ci-coverage.yml'
+      - '.github/workflows/coverage.yml'
   pull_request:
     branches: [main]
     paths:
       - '**.rs'
       - '**/Cargo.toml'
       - '**/Cargo.lock'
-      - '.github/workflows/ci-coverage.yml'
+      - '.github/workflows/coverage.yml'
   workflow_dispatch:
 
 permissions:

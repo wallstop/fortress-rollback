@@ -12,7 +12,7 @@ on:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
       - 'benches/**'
-      - '.github/workflows/ci-benchmarks.yml'
+      - '.github/workflows/benchmark.yml'
   pull_request:
     branches: [main]
     paths:
@@ -20,7 +20,7 @@ on:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
       - 'benches/**'
-      - '.github/workflows/ci-benchmarks.yml'
+      - '.github/workflows/benchmark.yml'
   workflow_dispatch:  # Allow manual runs
 
 env:
