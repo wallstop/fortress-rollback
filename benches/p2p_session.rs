@@ -209,7 +209,17 @@ fn bench_advance_frame_with_rollback(c: &mut Criterion) {
     group.finish();
 }
 
+/// Number of iterations for sub-microsecond benchmarks.
+///
+/// Sub-10ns operations have high variance due to timer resolution, CPU frequency
+/// scaling, and scheduler jitter. By iterating many times within each benchmark
+/// sample, we move into the microsecond range where measurements are more stable.
+const FAST_BENCH_ITERATIONS: usize = 1000;
+
 /// Benchmark message serialization round trip
+///
+/// Note: These benchmarks iterate [`FAST_BENCH_ITERATIONS`] times internally to
+/// get into microsecond range where measurements are more stable.
 fn bench_message_serialization(c: &mut Criterion) {
     use fortress_rollback::network::codec;
 
@@ -220,12 +230,14 @@ fn bench_message_serialization(c: &mut Criterion) {
 
     group.bench_function("round_trip_input_msg", |b| {
         b.iter(|| {
-            // Serialize
-            let bytes = codec::encode(&sample_input_bytes).expect("serialize");
-            black_box(&bytes);
+            for _ in 0..FAST_BENCH_ITERATIONS {
+                // Serialize
+                let bytes = codec::encode(&sample_input_bytes).expect("serialize");
+                black_box(&bytes);
 
-            // Deserialize
-            let _decoded: Vec<u8> = codec::decode_value(&bytes).expect("deserialize");
+                // Deserialize
+                let _decoded: Vec<u8> = codec::decode_value(&bytes).expect("deserialize");
+            }
         });
     });
 
@@ -237,8 +249,10 @@ fn bench_message_serialization(c: &mut Criterion) {
             stick_y: -128,
         };
         b.iter(|| {
-            let bytes = codec::encode(black_box(&input)).expect("serialize");
-            black_box(bytes);
+            for _ in 0..FAST_BENCH_ITERATIONS {
+                let bytes = codec::encode(black_box(&input)).expect("serialize");
+                black_box(bytes);
+            }
         });
     });
 
@@ -250,8 +264,11 @@ fn bench_message_serialization(c: &mut Criterion) {
         };
         let bytes = codec::encode(&input).expect("serialize");
         b.iter(|| {
-            let decoded: BenchInput = codec::decode_value(black_box(&bytes)).expect("deserialize");
-            black_box(decoded);
+            for _ in 0..FAST_BENCH_ITERATIONS {
+                let decoded: BenchInput =
+                    codec::decode_value(black_box(&bytes)).expect("deserialize");
+                black_box(decoded);
+            }
         });
     });
 
@@ -264,8 +281,10 @@ fn bench_message_serialization(c: &mut Criterion) {
         };
         let mut buffer = [0u8; 64];
         b.iter(|| {
-            let len = codec::encode_into(black_box(&input), &mut buffer).expect("serialize");
-            black_box(len);
+            for _ in 0..FAST_BENCH_ITERATIONS {
+                let len = codec::encode_into(black_box(&input), &mut buffer).expect("serialize");
+                black_box(len);
+            }
         });
     });
 

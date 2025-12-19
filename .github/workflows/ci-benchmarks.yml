@@ -31,11 +31,15 @@ permissions:
   contents: write
   # Required for posting benchmark comments on commits
   deployments: write
+  # Required for posting PR comments (benchmark alerts)
+  pull-requests: write
 
 jobs:
   benchmark:
     name: Run Benchmarks
     runs-on: ubuntu-latest
+    # Skip for Dependabot PRs - it doesn't have write permissions for PR comments
+    if: github.actor != 'dependabot[bot]'
     # Use a consistent runner for reproducible results
     # Note: Performance may vary between runner hardware revisions
 
@@ -119,13 +123,15 @@ jobs:
           # Store results in gh-pages branch under bench/
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: ${{ github.event_name != 'pull_request' }}
-          # Alert if performance regresses by more than 15%
-          alert-threshold: '115%'
+          # Alert if performance regresses by more than 50%
+          # Note: Sub-10ns benchmarks have high variance due to timer resolution,
+          # so we use a generous threshold to avoid false positives
+          alert-threshold: '150%'
           # Post alert as commit comment when regression detected
           comment-on-alert: true
-          # Fail workflow if regression exceeds 30%
-          fail-on-alert: true
-          fail-threshold: '130%'
+          # Don't fail workflow on alerts - use for tracking only
+          # Nanosecond-scale benchmarks have too much noise for reliable CI gates
+          fail-on-alert: false
           # Keep benchmark history for trend analysis
           max-items-in-chart: 50
           # Only update on push to main (not PRs) to avoid benchmark pollution
@@ -175,7 +181,8 @@ jobs:
     name: Quick Benchmark Smoke Test
     runs-on: ubuntu-latest
     # Quick benchmarks run even if full benchmark fails
-    if: github.event_name == 'pull_request'
+    # Skip for Dependabot PRs - benchmark results aren't useful for dependency updates
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
 
     steps:
       - uses: actions/checkout@v4

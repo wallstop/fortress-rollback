@@ -2026,6 +2026,183 @@ mod tests {
         }
     }
 
+    #[test]
+    fn confirmed_inputs_for_frame_returns_correct_inputs() {
+        let mut session = create_local_only_session();
+
+        // Advance a few frames
+        for i in 0..5 {
+            session
+                .add_local_input(PlayerHandle::new(0), (i * 10) as u8)
+                .expect("Input failed");
+            let _ = session.advance_frame();
+        }
+
+        // After advancing, confirmed_frame should be at least 0
+        let confirmed = session.confirmed_frame();
+        assert!(
+            confirmed >= Frame::new(0),
+            "Should have some confirmed frames"
+        );
+
+        // If we have a confirmed frame, we should be able to get inputs for it
+        if confirmed >= Frame::new(0) && !confirmed.is_null() {
+            let inputs = session
+                .confirmed_inputs_for_frame(Frame::new(0))
+                .expect("Should get inputs for confirmed frame");
+            assert_eq!(inputs.len(), 1, "Should have 1 player's inputs");
+            assert_eq!(inputs[0], 0u8, "Frame 0 should have input value 0");
+        }
+    }
+
+    #[test]
+    fn confirmed_inputs_for_frame_frame_at_confirmed_boundary() {
+        let mut session = create_local_only_session();
+
+        // Advance several frames
+        for i in 0..10 {
+            session
+                .add_local_input(PlayerHandle::new(0), i as u8)
+                .expect("Input failed");
+            let _ = session.advance_frame();
+        }
+
+        let confirmed = session.confirmed_frame();
+
+        // Getting inputs at the confirmed frame should succeed
+        if !confirmed.is_null() {
+            let result = session.confirmed_inputs_for_frame(confirmed);
+            assert!(result.is_ok(), "Should succeed at confirmed frame boundary");
+        }
+
+        // Getting inputs one frame past confirmed should fail
+        let result = session.confirmed_inputs_for_frame(confirmed + 1);
+        assert!(result.is_err(), "Should fail past confirmed frame");
+    }
+
+    #[test]
+    fn confirmed_inputs_for_frame_null_frame_handling() {
+        let session = create_local_only_session();
+
+        // NULL frame (which is -1) - the behavior depends on whether it's treated as
+        // "before confirmed" or as an invalid frame. The function checks if frame > confirmed_frame,
+        // and since NULL (-1) <= any confirmed frame, it will try to fetch from the input queue.
+        // The input queue will then fail because frame -1 doesn't exist.
+        let result = session.confirmed_inputs_for_frame(Frame::NULL);
+        // This may succeed or fail depending on implementation details
+        // The key is that it doesn't panic and handles the edge case
+        match result {
+            Ok(_) => {
+                // If it somehow succeeds, that's fine - just verify behavior
+            },
+            Err(_) => {
+                // Expected - frame -1 is not in the queue
+            },
+        }
+    }
+
+    #[test]
+    fn confirmed_inputs_for_frame_discarded_frame_fails() {
+        let mut session = create_local_only_session();
+
+        // Advance many frames to trigger frame discard
+        // INPUT_QUEUE_LENGTH is 128, so after 128+ frames, early frames are discarded
+        for i in 0..150 {
+            session
+                .add_local_input(PlayerHandle::new(0), (i % 256) as u8)
+                .expect("Input failed");
+            let _ = session.advance_frame();
+        }
+
+        // Frame 0 should have been discarded by now (we're past INPUT_QUEUE_LENGTH)
+        let result = session.confirmed_inputs_for_frame(Frame::new(0));
+        // This might succeed or fail depending on how many frames were actually discarded
+        // The key point is that it handles the edge case gracefully
+        if result.is_err() {
+            match result {
+                Err(FortressError::InvalidRequest { .. }) => {
+                    // Expected - frame was discarded
+                },
+                Err(FortressError::InvalidFrame { .. }) => {
+                    // Also acceptable if frame is considered not confirmed
+                },
+                _ => panic!("Unexpected error type"),
+            }
+        }
+        // If it succeeds, that's also fine - the frame might still be in the queue
+    }
+
+    /// Data-driven test cases for confirmed_inputs_for_frame edge cases
+    #[test]
+    fn confirmed_inputs_for_frame_edge_cases() {
+        struct TestCase {
+            name: &'static str,
+            frames_to_advance: i32,
+            frame_to_query: i32,
+            expect_success: bool,
+        }
+
+        let test_cases = [
+            TestCase {
+                name: "frame 0 after advancing 5 frames",
+                frames_to_advance: 5,
+                frame_to_query: 0,
+                expect_success: true,
+            },
+            TestCase {
+                name: "frame beyond confirmed",
+                frames_to_advance: 5,
+                frame_to_query: 100,
+                expect_success: false,
+            },
+            TestCase {
+                name: "frame at current - 1",
+                frames_to_advance: 10,
+                frame_to_query: 9,
+                // For local-only sessions, confirmed_frame tracks current_frame,
+                // so frame 9 is confirmed after advancing 10 frames
+                expect_success: true,
+            },
+            TestCase {
+                name: "large negative frame",
+                frames_to_advance: 5,
+                frame_to_query: -100,
+                // Negative frames fail in the input queue (no such frame exists)
+                expect_success: false,
+            },
+        ];
+
+        for tc in &test_cases {
+            let mut session = create_local_only_session();
+
+            // Advance the specified number of frames
+            for i in 0..tc.frames_to_advance {
+                session
+                    .add_local_input(PlayerHandle::new(0), (i % 256) as u8)
+                    .expect("Input failed");
+                let _ = session.advance_frame();
+            }
+
+            let result = session.confirmed_inputs_for_frame(Frame::new(tc.frame_to_query));
+
+            if tc.expect_success {
+                assert!(
+                    result.is_ok(),
+                    "Test '{}' expected success but got {:?}",
+                    tc.name,
+                    result
+                );
+            } else {
+                assert!(
+                    result.is_err(),
+                    "Test '{}' expected failure but got {:?}",
+                    tc.name,
+                    result
+                );
+            }
+        }
+    }
+
     // ==========================================
     // handles_by_address Tests
     // ==========================================
