@@ -83,7 +83,9 @@ jobs:
 
       # Store benchmark results and detect regressions
       # Uses github-action-benchmark: https://github.com/benchmark-action/github-action-benchmark
+      # Note: This step only runs when gh-pages exists OR we're pushing to main (which creates it)
       - name: Store benchmark results
+        if: steps.gh-pages-check.outputs.exists == 'true' || github.event_name == 'push'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Fortress Rollback Benchmarks
@@ -104,8 +106,14 @@ jobs:
           # Only update on push to main (not PRs) to avoid benchmark pollution
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: bench
-          # Skip fetching gh-pages if it doesn't exist (bootstrap case)
+          # Skip fetching gh-pages if it doesn't exist (bootstrap case for first push)
           skip-fetch-gh-pages: ${{ steps.gh-pages-check.outputs.exists == 'false' }}
+
+      - name: Skip benchmark storage (no gh-pages branch yet)
+        if: steps.gh-pages-check.outputs.exists == 'false' && github.event_name != 'push'
+        run: |
+          echo "::notice::Skipping benchmark storage - gh-pages branch does not exist yet."
+          echo "The gh-pages branch will be created when the first commit is pushed to main."
 
       # On PRs, compare with main branch baseline (only if gh-pages exists)
       - name: Compare PR benchmarks with main

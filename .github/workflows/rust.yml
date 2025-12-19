@@ -59,7 +59,9 @@ jobs:
             --ignore 'target/**' \
             --ignore 'fuzz/target/**' \
             --ignore 'loom-tests/target/**' \
-            --ignore 'node_modules/**'
+            --ignore 'node_modules/**' \
+            --ignore 'progress/**' \
+            --ignore 'PLAN.md'
 
       - name: Install markdown-link-check
         run: npm install -g markdown-link-check

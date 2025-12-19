@@ -57,8 +57,10 @@ jobs:
     name: Rustdoc Link Check
     runs-on: ubuntu-latest
 
-    env:
-      CARGO_INCREMENTAL: 0
+    # Note: We intentionally don't use sccache for doc builds because:
+    # 1. Doc builds are fast and don't benefit much from compilation caching
+    # 2. sccache can cause transient CI failures when GitHub Actions cache service is unavailable
+    # 3. The complexity of sccache error handling outweighs any benefit for this job
 
     steps:
       - uses: actions/checkout@v4
@@ -67,23 +69,6 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
-
-      - name: Configure sccache
-        id: sccache
-        uses: mozilla-actions/sccache-action@v0.0.7
-        continue-on-error: true
-
-      - name: Verify sccache is working
-        id: sccache-check
-        if: steps.sccache.outcome == 'success'
-        run: ./scripts/verify-sccache.sh
-        continue-on-error: true
-
-      - name: Clear sccache env on failure
-        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
-        run: |
-          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -103,7 +88,3 @@ jobs:
 
           # Run with RUSTDOCFLAGS to treat warnings as errors for links
           RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --no-deps
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
-          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
-          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
