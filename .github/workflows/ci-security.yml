@@ -52,9 +52,18 @@ jobs:
         run: cargo deny check sources
 
   # Unsafe code audit via cargo-geiger
+  # Only runs when dependencies change (Cargo.toml/Cargo.lock) or on schedule/manual trigger
+  # Skips entirely on PR/push when only .rs files change (dependencies unchanged)
   unsafe-audit:
     name: Unsafe Code Audit
     runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(toJSON(github.event.commits.*.modified), 'Cargo.toml') ||
+      contains(toJSON(github.event.commits.*.modified), 'Cargo.lock') ||
+      contains(toJSON(github.event.commits.*.added), 'Cargo.toml') ||
+      contains(toJSON(github.event.commits.*.added), 'Cargo.lock')
 
     steps:
       - uses: actions/checkout@v6
@@ -95,12 +104,26 @@ jobs:
           restore-keys: |
             geiger-${{ runner.os }}-cargo-
 
+      - name: Check cached geiger report
+        id: geiger-cache
+        uses: actions/cache@v5
+        with:
+          path: geiger-report.txt
+          key: geiger-report-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Audit unsafe code in dependencies
+        if: steps.geiger-cache.outputs.cache-hit != 'true'
         run: cargo geiger --all-features --lib 2>&1 | tee geiger-report.txt || true
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+
+      - name: Display cached geiger report
+        if: steps.geiger-cache.outputs.cache-hit == 'true'
+        run: |
+          echo "Using cached geiger report (dependencies unchanged)"
+          cat geiger-report.txt
 
       - name: Verify no unsafe in library code
         run: |
