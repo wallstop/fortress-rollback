@@ -441,6 +441,8 @@ fn run_two_peer_test(
     peer1_config: PeerConfig,
     peer2_config: PeerConfig,
 ) -> (TestResult, TestResult) {
+    let test_start = std::time::Instant::now();
+
     // Spawn peer 1
     let peer1 = spawn_peer(&peer1_config).expect("Failed to spawn peer 1");
 
@@ -453,6 +455,8 @@ fn run_two_peer_test(
     // Wait for both peers
     let result1 = wait_for_peer(peer1, "Peer 1");
     let result2 = wait_for_peer(peer2, "Peer 2");
+
+    let test_duration = test_start.elapsed();
 
     // Log diagnostic information for debugging test failures
     // This helps understand what happened when tests fail in CI
@@ -467,7 +471,16 @@ fn run_two_peer_test(
         eprintln!("=== Test Results ===");
         eprintln!("Peer 1: {}", result1.diagnostic_summary());
         eprintln!("Peer 2: {}", result2.diagnostic_summary());
+        eprintln!("Duration: {:.2}s", test_duration.as_secs_f64());
         eprintln!("========================");
+    }
+
+    // Log timing for all tests (helps diagnose CI timeouts)
+    if test_duration.as_secs() > 30 {
+        eprintln!(
+            "WARNING: Test took {:.1}s (>30s) - may timeout under coverage",
+            test_duration.as_secs_f64()
+        );
     }
 
     (result1, result2)
@@ -2066,6 +2079,91 @@ fn test_packet_loss_determinism_data_driven() {
         );
     }
     println!("========================================");
+}
+
+/// Test edge cases related to timing and execution overhead.
+///
+/// This data-driven test covers scenarios that might be affected by:
+/// - Code instrumentation (coverage tools)
+/// - CI environment variability
+/// - Process scheduling overhead
+///
+/// These tests use shorter frame counts to ensure they complete even
+/// under instrumentation overhead.
+#[test]
+#[serial]
+fn test_timing_sensitive_edge_cases_data_driven() {
+    let test_cases = [
+        // Zero input delay with perfect network - tests raw sync behavior
+        NetworkConditionCase {
+            name: "zero_delay_perfect",
+            port_base: 10220,
+            frames: 50, // Shorter for reliability under instrumentation
+            packet_loss: 0.0,
+            latency_ms: 0,
+            jitter_ms: 0,
+            input_delay: 0,
+            expect_success: true,
+        },
+        // High frame count with minimal conditions
+        NetworkConditionCase {
+            name: "many_frames_minimal_conditions",
+            port_base: 10222,
+            frames: 200,
+            packet_loss: 0.0,
+            latency_ms: 5,
+            jitter_ms: 2,
+            input_delay: 2,
+            expect_success: true,
+        },
+        // High latency with jitter - stresses timing
+        NetworkConditionCase {
+            name: "high_latency_timing_stress",
+            port_base: 10224,
+            frames: 50,
+            packet_loss: 0.0,
+            latency_ms: 100,
+            jitter_ms: 50,
+            input_delay: 4,
+            expect_success: true,
+        },
+        // Combined stress: loss + latency + jitter
+        NetworkConditionCase {
+            name: "combined_timing_stress",
+            port_base: 10226,
+            frames: 50,
+            packet_loss: 0.10,
+            latency_ms: 50,
+            jitter_ms: 30,
+            input_delay: 3,
+            expect_success: true,
+        },
+    ];
+
+    println!("=== Timing-Sensitive Edge Cases ===");
+    let start = std::time::Instant::now();
+
+    for case in &test_cases {
+        let case_start = std::time::Instant::now();
+        let (result1, result2) = case.run_and_verify();
+        let case_duration = case_start.elapsed();
+
+        println!(
+            "  {}: duration={:.2}s, rollbacks p1={}, p2={}",
+            case.name,
+            case_duration.as_secs_f64(),
+            result1.rollbacks,
+            result2.rollbacks
+        );
+    }
+
+    let total_duration = start.elapsed();
+    println!(
+        "Total timing tests: {:.2}s (avg {:.2}s/test)",
+        total_duration.as_secs_f64(),
+        total_duration.as_secs_f64() / test_cases.len() as f64
+    );
+    println!("===================================");
 }
 
 // =============================================================================

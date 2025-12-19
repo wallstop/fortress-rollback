@@ -218,6 +218,27 @@ hyperfine --warmup 3 'cargo build --release'          # With warmup runs
 time cargo test                                       # No statistics, single run
 ```
 
+**NEVER redirect output to `/dev/null`:**
+
+Suppressing output hides errors, warnings, and important diagnostic information. This makes debugging impossible and can mask real problems.
+
+```bash
+# ❌ NEVER suppress output - hides critical information
+command 2>/dev/null                             # Hides all errors!
+command >/dev/null 2>&1                         # Hides everything!
+command 2>&1 >/dev/null                         # Still hides output!
+curl -s url 2>/dev/null                         # Hides network errors!
+some_script.sh 2>/dev/null || true              # Silently fails!
+
+# ✅ CORRECT - Always preserve output for debugging
+command                                         # See all output
+command 2>&1 | head -20                         # Limit output but don't hide it
+command || echo "Command failed with exit $?"   # Handle errors explicitly
+curl -sf url || echo "curl failed"              # Use flags, handle errors
+```
+
+**Exception:** Only use `/dev/null` when you have explicitly documented *why* the output is irrelevant AND the command's success/failure is properly checked. This should be extremely rare.
+
 **Use other modern tools:**
 
 ```bash
