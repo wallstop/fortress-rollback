@@ -1461,6 +1461,7 @@ matchbox_socket = { version = "0.13", features = ["ggrs"] }
 ```
 
 Matchbox provides:
+
 - **WebRTC peer-to-peer connections** — Direct data channels between browsers
 - **Signaling server** — Only needed during connection establishment
 - **Cross-platform** — Same API works on native and WASM

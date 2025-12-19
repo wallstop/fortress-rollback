@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reduced crate size by excluding irrelevant artifacts from published package
 
-## [0.1.0] - 2024-12-XX
+## [0.1.0] - 2025-12-XX
 
 Initial release of Fortress Rollback, a correctness-first fork of GGRS v0.11.0.
 

@@ -63,6 +63,7 @@ Demonstrates how to implement the `NonBlockingSocket` trait for custom networkin
 - Matchbox integration reference
 
 This is essential reading if you're:
+
 - Building a browser game (WebRTC/WebSockets)
 - Integrating with a custom networking library
 - Testing without real network connections

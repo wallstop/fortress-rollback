@@ -63,6 +63,7 @@ Located within each source file under `#[cfg(test)] mod tests`.
 **Purpose:** Test internal implementation details, edge cases, and private functions.
 
 **Examples:**
+
 - `src/hash.rs` - Hash function determinism, collision resistance
 - `src/rle.rs` - RLE encoding/decoding edge cases
 - `src/rng.rs` - PCG32 PRNG statistical properties
@@ -75,7 +76,9 @@ Located within each source file under `#[cfg(test)] mod tests`.
 Test the public API as users would consume it.
 
 #### `tests/sessions/`
+
 End-to-end session lifecycle tests:
+
 - Session creation via `SessionBuilder`
 - Player management (add, remove, disconnect)
 - Synchronization between peers
@@ -83,13 +86,17 @@ End-to-end session lifecycle tests:
 - Input handling with various input types
 
 #### `tests/network/`
+
 Network layer integration:
+
 - Multi-process UDP communication
 - Resilience under packet loss, latency, jitter
 - Connection establishment and recovery
 
 #### `tests/verification/`
+
 Formal verification and property testing:
+
 - **property.rs** - Proptest-based invariant verification
 - **invariants.rs** - Internal invariant checking with `InvariantChecker`
 - **determinism.rs** - Determinism verification across sessions
@@ -97,7 +104,9 @@ Formal verification and property testing:
 - **z3.rs** - Z3 SMT solver proofs (requires `z3-verification` feature)
 
 #### `tests/config.rs`
+
 Configuration struct tests:
+
 - Default values
 - Preset methods (`.high_latency()`, `.competitive()`, etc.)
 - Configuration validation
@@ -105,6 +114,7 @@ Configuration struct tests:
 ### Property Tests
 
 Split between inline and integration tests:
+
 - **Inline** (`src/**/mod.rs#property_tests`): Access internal state
 - **Integration** (`tests/verification/property.rs`): Use `__internal` module
 
@@ -119,6 +129,7 @@ cd loom-tests && cargo test
 ### Fuzz Tests (`fuzz/`)
 
 Cargo-fuzz targets for security testing:
+
 - `fuzz_compression` - Message compression
 - `fuzz_input_queue` - Input queue operations
 - `fuzz_messages` - Message parsing
@@ -201,7 +212,8 @@ cargo +nightly fuzz run fuzz_rle -- -max_total_time=60
 
 ## Coverage Metrics
 
-Current test coverage (as of December 2024):
+Current test coverage (as of December 2025):
+
 - **Line Coverage:** 91.77%
 - **Region Coverage:** 93.73%
 - **Function Coverage:** 97.35%
