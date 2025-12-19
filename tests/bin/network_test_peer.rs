@@ -158,6 +158,9 @@ struct ChecksumDiagnostics {
     frames_included: i32,
     frames_missing: Vec<i32>,
     confirmed_frame: i32,
+    /// The session's current frame when the checksum was computed.
+    /// This helps diagnose issues where frames were discarded due to session advancement.
+    current_frame: i32,
 }
 
 /// Compute a checksum from confirmed inputs for a recent window of frames.
@@ -206,6 +209,7 @@ fn compute_confirmed_checksum_with_diagnostics<
         frames_included,
         frames_missing,
         confirmed_frame: session.confirmed_frame().as_i32(),
+        current_frame: session.current_frame().as_i32(),
     };
 
     (hasher.finish(), diagnostics)
@@ -257,6 +261,7 @@ fn compute_confirmed_game_value_with_diagnostics<
         frames_included,
         frames_missing,
         confirmed_frame: session.confirmed_frame().as_i32(),
+        current_frame: session.current_frame().as_i32(),
     };
 
     (value, diagnostics)
@@ -593,45 +598,41 @@ fn run_test(args: &Args) -> TestResult {
         // and triggered a rollback, we give time for that rollback to complete.
         let confirmed = session.confirmed_frame();
         if game.state.frame >= args.target_frames && confirmed.as_i32() >= args.target_frames {
-            // Continue polling for a settle period to ensure rollbacks complete.
-            // During settle, we ONLY poll for network messages - we don't advance new frames.
-            // This ensures both peers end up at the same final state.
-            // Note: 500ms is generous to handle slow CI VMs where scheduling delays can be significant.
-            let settle_start = Instant::now();
-            let settle_duration = Duration::from_millis(500);
+            // IMPORTANT: Compute checksum BEFORE the settle phase!
+            // The settle phase may advance frames, causing set_last_confirmed_frame to
+            // discard inputs from the queue. We need to capture the checksum while
+            // all frames from [target_frames - 64, target_frames) are still available.
+            //
+            // The checksum is deterministic because:
+            // 1. confirmed_frame >= target_frames means all inputs up to target are confirmed
+            // 2. Both peers have the same confirmed inputs for these frames
+            // 3. We compute the checksum over a fixed window [target_frames - 64, target_frames)
+            let (checksum, checksum_diagnostics) =
+                compute_confirmed_checksum_with_diagnostics(&session, args.target_frames);
 
-            while settle_start.elapsed() < settle_duration {
-                session.poll_remote_clients();
-
-                // Only process rollbacks during settle - don't advance new frames.
-                // advance_frame() with no new input will process any pending rollbacks.
-                if session.current_state() == SessionState::Running {
-                    // We need to add input for the session to be able to advance,
-                    // but we'll track when we've reached a stable state.
-                    let session_frame = session.current_frame().as_i32();
-                    let input = TestInput {
-                        value: (session_frame as u32).wrapping_mul(args.player_index as u32 + 1),
-                    };
-                    let _ = session.add_local_input(local_handle, input);
-
-                    if let Ok(requests) = session.advance_frame() {
-                        game.handle_requests(requests);
-                    }
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-
-            // After settle, recompute the game state from confirmed inputs only.
-            // This gives us a deterministic value that both peers will agree on.
             let (confirmed_value, value_diagnostics) =
                 compute_confirmed_game_value_with_diagnostics::<TestConfig>(
                     &session,
                     args.target_frames,
                 );
 
-            // Compute checksum from confirmed inputs for frames 0..target_frames
-            let (checksum, checksum_diagnostics) =
-                compute_confirmed_checksum_with_diagnostics(&session, args.target_frames);
+            // Continue polling for a settle period to ensure rollbacks complete.
+            // During settle, we ONLY poll for network messages - we don't advance new frames.
+            // This ensures both peers have finished processing all pending messages.
+            // Note: 500ms is generous to handle slow CI VMs where scheduling delays can be significant.
+            //
+            // IMPORTANT: We do NOT call advance_frame() during settle anymore!
+            // Advancing frames causes set_last_confirmed_frame to be called, which discards
+            // old inputs from the queue. This was causing checksum mismatches because peers
+            // would advance different amounts based on latency, resulting in different
+            // frames being available when computing the checksum.
+            let settle_start = Instant::now();
+            let settle_duration = Duration::from_millis(500);
+
+            while settle_start.elapsed() < settle_duration {
+                session.poll_remote_clients();
+                std::thread::sleep(Duration::from_millis(5));
+            }
 
             // Warn if diagnostics show missing frames (this helps debug desync issues)
             if !checksum_diagnostics.frames_missing.is_empty() {
