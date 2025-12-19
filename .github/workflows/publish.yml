@@ -113,11 +113,11 @@ jobs:
             }
             printing { print }
           ' CHANGELOG.md)
-          
+
           if [ -z "$CHANGELOG_CONTENT" ]; then
             CHANGELOG_CONTENT="Release $VERSION"
           fi
-          
+
           # Write to file to preserve newlines
           echo "$CHANGELOG_CONTENT" > release_notes.md
 

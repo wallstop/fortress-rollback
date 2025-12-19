@@ -32,10 +32,11 @@ exclude = [
     "clippy.toml",
     "deny.toml",
     "rustfmt.toml",
-    # LLM instruction files
+    # LLM instruction files (for contributing to this project, not for users)
     "AGENTS.md",
     "CLAUDE.md",
-    "llms.txt",
+    # Note: llms.txt is intentionally NOT excluded - it helps AI tools understand
+    # the library API for users integrating Fortress Rollback into their projects
     # Supply chain audits (cargo-vet metadata)
     "supply-chain/",
     # Tests are large and users can clone repo to run them

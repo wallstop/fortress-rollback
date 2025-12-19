@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Excluded `tests/` directory (users can clone repo to run tests)
   - Excluded `Cargo.lock` (not needed for library crates)
   - Excluded development config files (`.cargo/`, `.config/`, `clippy.toml`, etc.)
-  - Excluded LLM instruction files (`AGENTS.md`, `CLAUDE.md`, `llms.txt`, `.llm/`)
+  - Excluded LLM instruction files (`AGENTS.md`, `CLAUDE.md`, `.llm/`)
   - Excluded `supply-chain/` cargo-vet metadata
 
 ## [0.1.1] - 2025-12-19
