@@ -30,16 +30,10 @@ If you are interested in integrating rollback networking into your game or just 
 
 Fortress Rollback currently ships with the same demos you may know from GGRS. One is written with [macroquad](https://github.com/not-fl3/macroquad), the other with [bevy](https://bevyengine.org/). Both use [matchbox](https://github.com/johanhelsing/matchbox). Try it out with a friend! Just click the link and match with another player! (You can also open the link in two separate windows to play against yourself)
 
-🚧 MATCHMAKING CURRENTLY OFFLINE! 🚧
-
-- [Bevy Demo](https://gschup.github.io/bevy_ggrs_demo/) ([Repository](https://github.com/gschup/bevy_ggrs_demo))
-- [Macroquad Demo](https://gschup.github.io/ggrs_demo/) ([Repository](https://github.com/gschup/ggrs_demo))
-
 ## Getting Started
 
 To get started with Fortress Rollback, check out the following resources:
 
-- [Wiki](https://github.com/wallstop/fortress-rollback/wiki)
 - [Examples](./examples/)
 - [Documentation](https://docs.rs/fortress-rollback/newest/fortress_rollback/)
 
@@ -105,33 +99,12 @@ For detailed feature documentation, see the [User Guide](./docs/user-guide.md#fe
 
 Moving from the original `ggrs` crate? See the step-by-step guide in [migration.md](./docs/migration.md). It covers the crate rename (`fortress-rollback`), the new `Config::Address` `Ord` bound, and import changes (`fortress_rollback`).
 
-## Useful Links
-
-### Bevy Plugin
-
-The authors of the original GGRS are maintaining a [bevy](https://bevyengine.org/) plugin. Check it out:
-
-- [Bevy GGRS](https://github.com/gschup/bevy_ggrs)
-
 ### WASM support through WebRTC sockets
 
 If you are interested to run a GGRS application in your browser, check the amazing Matchbox project!
 The matchbox sockets are compatible with GGRS through a feature flag:
 
 - [Matchbox](https://github.com/johanhelsing/matchbox)
-
-### Godot Wrapper
-
-[Godot](https://godotengine.org/) is a popular open-source game engine. marcello505 is developing a wrapper for GGRS/Fortress Rollback.
-Find the repository here:
-
-- [Godot GGRS Wrapper](https://github.com/marcello505/godot-ggrs-wrapper)
-
-### Other Rollback Implementations in Rust
-
-Also take a look at the awesome backroll project, a completely async rollback library. Special thanks to james7132 for a lot of inspiration and fruitful discussion.
-
-- [backroll-rs](https://github.com/HouraiTeahouse/backroll-rs/)
 
 ## Licensing
 
