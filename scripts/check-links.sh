@@ -238,8 +238,8 @@ echo ""
 # Find and check all markdown files
 echo -e "${BLUE}Checking markdown files...${NC}"
 while IFS= read -r -d '' file; do
-    # Skip target directories
-    if [[ "$file" == *"/target/"* ]]; then
+    # Skip target directories and progress (session notes)
+    if [[ "$file" == *"/target/"* ]] || [[ "$file" == *"/progress/"* ]]; then
         continue
     fi
     check_markdown_links "$file"

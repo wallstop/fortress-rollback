@@ -5,6 +5,8 @@
 //! This benchmark suite tests the compression pipeline used for network
 //! transmission of game inputs, with realistic game input patterns.
 
+#![allow(clippy::disallowed_macros, clippy::print_stdout)]
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use fortress_rollback::rle::{decode, encode};
 use std::hint::black_box;
