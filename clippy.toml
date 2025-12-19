@@ -1,0 +1,41 @@
+# Clippy configuration for Fortress Rollback
+# See: https://doc.rust-lang.org/clippy/configuration.html
+
+# Minimum Supported Rust Version
+# This should match rust-version in Cargo.toml
+msrv = "1.86"
+
+# Cognitive complexity threshold for clippy::cognitive_complexity
+# Default is 25, keeping it reasonable for complex rollback logic
+cognitive-complexity-threshold = 30
+
+# Type complexity threshold for clippy::type_complexity
+# Default is 250, slightly increased for generic session types
+type-complexity-threshold = 350
+
+# Maximum number of lines in a function for clippy::too_many_lines
+# Not enforced via lint, but documented here for reference
+too-many-lines-threshold = 200
+
+# Threshold for trivially_copy_pass_by_ref
+# Types larger than this (in bytes) won't trigger the lint
+trivial-copy-size-limit = 16
+
+# Threshold for pass_by_value
+# Types larger than this (in bytes) should be passed by reference
+pass-by-value-size-limit = 256
+
+# Allowed names that would otherwise trigger clippy::similar_names
+allowed-idents-below-min-chars = ["x", "y", "z", "i", "j", "k", "n", "id"]
+
+# Documentation requirements
+missing-docs-in-crate-items = true
+
+# Disallowed macros (prevents accidental debug output in production)
+disallowed-macros = [
+    { path = "std::dbg", reason = "Use tracing macros instead" },
+    { path = "std::print", reason = "Use tracing macros instead" },
+    { path = "std::println", reason = "Use tracing macros instead" },
+    { path = "std::eprint", reason = "Use tracing macros instead" },
+    { path = "std::eprintln", reason = "Use tracing macros instead" },
+]

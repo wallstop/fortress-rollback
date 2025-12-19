@@ -1,22 +1,57 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use instant::Duration;
+use web_time::Duration;
 
 use crate::{
-    Config, DesyncDetection, GgrsError, NonBlockingSocket, P2PSession, PlayerHandle, PlayerType,
-    SpectatorSession, SyncTestSession, network::protocol::UdpProtocol,
-    sessions::p2p_session::PlayerRegistry,
+    network::protocol::UdpProtocol,
+    report_violation,
+    sessions::player_registry::PlayerRegistry,
+    telemetry::{ViolationKind, ViolationObserver, ViolationSeverity},
+    time_sync::TimeSyncConfig,
+    Config, DesyncDetection, FortressError, NonBlockingSocket, P2PSession, PlayerHandle,
+    PlayerType, SpectatorSession, SyncTestSession,
 };
 
-use super::p2p_spectator_session::SPECTATOR_BUFFER_SIZE;
+// Re-export config types for backwards compatibility with code that imports from builder
+pub use crate::sessions::config::{
+    InputQueueConfig, ProtocolConfig, SaveMode, SpectatorConfig, SyncConfig,
+};
 
 const DEFAULT_PLAYERS: usize = 2;
-const DEFAULT_SAVE_MODE: bool = false;
-const DEFAULT_DETECTION_MODE: DesyncDetection = DesyncDetection::Off;
+/// Default desync detection mode.
+///
+/// Defaults to `On { interval: 60 }` to catch state divergence early (once per second at 60fps).
+/// This aligns with Fortress Rollback's correctness-first philosophy. Users who want to disable
+/// desync detection for performance reasons can explicitly set `DesyncDetection::Off`.
+///
+/// # Breaking Change from GGRS
+///
+/// GGRS defaulted to `DesyncDetection::Off`. Fortress Rollback enables it by default because:
+/// - Silent desync is a correctness bug that's hard to debug
+/// - The overhead is minimal (one checksum comparison per second)
+/// - Early detection prevents subtle multiplayer issues from reaching production
+const DEFAULT_DETECTION_MODE: DesyncDetection = DesyncDetection::On { interval: 60 };
+
 const DEFAULT_INPUT_DELAY: usize = 0;
+/// Default peer disconnect timeout.
+///
+/// # Formal Specification Alignment
+/// - **formal-spec.md**: `DEFAULT_DISCONNECT_TIMEOUT = 2000ms`
 const DEFAULT_DISCONNECT_TIMEOUT: Duration = Duration::from_millis(2000);
 const DEFAULT_DISCONNECT_NOTIFY_START: Duration = Duration::from_millis(500);
+/// Default frames per second for session timing.
+///
+/// # Formal Specification Alignment
+/// - **formal-spec.md**: `DEFAULT_FPS = 60`
 const DEFAULT_FPS: usize = 60;
+/// Default maximum prediction window in frames.
+///
+/// # Formal Specification Alignment
+/// - **TLA+**: `MAX_PREDICTION` in `specs/tla/Rollback.tla` (set to 1-3 for model checking)
+/// - **Z3**: `MAX_PREDICTION = 8` in `tests/test_z3_verification.rs`
+/// - **formal-spec.md**: `DEFAULT_MAX_PREDICTION = 8`, INV-2 bounds rollback depth
+/// - **Kani**: Various proofs verify rollback bounds with configurable max_prediction
 const DEFAULT_MAX_PREDICTION_FRAMES: usize = 8;
 const DEFAULT_CHECK_DISTANCE: usize = 2;
 // If the spectator is more than this amount of frames behind, it will advance the game two steps at a time to catch up
@@ -26,9 +61,9 @@ const DEFAULT_CATCHUP_SPEED: usize = 1;
 // The amount of events a spectator can buffer; should never be an issue if the user polls the events at every step
 pub(crate) const MAX_EVENT_QUEUE_SIZE: usize = 100;
 
-/// The [`SessionBuilder`] builds all GGRS Sessions. After setting all appropriate values, use `SessionBuilder::start_yxz_session(...)`
+/// The [`SessionBuilder`] builds all Fortress Rollback Sessions. After setting all appropriate values, use `SessionBuilder::start_yxz_session(...)`
 /// to consume the builder and create a Session of desired type.
-#[derive(Debug)]
+#[must_use = "SessionBuilder must be consumed by calling a start_*_session method"]
 pub struct SessionBuilder<T>
 where
     T: Config,
@@ -38,7 +73,7 @@ where
     max_prediction: usize,
     /// FPS defines the expected update frequency of this session.
     fps: usize,
-    sparse_saving: bool,
+    save_mode: SaveMode,
     desync_detection: DesyncDetection,
     /// The time until a remote player gets disconnected.
     disconnect_timeout: Duration,
@@ -49,6 +84,68 @@ where
     check_dist: usize,
     max_frames_behind: usize,
     catchup_speed: usize,
+    /// Optional observer for specification violations.
+    violation_observer: Option<Arc<dyn ViolationObserver>>,
+    /// Configuration for the synchronization protocol.
+    sync_config: SyncConfig,
+    /// Configuration for the network protocol behavior.
+    protocol_config: ProtocolConfig,
+    /// Configuration for spectator sessions.
+    spectator_config: SpectatorConfig,
+    /// Configuration for time synchronization.
+    time_sync_config: TimeSyncConfig,
+    /// Configuration for input queue sizing.
+    input_queue_config: InputQueueConfig,
+}
+
+impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to ensure all fields are included when new fields are added.
+        // The compiler will error if a new field is added but not handled here.
+        let Self {
+            num_players,
+            local_players,
+            max_prediction,
+            fps,
+            save_mode,
+            desync_detection,
+            disconnect_timeout,
+            disconnect_notify_start,
+            player_reg,
+            input_delay,
+            check_dist,
+            max_frames_behind,
+            catchup_speed,
+            violation_observer,
+            sync_config,
+            protocol_config,
+            spectator_config,
+            time_sync_config,
+            input_queue_config,
+        } = self;
+
+        f.debug_struct("SessionBuilder")
+            .field("num_players", num_players)
+            .field("local_players", local_players)
+            .field("max_prediction", max_prediction)
+            .field("fps", fps)
+            .field("save_mode", save_mode)
+            .field("desync_detection", desync_detection)
+            .field("disconnect_timeout", disconnect_timeout)
+            .field("disconnect_notify_start", disconnect_notify_start)
+            .field("player_reg", player_reg)
+            .field("input_delay", input_delay)
+            .field("check_dist", check_dist)
+            .field("max_frames_behind", max_frames_behind)
+            .field("catchup_speed", catchup_speed)
+            .field("has_violation_observer", &violation_observer.is_some())
+            .field("sync_config", sync_config)
+            .field("protocol_config", protocol_config)
+            .field("spectator_config", spectator_config)
+            .field("time_sync_config", time_sync_config)
+            .field("input_queue_config", input_queue_config)
+            .finish()
+    }
 }
 
 impl<T: Config> Default for SessionBuilder<T> {
@@ -66,7 +163,7 @@ impl<T: Config> SessionBuilder<T> {
             num_players: DEFAULT_PLAYERS,
             max_prediction: DEFAULT_MAX_PREDICTION_FRAMES,
             fps: DEFAULT_FPS,
-            sparse_saving: DEFAULT_SAVE_MODE,
+            save_mode: SaveMode::default(),
             desync_detection: DEFAULT_DETECTION_MODE,
             disconnect_timeout: DEFAULT_DISCONNECT_TIMEOUT,
             disconnect_notify_start: DEFAULT_DISCONNECT_NOTIFY_START,
@@ -74,6 +171,12 @@ impl<T: Config> SessionBuilder<T> {
             check_dist: DEFAULT_CHECK_DISTANCE,
             max_frames_behind: DEFAULT_MAX_FRAMES_BEHIND,
             catchup_speed: DEFAULT_CATCHUP_SPEED,
+            violation_observer: None,
+            sync_config: SyncConfig::default(),
+            protocol_config: ProtocolConfig::default(),
+            spectator_config: SpectatorConfig::default(),
+            time_sync_config: TimeSyncConfig::default(),
+            input_queue_config: InputQueueConfig::default(),
         }
     }
 
@@ -85,16 +188,16 @@ impl<T: Config> SessionBuilder<T> {
     /// - Returns [`InvalidRequest`] if a player with that handle has been added before
     /// - Returns [`InvalidRequest`] if the handle is invalid for the given [`PlayerType`]
     ///
-    /// [`InvalidRequest`]: GgrsError::InvalidRequest
+    /// [`InvalidRequest`]: FortressError::InvalidRequest
     /// [`num_players`]: Self#structfield.num_players
     pub fn add_player(
         mut self,
         player_type: PlayerType<T::Address>,
         player_handle: PlayerHandle,
-    ) -> Result<Self, GgrsError> {
+    ) -> Result<Self, FortressError> {
         // check if the player handle is already in use
         if self.player_reg.handles.contains_key(&player_handle) {
-            return Err(GgrsError::InvalidRequest {
+            return Err(FortressError::InvalidRequest {
                 info: "Player handle already in use.".to_owned(),
             });
         }
@@ -102,26 +205,26 @@ impl<T: Config> SessionBuilder<T> {
         match player_type {
             PlayerType::Local => {
                 self.local_players += 1;
-                if player_handle >= self.num_players {
-                    return Err(GgrsError::InvalidRequest {
+                if !player_handle.is_valid_player_for(self.num_players) {
+                    return Err(FortressError::InvalidRequest {
                         info: "The player handle you provided is invalid. For a local player, the handle should be between 0 and num_players".to_owned(),
                     });
                 }
-            }
+            },
             PlayerType::Remote(_) => {
-                if player_handle >= self.num_players {
-                    return Err(GgrsError::InvalidRequest {
+                if !player_handle.is_valid_player_for(self.num_players) {
+                    return Err(FortressError::InvalidRequest {
                         info: "The player handle you provided is invalid. For a remote player, the handle should be between 0 and num_players".to_owned(),
                     });
                 }
-            }
+            },
             PlayerType::Spectator(_) => {
-                if player_handle < self.num_players {
-                    return Err(GgrsError::InvalidRequest {
+                if !player_handle.is_spectator_for(self.num_players) {
+                    return Err(FortressError::InvalidRequest {
                         info: "The player handle you provided is invalid. For a spectator, the handle should be num_players or higher".to_owned(),
                     });
                 }
-            }
+            },
         }
         self.player_reg.handles.insert(player_handle, player_type);
         Ok(self)
@@ -131,14 +234,14 @@ impl<T: Config> SessionBuilder<T> {
     ///
     /// ## Lockstep mode
     ///
-    /// As a special case, if you set this to 0, GGRS will run in lockstep mode:
-    /// * ggrs will only request that you advance the gamestate if the current frame has inputs
+    /// As a special case, if you set this to 0, Fortress Rollback will run in lockstep mode:
+    /// * Fortress Rollback will only request that you advance the gamestate if the current frame has inputs
     ///   confirmed from all other clients.
-    /// * ggrs will never request you to save or roll back the gamestate.
+    /// * Fortress Rollback will never request you to save or roll back the gamestate.
     ///
-    /// Lockstep mode can significantly reduce the (GGRS) framerate of your game, but may be
-    /// appropriate for games where a GGRS frame does not correspond to a rendered frame, such as a
-    /// game where GGRS frames are only advanced once a second; with input delay set to zero, the
+    /// Lockstep mode can significantly reduce the (Fortress Rollback) framerate of your game, but may be
+    /// appropriate for games where a Fortress Rollback frame does not correspond to a rendered frame, such as a
+    /// game where Fortress Rollback frames are only advanced once a second; with input delay set to zero, the
     /// framerate impact is approximately equivalent to taking the highest latency client and adding
     /// its latency to the current time to tick a frame.
     pub fn with_max_prediction_window(mut self, window: usize) -> Self {
@@ -146,9 +249,57 @@ impl<T: Config> SessionBuilder<T> {
         self
     }
 
-    /// Change the amount of frames GGRS will delay the inputs for local players.
+    /// Change the amount of frames Fortress Rollback will delay the inputs for local players.
+    ///
+    /// # Note on Invalid Values
+    ///
+    /// If `delay` is greater than or equal to the configured `queue_length`
+    /// (default 128, configurable via [`with_input_queue_config`](Self::with_input_queue_config)),
+    /// a violation is reported and the delay is clamped to the maximum allowed value.
+    ///
+    /// This limit ensures the circular input buffer doesn't overflow.
+    /// At 60fps with default settings, max delay is 127 frames (~2.1 seconds),
+    /// far exceeding any practical input delay (typically 0-8 frames).
+    ///
+    /// This constraint was discovered through Kani formal verification.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, InputQueueConfig};
+    ///
+    /// # #[derive(Debug)]
+    /// # struct TestConfig;
+    /// # impl Config for TestConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// // Default queue allows delays up to 127
+    /// let builder = SessionBuilder::<TestConfig>::new()
+    ///     .with_input_delay(8);
+    ///
+    /// // With custom queue size, max delay changes
+    /// let builder = SessionBuilder::<TestConfig>::new()
+    ///     .with_input_queue_config(InputQueueConfig::minimal()) // queue_length = 32
+    ///     .with_input_delay(30); // max is now 31
+    /// ```
     pub fn with_input_delay(mut self, delay: usize) -> Self {
-        self.input_delay = delay;
+        let max_delay = self.input_queue_config.max_frame_delay();
+        if delay > max_delay {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::Configuration,
+                "Input delay {} exceeds maximum allowed value of {} (queue_length - 1). \
+                 At 60fps, this would be {:.1}+ seconds of delay. Clamping to max.",
+                delay,
+                max_delay,
+                delay as f64 / 60.0
+            );
+            self.input_delay = max_delay;
+        } else {
+            self.input_delay = delay;
+        }
         self
     }
 
@@ -158,13 +309,50 @@ impl<T: Config> SessionBuilder<T> {
         self
     }
 
-    /// Sets the sparse saving mode. With sparse saving turned on, only the minimum confirmed frame
-    /// (for which all inputs from all players are confirmed correct) will be saved. This leads to
-    /// much less save requests at the cost of potentially longer rollbacks and thus more advance
-    /// frame requests. Recommended, if saving your gamestate takes much more time than advancing
+    /// Sets the save mode for game state management.
+    ///
+    /// Controls how frequently the session requests state saves for rollback.
+    /// See [`SaveMode`] for detailed documentation on each option.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, SaveMode, Config};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u32;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// // For games with expensive state serialization
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_save_mode(SaveMode::Sparse);
+    /// ```
+    pub fn with_save_mode(mut self, save_mode: SaveMode) -> Self {
+        self.save_mode = save_mode;
+        self
+    }
+
+    /// Sets the sparse saving mode (deprecated: use `with_save_mode` instead).
+    ///
+    /// With sparse saving turned on, only the minimum confirmed frame
+    /// (for which all inputs from all players are confirmed correct) will be saved.
+    /// This leads to much less save requests at the cost of potentially longer rollbacks
+    /// and thus more advance frame requests.
+    ///
+    /// Recommended if saving your gamestate takes much more time than advancing
     /// the game state.
+    #[deprecated(
+        since = "0.12.0",
+        note = "Use `with_save_mode(SaveMode::Sparse)` instead"
+    )]
     pub fn with_sparse_saving_mode(mut self, sparse_saving: bool) -> Self {
-        self.sparse_saving = sparse_saving;
+        self.save_mode = if sparse_saving {
+            SaveMode::Sparse
+        } else {
+            SaveMode::EveryFrame
+        };
         self
     }
 
@@ -187,14 +375,195 @@ impl<T: Config> SessionBuilder<T> {
         self
     }
 
+    /// Sets the synchronization protocol configuration.
+    ///
+    /// This allows fine-tuning the sync handshake behavior for different network
+    /// conditions. See [`SyncConfig`] for available options and presets.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, SyncConfig};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// // Use the high-latency preset
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_sync_config(SyncConfig::high_latency());
+    ///
+    /// // Or customize individual settings
+    /// let custom_config = SyncConfig {
+    ///     num_sync_packets: 8,
+    ///     ..SyncConfig::default()
+    /// };
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_sync_config(custom_config);
+    /// ```
+    pub fn with_sync_config(mut self, sync_config: SyncConfig) -> Self {
+        self.sync_config = sync_config;
+        self
+    }
+
+    /// Sets the network protocol configuration.
+    ///
+    /// This allows fine-tuning network timing, buffering, and telemetry thresholds.
+    /// See [`ProtocolConfig`] for available options and presets.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, ProtocolConfig};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// // Use the competitive preset for LAN play
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_protocol_config(ProtocolConfig::competitive());
+    ///
+    /// // Or customize individual settings
+    /// let custom_config = ProtocolConfig {
+    ///     quality_report_interval: web_time::Duration::from_millis(100),
+    ///     ..ProtocolConfig::default()
+    /// };
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_protocol_config(custom_config);
+    /// ```
+    pub fn with_protocol_config(mut self, protocol_config: ProtocolConfig) -> Self {
+        self.protocol_config = protocol_config;
+        self
+    }
+
+    /// Sets the spectator session configuration.
+    ///
+    /// This allows fine-tuning spectator behavior including buffer sizes,
+    /// catch-up speed, and frame lag tolerance.
+    /// See [`SpectatorConfig`] for available options and presets.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, SpectatorConfig};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// // Use the fast-paced preset for action games
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_spectator_config(SpectatorConfig::fast_paced());
+    ///
+    /// // Or customize individual settings
+    /// let custom_config = SpectatorConfig {
+    ///     buffer_size: 90,
+    ///     max_frames_behind: 15,
+    ///     ..SpectatorConfig::default()
+    /// };
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_spectator_config(custom_config);
+    /// ```
+    pub fn with_spectator_config(mut self, spectator_config: SpectatorConfig) -> Self {
+        self.spectator_config = spectator_config;
+        // Also update the legacy fields for backwards compatibility
+        self.max_frames_behind = spectator_config.max_frames_behind;
+        self.catchup_speed = spectator_config.catchup_speed;
+        self
+    }
+
+    /// Sets the time synchronization configuration.
+    ///
+    /// This allows fine-tuning the frame advantage averaging window size,
+    /// which affects how responsive vs stable the synchronization is.
+    /// See [`TimeSyncConfig`] for available options and presets.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, TimeSyncConfig};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// // Use the responsive preset for competitive play
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_time_sync_config(TimeSyncConfig::responsive());
+    ///
+    /// // Or customize the window size
+    /// let custom_config = TimeSyncConfig {
+    ///     window_size: 45,
+    /// };
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_time_sync_config(custom_config);
+    /// ```
+    pub fn with_time_sync_config(mut self, time_sync_config: TimeSyncConfig) -> Self {
+        self.time_sync_config = time_sync_config;
+        self
+    }
+
+    /// Sets the input queue configuration.
+    ///
+    /// This allows configuring the size of the input queue (circular buffer) that stores
+    /// player inputs. A larger queue allows for longer input history and higher frame delays,
+    /// but uses more memory.
+    ///
+    /// See [`InputQueueConfig`] for available options and presets.
+    ///
+    /// # Important
+    ///
+    /// If you plan to use [`with_input_delay`](Self::with_input_delay), call this method first
+    /// to ensure the delay is validated against the correct queue size.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, InputQueueConfig};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// // For high-latency networks, use a larger queue
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_input_queue_config(InputQueueConfig::high_latency());
+    ///
+    /// // For memory-constrained environments, use a smaller queue
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_input_queue_config(InputQueueConfig::minimal());
+    ///
+    /// // Or customize the queue length
+    /// let custom_config = InputQueueConfig {
+    ///     queue_length: 64,
+    /// };
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_input_queue_config(custom_config);
+    /// ```
+    pub fn with_input_queue_config(mut self, input_queue_config: InputQueueConfig) -> Self {
+        self.input_queue_config = input_queue_config;
+        self
+    }
+
     /// Sets the FPS this session is used with. This influences estimations for frame synchronization between sessions.
     /// # Errors
     /// - Returns [`InvalidRequest`] if the fps is 0
     ///
-    /// [`InvalidRequest`]: GgrsError::InvalidRequest
-    pub fn with_fps(mut self, fps: usize) -> Result<Self, GgrsError> {
+    /// [`InvalidRequest`]: FortressError::InvalidRequest
+    pub fn with_fps(mut self, fps: usize) -> Result<Self, FortressError> {
         if fps == 0 {
-            return Err(GgrsError::InvalidRequest {
+            return Err(FortressError::InvalidRequest {
                 info: "FPS should be higher than 0.".to_owned(),
             });
         }
@@ -211,55 +580,98 @@ impl<T: Config> SessionBuilder<T> {
     /// Sets the maximum frames behind. If the spectator is more than this amount of frames behind the received inputs,
     /// it will catch up with `catchup_speed` amount of frames per step.
     ///
-    pub fn with_max_frames_behind(mut self, max_frames_behind: usize) -> Result<Self, GgrsError> {
+    /// Note: Prefer using [`Self::with_spectator_config`] for configuring spectator behavior.
+    pub fn with_max_frames_behind(
+        mut self,
+        max_frames_behind: usize,
+    ) -> Result<Self, FortressError> {
         if max_frames_behind < 1 {
-            return Err(GgrsError::InvalidRequest {
+            return Err(FortressError::InvalidRequest {
                 info: "Max frames behind cannot be smaller than 1.".to_owned(),
             });
         }
 
-        if max_frames_behind >= SPECTATOR_BUFFER_SIZE {
-            return Err(GgrsError::InvalidRequest {
-                info: "Max frames behind cannot be larger or equal than the Spectator buffer size (60)"
-                    .to_owned(),
+        if max_frames_behind >= self.spectator_config.buffer_size {
+            return Err(FortressError::InvalidRequest {
+                info: format!(
+                    "Max frames behind cannot be larger or equal than the Spectator buffer size ({})",
+                    self.spectator_config.buffer_size
+                ),
             });
         }
         self.max_frames_behind = max_frames_behind;
+        self.spectator_config.max_frames_behind = max_frames_behind;
         Ok(self)
     }
 
     /// Sets the catchup speed. Per default, this is set to 1, so the spectator never catches up.
     /// If you want the spectator to catch up to the host if `max_frames_behind` is surpassed, set this to a value higher than 1.
-    pub fn with_catchup_speed(mut self, catchup_speed: usize) -> Result<Self, GgrsError> {
+    ///
+    /// Note: Prefer using [`Self::with_spectator_config`] for configuring spectator behavior.
+    pub fn with_catchup_speed(mut self, catchup_speed: usize) -> Result<Self, FortressError> {
         if catchup_speed < 1 {
-            return Err(GgrsError::InvalidRequest {
+            return Err(FortressError::InvalidRequest {
                 info: "Catchup speed cannot be smaller than 1.".to_owned(),
             });
         }
 
-        if catchup_speed >= self.max_frames_behind {
-            return Err(GgrsError::InvalidRequest {
+        if catchup_speed >= self.spectator_config.max_frames_behind {
+            return Err(FortressError::InvalidRequest {
                 info: "Catchup speed cannot be larger or equal than the allowed maximum frames behind host"
                     .to_owned(),
             });
         }
         self.catchup_speed = catchup_speed;
+        self.spectator_config.catchup_speed = catchup_speed;
         Ok(self)
+    }
+
+    /// Sets a custom observer for specification violations.
+    ///
+    /// When a violation occurs during session operation (e.g., frame sync issues,
+    /// input queue anomalies, checksum mismatches), it will be reported to this observer.
+    /// This enables programmatic monitoring, custom logging, or test assertions.
+    ///
+    /// If no observer is set, violations are logged via the `tracing` crate by default.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, telemetry::CollectingObserver};
+    /// use std::sync::Arc;
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// let observer = Arc::new(CollectingObserver::new());
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_violation_observer(observer.clone());
+    ///
+    /// // After session operations, check for violations
+    /// // assert!(observer.violations().is_empty());
+    /// ```
+    pub fn with_violation_observer(mut self, observer: Arc<dyn ViolationObserver>) -> Self {
+        self.violation_observer = Some(observer);
+        self
     }
 
     /// Consumes the builder to construct a [`P2PSession`] and starts synchronization of endpoints.
     /// # Errors
     /// - Returns [`InvalidRequest`] if insufficient players have been registered.
     ///
-    /// [`InvalidRequest`]: GgrsError::InvalidRequest
+    /// [`InvalidRequest`]: FortressError::InvalidRequest
     pub fn start_p2p_session(
         mut self,
         socket: impl NonBlockingSocket<T::Address> + 'static,
-    ) -> Result<P2PSession<T>, GgrsError> {
+    ) -> Result<P2PSession<T>, FortressError> {
         // check if all players are added
         for player_handle in 0..self.num_players {
-            if !self.player_reg.handles.contains_key(&player_handle) {
-                return Err(GgrsError::InvalidRequest{
+            let handle = PlayerHandle::new(player_handle);
+            if !self.player_reg.handles.contains_key(&handle) {
+                return Err(FortressError::InvalidRequest{
                     info: "Not enough players have been added. Keep registering players up to the defined player number.".to_owned(),
                 });
             }
@@ -281,29 +693,45 @@ impl<T: Config> SessionBuilder<T> {
         for (player_type, handles) in addr_count.into_iter() {
             match player_type {
                 PlayerType::Remote(peer_addr) => {
-                    self.player_reg.remotes.insert(
-                        peer_addr.clone(),
-                        self.create_endpoint(handles, peer_addr.clone(), self.local_players),
-                    );
-                }
+                    let endpoint = self
+                        .create_endpoint(handles, peer_addr.clone(), self.local_players)
+                        .ok_or_else(|| FortressError::SerializationError {
+                            context:
+                                "Failed to create protocol endpoint - input serialization error"
+                                    .to_owned(),
+                        })?;
+                    self.player_reg.remotes.insert(peer_addr, endpoint);
+                },
                 PlayerType::Spectator(peer_addr) => {
-                    self.player_reg.spectators.insert(
-                        peer_addr.clone(),
-                        self.create_endpoint(handles, peer_addr.clone(), self.num_players), // the host of the spectator sends inputs for all players
-                    );
-                }
+                    let endpoint = self
+                        .create_endpoint(handles, peer_addr.clone(), self.num_players) // the host of the spectator sends inputs for all players
+                        .ok_or_else(|| FortressError::SerializationError {
+                            context:
+                                "Failed to create spectator endpoint - input serialization error"
+                                    .to_owned(),
+                        })?;
+                    self.player_reg.spectators.insert(peer_addr, endpoint);
+                },
                 PlayerType::Local => (),
             }
         }
+
+        // Validate the input queue configuration
+        self.input_queue_config.validate()?;
+        self.input_queue_config
+            .validate_frame_delay(self.input_delay)?;
 
         Ok(P2PSession::<T>::new(
             self.num_players,
             self.max_prediction,
             Box::new(socket),
             self.player_reg,
-            self.sparse_saving,
+            self.save_mode,
             self.desync_detection,
             self.input_delay,
+            self.violation_observer,
+            self.protocol_config,
+            self.input_queue_config.queue_length,
         ))
     }
 
@@ -311,14 +739,17 @@ impl<T: Config> SessionBuilder<T> {
     /// A [`SpectatorSession`] provides all functionality to connect to a remote host in a peer-to-peer fashion.
     /// The host will broadcast all confirmed inputs to this session.
     /// This session can be used to spectate a session without contributing to the game input.
+    ///
+    /// # Returns
+    /// Returns `None` if the protocol initialization fails (e.g., due to serialization issues with the Input type).
     pub fn start_spectator_session(
         self,
         host_addr: T::Address,
         socket: impl NonBlockingSocket<T::Address> + 'static,
-    ) -> SpectatorSession<T> {
+    ) -> Option<SpectatorSession<T>> {
         // create host endpoint
         let mut host = UdpProtocol::new(
-            (0..self.num_players).collect(),
+            (0..self.num_players).map(PlayerHandle::new).collect(),
             host_addr,
             self.num_players,
             1, //should not matter since the spectator is never sending
@@ -327,34 +758,46 @@ impl<T: Config> SessionBuilder<T> {
             self.disconnect_notify_start,
             self.fps,
             DesyncDetection::Off,
-        );
+            self.sync_config,
+            self.protocol_config,
+        )?;
         host.synchronize();
-        SpectatorSession::new(
+        Some(SpectatorSession::new(
             self.num_players,
             Box::new(socket),
             host,
-            self.max_frames_behind,
-            self.catchup_speed,
-        )
+            self.spectator_config.buffer_size,
+            self.spectator_config.max_frames_behind,
+            self.spectator_config.catchup_speed,
+            self.violation_observer,
+        ))
     }
 
-    /// Consumes the builder to construct a new [`SyncTestSession`]. During a [`SyncTestSession`], GGRS will simulate a rollback every frame
+    /// Consumes the builder to construct a new [`SyncTestSession`]. During a [`SyncTestSession`], Fortress Rollback will simulate a rollback every frame
     /// and resimulate the last n states, where n is the given `check_distance`.
     /// The resimulated checksums will be compared with the original checksums and report if there was a mismatch.
     /// Due to the decentralized nature of saving and loading gamestates, checksum comparisons can only be made if `check_distance` is 2 or higher.
     /// This is a great way to test if your system runs deterministically.
     /// After creating the session, add a local player, set input delay for them and then start the session.
-    pub fn start_synctest_session(self) -> Result<SyncTestSession<T>, GgrsError> {
+    pub fn start_synctest_session(self) -> Result<SyncTestSession<T>, FortressError> {
         if self.check_dist >= self.max_prediction {
-            return Err(GgrsError::InvalidRequest {
+            return Err(FortressError::InvalidRequest {
                 info: "Check distance too big.".to_owned(),
             });
         }
-        Ok(SyncTestSession::new(
+
+        // Validate the input queue configuration
+        self.input_queue_config.validate()?;
+        self.input_queue_config
+            .validate_frame_delay(self.input_delay)?;
+
+        Ok(SyncTestSession::with_queue_length(
             self.num_players,
             self.max_prediction,
             self.check_dist,
             self.input_delay,
+            self.violation_observer,
+            self.input_queue_config.queue_length,
         ))
     }
 
@@ -363,7 +806,7 @@ impl<T: Config> SessionBuilder<T> {
         handles: Vec<PlayerHandle>,
         peer_addr: T::Address,
         local_players: usize,
-    ) -> UdpProtocol<T> {
+    ) -> Option<UdpProtocol<T>> {
         // create the endpoint, set parameters
         let mut endpoint = UdpProtocol::new(
             handles,
@@ -375,9 +818,156 @@ impl<T: Config> SessionBuilder<T> {
             self.disconnect_notify_start,
             self.fps,
             self.desync_detection,
-        );
+            self.sync_config,
+            self.protocol_config,
+        )?;
         // start the synchronization
         endpoint.synchronize();
-        endpoint
+        Some(endpoint)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use std::net::SocketAddr;
+
+    #[repr(C)]
+    #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+    struct TestInput {
+        inp: u8,
+    }
+
+    struct TestConfig;
+
+    impl Config for TestConfig {
+        type Input = TestInput;
+        type State = Vec<u8>;
+        type Address = SocketAddr;
+    }
+
+    // ========================================================================
+    // SessionBuilder SaveMode Integration Tests
+    // ========================================================================
+
+    #[test]
+    fn test_with_save_mode_every_frame() {
+        let builder = SessionBuilder::<TestConfig>::new().with_save_mode(SaveMode::EveryFrame);
+        assert_eq!(builder.save_mode, SaveMode::EveryFrame);
+    }
+
+    #[test]
+    fn test_with_save_mode_sparse() {
+        let builder = SessionBuilder::<TestConfig>::new().with_save_mode(SaveMode::Sparse);
+        assert_eq!(builder.save_mode, SaveMode::Sparse);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_deprecated_with_sparse_saving_mode_true() {
+        let builder = SessionBuilder::<TestConfig>::new().with_sparse_saving_mode(true);
+        assert_eq!(builder.save_mode, SaveMode::Sparse);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_deprecated_with_sparse_saving_mode_false() {
+        let builder = SessionBuilder::<TestConfig>::new().with_sparse_saving_mode(false);
+        assert_eq!(builder.save_mode, SaveMode::EveryFrame);
+    }
+
+    #[test]
+    fn test_builder_default_save_mode() {
+        let builder = SessionBuilder::<TestConfig>::new();
+        assert_eq!(builder.save_mode, SaveMode::EveryFrame);
+    }
+
+    // ========================================================================
+    // Input Delay Bounds Tests
+    // These tests verify the fix for a Kani-discovered edge case where
+    // frame_delay >= INPUT_QUEUE_LENGTH could cause circular buffer overflow.
+    // ========================================================================
+
+    #[test]
+    fn test_with_input_delay_accepts_zero() {
+        let builder = SessionBuilder::<TestConfig>::new().with_input_delay(0);
+        assert_eq!(builder.input_delay, 0);
+    }
+
+    #[test]
+    fn test_with_input_delay_accepts_typical_values() {
+        for delay in 1..=8 {
+            let builder = SessionBuilder::<TestConfig>::new().with_input_delay(delay);
+            assert_eq!(builder.input_delay, delay);
+        }
+    }
+
+    #[test]
+    fn test_with_input_delay_accepts_max_valid() {
+        use crate::input_queue::INPUT_QUEUE_LENGTH;
+        let max_delay = INPUT_QUEUE_LENGTH - 1;
+        let builder = SessionBuilder::<TestConfig>::new().with_input_delay(max_delay);
+        assert_eq!(builder.input_delay, max_delay);
+    }
+
+    #[test]
+    fn test_with_input_delay_clamps_excessive_delay() {
+        use crate::input_queue::INPUT_QUEUE_LENGTH;
+        let builder = SessionBuilder::<TestConfig>::new().with_input_delay(INPUT_QUEUE_LENGTH);
+        // Excessive delay should be clamped to max allowed value (queue_length - 1)
+        assert_eq!(builder.input_delay, INPUT_QUEUE_LENGTH - 1);
+    }
+
+    #[test]
+    fn test_with_input_delay_clamps_to_queue_length() {
+        use crate::input_queue::INPUT_QUEUE_LENGTH;
+        let builder = SessionBuilder::<TestConfig>::new().with_input_delay(INPUT_QUEUE_LENGTH * 2);
+        // Excessive delay should be clamped to max allowed value (queue_length - 1)
+        assert_eq!(builder.input_delay, INPUT_QUEUE_LENGTH - 1);
+    }
+
+    // ========================================================================
+    // SessionBuilder Config Integration Tests
+    // ========================================================================
+
+    #[test]
+    fn test_with_input_queue_config() {
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_input_queue_config(InputQueueConfig::minimal());
+        assert_eq!(builder.input_queue_config.queue_length, 32);
+    }
+
+    #[test]
+    fn test_input_queue_config_affects_max_delay() {
+        // With minimal config (queue_length=32), max delay is 31
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_input_queue_config(InputQueueConfig::minimal())
+            .with_input_delay(31); // Should succeed
+        assert_eq!(builder.input_delay, 31);
+    }
+
+    #[test]
+    fn test_input_queue_config_custom_queue_clamps_delay() {
+        // With minimal config (queue_length=32), max delay is 31
+        // Trying to set delay=32 should clamp to 31
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_input_queue_config(InputQueueConfig::minimal())
+            .with_input_delay(32);
+        assert_eq!(builder.input_delay, 31);
+    }
+
+    #[test]
+    fn with_sync_config_applies_to_builder() {
+        let builder =
+            SessionBuilder::<TestConfig>::new().with_sync_config(SyncConfig::high_latency());
+        assert_eq!(builder.sync_config, SyncConfig::high_latency());
+    }
+
+    #[test]
+    fn with_protocol_config_applies_to_builder() {
+        let builder =
+            SessionBuilder::<TestConfig>::new().with_protocol_config(ProtocolConfig::competitive());
+        assert_eq!(builder.protocol_config, ProtocolConfig::competitive());
     }
 }

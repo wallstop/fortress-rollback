@@ -1,212 +1,179 @@
+<p align="center">
+  <img src="assets/logo-small.svg" alt="Fortress Rollback" width="64">
+</p>
+
 # Changelog
 
-In this document, all remarkable changes are listed. Not mentioned are smaller code cleanups or documentation improvements.
+All notable changes to this project will be documented in this file.
 
-## Unreleased
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-### Breaking Changes
+> **Note:** For historical changes from the original GGRS project (versions 0.2.0–0.11.0),
+> see [docs/ggrs-changelog-archive.md](docs/ggrs-changelog-archive.md).
 
-- **[REBRAND]** Crate renamed to `fortress-rollback` (import as `fortress_rollback`)
-  - Previous crate name: `ggrs`
-  - Migration: update `Cargo.toml` dependencies and Rust imports to `fortress_rollback`
-- **[DETERMINISM]** `Config::Address` now requires `Ord` + `PartialOrd` trait bounds
-  - **Rationale:** Enables complete determinism by replacing all `HashMap` with `BTreeMap`
-  - **Impact:** Most common address types (`SocketAddr`, `String`, etc.) already implement `Ord`
-  - **Migration:** For custom address types, add `#[derive(PartialOrd, Ord)]` to your type
-  - Example:
-    ```rust
-    // Before:
-    #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-    struct MyAddress { /* ... */ }
-    
-    // After:
-    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-    struct MyAddress { /* ... */ }
-    ```
+## [Unreleased]
 
-### Improvements
+## [0.1.0] - 2024-12-XX
 
-- **[DETERMINISM]** Replaced all `HashMap` with `BTreeMap` for guaranteed iteration order
-  - Eliminates non-deterministic iteration in all code paths
-  - Affects: player inputs, checksums, network endpoints, all frame-based collections
-  - Ensures consistent behavior across platforms and runs
-  - All collection iteration now has predictable, sorted ordering
-- Added 5 new determinism tests to verify iteration order consistency
-- **[TESTING]** Test suite expanded from 32 to 37 tests (15 unit + 17 integration + 5 determinism)
+Initial release of Fortress Rollback, a correctness-first fork of GGRS v0.11.0.
 
-## 0.11.0
+### Added
 
-- add `tracing` crate for logging support
-- breaking change: `Config::Input` must now satisfy `Default` + serde's `Serialize` & `DeserializeOwned` traits, rather than bytemuck's `Pod` and `Zeroable`.
-  - This allows enums with fields as well as variable-sized types (such as `Vec`) to be directly used as the GGRS input type, and should generally be more flexible than the old bounds.
-  - To migrate old code, it's recommended to simply derive `Default` and `Serialize` & `Deserialize` on your `Input` type.
-  - Or, to migrate old code strictly without changing behavior, implement `Default` in terms of `bytemuck::Zeroable::zeroed()` and implement `Serialize` and `DeserializedOwned` in terms of `bytemuck::bytes_of()` and (probably) `bytemuck::pod_read_unaligned()`.
-  - Fixes [#40](https://github.com/gschup/ggrs/issues/40) and [#74](https://github.com/gschup/ggrs/issues/74).
-- lockstep determinism is now possible by setting max predictions to 0
-- allow non-`Clone` types to be stored in `GameStateCell`.
-- added `SyncTestSession::current_frame()` and `SpectatorSession::current_frame()` to match the existing `P2PSession::current_frame()`.
-- added `P2PSession::desync_detection()` to read the session's desync detection mode.
-- fix: ggrs no longer panics when a client's local frame advantage exceeds the range of an i8 ([#35](https://github.com/gschup/ggrs/issues/35))
-- fix: ggrs no longer panics when trying to send an overly large UDP packet, unless debug assertions are on.
-- fix: ggrs no longer panics when trying to send a message over a custom socket implementation if that message exceeded the maximum safe UDP packet size, even though the underlying socket might have totally different applicable thresholds for what messages can be safely delivered.
-- fix a false positive in `P2PSession`'s desync detection; it was possible for a desync to incorrectly be detected when `P2PSession::advance_frame()` would 1. enqueue a checksum-changing rollback, 2. mark a to-be-rolled-back frame as confirmed, and 3. send that newly-confirmed frame's still-incorrect checksum to peers.
+#### Desync Detection API
 
-## 0.10.2
+- `SyncHealth` enum for synchronization status reporting (`InSync`, `Pending`, `DesyncDetected`)
+- `P2PSession::sync_health(peer)` to query synchronization status with a specific peer
+- `P2PSession::is_synchronized()` to check if all peers are in sync
+- `P2PSession::all_sync_health()` to get sync status for all remote peers
+- `P2PSession::last_verified_frame()` to get the highest frame with successful checksum verification
+- `NetworkStats` fields for desync monitoring: `last_compared_frame`, `local_checksum`, `remote_checksum`, `checksums_match`
+- `InvariantChecker` implementation for `P2PSession` to validate session health
 
-- fix dependency versions
+#### Deterministic Hashing
 
-## 0.10.1
+- `fortress_rollback::hash` module with deterministic FNV-1a hashing utilities
+- `DeterministicHasher` for consistent cross-process checksums
+- `fnv1a_hash` convenience function for computing deterministic hashes
+- `DeterministicBuildHasher` for use with collections requiring deterministic hashing
 
-- SyncTest now checks frames in chronological order
+#### Configuration APIs
 
-## 0.10.0
+- Structured configuration: `SyncConfig`, `ProtocolConfig`, `TimeSyncConfig`, `SpectatorConfig`, `InputQueueConfig`
+- Preset-based configuration methods (e.g., `SyncConfig::high_latency()`, `ProtocolConfig::competitive()`)
+- `SaveMode` enum replacing deprecated `with_sparse_saving_mode()`
+- `ViolationObserver` trait and `CollectingObserver` for monitoring internal invariant violations
 
-- Rename types with GGRS prefix to match rust naming conventions
-- Removed deprecated `GgrsError` variants
-- `GameStateCell` now implements debug.
-- fixed a bug where checksums of unconfirmed frames were compared during desync detection.
-- You can now trigger a desync manually in the example game by pressing SPACE.
+#### Session APIs
 
-## 0.9.4
+- `P2PSession::confirmed_inputs_for_frame(frame)` for computing deterministic checksums over confirmed state
+- `InputQueue` now tracks player index for player-specific prediction strategies
 
-- `SessionBuilder` now implements debug. This requires `Config::Address` to have Debug
-- Optional desync detection for p2p sessions. This feature can be used by using `with_desync_detection_mode` in the `SessionBuilder`.
+#### Development Infrastructure
 
-## 0.9.3
+- Pre-commit hooks configuration for code quality automation (markdownlint, link validation, cargo fmt/clippy)
+- `docs.yml` CI workflow for documentation and link validation
+- `scripts/check-links.sh` for local file reference validation
+- Comprehensive test suite: 1100+ library and integration tests, multi-process network tests passing
+- TLA+ `Concurrency.tla` specification for `GameStateCell` thread safety verification
 
-- added support for fieldless enums in `PlayerInput`
+### Changed
 
-## 0.9.2
+#### Determinism Improvements
 
-- fixed a bug where sync would not work with RTT higher than SYNC_RETRY_INTERVAL
+- Replaced all `HashMap` with `BTreeMap` for guaranteed iteration order
+- Replaced all `HashSet` with `BTreeSet` for deterministic iteration
+- `Config::Address` now requires `Ord` + `PartialOrd` trait bounds (see Migration section)
+- Test infrastructure uses `fnv1a_hash` instead of `DefaultHasher`
 
-## 0.9.1
+#### Default Behavior
 
-- fixed multiple local players, added example documentation for it
-- fixed save and advance request ordering during a rollback in P2PSessions
+- **Desync detection now enabled by default**: `DesyncDetection::On { interval: 60 }` (once per second at 60fps). This catches state divergence early. Users needing to disable detection can explicitly set `DesyncDetection::Off`.
 
-## 0.9.0
+#### Branding
 
-- removed `GameState` from the public API.
-- removed `PlayerInput` from the public API. `AdvanceFrame` requests will now hand over a tuple with the `InputStatus` and status of that input
-- added `InputStatus` enum to distinguish the status of given inputs
-- users now have to call `add_local_input(..)` for every local player before calling `advance_frame()`
-- enabled multiple players per endpoint
-- sessions are now constructed through a unified `SessionBuilder`
-- overhauled all generics
-- provided inputs are now generic. The user has to only supply a POD struct instead of serialized input
-- added a `Config` trait with types to bundle all generic options
-- renamed `GameInput` to `PlayerInput`
-- the user now has to explicitly create a socket themselves before creating a session
+- Crate renamed to `fortress-rollback` (import as `fortress_rollback`)
+- All `Ggrs*` types renamed to `Fortress*`:
+  - `GgrsError` → `FortressError`
+  - `GgrsEvent<T>` → `FortressEvent<T>`
+  - `GgrsRequest<T>` → `FortressRequest<T>`
+- All documentation updated to reference "Fortress Rollback"
 
-## 0.8.0
+#### Performance Improvements
 
-- `GameState` now is a generic `GameState<T: Clone = Vec<u8>>`, so serialization of game state to save and load is no longer required
-- `trait NonBlockingSocket` now is a generic `NonBlockingSocket<A>`, where `A` generalizes the address that the socket uses to send a packet.
+- `FortressRequest::AdvanceFrame { inputs }` now uses `InputVec<T::Input>` (a `SmallVec<[(T::Input, InputStatus); 4]>`) instead of `Vec`. This avoids heap allocations for games with 1-4 players.
+- `synchronized_inputs()` returns `InputVec` for stack-allocated inputs in the common case
 
-## 0.7.2
+#### Safety Improvements
 
-- massively improved performance by improving input packet handling
+- `InputQueue::confirmed_input` now returns `Result` instead of panicking
+- Spectator confirmed-input path bubbles `FortressError` on missing data
 
-## 0.7.1
+### Fixed
 
-- added getter for the max prediction frames parameter in `P2PSession` and `SyncTestSession`
+- Crash when misprediction detected at frame 0 (first frame): `adjust_gamestate()` no longer attempts to load the current frame when receiving early corrections
+- Multi-process rollback desync (BUG-001): Window-based checksum computation using last 64 frames ensures frames are always available for comparison between peers
+- `PlayerRegistry::spectator_handles()` incorrectly returned local player handles in addition to spectators
+- All 35 multi-process network tests now pass reliably
 
-## 0.7.0
+### Removed
 
-- removed the const `MAX_PREDICTION_FRAMES` and made it a parameter for the user to choose
+- Historical GGRS changelog entries moved to [docs/ggrs-changelog-archive.md](docs/ggrs-changelog-archive.md)
 
-## 0.6.0
+---
 
-- added `P2PSession::current_frame()`
-- made `P2PSession::confirmed_frame()` public to let users access it
-- removed the need for a player cap and a maximum input size
-- adjusted session creation API to reflect the above change
-- fixed a bug where a p2p session without remote players would not start
-- migrated to rust 2021
+## Breaking Changes from GGRS
 
-## 0.5.1
+This section summarizes breaking changes for users migrating from GGRS v0.11.0.
 
-- ggrs no longer panics when packets have been tampered with
-- added `P2PSession::frames_ahead()` that shows how many frames the session believes to be ahead of other sessions.
+### Dependency Change
 
-## 0.5.0
+```toml
+# Before
+[dependencies]
+ggrs = "0.11"
 
-- renamed session constructors to make them more idiomatic. Sessions are now created through `P2PSession::new(...)` and `P2PSession::new_with_socket(...)`.
-- added functions to create sessions with own sockets provided
-- turned NonBlockingSocket into a trait to allow alternate socket types in the future.
-- fixed a bug where calling network_stats without any time passed would lead to a division by 0.
-- fixed a bug where packet transmission time would be accounted for with RTT instead of RTT / 2
+# After
+[dependencies]
+fortress-rollback = "0.1"
+```
 
-## 0.4.4
+### Import Path Change
 
-- fixed a bug where p2p sessions would falsely skip frames even when there able to run the frame
-- implemented some first steps towards WASM compatibility
+```rust
+// Before
+use ggrs::{SessionBuilder, P2PSession, GgrsError};
 
-## 0.4.3
+// After
+use fortress_rollback::{SessionBuilder, P2PSession, FortressError};
+```
 
-- changed license from MIT to MIT or Apache 2.0 at the users option
-- added `local_player_handle()` to `P2PSession`, which returns the handle of the local player
-- added `set_fps(desired_fps)` to `P2PSpectatorSession`
+### Type Renames
 
-## 0.4.2
+| Old Name           | New Name             |
+|--------------------|----------------------|
+| `GgrsError`        | `FortressError`      |
+| `GgrsEvent<T>`     | `FortressEvent<T>`   |
+| `GgrsRequest<T>`   | `FortressRequest<T>` |
 
-- users are now allowed to save `None` buffers for a `GgrsRequest::SaveRequest`. This allows users to keep their own state history and load/save more efficiently
-- added `num_players()`, `input_size()` getters to all sessions
+### Address Trait Bounds
 
-## 0.4.1
+`Config::Address` now requires `Ord` + `PartialOrd`:
 
-- added sparse saving feature `P2PSession`, minimizing the SaveState requests to a bare minimum at the cost of potentially longer rollbacks
-- added `set_sparse_saving()` to `P2PSession` to enable sparse saving
-- added `set_fps(desired_fps)` to `P2PSession` for the user to set expected update frequency. This is helpful for frame synchronization between sessions
-- fixed a bug where a spectator would not handle disconnected players correctly with more than two players
-- fixed a bug where changes to `disconnect_timeout` and `disconnect_notify_start` would change existings endpoints, but would not influence endpoints created afterwards
-- expanded the BoxGame example for up to four players and as many spectators as wanted
-- minor code optimizations
+```rust
+// Before
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct MyAddress { /* ... */ }
 
-## 0.4.0
+// After
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+struct MyAddress { /* ... */ }
+```
 
-- spectators catch up by advancing the frame twice per `advance_frame(...)` call, if too far behind
-- added `frames_behind_host()` to `P2PSpectatorSession`, allowing to query how many frames the spectator client is behind the last received input
-- added `set_max_frames_behind(desired_value)`to `P2PSpectatorSession`, allowing to set after how many frames behind the spectator fast-forwards to catch up
-- added `set_catchup_speed(desired_value)` to `P2PSpectatorSession`, allowing to set how many frames the spectator catches up per `advance_frame()` call, if too far behind
-- in `SyncTestSession`, the user now can (and has to) provide input for all players in order to advance the frame
+### Input Vector Type
 
-## 0.3.0
+The `inputs` field in `FortressRequest::AdvanceFrame` is now `InputVec<T::Input>` (a `SmallVec`) instead of `Vec`:
 
-- `GgrsError::InvalidRequest` now has an added `info` field to explain the problem in more detail
-- removed unused `GgrsError::GeneralFailure`
-- removed multiple methods in `SyncTestSession`, as they didn't fulfill any meaningful purpose
-- removed unused sequence number from message header, fixing related issues
-- fixed an issue where out-of-order packets would cause a crash
-- other minor improvements
+```rust
+// If you have explicit type annotations:
+// Before
+fn handle_inputs(inputs: Vec<(MyInput, InputStatus)>) { ... }
 
-## 0.2.5
+// After
+use fortress_rollback::InputVec;
+fn handle_inputs(inputs: InputVec<MyInput>) { ... }
+// Or accept a slice for flexibility:
+fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
+```
 
-- when a player disconnects, the other players now rollback to that frame. This is done in order to eliminate wrong predictions and resimulate the game with correct disconnection indicators
-- spectators now also handle those disconnections correctly
+### Behavioral Notes
 
-## 0.2.4
+- Session termination using `confirmed_frame()` alone is incorrect; use the new `SyncHealth` API for proper synchronization verification. See [docs/migration.md](docs/migration.md) for details.
+- **Desync detection is now enabled by default** (`DesyncDetection::On { interval: 60 }`). GGRS defaulted to `Off`. Explicitly set `DesyncDetection::Off` if you need the old behavior.
 
-- fixed an issue where the spectator would assign wrong frames to the input
-- players disconnecting now leads to a rollback to the disconnect frame, so wrongly made predictions can be removed
-- in the box game example, disconnected players now spin
-- minor code and documentation cleanups
+---
 
-## 0.2.3
+For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-- fixed an issue where encoding/decoding reference would not match, leading to client desyncs
-
-## 0.2.2
-
-- SyncTestSession now actually compares checksums again
-- if the user doesn't provide checksums, GGRS computes a fletcher16 checksum
-- internal refactoring/renaming
-
-## 0.2.1
-
-- fixed an issue where the spectator would only handle one UDP packet and drop the rest
-
-## 0.2.0
-
-- Reworked API: Instead of the user passing a GGRSInterface trait object, GGRS now returns a list of GgrsRequests for the user to fulfill
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/main...HEAD
+[0.1.0]: https://github.com/wallstop/fortress-rollback/tree/main

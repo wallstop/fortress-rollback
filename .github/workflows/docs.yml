@@ -1,0 +1,90 @@
+name: Docs & Links
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  markdown-lint:
+    name: Markdown Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install markdownlint-cli
+        run: npm install -g markdownlint-cli
+
+      - name: Run markdownlint
+        run: markdownlint '**/*.md' --config .markdownlint.json --ignore 'target/**' --ignore 'fuzz/target/**' --ignore 'loom-tests/target/**' --ignore 'progress/**' --ignore 'PLAN.md'
+
+  link-check:
+    name: Link Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install markdown-link-check
+        run: npm install -g markdown-link-check
+
+      - name: Check markdown links (external)
+        run: |
+          find . -name "*.md" \
+            -not -path "./target/*" \
+            -not -path "./fuzz/target/*" \
+            -not -path "./loom-tests/target/*" \
+            -exec markdown-link-check --config .markdown-link-check.json {} \;
+        continue-on-error: true  # External links may have rate limits
+
+      - name: Check local file links
+        run: ./scripts/check-links.sh
+
+  rustdoc-links:
+    name: Rustdoc Link Check
+    runs-on: ubuntu-latest
+
+    # Note: We intentionally don't use sccache for doc builds because:
+    # 1. Doc builds are fast and don't benefit much from compilation caching
+    # 2. sccache can cause transient CI failures when GitHub Actions cache service is unavailable
+    # 3. The complexity of sccache error handling outweighs any benefit for this job
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: docs-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            docs-${{ runner.os }}-cargo-
+
+      - name: Check for broken intra-doc links
+        run: |
+          # Clean any stale doc artifacts that might cause issues
+          rm -rf target/doc
+
+          # Run with RUSTDOCFLAGS to treat warnings as errors for links
+          RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --no-deps

@@ -1,0 +1,79 @@
+[package]
+name = "fortress-rollback-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1.3", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+
+[dependencies.fortress-rollback]
+path = ".."
+
+# Fuzz target: Network message deserialization
+# Tests that arbitrary bytes cannot crash the message deserializer
+[[bin]]
+name = "fuzz_message_parsing"
+path = "fuzz_targets/fuzz_message_parsing.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz target: Compression encode/decode roundtrip
+# Tests that arbitrary input sequences can be encoded/decoded safely
+[[bin]]
+name = "fuzz_compression"
+path = "fuzz_targets/fuzz_compression.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz target: Input queue operations
+# Tests that sequences of queue operations don't panic
+[[bin]]
+name = "fuzz_input_queue"
+path = "fuzz_targets/fuzz_input_queue.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz target: SessionBuilder configuration
+# Tests that arbitrary configuration values are handled gracefully
+[[bin]]
+name = "fuzz_session_config"
+path = "fuzz_targets/fuzz_session_config.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz target: Direct InputQueue operations via __internal
+# Tests InputQueue internals directly for better coverage
+[[bin]]
+name = "fuzz_input_queue_direct"
+path = "fuzz_targets/fuzz_input_queue_direct.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz target: Direct SyncLayer operations via __internal
+# Tests SyncLayer internals directly for rollback safety
+[[bin]]
+name = "fuzz_sync_layer_direct"
+path = "fuzz_targets/fuzz_sync_layer_direct.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz target: Direct RLE encode/decode testing
+# Tests RLE roundtrip, decode safety, and stress patterns
+[[bin]]
+name = "fuzz_rle"
+path = "fuzz_targets/fuzz_rle.rs"
+test = false
+doc = false
+bench = false

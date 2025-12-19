@@ -1,11 +1,13 @@
 mod ex_game;
 
-use ex_game::{GGRSConfig, Game};
-use fortress_rollback::{GgrsError, GgrsEvent, SessionBuilder, SessionState, UdpNonBlockingSocket};
-use instant::{Duration, Instant};
+use clap::Parser;
+use ex_game::{FortressConfig, Game};
+use fortress_rollback::{
+    FortressError, FortressEvent, SessionBuilder, SessionState, UdpNonBlockingSocket,
+};
 use macroquad::prelude::*;
 use std::net::SocketAddr;
-use structopt::StructOpt;
+use web_time::{Duration, Instant};
 
 const FPS: f64 = 60.0;
 
@@ -21,19 +23,19 @@ fn window_conf() -> Conf {
     }
 }
 
-#[derive(StructOpt)]
+#[derive(Parser)]
 struct Opt {
-    #[structopt(short, long)]
+    #[arg(short, long)]
     local_port: u16,
-    #[structopt(short, long)]
+    #[arg(short, long)]
     num_players: usize,
-    #[structopt(short, long)]
+    #[arg(short, long)]
     host: SocketAddr,
 }
 
 #[macroquad::main(window_conf)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // configure logging: output ggrs and example game logs to standard out
+    // configure logging: output Fortress Rollback and example game logs to standard out
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_max_level(tracing::Level::DEBUG)
@@ -44,15 +46,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_log::LogTracer::init()?;
 
     // read cmd line arguments
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
 
-    // create a GGRS session for a spectator
+    // create a Fortress Rollback session for a spectator
     let socket = UdpNonBlockingSocket::bind_to_port(opt.local_port)?;
-    let mut sess = SessionBuilder::<GGRSConfig>::new()
+    let mut sess = SessionBuilder::<FortressConfig>::new()
         .with_num_players(opt.num_players)
         .with_max_frames_behind(5)? // (optional) when the spectator is more than this amount of frames behind, it will catch up
         .with_catchup_speed(2)? // (optional) set this to 1 if you don't want any catch-ups
-        .start_spectator_session(opt.host, socket);
+        .start_spectator_session(opt.host, socket)
+        .expect("Failed to start spectator session");
 
     // Create a new box game
     let mut game = Game::new(opt.num_players);
@@ -66,10 +69,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // communicate, receive and send packets
         sess.poll_remote_clients();
 
-        // handle GGRS events
+        // handle Fortress Rollback events
         for event in sess.events() {
             info!("Event: {:?}", event);
-            if let GgrsEvent::Disconnected { .. } = event {
+            if let FortressEvent::Disconnected { .. } = event {
                 info!("Disconnected from host.");
                 return Ok(());
             }
@@ -89,12 +92,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if sess.current_state() == SessionState::Running {
                 match sess.advance_frame() {
                     Ok(requests) => game.handle_requests(requests, false),
-                    Err(GgrsError::PredictionThreshold) => {
+                    Err(FortressError::PredictionThreshold) => {
                         info!(
                             "Frame {} skipped: Waiting for input from host.",
                             game.current_frame()
                         );
-                    }
+                    },
                     Err(e) => return Err(Box::new(e)),
                 }
             }

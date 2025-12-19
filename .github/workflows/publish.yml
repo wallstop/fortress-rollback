@@ -28,6 +28,34 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Configure sccache
+        id: sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
+
+      - name: Verify sccache is working
+        id: sccache-check
+        if: steps.sccache.outcome == 'success'
+        run: ./scripts/verify-sccache.sh
+        continue-on-error: true
+
+      - name: Clear sccache env on failure
+        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
+        run: |
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: publish-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            publish-${{ runner.os }}-cargo-
+
       - name: Verify version matches tag (if tag push)
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -40,6 +68,10 @@ jobs:
 
       - name: Publish (dry-run)
         run: cargo publish --dry-run
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
 
       - name: Publish to crates.io
         env:

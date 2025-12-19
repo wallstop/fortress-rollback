@@ -2,7 +2,8 @@
 name = "fortress-rollback"
 version = "0.1.0"
 authors = ["wallstop <wallstop@wallstopstudios.com>"]
-edition = "2024"
+edition = "2021"
+rust-version = "1.86"  # Minimum Supported Rust Version (MSRV) - required by criterion 0.8.1
 description = "Fortress Rollback (a fork of GGRS) is a fortified, verified P2P rollback networking library for Rust."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
@@ -10,39 +11,222 @@ repository = "https://github.com/wallstop/fortress-rollback"
 keywords = ["gamedev", "networking", "ggpo", "rollback"]
 categories = ["network-programming", "game-development"]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(loom)'] }
+
+# Defensive programming clippy lints
+# Reference: https://corrode.dev/blog/defensive-programming/
+[lints.clippy]
+# Ensure all public API methods that return values have #[must_use]
+must_use_candidate = "warn"
+# Catch fallible From implementations that should be TryFrom
+fallible_impl_from = "deny"
+# Make clone() calls explicit for readability
+implicit_clone = "warn"
+# Remove unnecessary clone() calls
+redundant_clone = "warn"
+# Use to_owned() for &str instead of to_string() for clarity
+inefficient_to_string = "warn"
+
+# === Additional defensive lints ===
+# No TODOs in production code
+todo = "deny"
+# No unimplemented!() in production code
+unimplemented = "deny"
+# No debug macros in production (use tracing)
+dbg_macro = "warn"
+# Use tracing instead of print statements
+print_stdout = "warn"
+print_stderr = "warn"
+
+# === Pedantic lints (enabled selectively) ===
+# Enable pedantic as baseline, then allow noisy ones
+pedantic = { level = "warn", priority = -1 }
+# Allow these commonly noisy pedantic lints
+module_name_repetitions = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# These are too strict for this codebase
+if_not_else = "allow"
+match_same_arms = "allow"
+single_match_else = "allow"
+unnested_or_patterns = "allow"
+unreadable_literal = "allow"
+items_after_statements = "allow"
+# Allow precision loss for frame calculations (never exceed mantissa)
+cast_precision_loss = "allow"
+# Allow sign loss for frame index calculations (validated elsewhere)
+cast_sign_loss = "allow"
+# Allow possible truncation (sizes are always within bounds)
+cast_possible_truncation = "allow"
+# Allow lossless casts (clearer intent)
+cast_lossless = "allow"
+# Allow possible wrap for intentional bit manipulation
+cast_possible_wrap = "allow"
+# Allow indexing - we use bounds checking where critical
+indexing_slicing = "allow"
+# Allow needless pass by value for small Copy types
+needless_pass_by_value = "allow"
+# Allow doc markdown flexibility
+doc_markdown = "allow"
+# Allow format string style choice
+uninlined_format_args = "allow"
+# Allow explicit returns for clarity
+needless_return = "allow"
+# Allow wildcard imports in tests
+wildcard_imports = "allow"
+# Allow redundant else for clarity
+redundant_else = "allow"
+# Allow bool comparison for readability
+bool_comparison = "allow"
+# Allow used underscore binding
+used_underscore_binding = "allow"
+# Allow struct field names
+struct_field_names = "allow"
+# Allow needless continue for clarity
+needless_continue = "allow"
+# Allow borrow as ptr patterns
+borrow_as_ptr = "allow"
+# Allow checked conversions style choice
+checked_conversions = "allow"
+# Allow explicit iter loops
+explicit_iter_loop = "allow"
+# Allow manual let else
+manual_let_else = "allow"
+# Allow range plus one patterns
+range_plus_one = "allow"
+# Allow explicit into iter
+explicit_into_iter_loop = "allow"
+# Allow semicolon if nothing returned style
+semicolon_if_nothing_returned = "allow"
+# Allow struct excessive bools (protocol state)
+struct_excessive_bools = "allow"
+# Allow trivially copy pass by ref (API consistency)
+trivially_copy_pass_by_ref = "allow"
+# Allow unchecked duration subtraction (validated)
+unchecked_duration_subtraction = "allow"
+
+# Note: wildcard_enum_match_arm is NOT enabled because public enums use #[non_exhaustive],
+# which already forces external users to handle wildcards. Internal test code uses wildcards
+# intentionally for internal enums like MessageBody.
+
+# === Defensive programming pattern enforcement ===
+# Warn about unneeded field patterns in struct destructuring
+unneeded_field_pattern = "warn"
+# Warn about functions with too many boolean parameters (4+ by default)
+fn_params_excessive_bools = "warn"
+
 [features]
 sync-send = []
-wasm-bindgen = ["instant/wasm-bindgen", "getrandom/js"]
+wasm-bindgen = []
+# Enable runtime invariant checking in release builds (for debugging production issues)
+paranoid = []
+# Enable loom-compatible synchronization primitives for concurrency testing
+# NOTE: This changes the internal sync primitives from parking_lot to std/loom
+loom = []
+# Enable Z3 formal verification tests (requires system Z3: apt install libz3-dev)
+z3-verification = ["dep:z3"]
+# Enable Z3 with bundled build (slow - builds Z3 from source, ~30+ minutes)
+# Use this only if you don't have Z3 installed system-wide
+z3-verification-bundled = ["z3-verification", "z3?/bundled"]
+# Enable graphical examples (ex_game_*) - requires system audio/graphics libraries
+# On Linux: sudo apt-get install libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
+graphical-examples = ["dep:macroquad"]
+# Enable tokio async runtime integration for async socket adapters
+# Provides TokioUdpSocket for use with async networking code
+tokio = ["dep:tokio"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-bincode = "1.3"
-rand = "0.8"
-bitfield-rle = "0.2.1"
+serde_json = "1.0"
+bincode = { version = "2.0", features = ["serde"] }
 parking_lot = "0.12"
-instant = "0.1"
-getrandom = { version = "0.2", optional = true }
+web-time = "1.1"
 tracing = "0.1"
+# SmallVec for stack-allocated small vectors (avoids heap allocation for 1-4 players)
+smallvec = { version = "1.13", features = ["serde"] }
+# SMT solver for formal verification
+# Only compiled when z3-verification feature is enabled
+# For bundled build (slow), use z3-verification-bundled feature instead
+z3 = { version = "0.19", optional = true }
+# Graphical examples dependency (requires system audio/graphics libraries)
+# On Linux: sudo apt-get install libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
+macroquad = { version = "0.4", optional = true }
+# Tokio async runtime for async socket adapters
+# Only compiled when tokio feature is enabled
+tokio = { version = "1.43", features = ["net", "io-util", "sync", "rt", "macros", "time"], optional = true }
+
+# Loom for concurrency testing - only used when cfg(loom) is set
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 
 [dev-dependencies]
-serial_test = "0.5"
-structopt = "0.3"
-macroquad = { version = "0.4", features = ["log-rs"] }
+serial_test = "3.2"
+clap = { version = "4.5", features = ["derive"] }
 tracing-subscriber = "0.3"
 tracing-log = "0.2"
+proptest = "1.9"
+# Benchmarking
+criterion = { version = "0.8", features = ["html_reports"] }
+# Additional testing utilities
+arbitrary = { version = "1.3", features = ["derive"] }
+
+# Network test peer binary for multi-process testing
+[[bin]]
+name = "network_test_peer"
+path = "tests/bin/network_test_peer.rs"
+test = false
+bench = false
 
 # Examples
 [[example]]
 name = "ex_game_p2p"
 path = "examples/ex_game/ex_game_p2p.rs"
+required-features = ["graphical-examples"]
 
 [[example]]
 name = "ex_game_spectator"
 path = "examples/ex_game/ex_game_spectator.rs"
+required-features = ["graphical-examples"]
 
 [[example]]
 name = "ex_game_synctest"
 path = "examples/ex_game/ex_game_synctest.rs"
+required-features = ["graphical-examples"]
+
+# Benchmarks (using criterion)
+[[bench]]
+name = "input_queue"
+harness = false
+
+[[bench]]
+name = "sync_layer"
+harness = false
+
+[[bench]]
+name = "p2p_session"
+harness = false
+
+[[bench]]
+name = "compression"
+harness = false
+
+# Profile for benchmarks
+[profile.bench]
+debug = true
+lto = "thin"
+
+# Profile for faster dev builds (optimized deps, unoptimized local code)
+[profile.dev.package."*"]
+opt-level = 1
+
+# Loom concurrency tests - isolated from other dev-deps
+[[test]]
+name = "loom_concurrency"
+path = "tests/loom_concurrency.rs"
+required-features = []             # No features required, but only runs under cfg(loom)

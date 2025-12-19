@@ -1,0 +1,37 @@
+# Auto detect text files and perform LF normalization
+* text=auto eol=lf
+
+# Shell scripts should always have LF line endings
+*.sh text eol=lf
+
+# Batch files should have CRLF line endings on Windows
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Rust files - must use LF for cargo fmt (rustfmt.toml: newline_style = "Unix")
+*.rs text eol=lf diff=rust
+
+# Configuration and data files - LF for cross-platform consistency
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.lock text eol=lf
+
+# Documentation
+*.md text eol=lf
+*.txt text eol=lf
+
+# TLA+ specification files
+*.tla text eol=lf
+*.cfg text eol=lf
+
+# Docker and CI files
+Dockerfile text eol=lf
+*.dockerfile text eol=lf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary

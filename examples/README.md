@@ -1,6 +1,72 @@
+<p align="center">
+  <img src="../assets/logo-small.svg" alt="Fortress Rollback" width="64">
+</p>
+
 # Example Instructions
 
 Gathered here are some additional instructions on how to build and run the examples. Note that the examples are usually kept up-to-date with the most recent version of the code. If you are looking for example code compatible with a version published on crates.io, take a look at the [release tags](https://github.com/wallstop/fortress-rollback/tags).
+
+## System Dependencies
+
+The ExGame graphical examples use [macroquad](https://github.com/not-fl3/macroquad) for graphics and audio. These examples are **optional** and require the `graphical-examples` feature flag to build.
+
+### Building Graphical Examples
+
+To build the graphical examples, enable the feature:
+
+```shell
+cargo build --examples --features graphical-examples
+```
+
+### Linux (Debian/Ubuntu)
+
+```shell
+sudo apt-get install libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
+```
+
+### Linux (Fedora/RHEL)
+
+```shell
+sudo dnf install alsa-lib-devel libX11-devel libXi-devel mesa-libGL-devel
+```
+
+### macOS
+
+No additional dependencies required (uses system frameworks).
+
+### Windows
+
+No additional dependencies required (uses system APIs).
+
+---
+
+## Configuration Example
+
+Demonstrates all available configuration options including:
+
+- Basic session setup
+- Network presets (LAN, high-latency, lossy)
+- Custom fine-tuned configurations
+- Competitive and casual setups
+- Spectator configuration
+
+```shell
+cargo run --example configuration
+```
+
+## Error Handling Example
+
+Demonstrates proper error handling patterns:
+
+- Configuration-time errors
+- Session setup errors
+- Runtime error handling
+- Recovery strategies
+- Comprehensive error matching
+
+```shell
+cargo run --example error_handling
+```
 
 ## ExGame
 
@@ -38,25 +104,25 @@ For example, to run a two-player game on your local machine,
 run these commands in separate terminals:
 
 ```shell
-cargo run --example ex_game_p2p -- --local-port 7000 --players localhost 127.0.0.1:7001
-cargo run --example ex_game_p2p -- --local-port 7001 --players 127.0.0.1:7000 localhost
+cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7000 --players localhost 127.0.0.1:7001
+cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7001 --players 127.0.0.1:7000 localhost
 ```
 
 In order to run a two-player game and a spectator on your local machine,
 run these commands in separate terminals:
 
 ```shell
-cargo run --example ex_game_p2p -- --local-port 7000 --players localhost 127.0.0.1:7001 --spectators 127.0.0.1:7002
-cargo run --example ex_game_p2p -- --local-port 7001 --players 127.0.0.1:7000 localhost
-cargo run --example ex_game_spectator -- --local-port 7002 --num-players 2 --host 127.0.0.1:7000 
+cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7000 --players localhost 127.0.0.1:7001 --spectators 127.0.0.1:7002
+cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7001 --players 127.0.0.1:7000 localhost
+cargo run --example ex_game_spectator --features graphical-examples -- --local-port 7002 --num-players 2 --host 127.0.0.1:7000 
 ```
 
 In order to run a three-player game with two players playing in the same client and a third player playing on a second client,
 run these commands in separate terminals:
 
 ```shell
-cargo run --example ex_game_p2p -- --local-port 7000 --players localhost localhost 127.0.0.1:7001
-cargo run --example ex_game_p2p -- --local-port 7001 --players 127.0.0.1:7000 127.0.0.1:7000 localhost
+cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7000 --players localhost localhost 127.0.0.1:7001
+cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7001 --players 127.0.0.1:7000 127.0.0.1:7000 localhost
 ```
 
 ## ExGame SyncTest
@@ -73,5 +139,5 @@ ExGame SyncTest is launched by a single command-line argument:
 - `--check-distance / -c`: number of frames that will be rolled back and resimulated each frame
 
 ```shell
-cargo run --example ex_game_synctest -- --num-players 2 --check-distance 7
+cargo run --example ex_game_synctest --features graphical-examples -- --num-players 2 --check-distance 7
 ```

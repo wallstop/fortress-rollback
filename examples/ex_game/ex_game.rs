@@ -1,7 +1,8 @@
 use std::net::SocketAddr;
 
 use fortress_rollback::{
-    Config, Frame, GameStateCell, GgrsRequest, InputStatus, NULL_FRAME, PlayerHandle,
+    compute_checksum_fletcher16, fletcher16, handle_requests, Config, FortressRequest, Frame,
+    GameStateCell, InputStatus, InputVec, PlayerHandle,
 };
 use macroquad::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -30,29 +31,16 @@ pub struct Input {
     pub inp: u8,
 }
 
-/// `GGRSConfig` holds all type parameters for GGRS Sessions
+/// `FortressConfig` holds all type parameters for Fortress Rollback sessions
 #[derive(Debug)]
-pub struct GGRSConfig;
-impl Config for GGRSConfig {
+pub struct FortressConfig;
+impl Config for FortressConfig {
     type Input = Input;
     type State = State;
     type Address = SocketAddr;
 }
 
-/// computes the fletcher16 checksum, copied from wikipedia: <https://en.wikipedia.org/wiki/Fletcher%27s_checksum>
-fn fletcher16(data: &[u8]) -> u16 {
-    let mut sum1: u16 = 0;
-    let mut sum2: u16 = 0;
-
-    for index in 0..data.len() {
-        sum1 = (sum1 + data[index] as u16) % 255;
-        sum2 = (sum2 + sum1) % 255;
-    }
-
-    (sum2 << 8) | sum1
-}
-
-// BoxGame will handle rendering, gamestate, inputs and GgrsRequests
+// BoxGame will handle rendering, gamestate, inputs and Fortress Rollback requests
 pub struct Game {
     num_players: usize,
     game_state: State,
@@ -68,41 +56,75 @@ impl Game {
             num_players,
             game_state: State::new(num_players),
             local_handles: Vec::new(),
-            last_checksum: (NULL_FRAME, 0),
-            periodic_checksum: (NULL_FRAME, 0),
+            last_checksum: (Frame::NULL, 0),
+            periodic_checksum: (Frame::NULL, 0),
         }
     }
 
     // for each request, call the appropriate function
-    pub fn handle_requests(&mut self, requests: Vec<GgrsRequest<GGRSConfig>>, in_lockstep: bool) {
+    pub fn handle_requests(
+        &mut self,
+        requests: Vec<FortressRequest<FortressConfig>>,
+        in_lockstep: bool,
+    ) {
         for request in requests {
             match request {
-                GgrsRequest::LoadGameState { cell, .. } => {
+                FortressRequest::LoadGameState { cell, .. } => {
                     if in_lockstep {
                         unreachable!("Should never get a load request if running in lockstep")
                     } else {
                         self.load_game_state(cell)
                     }
-                }
-                GgrsRequest::SaveGameState { cell, frame } => {
+                },
+                FortressRequest::SaveGameState { cell, frame } => {
                     if in_lockstep {
                         unreachable!("Should never get a save request if running in lockstep")
                     } else {
                         self.save_game_state(cell, frame)
                     }
-                }
-                GgrsRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
+                },
+                FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
+                _ => unreachable!("Unknown request type"),
             }
         }
+    }
+
+    /// Alternative request handling using the `handle_requests!` macro.
+    ///
+    /// This method shows how to use the macro for cleaner code when you don't
+    /// need special lockstep handling.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// match sess.advance_frame() {
+    ///     Ok(requests) => game.handle_requests_with_macro(requests),
+    ///     Err(e) => return Err(Box::new(e)),
+    /// }
+    /// ```
+    #[allow(dead_code)]
+    pub fn handle_requests_with_macro(&mut self, requests: Vec<FortressRequest<FortressConfig>>) {
+        handle_requests!(
+            requests,
+            save: |cell: GameStateCell<State>, frame: Frame| {
+                self.save_game_state(cell, frame);
+            },
+            load: |cell: GameStateCell<State>, _frame: Frame| {
+                self.load_game_state(cell);
+            },
+            advance: |inputs: InputVec<Input>| {
+                self.advance_frame(inputs);
+            }
+        );
     }
 
     // save current gamestate, create a checksum
     // creating a checksum here is only relevant for SyncTestSessions
     fn save_game_state(&mut self, cell: GameStateCell<State>, frame: Frame) {
-        assert_eq!(self.game_state.frame, frame);
-        let buffer = bincode::serialize(&self.game_state).unwrap();
-        let checksum = fletcher16(&buffer) as u128;
-        cell.save(frame, Some(self.game_state.clone()), Some(checksum));
+        assert_eq!(self.game_state.frame, frame.as_i32());
+        // Use the built-in checksum helper for deterministic serialization + hashing
+        let checksum = compute_checksum_fletcher16(&self.game_state).ok();
+        cell.save(frame, Some(self.game_state.clone()), checksum);
     }
 
     // load gamestate and overwrite
@@ -110,17 +132,19 @@ impl Game {
         self.game_state = cell.load().expect("No data found.");
     }
 
-    fn advance_frame(&mut self, inputs: Vec<(Input, InputStatus)>) {
+    fn advance_frame(&mut self, inputs: InputVec<Input>) {
         // advance the game state
         self.game_state.advance(inputs);
 
         // remember checksum to render it later
-        // it is very inefficient to serialize the gamestate here just for the checksum
-        let buffer = bincode::serialize(&self.game_state).unwrap();
-        let checksum = fletcher16(&buffer) as u64;
-        self.last_checksum = (self.game_state.frame, checksum);
+        // Note: it's more efficient to only compute checksums periodically for display
+        // For actual desync detection, use the checksum passed to cell.save() in SaveGameState
+        let buffer = fortress_rollback::network::codec::encode(&self.game_state)
+            .expect("serialization should succeed");
+        let checksum = u64::from(fletcher16(&buffer));
+        self.last_checksum = (Frame::new(self.game_state.frame), checksum);
         if self.game_state.frame % CHECKSUM_PERIOD == 0 {
-            self.periodic_checksum = (self.game_state.frame, checksum);
+            self.periodic_checksum = (Frame::new(self.game_state.frame), checksum);
         }
     }
 
@@ -163,11 +187,11 @@ impl Game {
             "Frame {}: Checksum {}",
             self.periodic_checksum.0, self.periodic_checksum.1
         );
-        let force_desync_info_str = format!("Press SPACE to trigger a desync");
+        let force_desync_info_str = "Press SPACE to trigger a desync";
         draw_text(&last_checksum_str, 20.0, 20.0, 30.0, WHITE);
         draw_text(&periodic_checksum_str, 20.0, 40.0, 30.0, WHITE);
         draw_text(
-            &force_desync_info_str,
+            force_desync_info_str,
             90.0,
             WINDOW_HEIGHT * 9.0 / 10.0,
             30.0,
@@ -186,7 +210,8 @@ impl Game {
         // manually teleport the player to the center of the screen, but not through a proper input
         // this will create a forced desync (unless player one is already at the center)
         if is_key_pressed(KeyCode::Space) {
-            self.game_state.positions[handle] = (WINDOW_WIDTH * 0.5, WINDOW_HEIGHT * 0.5);
+            self.game_state.positions[handle.as_usize()] =
+                (WINDOW_WIDTH * 0.5, WINDOW_HEIGHT * 0.5);
         }
 
         let mut inp: u8 = 0;
@@ -266,15 +291,15 @@ impl State {
         }
     }
 
-    pub fn advance(&mut self, inputs: Vec<(Input, InputStatus)>) {
+    pub fn advance(&mut self, inputs: InputVec<Input>) {
         // increase the frame counter
         self.frame += 1;
 
-        for i in 0..self.num_players {
+        for (i, (player_input, status)) in inputs.iter().enumerate().take(self.num_players) {
             // get input of that player
-            let input = match inputs[i].1 {
-                InputStatus::Confirmed => inputs[i].0.inp,
-                InputStatus::Predicted => inputs[i].0.inp,
+            let input = match status {
+                InputStatus::Confirmed => player_input.inp,
+                InputStatus::Predicted => player_input.inp,
                 InputStatus::Disconnected => 4, // disconnected players spin
             };
 

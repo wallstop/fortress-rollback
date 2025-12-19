@@ -1,6 +1,22 @@
-[![crates.io](https://img.shields.io/crates/v/fortress-rollback?style=for-the-badge)](https://crates.io/crates/fortress-rollback)
-[![CI](https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/rust.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/wallstop/fortress-rollback/actions/workflows/rust.yml)
-[![Publish](https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/publish.yml?branch=main&style=for-the-badge&label=Publish)](https://github.com/wallstop/fortress-rollback/actions/workflows/publish.yml)
+<p align="center">
+  <img src="assets/logo-banner.svg" alt="Fortress Rollback" width="600">
+</p>
+
+<p align="center">
+  <a href="https://crates.io/crates/fortress-rollback"><img src="https://img.shields.io/crates/v/fortress-rollback?style=for-the-badge" alt="crates.io"></a>
+  <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/rust.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/rust.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
+  <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/publish.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/publish.yml?branch=main&style=for-the-badge&label=Publish" alt="Publish"></a>
+  <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/coverage.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/coverage.yml?branch=main&style=for-the-badge&label=Coverage" alt="Coverage"></a>
+  <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/benchmark.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/benchmark.yml?branch=main&style=for-the-badge&label=Benchmark" alt="Benchmark"></a>
+</p>
+
+---
+
+> **🤖 AI-Assisted Development Notice**
+>
+> This project was developed with **substantial AI assistance**. The vast majority of the code, documentation, tests, and formal specifications were written with the help of **Claude Opus 4.5** and **Codex 5.1**. Human oversight was provided for code review, architectural decisions, and final approval, but the implementation work was heavily AI-driven. This transparency is provided so users can make informed decisions about using this crate.
+
+---
 
 ## P2P Rollback Networking in Rust
 
@@ -15,6 +31,7 @@ If you are interested in integrating rollback networking into your game or just 
 Fortress Rollback currently ships with the same demos you may know from GGRS. One is written with [macroquad](https://github.com/not-fl3/macroquad), the other with [bevy](https://bevyengine.org/). Both use [matchbox](https://github.com/johanhelsing/matchbox). Try it out with a friend! Just click the link and match with another player! (You can also open the link in two separate windows to play against yourself)
 
 🚧 MATCHMAKING CURRENTLY OFFLINE! 🚧
+
 - [Bevy Demo](https://gschup.github.io/bevy_ggrs_demo/) ([Repository](https://github.com/gschup/bevy_ggrs_demo))
 - [Macroquad Demo](https://gschup.github.io/ggrs_demo/) ([Repository](https://github.com/gschup/ggrs_demo))
 
@@ -26,17 +43,67 @@ To get started with Fortress Rollback, check out the following resources:
 - [Examples](./examples/)
 - [Documentation](https://docs.rs/fortress-rollback/newest/fortress_rollback/)
 
+### System Dependencies for Examples
+
+The interactive examples use [macroquad](https://github.com/not-fl3/macroquad), which requires system libraries:
+
+**Linux (Debian/Ubuntu):**
+
+```shell
+sudo apt-get install libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
+```
+
+**Linux (Fedora/RHEL):**
+
+```shell
+sudo dnf install alsa-lib-devel libX11-devel libXi-devel mesa-libGL-devel
+```
+
+**macOS/Windows:** No additional dependencies required.
+
 ## Development Status
 
 Alpha / experimental only.
 
+### Key Improvements in Fortress Rollback
+
+- **100% Deterministic**: All collections use `BTreeMap`/`BTreeSet` for guaranteed iteration order; new `hash` module provides FNV-1a deterministic hashing
+- **Correctness-First**: 1100+ tests including multi-process network tests, network resilience tests, and formal TLA+ specifications
+- **Panic-Free API**: All public APIs return `Result` types instead of panicking
+- **Enhanced Testing**: Full desync detection with confirmed input checksums via `P2PSession::confirmed_inputs_for_frame()`
+
+📋 **[Complete comparison with GGRS →](./docs/fortress-vs-ggrs.md)** — See all differences, bug fixes, and migration steps
+
 - [Changelog](./CHANGELOG.md)
 - [Issues](https://github.com/wallstop/fortress-rollback/issues)
-- [Contribution Guide](./CONTRIBUTING.md)
+- [Contribution Guide](./docs/contributing.md)
+
+### Network Requirements
+
+| Condition | Supported | Optimal |
+|-----------|-----------|---------|
+| RTT | <200ms | <100ms |
+| Packet Loss | <15% | <5% |
+| Jitter | <50ms | <20ms |
+
+For detailed configuration guidance, see the [User Guide](./docs/user-guide.md#network-requirements).
+
+### Feature Flags
+
+| Feature | Description |
+|---------|-------------|
+| `sync-send` | Adds `Send + Sync` bounds for multi-threaded game engines (e.g., Bevy) |
+| `tokio` | Enables `TokioUdpSocket` for async Tokio applications |
+| `wasm-bindgen` | WASM compatibility for browser games |
+| `paranoid` | Runtime invariant checking in release builds |
+| `graphical-examples` | Enables ex_game graphical examples (requires macroquad deps) |
+| `z3-verification` | Z3 formal verification tests (requires system Z3) |
+
+For detailed feature documentation, see the [User Guide](./docs/user-guide.md#feature-flags).
 
 ## Migration from ggrs
 
-Moving from the original `ggrs` crate? See the step-by-step guide in [MIGRATION.md](./MIGRATION.md). It covers the crate rename (`fortress-rollback`), the new `Config::Address` `Ord` bound, and import changes (`fortress_rollback`).
+Moving from the original `ggrs` crate? See the step-by-step guide in [migration.md](./docs/migration.md). It covers the crate rename (`fortress-rollback`), the new `Config::Address` `Ord` bound, and import changes (`fortress_rollback`).
 
 ## Useful Links
 

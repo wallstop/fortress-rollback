@@ -1,10 +1,10 @@
 mod ex_game;
 
+use clap::Parser;
 use ex_game::Game;
-use fortress_rollback::SessionBuilder;
-use instant::{Duration, Instant};
+use fortress_rollback::{PlayerHandle, SessionBuilder};
 use macroquad::prelude::*;
-use structopt::StructOpt;
+use web_time::{Duration, Instant};
 
 const FPS: f64 = 60.0;
 
@@ -20,17 +20,17 @@ fn window_conf() -> Conf {
     }
 }
 
-#[derive(StructOpt)]
+#[derive(Parser)]
 struct Opt {
-    #[structopt(short, long)]
+    #[arg(short, long)]
     num_players: usize,
-    #[structopt(short, long)]
+    #[arg(short = 'd', long)]
     check_distance: usize,
 }
 
 #[macroquad::main(window_conf)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // configure logging: output ggrs and example game logs to standard out
+    // configure logging: output Fortress Rollback and example game logs to standard out
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_max_level(tracing::Level::DEBUG)
@@ -41,9 +41,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_log::LogTracer::init()?;
 
     // read cmd line arguments
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
 
-    // create a GGRS session
+    // create a Fortress Rollback session
     let mut sess = SessionBuilder::new()
         .with_num_players(opt.num_players)
         .with_check_distance(opt.check_distance)
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a new box game
     let mut game = Game::new(opt.num_players);
-    game.register_local_handles((0..opt.num_players).collect());
+    game.register_local_handles((0..opt.num_players).map(PlayerHandle::new).collect());
 
     // time variables for tick rate
     let mut last_update = Instant::now();
@@ -71,7 +71,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             accumulator = accumulator.saturating_sub(Duration::from_secs_f64(fps_delta));
 
             // gather inputs
-            for handle in 0..opt.num_players {
+            for handle_idx in 0..opt.num_players {
+                let handle = PlayerHandle::new(handle_idx);
                 sess.add_local_input(handle, game.local_input(handle))?;
             }
 
