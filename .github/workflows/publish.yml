@@ -1,4 +1,4 @@
-name: Publish Crate
+name: Release - Publish Crate
 
 on:
   workflow_dispatch:

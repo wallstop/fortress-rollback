@@ -1,0 +1,48 @@
+# Fortress Rollback
+
+> Fortress Rollback is a correctness-first fork of GGRS (Good Game Rollback System), providing peer-to-peer rollback networking for deterministic multiplayer games in 100% safe Rust. It features deterministic hashing, panic-free APIs, formal verification (TLA+, Z3), and 1100+ tests with ~92% coverage.
+
+Key information:
+
+- Replaces callback-style API with request-driven control flow
+- All collections use `BTreeMap`/`BTreeSet` for guaranteed iteration order
+- All public APIs return `Result` types instead of panicking
+- `Config::Address` requires `Ord` trait (breaking change from GGRS)
+- Desync detection enabled by default (interval: 60 frames)
+- Types renamed: `GgrsError` → `FortressError`, `GgrsEvent` → `FortressEvent`, `GgrsRequest` → `FortressRequest`
+
+## Core Documentation
+
+- [README](https://github.com/wallstop/fortress-rollback/blob/main/README.md): Project overview, quick start, feature flags, and system dependencies
+- [User Guide](https://github.com/wallstop/fortress-rollback/blob/main/docs/user-guide.md): Complete integration guide covering sessions, inputs, state management, network configuration, and troubleshooting
+- [Architecture Guide](https://github.com/wallstop/fortress-rollback/blob/main/docs/architecture.md): Internal architecture, data flow, session types, synchronization protocol, and rollback mechanics
+- [Migration Guide](https://github.com/wallstop/fortress-rollback/blob/main/docs/migration.md): Step-by-step migration from GGRS to Fortress Rollback
+- [Fortress vs GGRS](https://github.com/wallstop/fortress-rollback/blob/main/docs/fortress-vs-ggrs.md): Detailed comparison, breaking changes, and bugs fixed
+
+## Examples
+
+- [Configuration Example](https://github.com/wallstop/fortress-rollback/blob/main/examples/configuration.rs): Demonstrates session builder configuration options
+- [Error Handling Example](https://github.com/wallstop/fortress-rollback/blob/main/examples/error_handling.rs): Shows proper error handling patterns
+- [Example Game](https://github.com/wallstop/fortress-rollback/tree/main/examples/ex_game): Complete interactive game demo with macroquad/bevy and matchbox
+
+## API Reference
+
+- [API Documentation](https://docs.rs/fortress-rollback/newest/fortress_rollback/): Complete Rustdoc API reference
+- [API Contracts](https://github.com/wallstop/fortress-rollback/blob/main/docs/specs/api-contracts.md): Preconditions, postconditions, and invariants for all public APIs
+
+## Formal Specifications
+
+- [Formal Spec](https://github.com/wallstop/fortress-rollback/blob/main/docs/specs/formal-spec.md): Core formal specifications in TLA+ notation
+- [Determinism Model](https://github.com/wallstop/fortress-rollback/blob/main/docs/specs/determinism-model.md): Determinism requirements and verification approach
+
+## Development
+
+- [Contributing Guide](https://github.com/wallstop/fortress-rollback/blob/main/docs/contributing.md): How to contribute, code style, and pre-commit hooks
+- [Changelog](https://github.com/wallstop/fortress-rollback/blob/main/CHANGELOG.md): Version history and release notes
+- [LLM Context](https://github.com/wallstop/fortress-rollback/blob/main/.llm/context.md): Comprehensive development guide for AI assistants
+
+## Optional
+
+- [Code of Conduct](https://github.com/wallstop/fortress-rollback/blob/main/docs/code-of-conduct.md): Community guidelines
+- [Spec Divergences](https://github.com/wallstop/fortress-rollback/blob/main/docs/specs/spec-divergences.md): Documented differences between formal spec and implementation
+- [GGRS Changelog Archive](https://github.com/wallstop/fortress-rollback/blob/main/docs/ggrs-changelog-archive.md): Historical changes from original GGRS project (v0.2.0–v0.11.0)

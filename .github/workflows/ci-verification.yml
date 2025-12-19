@@ -1,0 +1,207 @@
+name: CI - Verification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'specs/**'
+      - 'scripts/verify-*.sh'
+      - '.github/workflows/ci-verification.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'specs/**'
+      - 'scripts/verify-*.sh'
+      - '.github/workflows/ci-verification.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # TLA+ Model Checking
+  tla-verification:
+    name: TLA+ Model Checking
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Cache TLA+ tools
+        uses: actions/cache@v4
+        with:
+          path: .tla-tools
+          key: tla-tools-v1.8.0
+
+      - name: Run TLA+ verification
+        run: ./scripts/verify-tla.sh --fail-fast
+        timeout-minutes: 30
+
+  # Z3 SMT Solver Verification
+  z3-verification:
+    name: Z3 SMT Verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Configure sccache
+        id: sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
+
+      - name: Verify sccache is working
+        id: sccache-check
+        if: steps.sccache.outcome == 'success'
+        run: ./scripts/verify-sccache.sh
+        continue-on-error: true
+
+      - name: Clear sccache env on failure
+        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
+        run: |
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: z3-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            z3-${{ runner.os }}-cargo-
+
+      - name: Install Z3 library
+        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+
+      - name: Run Z3 verification tests (nextest)
+        run: cargo nextest run --profile ci --test verification --features z3-verification -E 'test(z3)'
+        timeout-minutes: 10
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+
+  # Kani Formal Verification (Tier 1 - Fast proofs)
+  kani-tier1:
+    name: Kani Tier 1 (Fast)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - name: Cache Kani
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-kani
+            ~/.cargo/bin/kani-*
+            ~/.kani
+          key: kani-0.66.0-${{ runner.os }}
+
+      - name: Install Kani
+        run: |
+          if ! command -v cargo-kani &> /dev/null; then
+            cargo install --locked kani-verifier
+            cargo kani setup
+          fi
+
+      - name: Run Kani verification (Tier 1 - Fast)
+        run: ./scripts/verify-kani.sh --quick --tier 1 --fail-fast --verbose
+        timeout-minutes: 15
+
+  # Kani Formal Verification (Tier 2 - Medium proofs)
+  kani-tier2:
+    name: Kani Tier 2 (Medium)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - name: Cache Kani
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-kani
+            ~/.cargo/bin/kani-*
+            ~/.kani
+          key: kani-0.66.0-${{ runner.os }}
+
+      - name: Install Kani
+        run: |
+          if ! command -v cargo-kani &> /dev/null; then
+            cargo install --locked kani-verifier
+            cargo kani setup
+          fi
+
+      - name: Run Kani verification (Tier 2 - Medium)
+        run: ./scripts/verify-kani.sh --quick --tier 2 --fail-fast
+        timeout-minutes: 30
+
+  # Kani Formal Verification (Tier 3 - Slow proofs)
+  kani-tier3:
+    name: Kani Tier 3 (Slow)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - name: Cache Kani
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-kani
+            ~/.cargo/bin/kani-*
+            ~/.kani
+          key: kani-0.66.0-${{ runner.os }}
+
+      - name: Install Kani
+        run: |
+          if ! command -v cargo-kani &> /dev/null; then
+            cargo install --locked kani-verifier
+            cargo kani setup
+          fi
+
+      - name: Run Kani verification (Tier 3 - Slow)
+        run: ./scripts/verify-kani.sh --quick --tier 3 --fail-fast
+        timeout-minutes: 45

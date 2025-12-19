@@ -1,10 +1,24 @@
-name: Docs & Links
+name: CI - Documentation
 
 on:
   push:
     branches: [main]
+    paths:
+      - '**.md'
+      - 'docs/**'
+      - '.markdownlint.json'
+      - '.markdown-link-check.json'
+      - 'scripts/check-links.sh'
+      - '.github/workflows/ci-docs.yml'
   pull_request:
     branches: [main]
+    paths:
+      - '**.md'
+      - 'docs/**'
+      - '.markdownlint.json'
+      - '.markdown-link-check.json'
+      - 'scripts/check-links.sh'
+      - '.github/workflows/ci-docs.yml'
   workflow_dispatch:
 
 jobs:
