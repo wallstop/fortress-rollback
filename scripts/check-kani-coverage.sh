@@ -48,11 +48,20 @@ print_usage() {
 get_source_proofs() {
     # Find all functions marked with #[kani::proof] in src/
     # Pattern: look for #[kani::proof] followed by fn proof_*
-    rg -A 3 '#\[kani::proof\]' "$PROJECT_ROOT/src/" 2>/dev/null \
-        | grep 'fn proof_' \
-        | /bin/sed 's/.*fn \(proof_[a-zA-Z0-9_]*\).*/\1/' \
-        | sort \
-        | uniq
+    # Use ripgrep if available, otherwise fall back to grep -r
+    if command -v rg &> /dev/null; then
+        rg -A 3 '#\[kani::proof\]' "$PROJECT_ROOT/src/" 2>/dev/null \
+            | grep 'fn proof_' \
+            | /bin/sed 's/.*fn \(proof_[a-zA-Z0-9_]*\).*/\1/' \
+            | sort \
+            | uniq
+    else
+        grep -r -A 3 '#\[kani::proof\]' "$PROJECT_ROOT/src/" 2>/dev/null \
+            | grep 'fn proof_' \
+            | /bin/sed 's/.*fn \(proof_[a-zA-Z0-9_]*\).*/\1/' \
+            | sort \
+            | uniq
+    fi
 }
 
 # Extract proof names from verify-kani.sh tier arrays
@@ -94,10 +103,11 @@ main() {
     echo "=========================================="
     echo ""
 
-    # Check prerequisites
-    if ! command -v rg &> /dev/null; then
-        echo -e "${RED}Error: ripgrep (rg) is not installed.${NC}"
-        exit 1
+    # Check prerequisites - ripgrep is optional, grep -r is fallback
+    if command -v rg &> /dev/null; then
+        echo -e "${BLUE}Using ripgrep for source scanning${NC}"
+    else
+        echo -e "${YELLOW}Note: ripgrep not found, using grep -r fallback${NC}"
     fi
 
     if [[ ! -f "$VERIFY_KANI_SCRIPT" ]]; then

@@ -262,8 +262,9 @@ run_kani() {
     fi
     
     # Add jobs for parallel execution
+    # Note: --jobs requires --output-format=terse in Kani 0.66.0+
     if [[ "$jobs" -gt 1 ]]; then
-        kani_cmd+=(--jobs "$jobs")
+        kani_cmd+=(--jobs "$jobs" --output-format terse)
     fi
     
     local start_time
