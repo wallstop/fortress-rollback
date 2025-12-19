@@ -138,11 +138,15 @@ jobs:
         run: ./scripts/verify-kani.sh --quick --tier 1 --fail-fast --verbose
         timeout-minutes: 15
 
-  # Kani Formal Verification (Tier 2 - Medium proofs)
+  # Kani Formal Verification (Tier 2 - Medium proofs, split into 3 parallel jobs)
   kani-tier2:
-    name: Kani Tier 2 (Medium)
+    name: Kani Tier 2 (${{ matrix.part }}/3)
     runs-on: ubuntu-latest
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3]
 
     steps:
       - uses: actions/checkout@v6
@@ -168,15 +172,19 @@ jobs:
             cargo kani setup
           fi
 
-      - name: Run Kani verification (Tier 2 - Medium)
-        run: ./scripts/verify-kani.sh --quick --tier 2 --fail-fast
-        timeout-minutes: 30
+      - name: Run Kani verification (Tier 2 - Part ${{ matrix.part }}/3)
+        run: ./scripts/verify-kani.sh --quick --tier 2 --part ${{ matrix.part }} --parts 3 --fail-fast
+        timeout-minutes: 20
 
-  # Kani Formal Verification (Tier 3 - Slow proofs)
+  # Kani Formal Verification (Tier 3 - Slow proofs, split into 3 parallel jobs)
   kani-tier3:
-    name: Kani Tier 3 (Slow)
+    name: Kani Tier 3 (${{ matrix.part }}/3)
     runs-on: ubuntu-latest
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3]
 
     steps:
       - uses: actions/checkout@v6
@@ -202,6 +210,6 @@ jobs:
             cargo kani setup
           fi
 
-      - name: Run Kani verification (Tier 3 - Slow)
-        run: ./scripts/verify-kani.sh --quick --tier 3 --fail-fast
-        timeout-minutes: 45
+      - name: Run Kani verification (Tier 3 - Part ${{ matrix.part }}/3)
+        run: ./scripts/verify-kani.sh --quick --tier 3 --part ${{ matrix.part }} --parts 3 --fail-fast
+        timeout-minutes: 30
