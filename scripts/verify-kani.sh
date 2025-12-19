@@ -16,6 +16,10 @@
 #   KANI_TIMEOUT     - Timeout per proof in seconds (default: 300)
 #   KANI_UNWIND      - Default unwind bound (default: use Kani defaults)
 #   KANI_JOBS        - Number of parallel jobs (default: 1)
+#
+# IMPORTANT: When adding new #[kani::proof] functions, you must also add them
+# to the appropriate TIER*_PROOFS array below. Use ./scripts/check-kani-coverage.sh
+# to validate that all proofs are covered.
 
 set -euo pipefail
 
@@ -89,11 +93,11 @@ TIER2_PROOFS=(
     "proof_saved_states_count"
     "proof_get_cell_validates_frame"
     "proof_saved_states_circular_index"
-    "proof_index_wrapping_consistent"
 )
 
 # Tier 3: Slow proofs (>2min each) - complex state verification
 TIER3_PROOFS=(
+    "proof_index_wrapping_consistent"
     "proof_add_single_input_maintains_invariants"
     "proof_sequential_inputs_maintain_invariants"
     "proof_discard_maintains_invariants"
@@ -119,6 +123,8 @@ print_usage() {
     echo "  --harness NAME  Run specific harness (can be repeated)"
     echo "  --quick         Run with reduced bounds for faster verification"
     echo "  --tier N        Run only tier N proofs (1=fast, 2=medium, 3=slow)"
+    echo "  --part P        Run only part P of the tier (use with --parts)"
+    echo "  --parts N       Split tier into N parts (use with --part)"
     echo "  --verbose       Show detailed Kani output"
     echo "  --jobs N        Run N harnesses in parallel (default: 1)"
     echo "  --fail-fast     Stop immediately when any proof fails (useful for CI)"
@@ -137,6 +143,7 @@ print_usage() {
     echo "  $0                              # Run all proofs"
     echo "  $0 --tier 1                     # Run only fast proofs"
     echo "  $0 --tier 1 --tier 2            # Run fast and medium proofs"
+    echo "  $0 --tier 2 --part 1 --parts 3  # Run first third of tier 2"
     echo "  $0 --harness proof_frame_new_valid  # Run single proof"
     echo "  $0 --quick --jobs 4             # Fast mode with parallel execution"
     echo "  $0 --quick --fail-fast          # CI mode: fast bounds, stop on first failure"
@@ -255,8 +262,9 @@ run_kani() {
     fi
     
     # Add jobs for parallel execution
+    # Note: --jobs requires --output-format=terse in Kani 0.66.0+
     if [[ "$jobs" -gt 1 ]]; then
-        kani_cmd+=(--jobs "$jobs")
+        kani_cmd+=(--jobs "$jobs" --output-format terse)
     fi
     
     local start_time
@@ -394,6 +402,8 @@ run_tier_proofs() {
     local verbose=$3
     local jobs=$4
     local fail_fast=$5
+    local part=${6:-0}
+    local parts=${7:-0}
     
     local proofs
     case "$tier" in
@@ -403,7 +413,26 @@ run_tier_proofs() {
         *) echo "Invalid tier: $tier" >&2; return 1 ;;
     esac
     
-    echo -e "${BLUE}Running Tier $tier proofs (${#proofs[@]} harnesses)...${NC}"
+    # If part/parts specified, select subset of proofs
+    if [[ "$part" -gt 0 ]] && [[ "$parts" -gt 0 ]]; then
+        local total_proofs=${#proofs[@]}
+        local chunk_size=$(( (total_proofs + parts - 1) / parts ))
+        local start_idx=$(( (part - 1) * chunk_size ))
+        local end_idx=$(( start_idx + chunk_size ))
+        if [[ $end_idx -gt $total_proofs ]]; then
+            end_idx=$total_proofs
+        fi
+        
+        local selected_proofs=()
+        for ((i=start_idx; i<end_idx; i++)); do
+            selected_proofs+=("${proofs[$i]}")
+        done
+        proofs=("${selected_proofs[@]}")
+        
+        echo -e "${BLUE}Running Tier $tier Part $part/$parts proofs (${#proofs[@]} harnesses)...${NC}"
+    else
+        echo -e "${BLUE}Running Tier $tier proofs (${#proofs[@]} harnesses)...${NC}"
+    fi
     
     local any_failed=false
     local tier_passed=0
@@ -442,6 +471,8 @@ main() {
     local harnesses=()
     local tiers=()
     local jobs=1
+    local part=0
+    local parts=0
     
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -483,6 +514,22 @@ main() {
                 fi
                 shift 2
                 ;;
+            --part)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: --part requires a number"
+                    exit 1
+                fi
+                part="$2"
+                shift 2
+                ;;
+            --parts)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: --parts requires a number"
+                    exit 1
+                fi
+                parts="$2"
+                shift 2
+                ;;
             --jobs)
                 if [[ $# -lt 2 ]]; then
                     echo "Error: --jobs requires a number"
@@ -507,6 +554,20 @@ main() {
                 ;;
         esac
     done
+    
+    # Validate part/parts combination
+    if [[ "$part" -gt 0 ]] && [[ "$parts" -eq 0 ]]; then
+        echo "Error: --part requires --parts to be specified"
+        exit 1
+    fi
+    if [[ "$parts" -gt 0 ]] && [[ "$part" -eq 0 ]]; then
+        echo "Error: --parts requires --part to be specified"
+        exit 1
+    fi
+    if [[ "$part" -gt "$parts" ]] && [[ "$parts" -gt 0 ]]; then
+        echo "Error: --part ($part) cannot be greater than --parts ($parts)"
+        exit 1
+    fi
     
     echo "=========================================="
     echo "Fortress Rollback Kani Verification"
@@ -538,7 +599,7 @@ main() {
     elif [[ ${#tiers[@]} -gt 0 ]]; then
         # Run specific tiers
         for tier in "${tiers[@]}"; do
-            if ! run_tier_proofs "$tier" "$quick" "$verbose" "$jobs" "$fail_fast"; then
+            if ! run_tier_proofs "$tier" "$quick" "$verbose" "$jobs" "$fail_fast" "$part" "$parts"; then
                 any_failed=true
                 if [[ "$fail_fast" == "true" ]]; then
                     break

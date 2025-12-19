@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -53,8 +53,16 @@ jobs:
       # Note: sccache is intentionally NOT used here because cargo-tarpaulin
       # needs direct control over the compilation process to instrument code
       # for coverage collection. Using RUSTC_WRAPPER breaks tarpaulin.
+      #
+      # Multi-process network tests are skipped because:
+      # 1. They spawn external processes which doesn't work well under instrumentation
+      # 2. The overhead causes timeouts (default 60s is insufficient)
+      # 3. These tests are thoroughly exercised in ci-network.yml with proper timeouts
+      #
+      # --exclude-files removes code from coverage report
+      # -- --skip multi_process passes skip argument to test executable
       - name: Run coverage (tarpaulin)
-        run: cargo tarpaulin --out Xml --exclude-files 'tests/network/multi_process.rs'
+        run: cargo tarpaulin --out Xml --exclude-files 'tests/network/multi_process.rs' -- --skip multi_process
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v6
