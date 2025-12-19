@@ -28,6 +28,7 @@ This guide walks you through integrating Fortress Rollback into your game. By th
 10. [Feature Flags](#feature-flags)
     - [Feature Flag Reference](#feature-flag-reference)
     - [Feature Flag Combinations](#feature-flag-combinations)
+    - [Web / WASM Integration](#web--wasm-integration)
     - [Platform-Specific Features](#platform-specific-features)
 11. [Spectator Sessions](#spectator-sessions)
 12. [Testing with SyncTest](#testing-with-synctest)
@@ -1249,12 +1250,13 @@ Fortress Rollback provides several Cargo feature flags to customize behavior for
 |---------|-------------|----------|--------------|
 | `sync-send` | Adds `Send + Sync` bounds to core traits | Multi-threaded game engines | None |
 | `tokio` | Enables `TokioUdpSocket` for async Tokio applications | Async game servers | `tokio` crate |
-| `wasm-bindgen` | Placeholder for WASM compatibility | Browser-based games | None |
 | `paranoid` | Enables runtime invariant checking in release builds | Debugging production issues | None |
 | `loom` | Enables Loom-compatible synchronization primitives | Concurrency testing | `loom` crate |
 | `z3-verification` | Enables Z3 formal verification tests | Development/CI verification | `z3` crate (system) |
 | `z3-verification-bundled` | Z3 with bundled build (builds from source) | CI environments without system Z3 | `z3` crate |
 | `graphical-examples` | Enables the ex_game graphical examples | Running visual demos | `macroquad` crate |
+
+> **Note:** WASM support is automatic — no feature flag needed. See [Web / WASM Integration](#web--wasm-integration) below.
 
 ### Feature Details
 
@@ -1319,17 +1321,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 **Note:** When used with the `sync-send` feature, `TokioUdpSocket` automatically implements `Send + Sync`.
-
-#### `wasm-bindgen`
-
-Placeholder feature for WebAssembly compatibility. Fortress Rollback automatically detects `target_arch = "wasm32"` and uses `js-sys` for time functions when compiling for WebAssembly.
-
-```toml
-[dependencies]
-fortress-rollback = { version = "0.1", features = ["wasm-bindgen"] }
-```
-
-For browser games using WebRTC, combine with [Matchbox](https://github.com/johanhelsing/matchbox) sockets.
 
 #### `paranoid`
 
@@ -1419,8 +1410,8 @@ Most features are independent and can be combined freely. Here's a matrix showin
 
 | Combination | Valid | Notes |
 |-------------|-------|-------|
-| `sync-send` + `wasm-bindgen` | ✅ | Common for browser games |
 | `sync-send` + `paranoid` | ✅ | Debug multi-threaded issues |
+| `sync-send` + `tokio` | ✅ | Common for async servers |
 | `paranoid` + `z3-verification` | ✅ | Maximum verification |
 | `z3-verification` + `z3-verification-bundled` | ⚠️ | Redundant (bundled implies base) |
 | `loom` + any other | ⚠️ | Loom tests should run in isolation |
@@ -1433,9 +1424,9 @@ Most features are independent and can be combined freely. Here's a matrix showin
 [dependencies]
 fortress-rollback = { version = "0.1", features = ["sync-send"] }
 
-# Browser game with matchbox
+# Async server with Tokio
 [dependencies]
-fortress-rollback = { version = "0.1", features = ["sync-send", "wasm-bindgen"] }
+fortress-rollback = { version = "0.1", features = ["sync-send", "tokio"] }
 
 # Debugging production issues
 [dependencies]
@@ -1444,6 +1435,105 @@ fortress-rollback = { version = "0.1", features = ["sync-send", "paranoid"] }
 # Development with examples
 [dependencies]
 fortress-rollback = { version = "0.1", features = ["sync-send", "graphical-examples"] }
+```
+
+### Web / WASM Integration
+
+Fortress Rollback works in the browser with **no feature flags required**. The library automatically detects `target_arch = "wasm32"` at compile time and uses browser-compatible APIs.
+
+#### What Works Automatically
+
+| Component | Native | WASM |
+|-----------|--------|------|
+| Time (`Instant`) | `std::time` | `web_time` crate |
+| Epoch time | `SystemTime` | `js_sys::Date` |
+| Core rollback logic | ✅ | ✅ |
+| `UdpNonBlockingSocket` | ✅ | ❌ (no UDP in browsers) |
+
+#### Networking in the Browser
+
+Browsers don't support raw UDP sockets. For browser games, you need WebRTC or WebSockets. The recommended solution is **[Matchbox](https://github.com/johanhelsing/matchbox)**:
+
+```toml
+[dependencies]
+fortress-rollback = { version = "0.1", features = ["sync-send"] }
+matchbox_socket = { version = "0.13", features = ["ggrs"] }
+```
+
+Matchbox provides:
+
+- **WebRTC peer-to-peer connections** — Direct data channels between browsers
+- **Signaling server** — Only needed during connection establishment
+- **Cross-platform** — Same API works on native and WASM
+- **GGRS compatibility** — The `ggrs` feature implements `NonBlockingSocket`
+
+#### Basic Matchbox Integration
+
+```rust,ignore
+use fortress_rollback::{Config, PlayerHandle, PlayerType, SessionBuilder};
+use matchbox_socket::WebRtcSocket;
+
+// Create matchbox socket (connects to signaling server)
+let (socket, message_loop) = WebRtcSocket::new_ggrs("wss://matchbox.example.com/my_game");
+
+// Spawn the message loop (required for WASM)
+#[cfg(target_arch = "wasm32")]
+wasm_bindgen_futures::spawn_local(message_loop);
+
+// Wait for peers to connect...
+// (In practice, poll socket.connected_peers() until you have enough)
+
+// Create session with matchbox socket
+let session = SessionBuilder::<GameConfig>::new()
+    .with_num_players(2)
+    .add_player(PlayerType::Local, PlayerHandle::new(0))?
+    .add_player(PlayerType::Remote(peer_id), PlayerHandle::new(1))?
+    .start_p2p_session(socket)?;
+```
+
+#### Custom Transport (WebSockets, etc.)
+
+For other transports, implement `NonBlockingSocket`:
+
+```rust,ignore
+use fortress_rollback::{Message, NonBlockingSocket};
+
+struct MyWebSocketTransport {
+    // Your WebSocket implementation
+}
+
+impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
+    fn send_to(&mut self, msg: &Message, addr: &MyPeerId) {
+        // Serialize msg and send via WebSocket
+        let bytes = bincode::serialize(msg).unwrap();
+        self.send_to_peer(addr, &bytes);
+    }
+
+    fn receive_all_messages(&mut self) -> Vec<(MyPeerId, Message)> {
+        // Return all messages received since last call
+        self.drain_received_messages()
+            .filter_map(|(peer, bytes)| {
+                bincode::deserialize(&bytes).ok().map(|msg| (peer, msg))
+            })
+            .collect()
+    }
+}
+```
+
+See the [custom socket example](../examples/custom_socket.rs) for a complete implementation guide.
+
+#### Building for WASM
+
+```bash
+# Install wasm-pack
+cargo install wasm-pack
+
+# Build for web
+wasm-pack build --target web
+
+# Or use trunk for development
+cargo install trunk
+trunk serve
 ```
 
 ### Platform-Specific Features

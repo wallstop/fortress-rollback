@@ -14,7 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] - 2024-12-XX
+## [0.1.1] - 2025-12-XX
+
+### Changed
+
+- Reduced crate size by excluding irrelevant artifacts from published package
+
+## [0.1.0] - 2025-12-XX
 
 Initial release of Fortress Rollback, a correctness-first fork of GGRS v0.11.0.
 
@@ -175,5 +181,6 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/main...HEAD
-[0.1.0]: https://github.com/wallstop/fortress-rollback/tree/main
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/wallstop/fortress-rollback/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/wallstop/fortress-rollback/releases/tag/v0.1.0

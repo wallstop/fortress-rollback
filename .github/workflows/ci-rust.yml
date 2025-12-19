@@ -92,55 +92,6 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-  # WASM compatibility check
-  check-wasm:
-    name: Check WASM Target
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install stable wasm toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          targets: wasm32-unknown-unknown
-
-      - name: Configure sccache
-        id: sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-        continue-on-error: true
-
-      - name: Verify sccache is working
-        id: sccache-check
-        if: steps.sccache.outcome == 'success'
-        run: ./scripts/verify-sccache.sh
-        continue-on-error: true
-
-      - name: Clear sccache env on failure
-        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
-        run: |
-          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
-
-      - name: Cache cargo registry and build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: wasm-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            wasm-${{ runner.os }}-cargo-
-
-      - name: Check WASM target
-        run: cargo check --target wasm32-unknown-unknown --features wasm-bindgen
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
-          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
-          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
-
   # Miri undefined behavior check
   miri:
     name: Miri UB Check

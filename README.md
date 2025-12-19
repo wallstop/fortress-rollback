@@ -88,7 +88,6 @@ For detailed configuration guidance, see the [User Guide](./docs/user-guide.md#n
 |---------|-------------|
 | `sync-send` | Adds `Send + Sync` bounds for multi-threaded game engines (e.g., Bevy) |
 | `tokio` | Enables `TokioUdpSocket` for async Tokio applications |
-| `wasm-bindgen` | WASM compatibility for browser games |
 | `paranoid` | Runtime invariant checking in release builds |
 | `graphical-examples` | Enables ex_game graphical examples (requires macroquad deps) |
 | `z3-verification` | Z3 formal verification tests (requires system Z3) |
@@ -99,12 +98,25 @@ For detailed feature documentation, see the [User Guide](./docs/user-guide.md#fe
 
 Moving from the original `ggrs` crate? See the step-by-step guide in [migration.md](./docs/migration.md). It covers the crate rename (`fortress-rollback`), the new `Config::Address` `Ord` bound, and import changes (`fortress_rollback`).
 
-### WASM support through WebRTC sockets
+### Web / WASM Support
 
-If you are interested to run a GGRS application in your browser, check the amazing Matchbox project!
-The matchbox sockets are compatible with GGRS through a feature flag:
+Fortress Rollback works in the browser! WASM support is **automatic** — no feature flags needed. The library detects `target_arch = "wasm32"` at compile time and uses browser-compatible APIs (`js-sys` for time).
 
-- [Matchbox](https://github.com/johanhelsing/matchbox)
+For networking in the browser, use **[Matchbox](https://github.com/johanhelsing/matchbox)** — it provides WebRTC sockets that implement `NonBlockingSocket` and work seamlessly with Fortress Rollback:
+
+```toml
+[dependencies]
+fortress-rollback = "0.1"
+matchbox_socket = { version = "0.13", features = ["ggrs"] }
+```
+
+Matchbox handles:
+
+- **WebRTC peer-to-peer connections** — direct data channels between browsers
+- **Signaling server** — connection establishment (only needed during setup)
+- **Cross-platform** — works on native and WASM with the same API
+
+See the [custom socket example](./examples/custom_socket.rs) for implementing your own transport (WebSockets, custom protocols, etc.)
 
 ## Licensing
 
