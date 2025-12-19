@@ -4,10 +4,10 @@
 
 <p align="center">
   <a href="https://crates.io/crates/fortress-rollback"><img src="https://img.shields.io/crates/v/fortress-rollback?style=for-the-badge" alt="crates.io"></a>
-  <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/rust.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/rust.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
+  <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/ci-rust.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/ci-rust.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
   <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/publish.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/publish.yml?branch=main&style=for-the-badge&label=Publish" alt="Publish"></a>
-  <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/coverage.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/coverage.yml?branch=main&style=for-the-badge&label=Coverage" alt="Coverage"></a>
-  <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/benchmark.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/benchmark.yml?branch=main&style=for-the-badge&label=Benchmark" alt="Benchmark"></a>
+  <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/ci-coverage.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/ci-coverage.yml?branch=main&style=for-the-badge&label=Coverage" alt="Coverage"></a>
+  <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/ci-benchmarks.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/ci-benchmarks.yml?branch=main&style=for-the-badge&label=Benchmark" alt="Benchmark"></a>
 </p>
 
 ---
