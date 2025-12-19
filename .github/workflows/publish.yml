@@ -11,7 +11,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -77,3 +77,13 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: cargo publish
+
+      - name: Create and push git tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -n1 | cut -d '"' -f2)
+          TAG_NAME="v${CARGO_VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
+          git push origin "$TAG_NAME"

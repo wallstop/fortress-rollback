@@ -54,6 +54,23 @@ Demonstrates all available configuration options including:
 cargo run --example configuration
 ```
 
+## Custom Socket Example
+
+Demonstrates how to implement the `NonBlockingSocket` trait for custom networking transports:
+
+- Channel-based socket for local testing
+- WebSocket adapter skeleton
+- Matchbox integration reference
+
+This is essential reading if you're:
+- Building a browser game (WebRTC/WebSockets)
+- Integrating with a custom networking library
+- Testing without real network connections
+
+```shell
+cargo run --example custom_socket
+```
+
 ## Error Handling Example
 
 Demonstrates proper error handling patterns:

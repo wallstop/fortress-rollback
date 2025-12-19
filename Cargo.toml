@@ -1,6 +1,6 @@
 [package]
 name = "fortress-rollback"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["wallstop <wallstop@wallstopstudios.com>"]
 edition = "2021"
 rust-version = "1.86"  # Minimum Supported Rust Version (MSRV) - required by criterion 0.8.1
@@ -10,6 +10,15 @@ readme = "README.md"
 repository = "https://github.com/wallstop/fortress-rollback"
 keywords = ["gamedev", "networking", "ggpo", "rollback"]
 categories = ["network-programming", "game-development"]
+exclude = [
+    ".tla-tools/",
+    ".devcontainer/",
+    ".github/",
+    "docker/",
+    "scripts/",
+    "specs/",
+    "proptest-regressions/",
+]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(loom)'] }
@@ -120,7 +129,6 @@ fn_params_excessive_bools = "warn"
 
 [features]
 sync-send = []
-wasm-bindgen = []
 # Enable runtime invariant checking in release builds (for debugging production issues)
 paranoid = []
 # Enable loom-compatible synchronization primitives for concurrency testing
