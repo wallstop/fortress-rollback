@@ -70,22 +70,34 @@ jobs:
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
 
-      # Check if gh-pages branch exists
-      - name: Check if gh-pages branch exists
+      # Check if gh-pages branch exists, create it if pushing to main
+      - name: Check and create gh-pages branch if needed
         id: gh-pages-check
         run: |
           if git ls-remote --exit-code --heads origin gh-pages > /dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::gh-pages branch does not exist yet. It will be created on the first push to main."
+            echo "::notice::gh-pages branch does not exist yet."
+            # Create gh-pages branch on push to main (bootstrap case)
+            if [ "${{ github.event_name }}" = "push" ]; then
+              echo "Creating gh-pages branch for benchmark storage..."
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git checkout --orphan gh-pages
+              git reset --hard
+              git commit --allow-empty -m "Initialize gh-pages branch for benchmarks"
+              git push origin gh-pages
+              git checkout main
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::gh-pages branch created successfully."
+            fi
           fi
 
       # Store benchmark results and detect regressions
       # Uses github-action-benchmark: https://github.com/benchmark-action/github-action-benchmark
-      # Note: This step only runs when gh-pages exists OR we're pushing to main (which creates it)
       - name: Store benchmark results
-        if: steps.gh-pages-check.outputs.exists == 'true' || github.event_name == 'push'
+        if: steps.gh-pages-check.outputs.exists == 'true'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Fortress Rollback Benchmarks
@@ -106,8 +118,6 @@ jobs:
           # Only update on push to main (not PRs) to avoid benchmark pollution
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: bench
-          # Skip fetching gh-pages if it doesn't exist (bootstrap case for first push)
-          skip-fetch-gh-pages: ${{ steps.gh-pages-check.outputs.exists == 'false' }}
 
       - name: Skip benchmark storage (no gh-pages branch yet)
         if: steps.gh-pages-check.outputs.exists == 'false' && github.event_name != 'push'
