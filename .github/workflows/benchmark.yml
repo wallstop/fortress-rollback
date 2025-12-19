@@ -31,10 +31,15 @@ permissions:
   contents: write
   # Required for posting benchmark comments on commits
   deployments: write
+  # Required for posting PR comments (benchmark alerts)
+  pull-requests: write
 
 jobs:
   benchmark:
+    name: Run Benchmarks
     runs-on: ubuntu-latest
+    # Skip for Dependabot PRs - it doesn't have write permissions for PR comments
+    if: github.actor != 'dependabot[bot]'
     # Use a consistent runner for reproducible results
     # Note: Performance may vary between runner hardware revisions
 
