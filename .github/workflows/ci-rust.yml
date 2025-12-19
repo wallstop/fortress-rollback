@@ -286,6 +286,7 @@ jobs:
         run: cargo publish --dry-run
 
   # Semver compatibility check
+  # Uses the official action which has built-in caching for baseline rustdoc
   semver-checks:
     name: Semver Check
     runs-on: ubuntu-latest
@@ -293,49 +294,19 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+
+      # Use Swatinem/rust-cache for better Rust-specific caching
+      # This caches ~/.cargo and target/ efficiently
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
         with:
-          fetch-depth: 0
+          # Share cache with other Ubuntu jobs for faster builds
+          shared-key: "ubuntu-cargo"
+          # Cache only dependencies, not the main crate build artifacts
+          cache-targets: "false"
 
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-
-      - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@cargo-semver-checks
-
-      - name: Configure sccache
-        id: sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-        continue-on-error: true
-
-      - name: Verify sccache is working
-        id: sccache-check
-        if: steps.sccache.outcome == 'success'
-        run: ./scripts/verify-sccache.sh
-        continue-on-error: true
-
-      - name: Clear sccache env on failure
-        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
-        run: |
-          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
-
-      - name: Cache cargo registry and build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: semver-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            semver-${{ runner.os }}-cargo-
-
+      # Use the official cargo-semver-checks action which has built-in
+      # rustdoc caching for both baseline and current versions
       - name: Check semver compatibility
-        run: cargo semver-checks check-release
+        uses: obi1kenobi/cargo-semver-checks-action@v2
         continue-on-error: true  # Warn but don't fail - breaking changes are acceptable if documented
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
-          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
-          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
