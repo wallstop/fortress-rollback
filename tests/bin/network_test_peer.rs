@@ -150,13 +150,27 @@ impl TestState {
     }
 }
 
+/// Information about the checksum computation for diagnostic purposes.
+#[derive(Serialize)]
+struct ChecksumDiagnostics {
+    start_frame: i32,
+    end_frame: i32,
+    frames_included: i32,
+    frames_missing: Vec<i32>,
+    confirmed_frame: i32,
+}
+
 /// Compute a checksum from confirmed inputs for a recent window of frames.
 /// This is deterministic because both peers have the same confirmed inputs,
 /// and we only use frames that are guaranteed to be in the input queue.
-fn compute_confirmed_checksum<T: Config<Input = TestInput, Address = SocketAddr>>(
+///
+/// Returns the checksum and diagnostic information about which frames were included.
+fn compute_confirmed_checksum_with_diagnostics<
+    T: Config<Input = TestInput, Address = SocketAddr>,
+>(
     session: &fortress_rollback::P2PSession<T>,
     target_frames: i32,
-) -> u64 {
+) -> (u64, ChecksumDiagnostics) {
     let mut hasher = DeterministicHasher::new();
 
     // Use a window of the last 64 frames (half of input queue capacity).
@@ -164,20 +178,37 @@ fn compute_confirmed_checksum<T: Config<Input = TestInput, Address = SocketAddr>
     const WINDOW_SIZE: i32 = 64;
     let start_frame = std::cmp::max(0, target_frames - WINDOW_SIZE);
 
+    let mut frames_included = 0;
+    let mut frames_missing = Vec::new();
+
     for frame_num in start_frame..target_frames {
         let frame = Frame::new(frame_num);
-        if let Ok(inputs) = session.confirmed_inputs_for_frame(frame) {
-            // Hash each player's input for this frame
-            for (player_idx, input) in inputs.iter().enumerate() {
-                // Hash player index, frame, and input value
-                (player_idx as u32).hash(&mut hasher);
-                frame_num.hash(&mut hasher);
-                input.value.hash(&mut hasher);
-            }
+        match session.confirmed_inputs_for_frame(frame) {
+            Ok(inputs) => {
+                frames_included += 1;
+                // Hash each player's input for this frame
+                for (player_idx, input) in inputs.iter().enumerate() {
+                    // Hash player index, frame, and input value
+                    (player_idx as u32).hash(&mut hasher);
+                    frame_num.hash(&mut hasher);
+                    input.value.hash(&mut hasher);
+                }
+            },
+            Err(_) => {
+                frames_missing.push(frame_num);
+            },
         }
     }
 
-    hasher.finish()
+    let diagnostics = ChecksumDiagnostics {
+        start_frame,
+        end_frame: target_frames,
+        frames_included,
+        frames_missing,
+        confirmed_frame: session.confirmed_frame().as_i32(),
+    };
+
+    (hasher.finish(), diagnostics)
 }
 
 /// Compute the game state value from confirmed inputs only.
@@ -186,10 +217,14 @@ fn compute_confirmed_checksum<T: Config<Input = TestInput, Address = SocketAddr>
 /// We compute over a RECENT window of frames rather than all frames, because
 /// older frames may have been discarded from the input queue. The window size
 /// is chosen to be well within the input queue capacity (128 frames).
-fn compute_confirmed_game_value<T: Config<Input = TestInput, Address = SocketAddr>>(
+///
+/// Returns the computed value and diagnostic information.
+fn compute_confirmed_game_value_with_diagnostics<
+    T: Config<Input = TestInput, Address = SocketAddr>,
+>(
     session: &fortress_rollback::P2PSession<T>,
     target_frames: i32,
-) -> i64 {
+) -> (i64, ChecksumDiagnostics) {
     let mut value: i64 = 0;
 
     // Use a window of the last 64 frames (half of input queue capacity).
@@ -197,17 +232,34 @@ fn compute_confirmed_game_value<T: Config<Input = TestInput, Address = SocketAdd
     const WINDOW_SIZE: i32 = 64;
     let start_frame = std::cmp::max(0, target_frames - WINDOW_SIZE);
 
+    let mut frames_included = 0;
+    let mut frames_missing = Vec::new();
+
     for frame_num in start_frame..target_frames {
         let frame = Frame::new(frame_num);
-        if let Ok(inputs) = session.confirmed_inputs_for_frame(frame) {
-            // Apply each player's input using the same formula as TestState::advance
-            for (i, input) in inputs.iter().enumerate() {
-                value = value.wrapping_add(input.value as i64 * (i as i64 + 1));
-            }
+        match session.confirmed_inputs_for_frame(frame) {
+            Ok(inputs) => {
+                frames_included += 1;
+                // Apply each player's input using the same formula as TestState::advance
+                for (i, input) in inputs.iter().enumerate() {
+                    value = value.wrapping_add(input.value as i64 * (i as i64 + 1));
+                }
+            },
+            Err(_) => {
+                frames_missing.push(frame_num);
+            },
         }
     }
 
-    value
+    let diagnostics = ChecksumDiagnostics {
+        start_frame,
+        end_frame: target_frames,
+        frames_included,
+        frames_missing,
+        confirmed_frame: session.confirmed_frame().as_i32(),
+    };
+
+    (value, diagnostics)
 }
 
 #[repr(C)]
@@ -275,6 +327,8 @@ struct TestResult {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     debug_log: Option<Vec<DebugEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<ChecksumDiagnostics>,
 }
 
 fn parse_args() -> Args {
@@ -388,6 +442,7 @@ fn output_error(msg: &str) {
         rollbacks: 0,
         error: Some(msg.to_string()),
         debug_log: None,
+        diagnostics: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     println!("{}", json);
@@ -422,6 +477,7 @@ fn run_test(args: &Args) -> TestResult {
                 rollbacks: 0,
                 error: Some(format!("Failed to bind socket: {}", e)),
                 debug_log: None,
+                diagnostics: None,
             };
         },
     };
@@ -451,6 +507,7 @@ fn run_test(args: &Args) -> TestResult {
                 rollbacks: 0,
                 error: Some(format!("Failed to add local player: {}", e)),
                 debug_log: None,
+                diagnostics: None,
             };
         },
     };
@@ -466,6 +523,7 @@ fn run_test(args: &Args) -> TestResult {
                 rollbacks: 0,
                 error: Some(format!("Failed to add remote player: {}", e)),
                 debug_log: None,
+                diagnostics: None,
             };
         },
     };
@@ -481,6 +539,7 @@ fn run_test(args: &Args) -> TestResult {
                 rollbacks: 0,
                 error: Some(format!("Failed to start session: {}", e)),
                 debug_log: None,
+                diagnostics: None,
             };
         },
     };
@@ -498,7 +557,8 @@ fn run_test(args: &Args) -> TestResult {
         // Check timeout
         if start_time.elapsed() > timeout {
             // Compute checksum from confirmed inputs (even though we timed out)
-            let checksum = compute_confirmed_checksum(&session, args.target_frames);
+            let (checksum, diagnostics) =
+                compute_confirmed_checksum_with_diagnostics(&session, args.target_frames);
             return TestResult {
                 success: false,
                 final_frame: game.state.frame,
@@ -516,6 +576,7 @@ fn run_test(args: &Args) -> TestResult {
                 } else {
                     None
                 },
+                diagnostics: Some(diagnostics),
             };
         }
 
@@ -562,11 +623,32 @@ fn run_test(args: &Args) -> TestResult {
 
             // After settle, recompute the game state from confirmed inputs only.
             // This gives us a deterministic value that both peers will agree on.
-            let confirmed_value =
-                compute_confirmed_game_value::<TestConfig>(&session, args.target_frames);
+            let (confirmed_value, value_diagnostics) =
+                compute_confirmed_game_value_with_diagnostics::<TestConfig>(
+                    &session,
+                    args.target_frames,
+                );
 
             // Compute checksum from confirmed inputs for frames 0..target_frames
-            let checksum = compute_confirmed_checksum(&session, args.target_frames);
+            let (checksum, checksum_diagnostics) =
+                compute_confirmed_checksum_with_diagnostics(&session, args.target_frames);
+
+            // Warn if diagnostics show missing frames (this helps debug desync issues)
+            if !checksum_diagnostics.frames_missing.is_empty() {
+                eprintln!(
+                    "WARNING: Missing {} frames in checksum computation: {:?}",
+                    checksum_diagnostics.frames_missing.len(),
+                    checksum_diagnostics.frames_missing
+                );
+            }
+
+            // Sanity check: value_diagnostics and checksum_diagnostics should match
+            if value_diagnostics.frames_included != checksum_diagnostics.frames_included {
+                eprintln!(
+                    "WARNING: Diagnostics mismatch - value included {} frames, checksum included {}",
+                    value_diagnostics.frames_included, checksum_diagnostics.frames_included
+                );
+            }
 
             return TestResult {
                 success: true,
@@ -580,6 +662,7 @@ fn run_test(args: &Args) -> TestResult {
                 } else {
                     None
                 },
+                diagnostics: Some(checksum_diagnostics),
             };
         }
 
@@ -594,7 +677,8 @@ fn run_test(args: &Args) -> TestResult {
             };
 
             if let Err(e) = session.add_local_input(local_handle, input) {
-                let checksum = compute_confirmed_checksum(&session, args.target_frames);
+                let (checksum, diagnostics) =
+                    compute_confirmed_checksum_with_diagnostics(&session, args.target_frames);
                 return TestResult {
                     success: false,
                     final_frame: game.state.frame,
@@ -607,13 +691,15 @@ fn run_test(args: &Args) -> TestResult {
                     } else {
                         None
                     },
+                    diagnostics: Some(diagnostics),
                 };
             }
 
             match session.advance_frame() {
                 Ok(requests) => game.handle_requests(requests),
                 Err(e) => {
-                    let checksum = compute_confirmed_checksum(&session, args.target_frames);
+                    let (checksum, diagnostics) =
+                        compute_confirmed_checksum_with_diagnostics(&session, args.target_frames);
                     return TestResult {
                         success: false,
                         final_frame: game.state.frame,
@@ -626,6 +712,7 @@ fn run_test(args: &Args) -> TestResult {
                         } else {
                             None
                         },
+                        diagnostics: Some(diagnostics),
                     };
                 },
             }

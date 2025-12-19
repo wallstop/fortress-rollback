@@ -115,54 +115,104 @@ run_test() {
     cd "$PROJECT_ROOT"
     local start_time=$(date +%s)
 
-    if env $env_string docker compose -f "$COMPOSE_FILE" up \
-        --abort-on-container-exit \
-        --exit-code-from peer1 \
-        --timeout 180 \
-        > "$log_file" 2>&1; then
+    # Start containers in detached mode and capture logs
+    # NOTE: We don't use --abort-on-container-exit because under poor network
+    # conditions, peers may finish at very different times. If peer2 finishes
+    # first, --abort-on-container-exit would kill peer1 before it outputs results.
+    if ! env $env_string docker compose -f "$COMPOSE_FILE" up -d > "$log_file" 2>&1; then
+        log_error "$test_name failed to start containers - check $log_file"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        FAILED_TESTS="$FAILED_TESTS $test_name"
+        docker compose -f "$COMPOSE_FILE" down --timeout 5 > /dev/null 2>&1 || true
+        return
+    fi
 
-        local end_time=$(date +%s)
-        local duration=$((end_time - start_time))
-
-        # Parse results in a single pass using awk (much faster than multiple greps)
-        # Uses POSIX-compatible awk (no gawk extensions)
-        local result
-        result=$(awk '
-            /"success": *true/ { success_count++ }
-            /"checksum": *[0-9]/ { 
-                # Extract checksum value using gsub to strip non-digits
-                gsub(/.*"checksum": */, "")
-                gsub(/[^0-9].*/, "")
-                if ($0 != "") checksums[++checksum_count] = $0
-            }
-            END {
-                printf "%d %s %s", success_count+0, checksums[1], checksums[2]
-            }
-        ' "$log_file")
-
-        local success_count checksum1 checksum2
-        read -r success_count checksum1 checksum2 <<< "$result"
-
-        # Both peers must report success
-        if [ "$success_count" -ge 2 ]; then
-            log_success "$test_name passed (${duration}s)"
-
-            if [ -n "$checksum1" ] && [ -n "$checksum2" ]; then
-                if [ "$checksum1" = "$checksum2" ]; then
-                    log_success "  Checksums match: $checksum1"
-                else
-                    log_warning "  Checksums differ: $checksum1 vs $checksum2 (possible desync)"
-                fi
-            fi
-
-            TESTS_PASSED=$((TESTS_PASSED + 1))
-        else
-            log_error "$test_name failed (only $success_count peers succeeded) - check $log_file"
-            TESTS_FAILED=$((TESTS_FAILED + 1))
-            FAILED_TESTS="$FAILED_TESTS $test_name"
+    # Wait for both containers to complete with timeout
+    # Extract timeout from env vars, default to 180 seconds
+    local timeout_secs=180
+    for var in "${env_vars[@]}"; do
+        if [[ "$var" == TEST_TIMEOUT=* ]]; then
+            timeout_secs="${var#TEST_TIMEOUT=}"
         fi
+    done
+    # Add buffer for container startup/shutdown
+    local wait_timeout=$((timeout_secs + 30))
+
+    # Wait for containers to exit (poll their status)
+    local elapsed=0
+    local poll_interval=2
+    while [ $elapsed -lt $wait_timeout ]; do
+        # Check if both containers have exited
+        local peer1_running peer2_running
+        peer1_running=$(docker inspect -f '{{.State.Running}}' fortress-peer1 2>/dev/null || echo "false")
+        peer2_running=$(docker inspect -f '{{.State.Running}}' fortress-peer2 2>/dev/null || echo "false")
+
+        if [ "$peer1_running" = "false" ] && [ "$peer2_running" = "false" ]; then
+            break
+        fi
+
+        sleep $poll_interval
+        elapsed=$((elapsed + poll_interval))
+    done
+
+    # Collect logs from both containers
+    docker compose -f "$COMPOSE_FILE" logs >> "$log_file" 2>&1
+
+    # Check exit codes of both containers
+    local peer1_exit peer2_exit
+    peer1_exit=$(docker inspect -f '{{.State.ExitCode}}' fortress-peer1 2>/dev/null || echo "1")
+    peer2_exit=$(docker inspect -f '{{.State.ExitCode}}' fortress-peer2 2>/dev/null || echo "1")
+
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+
+    # Parse results from the log file
+    # Uses POSIX-compatible awk (no gawk extensions)
+    local result
+    result=$(awk '
+        /"success": *true/ { success_count++ }
+        /"checksum": *[0-9]/ { 
+            # Extract checksum value using gsub to strip non-digits
+            gsub(/.*"checksum": */, "")
+            gsub(/[^0-9].*/, "")
+            if ($0 != "") checksums[++checksum_count] = $0
+        }
+        /"final_value": *[0-9]/ {
+            # Extract final_value
+            gsub(/.*"final_value": */, "")
+            gsub(/[^0-9].*/, "")
+            if ($0 != "") final_values[++fv_count] = $0
+        }
+        END {
+            printf "%d %s %s %s %s", success_count+0, checksums[1], checksums[2], final_values[1], final_values[2]
+        }
+    ' "$log_file")
+
+    local success_count checksum1 checksum2 fv1 fv2
+    read -r success_count checksum1 checksum2 fv1 fv2 <<< "$result"
+
+    # Both peers must report success
+    if [ "$success_count" -ge 2 ]; then
+        log_success "$test_name passed (${duration}s)"
+
+        if [ -n "$checksum1" ] && [ -n "$checksum2" ]; then
+            if [ "$checksum1" = "$checksum2" ]; then
+                log_success "  Checksums match: $checksum1"
+            else
+                log_warning "  Checksums differ: $checksum1 vs $checksum2 (possible desync)"
+                log_warning "  Final values: $fv1 vs $fv2"
+            fi
+        fi
+
+        TESTS_PASSED=$((TESTS_PASSED + 1))
     else
-        log_error "$test_name failed (exit code: $?) - check $log_file"
+        # Report more diagnostic information on failure
+        log_error "$test_name failed (only $success_count peers succeeded)"
+        log_error "  Container exit codes: peer1=$peer1_exit, peer2=$peer2_exit"
+        if [ $elapsed -ge $wait_timeout ]; then
+            log_error "  Test timed out after ${wait_timeout}s"
+        fi
+        log_error "  Full log: $log_file"
         TESTS_FAILED=$((TESTS_FAILED + 1))
         FAILED_TESTS="$FAILED_TESTS $test_name"
     fi
