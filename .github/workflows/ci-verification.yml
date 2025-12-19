@@ -9,6 +9,7 @@ on:
       - '**/Cargo.lock'
       - 'specs/**'
       - 'scripts/verify-*.sh'
+      - 'scripts/check-kani-coverage.sh'
       - '.github/workflows/ci-verification.yml'
   pull_request:
     branches: [main]
@@ -18,6 +19,7 @@ on:
       - '**/Cargo.lock'
       - 'specs/**'
       - 'scripts/verify-*.sh'
+      - 'scripts/check-kani-coverage.sh'
       - '.github/workflows/ci-verification.yml'
   workflow_dispatch:
 
@@ -25,6 +27,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Validate Kani proof coverage before running actual proofs
+  kani-coverage-check:
+    name: Kani Proof Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate Kani proof coverage
+        run: ./scripts/check-kani-coverage.sh
+        # This ensures all #[kani::proof] functions are in tier lists
+
   # TLA+ Model Checking
   tla-verification:
     name: TLA+ Model Checking
@@ -173,7 +187,7 @@ jobs:
           fi
 
       - name: Run Kani verification (Tier 2 - Part ${{ matrix.part }}/6)
-        run: ./scripts/verify-kani.sh --quick --tier 2 --part ${{ matrix.part }} --parts 6 --fail-fast
+        run: ./scripts/verify-kani.sh --quick --tier 2 --part ${{ matrix.part }} --parts 6 --fail-fast --jobs 2
         timeout-minutes: 10
 
   # Kani Formal Verification (Tier 3 - Slow proofs, split into 5 parallel jobs)
@@ -211,5 +225,5 @@ jobs:
           fi
 
       - name: Run Kani verification (Tier 3 - Part ${{ matrix.part }}/5)
-        run: ./scripts/verify-kani.sh --quick --tier 3 --part ${{ matrix.part }} --parts 5 --fail-fast
+        run: ./scripts/verify-kani.sh --quick --tier 3 --part ${{ matrix.part }} --parts 5 --fail-fast --jobs 2
         timeout-minutes: 20

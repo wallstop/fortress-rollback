@@ -16,6 +16,10 @@
 #   KANI_TIMEOUT     - Timeout per proof in seconds (default: 300)
 #   KANI_UNWIND      - Default unwind bound (default: use Kani defaults)
 #   KANI_JOBS        - Number of parallel jobs (default: 1)
+#
+# IMPORTANT: When adding new #[kani::proof] functions, you must also add them
+# to the appropriate TIER*_PROOFS array below. Use ./scripts/check-kani-coverage.sh
+# to validate that all proofs are covered.
 
 set -euo pipefail
 
@@ -89,11 +93,11 @@ TIER2_PROOFS=(
     "proof_saved_states_count"
     "proof_get_cell_validates_frame"
     "proof_saved_states_circular_index"
-    "proof_index_wrapping_consistent"
 )
 
 # Tier 3: Slow proofs (>2min each) - complex state verification
 TIER3_PROOFS=(
+    "proof_index_wrapping_consistent"
     "proof_add_single_input_maintains_invariants"
     "proof_sequential_inputs_maintain_invariants"
     "proof_discard_maintains_invariants"

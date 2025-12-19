@@ -63,6 +63,15 @@ repos:
         pass_filenames: false
         files: '\.rs$'
 
+      # Validate Kani proof coverage - ensures all #[kani::proof] functions
+      # are included in verify-kani.sh tier lists so they run in CI
+      - id: kani-coverage
+        name: kani proof coverage
+        entry: ./scripts/check-kani-coverage.sh
+        language: script
+        pass_filenames: false
+        files: '\.rs$|verify-kani\.sh$'
+
       # Custom link validation script
       - id: check-links
         name: check links
