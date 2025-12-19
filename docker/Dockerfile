@@ -13,7 +13,7 @@
 # NOTE: The Rust version must be >= 1.86 due to criterion 0.8.1 dependency.
 # Update this when dependencies change their MSRV requirements.
 
-FROM rust:1.86-slim-bookworm AS builder
+FROM rust:1.92-slim-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
