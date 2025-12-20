@@ -142,6 +142,9 @@ struct NetworkScenario {
     frames: i32,
     input_delay: usize,
     timeout_secs: u64,
+    /// Sync configuration preset for the session.
+    /// Use "lossy" for moderate packet loss, "mobile" for heavy burst loss.
+    sync_preset: Option<String>,
 }
 
 /// Network condition profile for a single peer.
@@ -345,6 +348,7 @@ impl NetworkScenario {
             frames: 100,
             input_delay: 2,
             timeout_secs: 60,
+            sync_preset: None,
         }
     }
 
@@ -361,6 +365,7 @@ impl NetworkScenario {
             frames: 100,
             input_delay: 2,
             timeout_secs: 120, // Asymmetric needs more time
+            sync_preset: None,
         }
     }
 
@@ -412,6 +417,16 @@ impl NetworkScenario {
         self
     }
 
+    /// Builder: Set sync preset.
+    ///
+    /// Use "lossy" for moderate packet loss (5-15%), "mobile" for heavy burst loss
+    /// or high variability conditions. Without this, the default sync config may
+    /// fail to synchronize under aggressive chaos conditions.
+    fn with_sync_preset(mut self, preset: &str) -> Self {
+        self.sync_preset = Some(preset.to_string());
+        self
+    }
+
     /// Creates peer configs for this scenario at the given port base.
     fn to_peer_configs(&self, port_base: u16) -> (PeerConfig, PeerConfig) {
         let peer1_config = PeerConfig {
@@ -430,7 +445,7 @@ impl NetworkScenario {
             duplicate_rate: self.peer1_profile.duplicate_rate,
             burst_loss_prob: self.peer1_profile.burst_loss_prob,
             burst_loss_len: self.peer1_profile.burst_loss_len,
-            sync_preset: None,
+            sync_preset: self.sync_preset.clone(),
         };
 
         let peer2_config = PeerConfig {
@@ -449,7 +464,7 @@ impl NetworkScenario {
             duplicate_rate: self.peer2_profile.duplicate_rate,
             burst_loss_prob: self.peer2_profile.burst_loss_prob,
             burst_loss_len: self.peer2_profile.burst_loss_len,
-            sync_preset: None,
+            sync_preset: self.sync_preset.clone(),
         };
 
         (peer1_config, peer2_config)
@@ -819,6 +834,36 @@ fn verify_determinism(result1: &TestResult, result2: &TestResult, context: &str)
     // The library's sync_health() API already verified determinism.
     // final_value comparison is disabled because it depends on accumulation timing.
     // Both peers reaching success=true means sync_health() returned InSync.
+
+    // Provide detailed diagnostics for sync failures
+    if !result1.success || !result2.success {
+        eprintln!("=== Determinism Verification Failed: {} ===", context);
+        eprintln!(
+            "Peer 1: success={}, frame={}, error={:?}",
+            result1.success, result1.final_frame, result1.error
+        );
+        eprintln!(
+            "Peer 2: success={}, frame={}, error={:?}",
+            result2.success, result2.final_frame, result2.error
+        );
+
+        // Check for common failure patterns
+        if result1.final_frame == 0 && result2.final_frame > 0 {
+            eprintln!("DIAGNOSIS: Peer 1 never started advancing frames.");
+            eprintln!("  This typically indicates sync handshake failure.");
+            eprintln!("  Consider using 'mobile' or 'lossy' sync preset for high loss scenarios.");
+        } else if result1.final_frame > 0 && result2.final_frame == 0 {
+            eprintln!("DIAGNOSIS: Peer 2 never started advancing frames.");
+            eprintln!("  This typically indicates sync handshake failure.");
+            eprintln!("  Consider using 'mobile' or 'lossy' sync preset for high loss scenarios.");
+        } else if result1.final_frame == 0 && result2.final_frame == 0 {
+            eprintln!("DIAGNOSIS: Neither peer advanced any frames.");
+            eprintln!("  This typically indicates both peers failed to sync.");
+            eprintln!("  Check network conditions and sync preset configuration.");
+        }
+        eprintln!("============================================");
+    }
+
     assert!(
         result1.success,
         "{}: Peer 1 failed (sync_health did not reach InSync): {:?}",
@@ -3026,11 +3071,38 @@ mod infrastructure_tests {
         let scenario = NetworkScenario::lan()
             .with_frames(200)
             .with_input_delay(4)
-            .with_timeout(120);
+            .with_timeout(120)
+            .with_sync_preset("mobile");
 
         assert_eq!(scenario.frames, 200);
         assert_eq!(scenario.input_delay, 4);
         assert_eq!(scenario.timeout_secs, 120);
+        assert_eq!(scenario.sync_preset, Some("mobile".to_string()));
+    }
+
+    /// Test NetworkScenario sync_preset is properly propagated to peer configs.
+    #[test]
+    fn test_network_scenario_sync_preset_propagation() {
+        let scenario =
+            NetworkScenario::symmetric("test", NetworkProfile::bursty()).with_sync_preset("mobile");
+
+        let (peer1, peer2) = scenario.to_peer_configs(30000);
+
+        // Both peers should have the sync preset set
+        assert_eq!(peer1.sync_preset, Some("mobile".to_string()));
+        assert_eq!(peer2.sync_preset, Some("mobile".to_string()));
+    }
+
+    /// Test NetworkScenario without sync_preset defaults to None.
+    #[test]
+    fn test_network_scenario_no_sync_preset() {
+        let scenario = NetworkScenario::lan();
+
+        let (peer1, peer2) = scenario.to_peer_configs(30010);
+
+        // Both peers should have None for sync preset
+        assert_eq!(peer1.sync_preset, None);
+        assert_eq!(peer2.sync_preset, None);
     }
 
     /// Test NetworkScenario asymmetric creation.
@@ -3331,14 +3403,23 @@ fn test_burst_packet_loss() {
 }
 
 /// Test with aggressive burst loss pattern.
+///
+/// The `bursty()` profile has 10% burst loss probability with 8-packet bursts,
+/// plus 5% baseline packet loss. This can easily drop all sync packets in the
+/// default configuration (5 packets). We use `mobile` sync preset which sends
+/// 10 sync packets with longer retry intervals to handle this scenario.
 #[test]
 #[serial]
 fn test_heavy_burst_loss() {
     skip_if_no_peer_binary!();
+    // The bursty profile has aggressive burst loss (10% prob, 8-packet bursts)
+    // which can easily drop all sync packets during handshake.
+    // Using "mobile" preset: 10 sync packets, 350ms retry, 15s timeout.
     let scenario = NetworkScenario::symmetric("bursty", NetworkProfile::bursty())
         .with_frames(80)
         .with_input_delay(3)
-        .with_timeout(150);
+        .with_timeout(150)
+        .with_sync_preset("mobile");
 
     let (result1, result2) = scenario.run_test(10410);
 
@@ -3771,10 +3852,12 @@ fn test_extended_chaos_scenario_suite() {
         ),
         (
             10702,
+            // mobile_3g has 15% packet loss, needs lossy sync config
             NetworkScenario::symmetric("mobile_3g", NetworkProfile::mobile_3g())
                 .with_frames(60)
                 .with_input_delay(4)
-                .with_timeout(180),
+                .with_timeout(180)
+                .with_sync_preset("mobile"),
         ),
         (
             10704,
@@ -3791,10 +3874,12 @@ fn test_extended_chaos_scenario_suite() {
         ),
         (
             10708,
+            // bursty has 10% burst loss with 8-packet bursts, needs mobile sync config
             NetworkScenario::symmetric("bursty", NetworkProfile::bursty())
                 .with_frames(80)
                 .with_input_delay(3)
-                .with_timeout(150),
+                .with_timeout(150)
+                .with_sync_preset("mobile"),
         ),
     ];
 
@@ -3842,6 +3927,7 @@ fn test_asymmetric_extended_chaos() {
             .with_timeout(150),
         ),
         // One peer with burst loss, one stable
+        // The bursty peer needs mobile sync to handle burst loss during handshake
         (
             10722,
             NetworkScenario::asymmetric(
@@ -3851,9 +3937,10 @@ fn test_asymmetric_extended_chaos() {
             )
             .with_frames(100)
             .with_input_delay(3)
-            .with_timeout(150),
+            .with_timeout(150)
+            .with_sync_preset("mobile"),
         ),
-        // Mobile vs WiFi
+        // Mobile vs WiFi - both have significant packet loss
         (
             10724,
             NetworkScenario::asymmetric(
@@ -3863,7 +3950,8 @@ fn test_asymmetric_extended_chaos() {
             )
             .with_frames(60)
             .with_input_delay(4)
-            .with_timeout(180),
+            .with_timeout(180)
+            .with_sync_preset("mobile"),
         ),
     ];
 

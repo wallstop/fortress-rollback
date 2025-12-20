@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed `test_heavy_burst_loss` test failure on macOS CI by adding appropriate `sync_preset`
+  - Root cause: The `bursty()` network profile has 10% burst loss with 8-packet bursts, which
+    can drop all sync packets during handshake when using default `SyncConfig` (5 packets)
+  - Tests using `NetworkProfile::bursty()` or similar high-loss scenarios now use `mobile`
+    sync preset (10 sync packets) to reliably complete synchronization
+  - Added `with_sync_preset()` builder method to `NetworkScenario` for configuring sync behavior
 - Fixed timing-sensitive tests that could fail on CI systems with high load (especially macOS)
   - `test_latency_delays_delivery` now uses 500ms latency with 400ms safety margin (was 100ms/50ms)
   - `test_in_flight_count` now uses 300ms latency with 200ms safety margin (was 100ms/10ms)
@@ -25,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `sync_preset` field and `with_sync_preset()` builder to `NetworkScenario` test helper
+- Added unit tests for `NetworkScenario` sync preset propagation
+- Improved `verify_determinism()` test helper with detailed diagnostics for sync failures
 - Added comprehensive data-driven latency tests in `chaos_socket` module:
   - `test_latency_minimum_delivery_time_data_driven` - verifies packets aren't delivered early
   - `test_latency_maximum_delivery_time_data_driven` - verifies packets are delivered after max time
