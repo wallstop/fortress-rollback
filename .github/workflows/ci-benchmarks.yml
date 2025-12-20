@@ -86,6 +86,9 @@ jobs:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          # Increase startup timeout to handle slow GitHub Actions runners
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
 
       # Check if gh-pages branch exists, create it if pushing to main
       - name: Check and create gh-pages branch if needed
@@ -231,3 +234,6 @@ jobs:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          # Increase startup timeout to handle slow GitHub Actions runners
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"

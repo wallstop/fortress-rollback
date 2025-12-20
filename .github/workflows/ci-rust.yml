@@ -104,6 +104,8 @@ jobs:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
 
       - name: Build network test peer
         run: cargo build -p network-test-peer
@@ -111,6 +113,8 @@ jobs:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
 
       - name: Run tests (nextest)
         run: cargo nextest run --profile ci --verbose
@@ -118,6 +122,8 @@ jobs:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
 
       - name: Build docs
         run: cargo doc --verbose
@@ -262,6 +268,8 @@ jobs:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
 
   # Package dry-run
   package-dry-run:
