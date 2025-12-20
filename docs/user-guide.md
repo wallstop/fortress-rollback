@@ -1250,6 +1250,7 @@ Fortress Rollback provides several Cargo feature flags to customize behavior for
 |---------|-------------|----------|--------------|
 | `sync-send` | Adds `Send + Sync` bounds to core traits | Multi-threaded game engines | None |
 | `tokio` | Enables `TokioUdpSocket` for async Tokio applications | Async game servers | `tokio` crate |
+| `json` | Enables JSON serialization for telemetry types | Structured logging/monitoring | `serde_json` crate |
 | `paranoid` | Enables runtime invariant checking in release builds | Debugging production issues | None |
 | `loom` | Enables Loom-compatible synchronization primitives | Concurrency testing | `loom` crate |
 | `z3-verification` | Enables Z3 formal verification tests | Development/CI verification | `z3` crate (system) |
@@ -1321,6 +1322,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 **Note:** When used with the `sync-send` feature, `TokioUdpSocket` automatically implements `Send + Sync`.
+
+#### `json`
+
+Enables JSON serialization methods (`to_json()` and `to_json_pretty()`) on telemetry types like `SpecViolation` and `InvariantViolation`. This is useful for structured logging, monitoring systems, or exporting violation data.
+
+```toml
+[dependencies]
+fortress-rollback = { version = "0.1", features = ["json"] }
+```
+
+**Example usage:**
+
+```rust,ignore
+use fortress_rollback::telemetry::{SpecViolation, ViolationSeverity, ViolationKind};
+
+let violation = SpecViolation::new(
+    ViolationSeverity::Warning,
+    ViolationKind::FrameSync,
+    "frame mismatch detected",
+    "sync.rs:42",
+);
+
+// With the `json` feature enabled:
+if let Some(json) = violation.to_json() {
+    println!("Violation: {}", json);
+    // Output: {"severity":"warning","kind":"frame_sync","message":"frame mismatch detected",...}
+}
+```
+
+**Note:** Without the `json` feature, the telemetry types still implement `serde::Serialize` and can be serialized with any serde-compatible serializer (like bincode). The `json` feature specifically enables the convenience `to_json()` methods and adds the `serde_json` dependency.
 
 #### `paranoid`
 

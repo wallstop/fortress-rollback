@@ -276,7 +276,7 @@ z network                                       # Jump to dir matching "network"
 3. **Handle all errors** — No panics, use `Result<T, FortressError>`
 4. **Document as you go** — Rustdoc with examples for all public items
 5. **Consider edge cases** — Zero values, max values, empty collections
-6. **Update changelog** — Document changes in `CHANGELOG.md`
+6. **Update changelog** — Only for user-facing changes (see Changelog Policy below)
 
 ### When Fixing Bugs
 
@@ -557,6 +557,29 @@ PlayerType::Spectator(addr)    // Observer (no input)
 - Include positive and negative test cases
 - Test edge cases and error conditions
 - Use integration tests for cross-component behavior
+
+### Changelog Policy
+
+The changelog (`CHANGELOG.md`) is for **users of the library**, not developers.
+
+**Include in changelog:**
+- New features, APIs, or configuration options
+- Bug fixes that affect user-visible behavior
+- Breaking changes (with migration guidance)
+- Performance improvements users would notice
+- Dependency updates that affect compatibility
+
+**Do NOT include in changelog:**
+- Internal refactoring (module splits, code reorganization)
+- Test improvements or new tests
+- Documentation-only changes
+- CI/CD or tooling changes
+- Code style or lint fixes
+
+**Exception:** If a release contains *only* internal work (no user-facing changes), add a single summary line like:
+> "Internal: Improved test coverage and code organization"
+
+This keeps the changelog focused and useful for library consumers.
 
 ---
 

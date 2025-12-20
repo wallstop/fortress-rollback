@@ -14,24 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Added resilient cargo tool installation composite action for CI
-  - Automatic retry logic (3 attempts with 10s delay) for transient network failures
-  - Fallback to `cargo install` if binary download repeatedly fails
-  - Caching of installed binaries to avoid redundant downloads
-  - Handles GitHub Releases CDN outages (504 Gateway Timeout, etc.)
-
-### Changed
-
-- CI workflows now use resilient tool installation instead of direct `taiki-e/install-action`
-  - Affects: `ci-rust.yml`, `ci-network.yml`, `ci-verification.yml`, `ci-coverage.yml`,
-    `ci-security.yml`, and `coverage.yml`
-
-## [0.1.3] - 2025-12-20
+## [0.2.0] - 2025-12-20
 
 ### Added
 
+- Added optional `json` feature for JSON serialization of telemetry types
+  - Provides `to_json()` and `to_json_pretty()` methods on `SpecViolation` and `InvariantViolation`
+  - Enable with `features = ["json"]` in Cargo.toml
 - Added `SyncConfig::extreme()` preset for very hostile network conditions
   - Sends 20 sync packets (vs 10 for mobile, 5 for default) with 250ms retry intervals
   - 30-second sync timeout to handle multiple burst loss events
@@ -41,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `serde_json` is now an optional dependency behind the `json` feature
+  - Reduces default dependency count from 7 to 6 production dependencies
+  - Users who need `to_json()` methods must enable the `json` feature
+  - The telemetry types still implement `serde::Serialize` for use with any serializer
 - Restructured test code to further reduce published crate size
   - Moved network peer binary to separate `tests/network-peer` crate
   - Excluded additional test infrastructure from published package
@@ -229,6 +222,8 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/wallstop/fortress-rollback/compare/v0.1.2...v0.2.0
+[0.1.2]: https://github.com/wallstop/fortress-rollback/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/wallstop/fortress-rollback/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/wallstop/fortress-rollback/releases/tag/v0.1.0

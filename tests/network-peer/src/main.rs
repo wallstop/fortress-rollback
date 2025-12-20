@@ -543,6 +543,7 @@ fn run_test(args: &Args) -> TestResult {
         Some("high_latency") => SyncConfig::high_latency(),
         Some("competitive") => SyncConfig::competitive(),
         Some("extreme") => SyncConfig::extreme(),
+        Some("stress_test") => SyncConfig::stress_test(),
         Some(preset) => {
             return TestResult {
                 success: false,
@@ -551,7 +552,7 @@ fn run_test(args: &Args) -> TestResult {
                 checksum: 0,
                 rollbacks: 0,
                 error: Some(format!(
-                    "Unknown sync preset: '{}'. Valid presets: lan, lossy, mobile, high_latency, competitive, extreme",
+                    "Unknown sync preset: '{}'. Valid presets: lan, lossy, mobile, high_latency, competitive, extreme, stress_test",
                     preset
                 )),
                 debug_log: None,

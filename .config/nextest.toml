@@ -38,6 +38,15 @@ test-group = 'port-7777'
 filter = 'test(sessions::spectator::test_start_session) | test(sessions::spectator::test_synchronize_with_host)'
 test-group = 'port-7777'
 
+# Multi-process network tests need longer timeouts because they:
+# 1. Spawn external peer processes
+# 2. Simulate hostile network conditions (high packet loss, burst loss)
+# 3. May need multiple sync attempts before establishing connection
+# Tests using stress_test preset need up to 180s (60s sync timeout + overhead)
+[[profile.default.overrides]]
+filter = 'test(network::multi_process::)'
+slow-timeout = { period = "60s", terminate-after = 4 }  # Max 240s for extreme scenarios
+
 [profile.default.junit]
 # Generate JUnit XML reports for CI integration
 path = "target/nextest/default/junit.xml"

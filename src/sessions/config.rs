@@ -262,6 +262,57 @@ impl SyncConfig {
             keepalive_interval: Duration::from_millis(200),
         }
     }
+
+    /// Configuration preset for stress testing under the most hostile conditions.
+    ///
+    /// This preset is specifically designed for automated testing scenarios where
+    /// reliability is paramount, even at the cost of very long sync times. It uses
+    /// aggressive parameters to survive the most hostile simulated network conditions.
+    ///
+    /// **ONLY USE FOR TESTING** - These settings would cause unacceptable delays
+    /// in production. The 60-second sync timeout means users would wait up to a
+    /// full minute before connection failure is reported.
+    ///
+    /// Characteristics addressed:
+    /// - Extreme burst loss (10%+ probability with 8+ packet bursts)
+    /// - Very high combined packet loss (>25%)
+    /// - Multiple consecutive burst events during handshake
+    /// - Slow CI environments with timing variability (macOS CI, coverage builds)
+    ///
+    /// # Probability Analysis
+    ///
+    /// With 10% burst probability and 8-packet bursts:
+    /// - Each burst can drop 8 consecutive packets
+    /// - With 150ms retry interval and 60s timeout: ~400 retry opportunities
+    /// - With 40 required sync roundtrips spread across this window, the
+    ///   probability of success is very high even under worst-case conditions
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::SyncConfig;
+    ///
+    /// // For stress testing with extremely hostile network simulation
+    /// let config = SyncConfig::stress_test();
+    /// assert_eq!(config.num_sync_packets, 40);
+    /// ```
+    pub fn stress_test() -> Self {
+        Self {
+            // Double the sync packets compared to extreme - we have the timeout
+            // budget to spare and this dramatically increases success probability
+            num_sync_packets: 40,
+            // Faster retry interval to get more attempts within the timeout window
+            // 150ms gives ~400 attempts in 60 seconds
+            sync_retry_interval: Duration::from_millis(150),
+            // Very generous timeout for sync (60 seconds)
+            // This is acceptable for automated testing but NOT for production
+            sync_timeout: Some(Duration::from_secs(60)),
+            // Match the faster retry interval for gameplay
+            running_retry_interval: Duration::from_millis(150),
+            // Frequent keepalives to detect issues quickly once connected
+            keepalive_interval: Duration::from_millis(150),
+        }
+    }
 }
 
 /// Configuration for network protocol behavior.
@@ -1059,6 +1110,16 @@ mod tests {
         assert_eq!(config.sync_timeout, Some(Duration::from_secs(30)));
         assert_eq!(config.running_retry_interval, Duration::from_millis(250));
         assert_eq!(config.keepalive_interval, Duration::from_millis(200));
+    }
+
+    #[test]
+    fn sync_config_stress_test_preset() {
+        let config = SyncConfig::stress_test();
+        assert_eq!(config.num_sync_packets, 40);
+        assert_eq!(config.sync_retry_interval, Duration::from_millis(150));
+        assert_eq!(config.sync_timeout, Some(Duration::from_secs(60)));
+        assert_eq!(config.running_retry_interval, Duration::from_millis(150));
+        assert_eq!(config.keepalive_interval, Duration::from_millis(150));
     }
 
     #[test]

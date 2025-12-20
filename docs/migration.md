@@ -139,10 +139,14 @@ Existing feature flags (`sync-send`, `wasm-bindgen`) remain compatible. Fortress
 | `sync-send` | Multi-threaded trait bounds | ❌ (existing) |
 | `wasm-bindgen` | WASM compatibility | ❌ (existing) |
 | `tokio` | Async Tokio UDP socket adapter | ✅ |
+| `json` | JSON serialization for telemetry types | ✅ |
 | `paranoid` | Runtime invariant checking | ✅ |
 | `loom` | Concurrency testing | ✅ |
 | `z3-verification` | Formal verification tests | ✅ |
 | `graphical-examples` | Interactive demos | ✅ |
+
+> **Note:** The `json` feature enables `to_json()` and `to_json_pretty()` methods on telemetry types.
+> Without this feature, the `serde_json` dependency is not included, reducing the default dependency count.
 
 For detailed feature documentation, see the [User Guide](user-guide.md#feature-flags).
 

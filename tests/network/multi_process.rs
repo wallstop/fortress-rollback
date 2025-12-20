@@ -3202,12 +3202,12 @@ mod infrastructure_tests {
     /// |-----------------|--------------|------------------------|
     /// | 2%              | 3-4          | lossy                  |
     /// | 5%              | 3-5          | mobile                 |
-    /// | 10%             | 5-8          | extreme                |
-    /// | >10%            | >8           | extreme (may be flaky) |
+    /// | 10%             | 5-8          | stress_test            |
+    /// | >10%            | >8           | stress_test (may be flaky) |
     ///
     /// Note: At 30% bidirectional loss or 10% burst loss with 8-packet bursts,
-    /// synchronization is probabilistic even with extreme preset. Tests at this
-    /// level may be flaky on slow CI systems.
+    /// synchronization can be challenging even with stress_test preset. Tests at
+    /// this level may require longer timeouts on slow CI systems.
     #[test]
     fn test_packet_loss_effective_rate_documentation() {
         // Document effective loss rates for bidirectional loss
@@ -3563,25 +3563,33 @@ fn test_burst_packet_loss() {
 /// plus 5% baseline packet loss. This creates extremely hostile conditions where
 /// multiple consecutive packets can be dropped simultaneously.
 ///
-/// We use `extreme` sync preset which sends 20 sync packets with 250ms retry intervals
-/// and a 30-second timeout to maximize the probability of successful sync handshake.
-/// The mobile preset (10 packets) was insufficient for this scenario on some platforms
-/// (particularly macOS CI where timing differences affect burst patterns).
+/// We use `stress_test` sync preset which sends 40 sync packets with 150ms retry
+/// intervals and a 60-second timeout. This is specifically designed for the most
+/// hostile testing conditions and maximizes the probability of successful sync
+/// handshake even under worst-case burst patterns.
+///
+/// The `extreme` preset (20 packets, 250ms retry, 30s timeout) proved insufficient
+/// on some platforms (particularly macOS CI where timing differences affect burst
+/// patterns and can cause multiple burst events during the handshake window).
 #[test]
 #[serial]
 fn test_heavy_burst_loss() {
     skip_if_no_peer_binary!();
     // The bursty profile has aggressive burst loss (10% prob, 8-packet bursts)
     // which can easily drop all sync packets during handshake.
-    // Using "extreme" preset: 20 sync packets, 250ms retry, 30s timeout.
-    // This is more resilient than "mobile" for the most hostile network conditions.
+    // Using "stress_test" preset: 40 sync packets, 150ms retry, 60s timeout.
+    // This is the most resilient preset, designed specifically for stress testing
+    // under the most hostile simulated network conditions.
     let scenario = NetworkScenario::symmetric("bursty", NetworkProfile::bursty())
         .with_frames(80)
         .with_input_delay(3)
-        .with_timeout(150)
-        .with_sync_preset("extreme");
+        .with_timeout(180) // Increased to accommodate longer sync timeout
+        .with_sync_preset("stress_test");
 
     let (result1, result2) = scenario.run_test(10410);
+
+    // Verify both peers synchronized successfully
+    verify_determinism(&result1, &result2, "bursty");
 
     println!(
         "Heavy burst loss - Rollbacks: peer1={}, peer2={}",
@@ -4034,13 +4042,14 @@ fn test_extended_chaos_scenario_suite() {
         ),
         (
             10708,
-            // bursty has 10% burst loss with 8-packet bursts, needs extreme sync config
-            // to handle the very hostile network conditions reliably across all platforms
+            // bursty has 10% burst loss with 8-packet bursts, needs stress_test sync config
+            // to handle the very hostile network conditions reliably across all platforms.
+            // The extreme preset proved insufficient on macOS CI due to timing differences.
             NetworkScenario::symmetric("bursty", NetworkProfile::bursty())
                 .with_frames(80)
                 .with_input_delay(3)
-                .with_timeout(150)
-                .with_sync_preset("extreme"),
+                .with_timeout(180) // Accommodate longer sync timeout
+                .with_sync_preset("stress_test"),
         ),
     ];
 
@@ -4088,7 +4097,7 @@ fn test_asymmetric_extended_chaos() {
             .with_timeout(150),
         ),
         // One peer with burst loss, one stable
-        // The bursty peer needs extreme sync to handle burst loss during handshake
+        // The bursty peer needs stress_test sync to handle burst loss during handshake
         // reliably across all platforms (macOS CI in particular has different timing)
         (
             10722,
@@ -4099,8 +4108,8 @@ fn test_asymmetric_extended_chaos() {
             )
             .with_frames(100)
             .with_input_delay(3)
-            .with_timeout(150)
-            .with_sync_preset("extreme"),
+            .with_timeout(180) // Accommodate longer sync timeout
+            .with_sync_preset("stress_test"),
         ),
         // Mobile vs WiFi - both have significant packet loss
         (
