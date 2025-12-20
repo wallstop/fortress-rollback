@@ -690,19 +690,9 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
 
     let mut host_game = GameStub::new();
 
-    // Phase 1: Synchronization
-    let mut synced = false;
-    for _ in 0..100 {
-        spec_sess.poll_remote_clients();
-        host_sess.poll_remote_clients();
-        if spec_sess.current_state() == SessionState::Running
-            && host_sess.current_state() == SessionState::Running
-        {
-            synced = true;
-            break;
-        }
-    }
-    assert!(synced, "Failed to synchronize");
+    // Phase 1: Synchronization - use robust helper with timeout and diagnostics
+    let sync_result = wait_for_sync(&mut spec_sess, &mut host_sess, SYNC_TIMEOUT);
+    assert_synchronized(&spec_sess, &host_sess, &sync_result);
 
     // Phase 2: Host advances frames and spectator follows
     for frame in 0..10 {
@@ -712,10 +702,11 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
         let requests = host_sess.advance_frame()?;
         host_game.handle_requests(requests);
 
-        // Poll to exchange messages
+        // Poll to exchange messages with sleep to allow packet delivery
         for _ in 0..5 {
             host_sess.poll_remote_clients();
             spec_sess.poll_remote_clients();
+            thread::sleep(POLL_INTERVAL);
         }
     }
 
@@ -723,6 +714,7 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
     for _ in 0..30 {
         host_sess.poll_remote_clients();
         spec_sess.poll_remote_clients();
+        thread::sleep(POLL_INTERVAL);
     }
 
     // Spectator should be able to get inputs now
@@ -762,7 +754,9 @@ fn test_synchronized_event_generated() -> Result<(), FortressError> {
     let mut found_synchronized = false;
 
     // Synchronize and collect events
-    for _ in 0..100 {
+    // Use time-based timeout and sleep between iterations for reliable packet delivery
+    let start = Instant::now();
+    while start.elapsed() < SYNC_TIMEOUT {
         spec_sess.poll_remote_clients();
         host_sess.poll_remote_clients();
 
@@ -775,6 +769,7 @@ fn test_synchronized_event_generated() -> Result<(), FortressError> {
         if spec_sess.current_state() == SessionState::Running {
             break;
         }
+        thread::sleep(POLL_INTERVAL);
     }
 
     // We should have received a Synchronized event

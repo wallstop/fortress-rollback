@@ -69,8 +69,14 @@ fn test_advance_frame_p2p_sessions_enum() -> Result<(), FortressError> {
     let mut stub2 = GameStubEnum::new();
     let reps = 10;
     for i in 0..reps {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
+        // Poll with multiple iterations and sleep to ensure packets are delivered.
+        // This is crucial on systems with different scheduling behavior (e.g., macOS CI)
+        // where tight loops may not give the network stack enough time.
+        for _ in 0..3 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+            thread::sleep(POLL_INTERVAL);
+        }
 
         sess1
             .add_local_input(
