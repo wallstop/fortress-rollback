@@ -22,6 +22,7 @@ pub struct StubInput {
     pub inp: u32,
 }
 
+#[derive(Debug)]
 pub struct StubConfig;
 
 impl Config for StubConfig {

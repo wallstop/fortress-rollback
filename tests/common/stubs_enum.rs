@@ -24,6 +24,7 @@ pub enum EnumInput {
     Val2,
 }
 
+#[derive(Debug)]
 pub struct StubEnumConfig;
 
 impl Config for StubEnumConfig {
