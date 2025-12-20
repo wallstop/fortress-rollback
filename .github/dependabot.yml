@@ -3,7 +3,8 @@
 
 version: 2
 updates:
-  # Rust dependencies (Cargo)
+  # Rust dependencies (Cargo) - covers root workspace and all members
+  # (includes: fortress-rollback, tests/network-peer)
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
@@ -16,7 +17,7 @@ updates:
       prefix: "chore(deps)"
     open-pull-requests-limit: 10
 
-  # Rust dependencies for fuzz directory
+  # Rust dependencies for fuzz directory (separate workspace)
   - package-ecosystem: "cargo"
     directory: "/fuzz"
     schedule:
@@ -29,7 +30,8 @@ updates:
       prefix: "chore(deps)"
     open-pull-requests-limit: 5
 
-  # Rust dependencies for loom-tests directory
+  # Rust dependencies for loom-tests directory (separate workspace,
+  # requires special --cfg loom flags that conflict with normal builds)
   - package-ecosystem: "cargo"
     directory: "/loom-tests"
     schedule:
