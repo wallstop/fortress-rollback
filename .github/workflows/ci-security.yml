@@ -148,7 +148,9 @@ jobs:
           toolchain: nightly
 
       - name: Install cargo-udeps
-        uses: taiki-e/install-action@cargo-udeps
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-udeps
 
       - name: Configure sccache
         id: sccache

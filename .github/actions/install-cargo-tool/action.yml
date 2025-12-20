@@ -1,0 +1,170 @@
+# Resilient cargo tool installation with retries and fallback
+#
+# This composite action provides robust tool installation that handles:
+# - Transient network failures (504 Gateway Timeout, etc.)
+# - GitHub Releases CDN outages
+# - Rate limiting
+#
+# It uses taiki-e/install-action with retry logic and falls back to
+# cargo install if the binary download consistently fails.
+
+name: 'Install Cargo Tool'
+description: 'Installs a cargo tool with retry logic and fallback to cargo install'
+
+inputs:
+  tool:
+    description: 'Tool name (e.g., cargo-nextest, cargo-tarpaulin, cargo-hack)'
+    required: true
+  version:
+    description: 'Tool version (optional, defaults to latest stable)'
+    required: false
+    default: ''
+  max-retries:
+    description: 'Maximum number of retry attempts for taiki-e/install-action'
+    required: false
+    default: '3'
+  retry-delay:
+    description: 'Delay in seconds between retry attempts'
+    required: false
+    default: '10'
+  fallback-to-cargo-install:
+    description: 'Whether to fall back to cargo install if binary download fails'
+    required: false
+    default: 'true'
+
+outputs:
+  install-method:
+    description: 'How the tool was installed (binary, cargo-install, or cache)'
+    value: ${{ steps.final-status.outputs.method }}
+
+runs:
+  using: composite
+  steps:
+    # Check cache first - significantly faster than downloading
+    - name: Cache cargo binaries
+      id: cargo-bin-cache
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.cargo/bin/${{ inputs.tool }}*
+        key: cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tool }}-${{ inputs.version || 'latest' }}-v1
+        restore-keys: |
+          cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tool }}-
+
+    - name: Check if tool is already installed
+      id: check-installed
+      shell: bash
+      run: |
+        TOOL_NAME="${{ inputs.tool }}"
+        # Convert cargo-foo to cargo foo for version check
+        CARGO_CMD="${TOOL_NAME#cargo-}"
+
+        if command -v "$TOOL_NAME" &> /dev/null || cargo "$CARGO_CMD" --version &> /dev/null 2>&1; then
+          echo "installed=true" >> "$GITHUB_OUTPUT"
+          echo "✅ $TOOL_NAME is already installed (from cache)"
+        else
+          echo "installed=false" >> "$GITHUB_OUTPUT"
+          echo "📦 $TOOL_NAME needs to be installed"
+        fi
+
+    # Attempt 1: taiki-e/install-action (fast binary download)
+    - name: Install ${{ inputs.tool }} (attempt 1)
+      id: install-attempt-1
+      if: steps.check-installed.outputs.installed != 'true'
+      uses: taiki-e/install-action@v2
+      with:
+        tool: ${{ inputs.tool }}${{ inputs.version && format('@{0}', inputs.version) || '' }}
+      continue-on-error: true
+
+    # Brief delay before retry
+    - name: Delay before retry 1
+      if: steps.check-installed.outputs.installed != 'true' && steps.install-attempt-1.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "⏳ First attempt failed, waiting ${{ inputs.retry-delay }}s before retry..."
+        sleep ${{ inputs.retry-delay }}
+
+    # Attempt 2
+    - name: Install ${{ inputs.tool }} (attempt 2)
+      id: install-attempt-2
+      if: steps.check-installed.outputs.installed != 'true' && steps.install-attempt-1.outcome == 'failure'
+      uses: taiki-e/install-action@v2
+      with:
+        tool: ${{ inputs.tool }}${{ inputs.version && format('@{0}', inputs.version) || '' }}
+      continue-on-error: true
+
+    # Brief delay before retry
+    - name: Delay before retry 2
+      if: steps.check-installed.outputs.installed != 'true' && steps.install-attempt-1.outcome == 'failure' && steps.install-attempt-2.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "⏳ Second attempt failed, waiting ${{ inputs.retry-delay }}s before retry..."
+        sleep ${{ inputs.retry-delay }}
+
+    # Attempt 3
+    - name: Install ${{ inputs.tool }} (attempt 3)
+      id: install-attempt-3
+      if: steps.check-installed.outputs.installed != 'true' && steps.install-attempt-1.outcome == 'failure' && steps.install-attempt-2.outcome == 'failure'
+      uses: taiki-e/install-action@v2
+      with:
+        tool: ${{ inputs.tool }}${{ inputs.version && format('@{0}', inputs.version) || '' }}
+      continue-on-error: true
+
+    # Fallback: cargo install (slower but more reliable)
+    - name: Fallback to cargo install
+      id: cargo-install-fallback
+      if: |
+        steps.check-installed.outputs.installed != 'true' &&
+        steps.install-attempt-1.outcome == 'failure' &&
+        steps.install-attempt-2.outcome == 'failure' &&
+        steps.install-attempt-3.outcome == 'failure' &&
+        inputs.fallback-to-cargo-install == 'true'
+      shell: bash
+      run: |
+        echo "⚠️ Binary download failed after 3 attempts, falling back to cargo install..."
+        TOOL="${{ inputs.tool }}"
+        VERSION="${{ inputs.version }}"
+
+        if [ -n "$VERSION" ]; then
+          echo "Installing $TOOL@$VERSION via cargo install..."
+          cargo install "$TOOL" --version "$VERSION" --locked
+        else
+          echo "Installing $TOOL (latest) via cargo install..."
+          cargo install "$TOOL" --locked
+        fi
+
+    # Final status check
+    - name: Verify installation and report status
+      id: final-status
+      shell: bash
+      run: |
+        TOOL_NAME="${{ inputs.tool }}"
+        CARGO_CMD="${TOOL_NAME#cargo-}"
+
+        # Check if tool is now available
+        if command -v "$TOOL_NAME" &> /dev/null || cargo "$CARGO_CMD" --version &> /dev/null 2>&1; then
+          # Determine how it was installed
+          if [ "${{ steps.check-installed.outputs.installed }}" == "true" ]; then
+            echo "method=cache" >> "$GITHUB_OUTPUT"
+            echo "✅ $TOOL_NAME was restored from cache"
+          elif [ "${{ steps.install-attempt-1.outcome }}" == "success" ]; then
+            echo "method=binary" >> "$GITHUB_OUTPUT"
+            echo "✅ $TOOL_NAME installed via binary download (attempt 1)"
+          elif [ "${{ steps.install-attempt-2.outcome }}" == "success" ]; then
+            echo "method=binary" >> "$GITHUB_OUTPUT"
+            echo "✅ $TOOL_NAME installed via binary download (attempt 2)"
+          elif [ "${{ steps.install-attempt-3.outcome }}" == "success" ]; then
+            echo "method=binary" >> "$GITHUB_OUTPUT"
+            echo "✅ $TOOL_NAME installed via binary download (attempt 3)"
+          else
+            echo "method=cargo-install" >> "$GITHUB_OUTPUT"
+            echo "✅ $TOOL_NAME installed via cargo install (fallback)"
+          fi
+
+          # Show version
+          cargo "$CARGO_CMD" --version || "$TOOL_NAME" --version || echo "(version check not available)"
+        else
+          echo "❌ ERROR: Failed to install $TOOL_NAME after all attempts"
+          echo "method=failed" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi

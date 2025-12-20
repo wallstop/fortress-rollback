@@ -14,6 +14,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added resilient cargo tool installation composite action for CI
+  - Automatic retry logic (3 attempts with 10s delay) for transient network failures
+  - Fallback to `cargo install` if binary download repeatedly fails
+  - Caching of installed binaries to avoid redundant downloads
+  - Handles GitHub Releases CDN outages (504 Gateway Timeout, etc.)
+
+### Changed
+
+- CI workflows now use resilient tool installation instead of direct `taiki-e/install-action`
+  - Affects: `ci-rust.yml`, `ci-network.yml`, `ci-verification.yml`, `ci-coverage.yml`,
+    `ci-security.yml`, and `coverage.yml`
+
 ## [0.1.3] - 2025-12-20
 
 ### Added

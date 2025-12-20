@@ -44,7 +44,9 @@ jobs:
           toolchain: stable
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-nextest
 
       - name: Configure sccache
         id: sccache
