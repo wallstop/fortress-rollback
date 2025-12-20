@@ -221,6 +221,47 @@ impl SyncConfig {
             keepalive_interval: Duration::from_millis(100),
         }
     }
+
+    /// Configuration preset for extreme/hostile network conditions (testing).
+    ///
+    /// Designed for testing scenarios with very high packet loss, aggressive
+    /// burst loss, or other extreme network impairments. Uses significantly
+    /// more sync packets and longer timeouts to maximize chance of success.
+    ///
+    /// This preset is **not recommended for production use** as it has very
+    /// long timeouts that could delay error detection in real scenarios.
+    ///
+    /// Characteristics addressed:
+    /// - High burst loss (10%+ probability, 8+ packet bursts)
+    /// - Combined high packet loss (>15%)
+    /// - Extreme jitter and latency variation
+    /// - Scenarios where multiple consecutive sync attempts may fail
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::SyncConfig;
+    ///
+    /// // For testing with aggressive burst loss
+    /// let config = SyncConfig::extreme();
+    /// assert_eq!(config.num_sync_packets, 20);
+    /// ```
+    pub fn extreme() -> Self {
+        Self {
+            // Many more sync packets to survive multiple burst losses
+            // With 10% burst probability and 8-packet bursts, we need enough
+            // retries to statistically guarantee success
+            num_sync_packets: 20,
+            // Moderate retry interval - not too fast (flooding) nor too slow
+            sync_retry_interval: Duration::from_millis(250),
+            // Very generous timeout for sync (30 seconds)
+            sync_timeout: Some(Duration::from_secs(30)),
+            // Moderate retry interval during gameplay
+            running_retry_interval: Duration::from_millis(250),
+            // Frequent keepalives to detect issues
+            keepalive_interval: Duration::from_millis(200),
+        }
+    }
 }
 
 /// Configuration for network protocol behavior.
@@ -1008,6 +1049,16 @@ mod tests {
         assert_eq!(config.sync_timeout, Some(Duration::from_secs(3)));
         assert_eq!(config.running_retry_interval, Duration::from_millis(100));
         assert_eq!(config.keepalive_interval, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn sync_config_extreme_preset() {
+        let config = SyncConfig::extreme();
+        assert_eq!(config.num_sync_packets, 20);
+        assert_eq!(config.sync_retry_interval, Duration::from_millis(250));
+        assert_eq!(config.sync_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(config.running_retry_interval, Duration::from_millis(250));
+        assert_eq!(config.keepalive_interval, Duration::from_millis(200));
     }
 
     #[test]

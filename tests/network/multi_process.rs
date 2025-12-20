@@ -3093,6 +3093,19 @@ mod infrastructure_tests {
         assert_eq!(peer2.sync_preset, Some("mobile".to_string()));
     }
 
+    /// Test NetworkScenario sync_preset "extreme" is properly propagated.
+    #[test]
+    fn test_network_scenario_extreme_sync_preset_propagation() {
+        let scenario = NetworkScenario::symmetric("test", NetworkProfile::bursty())
+            .with_sync_preset("extreme");
+
+        let (peer1, peer2) = scenario.to_peer_configs(30020);
+
+        // Both peers should have the extreme sync preset set
+        assert_eq!(peer1.sync_preset, Some("extreme".to_string()));
+        assert_eq!(peer2.sync_preset, Some("extreme".to_string()));
+    }
+
     /// Test NetworkScenario without sync_preset defaults to None.
     #[test]
     fn test_network_scenario_no_sync_preset() {
@@ -3183,8 +3196,18 @@ mod infrastructure_tests {
     /// | 25%               | ~43.75%        | mobile                 |
     /// | 30%               | ~51%           | mobile (strict)        |
     ///
-    /// Note: At 30% bidirectional loss, synchronization is probabilistic even with
-    /// mobile preset. Tests at this level may be flaky on slow CI systems.
+    /// For scenarios with burst loss (multiple consecutive packets dropped):
+    ///
+    /// | Burst Loss Prob | Burst Length | Recommended SyncConfig |
+    /// |-----------------|--------------|------------------------|
+    /// | 2%              | 3-4          | lossy                  |
+    /// | 5%              | 3-5          | mobile                 |
+    /// | 10%             | 5-8          | extreme                |
+    /// | >10%            | >8           | extreme (may be flaky) |
+    ///
+    /// Note: At 30% bidirectional loss or 10% burst loss with 8-packet bursts,
+    /// synchronization is probabilistic even with extreme preset. Tests at this
+    /// level may be flaky on slow CI systems.
     #[test]
     fn test_packet_loss_effective_rate_documentation() {
         // Document effective loss rates for bidirectional loss
@@ -3233,6 +3256,138 @@ mod infrastructure_tests {
             "Summary should show None for default: {}",
             summary
         );
+    }
+
+    /// Data-driven test documenting which sync presets are appropriate for which network profiles.
+    ///
+    /// This test verifies that each network profile has a documented recommended sync preset,
+    /// and explains the relationship between network conditions and sync configuration.
+    ///
+    /// # Sync Preset Selection Guidelines
+    ///
+    /// - **default**: Baseline packet loss ≤5%, no burst loss, latency ≤50ms
+    /// - **lossy**: Packet loss 5-15%, no significant burst loss
+    /// - **mobile**: Packet loss 10-20%, burst loss ≤5%, high jitter
+    /// - **extreme**: Burst loss >5%, packet loss >20%, or combined hostile conditions
+    #[test]
+    fn test_sync_preset_recommendations_data_driven() {
+        struct SyncPresetRecommendation {
+            profile_name: &'static str,
+            profile: NetworkProfile,
+            recommended_preset: Option<&'static str>,
+            reason: &'static str,
+        }
+
+        let recommendations = [
+            SyncPresetRecommendation {
+                profile_name: "local",
+                profile: NetworkProfile::local(),
+                recommended_preset: None,
+                reason: "No loss or latency, default sync is sufficient",
+            },
+            SyncPresetRecommendation {
+                profile_name: "lan",
+                profile: NetworkProfile::lan(),
+                recommended_preset: None,
+                reason: "Minimal latency, no loss - default sync works",
+            },
+            SyncPresetRecommendation {
+                profile_name: "wifi_good",
+                profile: NetworkProfile::wifi_good(),
+                recommended_preset: None,
+                reason: "Low loss and latency - default sync sufficient",
+            },
+            SyncPresetRecommendation {
+                profile_name: "wifi_average",
+                profile: NetworkProfile::wifi_average(),
+                recommended_preset: None,
+                reason: "5% loss is borderline, default usually works",
+            },
+            SyncPresetRecommendation {
+                profile_name: "wifi_congested",
+                profile: NetworkProfile::wifi_congested(),
+                recommended_preset: Some("mobile"),
+                reason: "15% loss with burst loss needs mobile preset for reliability",
+            },
+            SyncPresetRecommendation {
+                profile_name: "mobile_4g",
+                profile: NetworkProfile::mobile_4g(),
+                recommended_preset: None,
+                reason: "5% loss with higher latency - default usually works",
+            },
+            SyncPresetRecommendation {
+                profile_name: "mobile_3g",
+                profile: NetworkProfile::mobile_3g(),
+                recommended_preset: Some("mobile"),
+                reason: "15% loss is high - needs mobile preset for reliability",
+            },
+            SyncPresetRecommendation {
+                profile_name: "terrible",
+                profile: NetworkProfile::terrible(),
+                recommended_preset: Some("mobile"),
+                reason: "30% loss is extreme - mobile preset required",
+            },
+            SyncPresetRecommendation {
+                profile_name: "heavy_reorder",
+                profile: NetworkProfile::heavy_reorder(),
+                recommended_preset: None,
+                reason: "Low loss, reordering doesn't affect sync handshake",
+            },
+            SyncPresetRecommendation {
+                profile_name: "duplicating",
+                profile: NetworkProfile::duplicating(),
+                recommended_preset: None,
+                reason: "Duplication doesn't negatively affect sync",
+            },
+            SyncPresetRecommendation {
+                profile_name: "bursty",
+                profile: NetworkProfile::bursty(),
+                recommended_preset: Some("extreme"),
+                reason: "10% burst loss with 8-packet bursts can drop entire sync exchanges",
+            },
+        ];
+
+        // Print documentation table
+        println!("\n=== Sync Preset Recommendations ===");
+        println!(
+            "{:<16} {:<8} {:<10} {:<8} {:<10} Reason",
+            "Profile", "Loss%", "BurstP%", "BurstLen", "Preset"
+        );
+        println!("{}", "-".repeat(100));
+
+        for rec in &recommendations {
+            let preset_str = rec.recommended_preset.unwrap_or("default");
+            let p = &rec.profile;
+            println!(
+                "{:<16} {:<8.1} {:<10.1} {:<8} {:<10} {}",
+                rec.profile_name,
+                p.packet_loss * 100.0,
+                p.burst_loss_prob * 100.0,
+                p.burst_loss_len,
+                preset_str,
+                rec.reason
+            );
+
+            // Verify the recommendations make sense based on documented thresholds
+            if p.burst_loss_prob >= 0.10 && p.burst_loss_len >= 8 {
+                assert_eq!(
+                    rec.recommended_preset,
+                    Some("extreme"),
+                    "{}: High burst loss ({}%x{}) should recommend 'extreme' preset",
+                    rec.profile_name,
+                    p.burst_loss_prob * 100.0,
+                    p.burst_loss_len
+                );
+            } else if p.packet_loss >= 0.15 {
+                assert!(
+                    matches!(rec.recommended_preset, Some("mobile") | Some("extreme")),
+                    "{}: High packet loss ({}%) should recommend 'mobile' or 'extreme' preset",
+                    rec.profile_name,
+                    p.packet_loss * 100.0
+                );
+            }
+        }
+        println!("===================================\n");
     }
 }
 
@@ -3405,21 +3560,26 @@ fn test_burst_packet_loss() {
 /// Test with aggressive burst loss pattern.
 ///
 /// The `bursty()` profile has 10% burst loss probability with 8-packet bursts,
-/// plus 5% baseline packet loss. This can easily drop all sync packets in the
-/// default configuration (5 packets). We use `mobile` sync preset which sends
-/// 10 sync packets with longer retry intervals to handle this scenario.
+/// plus 5% baseline packet loss. This creates extremely hostile conditions where
+/// multiple consecutive packets can be dropped simultaneously.
+///
+/// We use `extreme` sync preset which sends 20 sync packets with 250ms retry intervals
+/// and a 30-second timeout to maximize the probability of successful sync handshake.
+/// The mobile preset (10 packets) was insufficient for this scenario on some platforms
+/// (particularly macOS CI where timing differences affect burst patterns).
 #[test]
 #[serial]
 fn test_heavy_burst_loss() {
     skip_if_no_peer_binary!();
     // The bursty profile has aggressive burst loss (10% prob, 8-packet bursts)
     // which can easily drop all sync packets during handshake.
-    // Using "mobile" preset: 10 sync packets, 350ms retry, 15s timeout.
+    // Using "extreme" preset: 20 sync packets, 250ms retry, 30s timeout.
+    // This is more resilient than "mobile" for the most hostile network conditions.
     let scenario = NetworkScenario::symmetric("bursty", NetworkProfile::bursty())
         .with_frames(80)
         .with_input_delay(3)
         .with_timeout(150)
-        .with_sync_preset("mobile");
+        .with_sync_preset("extreme");
 
     let (result1, result2) = scenario.run_test(10410);
 
@@ -3874,12 +4034,13 @@ fn test_extended_chaos_scenario_suite() {
         ),
         (
             10708,
-            // bursty has 10% burst loss with 8-packet bursts, needs mobile sync config
+            // bursty has 10% burst loss with 8-packet bursts, needs extreme sync config
+            // to handle the very hostile network conditions reliably across all platforms
             NetworkScenario::symmetric("bursty", NetworkProfile::bursty())
                 .with_frames(80)
                 .with_input_delay(3)
                 .with_timeout(150)
-                .with_sync_preset("mobile"),
+                .with_sync_preset("extreme"),
         ),
     ];
 
@@ -3927,7 +4088,8 @@ fn test_asymmetric_extended_chaos() {
             .with_timeout(150),
         ),
         // One peer with burst loss, one stable
-        // The bursty peer needs mobile sync to handle burst loss during handshake
+        // The bursty peer needs extreme sync to handle burst loss during handshake
+        // reliably across all platforms (macOS CI in particular has different timing)
         (
             10722,
             NetworkScenario::asymmetric(
@@ -3938,7 +4100,7 @@ fn test_asymmetric_extended_chaos() {
             .with_frames(100)
             .with_input_delay(3)
             .with_timeout(150)
-            .with_sync_preset("mobile"),
+            .with_sync_preset("extreme"),
         ),
         // Mobile vs WiFi - both have significant packet loss
         (

@@ -16,38 +16,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.3] - 2025-12-20
 
-### Fixed
-
-- Fixed `test_heavy_burst_loss` test failure on macOS CI by adding appropriate `sync_preset`
-  - Root cause: The `bursty()` network profile has 10% burst loss with 8-packet bursts, which
-    can drop all sync packets during handshake when using default `SyncConfig` (5 packets)
-  - Tests using `NetworkProfile::bursty()` or similar high-loss scenarios now use `mobile`
-    sync preset (10 sync packets) to reliably complete synchronization
-  - Added `with_sync_preset()` builder method to `NetworkScenario` for configuring sync behavior
-- Fixed timing-sensitive tests that could fail on CI systems with high load (especially macOS)
-  - `test_latency_delays_delivery` now uses 500ms latency with 400ms safety margin (was 100ms/50ms)
-  - `test_in_flight_count` now uses 300ms latency with 200ms safety margin (was 100ms/10ms)
-  - Added detailed diagnostics to timing assertions for debugging future issues
-
 ### Added
 
-- Added `sync_preset` field and `with_sync_preset()` builder to `NetworkScenario` test helper
-- Added unit tests for `NetworkScenario` sync preset propagation
-- Improved `verify_determinism()` test helper with detailed diagnostics for sync failures
-- Added comprehensive data-driven latency tests in `chaos_socket` module:
-  - `test_latency_minimum_delivery_time_data_driven` - verifies packets aren't delivered early
-  - `test_latency_maximum_delivery_time_data_driven` - verifies packets are delivered after max time
-  - `test_latency_fifo_ordering_without_jitter` - verifies FIFO order is maintained
-  - `test_latency_zero_immediate_delivery` - verifies zero latency delivers immediately
-  - `test_latency_high_values_accepted` - verifies high latency values don't overflow
-  - `test_in_flight_accuracy_multiple_cycles` - verifies in-flight tracking across cycles
+- Added `SyncConfig::extreme()` preset for very hostile network conditions
+  - Sends 20 sync packets (vs 10 for mobile, 5 for default) with 250ms retry intervals
+  - 30-second sync timeout to handle multiple burst loss events
+  - Designed for scenarios with 10%+ burst loss probability and 8+ packet burst lengths
+  - Not recommended for production use due to long timeouts
+- Added burst loss recommendations to packet loss documentation table
 
 ### Changed
 
 - Restructured test code to further reduce published crate size
   - Moved network peer binary to separate `tests/network-peer` crate
-  - Network tests now use workspace dependency on the peer binary
   - Excluded additional test infrastructure from published package
+
+### Fixed
+
+- Fixed flaky CI tests on macOS under high load by using more robust timing margins
+- Improved test reliability for high packet loss scenarios using appropriate sync presets
 
 ## [0.1.2] - 2025-12-19
 
