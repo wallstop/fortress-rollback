@@ -14,7 +14,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
 ## [0.1.3] - 2025-12-20
+
+### Fixed
+
+- Fixed timing-sensitive tests that could fail on CI systems with high load (especially macOS)
+  - `test_latency_delays_delivery` now uses 500ms latency with 400ms safety margin (was 100ms/50ms)
+  - `test_in_flight_count` now uses 300ms latency with 200ms safety margin (was 100ms/10ms)
+  - Added detailed diagnostics to timing assertions for debugging future issues
+
+### Added
+
+- Added comprehensive data-driven latency tests in `chaos_socket` module:
+  - `test_latency_minimum_delivery_time_data_driven` - verifies packets aren't delivered early
+  - `test_latency_maximum_delivery_time_data_driven` - verifies packets are delivered after max time
+  - `test_latency_fifo_ordering_without_jitter` - verifies FIFO order is maintained
+  - `test_latency_zero_immediate_delivery` - verifies zero latency delivers immediately
+  - `test_latency_high_values_accepted` - verifies high latency values don't overflow
+  - `test_in_flight_accuracy_multiple_cycles` - verifies in-flight tracking across cycles
 
 ### Changed
 

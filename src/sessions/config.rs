@@ -135,9 +135,20 @@ impl SyncConfig {
         }
     }
 
-    /// Configuration preset for lossy networks (5-15% packet loss).
+    /// Configuration preset for lossy networks (5-15% unidirectional packet loss).
     ///
     /// Uses more sync packets for higher confidence and a sync timeout.
+    ///
+    /// # Note on Packet Loss Math
+    ///
+    /// When packet loss is applied bidirectionally (both send and receive),
+    /// the effective loss rate compounds. For example:
+    /// - 10% bidirectional loss = ~19% effective (1 - 0.9 × 0.9)
+    /// - 15% bidirectional loss = ~28% effective (1 - 0.85 × 0.85)
+    /// - 20% bidirectional loss = ~36% effective (1 - 0.8 × 0.8)
+    /// - 30% bidirectional loss = ~51% effective (1 - 0.7 × 0.7)
+    ///
+    /// For bidirectional loss rates > 20%, consider using [`Self::mobile()`] instead.
     pub fn lossy() -> Self {
         Self {
             num_sync_packets: 8,

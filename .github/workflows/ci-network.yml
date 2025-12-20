@@ -25,10 +25,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Multi-process network tests (localhost)
+  # Multi-process network tests (localhost) - cross-platform
   network-tests:
-    name: Network Tests (localhost)
-    runs-on: ubuntu-latest
+    name: Network Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v6
@@ -46,14 +51,32 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.9
         continue-on-error: true
 
-      - name: Verify sccache is working
-        id: sccache-check
-        if: steps.sccache.outcome == 'success'
+      - name: Verify sccache is working (Unix)
+        id: sccache-check-unix
+        if: steps.sccache.outcome == 'success' && runner.os != 'Windows'
         run: ./scripts/verify-sccache.sh
         continue-on-error: true
 
+      - name: Verify sccache is working (Windows)
+        id: sccache-check-windows
+        if: steps.sccache.outcome == 'success' && runner.os == 'Windows'
+        shell: bash
+        run: ./scripts/verify-sccache.sh
+        continue-on-error: true
+
+      - name: Set sccache working status
+        id: sccache-check
+        shell: bash
+        run: |
+          if [ "${{ steps.sccache-check-unix.outputs.working }}" == "true" ] || [ "${{ steps.sccache-check-windows.outputs.working }}" == "true" ]; then
+            echo "working=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "working=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Clear sccache env on failure
-        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
+        if: steps.sccache.outcome != 'success' || steps.sccache-check.outputs.working != 'true'
+        shell: bash
         run: |
           echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
           echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
