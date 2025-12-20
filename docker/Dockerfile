@@ -24,26 +24,25 @@ WORKDIR /app
 
 # Copy manifests first for better caching
 COPY Cargo.toml Cargo.lock ./
+COPY tests/network-peer/Cargo.toml tests/network-peer/Cargo.toml
 
-# Create a dummy main.rs to build dependencies
-RUN mkdir -p src tests/bin && \
+# Create dummy source files to build dependencies
+RUN mkdir -p src tests/network-peer/src && \
     echo "fn main() {}" > src/lib.rs && \
-    echo "fn main() {}" > tests/bin/network_test_peer.rs
+    echo "fn main() {}" > tests/network-peer/src/main.rs
 
 # Build dependencies only (this layer will be cached)
-RUN cargo build --release --bin network_test_peer 2>/dev/null || true
+RUN cargo build --release -p network-test-peer 2>/dev/null || true
 
 # Now copy the real source code (this overwrites the dummy files)
 COPY src ./src
-COPY tests ./tests
-COPY benches ./benches
+COPY tests/network-peer ./tests/network-peer
 
 # Touch source files to ensure they're newer than cached dependencies
-# (the COPY above already overwrote the dummy files with real content)
-RUN touch src/lib.rs tests/bin/network_test_peer.rs
+RUN touch src/lib.rs tests/network-peer/src/main.rs
 
 # Build the actual binary
-RUN cargo build --release --bin network_test_peer
+RUN cargo build --release -p network-test-peer
 
 # Runtime image
 FROM debian:bookworm-slim

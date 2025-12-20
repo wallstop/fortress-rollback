@@ -9,7 +9,7 @@
 //!
 //! The `network_test_peer` binary must be built before running these tests:
 //! ```bash
-//! cargo build --bin network_test_peer
+//! cargo build -p network-test-peer
 //! ```
 //!
 //! # Test Categories
@@ -373,7 +373,30 @@ impl NetworkScenario {
 
 /// Spawns a test peer process
 fn spawn_peer(config: &PeerConfig) -> std::io::Result<Child> {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_network_test_peer"));
+    // The network_test_peer binary is in a workspace member crate (tests/network-peer).
+    // Since it's part of the workspace, it builds to the shared target directory.
+    let test_exe = std::env::current_exe().expect("Failed to get test executable path");
+
+    // Test executables are in target/debug/deps/, but binaries are in target/debug/
+    let target_dir = test_exe
+        .parent() // deps
+        .and_then(|p| p.parent()) // debug or release
+        .expect("Could not determine target directory");
+
+    // The binary is in the target directory (e.g., target/debug/network_test_peer)
+    let peer_binary = target_dir.join("network_test_peer");
+
+    if !peer_binary.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "network_test_peer binary not found at {}. Build it with: cargo build -p network-test-peer",
+                peer_binary.display()
+            ),
+        ));
+    }
+
+    let mut cmd = Command::new(peer_binary);
 
     cmd.arg("--local-port")
         .arg(config.local_port.to_string())

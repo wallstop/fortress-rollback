@@ -29,8 +29,9 @@ tests/
 │   ├── mod.rs            # Re-exports stubs modules
 │   ├── stubs.rs          # GameStub with struct-based inputs
 │   └── stubs_enum.rs     # GameStub with enum-based inputs
-├── bin/                   # Test binaries
-│   └── network_test_peer.rs  # Multi-process network testing peer
+├── network-peer/          # Separate crate for test binary
+│   ├── Cargo.toml        # Avoids Cargo.lock in main crate
+│   └── src/main.rs       # Multi-process network testing peer
 ├── config.rs              # Configuration struct integration tests
 ├── loom_concurrency.rs    # Loom integration tests (require loom feature)
 ├── network.rs             # Network test module root

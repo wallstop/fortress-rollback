@@ -70,7 +70,7 @@ jobs:
             network-${{ runner.os }}-cargo-
 
       - name: Build network test peer
-        run: cargo build --release --bin network_test_peer
+        run: cargo build --release -p network-test-peer
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}

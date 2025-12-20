@@ -8,14 +8,14 @@
 //!
 //! ```bash
 //! # Start peer 1 (player 0)
-//! cargo run --bin network_test_peer -- \
+//! cargo run -p network-test-peer -- \
 //!     --local-port 9001 \
 //!     --player-index 0 \
 //!     --peer 127.0.0.1:9002 \
 //!     --frames 100
 //!
 //! # Start peer 2 (player 1)
-//! cargo run --bin network_test_peer -- \
+//! cargo run -p network-test-peer -- \
 //!     --local-port 9002 \
 //!     --player-index 1 \
 //!     --peer 127.0.0.1:9001 \
@@ -28,9 +28,6 @@
 //! --packet-loss 0.1       # 10% packet loss
 //! --latency 50            # 50ms latency
 //! --jitter 20             # ±20ms jitter
-
-// Allow print macros for test output and error reporting
-#![allow(clippy::print_stdout, clippy::print_stderr, clippy::disallowed_macros)]
 //! --seed 42               # Deterministic chaos
 //! ```
 //!
@@ -429,7 +426,7 @@ fn main() {
 
     let result = run_test(&args);
     let json = serde_json::to_string(&result).unwrap();
-    println!("{}", json);
+    println!("{json}");
     io::stdout().flush().unwrap();
 
     // Exit with non-zero code on failure so docker compose can detect it
@@ -450,7 +447,7 @@ fn output_error(msg: &str) {
         diagnostics: None,
     };
     let json = serde_json::to_string(&result).unwrap();
-    println!("{}", json);
+    println!("{json}");
 }
 
 fn run_test(args: &Args) -> TestResult {
@@ -480,7 +477,7 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
-                error: Some(format!("Failed to bind socket: {}", e)),
+                error: Some(format!("Failed to bind socket: {e}")),
                 debug_log: None,
                 diagnostics: None,
             };
@@ -510,7 +507,7 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
-                error: Some(format!("Failed to add local player: {}", e)),
+                error: Some(format!("Failed to add local player: {e}")),
                 debug_log: None,
                 diagnostics: None,
             };
@@ -526,7 +523,7 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
-                error: Some(format!("Failed to add remote player: {}", e)),
+                error: Some(format!("Failed to add remote player: {e}")),
                 debug_log: None,
                 diagnostics: None,
             };
@@ -542,7 +539,7 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
-                error: Some(format!("Failed to start session: {}", e)),
+                error: Some(format!("Failed to start session: {e}")),
                 debug_log: None,
                 diagnostics: None,
             };
@@ -686,7 +683,7 @@ fn run_test(args: &Args) -> TestResult {
                     final_value: game.state.value,
                     checksum,
                     rollbacks: game.rollback_count,
-                    error: Some(format!("Failed to add input: {}", e)),
+                    error: Some(format!("Failed to add input: {e}")),
                     debug_log: if args.debug {
                         Some(game.debug_log.entries)
                     } else {
@@ -707,7 +704,7 @@ fn run_test(args: &Args) -> TestResult {
                         final_value: game.state.value,
                         checksum,
                         rollbacks: game.rollback_count,
-                        error: Some(format!("Failed to advance frame: {}", e)),
+                        error: Some(format!("Failed to advance frame: {e}")),
                         debug_log: if args.debug {
                             Some(game.debug_log.entries)
                         } else {

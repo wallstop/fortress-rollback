@@ -1,0 +1,24 @@
+[package]
+name = "network-test-peer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Headless network test peer for multi-process testing of fortress-rollback"
+
+# This is an internal test tool, not published to crates.io
+# It exists as a separate crate to avoid forcing Cargo.lock inclusion
+# in the main fortress-rollback crate (binaries force Cargo.lock inclusion)
+
+[lints.clippy]
+# Allow print macros for test output and error reporting
+print_stdout = "allow"
+print_stderr = "allow"
+
+[dependencies]
+fortress-rollback = { path = "../.." }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[[bin]]
+name = "network_test_peer"
+path = "src/main.rs"
