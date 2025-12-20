@@ -1,6 +1,6 @@
 [package]
 name = "fortress-rollback"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["wallstop <wallstop@wallstopstudios.com>"]
 edition = "2021"
 rust-version = "1.86"  # Minimum Supported Rust Version (MSRV) - required by criterion 0.8.1
@@ -11,6 +11,7 @@ repository = "https://github.com/wallstop/fortress-rollback"
 keywords = ["gamedev", "networking", "ggpo", "rollback"]
 categories = ["network-programming", "game-development"]
 exclude = [
+    # Build/CI artifacts
     ".tla-tools/",
     ".devcontainer/",
     ".github/",
@@ -18,6 +19,30 @@ exclude = [
     "scripts/",
     "specs/",
     "proptest-regressions/",
+    "actionlint",
+    # Development config files (not needed by users)
+    ".cargo/",
+    ".config/",
+    ".cursorrules",
+    ".dockerignore",
+    ".llm/",
+    ".markdown-link-check.json",
+    ".markdownlint.json",
+    ".pre-commit-config.yaml",
+    "clippy.toml",
+    "deny.toml",
+    "rustfmt.toml",
+    # LLM instruction files (for contributing to this project, not for users)
+    "AGENTS.md",
+    "CLAUDE.md",
+    # Note: llms.txt is intentionally NOT excluded - it helps AI tools understand
+    # the library API for users integrating Fortress Rollback into their projects
+    # Supply chain audits (cargo-vet metadata)
+    "supply-chain/",
+    # Tests are large and users can clone repo to run them
+    "tests/",
+    # Cargo.lock not needed for library crates
+    "Cargo.lock",
 ]
 
 [lints.rust]

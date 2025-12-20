@@ -14,13 +14,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.1] - 2025-12-XX
+## [0.1.2] - 2025-12-19
+
+### Changed
+
+- Reduced published crate size from 2.43 MiB to ~300 KiB (88% reduction)
+  - Excluded `actionlint` binary that was accidentally committed
+  - Excluded `tests/` directory (users can clone repo to run tests)
+  - Excluded `Cargo.lock` (not needed for library crates)
+  - Excluded development config files (`.cargo/`, `.config/`, `clippy.toml`, etc.)
+  - Excluded LLM instruction files (`AGENTS.md`, `CLAUDE.md`, `.llm/`)
+  - Excluded `supply-chain/` cargo-vet metadata
+
+## [0.1.1] - 2025-12-19
 
 ### Changed
 
 - Reduced crate size by excluding irrelevant artifacts from published package
 
-## [0.1.0] - 2025-12-XX
+## [0.1.0] - 2025-12-19
 
 Initial release of Fortress Rollback, a correctness-first fork of GGRS v0.11.0.
 
