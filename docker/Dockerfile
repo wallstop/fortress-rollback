@@ -36,6 +36,7 @@ RUN cargo build --release -p network-test-peer 2>/dev/null || true
 
 # Now copy the real source code (this overwrites the dummy files)
 COPY src ./src
+COPY benches ./benches
 COPY tests/network-peer ./tests/network-peer
 
 # Touch source files to ensure they're newer than cached dependencies
