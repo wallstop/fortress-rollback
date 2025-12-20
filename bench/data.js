@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1766185756363,
+  "lastUpdate": 1766189130574,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
@@ -1883,6 +1883,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1555,
             "range": "± 105",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "74001892679241253d1be2289fb271206755e0cb",
+          "message": "Further cargo size reduction (#18)",
+          "timestamp": "2025-12-19T16:00:35-08:00",
+          "tree_id": "008074937a67f8abd8947024eff864af6e889a52",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/74001892679241253d1be2289fb271206755e0cb"
+        },
+        "date": 1766189130242,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 106,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 161,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 532,
+            "range": "± 35",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 796,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1145,
+            "range": "± 25",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 121268,
+            "range": "± 2181",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25467,
+            "range": "± 144",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 11657,
+            "range": "± 164",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1553,
+            "range": "± 103",
             "unit": "ns/iter"
           },
           {
