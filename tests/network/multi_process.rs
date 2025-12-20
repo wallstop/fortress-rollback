@@ -371,30 +371,94 @@ impl NetworkScenario {
     }
 }
 
-/// Spawns a test peer process
-fn spawn_peer(config: &PeerConfig) -> std::io::Result<Child> {
+/// The binary name for the network test peer (platform-specific).
+/// On Windows, executables have a `.exe` suffix.
+const PEER_BINARY_NAME: &str = if cfg!(windows) {
+    "network_test_peer.exe"
+} else {
+    "network_test_peer"
+};
+
+/// Finds the network_test_peer binary path.
+///
+/// Returns `Some(PathBuf)` if the binary exists, `None` otherwise.
+/// This handles platform-specific executable extensions (.exe on Windows).
+fn find_peer_binary() -> Option<std::path::PathBuf> {
     // The network_test_peer binary is in a workspace member crate (tests/network-peer).
     // Since it's part of the workspace, it builds to the shared target directory.
-    let test_exe = std::env::current_exe().expect("Failed to get test executable path");
+    let test_exe = std::env::current_exe().ok()?;
 
     // Test executables are in target/debug/deps/, but binaries are in target/debug/
     let target_dir = test_exe
         .parent() // deps
-        .and_then(|p| p.parent()) // debug or release
-        .expect("Could not determine target directory");
+        .and_then(|p| p.parent())?; // debug or release
 
     // The binary is in the target directory (e.g., target/debug/network_test_peer)
-    let peer_binary = target_dir.join("network_test_peer");
+    let peer_binary = target_dir.join(PEER_BINARY_NAME);
 
-    if !peer_binary.exists() {
-        return Err(std::io::Error::new(
+    if peer_binary.exists() {
+        Some(peer_binary)
+    } else {
+        None
+    }
+}
+
+/// Checks if the network_test_peer binary is available.
+///
+/// Returns `true` if the binary exists and is ready to use.
+/// Call this at the start of tests to skip gracefully if not available.
+fn is_peer_binary_available() -> bool {
+    find_peer_binary().is_some()
+}
+
+/// Skips the test if the network_test_peer binary is not available.
+///
+/// This macro should be called at the beginning of each multi-process test.
+/// It prints a diagnostic message and returns early if the binary is missing.
+macro_rules! skip_if_no_peer_binary {
+    () => {
+        if !is_peer_binary_available() {
+            // Provide detailed diagnostic information for CI debugging
+            let test_exe = std::env::current_exe().ok();
+            let target_dir = test_exe.as_ref().and_then(|p| p.parent()).and_then(|p| p.parent());
+            let expected_path = target_dir.map(|d| d.join(PEER_BINARY_NAME));
+
+            eprintln!("╔══════════════════════════════════════════════════════════════╗");
+            eprintln!("║ SKIP: network_test_peer binary not found                     ║");
+            eprintln!("╠══════════════════════════════════════════════════════════════╣");
+            eprintln!("║ Build it with: cargo build -p network-test-peer              ║");
+            eprintln!("╚══════════════════════════════════════════════════════════════╝");
+            eprintln!();
+            eprintln!("Diagnostic info:");
+            eprintln!("  Expected binary name: {}", PEER_BINARY_NAME);
+            if let Some(path) = &expected_path {
+                eprintln!("  Expected at: {}", path.display());
+                eprintln!("  Path exists: {}", path.exists());
+            }
+            if let Some(target) = target_dir {
+                eprintln!("  Target directory: {}", target.display());
+                eprintln!("  Target exists: {}", target.exists());
+            }
+            eprintln!("  Current platform: {}", std::env::consts::OS);
+            eprintln!();
+            return;
+        }
+    };
+}
+
+/// Spawns a test peer process
+fn spawn_peer(config: &PeerConfig) -> std::io::Result<Child> {
+    let peer_binary = find_peer_binary().ok_or_else(|| {
+        std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!(
-                "network_test_peer binary not found at {}. Build it with: cargo build -p network-test-peer",
-                peer_binary.display()
+                "network_test_peer binary not found. \
+                 Build it with: cargo build -p network-test-peer\n\
+                 Expected binary name: {}",
+                PEER_BINARY_NAME
             ),
-        ));
-    }
+        )
+    })?;
 
     let mut cmd = Command::new(peer_binary);
 
@@ -459,11 +523,26 @@ fn wait_for_peer(child: Child, name: &str) -> TestResult {
     }
 }
 
-/// Runs a two-peer test with the given configurations
+/// Runs a two-peer test with the given configurations.
+///
+/// # Panics
+/// Panics if the network_test_peer binary is not available.
+/// Use [`skip_if_no_peer_binary!`] at the start of tests to skip gracefully.
 fn run_two_peer_test(
     peer1_config: PeerConfig,
     peer2_config: PeerConfig,
 ) -> (TestResult, TestResult) {
+    // Check if the binary exists - fail fast with a clear message
+    assert!(
+        is_peer_binary_available(),
+        "PREREQUISITE NOT MET: network_test_peer binary not found.\n\
+         Build it with: cargo build -p network-test-peer\n\
+         Expected binary: {} in target directory\n\
+         \n\
+         This is not a test failure - the test requires the peer binary to be built first.",
+        PEER_BINARY_NAME
+    );
+
     let test_start = std::time::Instant::now();
 
     // Spawn peer 1
@@ -552,6 +631,7 @@ fn verify_determinism(result1: &TestResult, result2: &TestResult, context: &str)
 #[test]
 #[serial]
 fn test_basic_connectivity() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10001,
         player_index: 0,
@@ -597,6 +677,7 @@ fn test_basic_connectivity() {
 #[test]
 #[serial]
 fn test_extended_session() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10003,
         player_index: 0,
@@ -640,6 +721,7 @@ fn test_extended_session() {
 #[test]
 #[serial]
 fn test_packet_loss_5_percent() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10005,
         player_index: 0,
@@ -672,6 +754,7 @@ fn test_packet_loss_5_percent() {
 #[test]
 #[serial]
 fn test_packet_loss_15_percent() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10007,
         player_index: 0,
@@ -708,6 +791,7 @@ fn test_packet_loss_15_percent() {
 #[test]
 #[serial]
 fn test_latency_30ms() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10009,
         player_index: 0,
@@ -740,6 +824,7 @@ fn test_latency_30ms() {
 #[test]
 #[serial]
 fn test_latency_with_jitter() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10011,
         player_index: 0,
@@ -778,6 +863,7 @@ fn test_latency_with_jitter() {
 #[test]
 #[serial]
 fn test_poor_network_combined() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10013,
         player_index: 0,
@@ -814,6 +900,7 @@ fn test_poor_network_combined() {
 #[test]
 #[serial]
 fn test_asymmetric_network() {
+    skip_if_no_peer_binary!();
     // Peer 1 has bad network
     let peer1_config = PeerConfig {
         local_port: 10015,
@@ -863,6 +950,7 @@ fn test_asymmetric_network() {
 #[test]
 #[serial]
 fn test_stress_long_session_with_loss() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10017,
         player_index: 0,
@@ -915,6 +1003,7 @@ fn test_stress_long_session_with_loss() {
 #[test]
 #[serial]
 fn test_high_jitter_50ms() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10019,
         player_index: 0,
@@ -949,6 +1038,7 @@ fn test_high_jitter_50ms() {
 #[test]
 #[serial]
 fn test_mobile_network_simulation() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10021,
         player_index: 0,
@@ -990,6 +1080,7 @@ fn test_mobile_network_simulation() {
 #[test]
 #[serial]
 fn test_heavily_asymmetric_network() {
+    skip_if_no_peer_binary!();
     // Peer 1 has terrible network conditions
     let peer1_config = PeerConfig {
         local_port: 10023,
@@ -1033,6 +1124,7 @@ fn test_heavily_asymmetric_network() {
 #[test]
 #[serial]
 fn test_higher_input_delay() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10025,
         player_index: 0,
@@ -1069,6 +1161,7 @@ fn test_higher_input_delay() {
 #[test]
 #[serial]
 fn test_zero_latency_high_loss() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10027,
         player_index: 0,
@@ -1103,6 +1196,7 @@ fn test_zero_latency_high_loss() {
 #[test]
 #[serial]
 fn test_medium_session_300_frames() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10029,
         player_index: 0,
@@ -1153,6 +1247,7 @@ fn test_medium_session_300_frames() {
 #[test]
 #[serial]
 fn test_stress_very_long_session() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10031,
         player_index: 0,
@@ -1192,6 +1287,7 @@ fn test_stress_very_long_session() {
 #[test]
 #[serial]
 fn test_determinism_different_seeds() {
+    skip_if_no_peer_binary!();
     // Same network conditions but different chaos seeds
     let peer1_config = PeerConfig {
         local_port: 10033,
@@ -1232,6 +1328,7 @@ fn test_determinism_different_seeds() {
 #[test]
 #[serial]
 fn test_staggered_peer_startup() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10035,
         player_index: 0,
@@ -1272,6 +1369,7 @@ fn test_staggered_peer_startup() {
 #[test]
 #[serial]
 fn test_heavily_staggered_startup() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10037,
         player_index: 0,
@@ -1312,6 +1410,7 @@ fn test_heavily_staggered_startup() {
 #[test]
 #[serial]
 fn test_asymmetric_input_delays() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10039,
         player_index: 0,
@@ -1343,6 +1442,7 @@ fn test_asymmetric_input_delays() {
 #[test]
 #[serial]
 fn test_zero_input_delay() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10041,
         player_index: 0,
@@ -1380,6 +1480,7 @@ fn test_zero_input_delay() {
 #[test]
 #[serial]
 fn test_high_input_delay_8_frames() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10043,
         player_index: 0,
@@ -1417,6 +1518,7 @@ fn test_high_input_delay_8_frames() {
 #[test]
 #[serial]
 fn test_severe_burst_loss_recovery() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10045,
         player_index: 0,
@@ -1457,6 +1559,7 @@ fn test_severe_burst_loss_recovery() {
 #[test]
 #[serial]
 fn test_worst_case_realistic_network() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10047,
         player_index: 0,
@@ -1498,6 +1601,7 @@ fn test_worst_case_realistic_network() {
 #[test]
 #[serial]
 fn test_rapid_short_session() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10049,
         player_index: 0,
@@ -1538,6 +1642,7 @@ fn test_rapid_short_session() {
 #[test]
 #[serial]
 fn test_extreme_asymmetric_one_perfect_one_terrible() {
+    skip_if_no_peer_binary!();
     // Peer 1 has perfect network
     let peer1_config = PeerConfig {
         local_port: 10051,
@@ -1585,6 +1690,7 @@ fn test_extreme_asymmetric_one_perfect_one_terrible() {
 #[test]
 #[serial]
 fn test_intercontinental_latency() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10053,
         player_index: 0,
@@ -1622,6 +1728,7 @@ fn test_intercontinental_latency() {
 #[test]
 #[serial]
 fn test_sustained_moderate_adversity() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10055,
         player_index: 0,
@@ -1675,6 +1782,7 @@ fn test_sustained_moderate_adversity() {
 #[test]
 #[serial]
 fn test_reproducible_chaos_same_seed() {
+    skip_if_no_peer_binary!();
     // Same chaos seed on both peers
     let peer1_config = PeerConfig {
         local_port: 10057,
@@ -1712,6 +1820,7 @@ fn test_reproducible_chaos_same_seed() {
 #[test]
 #[serial]
 fn test_baseline_no_chaos() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10059,
         player_index: 0,
@@ -1764,6 +1873,7 @@ fn test_baseline_no_chaos() {
 #[test]
 #[serial]
 fn test_wifi_interference_simulation() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10061,
         player_index: 0,
@@ -1806,6 +1916,7 @@ fn test_wifi_interference_simulation() {
 #[test]
 #[serial]
 fn test_intercontinental_simulation() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10063,
         player_index: 0,
@@ -1848,6 +1959,7 @@ fn test_intercontinental_simulation() {
 #[test]
 #[serial]
 fn test_competitive_lan_simulation() {
+    skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
         local_port: 10065,
         player_index: 0,
@@ -1985,6 +2097,7 @@ impl NetworkConditionCase {
 #[test]
 #[serial]
 fn test_input_delay_vs_rollbacks_data_driven() {
+    skip_if_no_peer_binary!();
     let test_cases = [
         NetworkConditionCase {
             name: "zero_delay_zero_latency",
@@ -2054,6 +2167,7 @@ fn test_input_delay_vs_rollbacks_data_driven() {
 #[test]
 #[serial]
 fn test_packet_loss_determinism_data_driven() {
+    skip_if_no_peer_binary!();
     let test_cases = [
         NetworkConditionCase {
             name: "low_loss_5pct",
@@ -2116,6 +2230,7 @@ fn test_packet_loss_determinism_data_driven() {
 #[test]
 #[serial]
 fn test_timing_sensitive_edge_cases_data_driven() {
+    skip_if_no_peer_binary!();
     let test_cases = [
         // Zero input delay with perfect network - tests raw sync behavior
         NetworkConditionCase {
@@ -2200,6 +2315,7 @@ fn test_timing_sensitive_edge_cases_data_driven() {
 #[test]
 #[serial]
 fn test_network_scenario_suite() {
+    skip_if_no_peer_binary!();
     println!("=== Network Scenario Suite ===");
 
     // Test a variety of common network scenarios
@@ -2252,6 +2368,7 @@ fn test_network_scenario_suite() {
 #[test]
 #[serial]
 fn test_asymmetric_scenarios() {
+    skip_if_no_peer_binary!();
     println!("=== Asymmetric Network Scenarios ===");
 
     let scenarios = [
@@ -2331,6 +2448,7 @@ fn test_asymmetric_scenarios() {
 #[test]
 #[serial]
 fn test_scenario_local_perfect() {
+    skip_if_no_peer_binary!();
     let scenario = NetworkScenario::symmetric("local_perfect", NetworkProfile::local())
         .with_frames(200)
         .with_input_delay(0);
@@ -2344,4 +2462,287 @@ fn test_scenario_local_perfect() {
         "Perfect local: rollbacks peer1={}, peer2={}",
         result1.rollbacks, result2.rollbacks
     );
+}
+
+// =============================================================================
+// Unit Tests for Test Infrastructure
+// =============================================================================
+
+#[cfg(test)]
+mod infrastructure_tests {
+    use super::*;
+
+    /// Verify that the platform-specific binary name is correct.
+    #[test]
+    fn test_peer_binary_name_platform_specific() {
+        // This tests that the const correctly handles platform differences
+        #[cfg(windows)]
+        assert_eq!(PEER_BINARY_NAME, "network_test_peer.exe");
+
+        #[cfg(not(windows))]
+        assert_eq!(PEER_BINARY_NAME, "network_test_peer");
+    }
+
+    /// Verify that find_peer_binary returns Some when binary exists.
+    #[test]
+    fn test_find_peer_binary_when_exists() {
+        // This test will pass if the binary is built, skip otherwise
+        if let Some(path) = find_peer_binary() {
+            assert!(
+                path.exists(),
+                "Returned path should exist: {}",
+                path.display()
+            );
+            assert!(
+                path.ends_with(PEER_BINARY_NAME),
+                "Path should end with binary name: {}",
+                path.display()
+            );
+        } else {
+            eprintln!(
+                "Note: find_peer_binary returned None - binary not built. \
+                 This is expected if network-test-peer hasn't been compiled."
+            );
+        }
+    }
+
+    /// Verify that is_peer_binary_available is consistent with find_peer_binary.
+    #[test]
+    fn test_is_peer_binary_available_consistency() {
+        let available = is_peer_binary_available();
+        let found = find_peer_binary();
+
+        assert_eq!(
+            available,
+            found.is_some(),
+            "is_peer_binary_available should match find_peer_binary().is_some()"
+        );
+    }
+
+    /// Test PeerConfig default values.
+    #[test]
+    fn test_peer_config_defaults() {
+        let config = PeerConfig::default();
+
+        assert_eq!(config.local_port, 0);
+        assert_eq!(config.player_index, 0);
+        assert!(config.peer_addr.is_empty());
+        assert_eq!(config.frames, 100);
+        assert!((config.packet_loss - 0.0).abs() < f64::EPSILON);
+        assert_eq!(config.latency_ms, 0);
+        assert_eq!(config.jitter_ms, 0);
+        assert!(config.seed.is_none());
+        assert_eq!(config.timeout_secs, 30);
+        assert_eq!(config.input_delay, 2);
+    }
+
+    /// Test PeerConfig diagnostic summary format.
+    #[test]
+    fn test_peer_config_diagnostic_summary() {
+        let config = PeerConfig {
+            local_port: 10001,
+            player_index: 0,
+            peer_addr: "127.0.0.1:10002".to_string(),
+            frames: 100,
+            packet_loss: 0.05,
+            latency_ms: 30,
+            jitter_ms: 10,
+            seed: Some(42),
+            timeout_secs: 60,
+            input_delay: 2,
+        };
+
+        let summary = config.diagnostic_summary();
+
+        // Verify all key fields are present in the summary
+        assert!(
+            summary.contains("port=10001"),
+            "Summary should contain port"
+        );
+        assert!(
+            summary.contains("player=0"),
+            "Summary should contain player index"
+        );
+        assert!(
+            summary.contains("127.0.0.1:10002"),
+            "Summary should contain peer address"
+        );
+        assert!(
+            summary.contains("frames=100"),
+            "Summary should contain frames"
+        );
+        assert!(
+            summary.contains("5.0%"),
+            "Summary should contain packet loss percentage"
+        );
+        assert!(summary.contains("30ms"), "Summary should contain latency");
+        assert!(summary.contains("10ms"), "Summary should contain jitter");
+        assert!(
+            summary.contains("delay=2"),
+            "Summary should contain input delay"
+        );
+        assert!(summary.contains("42"), "Summary should contain seed");
+    }
+
+    /// Test TestResult diagnostic summary format.
+    #[test]
+    fn test_test_result_diagnostic_summary() {
+        let result = TestResult {
+            success: true,
+            final_frame: 100,
+            final_value: 12345,
+            checksum: 0xDEADBEEF,
+            rollbacks: 5,
+            error: None,
+        };
+
+        let summary = result.diagnostic_summary();
+
+        // Verify all key fields are present
+        assert!(
+            summary.contains("success=true"),
+            "Summary should contain success"
+        );
+        assert!(
+            summary.contains("frame=100"),
+            "Summary should contain frame"
+        );
+        assert!(
+            summary.contains("value=12345"),
+            "Summary should contain value"
+        );
+        assert!(
+            summary.contains("deadbeef"),
+            "Summary should contain checksum hex"
+        );
+        assert!(
+            summary.contains("rollbacks=5"),
+            "Summary should contain rollbacks"
+        );
+    }
+
+    /// Test TestResult with error message.
+    #[test]
+    fn test_test_result_with_error() {
+        let result = TestResult {
+            success: false,
+            final_frame: 50,
+            final_value: 0,
+            checksum: 0,
+            rollbacks: 0,
+            error: Some("Connection timeout".to_string()),
+        };
+
+        let summary = result.diagnostic_summary();
+
+        assert!(
+            summary.contains("success=false"),
+            "Summary should show failure"
+        );
+        assert!(
+            summary.contains("Connection timeout"),
+            "Summary should contain error"
+        );
+    }
+
+    /// Test NetworkProfile constants are valid.
+    #[test]
+    fn test_network_profiles_valid() {
+        // Test that all profiles have valid values
+        let profiles = [
+            ("local", NetworkProfile::local()),
+            ("lan", NetworkProfile::lan()),
+            ("wifi_good", NetworkProfile::wifi_good()),
+            ("wifi_average", NetworkProfile::wifi_average()),
+            ("wifi_congested", NetworkProfile::wifi_congested()),
+            ("mobile_4g", NetworkProfile::mobile_4g()),
+            ("mobile_3g", NetworkProfile::mobile_3g()),
+            ("intercontinental", NetworkProfile::intercontinental()),
+            ("terrible", NetworkProfile::terrible()),
+        ];
+
+        for (name, profile) in profiles {
+            // Packet loss should be between 0 and 1
+            assert!(
+                (0.0..=1.0).contains(&profile.packet_loss),
+                "{}: packet_loss {} should be between 0 and 1",
+                name,
+                profile.packet_loss
+            );
+
+            // Latency values are reasonable (under 1 second)
+            assert!(
+                profile.latency_ms < 1000,
+                "{}: latency_ms {} seems unreasonably high",
+                name,
+                profile.latency_ms
+            );
+
+            // Jitter should not exceed latency significantly
+            assert!(
+                profile.jitter_ms <= profile.latency_ms * 2 + 50,
+                "{}: jitter_ms {} seems disproportionate to latency {}",
+                name,
+                profile.jitter_ms,
+                profile.latency_ms
+            );
+        }
+    }
+
+    /// Test NetworkScenario builder pattern.
+    #[test]
+    fn test_network_scenario_builder() {
+        let scenario = NetworkScenario::lan()
+            .with_frames(200)
+            .with_input_delay(4)
+            .with_timeout(120);
+
+        assert_eq!(scenario.frames, 200);
+        assert_eq!(scenario.input_delay, 4);
+        assert_eq!(scenario.timeout_secs, 120);
+    }
+
+    /// Test NetworkScenario asymmetric creation.
+    #[test]
+    fn test_network_scenario_asymmetric() {
+        let scenario = NetworkScenario::asymmetric(
+            "test_asymmetric",
+            NetworkProfile::lan(),
+            NetworkProfile::terrible(),
+        );
+
+        assert_eq!(scenario.name, "test_asymmetric");
+        // Use approx comparison for floating point
+        assert!(
+            (scenario.peer1_profile.packet_loss - NetworkProfile::lan().packet_loss).abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (scenario.peer2_profile.packet_loss - NetworkProfile::terrible().packet_loss).abs()
+                < f64::EPSILON
+        );
+    }
+
+    /// Test NetworkScenario to_peer_configs generates valid configurations.
+    #[test]
+    fn test_network_scenario_to_peer_configs() {
+        let scenario = NetworkScenario::lan().with_frames(100);
+        let (peer1, peer2) = scenario.to_peer_configs(20000);
+
+        // Verify port allocation
+        assert_eq!(peer1.local_port, 20000);
+        assert_eq!(peer2.local_port, 20001);
+
+        // Verify peer addresses point to each other
+        assert_eq!(peer1.peer_addr, "127.0.0.1:20001");
+        assert_eq!(peer2.peer_addr, "127.0.0.1:20000");
+
+        // Verify player indices
+        assert_eq!(peer1.player_index, 0);
+        assert_eq!(peer2.player_index, 1);
+
+        // Verify frames match scenario
+        assert_eq!(peer1.frames, 100);
+        assert_eq!(peer2.frames, 100);
+    }
 }
