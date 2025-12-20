@@ -804,23 +804,44 @@ fn test_synchronizing_events_generated() -> Result<(), FortressError> {
         .expect("spectator session should start");
 
     let mut found_synchronizing = false;
+    let mut iterations = 0;
+    let start = Instant::now();
 
-    // Run synchronization and collect events
-    for _ in 0..50 {
+    // Run synchronization and collect events with timeout to handle platform timing variations.
+    // On slow or busy CI systems (especially macOS), tight loops may not allow enough time
+    // for UDP packets to be delivered and processed.
+    while start.elapsed() < SYNC_TIMEOUT && iterations < MAX_SYNC_ITERATIONS {
         spec_sess.poll_remote_clients();
         host_sess.poll_remote_clients();
+        iterations += 1;
 
         for event in spec_sess.events() {
             if matches!(event, FortressEvent::Synchronizing { .. }) {
                 found_synchronizing = true;
             }
         }
+
+        // Early exit once we found what we're looking for
+        if found_synchronizing {
+            break;
+        }
+
+        // Small sleep to allow network layer to process messages
+        thread::sleep(POLL_INTERVAL);
     }
 
     // We should have received Synchronizing progress events
     assert!(
         found_synchronizing,
-        "Expected Synchronizing events during handshake"
+        "Expected Synchronizing events during handshake.\n\
+         Iterations: {}\n\
+         Elapsed: {:?}\n\
+         Spectator state: {:?}\n\
+         Host state: {:?}",
+        iterations,
+        start.elapsed(),
+        spec_sess.current_state(),
+        host_sess.current_state()
     );
 
     Ok(())
@@ -861,16 +882,9 @@ fn test_spectator_catchup_speed() -> Result<(), FortressError> {
 
     let mut host_game = GameStub::new();
 
-    // Synchronize first
-    for _ in 0..100 {
-        spec_sess.poll_remote_clients();
-        host_sess.poll_remote_clients();
-        if spec_sess.current_state() == SessionState::Running
-            && host_sess.current_state() == SessionState::Running
-        {
-            break;
-        }
-    }
+    // Synchronize first with proper timeout and sleeps for reliable timing
+    let result = wait_for_sync(&mut spec_sess, &mut host_sess, SYNC_TIMEOUT);
+    assert_synchronized(&spec_sess, &host_sess, &result);
 
     // Have host advance many frames ahead
     for frame in 0..20 {
@@ -881,10 +895,12 @@ fn test_spectator_catchup_speed() -> Result<(), FortressError> {
         host_sess.poll_remote_clients();
     }
 
-    // Let messages propagate
-    for _ in 0..50 {
+    // Let messages propagate with proper timing
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(1) {
         host_sess.poll_remote_clients();
         spec_sess.poll_remote_clients();
+        thread::sleep(POLL_INTERVAL);
     }
 
     // Spectator should now be behind and catch up

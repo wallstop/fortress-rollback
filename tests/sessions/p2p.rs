@@ -10,9 +10,19 @@ use fortress_rollback::{
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Maximum iterations to wait for synchronization before giving up.
-const MAX_SYNC_ITERATIONS: usize = 200;
+const MAX_SYNC_ITERATIONS: usize = 500;
+
+/// Time to sleep between poll iterations to allow for proper timing.
+/// This prevents tight loops that may not give the network layer enough time
+/// to process messages, especially on systems with different scheduling behavior (e.g., macOS CI).
+const POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Maximum time to wait for synchronization to complete.
+const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Synchronization configuration for test sessions.
 #[derive(Debug, Clone)]
@@ -44,17 +54,21 @@ fn synchronize_sessions<C: fortress_rollback::Config>(
     config: &SyncConfig,
 ) -> Result<usize, String> {
     let mut iterations = 0;
+    let start = Instant::now();
 
     // Use || (OR) because we want to continue while EITHER session is not Running.
     // Using && would exit as soon as ONE session is Running, which is incorrect.
     while sess1.current_state() != SessionState::Running
         || sess2.current_state() != SessionState::Running
     {
-        if iterations >= config.max_iterations {
+        // Check both iteration count AND time-based timeout for robustness.
+        // Time-based timeout is more reliable across different platforms (especially macOS CI).
+        if iterations >= config.max_iterations || start.elapsed() > SYNC_TIMEOUT {
             return Err(format!(
-                "Synchronization timed out after {} iterations. \
+                "Synchronization timed out after {} iterations ({:?}). \
                  sess1 state: {:?}, sess2 state: {:?}",
-                config.max_iterations,
+                iterations,
+                start.elapsed(),
                 sess1.current_state(),
                 sess2.current_state()
             ));
@@ -63,6 +77,11 @@ fn synchronize_sessions<C: fortress_rollback::Config>(
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
         iterations += 1;
+
+        // Small sleep to allow network layer to process messages.
+        // This is crucial on fast systems where tight loops may not give
+        // the OS enough time to deliver UDP packets.
+        thread::sleep(POLL_INTERVAL);
     }
 
     // Verify both are actually Running
@@ -184,10 +203,9 @@ fn test_synchronize_p2p_sessions() -> Result<(), FortressError> {
     assert!(sess1.current_state() == SessionState::Synchronizing);
     assert!(sess2.current_state() == SessionState::Synchronizing);
 
-    for _ in 0..50 {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
-    }
+    // Use robust synchronization with time-based timeout
+    synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default())
+        .expect("Sessions should synchronize");
 
     assert!(sess1.current_state() == SessionState::Running);
     assert!(sess2.current_state() == SessionState::Running);
@@ -216,10 +234,9 @@ fn test_advance_frame_p2p_sessions() -> Result<(), FortressError> {
     assert!(sess1.current_state() == SessionState::Synchronizing);
     assert!(sess2.current_state() == SessionState::Synchronizing);
 
-    for _ in 0..50 {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
-    }
+    // Use robust synchronization with time-based timeout
+    synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default())
+        .expect("Sessions should synchronize");
 
     assert!(sess1.current_state() == SessionState::Running);
     assert!(sess2.current_state() == SessionState::Running);
@@ -664,8 +681,6 @@ fn test_four_player_session() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_misprediction_at_frame_0_no_crash() -> Result<(), FortressError> {
-    use std::time::Duration;
-
     let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9910);
     let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9911);
 
@@ -685,12 +700,9 @@ fn test_misprediction_at_frame_0_no_crash() -> Result<(), FortressError> {
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    // Synchronize sessions
-    for _ in 0..100 {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    // Use robust synchronization with time-based timeout
+    synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default())
+        .expect("Sessions should synchronize");
 
     assert_eq!(sess1.current_state(), SessionState::Running);
     assert_eq!(sess2.current_state(), SessionState::Running);
@@ -708,10 +720,12 @@ fn test_misprediction_at_frame_0_no_crash() -> Result<(), FortressError> {
     let requests1 = sess1.advance_frame()?;
     stub1.handle_requests(requests1);
 
-    // Now exchange messages - sess2's actual input (200) will differ from sess1's prediction (0)
+    // Now exchange messages with sleeps to allow proper message processing
+    // sess2's actual input (200) will differ from sess1's prediction (0)
     for _ in 0..10 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
+        thread::sleep(POLL_INTERVAL);
     }
 
     // Advance sess2 normally
@@ -723,6 +737,7 @@ fn test_misprediction_at_frame_0_no_crash() -> Result<(), FortressError> {
     for _ in 0..50 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
+        thread::sleep(POLL_INTERVAL);
     }
 
     // Continue advancing frames to verify the session remains stable
@@ -742,6 +757,7 @@ fn test_misprediction_at_frame_0_no_crash() -> Result<(), FortressError> {
         for _ in 0..5 {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
+            thread::sleep(POLL_INTERVAL);
         }
     }
 
