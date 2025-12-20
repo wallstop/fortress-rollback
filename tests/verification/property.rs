@@ -841,17 +841,33 @@ mod p2p_checksum_tests {
     }
 
     /// Helper to advance a session by processing a number of frames with poll cycles.
+    /// Uses time-based waiting to be robust across different platforms.
     fn synchronize_sessions<T: Config>(
         sess1: &mut fortress_rollback::P2PSession<T>,
         sess2: &mut fortress_rollback::P2PSession<T>,
-        poll_cycles: usize,
+        _poll_cycles: usize, // Kept for API compatibility but ignored - we use time-based timeout
     ) where
         T::Input: Default,
     {
-        for _ in 0..poll_cycles {
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
+        const POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+        let start = Instant::now();
+        while start.elapsed() < SYNC_TIMEOUT {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
+            if sess1.current_state() == SessionState::Running
+                && sess2.current_state() == SessionState::Running
+            {
+                return;
+            }
+            thread::sleep(POLL_INTERVAL);
         }
+        // If we get here, synchronization may have failed - but don't assert,
+        // let the caller handle the failure with their own assertions
     }
 
     /// Property: sync_health returns Pending when desync detection is off
@@ -1126,9 +1142,12 @@ mod p2p_checksum_tests {
         }
 
         // Continue polling to ensure checksum messages are exchanged
-        for _ in 0..50 {
+        // Use time-based waiting for robustness across platforms
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(500) {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
 
         // At this point, checksums should have been exchanged and compared

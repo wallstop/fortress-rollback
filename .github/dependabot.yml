@@ -3,7 +3,8 @@
 
 version: 2
 updates:
-  # Rust dependencies (Cargo)
+  # Rust dependencies (Cargo) - covers root workspace and all members
+  # (includes: fortress-rollback, tests/network-peer)
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
@@ -14,12 +15,9 @@ updates:
       - "wallstop"
     commit-message:
       prefix: "chore(deps)"
-    labels:
-      - "dependencies"
-      - "rust"
     open-pull-requests-limit: 10
 
-  # Rust dependencies for fuzz directory
+  # Rust dependencies for fuzz directory (separate workspace)
   - package-ecosystem: "cargo"
     directory: "/fuzz"
     schedule:
@@ -30,13 +28,10 @@ updates:
       - "wallstop"
     commit-message:
       prefix: "chore(deps)"
-    labels:
-      - "dependencies"
-      - "rust"
-      - "fuzz"
     open-pull-requests-limit: 5
 
-  # Rust dependencies for loom-tests directory
+  # Rust dependencies for loom-tests directory (separate workspace,
+  # requires special --cfg loom flags that conflict with normal builds)
   - package-ecosystem: "cargo"
     directory: "/loom-tests"
     schedule:
@@ -47,10 +42,6 @@ updates:
       - "wallstop"
     commit-message:
       prefix: "chore(deps)"
-    labels:
-      - "dependencies"
-      - "rust"
-      - "loom"
     open-pull-requests-limit: 5
 
   # GitHub Actions dependencies
@@ -64,9 +55,6 @@ updates:
       - "wallstop"
     commit-message:
       prefix: "chore(ci)"
-    labels:
-      - "dependencies"
-      - "github-actions"
     open-pull-requests-limit: 5
 
   # Docker dependencies
@@ -80,7 +68,10 @@ updates:
       - "wallstop"
     commit-message:
       prefix: "chore(docker)"
-    labels:
-      - "dependencies"
-      - "docker"
     open-pull-requests-limit: 3
+    ignore:
+      # Rust base image is intentionally pinned to MSRV (Minimum Supported Rust Version)
+      # defined in Cargo.toml. The Dockerfile uses MSRV to ensure network tests validate
+      # builds at the minimum supported version. CI tests latest stable separately.
+      # Only update when MSRV changes in Cargo.toml.
+      - dependency-name: "rust"

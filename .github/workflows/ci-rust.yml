@@ -29,34 +29,60 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Primary build and test job (Windows)
-  build-windows:
-    name: Build & Test (Windows)
-    runs-on: windows-latest
+  # Primary build and test job (cross-platform matrix)
+  build:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v6
 
-      - name: Update Rust
-        run: rustup update stable
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-nextest
 
       - name: Configure sccache
         id: sccache
         uses: mozilla-actions/sccache-action@v0.0.9
         continue-on-error: true
 
-      - name: Verify sccache is working
-        id: sccache-check
-        if: steps.sccache.outcome == 'success'
+      - name: Verify sccache is working (Unix)
+        id: sccache-check-unix
+        if: steps.sccache.outcome == 'success' && runner.os != 'Windows'
         run: ./scripts/verify-sccache.sh
         continue-on-error: true
 
+      - name: Verify sccache is working (Windows)
+        id: sccache-check-windows
+        if: steps.sccache.outcome == 'success' && runner.os == 'Windows'
+        shell: bash
+        run: ./scripts/verify-sccache.sh
+        continue-on-error: true
+
+      - name: Set sccache working status
+        id: sccache-check
+        shell: bash
+        run: |
+          if [ "${{ steps.sccache-check-unix.outputs.working }}" == "true" ] || [ "${{ steps.sccache-check-windows.outputs.working }}" == "true" ]; then
+            echo "working=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "working=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Clear sccache env on failure
-        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
+        if: steps.sccache.outcome != 'success' || steps.sccache-check.outputs.working != 'true'
+        shell: bash
         run: |
           echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
           echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
@@ -68,9 +94,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: build-windows-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: build-${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            build-windows-${{ runner.os }}-cargo-
+            build-${{ matrix.os }}-cargo-
 
       - name: Build
         run: cargo build --verbose
@@ -78,6 +104,17 @@ jobs:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Build network test peer
+        run: cargo build -p network-test-peer
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
 
       - name: Run tests (nextest)
         run: cargo nextest run --profile ci --verbose
@@ -85,12 +122,17 @@ jobs:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
 
       - name: Build docs
         run: cargo doc --verbose
 
       - name: Check formatting
         run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
 
   # Miri undefined behavior check
   miri:
@@ -188,7 +230,9 @@ jobs:
           toolchain: stable
 
       - name: Install cargo-hack
-        uses: taiki-e/install-action@cargo-hack
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-hack
 
       - name: Configure sccache
         id: sccache
@@ -224,12 +268,14 @@ jobs:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
 
   # Package dry-run
   package-dry-run:
     name: Package Dry Run
     runs-on: ubuntu-latest
-    needs: build-windows
+    needs: build
 
     steps:
       - uses: actions/checkout@v6

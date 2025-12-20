@@ -5,18 +5,111 @@
 
 use crate::common::stubs::{GameStub, StubConfig, StubInput};
 use fortress_rollback::{
-    telemetry::CollectingObserver, FortressError, FortressEvent, InputQueueConfig, PlayerHandle,
-    PlayerType, SessionBuilder, SessionState, SpectatorConfig, UdpNonBlockingSocket,
+    telemetry::CollectingObserver, FortressError, FortressEvent, InputQueueConfig, P2PSession,
+    PlayerHandle, PlayerType, SessionBuilder, SessionState, SpectatorConfig, SpectatorSession,
+    SyncConfig, UdpNonBlockingSocket,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Maximum time to wait for synchronization to complete.
+const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Time to sleep between poll iterations to allow for proper timing.
+/// This prevents tight loops that may not give the network layer enough time
+/// to process messages, especially on systems with different scheduling behavior.
+const POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Maximum number of poll iterations to attempt during synchronization.
+const MAX_SYNC_ITERATIONS: usize = 500;
 
 // Helper to create test addresses
 fn test_addr(port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
+}
+
+/// Result of a synchronization attempt.
+#[derive(Debug)]
+struct SyncResult {
+    /// Number of poll iterations it took to synchronize.
+    iterations: usize,
+    /// Time elapsed during synchronization.
+    elapsed: Duration,
+    /// Whether both sessions are now in Running state.
+    success: bool,
+}
+
+/// Polls both sessions until they reach the Running state or timeout.
+///
+/// This function is more robust than a fixed number of iterations because:
+/// 1. It uses actual time-based timeout instead of iteration count
+/// 2. It includes small sleeps between iterations to allow proper message processing
+/// 3. It provides diagnostic information on failure
+///
+/// # Arguments
+/// * `spec_sess` - The spectator session to synchronize
+/// * `host_sess` - The host P2P session to synchronize  
+/// * `timeout` - Maximum time to wait for synchronization
+///
+/// # Returns
+/// `SyncResult` with synchronization outcome and diagnostics.
+fn wait_for_sync(
+    spec_sess: &mut SpectatorSession<StubConfig>,
+    host_sess: &mut P2PSession<StubConfig>,
+    timeout: Duration,
+) -> SyncResult {
+    let start = Instant::now();
+    let mut iterations = 0;
+
+    while start.elapsed() < timeout && iterations < MAX_SYNC_ITERATIONS {
+        spec_sess.poll_remote_clients();
+        host_sess.poll_remote_clients();
+        iterations += 1;
+
+        // Check if both sessions are synchronized
+        if spec_sess.current_state() == SessionState::Running
+            && host_sess.current_state() == SessionState::Running
+        {
+            return SyncResult {
+                iterations,
+                elapsed: start.elapsed(),
+                success: true,
+            };
+        }
+
+        // Small sleep to allow network layer to process messages
+        // This is especially important on fast systems where tight loops
+        // may not give the OS enough time to deliver UDP packets
+        thread::sleep(POLL_INTERVAL);
+    }
+
+    SyncResult {
+        iterations,
+        elapsed: start.elapsed(),
+        success: false,
+    }
+}
+
+/// Asserts that synchronization completed successfully, with detailed diagnostics on failure.
+fn assert_synchronized(
+    spec_sess: &SpectatorSession<StubConfig>,
+    host_sess: &P2PSession<StubConfig>,
+    result: &SyncResult,
+) {
+    assert!(
+        result.success,
+        "Synchronization failed after {} iterations ({:?}).\n\
+         Spectator state: {:?}\n\
+         Host state: {:?}\n\
+         This may indicate a timing issue on this platform.",
+        result.iterations,
+        result.elapsed,
+        spec_sess.current_state(),
+        host_sess.current_state()
+    );
 }
 
 // ============================================================================
@@ -55,13 +148,193 @@ fn test_synchronize_with_host() -> Result<(), FortressError> {
     assert_eq!(spec_sess.current_state(), SessionState::Synchronizing);
     assert_eq!(host_sess.current_state(), SessionState::Synchronizing);
 
-    for _ in 0..50 {
-        spec_sess.poll_remote_clients();
-        host_sess.poll_remote_clients();
+    // Use robust synchronization with timeout and diagnostics
+    let result = wait_for_sync(&mut spec_sess, &mut host_sess, SYNC_TIMEOUT);
+    assert_synchronized(&spec_sess, &host_sess, &result);
+
+    Ok(())
+}
+
+// ============================================================================
+// Data-Driven Synchronization Tests
+// ============================================================================
+
+/// Test configuration for synchronization scenarios
+struct SyncTestCase {
+    /// Descriptive name of the test case
+    name: &'static str,
+    /// Number of players in the host session
+    num_players: usize,
+    /// Number of local players (remaining will be spectators)
+    num_local_players: usize,
+    /// Base port number for socket binding
+    base_port: u16,
+}
+
+impl SyncTestCase {
+    const fn new(
+        name: &'static str,
+        num_players: usize,
+        num_local_players: usize,
+        base_port: u16,
+    ) -> Self {
+        Self {
+            name,
+            num_players,
+            num_local_players,
+            base_port,
+        }
+    }
+}
+
+/// Data-driven test for various synchronization scenarios.
+///
+/// This test verifies that spectator synchronization works reliably across
+/// different player configurations. It uses timeout-based polling instead
+/// of fixed iterations to be robust across different platforms and timing.
+#[test]
+#[serial]
+fn test_synchronization_scenarios_data_driven() -> Result<(), FortressError> {
+    // Define test cases for different configurations
+    let test_cases = [
+        SyncTestCase::new("single_local_single_spectator", 1, 1, 7300),
+        SyncTestCase::new("two_local_single_spectator", 2, 2, 7310),
+        SyncTestCase::new("four_local_single_spectator", 4, 4, 7320),
+    ];
+
+    for case in &test_cases {
+        // Create host session with local players and one spectator
+        let host_addr = test_addr(case.base_port);
+        let spec_addr = test_addr(case.base_port + 1);
+
+        let socket1 = UdpNonBlockingSocket::bind_to_port(case.base_port)
+            .unwrap_or_else(|e| panic!("[{}] Failed to bind host socket: {:?}", case.name, e));
+
+        let mut builder = SessionBuilder::<StubConfig>::new().with_num_players(case.num_players);
+
+        // Add local players
+        for i in 0..case.num_local_players {
+            builder = builder.add_player(PlayerType::Local, PlayerHandle::new(i))?;
+        }
+
+        // Add spectator
+        builder = builder.add_player(
+            PlayerType::Spectator(spec_addr),
+            PlayerHandle::new(case.num_local_players),
+        )?;
+
+        let mut host_sess = builder
+            .start_p2p_session(socket1)
+            .expect("Failed to start host session");
+
+        let socket2 = UdpNonBlockingSocket::bind_to_port(case.base_port + 1)
+            .unwrap_or_else(|e| panic!("[{}] Failed to bind spectator socket: {:?}", case.name, e));
+
+        let mut spec_sess = SessionBuilder::<StubConfig>::new()
+            .with_num_players(case.num_players)
+            .start_spectator_session(host_addr, socket2)
+            .expect("Failed to start spectator session");
+
+        // Perform synchronization with timeout
+        let result = wait_for_sync(&mut spec_sess, &mut host_sess, SYNC_TIMEOUT);
+
+        // Assert with detailed failure message for this specific case
+        assert!(
+            result.success,
+            "[{}] Synchronization failed:\n\
+             - Iterations: {}\n\
+             - Elapsed: {:?}\n\
+             - Spectator state: {:?}\n\
+             - Host state: {:?}",
+            case.name,
+            result.iterations,
+            result.elapsed,
+            spec_sess.current_state(),
+            host_sess.current_state()
+        );
     }
 
-    assert_eq!(spec_sess.current_state(), SessionState::Running);
-    assert_eq!(host_sess.current_state(), SessionState::Running);
+    Ok(())
+}
+
+/// Data-driven test for synchronization with different SyncConfig presets.
+///
+/// This test verifies that spectator synchronization works reliably with
+/// various sync configuration presets. Each preset has different timing
+/// characteristics that might interact with platform scheduling.
+#[test]
+#[serial]
+fn test_sync_config_presets_data_driven() -> Result<(), FortressError> {
+    // Test cases with different sync configurations
+    struct SyncConfigTestCase {
+        name: &'static str,
+        config: SyncConfig,
+        base_port: u16,
+    }
+
+    let test_cases = [
+        SyncConfigTestCase {
+            name: "default",
+            config: SyncConfig::default(),
+            base_port: 7330,
+        },
+        SyncConfigTestCase {
+            name: "lan",
+            config: SyncConfig::lan(),
+            base_port: 7340,
+        },
+        SyncConfigTestCase {
+            name: "competitive",
+            config: SyncConfig::competitive(),
+            base_port: 7350,
+        },
+    ];
+
+    for case in &test_cases {
+        let host_addr = test_addr(case.base_port);
+        let spec_addr = test_addr(case.base_port + 1);
+
+        let socket1 = UdpNonBlockingSocket::bind_to_port(case.base_port)
+            .unwrap_or_else(|e| panic!("[{}] Failed to bind host socket: {:?}", case.name, e));
+
+        let mut host_sess = SessionBuilder::<StubConfig>::new()
+            .with_num_players(2)
+            .with_sync_config(case.config)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Local, PlayerHandle::new(1))?
+            .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
+            .start_p2p_session(socket1)
+            .expect("Failed to start host session");
+
+        let socket2 = UdpNonBlockingSocket::bind_to_port(case.base_port + 1)
+            .unwrap_or_else(|e| panic!("[{}] Failed to bind spectator socket: {:?}", case.name, e));
+
+        let mut spec_sess = SessionBuilder::<StubConfig>::new()
+            .with_num_players(2)
+            .with_sync_config(case.config)
+            .start_spectator_session(host_addr, socket2)
+            .expect("Failed to start spectator session");
+
+        // Use robust synchronization with timeout
+        let result = wait_for_sync(&mut spec_sess, &mut host_sess, SYNC_TIMEOUT);
+
+        assert!(
+            result.success,
+            "[SyncConfig::{}] Synchronization failed:\n\
+             - Config: num_sync_packets={}, sync_retry_interval={:?}\n\
+             - Iterations: {}\n\
+             - Elapsed: {:?}\n\
+             - Spectator state: {:?}\n\
+             - Host state: {:?}",
+            case.name,
+            case.config.num_sync_packets,
+            case.config.sync_retry_interval,
+            result.iterations,
+            result.elapsed,
+            spec_sess.current_state(),
+            host_sess.current_state()
+        );
+    }
 
     Ok(())
 }
@@ -179,9 +452,11 @@ fn test_events_generated_during_sync() -> Result<(), FortressError> {
         .expect("spectator session should start");
 
     // Poll a few times to generate synchronization events
+    // Include small sleeps to allow messages to propagate reliably
     for _ in 0..10 {
         spec_sess.poll_remote_clients();
         host_sess.poll_remote_clients();
+        thread::sleep(POLL_INTERVAL);
     }
 
     // We should get some synchronization events
@@ -234,14 +509,9 @@ fn test_advance_frame_after_sync() -> Result<(), FortressError> {
 
     let mut host_game = GameStub::new();
 
-    // Synchronize
-    for _ in 0..50 {
-        spec_sess.poll_remote_clients();
-        host_sess.poll_remote_clients();
-    }
-
-    assert_eq!(spec_sess.current_state(), SessionState::Running);
-    assert_eq!(host_sess.current_state(), SessionState::Running);
+    // Use robust synchronization with timeout and diagnostics
+    let result = wait_for_sync(&mut spec_sess, &mut host_sess, SYNC_TIMEOUT);
+    assert_synchronized(&spec_sess, &host_sess, &result);
 
     // Advance host a few frames and send inputs
     for _ in 0..5 {
@@ -251,12 +521,15 @@ fn test_advance_frame_after_sync() -> Result<(), FortressError> {
         host_game.handle_requests(requests);
         host_sess.poll_remote_clients();
         spec_sess.poll_remote_clients();
+        // Small sleep to allow message propagation
+        thread::sleep(POLL_INTERVAL);
     }
 
     // Give time for messages to propagate
     for _ in 0..20 {
         host_sess.poll_remote_clients();
         spec_sess.poll_remote_clients();
+        thread::sleep(POLL_INTERVAL);
     }
 
     // Spectator should now be able to advance frames
@@ -417,19 +690,9 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
 
     let mut host_game = GameStub::new();
 
-    // Phase 1: Synchronization
-    let mut synced = false;
-    for _ in 0..100 {
-        spec_sess.poll_remote_clients();
-        host_sess.poll_remote_clients();
-        if spec_sess.current_state() == SessionState::Running
-            && host_sess.current_state() == SessionState::Running
-        {
-            synced = true;
-            break;
-        }
-    }
-    assert!(synced, "Failed to synchronize");
+    // Phase 1: Synchronization - use robust helper with timeout and diagnostics
+    let sync_result = wait_for_sync(&mut spec_sess, &mut host_sess, SYNC_TIMEOUT);
+    assert_synchronized(&spec_sess, &host_sess, &sync_result);
 
     // Phase 2: Host advances frames and spectator follows
     for frame in 0..10 {
@@ -439,10 +702,11 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
         let requests = host_sess.advance_frame()?;
         host_game.handle_requests(requests);
 
-        // Poll to exchange messages
+        // Poll to exchange messages with sleep to allow packet delivery
         for _ in 0..5 {
             host_sess.poll_remote_clients();
             spec_sess.poll_remote_clients();
+            thread::sleep(POLL_INTERVAL);
         }
     }
 
@@ -450,6 +714,7 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
     for _ in 0..30 {
         host_sess.poll_remote_clients();
         spec_sess.poll_remote_clients();
+        thread::sleep(POLL_INTERVAL);
     }
 
     // Spectator should be able to get inputs now
@@ -489,7 +754,9 @@ fn test_synchronized_event_generated() -> Result<(), FortressError> {
     let mut found_synchronized = false;
 
     // Synchronize and collect events
-    for _ in 0..100 {
+    // Use time-based timeout and sleep between iterations for reliable packet delivery
+    let start = Instant::now();
+    while start.elapsed() < SYNC_TIMEOUT {
         spec_sess.poll_remote_clients();
         host_sess.poll_remote_clients();
 
@@ -502,6 +769,7 @@ fn test_synchronized_event_generated() -> Result<(), FortressError> {
         if spec_sess.current_state() == SessionState::Running {
             break;
         }
+        thread::sleep(POLL_INTERVAL);
     }
 
     // We should have received a Synchronized event
@@ -531,23 +799,44 @@ fn test_synchronizing_events_generated() -> Result<(), FortressError> {
         .expect("spectator session should start");
 
     let mut found_synchronizing = false;
+    let mut iterations = 0;
+    let start = Instant::now();
 
-    // Run synchronization and collect events
-    for _ in 0..50 {
+    // Run synchronization and collect events with timeout to handle platform timing variations.
+    // On slow or busy CI systems (especially macOS), tight loops may not allow enough time
+    // for UDP packets to be delivered and processed.
+    while start.elapsed() < SYNC_TIMEOUT && iterations < MAX_SYNC_ITERATIONS {
         spec_sess.poll_remote_clients();
         host_sess.poll_remote_clients();
+        iterations += 1;
 
         for event in spec_sess.events() {
             if matches!(event, FortressEvent::Synchronizing { .. }) {
                 found_synchronizing = true;
             }
         }
+
+        // Early exit once we found what we're looking for
+        if found_synchronizing {
+            break;
+        }
+
+        // Small sleep to allow network layer to process messages
+        thread::sleep(POLL_INTERVAL);
     }
 
     // We should have received Synchronizing progress events
     assert!(
         found_synchronizing,
-        "Expected Synchronizing events during handshake"
+        "Expected Synchronizing events during handshake.\n\
+         Iterations: {}\n\
+         Elapsed: {:?}\n\
+         Spectator state: {:?}\n\
+         Host state: {:?}",
+        iterations,
+        start.elapsed(),
+        spec_sess.current_state(),
+        host_sess.current_state()
     );
 
     Ok(())
@@ -588,16 +877,9 @@ fn test_spectator_catchup_speed() -> Result<(), FortressError> {
 
     let mut host_game = GameStub::new();
 
-    // Synchronize first
-    for _ in 0..100 {
-        spec_sess.poll_remote_clients();
-        host_sess.poll_remote_clients();
-        if spec_sess.current_state() == SessionState::Running
-            && host_sess.current_state() == SessionState::Running
-        {
-            break;
-        }
-    }
+    // Synchronize first with proper timeout and sleeps for reliable timing
+    let result = wait_for_sync(&mut spec_sess, &mut host_sess, SYNC_TIMEOUT);
+    assert_synchronized(&spec_sess, &host_sess, &result);
 
     // Have host advance many frames ahead
     for frame in 0..20 {
@@ -608,10 +890,12 @@ fn test_spectator_catchup_speed() -> Result<(), FortressError> {
         host_sess.poll_remote_clients();
     }
 
-    // Let messages propagate
-    for _ in 0..50 {
+    // Let messages propagate with proper timing
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(1) {
         host_sess.poll_remote_clients();
         spec_sess.poll_remote_clients();
+        thread::sleep(POLL_INTERVAL);
     }
 
     // Spectator should now be behind and catch up
@@ -650,16 +934,35 @@ fn test_multiple_spectators_same_host() -> Result<(), FortressError> {
         .start_spectator_session(host_addr, socket3)
         .expect("spectator session should start");
 
-    // Synchronize all
-    for _ in 0..100 {
+    // Synchronize all with proper timeout and small sleeps for reliable timing
+    let start = Instant::now();
+    let mut all_synced = false;
+    while start.elapsed() < SYNC_TIMEOUT && !all_synced {
         spec_sess1.poll_remote_clients();
         spec_sess2.poll_remote_clients();
         host_sess.poll_remote_clients();
+
+        all_synced = spec_sess1.current_state() == SessionState::Running
+            && spec_sess2.current_state() == SessionState::Running
+            && host_sess.current_state() == SessionState::Running;
+
+        if !all_synced {
+            thread::sleep(POLL_INTERVAL);
+        }
     }
 
-    // Both spectators should sync
-    assert_eq!(spec_sess1.current_state(), SessionState::Running);
-    assert_eq!(spec_sess2.current_state(), SessionState::Running);
+    // Both spectators should sync with detailed diagnostics on failure
+    assert!(
+        all_synced,
+        "Failed to synchronize all sessions after {:?}.\n\
+         Host state: {:?}\n\
+         Spectator 1 state: {:?}\n\
+         Spectator 2 state: {:?}",
+        start.elapsed(),
+        host_sess.current_state(),
+        spec_sess1.current_state(),
+        spec_sess2.current_state()
+    );
 
     Ok(())
 }

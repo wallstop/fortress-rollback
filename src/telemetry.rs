@@ -285,9 +285,12 @@ impl SpecViolation {
     ///     "test.rs:1",
     /// ).with_frame(Frame::new(42));
     ///
+    /// # #[cfg(feature = "json")]
     /// let json = violation.to_json().unwrap();
+    /// # #[cfg(feature = "json")]
     /// assert!(json.contains(r#""frame":42"#));
     /// ```
+    #[cfg(feature = "json")]
     #[must_use]
     pub fn to_json(&self) -> Option<String> {
         serde_json::to_string(self).ok()
@@ -296,6 +299,7 @@ impl SpecViolation {
     /// Serializes this violation to a pretty-printed JSON string.
     ///
     /// Like [`to_json`](Self::to_json), but with indentation for readability.
+    #[cfg(feature = "json")]
     #[must_use]
     pub fn to_json_pretty(&self) -> Option<String> {
         serde_json::to_string_pretty(self).ok()
@@ -888,12 +892,14 @@ impl InvariantViolation {
     ///
     /// Returns `None` if serialization fails (which should not happen for
     /// well-formed violations).
+    #[cfg(feature = "json")]
     #[must_use]
     pub fn to_json(&self) -> Option<String> {
         serde_json::to_string(self).ok()
     }
 
     /// Serializes this violation to a pretty-printed JSON string.
+    #[cfg(feature = "json")]
     #[must_use]
     pub fn to_json_pretty(&self) -> Option<String> {
         serde_json::to_string_pretty(self).ok()
@@ -1779,189 +1785,194 @@ mod tests {
     // JSON Serialization Tests
     // ==========================================
 
-    #[test]
-    fn test_violation_severity_serialization() {
-        assert_eq!(
-            serde_json::to_string(&ViolationSeverity::Warning).unwrap(),
-            r#""warning""#
-        );
-        assert_eq!(
-            serde_json::to_string(&ViolationSeverity::Error).unwrap(),
-            r#""error""#
-        );
-        assert_eq!(
-            serde_json::to_string(&ViolationSeverity::Critical).unwrap(),
-            r#""critical""#
-        );
-    }
+    #[cfg(feature = "json")]
+    mod json_tests {
+        use super::*;
 
-    #[test]
-    fn test_violation_kind_serialization() {
-        assert_eq!(
-            serde_json::to_string(&ViolationKind::FrameSync).unwrap(),
-            r#""frame_sync""#
-        );
-        assert_eq!(
-            serde_json::to_string(&ViolationKind::InputQueue).unwrap(),
-            r#""input_queue""#
-        );
-        assert_eq!(
-            serde_json::to_string(&ViolationKind::StateManagement).unwrap(),
-            r#""state_management""#
-        );
-        assert_eq!(
-            serde_json::to_string(&ViolationKind::NetworkProtocol).unwrap(),
-            r#""network_protocol""#
-        );
-        assert_eq!(
-            serde_json::to_string(&ViolationKind::ChecksumMismatch).unwrap(),
-            r#""checksum_mismatch""#
-        );
-        assert_eq!(
-            serde_json::to_string(&ViolationKind::Synchronization).unwrap(),
-            r#""synchronization""#
-        );
-        assert_eq!(
-            serde_json::to_string(&ViolationKind::Invariant).unwrap(),
-            r#""invariant""#
-        );
-        assert_eq!(
-            serde_json::to_string(&ViolationKind::InternalError).unwrap(),
-            r#""internal_error""#
-        );
-        assert_eq!(
-            serde_json::to_string(&ViolationKind::Configuration).unwrap(),
-            r#""configuration""#
-        );
-    }
+        #[test]
+        fn test_violation_severity_serialization() {
+            assert_eq!(
+                serde_json::to_string(&ViolationSeverity::Warning).unwrap(),
+                r#""warning""#
+            );
+            assert_eq!(
+                serde_json::to_string(&ViolationSeverity::Error).unwrap(),
+                r#""error""#
+            );
+            assert_eq!(
+                serde_json::to_string(&ViolationSeverity::Critical).unwrap(),
+                r#""critical""#
+            );
+        }
 
-    #[test]
-    fn test_spec_violation_json_serialization_basic() {
-        let violation = SpecViolation::new(
-            ViolationSeverity::Warning,
-            ViolationKind::FrameSync,
-            "test message",
-            "test.rs:42",
-        );
+        #[test]
+        fn test_violation_kind_serialization() {
+            assert_eq!(
+                serde_json::to_string(&ViolationKind::FrameSync).unwrap(),
+                r#""frame_sync""#
+            );
+            assert_eq!(
+                serde_json::to_string(&ViolationKind::InputQueue).unwrap(),
+                r#""input_queue""#
+            );
+            assert_eq!(
+                serde_json::to_string(&ViolationKind::StateManagement).unwrap(),
+                r#""state_management""#
+            );
+            assert_eq!(
+                serde_json::to_string(&ViolationKind::NetworkProtocol).unwrap(),
+                r#""network_protocol""#
+            );
+            assert_eq!(
+                serde_json::to_string(&ViolationKind::ChecksumMismatch).unwrap(),
+                r#""checksum_mismatch""#
+            );
+            assert_eq!(
+                serde_json::to_string(&ViolationKind::Synchronization).unwrap(),
+                r#""synchronization""#
+            );
+            assert_eq!(
+                serde_json::to_string(&ViolationKind::Invariant).unwrap(),
+                r#""invariant""#
+            );
+            assert_eq!(
+                serde_json::to_string(&ViolationKind::InternalError).unwrap(),
+                r#""internal_error""#
+            );
+            assert_eq!(
+                serde_json::to_string(&ViolationKind::Configuration).unwrap(),
+                r#""configuration""#
+            );
+        }
 
-        let json = violation.to_json().unwrap();
-        assert!(json.contains(r#""severity":"warning""#));
-        assert!(json.contains(r#""kind":"frame_sync""#));
-        assert!(json.contains(r#""message":"test message""#));
-        assert!(json.contains(r#""location":"test.rs:42""#));
-        // frame should be null when not set
-        assert!(json.contains(r#""frame":null"#));
-    }
+        #[test]
+        fn test_spec_violation_json_serialization_basic() {
+            let violation = SpecViolation::new(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "test message",
+                "test.rs:42",
+            );
 
-    #[test]
-    fn test_spec_violation_json_serialization_with_frame() {
-        let violation = SpecViolation::new(
-            ViolationSeverity::Error,
-            ViolationKind::InputQueue,
-            "missing input",
-            "queue.rs:100",
-        )
-        .with_frame(Frame::new(42));
+            let json = violation.to_json().unwrap();
+            assert!(json.contains(r#""severity":"warning""#));
+            assert!(json.contains(r#""kind":"frame_sync""#));
+            assert!(json.contains(r#""message":"test message""#));
+            assert!(json.contains(r#""location":"test.rs:42""#));
+            // frame should be null when not set
+            assert!(json.contains(r#""frame":null"#));
+        }
 
-        let json = violation.to_json().unwrap();
-        assert!(json.contains(r#""frame":42"#));
-        // Verify it's a number, not a string
-        assert!(!json.contains(r#""frame":"42""#));
-    }
+        #[test]
+        fn test_spec_violation_json_serialization_with_frame() {
+            let violation = SpecViolation::new(
+                ViolationSeverity::Error,
+                ViolationKind::InputQueue,
+                "missing input",
+                "queue.rs:100",
+            )
+            .with_frame(Frame::new(42));
 
-    #[test]
-    fn test_spec_violation_json_serialization_with_null_frame() {
-        let violation = SpecViolation::new(
-            ViolationSeverity::Warning,
-            ViolationKind::FrameSync,
-            "test",
-            "test.rs:1",
-        )
-        .with_frame(Frame::NULL);
+            let json = violation.to_json().unwrap();
+            assert!(json.contains(r#""frame":42"#));
+            // Verify it's a number, not a string
+            assert!(!json.contains(r#""frame":"42""#));
+        }
 
-        let json = violation.to_json().unwrap();
-        // NULL frame should serialize as null, not as -1
-        assert!(json.contains(r#""frame":null"#));
-    }
+        #[test]
+        fn test_spec_violation_json_serialization_with_null_frame() {
+            let violation = SpecViolation::new(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "test",
+                "test.rs:1",
+            )
+            .with_frame(Frame::NULL);
 
-    #[test]
-    fn test_spec_violation_json_serialization_with_context() {
-        let violation = SpecViolation::new(
-            ViolationSeverity::Critical,
-            ViolationKind::ChecksumMismatch,
-            "checksum mismatch",
-            "sync.rs:50",
-        )
-        .with_frame(Frame::new(100))
-        .with_context("expected", "0x12345678")
-        .with_context("actual", "0x87654321");
+            let json = violation.to_json().unwrap();
+            // NULL frame should serialize as null, not as -1
+            assert!(json.contains(r#""frame":null"#));
+        }
 
-        let json = violation.to_json().unwrap();
-        assert!(json.contains(r#""severity":"critical""#));
-        assert!(json.contains(r#""frame":100"#));
-        // Context should be serialized as an object
-        assert!(json.contains(r#""expected":"0x12345678""#));
-        assert!(json.contains(r#""actual":"0x87654321""#));
-    }
+        #[test]
+        fn test_spec_violation_json_serialization_with_context() {
+            let violation = SpecViolation::new(
+                ViolationSeverity::Critical,
+                ViolationKind::ChecksumMismatch,
+                "checksum mismatch",
+                "sync.rs:50",
+            )
+            .with_frame(Frame::new(100))
+            .with_context("expected", "0x12345678")
+            .with_context("actual", "0x87654321");
 
-    #[test]
-    fn test_spec_violation_to_json_pretty() {
-        let violation = SpecViolation::new(
-            ViolationSeverity::Warning,
-            ViolationKind::FrameSync,
-            "test",
-            "test.rs:1",
-        );
+            let json = violation.to_json().unwrap();
+            assert!(json.contains(r#""severity":"critical""#));
+            assert!(json.contains(r#""frame":100"#));
+            // Context should be serialized as an object
+            assert!(json.contains(r#""expected":"0x12345678""#));
+            assert!(json.contains(r#""actual":"0x87654321""#));
+        }
 
-        let json_pretty = violation.to_json_pretty().unwrap();
-        // Pretty JSON should have newlines
-        assert!(json_pretty.contains('\n'));
-        assert!(json_pretty.contains("  ")); // indentation
-    }
+        #[test]
+        fn test_spec_violation_to_json_pretty() {
+            let violation = SpecViolation::new(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "test",
+                "test.rs:1",
+            );
 
-    #[test]
-    fn test_invariant_violation_json_serialization() {
-        let violation = InvariantViolation::new("TestType", "value out of range")
-            .with_details("value=-5, expected>=0");
+            let json_pretty = violation.to_json_pretty().unwrap();
+            // Pretty JSON should have newlines
+            assert!(json_pretty.contains('\n'));
+            assert!(json_pretty.contains("  ")); // indentation
+        }
 
-        let json = violation.to_json().unwrap();
-        assert!(json.contains(r#""type_name":"TestType""#));
-        assert!(json.contains(r#""invariant":"value out of range""#));
-        assert!(json.contains(r#""details":"value=-5, expected>=0""#));
-    }
+        #[test]
+        fn test_invariant_violation_json_serialization() {
+            let violation = InvariantViolation::new("TestType", "value out of range")
+                .with_details("value=-5, expected>=0");
 
-    #[test]
-    fn test_invariant_violation_json_without_details() {
-        let violation = InvariantViolation::new("Counter", "overflow");
+            let json = violation.to_json().unwrap();
+            assert!(json.contains(r#""type_name":"TestType""#));
+            assert!(json.contains(r#""invariant":"value out of range""#));
+            assert!(json.contains(r#""details":"value=-5, expected>=0""#));
+        }
 
-        let json = violation.to_json().unwrap();
-        assert!(json.contains(r#""type_name":"Counter""#));
-        assert!(json.contains(r#""invariant":"overflow""#));
-        assert!(json.contains(r#""details":null"#));
-    }
+        #[test]
+        fn test_invariant_violation_json_without_details() {
+            let violation = InvariantViolation::new("Counter", "overflow");
 
-    #[test]
-    fn test_spec_violation_roundtrip_parseable() {
-        // Verify that the JSON output can be parsed back by a JSON parser
-        let violation = SpecViolation::new(
-            ViolationSeverity::Warning,
-            ViolationKind::FrameSync,
-            "test message with \"quotes\" and special chars",
-            "test.rs:1",
-        )
-        .with_frame(Frame::new(42))
-        .with_context("key", "value with spaces");
+            let json = violation.to_json().unwrap();
+            assert!(json.contains(r#""type_name":"Counter""#));
+            assert!(json.contains(r#""invariant":"overflow""#));
+            assert!(json.contains(r#""details":null"#));
+        }
 
-        let json = violation.to_json().unwrap();
+        #[test]
+        fn test_spec_violation_roundtrip_parseable() {
+            // Verify that the JSON output can be parsed back by a JSON parser
+            let violation = SpecViolation::new(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "test message with \"quotes\" and special chars",
+                "test.rs:1",
+            )
+            .with_frame(Frame::new(42))
+            .with_context("key", "value with spaces");
 
-        // Parse it back as a generic JSON value
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let json = violation.to_json().unwrap();
 
-        assert_eq!(parsed["severity"], "warning");
-        assert_eq!(parsed["kind"], "frame_sync");
-        assert_eq!(parsed["frame"], 42);
-        assert_eq!(parsed["context"]["key"], "value with spaces");
-    }
+            // Parse it back as a generic JSON value
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+            assert_eq!(parsed["severity"], "warning");
+            assert_eq!(parsed["kind"], "frame_sync");
+            assert_eq!(parsed["frame"], 42);
+            assert_eq!(parsed["context"]["key"], "value with spaces");
+        }
+    } // end of json_tests module
 
     #[test]
     fn test_tracing_observer_format_frame() {

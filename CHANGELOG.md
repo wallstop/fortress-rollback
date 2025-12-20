@@ -14,6 +14,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2025-12-20
+
+### Added
+
+- Added optional `json` feature for JSON serialization of telemetry types
+  - Provides `to_json()` and `to_json_pretty()` methods on `SpecViolation` and `InvariantViolation`
+  - Enable with `features = ["json"]` in Cargo.toml
+- Added `SyncConfig::extreme()` preset for very hostile network conditions
+  - Sends 20 sync packets (vs 10 for mobile, 5 for default) with 250ms retry intervals
+  - 30-second sync timeout to handle multiple burst loss events
+  - Designed for scenarios with 10%+ burst loss probability and 8+ packet burst lengths
+  - Not recommended for production use due to long timeouts
+- Added burst loss recommendations to packet loss documentation table
+
+### Changed
+
+- **Breaking:** `serde_json` is now an optional dependency behind the `json` feature
+  - Reduces default dependency count from 7 to 6 production dependencies
+  - Users who need `to_json()` methods must enable the `json` feature
+  - The telemetry types still implement `serde::Serialize` for use with any serializer
+- Restructured test code to further reduce published crate size
+  - Moved network peer binary to separate `tests/network-peer` crate
+  - Excluded additional test infrastructure from published package
+
+### Fixed
+
+- Fixed flaky CI tests on macOS under high load by using more robust timing margins
+- Improved test reliability for high packet loss scenarios using appropriate sync presets
+
 ## [0.1.2] - 2025-12-19
 
 ### Changed
@@ -193,6 +222,8 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/wallstop/fortress-rollback/compare/v0.1.2...v0.2.0
+[0.1.2]: https://github.com/wallstop/fortress-rollback/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/wallstop/fortress-rollback/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/wallstop/fortress-rollback/releases/tag/v0.1.0

@@ -1,6 +1,11 @@
+[workspace]
+members = [".", "tests/network-peer"]
+# Note: loom-tests is intentionally NOT in the workspace because it requires
+# special cfg flags (--cfg loom) that conflict with normal builds
+
 [package]
 name = "fortress-rollback"
-version = "0.1.2"
+version = "0.2.0"
 authors = ["wallstop <wallstop@wallstopstudios.com>"]
 edition = "2021"
 rust-version = "1.86"  # Minimum Supported Rust Version (MSRV) - required by criterion 0.8.1
@@ -23,25 +28,36 @@ exclude = [
     # Development config files (not needed by users)
     ".cargo/",
     ".config/",
+    ".claude/",
     ".cursorrules",
     ".dockerignore",
     ".llm/",
     ".markdown-link-check.json",
     ".markdownlint.json",
     ".pre-commit-config.yaml",
+    ".z3-trace",
     "clippy.toml",
     "deny.toml",
     "rustfmt.toml",
     # LLM instruction files (for contributing to this project, not for users)
     "AGENTS.md",
     "CLAUDE.md",
+    # Note: .cursorrules is already excluded above with development config files
     # Note: llms.txt is intentionally NOT excluded - it helps AI tools understand
     # the library API for users integrating Fortress Rollback into their projects
     # Supply chain audits (cargo-vet metadata)
     "supply-chain/",
     # Tests are large and users can clone repo to run them
     "tests/",
-    # Cargo.lock not needed for library crates
+    # Benchmarks - users can clone repo to run them
+    "benches/",
+    "loom-tests/",
+    "fuzz/",
+    # Documentation that's development-focused (user-guide and architecture are kept)
+    "docs/ggrs-changelog-archive.md",
+    "docs/contributing.md",
+    "docs/code-of-conduct.md",
+    # Cargo.lock not needed for library crates (now excluded since no binaries in main crate)
     "Cargo.lock",
 ]
 
@@ -170,10 +186,13 @@ graphical-examples = ["dep:macroquad"]
 # Enable tokio async runtime integration for async socket adapters
 # Provides TokioUdpSocket for use with async networking code
 tokio = ["dep:tokio"]
+# Enable JSON serialization for telemetry types (adds serde_json dependency)
+# Provides to_json() and to_json_pretty() methods on SpecViolation and InvariantViolation
+json = ["dep:serde_json"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", optional = true }
 bincode = { version = "2.0", features = ["serde"] }
 parking_lot = "0.12"
 web-time = "1.1"
@@ -204,17 +223,12 @@ clap = { version = "4.5", features = ["derive"] }
 tracing-subscriber = "0.3"
 tracing-log = "0.2"
 proptest = "1.9"
+# JSON parsing for tests (also enables the "json" feature for telemetry tests)
+serde_json = "1.0"
 # Benchmarking
 criterion = { version = "0.8", features = ["html_reports"] }
 # Additional testing utilities
 arbitrary = { version = "1.3", features = ["derive"] }
-
-# Network test peer binary for multi-process testing
-[[bin]]
-name = "network_test_peer"
-path = "tests/bin/network_test_peer.rs"
-test = false
-bench = false
 
 # Examples
 [[example]]

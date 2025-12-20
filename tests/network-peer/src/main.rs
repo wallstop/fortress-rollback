@@ -8,14 +8,14 @@
 //!
 //! ```bash
 //! # Start peer 1 (player 0)
-//! cargo run --bin network_test_peer -- \
+//! cargo run -p network-test-peer -- \
 //!     --local-port 9001 \
 //!     --player-index 0 \
 //!     --peer 127.0.0.1:9002 \
 //!     --frames 100
 //!
 //! # Start peer 2 (player 1)
-//! cargo run --bin network_test_peer -- \
+//! cargo run -p network-test-peer -- \
 //!     --local-port 9002 \
 //!     --player-index 1 \
 //!     --peer 127.0.0.1:9001 \
@@ -28,9 +28,6 @@
 //! --packet-loss 0.1       # 10% packet loss
 //! --latency 50            # 50ms latency
 //! --jitter 20             # ±20ms jitter
-
-// Allow print macros for test output and error reporting
-#![allow(clippy::print_stdout, clippy::print_stderr, clippy::disallowed_macros)]
 //! --seed 42               # Deterministic chaos
 //! ```
 //!
@@ -48,7 +45,8 @@ use std::time::{Duration, Instant};
 
 use fortress_rollback::{
     hash::DeterministicHasher, ChaosConfig, ChaosSocket, Config, FortressRequest, Frame,
-    InputStatus, PlayerHandle, PlayerType, SessionBuilder, SessionState, UdpNonBlockingSocket,
+    InputStatus, PlayerHandle, PlayerType, SessionBuilder, SessionState, SyncConfig,
+    UdpNonBlockingSocket,
 };
 use serde::{Deserialize, Serialize};
 
@@ -386,6 +384,30 @@ fn parse_args() -> Args {
             "--debug" => {
                 result.debug = true;
             },
+            "--reorder-rate" => {
+                i += 1;
+                result.reorder_rate = args[i].parse().expect("Invalid reorder rate");
+            },
+            "--reorder-buffer" => {
+                i += 1;
+                result.reorder_buffer_size = args[i].parse().expect("Invalid reorder buffer size");
+            },
+            "--duplicate-rate" => {
+                i += 1;
+                result.duplicate_rate = args[i].parse().expect("Invalid duplicate rate");
+            },
+            "--burst-loss-prob" => {
+                i += 1;
+                result.burst_loss_prob = args[i].parse().expect("Invalid burst loss probability");
+            },
+            "--burst-loss-len" => {
+                i += 1;
+                result.burst_loss_len = args[i].parse().expect("Invalid burst loss length");
+            },
+            "--sync-preset" => {
+                i += 1;
+                result.sync_preset = Some(args[i].clone());
+            },
             _ => {
                 eprintln!("Unknown argument: {}", args[i]);
             },
@@ -409,6 +431,14 @@ struct Args {
     timeout_secs: u64,
     input_delay: usize,
     debug: bool,
+    // Extended chaos options
+    reorder_rate: f64,
+    reorder_buffer_size: usize,
+    duplicate_rate: f64,
+    burst_loss_prob: f64,
+    burst_loss_len: usize,
+    // Sync configuration preset
+    sync_preset: Option<String>,
 }
 
 fn main() {
@@ -429,7 +459,7 @@ fn main() {
 
     let result = run_test(&args);
     let json = serde_json::to_string(&result).unwrap();
-    println!("{}", json);
+    println!("{json}");
     io::stdout().flush().unwrap();
 
     // Exit with non-zero code on failure so docker compose can detect it
@@ -450,7 +480,7 @@ fn output_error(msg: &str) {
         diagnostics: None,
     };
     let json = serde_json::to_string(&result).unwrap();
-    println!("{}", json);
+    println!("{json}");
 }
 
 fn run_test(args: &Args) -> TestResult {
@@ -468,6 +498,19 @@ fn run_test(args: &Args) -> TestResult {
     if let Some(seed) = args.seed {
         chaos_builder = chaos_builder.seed(seed);
     }
+    // Extended chaos options
+    if args.reorder_rate > 0.0 {
+        chaos_builder = chaos_builder.reorder_rate(args.reorder_rate);
+    }
+    if args.reorder_buffer_size > 0 {
+        chaos_builder = chaos_builder.reorder_buffer_size(args.reorder_buffer_size);
+    }
+    if args.duplicate_rate > 0.0 {
+        chaos_builder = chaos_builder.duplication_rate(args.duplicate_rate);
+    }
+    if args.burst_loss_prob > 0.0 {
+        chaos_builder = chaos_builder.burst_loss(args.burst_loss_prob, args.burst_loss_len);
+    }
     let chaos_config = chaos_builder.build();
 
     // Create socket with chaos
@@ -480,7 +523,7 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
-                error: Some(format!("Failed to bind socket: {}", e)),
+                error: Some(format!("Failed to bind socket: {e}")),
                 debug_log: None,
                 diagnostics: None,
             };
@@ -492,9 +535,37 @@ fn run_test(args: &Args) -> TestResult {
     let peer_addr = args.peer_addr.unwrap();
     let num_players = 2; // Currently only supports 2-player testing
 
+    // Select sync config preset based on network conditions
+    let sync_config = match args.sync_preset.as_deref() {
+        Some("lan") => SyncConfig::lan(),
+        Some("lossy") => SyncConfig::lossy(),
+        Some("mobile") => SyncConfig::mobile(),
+        Some("high_latency") => SyncConfig::high_latency(),
+        Some("competitive") => SyncConfig::competitive(),
+        Some("extreme") => SyncConfig::extreme(),
+        Some("stress_test") => SyncConfig::stress_test(),
+        Some(preset) => {
+            return TestResult {
+                success: false,
+                final_frame: 0,
+                final_value: 0,
+                checksum: 0,
+                rollbacks: 0,
+                error: Some(format!(
+                    "Unknown sync preset: '{}'. Valid presets: lan, lossy, mobile, high_latency, competitive, extreme, stress_test",
+                    preset
+                )),
+                debug_log: None,
+                diagnostics: None,
+            };
+        },
+        None => SyncConfig::default(),
+    };
+
     let mut sess_builder = SessionBuilder::<TestConfig>::new()
         .with_num_players(num_players)
-        .with_input_delay(args.input_delay);
+        .with_input_delay(args.input_delay)
+        .with_sync_config(sync_config);
 
     // Add players based on our index
     let local_handle = PlayerHandle::new(args.player_index);
@@ -510,7 +581,7 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
-                error: Some(format!("Failed to add local player: {}", e)),
+                error: Some(format!("Failed to add local player: {e}")),
                 debug_log: None,
                 diagnostics: None,
             };
@@ -526,7 +597,7 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
-                error: Some(format!("Failed to add remote player: {}", e)),
+                error: Some(format!("Failed to add remote player: {e}")),
                 debug_log: None,
                 diagnostics: None,
             };
@@ -542,7 +613,7 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
-                error: Some(format!("Failed to start session: {}", e)),
+                error: Some(format!("Failed to start session: {e}")),
                 debug_log: None,
                 diagnostics: None,
             };
@@ -686,7 +757,7 @@ fn run_test(args: &Args) -> TestResult {
                     final_value: game.state.value,
                     checksum,
                     rollbacks: game.rollback_count,
-                    error: Some(format!("Failed to add input: {}", e)),
+                    error: Some(format!("Failed to add input: {e}")),
                     debug_log: if args.debug {
                         Some(game.debug_log.entries)
                     } else {
@@ -707,7 +778,7 @@ fn run_test(args: &Args) -> TestResult {
                         final_value: game.state.value,
                         checksum,
                         rollbacks: game.rollback_count,
-                        error: Some(format!("Failed to advance frame: {}", e)),
+                        error: Some(format!("Failed to advance frame: {e}")),
                         debug_log: if args.debug {
                             Some(game.debug_log.entries)
                         } else {

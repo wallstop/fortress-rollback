@@ -3,13 +3,150 @@
 // Allow hardcoded IP addresses - 127.0.0.1 is appropriate for tests
 #![allow(clippy::ip_constant)]
 
-use crate::common::stubs::{GameStub, StubConfig, StubInput};
+use crate::common::stubs::{CorruptibleGameStub, GameStub, StubConfig, StubInput};
 use fortress_rollback::{
-    DesyncDetection, FortressError, FortressEvent, PlayerHandle, PlayerType, SessionBuilder,
-    SessionState, UdpNonBlockingSocket,
+    DesyncDetection, FortressError, FortressEvent, P2PSession, PlayerHandle, PlayerType,
+    SessionBuilder, SessionState, UdpNonBlockingSocket,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// Maximum iterations to wait for synchronization before giving up.
+const MAX_SYNC_ITERATIONS: usize = 500;
+
+/// Time to sleep between poll iterations to allow for proper timing.
+/// This prevents tight loops that may not give the network layer enough time
+/// to process messages, especially on systems with different scheduling behavior (e.g., macOS CI).
+const POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Maximum time to wait for synchronization to complete.
+const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Synchronization configuration for test sessions.
+#[derive(Debug, Clone)]
+struct SyncConfig {
+    /// Maximum number of poll iterations before timing out.
+    max_iterations: usize,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: MAX_SYNC_ITERATIONS,
+        }
+    }
+}
+
+/// Synchronizes two P2P sessions and returns the number of iterations taken.
+///
+/// This helper ensures BOTH sessions are in the `Running` state before returning.
+/// The loop uses `||` (OR) in the condition because we want to continue while
+/// at least one session is NOT running — this is the correct logic per De Morgan's law.
+///
+/// # Returns
+/// - `Ok(iterations)` if both sessions synchronized successfully
+/// - `Err(error message)` if synchronization timed out
+fn synchronize_sessions<C: fortress_rollback::Config>(
+    sess1: &mut P2PSession<C>,
+    sess2: &mut P2PSession<C>,
+    config: &SyncConfig,
+) -> Result<usize, String> {
+    let mut iterations = 0;
+    let start = Instant::now();
+
+    // Use || (OR) because we want to continue while EITHER session is not Running.
+    // Using && would exit as soon as ONE session is Running, which is incorrect.
+    while sess1.current_state() != SessionState::Running
+        || sess2.current_state() != SessionState::Running
+    {
+        // Check both iteration count AND time-based timeout for robustness.
+        // Time-based timeout is more reliable across different platforms (especially macOS CI).
+        if iterations >= config.max_iterations || start.elapsed() > SYNC_TIMEOUT {
+            return Err(format!(
+                "Synchronization timed out after {} iterations ({:?}). \
+                 sess1 state: {:?}, sess2 state: {:?}",
+                iterations,
+                start.elapsed(),
+                sess1.current_state(),
+                sess2.current_state()
+            ));
+        }
+
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        iterations += 1;
+
+        // Small sleep to allow network layer to process messages.
+        // This is crucial on fast systems where tight loops may not give
+        // the OS enough time to deliver UDP packets.
+        thread::sleep(POLL_INTERVAL);
+    }
+
+    // Verify both are actually Running
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 should be Running after synchronization"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 should be Running after synchronization"
+    );
+
+    Ok(iterations)
+}
+
+/// Performs robust polling of two sessions with sleep intervals.
+///
+/// This helper ensures the network layer has adequate time to process packets,
+/// which is crucial on systems with different scheduling behavior (e.g., macOS CI).
+/// Without proper sleep intervals between polls, tight loops may not give the
+/// OS enough time to deliver UDP packets.
+///
+/// # Arguments
+/// * `sess1`, `sess2` - The sessions to poll
+/// * `iterations` - Number of poll cycles (each cycle includes a sleep)
+#[allow(dead_code)]
+fn poll_with_sleep<C: fortress_rollback::Config>(
+    sess1: &mut P2PSession<C>,
+    sess2: &mut P2PSession<C>,
+    iterations: usize,
+) {
+    for _ in 0..iterations {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Drains synchronization events from sessions and returns them for inspection.
+///
+/// This should be called after `synchronize_sessions` to clear any accumulated
+/// sync events before testing other functionality.
+fn drain_sync_events<C: fortress_rollback::Config + std::fmt::Debug>(
+    sess1: &mut P2PSession<C>,
+    sess2: &mut P2PSession<C>,
+) -> (Vec<FortressEvent<C>>, Vec<FortressEvent<C>>) {
+    let events1: Vec<_> = sess1.events().collect();
+    let events2: Vec<_> = sess2.events().collect();
+
+    // Verify all events are sync-related
+    for event in events1.iter().chain(events2.iter()) {
+        assert!(
+            matches!(
+                event,
+                FortressEvent::Synchronizing { .. } | FortressEvent::Synchronized { .. }
+            ),
+            "Expected sync event, got: {:?}",
+            event
+        );
+    }
+
+    (events1, events2)
+}
 
 #[test]
 #[serial]
@@ -89,10 +226,9 @@ fn test_synchronize_p2p_sessions() -> Result<(), FortressError> {
     assert!(sess1.current_state() == SessionState::Synchronizing);
     assert!(sess2.current_state() == SessionState::Synchronizing);
 
-    for _ in 0..50 {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
-    }
+    // Use robust synchronization with time-based timeout
+    synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default())
+        .expect("Sessions should synchronize");
 
     assert!(sess1.current_state() == SessionState::Running);
     assert!(sess2.current_state() == SessionState::Running);
@@ -121,10 +257,9 @@ fn test_advance_frame_p2p_sessions() -> Result<(), FortressError> {
     assert!(sess1.current_state() == SessionState::Synchronizing);
     assert!(sess2.current_state() == SessionState::Synchronizing);
 
-    for _ in 0..50 {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
-    }
+    // Use robust synchronization with time-based timeout
+    synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default())
+        .expect("Sessions should synchronize");
 
     assert!(sess1.current_state() == SessionState::Running);
     assert!(sess2.current_state() == SessionState::Running);
@@ -133,8 +268,14 @@ fn test_advance_frame_p2p_sessions() -> Result<(), FortressError> {
     let mut stub2 = GameStub::new();
     let reps = 10;
     for i in 0..reps {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
+        // Poll with multiple iterations and sleep to ensure packets are delivered.
+        // This is crucial on systems with different scheduling behavior (e.g., macOS CI)
+        // where tight loops may not give the network stack enough time.
+        for _ in 0..3 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+            thread::sleep(POLL_INTERVAL);
+        }
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -176,26 +317,25 @@ fn test_desyncs_detected() -> Result<(), FortressError> {
         .with_desync_detection_mode(desync_mode)
         .start_p2p_session(socket2)?;
 
-    while sess1.current_state() != SessionState::Running
-        && sess2.current_state() != SessionState::Running
-    {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
-    }
+    // Use helper to synchronize both sessions
+    let sync_config = SyncConfig::default();
+    synchronize_sessions(&mut sess1, &mut sess2, &sync_config)
+        .expect("Sessions should synchronize");
 
-    // drain events
-    assert!(sess1.events().chain(sess2.events()).all(|e| matches!(
-        e,
-        FortressEvent::Synchronizing { .. } | FortressEvent::Synchronized { .. }
-    )));
+    // Drain sync events using helper
+    drain_sync_events(&mut sess1, &mut sess2);
 
     let mut stub1 = GameStub::new();
     let mut stub2 = GameStub::new();
 
     // run normally for some frames (past first desync interval)
     for i in 0..110 {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
+        // Poll with multiple iterations and sleep to ensure packets are delivered.
+        for _ in 0..3 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+            thread::sleep(POLL_INTERVAL);
+        }
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -212,13 +352,29 @@ fn test_desyncs_detected() -> Result<(), FortressError> {
     }
 
     // check that there are no unexpected events yet
-    assert_eq!(sess1.events().len(), 0);
-    assert_eq!(sess2.events().len(), 0);
+    let unexpected_events1: Vec<_> = sess1.events().collect();
+    let unexpected_events2: Vec<_> = sess2.events().collect();
+    assert_eq!(
+        unexpected_events1.len(),
+        0,
+        "Session 1 should have no events after normal frames. Got: {:?}",
+        unexpected_events1
+    );
+    assert_eq!(
+        unexpected_events2.len(),
+        0,
+        "Session 2 should have no events after normal frames. Got: {:?}",
+        unexpected_events2
+    );
 
     // run for some more frames with steady inputs
     for _ in 0..100 {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
+        // Poll with multiple iterations and sleep to ensure packets are delivered.
+        for _ in 0..3 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+            thread::sleep(POLL_INTERVAL);
+        }
 
         // mess up state for peer 1 BEFORE handling requests
         stub1.gs.state = 1234;
@@ -301,26 +457,25 @@ fn test_desyncs_and_input_delay_no_panic() -> Result<(), FortressError> {
         .with_desync_detection_mode(desync_mode)
         .start_p2p_session(socket2)?;
 
-    while sess1.current_state() != SessionState::Running
-        && sess2.current_state() != SessionState::Running
-    {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
-    }
+    // Use helper to synchronize both sessions
+    let sync_config = SyncConfig::default();
+    synchronize_sessions(&mut sess1, &mut sess2, &sync_config)
+        .expect("Sessions should synchronize");
 
-    // drain events
-    assert!(sess1.events().chain(sess2.events()).all(|e| matches!(
-        e,
-        FortressEvent::Synchronizing { .. } | FortressEvent::Synchronized { .. }
-    )));
+    // Drain sync events using helper
+    drain_sync_events(&mut sess1, &mut sess2);
 
     let mut stub1 = GameStub::new();
     let mut stub2 = GameStub::new();
 
     // run normally for some frames (past first desync interval)
     for i in 0..150 {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
+        // Poll with multiple iterations and sleep to ensure packets are delivered.
+        for _ in 0..3 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+            thread::sleep(POLL_INTERVAL);
+        }
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -385,6 +540,7 @@ fn test_three_player_session() -> Result<(), FortressError> {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
         sess3.poll_remote_clients();
+        thread::sleep(POLL_INTERVAL);
     }
 
     // All sessions should now be Running
@@ -400,9 +556,13 @@ fn test_three_player_session() -> Result<(), FortressError> {
     // Advance frames
     let reps = 20;
     for i in 0..reps {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
-        sess3.poll_remote_clients();
+        // Poll with multiple iterations and sleep to ensure packets are delivered.
+        for _ in 0..3 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+            sess3.poll_remote_clients();
+            thread::sleep(POLL_INTERVAL);
+        }
 
         // Each player adds their local input
         sess1
@@ -488,6 +648,7 @@ fn test_four_player_session() -> Result<(), FortressError> {
         sess2.poll_remote_clients();
         sess3.poll_remote_clients();
         sess4.poll_remote_clients();
+        thread::sleep(POLL_INTERVAL);
     }
 
     // All sessions should be Running
@@ -505,10 +666,14 @@ fn test_four_player_session() -> Result<(), FortressError> {
     // Advance frames
     let reps = 15;
     for i in 0..reps {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
-        sess3.poll_remote_clients();
-        sess4.poll_remote_clients();
+        // Poll with multiple iterations and sleep to ensure packets are delivered.
+        for _ in 0..3 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+            sess3.poll_remote_clients();
+            sess4.poll_remote_clients();
+            thread::sleep(POLL_INTERVAL);
+        }
 
         // Each player adds their local input
         sess1
@@ -567,8 +732,6 @@ fn test_four_player_session() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_misprediction_at_frame_0_no_crash() -> Result<(), FortressError> {
-    use std::time::Duration;
-
     let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9910);
     let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9911);
 
@@ -588,12 +751,9 @@ fn test_misprediction_at_frame_0_no_crash() -> Result<(), FortressError> {
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    // Synchronize sessions
-    for _ in 0..100 {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    // Use robust synchronization with time-based timeout
+    synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default())
+        .expect("Sessions should synchronize");
 
     assert_eq!(sess1.current_state(), SessionState::Running);
     assert_eq!(sess2.current_state(), SessionState::Running);
@@ -611,10 +771,12 @@ fn test_misprediction_at_frame_0_no_crash() -> Result<(), FortressError> {
     let requests1 = sess1.advance_frame()?;
     stub1.handle_requests(requests1);
 
-    // Now exchange messages - sess2's actual input (200) will differ from sess1's prediction (0)
+    // Now exchange messages with sleeps to allow proper message processing
+    // sess2's actual input (200) will differ from sess1's prediction (0)
     for _ in 0..10 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
+        thread::sleep(POLL_INTERVAL);
     }
 
     // Advance sess2 normally
@@ -626,6 +788,7 @@ fn test_misprediction_at_frame_0_no_crash() -> Result<(), FortressError> {
     for _ in 0..50 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
+        thread::sleep(POLL_INTERVAL);
     }
 
     // Continue advancing frames to verify the session remains stable
@@ -645,12 +808,666 @@ fn test_misprediction_at_frame_0_no_crash() -> Result<(), FortressError> {
         for _ in 0..5 {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
+            thread::sleep(POLL_INTERVAL);
         }
     }
 
     // Both sessions should have advanced past frame 0 without crashing
     assert!(stub1.gs.frame >= 10);
     assert!(stub2.gs.frame >= 10);
+
+    Ok(())
+}
+
+// ============================================================================
+// Data-Driven Tests for Session Synchronization
+// ============================================================================
+
+/// Test case configuration for data-driven synchronization tests.
+#[derive(Debug, Clone)]
+struct SyncTestCase {
+    /// Name of the test case for error reporting
+    name: &'static str,
+    /// Input delay for session 1
+    input_delay_1: usize,
+    /// Input delay for session 2
+    input_delay_2: usize,
+    /// Number of frames to advance after sync
+    frames_to_advance: u32,
+    /// Whether to expect successful sync
+    expect_success: bool,
+}
+
+/// Data-driven tests for session synchronization with various configurations.
+///
+/// This test validates that the synchronization helper works correctly
+/// across different input delay configurations. It also serves as a
+/// regression test for the original bug where `&&` was used instead of `||`
+/// in the synchronization loop condition.
+#[test]
+#[serial]
+fn test_synchronization_data_driven() {
+    let test_cases = [
+        SyncTestCase {
+            name: "zero_input_delay",
+            input_delay_1: 0,
+            input_delay_2: 0,
+            frames_to_advance: 20,
+            expect_success: true,
+        },
+        SyncTestCase {
+            name: "symmetric_input_delay_2",
+            input_delay_1: 2,
+            input_delay_2: 2,
+            frames_to_advance: 20,
+            expect_success: true,
+        },
+        SyncTestCase {
+            name: "symmetric_input_delay_5",
+            input_delay_1: 5,
+            input_delay_2: 5,
+            frames_to_advance: 20,
+            expect_success: true,
+        },
+        SyncTestCase {
+            name: "asymmetric_input_delay_0_3",
+            input_delay_1: 0,
+            input_delay_2: 3,
+            frames_to_advance: 20,
+            expect_success: true,
+        },
+        SyncTestCase {
+            name: "asymmetric_input_delay_3_0",
+            input_delay_1: 3,
+            input_delay_2: 0,
+            frames_to_advance: 20,
+            expect_success: true,
+        },
+        SyncTestCase {
+            name: "asymmetric_input_delay_2_5",
+            input_delay_1: 2,
+            input_delay_2: 5,
+            frames_to_advance: 20,
+            expect_success: true,
+        },
+        SyncTestCase {
+            name: "high_input_delay_8",
+            input_delay_1: 8,
+            input_delay_2: 8,
+            frames_to_advance: 30,
+            expect_success: true,
+        },
+    ];
+
+    for (i, case) in test_cases.iter().enumerate() {
+        // Use unique ports per test case to avoid conflicts
+        let port1 = 8001 + (i * 2) as u16;
+        let port2 = 8002 + (i * 2) as u16;
+
+        let result = run_sync_test_case(case, port1, port2);
+
+        if case.expect_success {
+            assert!(
+                result.is_ok(),
+                "Test case '{}' should succeed but got error: {:?}",
+                case.name,
+                result.err()
+            );
+        } else {
+            assert!(
+                result.is_err(),
+                "Test case '{}' should fail but succeeded",
+                case.name
+            );
+        }
+    }
+}
+
+/// Runs a single synchronization test case.
+fn run_sync_test_case(
+    case: &SyncTestCase,
+    port1: u16,
+    port2: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port2);
+
+    let socket1 = UdpNonBlockingSocket::bind_to_port(port1)?;
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .with_input_delay(case.input_delay_1)
+        .start_p2p_session(socket1)?;
+
+    let socket2 = UdpNonBlockingSocket::bind_to_port(port2)?;
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .with_input_delay(case.input_delay_2)
+        .start_p2p_session(socket2)?;
+
+    // Synchronize using helper
+    let sync_config = SyncConfig::default();
+    let _iterations = synchronize_sessions(&mut sess1, &mut sess2, &sync_config)
+        .map_err(|e| format!("[{}] {}", case.name, e))?;
+
+    // Drain sync events
+    drain_sync_events(&mut sess1, &mut sess2);
+
+    // Advance frames
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let start = Instant::now();
+
+    for i in 0..case.frames_to_advance {
+        // Poll with multiple iterations and sleep to ensure packets are delivered.
+        // This is crucial on systems with different scheduling behavior (e.g., macOS CI)
+        // where tight loops may not give the network stack enough time.
+        for _ in 0..3 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+            thread::sleep(POLL_INTERVAL);
+        }
+
+        sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i })?;
+        sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: i })?;
+
+        let requests1 = sess1.advance_frame()?;
+        let requests2 = sess2.advance_frame()?;
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+    let frame_advance_time = start.elapsed();
+
+    // Verify frames advanced
+    assert!(
+        stub1.gs.frame >= case.frames_to_advance as i32,
+        "[{}] stub1 should have advanced to at least frame {}, got {} (elapsed: {:?}, input_delay_1: {}, input_delay_2: {})",
+        case.name,
+        case.frames_to_advance,
+        stub1.gs.frame,
+        frame_advance_time,
+        case.input_delay_1,
+        case.input_delay_2
+    );
+    assert!(
+        stub2.gs.frame >= case.frames_to_advance as i32,
+        "[{}] stub2 should have advanced to at least frame {}, got {} (elapsed: {:?}, input_delay_1: {}, input_delay_2: {})",
+        case.name,
+        case.frames_to_advance,
+        stub2.gs.frame,
+        frame_advance_time,
+        case.input_delay_1,
+        case.input_delay_2
+    );
+
+    // Verify no unexpected events
+    let events1: Vec<_> = sess1.events().collect();
+    let events2: Vec<_> = sess2.events().collect();
+    assert!(
+        events1.is_empty(),
+        "[{}] sess1 should have no unexpected events, got: {:?}",
+        case.name,
+        events1
+    );
+    assert!(
+        events2.is_empty(),
+        "[{}] sess2 should have no unexpected events, got: {:?}",
+        case.name,
+        events2
+    );
+
+    Ok(())
+}
+
+/// Test that the synchronization helper correctly handles edge cases.
+///
+/// This test specifically verifies the fix for the original bug where
+/// using `&&` instead of `||` in the synchronization condition could
+/// cause the loop to exit prematurely when only one session was Running.
+#[test]
+#[serial]
+fn test_sync_helper_both_sessions_must_be_running() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9501);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9502);
+
+    let socket1 = UdpNonBlockingSocket::bind_to_port(9501).unwrap();
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = UdpNonBlockingSocket::bind_to_port(9502).unwrap();
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Initial state should be Synchronizing
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Synchronizing,
+        "Session 1 should start in Synchronizing state"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Synchronizing,
+        "Session 2 should start in Synchronizing state"
+    );
+
+    // Use the helper to synchronize
+    let sync_config = SyncConfig::default();
+    let result = synchronize_sessions(&mut sess1, &mut sess2, &sync_config);
+
+    // Should succeed
+    assert!(
+        result.is_ok(),
+        "Synchronization should succeed: {:?}",
+        result
+    );
+
+    // CRITICAL: Both sessions MUST be Running after the helper returns
+    // This is the key invariant that the original bug violated
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 MUST be Running after synchronize_sessions returns"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 MUST be Running after synchronize_sessions returns"
+    );
+
+    Ok(())
+}
+
+/// Test desync detection with various checksum intervals (data-driven).
+///
+/// This test uses `CorruptibleGameStub` which corrupts checksums during save operations
+/// rather than corrupting state before `handle_requests`. This approach survives rollbacks
+/// because the corruption happens inside the save operation itself, not to external state
+/// that could be overwritten by `LoadGameState`.
+///
+/// IMPORTANT configuration requirements:
+/// 1. The circular buffer for saved states has size `max_prediction + 1`
+/// 2. Checksum comparison can only work if the state for `frame_to_send` is still in the buffer
+/// 3. For reliable desync detection with interval N, we need `max_prediction >= N`
+///
+/// The test uses larger `max_prediction` values to ensure states persist long enough
+/// for checksum comparison, regardless of platform-specific timing differences.
+#[test]
+#[serial]
+fn test_desync_detection_intervals_data_driven() -> Result<(), FortressError> {
+    struct DesyncTestCase {
+        name: &'static str,
+        /// Checksum interval - checksums are compared at frames N, 2N, 3N, etc.
+        interval: u32,
+        /// Max prediction window - must be >= interval to ensure states persist
+        max_prediction: usize,
+        /// Frame at which checksum corruption begins (peer 1 only)
+        corrupt_from_frame: i32,
+        /// Total frames to run
+        total_frames: u32,
+        /// Expected desync detection frame (first checksum frame >= corrupt_from_frame)
+        expected_desync_frame: i32,
+    }
+
+    let test_cases = [
+        // Small interval test: interval=10, corruption starts at frame 15
+        // First clean checksum at frame 10, first dirty checksum at frame 20
+        DesyncTestCase {
+            name: "interval_10_quick_detection",
+            interval: 10,
+            max_prediction: 16,
+            corrupt_from_frame: 15,
+            total_frames: 50,
+            expected_desync_frame: 20,
+        },
+        // Medium interval test: interval=25, corruption starts at frame 30
+        // First clean checksum at frame 25, first dirty checksum at frame 50
+        DesyncTestCase {
+            name: "interval_25_medium_detection",
+            interval: 25,
+            max_prediction: 32,
+            corrupt_from_frame: 30,
+            total_frames: 80,
+            expected_desync_frame: 50,
+        },
+        // Corruption right after checksum: interval=20, corruption starts at frame 21
+        // Checksum at frame 20 is clean, checksum at frame 40 should detect desync
+        DesyncTestCase {
+            name: "interval_20_corruption_just_after_checksum",
+            interval: 20,
+            max_prediction: 24,
+            corrupt_from_frame: 21,
+            total_frames: 70,
+            expected_desync_frame: 40,
+        },
+        // Corruption right before checksum: interval=20, corruption starts at frame 19
+        // Checksum at frame 20 should detect desync (first checksum after corruption)
+        DesyncTestCase {
+            name: "interval_20_corruption_just_before_checksum",
+            interval: 20,
+            max_prediction: 24,
+            corrupt_from_frame: 19,
+            total_frames: 50,
+            expected_desync_frame: 20,
+        },
+        // Corruption at exact checksum boundary: interval=15, corruption at frame 30
+        // Checksum at frame 30 should detect desync
+        DesyncTestCase {
+            name: "interval_15_corruption_at_boundary",
+            interval: 15,
+            max_prediction: 20,
+            corrupt_from_frame: 30,
+            total_frames: 60,
+            expected_desync_frame: 30,
+        },
+    ];
+
+    for (i, case) in test_cases.iter().enumerate() {
+        let port1 = 9100 + (i * 2) as u16;
+        let port2 = 9101 + (i * 2) as u16;
+
+        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port1);
+        let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port2);
+        let desync_mode = DesyncDetection::On {
+            interval: case.interval,
+        };
+
+        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let mut sess1 = SessionBuilder::<StubConfig>::new()
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .with_desync_detection_mode(desync_mode)
+            .with_max_prediction_window(case.max_prediction)
+            .start_p2p_session(socket1)?;
+
+        let socket2 = UdpNonBlockingSocket::bind_to_port(port2).unwrap();
+        let mut sess2 = SessionBuilder::<StubConfig>::new()
+            .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+            .add_player(PlayerType::Local, PlayerHandle::new(1))?
+            .with_desync_detection_mode(desync_mode)
+            .with_max_prediction_window(case.max_prediction)
+            .start_p2p_session(socket2)?;
+
+        // Synchronize
+        let sync_config = SyncConfig::default();
+        synchronize_sessions(&mut sess1, &mut sess2, &sync_config).unwrap_or_else(|e| {
+            panic!(
+                "[{}] sync failed: {} (ports {}:{})",
+                case.name, e, port1, port2
+            )
+        });
+        drain_sync_events(&mut sess1, &mut sess2);
+
+        // Use CorruptibleGameStub for peer 1 - it corrupts checksums from a specific frame
+        let mut stub1 = CorruptibleGameStub::with_corruption_from(case.corrupt_from_frame);
+        // Peer 2 uses clean GameStub - always produces correct checksums
+        let mut stub2 = GameStub::new();
+
+        // Run all frames
+        for frame_num in 0..case.total_frames {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+
+            // Use steady inputs to minimize rollback interference
+            sess1
+                .add_local_input(PlayerHandle::new(0), StubInput { inp: frame_num })
+                .unwrap();
+            sess2
+                .add_local_input(PlayerHandle::new(1), StubInput { inp: frame_num })
+                .unwrap();
+
+            let requests1 = sess1.advance_frame().unwrap();
+            let requests2 = sess2.advance_frame().unwrap();
+
+            stub1.handle_requests(requests1);
+            stub2.handle_requests(requests2);
+        }
+
+        // Check for desync events
+        let events1: Vec<_> = sess1.events().collect();
+        let events2: Vec<_> = sess2.events().collect();
+
+        // Both sessions should have detected the desync
+        assert!(
+            !events1.is_empty(),
+            "[{}] Expected desync event for sess1, got none. \
+             Config: interval={}, max_pred={}, corrupt_from={}, total_frames={}, \
+             expected_desync_frame={}",
+            case.name,
+            case.interval,
+            case.max_prediction,
+            case.corrupt_from_frame,
+            case.total_frames,
+            case.expected_desync_frame
+        );
+        assert!(
+            !events2.is_empty(),
+            "[{}] Expected desync event for sess2, got none. \
+             Config: interval={}, max_pred={}, corrupt_from={}, total_frames={}, \
+             expected_desync_frame={}",
+            case.name,
+            case.interval,
+            case.max_prediction,
+            case.corrupt_from_frame,
+            case.total_frames,
+            case.expected_desync_frame
+        );
+
+        // Verify the desync frame matches expectation
+        if let FortressEvent::DesyncDetected {
+            frame,
+            local_checksum,
+            remote_checksum,
+            ..
+        } = &events1[0]
+        {
+            assert_eq!(
+                *frame,
+                case.expected_desync_frame,
+                "[{}] Desync frame mismatch. \
+                 Expected frame {} (first checksum frame >= corrupt_from {}). \
+                 Got frame {}. local_checksum={:#x}, remote_checksum={:#x}. \
+                 Config: interval={}, max_pred={}, total_frames={}",
+                case.name,
+                case.expected_desync_frame,
+                case.corrupt_from_frame,
+                frame,
+                local_checksum,
+                remote_checksum,
+                case.interval,
+                case.max_prediction,
+                case.total_frames
+            );
+            // Verify checksums actually differ
+            assert_ne!(
+                local_checksum, remote_checksum,
+                "[{}] Checksums should differ in DesyncDetected event",
+                case.name
+            );
+        } else {
+            panic!(
+                "[{}] Expected DesyncDetected event, got {:?}",
+                case.name, events1[0]
+            );
+        }
+
+        // Verify sess2 also detected at the same frame
+        if let FortressEvent::DesyncDetected { frame, .. } = &events2[0] {
+            assert_eq!(
+                *frame, case.expected_desync_frame,
+                "[{}] Session 2 desync frame mismatch",
+                case.name
+            );
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Polling Robustness Tests
+// ============================================================================
+
+/// Test case for timing robustness testing.
+#[derive(Debug, Clone)]
+struct TimingTestCase {
+    /// Name of the test case for error reporting
+    name: &'static str,
+    /// Number of poll iterations per frame
+    polls_per_frame: usize,
+    /// Number of frames to advance
+    frames: u32,
+    /// Input delay for both sessions
+    input_delay: usize,
+}
+
+/// Data-driven tests for polling robustness.
+///
+/// This test validates that frame advancement works correctly with
+/// various polling patterns. It specifically catches timing-related
+/// bugs where tight polling loops don't give the network layer time
+/// to process messages.
+#[test]
+#[serial]
+fn test_polling_robustness_data_driven() {
+    let test_cases = [
+        TimingTestCase {
+            name: "single_poll_many_frames",
+            polls_per_frame: 1,
+            frames: 30,
+            input_delay: 0,
+        },
+        TimingTestCase {
+            name: "triple_poll_many_frames",
+            polls_per_frame: 3,
+            frames: 30,
+            input_delay: 0,
+        },
+        TimingTestCase {
+            name: "heavy_poll_few_frames",
+            polls_per_frame: 10,
+            frames: 10,
+            input_delay: 0,
+        },
+        TimingTestCase {
+            name: "single_poll_with_delay",
+            polls_per_frame: 1,
+            frames: 20,
+            input_delay: 3,
+        },
+        TimingTestCase {
+            name: "triple_poll_with_delay",
+            polls_per_frame: 3,
+            frames: 20,
+            input_delay: 3,
+        },
+        TimingTestCase {
+            name: "high_delay_triple_poll",
+            polls_per_frame: 3,
+            frames: 25,
+            input_delay: 7,
+        },
+    ];
+
+    for (i, case) in test_cases.iter().enumerate() {
+        // Use unique ports per test case to avoid conflicts (19xxx range is reserved for this test)
+        let port1 = 19001 + (i * 2) as u16;
+        let port2 = 19002 + (i * 2) as u16;
+
+        let result = run_timing_test_case(case, port1, port2);
+
+        assert!(
+            result.is_ok(),
+            "Test case '{}' should succeed but got error: {:?}",
+            case.name,
+            result.err()
+        );
+    }
+}
+
+/// Runs a single timing robustness test case.
+fn run_timing_test_case(
+    case: &TimingTestCase,
+    port1: u16,
+    port2: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port2);
+
+    let socket1 = UdpNonBlockingSocket::bind_to_port(port1)?;
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .with_input_delay(case.input_delay)
+        .start_p2p_session(socket1)?;
+
+    let socket2 = UdpNonBlockingSocket::bind_to_port(port2)?;
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .with_input_delay(case.input_delay)
+        .start_p2p_session(socket2)?;
+
+    // Synchronize using helper
+    let sync_config = SyncConfig::default();
+    synchronize_sessions(&mut sess1, &mut sess2, &sync_config)
+        .map_err(|e| format!("[{}] {}", case.name, e))?;
+
+    // Drain sync events
+    drain_sync_events(&mut sess1, &mut sess2);
+
+    // Advance frames with the specified polling pattern
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let start = Instant::now();
+
+    for i in 0..case.frames {
+        // Poll with the specified number of iterations
+        for _ in 0..case.polls_per_frame {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+            thread::sleep(POLL_INTERVAL);
+        }
+
+        sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i })?;
+        sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: i })?;
+
+        let requests1 = sess1.advance_frame()?;
+        let requests2 = sess2.advance_frame()?;
+
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+    }
+    let elapsed = start.elapsed();
+
+    // Verify frames advanced
+    assert!(
+        stub1.gs.frame >= case.frames as i32,
+        "[{}] stub1 should have advanced to at least frame {}, got {} \
+         (elapsed: {:?}, polls_per_frame: {}, input_delay: {})",
+        case.name,
+        case.frames,
+        stub1.gs.frame,
+        elapsed,
+        case.polls_per_frame,
+        case.input_delay
+    );
+    assert!(
+        stub2.gs.frame >= case.frames as i32,
+        "[{}] stub2 should have advanced to at least frame {}, got {} \
+         (elapsed: {:?}, polls_per_frame: {}, input_delay: {})",
+        case.name,
+        case.frames,
+        stub2.gs.frame,
+        elapsed,
+        case.polls_per_frame,
+        case.input_delay
+    );
 
     Ok(())
 }

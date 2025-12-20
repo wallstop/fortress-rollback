@@ -1003,29 +1003,69 @@ mod tests {
         // Queue a message to receive
         inner.to_receive.push((addr, msg));
 
-        // Set up high latency (100ms)
-        let config = ChaosConfig::builder().latency_ms(100).seed(42).build();
+        // Set up high latency (500ms) - use a large value to ensure timing reliability on CI
+        // On loaded CI systems (especially macOS), thread::sleep can overshoot significantly
+        const LATENCY_MS: u64 = 500;
+        const EARLY_CHECK_MS: u64 = 100; // Check well before delivery time
+        const LATE_CHECK_MS: u64 = 600; // Check well after delivery time
+
+        let config = ChaosConfig::builder()
+            .latency_ms(LATENCY_MS)
+            .seed(42)
+            .build();
         let mut socket = ChaosSocket::new(inner, config);
+        let start = Instant::now();
 
         // First receive - packet goes into in-flight queue
         let received = socket.receive_all_messages();
-        assert_eq!(received.len(), 0, "Packet should be delayed");
-        assert_eq!(socket.packets_in_flight(), 1, "Packet should be in flight");
+        assert_eq!(
+            received.len(),
+            0,
+            "Packet should be delayed immediately after receive (elapsed: {:?})",
+            start.elapsed()
+        );
+        assert_eq!(
+            socket.packets_in_flight(),
+            1,
+            "Packet should be in flight (elapsed: {:?})",
+            start.elapsed()
+        );
 
-        // Wait less than latency - still not delivered
-        std::thread::sleep(Duration::from_millis(50));
+        // Wait much less than latency - should still be delayed
+        std::thread::sleep(Duration::from_millis(EARLY_CHECK_MS));
+        let elapsed_at_check = start.elapsed();
         let received = socket.receive_all_messages();
-        assert_eq!(received.len(), 0, "Packet should still be delayed");
+        assert_eq!(
+            received.len(),
+            0,
+            "Packet should still be delayed after {}ms sleep \
+             (actual elapsed: {:?}, latency: {}ms, in_flight: {})",
+            EARLY_CHECK_MS,
+            elapsed_at_check,
+            LATENCY_MS,
+            socket.packets_in_flight()
+        );
 
-        // Wait for full latency - now delivered
-        std::thread::sleep(Duration::from_millis(60));
+        // Wait for well past the latency - now delivered
+        std::thread::sleep(Duration::from_millis(LATE_CHECK_MS - EARLY_CHECK_MS));
+        let elapsed_at_delivery = start.elapsed();
         let received = socket.receive_all_messages();
         assert_eq!(
             received.len(),
             1,
-            "Packet should be delivered after latency"
+            "Packet should be delivered after {}ms total sleep \
+             (actual elapsed: {:?}, latency: {}ms, in_flight: {})",
+            LATE_CHECK_MS,
+            elapsed_at_delivery,
+            LATENCY_MS,
+            socket.packets_in_flight()
         );
-        assert_eq!(socket.packets_in_flight(), 0, "No more packets in flight");
+        assert_eq!(
+            socket.packets_in_flight(),
+            0,
+            "No more packets in flight (elapsed: {:?})",
+            start.elapsed()
+        );
     }
 
     #[test]
@@ -1062,18 +1102,43 @@ mod tests {
             inner.to_receive.push((addr, msg.clone()));
         }
 
-        let config = ChaosConfig::builder().latency_ms(100).build();
+        // Use larger latency with generous margin for CI reliability
+        const LATENCY_MS: u64 = 300;
+        const WAIT_MS: u64 = 500; // Well past latency
+
+        let config = ChaosConfig::builder().latency_ms(LATENCY_MS).build();
         let mut socket = ChaosSocket::new(inner, config);
+        let start = Instant::now();
 
         // Receive puts them in flight
         let _ = socket.receive_all_messages();
-        assert_eq!(socket.packets_in_flight(), 5);
+        assert_eq!(
+            socket.packets_in_flight(),
+            5,
+            "All 5 packets should be in flight (elapsed: {:?})",
+            start.elapsed()
+        );
 
-        // Wait and check they're delivered
-        std::thread::sleep(Duration::from_millis(110));
+        // Wait well past latency and check they're delivered
+        std::thread::sleep(Duration::from_millis(WAIT_MS));
+        let elapsed = start.elapsed();
         let received = socket.receive_all_messages();
-        assert_eq!(received.len(), 5);
-        assert_eq!(socket.packets_in_flight(), 0);
+        assert_eq!(
+            received.len(),
+            5,
+            "All 5 packets should be delivered after {}ms sleep \
+             (actual elapsed: {:?}, latency: {}ms, in_flight: {})",
+            WAIT_MS,
+            elapsed,
+            LATENCY_MS,
+            socket.packets_in_flight()
+        );
+        assert_eq!(
+            socket.packets_in_flight(),
+            0,
+            "No packets should remain in flight (elapsed: {:?})",
+            start.elapsed()
+        );
     }
 
     #[test]
@@ -1370,5 +1435,310 @@ mod tests {
                 "{name}: jitter unreasonably high compared to latency"
             );
         }
+    }
+
+    // ============================================================================
+    // DATA-DRIVEN LATENCY TESTS
+    // ============================================================================
+    // These tests verify latency behavior with various configurations using a
+    // data-driven approach to catch edge cases.
+
+    /// Test case for data-driven latency testing
+    struct LatencyTestCase {
+        name: &'static str,
+        latency_ms: u64,
+        jitter_ms: u64,
+        packet_count: usize,
+    }
+
+    impl LatencyTestCase {
+        const fn new(
+            name: &'static str,
+            latency_ms: u64,
+            jitter_ms: u64,
+            packet_count: usize,
+        ) -> Self {
+            Self {
+                name,
+                latency_ms,
+                jitter_ms,
+                packet_count,
+            }
+        }
+    }
+
+    /// Data-driven test: packets should never be delivered before minimum delivery time
+    #[test]
+    fn test_latency_minimum_delivery_time_data_driven() {
+        const TEST_CASES: &[LatencyTestCase] = &[
+            LatencyTestCase::new("zero_latency", 0, 0, 1),
+            LatencyTestCase::new("small_latency", 50, 0, 1),
+            LatencyTestCase::new("medium_latency", 200, 0, 3),
+            LatencyTestCase::new("with_jitter", 200, 50, 3),
+            LatencyTestCase::new("high_jitter", 200, 100, 5),
+        ];
+
+        for case in TEST_CASES {
+            let mut inner = TestSocket::default();
+            let addr = test_addr();
+            let msg = test_message();
+
+            for _ in 0..case.packet_count {
+                inner.to_receive.push((addr, msg.clone()));
+            }
+
+            let config = ChaosConfig::builder()
+                .latency_ms(case.latency_ms)
+                .jitter_ms(case.jitter_ms)
+                .seed(42)
+                .build();
+            let mut socket = ChaosSocket::new(inner, config);
+            let start = Instant::now();
+
+            // First receive - packets go into in-flight queue
+            let _ = socket.receive_all_messages();
+
+            // Calculate minimum time before any packet could be delivered:
+            // min_delivery_time = latency - jitter (but not less than 0)
+            let min_delivery_ms = case.latency_ms.saturating_sub(case.jitter_ms);
+
+            // If there's a meaningful delay, check packets aren't delivered too early
+            if min_delivery_ms > 20 {
+                // Check immediately - no packets should be ready yet
+                let received = socket.receive_all_messages();
+                assert_eq!(
+                    received.len(),
+                    0,
+                    "[{}] Packets delivered too early! \
+                     min_delivery={}ms, jitter={}ms, elapsed={:?}",
+                    case.name,
+                    min_delivery_ms,
+                    case.jitter_ms,
+                    start.elapsed()
+                );
+            }
+        }
+    }
+
+    /// Data-driven test: packets should always be delivered after maximum delivery time
+    #[test]
+    fn test_latency_maximum_delivery_time_data_driven() {
+        const TEST_CASES: &[LatencyTestCase] = &[
+            LatencyTestCase::new("small_latency", 100, 0, 1),
+            LatencyTestCase::new("medium_latency", 200, 0, 3),
+            LatencyTestCase::new("with_jitter", 200, 50, 3),
+        ];
+
+        for case in TEST_CASES {
+            let mut inner = TestSocket::default();
+            let addr = test_addr();
+            let msg = test_message();
+
+            for _ in 0..case.packet_count {
+                inner.to_receive.push((addr, msg.clone()));
+            }
+
+            let config = ChaosConfig::builder()
+                .latency_ms(case.latency_ms)
+                .jitter_ms(case.jitter_ms)
+                .seed(42)
+                .build();
+            let mut socket = ChaosSocket::new(inner, config);
+            let start = Instant::now();
+
+            // First receive - packets go into in-flight queue
+            let _ = socket.receive_all_messages();
+            let in_flight_initial = socket.packets_in_flight();
+
+            // Calculate maximum time before all packets must be delivered:
+            // max_delivery_time = latency + jitter + generous CI margin (200ms)
+            let max_delivery_ms = case.latency_ms + case.jitter_ms + 200;
+
+            // Wait for maximum delivery time
+            std::thread::sleep(Duration::from_millis(max_delivery_ms));
+            let elapsed = start.elapsed();
+
+            let received = socket.receive_all_messages();
+            assert_eq!(
+                received.len(),
+                case.packet_count,
+                "[{}] Not all packets delivered! \
+                 expected={}, received={}, in_flight_before={}, in_flight_after={}, \
+                 latency={}ms, jitter={}ms, wait={}ms, elapsed={:?}",
+                case.name,
+                case.packet_count,
+                received.len(),
+                in_flight_initial,
+                socket.packets_in_flight(),
+                case.latency_ms,
+                case.jitter_ms,
+                max_delivery_ms,
+                elapsed
+            );
+        }
+    }
+
+    /// Test that multiple packets with same latency maintain FIFO order (no jitter)
+    #[test]
+    fn test_latency_fifo_ordering_without_jitter() {
+        let mut inner = TestSocket::default();
+        let addr = test_addr();
+
+        // Create distinct messages to track order
+        let messages: Vec<Message> = (0..5)
+            .map(|i| {
+                use crate::network::messages::{MessageBody, MessageHeader};
+                Message {
+                    header: MessageHeader { magic: i },
+                    body: MessageBody::KeepAlive,
+                }
+            })
+            .collect();
+
+        for msg in &messages {
+            inner.to_receive.push((addr, msg.clone()));
+        }
+
+        // No jitter - packets should maintain FIFO order
+        let config = ChaosConfig::builder()
+            .latency_ms(100)
+            .jitter_ms(0)
+            .seed(42)
+            .build();
+        let mut socket = ChaosSocket::new(inner, config);
+
+        // First receive
+        let _ = socket.receive_all_messages();
+
+        // Wait for delivery
+        std::thread::sleep(Duration::from_millis(300));
+        let received = socket.receive_all_messages();
+
+        assert_eq!(received.len(), 5, "All packets should be delivered");
+
+        // Verify FIFO order
+        for (i, (_addr, msg)) in received.iter().enumerate() {
+            let expected_magic = i as u16;
+            assert_eq!(
+                msg.header.magic, expected_magic,
+                "Packet {} has wrong magic: expected {}, got {}",
+                i, expected_magic, msg.header.magic
+            );
+        }
+    }
+
+    /// Test edge case: zero latency should deliver immediately
+    #[test]
+    fn test_latency_zero_immediate_delivery() {
+        let mut inner = TestSocket::default();
+        let addr = test_addr();
+        let msg = test_message();
+
+        for _ in 0..10 {
+            inner.to_receive.push((addr, msg.clone()));
+        }
+
+        let config = ChaosConfig::builder()
+            .latency_ms(0)
+            .jitter_ms(0)
+            .seed(42)
+            .build();
+        let mut socket = ChaosSocket::new(inner, config);
+
+        // All packets should be delivered on first receive (or very shortly after)
+        let received = socket.receive_all_messages();
+        assert_eq!(
+            received.len(),
+            10,
+            "Zero latency should deliver all packets immediately"
+        );
+        assert_eq!(
+            socket.packets_in_flight(),
+            0,
+            "No packets should remain in flight with zero latency"
+        );
+    }
+
+    /// Test edge case: very high latency values work correctly
+    #[test]
+    fn test_latency_high_values_accepted() {
+        // Just verify these don't panic or overflow
+        let config = ChaosConfig::builder()
+            .latency_ms(10_000) // 10 seconds
+            .jitter_ms(5_000) // 5 seconds
+            .build();
+
+        assert_eq!(config.latency, Duration::from_secs(10));
+        assert_eq!(config.jitter, Duration::from_secs(5));
+
+        let mut inner = TestSocket::default();
+        inner.to_receive.push((test_addr(), test_message()));
+
+        let mut socket = ChaosSocket::new(inner, config);
+        let _ = socket.receive_all_messages();
+
+        // Packet should be in flight, not delivered
+        assert_eq!(socket.packets_in_flight(), 1);
+    }
+
+    /// Test that in_flight tracking is accurate across multiple receive cycles
+    #[test]
+    fn test_in_flight_accuracy_multiple_cycles() {
+        let inner = TestSocket::default();
+        let addr = test_addr();
+        let msg = test_message();
+
+        // Use moderate latency with good margin
+        const LATENCY_MS: u64 = 150;
+        const WAIT_MS: u64 = 250;
+
+        let config = ChaosConfig::builder()
+            .latency_ms(LATENCY_MS)
+            .seed(42)
+            .build();
+        let mut socket = ChaosSocket::new(inner, config);
+
+        // Cycle 1: Add 3 packets
+        socket.inner_mut().to_receive.push((addr, msg.clone()));
+        socket.inner_mut().to_receive.push((addr, msg.clone()));
+        socket.inner_mut().to_receive.push((addr, msg.clone()));
+
+        let _ = socket.receive_all_messages();
+        assert_eq!(
+            socket.packets_in_flight(),
+            3,
+            "Cycle 1: 3 packets in flight"
+        );
+
+        // Wait and verify delivery
+        std::thread::sleep(Duration::from_millis(WAIT_MS));
+        let received1 = socket.receive_all_messages();
+        assert_eq!(received1.len(), 3, "Cycle 1: 3 packets delivered");
+        assert_eq!(
+            socket.packets_in_flight(),
+            0,
+            "Cycle 1: 0 in flight after delivery"
+        );
+
+        // Cycle 2: Add 2 more packets
+        socket.inner_mut().to_receive.push((addr, msg.clone()));
+        socket.inner_mut().to_receive.push((addr, msg));
+
+        let _ = socket.receive_all_messages();
+        assert_eq!(
+            socket.packets_in_flight(),
+            2,
+            "Cycle 2: 2 packets in flight"
+        );
+
+        // Wait and verify delivery
+        std::thread::sleep(Duration::from_millis(WAIT_MS));
+        let received2 = socket.receive_all_messages();
+        assert_eq!(received2.len(), 2, "Cycle 2: 2 packets delivered");
+        assert_eq!(
+            socket.packets_in_flight(),
+            0,
+            "Cycle 2: 0 in flight after delivery"
+        );
     }
 }
