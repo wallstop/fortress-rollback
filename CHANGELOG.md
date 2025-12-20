@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2025-12-20
+
+### Changed
+
+- Restructured test code to further reduce published crate size
+  - Moved network peer binary to separate `tests/network-peer` crate
+  - Network tests now use workspace dependency on the peer binary
+  - Excluded additional test infrastructure from published package
+
 ## [0.1.2] - 2025-12-19
 
 ### Changed
