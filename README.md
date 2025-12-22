@@ -22,7 +22,7 @@
 > ⚠️⚠️⚠️
 > WARNING
 > ⚠️⚠️⚠️
-> 
+>
 > This crate is currently in alpha state as I start integrating it with some in-development game projects. I will utilize `semver` to the best of my ability to help guard against breaking changes. The main goal of this is to provide a robust, easy-to-use, 100% reliable rollback engine for games. As such, there may be anywhere between "zero" API changes and "complete overhauls". This readme and the version will be updated appropriately as things stabilize.
 ---
 
