@@ -18,6 +18,14 @@
 
 ---
 
+---
+⚠️⚠️⚠️
+WARNING
+⚠️⚠️⚠️
+
+This crate is currently in alpha state as I start integrating it with some in-development game projects. I will utilize `semver` to the best of my ability to help guard against breaking changes. The main goal of this is to provide a robust, easy-to-use, 100% reliable rollback engine for games. As such, there may be anywhere between "zero" API changes and "complete overhauls". This readme and the version will be updated appropriately as things stabilize.
+---
+
 ## P2P Rollback Networking in Rust
 
 Fortress Rollback is a fortified, correctness-first port of the original, phenomenal [ggrs crate](https://github.com/gschup/ggrs) and reimagination of the [GGPO network SDK](https://www.ggpo.net/), written in 100% safe [Rust 🦀](https://www.rust-lang.org/). This crate was primarily developed with AI assistance. The callback-style API from the original library has been replaced with a simple, request-driven control flow: instead of registering callback functions, Fortress Rollback returns a list of requests for the user to fulfill.
