@@ -568,29 +568,58 @@ where
     }
 
     /// Applies reordering to a batch of messages.
+    ///
+    /// The reordering simulation works by buffering packets and probabilistically
+    /// swapping their positions before delivery. This creates realistic out-of-order
+    /// delivery patterns.
+    ///
+    /// When no new messages arrive (empty batch), buffered packets are released to
+    /// prevent indefinite holding - this simulates the real-world behavior where
+    /// delayed packets eventually arrive.
     fn apply_reordering(&mut self, messages: &mut Vec<(A, Message)>) {
         if self.config.reorder_buffer_size == 0 || self.config.reorder_rate <= 0.0 {
             return;
         }
 
+        // Track if we received new messages in this batch
+        let received_new_messages = !messages.is_empty();
+
         // Add messages to reorder buffer
         self.reorder_buffer.append(messages);
 
-        // If buffer is full enough, potentially reorder and release
-        if self.reorder_buffer.len() >= self.config.reorder_buffer_size {
-            // Apply random swaps based on reorder_rate
-            for i in 0..self.reorder_buffer.len() {
-                if self.should_drop(self.config.reorder_rate) {
-                    let j = self.rng.gen_range_usize(0..self.reorder_buffer.len());
-                    if i != j {
-                        self.reorder_buffer.swap(i, j);
-                        self.stats.packets_reordered += 1;
+        // Determine if we should release packets:
+        // 1. Buffer is full enough for meaningful reordering, OR
+        // 2. No new messages arrived and buffer has packets (prevent indefinite holding)
+        let should_release = self.reorder_buffer.len() >= self.config.reorder_buffer_size
+            || (!received_new_messages && !self.reorder_buffer.is_empty());
+
+        if should_release && !self.reorder_buffer.is_empty() {
+            // Apply random swaps based on reorder_rate (need at least 2 packets)
+            if self.reorder_buffer.len() >= 2 {
+                for i in 0..self.reorder_buffer.len() {
+                    if self.should_reorder() {
+                        let j = self.rng.gen_range_usize(0..self.reorder_buffer.len());
+                        if i != j {
+                            self.reorder_buffer.swap(i, j);
+                            self.stats.packets_reordered += 1;
+                        }
                     }
                 }
             }
 
             // Release all buffered packets
             messages.append(&mut self.reorder_buffer);
+        }
+    }
+
+    /// Determines if a packet swap should occur based on reorder_rate.
+    fn should_reorder(&mut self) -> bool {
+        if self.config.reorder_rate <= 0.0 {
+            false
+        } else if self.config.reorder_rate >= 1.0 {
+            true
+        } else {
+            self.rng.gen::<f64>() < self.config.reorder_rate
         }
     }
 }
@@ -1739,6 +1768,271 @@ mod tests {
             socket.packets_in_flight(),
             0,
             "Cycle 2: 0 in flight after delivery"
+        );
+    }
+
+    // ========================================================================
+    // Reorder Buffer Edge Case Tests
+    // ========================================================================
+
+    /// Test that packets in reorder buffer are released when no new packets arrive.
+    /// This tests the fix for the flaky test_out_of_order_delivery failure.
+    #[test]
+    fn test_reorder_buffer_releases_on_empty_batch() {
+        let mut inner = TestSocket::default();
+        let addr = test_addr();
+        let msg = test_message();
+
+        // Queue fewer messages than buffer size
+        for _ in 0..3 {
+            inner.to_receive.push((addr, msg.clone()));
+        }
+
+        // Buffer size 5, so 3 packets won't trigger threshold
+        let config = ChaosConfig::builder()
+            .reorder_buffer_size(5)
+            .reorder_rate(0.5)
+            .seed(42)
+            .build();
+        let mut socket = ChaosSocket::new(inner, config);
+
+        // First receive: packets go into reorder buffer (but not released yet
+        // because buffer < threshold)
+        let received1 = socket.receive_all_messages();
+
+        // Second receive with empty batch: buffered packets should be released
+        let received2 = socket.receive_all_messages();
+
+        // Total received should be 3 (all packets eventually released)
+        let total = received1.len() + received2.len();
+        assert_eq!(
+            total,
+            3,
+            "All 3 packets should be released. First batch: {}, Second batch: {}",
+            received1.len(),
+            received2.len()
+        );
+    }
+
+    /// Test that reorder buffer releases packets when threshold is reached.
+    #[test]
+    fn test_reorder_buffer_releases_at_threshold() {
+        let mut inner = TestSocket::default();
+        let addr = test_addr();
+        let msg = test_message();
+
+        // Queue exactly buffer size messages
+        for _ in 0..5 {
+            inner.to_receive.push((addr, msg.clone()));
+        }
+
+        let config = ChaosConfig::builder()
+            .reorder_buffer_size(5)
+            .reorder_rate(0.5)
+            .seed(42)
+            .build();
+        let mut socket = ChaosSocket::new(inner, config);
+
+        // All packets should be released in first receive (buffer reaches threshold)
+        let received = socket.receive_all_messages();
+        assert_eq!(
+            received.len(),
+            5,
+            "All 5 packets should be released when buffer reaches threshold"
+        );
+
+        // Verify some reordering occurred (with seed 42 and 50% rate)
+        assert!(
+            socket.stats().packets_reordered > 0,
+            "Expected some packets to be reordered with 50% rate"
+        );
+    }
+
+    /// Test that reorder buffer doesn't hold packets indefinitely across many receive calls.
+    #[test]
+    fn test_reorder_buffer_no_indefinite_holding() {
+        let inner = TestSocket::default();
+        let addr = test_addr();
+        let msg = test_message();
+
+        // Buffer size larger than what we'll ever send at once
+        let config = ChaosConfig::builder()
+            .reorder_buffer_size(10)
+            .reorder_rate(0.5)
+            .seed(42)
+            .build();
+        let mut socket = ChaosSocket::new(inner, config);
+
+        let mut total_received = 0;
+
+        // Simulate multiple rounds of sending small batches
+        for round in 0..5 {
+            // Add 1-2 packets per round (less than buffer size)
+            let packet_count = (round % 2) + 1;
+            for _ in 0..packet_count {
+                socket.inner_mut().to_receive.push((addr, msg.clone()));
+            }
+
+            // Receive (first call gets packets into buffer, second releases them)
+            let received1 = socket.receive_all_messages();
+            let received2 = socket.receive_all_messages();
+            total_received += received1.len() + received2.len();
+        }
+
+        // Expected: 1 + 2 + 1 + 2 + 1 = 7 packets total
+        assert_eq!(
+            total_received, 7,
+            "All packets should be received across multiple rounds"
+        );
+    }
+
+    /// Test reorder buffer with single packet (edge case).
+    #[test]
+    fn test_reorder_buffer_single_packet() {
+        let mut inner = TestSocket::default();
+        let addr = test_addr();
+        let msg = test_message();
+
+        // Queue single message
+        inner.to_receive.push((addr, msg));
+
+        let config = ChaosConfig::builder()
+            .reorder_buffer_size(5)
+            .reorder_rate(1.0) // 100% reorder rate, but can't reorder 1 packet
+            .seed(42)
+            .build();
+        let mut socket = ChaosSocket::new(inner, config);
+
+        // First receive puts packet in buffer
+        let received1 = socket.receive_all_messages();
+        // Second receive releases it (empty batch triggers flush)
+        let received2 = socket.receive_all_messages();
+
+        assert_eq!(
+            received1.len() + received2.len(),
+            1,
+            "Single packet should be released"
+        );
+        // Can't reorder a single packet
+        assert_eq!(
+            socket.stats().packets_reordered,
+            0,
+            "Cannot reorder single packet"
+        );
+    }
+
+    /// Test that reorder buffer is disabled when buffer size is 0.
+    #[test]
+    fn test_reorder_buffer_disabled_when_size_zero() {
+        let mut inner = TestSocket::default();
+        let addr = test_addr();
+        let msg = test_message();
+
+        for _ in 0..5 {
+            inner.to_receive.push((addr, msg.clone()));
+        }
+
+        let config = ChaosConfig::builder()
+            .reorder_buffer_size(0) // Disabled
+            .reorder_rate(1.0)
+            .seed(42)
+            .build();
+        let mut socket = ChaosSocket::new(inner, config);
+
+        // All packets should be delivered immediately (no buffering)
+        let received = socket.receive_all_messages();
+        assert_eq!(received.len(), 5, "All packets delivered immediately");
+        assert_eq!(
+            socket.stats().packets_reordered,
+            0,
+            "No reordering when disabled"
+        );
+    }
+
+    /// Test that reorder buffer is disabled when reorder rate is 0.
+    #[test]
+    fn test_reorder_buffer_disabled_when_rate_zero() {
+        let mut inner = TestSocket::default();
+        let addr = test_addr();
+        let msg = test_message();
+
+        for _ in 0..5 {
+            inner.to_receive.push((addr, msg.clone()));
+        }
+
+        let config = ChaosConfig::builder()
+            .reorder_buffer_size(5)
+            .reorder_rate(0.0) // Disabled
+            .seed(42)
+            .build();
+        let mut socket = ChaosSocket::new(inner, config);
+
+        // All packets should be delivered immediately (no buffering)
+        let received = socket.receive_all_messages();
+        assert_eq!(received.len(), 5, "All packets delivered immediately");
+        assert_eq!(
+            socket.stats().packets_reordered,
+            0,
+            "No reordering when disabled"
+        );
+    }
+
+    /// Test reorder buffer with burst of packets exceeding buffer size.
+    #[test]
+    fn test_reorder_buffer_burst_exceeds_size() {
+        let mut inner = TestSocket::default();
+        let addr = test_addr();
+        let msg = test_message();
+
+        // Queue 15 packets (3x buffer size)
+        for _ in 0..15 {
+            inner.to_receive.push((addr, msg.clone()));
+        }
+
+        let config = ChaosConfig::builder()
+            .reorder_buffer_size(5)
+            .reorder_rate(0.5)
+            .seed(42)
+            .build();
+        let mut socket = ChaosSocket::new(inner, config);
+
+        // All packets should be delivered (buffer flushes when it hits threshold)
+        let received = socket.receive_all_messages();
+        assert_eq!(received.len(), 15, "All 15 packets should be delivered");
+        assert!(
+            socket.stats().packets_reordered > 0,
+            "Expected some reordering with 50% rate on 15 packets"
+        );
+    }
+
+    /// Test that reorder statistics are accurate.
+    #[test]
+    fn test_reorder_stats_accuracy() {
+        let mut inner = TestSocket::default();
+        let addr = test_addr();
+        let msg = test_message();
+
+        // Queue exactly buffer size
+        for _ in 0..10 {
+            inner.to_receive.push((addr, msg.clone()));
+        }
+
+        // 100% reorder rate should swap every packet
+        let config = ChaosConfig::builder()
+            .reorder_buffer_size(10)
+            .reorder_rate(1.0)
+            .seed(42)
+            .build();
+        let mut socket = ChaosSocket::new(inner, config);
+
+        let _ = socket.receive_all_messages();
+
+        // With 100% reorder rate and 10 packets, expect most swaps to succeed
+        // (Some swaps might be no-ops if i == j)
+        assert!(
+            socket.stats().packets_reordered >= 5,
+            "Expected at least 5 reorders with 100% rate on 10 packets, got {}",
+            socket.stats().packets_reordered
         );
     }
 }
