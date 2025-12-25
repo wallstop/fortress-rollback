@@ -315,7 +315,7 @@ impl Frame {
     /// The null frame constant, representing "no frame" or "uninitialized".
     ///
     /// This is equivalent to [`NULL_FRAME`] (-1).
-    pub const NULL: Frame = Frame(NULL_FRAME);
+    pub const NULL: Self = Self(NULL_FRAME);
 
     /// Creates a new `Frame` from an `i32` value.
     ///
@@ -324,7 +324,7 @@ impl Frame {
     #[inline]
     #[must_use]
     pub const fn new(frame: i32) -> Self {
-        Frame(frame)
+        Self(frame)
     }
 
     /// Returns the underlying `i32` value.
@@ -373,7 +373,7 @@ impl Frame {
     /// This is useful for handling the null/valid frame pattern with Option.
     #[inline]
     #[must_use]
-    pub const fn to_option(self) -> Option<Frame> {
+    pub const fn to_option(self) -> Option<Self> {
         if self.is_valid() {
             Some(self)
         } else {
@@ -384,10 +384,10 @@ impl Frame {
     /// Creates a Frame from an Option, using NULL for None.
     #[inline]
     #[must_use]
-    pub const fn from_option(opt: Option<Frame>) -> Frame {
+    pub const fn from_option(opt: Option<Self>) -> Self {
         match opt {
             Some(f) => f,
-            None => Frame::NULL,
+            None => Self::NULL,
         }
     }
 }
@@ -405,20 +405,20 @@ impl std::fmt::Display for Frame {
 // Arithmetic operations
 
 impl std::ops::Add<i32> for Frame {
-    type Output = Frame;
+    type Output = Self;
 
     #[inline]
     fn add(self, rhs: i32) -> Self::Output {
-        Frame(self.0 + rhs)
+        Self(self.0 + rhs)
     }
 }
 
-impl std::ops::Add<Frame> for Frame {
-    type Output = Frame;
+impl std::ops::Add<Self> for Frame {
+    type Output = Self;
 
     #[inline]
-    fn add(self, rhs: Frame) -> Self::Output {
-        Frame(self.0 + rhs.0)
+    fn add(self, rhs: Self) -> Self::Output {
+        Self(self.0 + rhs.0)
     }
 }
 
@@ -430,19 +430,19 @@ impl std::ops::AddAssign<i32> for Frame {
 }
 
 impl std::ops::Sub<i32> for Frame {
-    type Output = Frame;
+    type Output = Self;
 
     #[inline]
     fn sub(self, rhs: i32) -> Self::Output {
-        Frame(self.0 - rhs)
+        Self(self.0 - rhs)
     }
 }
 
-impl std::ops::Sub<Frame> for Frame {
+impl std::ops::Sub<Self> for Frame {
     type Output = i32;
 
     #[inline]
-    fn sub(self, rhs: Frame) -> Self::Output {
+    fn sub(self, rhs: Self) -> Self::Output {
         self.0 - rhs.0
     }
 }
@@ -468,7 +468,7 @@ impl std::ops::Rem<i32> for Frame {
 impl From<i32> for Frame {
     #[inline]
     fn from(value: i32) -> Self {
-        Frame(value)
+        Self(value)
     }
 }
 
@@ -482,7 +482,7 @@ impl From<Frame> for i32 {
 impl From<usize> for Frame {
     #[inline]
     fn from(value: usize) -> Self {
-        Frame(value as i32)
+        Self(value as i32)
     }
 }
 
@@ -559,7 +559,7 @@ impl PlayerHandle {
     #[inline]
     #[must_use]
     pub const fn new(handle: usize) -> Self {
-        PlayerHandle(handle)
+        Self(handle)
     }
 
     /// Returns the underlying `usize` value.
@@ -617,7 +617,7 @@ impl std::fmt::Display for PlayerHandle {
 impl From<usize> for PlayerHandle {
     #[inline]
     fn from(value: usize) -> Self {
-        PlayerHandle(value)
+        Self(value)
     }
 }
 
@@ -1122,7 +1122,8 @@ pub trait Config: 'static {
     type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Debug;
 }
 
-/// This [`NonBlockingSocket`] trait is used when you want to use Fortress Rollback with your own socket.
+/// A trait for integrating custom socket implementations with Fortress Rollback.
+///
 /// However you wish to send and receive messages, it should be implemented through these two methods.
 /// Messages should be sent in an UDP-like fashion, unordered and unreliable.
 /// Fortress Rollback has an internal protocol on top of this to make sure all important information is sent and received.

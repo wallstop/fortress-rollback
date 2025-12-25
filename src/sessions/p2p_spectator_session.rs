@@ -21,6 +21,7 @@ use crate::{
 const NORMAL_SPEED: usize = 1;
 
 /// [`SpectatorSession`] provides all functionality to connect to a remote host in a peer-to-peer fashion.
+///
 /// The host will broadcast all confirmed inputs to this session.
 /// This session can be used to spectate a session without contributing to the game input.
 pub struct SpectatorSession<T>
@@ -195,7 +196,7 @@ impl<T: Config> SpectatorSession<T> {
         }
 
         // handle all events locally
-        for (event, addr) in events.drain(..) {
+        for (event, addr) in std::mem::take(&mut events) {
             self.handle_event(event, addr);
         }
 

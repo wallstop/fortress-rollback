@@ -130,7 +130,7 @@ impl<T: Config> P2PSession<T> {
         let mut sync_layer =
             SyncLayer::with_queue_length(num_players, max_prediction, queue_length);
         for (player_handle, player_type) in players.handles.iter() {
-            if let PlayerType::Local = player_type {
+            if matches!(player_type, PlayerType::Local) {
                 // This should never fail during construction as player handles are validated
                 if let Err(e) = sync_layer.set_frame_delay(*player_handle, input_delay) {
                     report_violation!(
@@ -454,7 +454,7 @@ impl<T: Config> P2PSession<T> {
         }
 
         // handle all events locally
-        for (event, handles, addr) in events.drain(..) {
+        for (event, handles, addr) in std::mem::take(&mut events) {
             self.handle_event(event, handles, addr);
         }
 

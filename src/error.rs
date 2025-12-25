@@ -85,22 +85,22 @@ pub enum FortressError {
 impl Display for FortressError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FortressError::PredictionThreshold => {
+            Self::PredictionThreshold => {
                 write!(
                     f,
                     "Prediction threshold is reached, cannot proceed without catching up."
                 )
             },
-            FortressError::InvalidRequest { info } => {
+            Self::InvalidRequest { info } => {
                 write!(f, "Invalid Request: {}", info)
             },
-            FortressError::NotSynchronized => {
+            Self::NotSynchronized => {
                 write!(
                     f,
                     "The session is not yet synchronized with all remote sessions."
                 )
             },
-            FortressError::MismatchedChecksum {
+            Self::MismatchedChecksum {
                 current_frame,
                 mismatched_frames,
             } => {
@@ -110,23 +110,23 @@ impl Display for FortressError {
                     current_frame, mismatched_frames
                 )
             },
-            FortressError::SpectatorTooFarBehind => {
+            Self::SpectatorTooFarBehind => {
                 write!(
                     f,
                     "The spectator got so far behind the host that catching up is impossible."
                 )
             },
-            FortressError::InvalidFrame { frame, reason } => {
+            Self::InvalidFrame { frame, reason } => {
                 write!(f, "Invalid frame {}: {}", frame, reason)
             },
-            FortressError::InvalidPlayerHandle { handle, max_handle } => {
+            Self::InvalidPlayerHandle { handle, max_handle } => {
                 write!(
                     f,
                     "Invalid player handle {}: must be less than or equal to {}",
                     handle, max_handle
                 )
             },
-            FortressError::MissingInput {
+            Self::MissingInput {
                 player_handle,
                 frame,
             } => {
@@ -136,13 +136,13 @@ impl Display for FortressError {
                     player_handle, frame
                 )
             },
-            FortressError::SerializationError { context } => {
+            Self::SerializationError { context } => {
                 write!(f, "Serialization error: {}", context)
             },
-            FortressError::InternalError { context } => {
+            Self::InternalError { context } => {
                 write!(f, "Internal error (please report as bug): {}", context)
             },
-            FortressError::SocketError { context } => {
+            Self::SocketError { context } => {
                 write!(f, "Socket error: {}", context)
             },
         }

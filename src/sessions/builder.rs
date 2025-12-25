@@ -61,7 +61,9 @@ const DEFAULT_CATCHUP_SPEED: usize = 1;
 // The amount of events a spectator can buffer; should never be an issue if the user polls the events at every step
 pub(crate) const MAX_EVENT_QUEUE_SIZE: usize = 100;
 
-/// The [`SessionBuilder`] builds all Fortress Rollback Sessions. After setting all appropriate values, use `SessionBuilder::start_yxz_session(...)`
+/// The [`SessionBuilder`] builds all Fortress Rollback Sessions.
+///
+/// After setting all appropriate values, use `SessionBuilder::start_yxz_session(...)`
 /// to consume the builder and create a Session of desired type.
 #[must_use = "SessionBuilder must be consumed by calling a start_*_session method"]
 pub struct SessionBuilder<T>
