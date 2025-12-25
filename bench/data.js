@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1766701260900,
+  "lastUpdate": 1766703305388,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
@@ -3899,6 +3899,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1553,
             "range": "± 81",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1b991704d0ab776a816f69629a6ca4cf90cf7f74",
+          "message": "Enhance code quality with stricter linting (#26)\n\n- Enable LTO (thin) and codegen-units=1 in release profile for 10-20%\nperf gain\n- Add #![deny(warnings)] to lib.rs for local warnings=errors parity with\nCI\n- Add high-value restriction clippy lints:\n  - if_then_some_else_none: Prefer .then()/.then_some() patterns\n  - empty_drop: Catch empty Drop implementations\n  - create_dir: Prefer create_dir_all() for robustness\n  - mutex_atomic: Prefer AtomicBool over Mutex<bool>\n  - string_add: Prefer push_str() for efficiency\n  - unnecessary_safety_comment/doc: Remove spurious safety docs\n- Refactor code to use idiomatic .then_some() patterns in:\n  - sync_layer/mod.rs: saved_cell_for_frame()\n  - sessions/player_registry.rs: handles_by_address()\n  - tests/network/multi_process.rs: find_peer_binary()\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+          "timestamp": "2025-12-25T14:49:47-08:00",
+          "tree_id": "662e2f93151564a4421a186c0c5c215559c4b503",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/1b991704d0ab776a816f69629a6ca4cf90cf7f74"
+        },
+        "date": 1766703304526,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 94,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 138,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 506,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 746,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1045,
+            "range": "± 28",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 102332,
+            "range": "± 549",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 27633,
+            "range": "± 810",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1243,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1553,
+            "range": "± 105",
             "unit": "ns/iter"
           },
           {
