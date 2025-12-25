@@ -102,5 +102,186 @@ jobs:
           # Clean any stale doc artifacts that might cause issues
           rm -rf target/doc
 
-          # Run with RUSTDOCFLAGS to treat warnings as errors for links
-          RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --no-deps
+          # Run with comprehensive RUSTDOCFLAGS for strict documentation validation
+          # All rustdoc-specific lints are enforced as errors
+          RUSTDOCFLAGS="\
+            -D warnings \
+            -D rustdoc::broken_intra_doc_links \
+            -D rustdoc::private_intra_doc_links \
+            -D rustdoc::invalid_codeblock_attributes \
+            -D rustdoc::invalid_html_tags \
+            -D rustdoc::bare_urls" \
+          cargo doc --no-deps
+
+  # ============================================================================
+  # RUSTDOC DEAD LINKS - Check for broken links in generated HTML
+  # ============================================================================
+  rustdoc-deadlinks:
+    name: Rustdoc Dead Links
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deadlinks
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-deadlinks
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: deadlinks-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            deadlinks-${{ runner.os }}-cargo-
+
+      - name: Build documentation
+        run: cargo doc --no-deps
+
+      - name: Check for dead links in rustdoc HTML
+        run: |
+          {
+            echo "## Rustdoc Dead Links Check"
+            echo ""
+            echo "Checking generated documentation for broken links..."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Check for dead links (file:// links only, HTTP would be too slow)
+          if cargo deadlinks 2>&1 | tee deadlinks-output.txt; then
+            echo "✅ No dead links found in documentation" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "⚠️ Dead links detected:"
+              echo ""
+              echo "\`\`\`"
+              head -50 deadlinks-output.txt
+              echo "\`\`\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Upload deadlinks report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deadlinks-report
+          path: deadlinks-output.txt
+          retention-days: 7
+
+  # ============================================================================
+  # DOC TESTS - Verify all documentation examples compile and run
+  # ============================================================================
+  doc-tests:
+    name: Documentation Examples
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: doctests-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            doctests-${{ runner.os }}-cargo-
+
+      - name: Run documentation tests
+        run: |
+          {
+            echo "## Documentation Example Tests"
+            echo ""
+            echo "Compiling and running all code examples in documentation..."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if cargo test --doc 2>&1 | tee doctest-output.txt; then
+            # Count passed tests
+            PASSED=$(grep -oP '\d+ passed' doctest-output.txt | head -1 || echo "0 passed")
+            echo "✅ All doc tests passed ($PASSED)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "❌ Some doc tests failed:"
+              echo ""
+              echo "\`\`\`"
+              tail -50 doctest-output.txt
+              echo "\`\`\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Upload doctest report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: doctest-report
+          path: doctest-output.txt
+          retention-days: 7
+
+  # ============================================================================
+  # DOC COVERAGE - Measure documentation coverage percentage
+  # ============================================================================
+  doc-coverage:
+    name: Documentation Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Measure documentation coverage
+        run: |
+          {
+            echo "## Documentation Coverage Report"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Generate coverage report
+          RUSTDOCFLAGS="-Z unstable-options --show-coverage" \
+            cargo +nightly doc --no-deps 2>&1 | tee doc-coverage.txt
+
+          # Extract and display coverage table
+          {
+            echo "\`\`\`"
+            cat doc-coverage.txt
+            echo "\`\`\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Check for minimum coverage (advisory, doesn't fail build)
+          if grep -q "Total" doc-coverage.txt; then
+            COVERAGE=$(grep "Total" doc-coverage.txt | awk '{print $NF}' | tr -d '%')
+            echo "**Total Documentation Coverage: ${COVERAGE}%**" >> "$GITHUB_STEP_SUMMARY"
+
+            # Advisory warning if below 90%
+            if [ -n "$COVERAGE" ] && [ "$(echo "$COVERAGE < 90" | bc -l 2>/dev/null || echo 0)" -eq 1 ]; then
+              echo "⚠️ Coverage is below 90% target" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "✅ Coverage meets or exceeds 90% target" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+        continue-on-error: true  # Nightly features may break, don't fail CI
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: doc-coverage-report
+          path: doc-coverage.txt
+          retention-days: 30
