@@ -13,13 +13,17 @@
     clippy::panic,
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::clone_on_copy,
+    clippy::print_stderr,
+    clippy::disallowed_macros
 )]
 
 use crate::common::stubs::{GameStub, StubConfig, StubInput};
 use fortress_rollback::{
-    ChaosConfig, ChaosSocket, FortressError, PlayerHandle, PlayerType, ProtocolConfig, SaveMode,
-    SessionBuilder, SessionState, SyncConfig, TimeSyncConfig, UdpNonBlockingSocket,
+    ChaosConfig, ChaosSocket, FortressError, FortressEvent, PlayerHandle, PlayerType,
+    ProtocolConfig, SaveMode, SessionBuilder, SessionState, SyncConfig, TimeSyncConfig,
+    UdpNonBlockingSocket,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -2255,8 +2259,9 @@ fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
 /// Simulates network flapping.
 ///
 /// Note: This test uses harsh network conditions (15% burst loss, 8-packet bursts)
-/// which exceed the default SyncConfig capabilities. We use SyncConfig::extreme()
-/// which is designed for 10%+ burst loss scenarios with longer timeouts.
+/// which exceed the default SyncConfig capabilities. We use SyncConfig::stress_test()
+/// which has a 60-second timeout and 40 sync packets, providing ample margin for
+/// the test's 32-second loop duration (800 iterations × 40ms).
 #[test]
 #[serial]
 fn test_network_flapping_simulation() -> Result<(), FortressError> {
@@ -2265,7 +2270,7 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
 
     // Simulate flapping with burst loss
     // 15% burst probability with 8-packet bursts is very aggressive
-    // Requires SyncConfig::extreme() for reliable synchronization
+    // Requires SyncConfig::stress_test() for reliable synchronization
     let chaos_config = ChaosConfig::builder()
         .latency_ms(25)
         .burst_loss(0.15, 8) // 15% chance of dropping 8 consecutive packets
@@ -2274,43 +2279,98 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
 
     let socket1 = create_chaos_socket(9057, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
-        .with_sync_config(SyncConfig::extreme()) // Required for harsh conditions
+        .with_sync_config(SyncConfig::stress_test()) // 60s timeout for harsh conditions
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
     let socket2 = create_chaos_socket(9058, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
-        .with_sync_config(SyncConfig::extreme()) // Required for harsh conditions
+        .with_sync_config(SyncConfig::stress_test()) // 60s timeout for harsh conditions
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
     // Synchronize with extra tolerance for bursts
-    // SyncConfig::extreme() has 30s timeout, so we use 800 iterations × 40ms = 32s
-    for _ in 0..800 {
+    // stress_test() has 60s timeout, test loop is 800 × 40ms = 32s (well within budget)
+    let start_time = std::time::Instant::now();
+    let mut sync_events_1 = 0u32;
+    let mut sync_events_2 = 0u32;
+    let mut timeout_events_1 = 0u32;
+    let mut timeout_events_2 = 0u32;
+    let mut last_progress_report = std::time::Instant::now();
+
+    for iteration in 0..800 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
+
+        // Track sync progress events for diagnostics
+        for event in sess1.events() {
+            match event {
+                FortressEvent::Synchronizing { .. } => sync_events_1 += 1,
+                FortressEvent::SyncTimeout { .. } => timeout_events_1 += 1,
+                _ => {},
+            }
+        }
+        for event in sess2.events() {
+            match event {
+                FortressEvent::Synchronizing { .. } => sync_events_2 += 1,
+                FortressEvent::SyncTimeout { .. } => timeout_events_2 += 1,
+                _ => {},
+            }
+        }
+
         std::thread::sleep(Duration::from_millis(40));
+
+        // Log progress every 5 seconds for long-running diagnostics
+        if last_progress_report.elapsed() >= Duration::from_secs(5) {
+            eprintln!(
+                "[Flapping Test] iter={}, elapsed={:.1}s, sess1={:?} (sync_events={}, timeouts={}), sess2={:?} (sync_events={}, timeouts={})",
+                iteration,
+                start_time.elapsed().as_secs_f32(),
+                sess1.current_state(),
+                sync_events_1,
+                timeout_events_1,
+                sess2.current_state(),
+                sync_events_2,
+                timeout_events_2
+            );
+            last_progress_report = std::time::Instant::now();
+        }
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
+            eprintln!(
+                "[Flapping Test] Synchronized at iter={}, elapsed={:.1}s, sync_events=({}, {})",
+                iteration,
+                start_time.elapsed().as_secs_f32(),
+                sync_events_1,
+                sync_events_2
+            );
             break;
         }
     }
 
+    // Enhanced assertion with diagnostic context
+    let elapsed = start_time.elapsed();
     assert_eq!(
         sess1.current_state(),
         SessionState::Running,
-        "Session 1 failed to synchronize under flapping (state: {:?})",
-        sess1.current_state()
+        "Session 1 failed to synchronize under flapping after {:.1}s (state: {:?}, sync_events: {}, timeout_events: {})",
+        elapsed.as_secs_f32(),
+        sess1.current_state(),
+        sync_events_1,
+        timeout_events_1
     );
     assert_eq!(
         sess2.current_state(),
         SessionState::Running,
-        "Session 2 failed to synchronize under flapping (state: {:?})",
-        sess2.current_state()
+        "Session 2 failed to synchronize under flapping after {:.1}s (state: {:?}, sync_events: {}, timeout_events: {})",
+        elapsed.as_secs_f32(),
+        sess2.current_state(),
+        sync_events_2,
+        timeout_events_2
     );
 
     // Advance frames
@@ -2888,6 +2948,383 @@ fn test_competitive_preset_fast_sync() -> Result<(), FortressError> {
     assert!(
         stub1.gs.frame >= 40,
         "Should advance many frames with competitive preset"
+    );
+
+    Ok(())
+}
+
+// =============================================================================
+// Data-Driven Network Resilience Tests
+// =============================================================================
+
+/// Parameters for data-driven network chaos testing.
+#[derive(Clone, Debug)]
+struct ChaosTestCase {
+    name: &'static str,
+    latency_ms: u64,
+    packet_loss: f64,
+    burst_loss_probability: f64,
+    burst_loss_length: usize,
+    jitter_ms: u64,
+    sync_config: SyncConfig,
+    max_iterations: usize,
+    iteration_delay_ms: u64,
+    expected_to_sync: bool,
+}
+
+impl ChaosTestCase {
+    /// Run the test case and return diagnostic information.
+    fn run(&self, base_port: u16) -> Result<ChaosTestResult, FortressError> {
+        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), base_port);
+        let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), base_port + 1);
+
+        // Build chaos configuration
+        let mut builder = ChaosConfig::builder()
+            .latency_ms(self.latency_ms)
+            .packet_loss_rate(self.packet_loss)
+            .seed(42); // Deterministic for reproducibility
+
+        if self.burst_loss_probability > 0.0 {
+            builder = builder.burst_loss(self.burst_loss_probability, self.burst_loss_length);
+        }
+        if self.jitter_ms > 0 {
+            builder = builder.jitter_ms(self.jitter_ms);
+        }
+
+        let chaos_config = builder.build();
+
+        let socket1 = create_chaos_socket(base_port, chaos_config.clone());
+        let mut sess1 = SessionBuilder::<StubConfig>::new()
+            .with_sync_config(self.sync_config.clone())
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .start_p2p_session(socket1)?;
+
+        let socket2 = create_chaos_socket(base_port + 1, chaos_config);
+        let mut sess2 = SessionBuilder::<StubConfig>::new()
+            .with_sync_config(self.sync_config.clone())
+            .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+            .add_player(PlayerType::Local, PlayerHandle::new(1))?
+            .start_p2p_session(socket2)?;
+
+        // Track diagnostics
+        let start_time = std::time::Instant::now();
+        let mut sync_events_1 = 0u32;
+        let mut sync_events_2 = 0u32;
+        let mut timeout_events_1 = 0u32;
+        let mut timeout_events_2 = 0u32;
+        let mut sync_iteration = None;
+
+        for iteration in 0..self.max_iterations {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+
+            // Track events
+            for event in sess1.events() {
+                match event {
+                    FortressEvent::Synchronizing { .. } => sync_events_1 += 1,
+                    FortressEvent::SyncTimeout { .. } => timeout_events_1 += 1,
+                    _ => {},
+                }
+            }
+            for event in sess2.events() {
+                match event {
+                    FortressEvent::Synchronizing { .. } => sync_events_2 += 1,
+                    FortressEvent::SyncTimeout { .. } => timeout_events_2 += 1,
+                    _ => {},
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(self.iteration_delay_ms));
+
+            if sess1.current_state() == SessionState::Running
+                && sess2.current_state() == SessionState::Running
+            {
+                sync_iteration = Some(iteration);
+                break;
+            }
+        }
+
+        Ok(ChaosTestResult {
+            elapsed: start_time.elapsed(),
+            sync_iteration,
+            sess1_state: sess1.current_state(),
+            sess2_state: sess2.current_state(),
+            sync_events: (sync_events_1, sync_events_2),
+            timeout_events: (timeout_events_1, timeout_events_2),
+            synchronized: sess1.current_state() == SessionState::Running
+                && sess2.current_state() == SessionState::Running,
+        })
+    }
+}
+
+/// Diagnostic results from a chaos test run.
+#[derive(Debug)]
+struct ChaosTestResult {
+    elapsed: Duration,
+    sync_iteration: Option<usize>,
+    sess1_state: SessionState,
+    sess2_state: SessionState,
+    sync_events: (u32, u32),
+    timeout_events: (u32, u32),
+    synchronized: bool,
+}
+
+/// Data-driven test: Various network conditions with appropriate SyncConfig.
+#[test]
+#[serial]
+fn test_chaos_conditions_data_driven() {
+    let test_cases = [
+        // Light conditions - should sync easily
+        ChaosTestCase {
+            name: "lan_ideal",
+            latency_ms: 5,
+            packet_loss: 0.0,
+            burst_loss_probability: 0.0,
+            burst_loss_length: 0,
+            jitter_ms: 0,
+            sync_config: SyncConfig::lan(),
+            max_iterations: 100,
+            iteration_delay_ms: 20,
+            expected_to_sync: true,
+        },
+        // Moderate packet loss
+        ChaosTestCase {
+            name: "moderate_loss_5pct",
+            latency_ms: 30,
+            packet_loss: 0.05,
+            burst_loss_probability: 0.0,
+            burst_loss_length: 0,
+            jitter_ms: 10,
+            sync_config: SyncConfig::lossy(),
+            max_iterations: 200,
+            iteration_delay_ms: 30,
+            expected_to_sync: true,
+        },
+        // Mobile-like conditions (increased iterations for high latency)
+        ChaosTestCase {
+            name: "mobile_conditions",
+            latency_ms: 60,
+            packet_loss: 0.05,
+            burst_loss_probability: 0.02,
+            burst_loss_length: 3,
+            jitter_ms: 20,
+            sync_config: SyncConfig::extreme(), // More robust than mobile for testing
+            max_iterations: 500,
+            iteration_delay_ms: 40,
+            expected_to_sync: true,
+        },
+        // High burst loss - requires stress_test config with more time
+        ChaosTestCase {
+            name: "high_burst_loss",
+            latency_ms: 25,
+            packet_loss: 0.0,
+            burst_loss_probability: 0.08,
+            burst_loss_length: 5,
+            jitter_ms: 15,
+            sync_config: SyncConfig::stress_test(),
+            max_iterations: 900,
+            iteration_delay_ms: 40,
+            expected_to_sync: true,
+        },
+    ];
+
+    let mut base_port = 9100u16;
+
+    for test_case in &test_cases {
+        eprintln!("\n[Data-Driven Test] Running: {}", test_case.name);
+
+        let result = test_case.run(base_port).expect("Test setup failed");
+
+        eprintln!(
+            "[Data-Driven Test] {} completed: synchronized={}, elapsed={:.2}s, \
+             sync_events=({}, {}), timeout_events=({}, {}), sync_at_iter={:?}",
+            test_case.name,
+            result.synchronized,
+            result.elapsed.as_secs_f32(),
+            result.sync_events.0,
+            result.sync_events.1,
+            result.timeout_events.0,
+            result.timeout_events.1,
+            result.sync_iteration
+        );
+
+        if test_case.expected_to_sync {
+            assert!(
+                result.synchronized,
+                "[{}] Expected to synchronize but failed (sess1={:?}, sess2={:?}, \
+                 sync_events=({}, {}), timeout_events=({}, {}))",
+                test_case.name,
+                result.sess1_state,
+                result.sess2_state,
+                result.sync_events.0,
+                result.sync_events.1,
+                result.timeout_events.0,
+                result.timeout_events.1
+            );
+        } else {
+            assert!(
+                !result.synchronized,
+                "[{}] Expected NOT to synchronize but it did",
+                test_case.name
+            );
+        }
+
+        base_port += 2; // Advance ports for next test
+    }
+}
+
+/// Test: Verify sync timeout is detected and reported correctly.
+#[test]
+#[serial]
+fn test_sync_timeout_detection() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9150);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9151);
+
+    // Use very short timeout with heavy packet loss to trigger timeout
+    let short_timeout_config = SyncConfig {
+        num_sync_packets: 10,
+        sync_retry_interval: Duration::from_millis(50),
+        sync_timeout: Some(Duration::from_secs(2)), // 2 second timeout
+        running_retry_interval: Duration::from_millis(100),
+        keepalive_interval: Duration::from_millis(100),
+    };
+
+    // 50% packet loss should make sync impossible in 2 seconds with 10 roundtrips
+    let chaos_config = ChaosConfig::builder()
+        .latency_ms(20)
+        .packet_loss_rate(0.50) // Very high loss
+        .seed(42)
+        .build();
+
+    let socket1 = create_chaos_socket(9150, chaos_config.clone());
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_sync_config(short_timeout_config.clone())
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9151, chaos_config);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_sync_config(short_timeout_config)
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Track timeout events
+    let mut timeout_detected_1 = false;
+    let mut timeout_detected_2 = false;
+    let start = std::time::Instant::now();
+
+    // Run for 5 seconds (well past the 2 second timeout)
+    for _ in 0..250 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+
+        for event in sess1.events() {
+            if matches!(event, FortressEvent::SyncTimeout { .. }) {
+                timeout_detected_1 = true;
+                eprintln!(
+                    "[Timeout Test] Session 1 timeout detected at {:.2}s",
+                    start.elapsed().as_secs_f32()
+                );
+            }
+        }
+        for event in sess2.events() {
+            if matches!(event, FortressEvent::SyncTimeout { .. }) {
+                timeout_detected_2 = true;
+                eprintln!(
+                    "[Timeout Test] Session 2 timeout detected at {:.2}s",
+                    start.elapsed().as_secs_f32()
+                );
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(20));
+
+        // Once we've detected timeouts, we can stop
+        if timeout_detected_1 && timeout_detected_2 {
+            break;
+        }
+    }
+
+    // At least one session should have detected a timeout
+    assert!(
+        timeout_detected_1 || timeout_detected_2,
+        "Expected at least one session to detect sync timeout under heavy packet loss"
+    );
+
+    // Sessions should still be in Synchronizing state (timeout doesn't change state)
+    // This verifies that timeout is informational, not a state transition
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Synchronizing,
+        "Session should remain Synchronizing after timeout event"
+    );
+
+    Ok(())
+}
+
+/// Test: Edge case where burst loss exactly matches sync packet count.
+#[test]
+#[serial]
+fn test_burst_loss_matches_sync_packets() -> Result<(), FortressError> {
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9160);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9161);
+
+    // Configure burst loss length equal to default sync packets (5)
+    // This tests the edge case where a burst could wipe out all initial sync attempts
+    let chaos_config = ChaosConfig::builder()
+        .latency_ms(20)
+        .burst_loss(0.05, 5) // Burst wipes exactly 5 packets
+        .seed(42)
+        .build();
+
+    // Use a config with more sync packets to handle burst wiping out initial 5
+    let resilient_config = SyncConfig {
+        num_sync_packets: 15, // 3x the burst length
+        sync_retry_interval: Duration::from_millis(100),
+        sync_timeout: Some(Duration::from_secs(15)),
+        running_retry_interval: Duration::from_millis(100),
+        keepalive_interval: Duration::from_millis(100),
+    };
+
+    let socket1 = create_chaos_socket(9160, chaos_config.clone());
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_sync_config(resilient_config.clone())
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let socket2 = create_chaos_socket(9161, chaos_config);
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_sync_config(resilient_config)
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    // Synchronize
+    for _ in 0..300 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        std::thread::sleep(Duration::from_millis(30));
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 should sync despite burst length matching initial sync packets"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 should sync despite burst length matching initial sync packets"
     );
 
     Ok(())
