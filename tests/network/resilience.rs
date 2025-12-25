@@ -6,6 +6,22 @@
 //! - High latency
 //! - Jitter (variable latency)
 //! - Combined conditions
+//!
+//! # Port Allocation
+//!
+//! This test file uses ports **9001-9070** (standard tests) and **9200-9299**
+//! (data-driven tests). When adding new tests that bind to UDP ports, ensure
+//! they don't conflict with other test files:
+//!
+//! | Test File                     | Port Range      |
+//! |-------------------------------|-----------------|
+//! | tests/config.rs               | 9100-9109       |
+//! | tests/sessions/p2p.rs         | 9100-9109, 19001+ |
+//! | tests/network/resilience.rs   | 9001-9070, 9200-9299 |
+//!
+//! **Important**: Even with `#[serial]`, tests in different crates can run
+//! in parallel. Choose non-overlapping port ranges to avoid "Address already
+//! in use" errors in CI.
 
 // Allow test-specific patterns that are appropriate for test code
 #![allow(
