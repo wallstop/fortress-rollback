@@ -39,3 +39,12 @@ disallowed-macros = [
     { path = "std::eprint", reason = "Use tracing macros instead" },
     { path = "std::eprintln", reason = "Use tracing macros instead" },
 ]
+
+# Allow unwrap/expect in test code (#[cfg(test)] modules and #[test] functions)
+# Note: This only applies to unit tests in src/, not integration tests in tests/
+# For integration tests, use #[allow(clippy::unwrap_used)] attributes
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# Allow indexing in test code (bounds-checked at runtime during testing)
+allow-indexing-slicing-in-tests = true

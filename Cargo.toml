@@ -155,8 +155,8 @@ semicolon_if_nothing_returned = "allow"
 struct_excessive_bools = "allow"
 # Allow trivially copy pass by ref (API consistency)
 trivially_copy_pass_by_ref = "allow"
-# Allow unchecked time subtraction (validated)
-unchecked_time_subtraction = "allow"
+# Allow unchecked duration subtraction (validated)
+unchecked_duration_subtraction = "allow"
 
 # Note: wildcard_enum_match_arm is NOT enabled because public enums use #[non_exhaustive],
 # which already forces external users to handle wildcards. Internal test code uses wildcards
@@ -190,6 +190,34 @@ missing_const_for_fn = "allow"
 option_if_let_else = "allow"
 or_fun_call = "allow"
 suboptimal_flops = "allow"
+
+# === Cargo lints (Cargo.toml quality) ===
+# Enable cargo lints for better Cargo.toml hygiene
+cargo = { level = "warn", priority = -1 }
+# Allow multiple crate versions (common in complex dependency trees)
+multiple_crate_versions = "allow"
+
+# === Restriction lints (cherry-picked for safety) ===
+# Note: Restriction lints must be individually enabled, never as a group
+# See: https://doc.rust-lang.org/clippy/lints.html#restriction
+#
+# Safety-critical: Prevent panics and memory issues
+mem_forget = "deny"                         # Memory leaks via std::mem::forget
+exit = "deny"                               # Library should never call std::process::exit
+#
+# String safety
+string_slice = "warn"                       # Track string slicing (can panic on non-char boundaries)
+#
+# Error handling quality
+map_err_ignore = "warn"                     # Preserve error context when mapping errors
+#
+# Code quality and safety
+rest_pat_in_fully_bound_structs = "warn"    # Catch new struct fields (no `..` in patterns)
+verbose_file_reads = "warn"                 # Use fs::read_to_string() instead of File::open + read
+#
+# Smart pointer hygiene
+rc_buffer = "warn"                          # Use Rc<[T]> instead of Rc<Vec<T>>
+rc_mutex = "warn"                           # Use Arc<Mutex<T>> instead of Rc<Mutex<T>>
 
 [features]
 sync-send = []

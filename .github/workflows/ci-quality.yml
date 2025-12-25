@@ -1,0 +1,194 @@
+name: CI - Code Quality
+
+# Additional static analysis tools for enhanced code quality
+# Includes:
+# - cargo-spellcheck: Spelling and grammar in documentation
+# - cargo-shear: Fast unused dependency detection
+#
+# Note: These are informational checks that provide warnings but don't fail the build
+# to avoid blocking PRs for minor issues like typos or unused dev-dependencies.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '**.md'
+      - '.github/workflows/ci-quality.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '**.md'
+      - '.github/workflows/ci-quality.yml'
+  schedule:
+    # Run weekly on Sundays at 4 AM UTC (after safety checks at 3 AM)
+    - cron: '0 4 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ============================================================================
+  # CARGO SHEAR - FAST UNUSED DEPENDENCY DETECTION
+  # ============================================================================
+  unused-deps-fast:
+    name: Unused Dependencies (cargo-shear)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-shear
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-shear
+
+      - name: Check for unused dependencies
+        run: |
+          {
+            echo "## Unused Dependencies Check (cargo-shear)"
+            echo ""
+            echo "Fast regex-based detection of unused dependencies."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # cargo-shear is fast but may have false positives
+          # Run and capture output, but don't fail the build
+          if cargo shear 2>&1 | tee shear-output.txt; then
+            echo "✅ No unused dependencies detected" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "⚠️ Potentially unused dependencies detected:"
+              echo ""
+              echo "\`\`\`"
+              cat shear-output.txt
+              echo "\`\`\`"
+              echo ""
+              echo "Note: cargo-shear may have false positives. Verify with \`cargo +nightly udeps\` if needed."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+        continue-on-error: true
+
+      - name: Upload shear report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shear-report
+          path: shear-output.txt
+          retention-days: 7
+
+  # ============================================================================
+  # CARGO SPELLCHECK - DOCUMENTATION SPELLING
+  # ============================================================================
+  spellcheck:
+    name: Documentation Spelling
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-spellcheck
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-spellcheck
+
+      - name: Check spelling in documentation
+        run: |
+          {
+            echo "## Documentation Spelling Check"
+            echo ""
+            echo "Checking spelling in doc comments and markdown files..."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Run spellcheck on Rust doc comments
+          # Use --code 0 to always exit successfully (advisory only)
+          if cargo spellcheck check 2>&1 | tee spellcheck-output.txt; then
+            echo "✅ No spelling issues found in documentation" >> "$GITHUB_STEP_SUMMARY"
+          else
+            ISSUE_COUNT=$(grep -c "error\|warning" spellcheck-output.txt || echo "0")
+            {
+              echo "⚠️ Found potential spelling issues ($ISSUE_COUNT):"
+              echo ""
+              echo "<details>"
+              echo "<summary>Click to expand</summary>"
+              echo ""
+              echo "\`\`\`"
+              head -100 spellcheck-output.txt
+              echo "\`\`\`"
+              echo ""
+              echo "</details>"
+              echo ""
+              echo "Run \`cargo spellcheck fix\` locally to auto-fix issues."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+        continue-on-error: true
+
+      - name: Upload spellcheck report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spellcheck-report
+          path: spellcheck-output.txt
+          retention-days: 7
+
+  # ============================================================================
+  # SUMMARY
+  # ============================================================================
+  quality-summary:
+    name: Quality Summary
+    runs-on: ubuntu-latest
+    needs: [unused-deps-fast, spellcheck]
+    if: always()
+
+    steps:
+      - name: Generate summary
+        run: |
+          map_status() {
+            case "$1" in
+              success) echo "✅ Passed" ;;
+              failure) echo "⚠️ Issues Found" ;;
+              skipped) echo "⏭️ Skipped" ;;
+              cancelled) echo "🚫 Cancelled" ;;
+              *) echo "❓ Unknown" ;;
+            esac
+          }
+
+          {
+            echo "## Code Quality Summary"
+            echo ""
+            echo "These checks are advisory and don't block the build."
+            echo ""
+            echo "| Check | Status |"
+            echo "|-------|--------|"
+            echo "| Unused Dependencies (cargo-shear) | $(map_status '${{ needs.unused-deps-fast.result }}') |"
+            echo "| Documentation Spelling | $(map_status '${{ needs.spellcheck.result }}') |"
+            echo ""
+            echo "### Recommendations"
+            echo ""
+            echo "- Review any warnings in the individual job logs"
+            echo "- Run \`cargo shear\` locally to check for unused dependencies"
+            echo "- Run \`cargo spellcheck fix\` to auto-fix spelling issues"
+          } >> "$GITHUB_STEP_SUMMARY"

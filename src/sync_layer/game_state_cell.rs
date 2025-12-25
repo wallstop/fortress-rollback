@@ -186,7 +186,7 @@ impl<T> Default for GameStateCell<T> {
 
 impl<T> Clone for GameStateCell<T> {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Self(Arc::clone(&self.0))
     }
 }
 
