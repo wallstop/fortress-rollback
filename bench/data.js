@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1766697927956,
+  "lastUpdate": 1766701250720,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
@@ -3647,6 +3647,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1553,
             "range": "± 89",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e921aa3e3fc158b440bc913ce5f418f00d7e3a13",
+          "message": "Enforce stricter code quality and static analysis (#25)\n\nAdd stronger clippy lints and new CI quality checks:\n\n## Cargo.toml changes\n- Enable clippy::cargo lint group for Cargo.toml hygiene\n- Add cherry-picked restriction lints for safety:\n  - mem_forget (deny): prevent memory leaks\n  - exit (deny): library should never call std::process::exit\n  - string_slice (warn): catch potential panics on string boundaries\n  - map_err_ignore (warn): preserve error context\n  - rest_pat_in_fully_bound_structs (warn): catch new struct fields\n  - verbose_file_reads (warn): prefer fs::read_to_string()\n  - rc_buffer, rc_mutex (warn): smart pointer hygiene\n- Fix lint name: unchecked_time_subtraction ->\nunchecked_duration_subtraction\n\n## clippy.toml changes\n- Add allow-unwrap-in-tests, allow-expect-in-tests,\nallow-indexing-slicing-in-tests for cleaner test code\n\n## CI changes\n- Add ci-quality.yml workflow with:\n  - cargo-shear for fast unused dependency detection\n  - cargo-spellcheck for documentation spelling checks\n- These are advisory checks that don't block builds\n\n## Code fixes\n- Fix Arc::clone style in game_state_cell.rs (clone_on_ref_ptr lint)\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+          "timestamp": "2025-12-25T14:15:55-08:00",
+          "tree_id": "8c64aa6398f62472942a2d1652abe6f30aefc85c",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/e921aa3e3fc158b440bc913ce5f418f00d7e3a13"
+        },
+        "date": 1766701250388,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 111,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 193,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 544,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 789,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1190,
+            "range": "± 28",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 111373,
+            "range": "± 1455",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25281,
+            "range": "± 263",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 11231,
+            "range": "± 167",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1553,
+            "range": "± 91",
             "unit": "ns/iter"
           },
           {
