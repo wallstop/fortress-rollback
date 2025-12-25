@@ -168,6 +168,29 @@ unneeded_field_pattern = "warn"
 # Warn about functions with too many boolean parameters (4+ by default)
 fn_params_excessive_bools = "warn"
 
+# === No-panic enforcement (for production safety) ===
+# These lints help achieve zero production panics
+# Note: Set to "warn" to allow gradual migration; change to "deny" once codebase is clean
+unwrap_used = "warn"
+expect_used = "warn"
+# Panic macro should only be used in truly unrecoverable situations
+panic = "warn"
+# Indexing can panic; prefer .get() with proper handling
+# (Currently allowed in pedantic section - indexing_slicing = "allow")
+
+# === Nursery lints (experimental but useful) ===
+# Enable nursery as baseline, then allow overly strict ones
+nursery = { level = "warn", priority = -1 }
+# Allow these commonly noisy nursery lints
+significant_drop_tightening = "allow"
+redundant_pub_crate = "allow"
+future_not_send = "allow"
+cognitive_complexity = "allow"
+missing_const_for_fn = "allow"
+option_if_let_else = "allow"
+or_fun_call = "allow"
+suboptimal_flops = "allow"
+
 [features]
 sync-send = []
 # Enable runtime invariant checking in release builds (for debugging production issues)
@@ -271,6 +294,19 @@ lto = "thin"
 # Profile for faster dev builds (optimized deps, unoptimized local code)
 [profile.dev.package."*"]
 opt-level = 1
+
+# === Safety-focused release profile ===
+# Enable overflow checks in release mode for maximum safety
+# This catches integer overflow bugs that would otherwise wrap silently
+[profile.release]
+overflow-checks = true
+
+# CI-specific profile with both overflow checks and debug assertions
+# Used by ci-safety.yml for maximum runtime checking
+[profile.release-safe]
+inherits = "release"
+overflow-checks = true
+debug-assertions = true
 
 # Loom concurrency tests - isolated from other dev-deps
 [[test]]
