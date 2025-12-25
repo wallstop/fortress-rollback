@@ -573,11 +573,7 @@ fn find_peer_binary() -> Option<std::path::PathBuf> {
     // The binary is in the target directory (e.g., target/debug/network_test_peer)
     let peer_binary = target_dir.join(PEER_BINARY_NAME);
 
-    if peer_binary.exists() {
-        Some(peer_binary)
-    } else {
-        None
-    }
+    peer_binary.exists().then_some(peer_binary)
 }
 
 /// Checks if the network_test_peer binary is available.

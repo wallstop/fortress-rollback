@@ -9,6 +9,7 @@
 //! Instead of registering callback functions, Fortress Rollback (previously GGRS) returns a list of requests for the user to fulfill.
 
 #![forbid(unsafe_code)] // let us try
+#![deny(warnings)] // Treat all warnings as errors (matches CI behavior)
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(rustdoc::private_intra_doc_links)]

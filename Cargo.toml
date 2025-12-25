@@ -218,6 +218,24 @@ verbose_file_reads = "warn"                 # Use fs::read_to_string() instead o
 # Smart pointer hygiene
 rc_buffer = "warn"                          # Use Rc<[T]> instead of Rc<Vec<T>>
 rc_mutex = "warn"                           # Use Arc<Mutex<T>> instead of Rc<Mutex<T>>
+#
+# === Additional restriction lints (high-value, low false positive) ===
+# Panic prevention
+if_then_some_else_none = "warn"             # Use .then() or .then_some() for cleaner code
+#
+# Correctness
+empty_drop = "warn"                         # Empty Drop implementations are dead code
+create_dir = "warn"                         # Use create_dir_all() for robustness
+#
+# API consistency
+mutex_atomic = "warn"                       # Use AtomicBool instead of Mutex<bool>
+#
+# Performance and idioms
+string_add = "warn"                         # Use push_str() instead of + for efficiency
+#
+# Documentation hygiene
+unnecessary_safety_comment = "warn"         # Remove spurious // SAFETY: comments
+unnecessary_safety_doc = "warn"             # Remove spurious /// # Safety sections
 
 [features]
 sync-send = []
@@ -328,6 +346,11 @@ opt-level = 1
 # This catches integer overflow bugs that would otherwise wrap silently
 [profile.release]
 overflow-checks = true
+# Link-Time Optimization for better performance (10-20% improvement typical)
+# "thin" provides most of the benefit with reasonable build times
+lto = "thin"
+# Single codegen unit for maximum optimization (slightly slower builds)
+codegen-units = 1
 
 # CI-specific profile with both overflow checks and debug assertions
 # Used by ci-safety.yml for maximum runtime checking

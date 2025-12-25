@@ -123,7 +123,7 @@ impl<T: Config> PlayerRegistry<T> {
                 PlayerType::Remote(a) => Some((h, a)),
                 PlayerType::Spectator(a) => Some((h, a)),
             })
-            .filter_map(|(h, a)| if addr == *a { Some(*h) } else { None })
+            .filter_map(|(h, a)| (addr == *a).then_some(*h))
             .collect();
         handles
     }

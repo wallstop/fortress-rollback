@@ -450,11 +450,7 @@ impl<T: Config> SyncLayer<T> {
         #[cfg(loom)]
         let cell_frame = cell.0.lock().unwrap().frame;
 
-        if cell_frame == frame {
-            Some(cell)
-        } else {
-            None
-        }
+        (cell_frame == frame).then_some(cell)
     }
 
     /// Returns the latest saved frame.
