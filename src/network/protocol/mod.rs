@@ -333,7 +333,10 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     pub(crate) fn peer_connect_status(&self, handle: PlayerHandle) -> ConnectionStatus {
-        self.peer_connect_status[handle.as_usize()]
+        self.peer_connect_status
+            .get(handle.as_usize())
+            .copied()
+            .unwrap_or_default()
     }
 
     pub(crate) fn disconnect(&mut self) {
@@ -802,11 +805,11 @@ impl<T: Config> UdpProtocol<T> {
                 self.recv_inputs.insert(input_data.frame, input_data);
 
                 for (i, player_input) in player_inputs.into_iter().enumerate() {
-                    // Bounds check on handles - should always be valid but be defensive
-                    if i < self.handles.len() {
+                    // Bounds check on handles - use .get() to be defensive
+                    if let Some(&player_handle) = self.handles.get(i) {
                         self.event_queue.push_back(Event::Input {
                             input: player_input,
-                            player: self.handles[i],
+                            player: player_handle,
                         });
                     }
                 }

@@ -131,7 +131,18 @@ impl InputBytes {
         for p in 0..num_players {
             let start = p * size;
             let end = start + size;
-            let player_byte_slice = &self.bytes[start..end];
+            let Some(player_byte_slice) = self.bytes.get(start..end) else {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::NetworkProtocol,
+                    "Invalid byte range for player {}: {}..{} (total length: {})",
+                    p,
+                    start,
+                    end,
+                    self.bytes.len()
+                );
+                return player_inputs;
+            };
             match codec::decode::<T::Input>(player_byte_slice) {
                 Ok((input, _)) => player_inputs.push(PlayerInput::new(self.frame, input)),
                 Err(e) => {

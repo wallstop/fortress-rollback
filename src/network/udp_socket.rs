@@ -93,7 +93,17 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
             },
         };
 
-        self.send_encoded_packet(&self.send_buffer[..len], addr);
+        let buf_slice = self.send_buffer.get(..len).unwrap_or_else(|| {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "send_buffer slice [..{}] out of bounds (buffer size: {})",
+                len,
+                self.send_buffer.len()
+            );
+            &[]
+        });
+        self.send_encoded_packet(buf_slice, addr);
     }
 
     fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
@@ -114,8 +124,18 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
                         );
                         continue;
                     }
-                    if let Ok(msg) = codec::decode_value(&self.recv_buffer[0..number_of_bytes]) {
-                        received_messages.push((src_addr, msg));
+                    if let Some(buf_slice) = self.recv_buffer.get(0..number_of_bytes) {
+                        if let Ok(msg) = codec::decode_value(buf_slice) {
+                            received_messages.push((src_addr, msg));
+                        }
+                    } else {
+                        report_violation!(
+                            ViolationSeverity::Error,
+                            ViolationKind::NetworkProtocol,
+                            "recv_buffer slice [0..{}] out of bounds (buffer size: {})",
+                            number_of_bytes,
+                            RECV_BUFFER_SIZE
+                        );
                     }
                 },
                 // there are no more messages

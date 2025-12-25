@@ -240,8 +240,17 @@ impl<T: Config> InputQueue<T> {
     ) -> Result<PlayerInput<T::Input>, crate::FortressError> {
         let offset = requested_frame.as_i32() as usize % self.queue_length;
 
-        if self.inputs[offset].frame == requested_frame {
-            return Ok(self.inputs[offset]);
+        let input = self
+            .inputs
+            .get(offset)
+            .ok_or_else(|| FortressError::InternalError {
+                context: format!(
+                    "Invalid offset {} in confirmed_input (queue_length={})",
+                    offset, self.queue_length
+                ),
+            })?;
+        if input.frame == requested_frame {
+            return Ok(*input);
         }
 
         // the requested confirmed input should not be before a prediction. We should not have asked for a known incorrect frame.
@@ -276,16 +285,18 @@ impl<T: Config> InputQueue<T> {
                 self.head - 1
             };
             self.length = 1;
-        } else if frame <= self.inputs[self.tail].frame {
-            // The target frame is at or before the current tail - nothing to delete
-            // (frames before tail don't exist in the queue)
-        } else {
-            // Discard frames from tail up to (but not including) 'frame'
-            // After this, 'frame' becomes the new tail
-            let tail_frame = self.inputs[self.tail].frame;
-            let offset = (frame - tail_frame) as usize;
-            self.tail = (self.tail + offset) % self.queue_length;
-            self.length -= offset;
+        } else if let Some(tail_input) = self.inputs.get(self.tail) {
+            if frame <= tail_input.frame {
+                // The target frame is at or before the current tail - nothing to delete
+                // (frames before tail don't exist in the queue)
+            } else {
+                // Discard frames from tail up to (but not including) 'frame'
+                // After this, 'frame' becomes the new tail
+                let tail_frame = tail_input.frame;
+                let offset = (frame - tail_frame) as usize;
+                self.tail = (self.tail + offset) % self.queue_length;
+                self.length -= offset;
+            }
         }
     }
 
@@ -325,13 +336,14 @@ impl<T: Config> InputQueue<T> {
         self.last_requested_frame = requested_frame;
 
         // Verify that we request a frame that still exists
-        if requested_frame < self.inputs[self.tail].frame {
+        let tail_input = self.inputs.get(self.tail)?;
+        if requested_frame < tail_input.frame {
             report_violation!(
                 ViolationSeverity::Error,
                 ViolationKind::InputQueue,
                 "Requested frame {} is before oldest frame {} in queue",
                 requested_frame,
-                self.inputs[self.tail].frame
+                tail_input.frame
             );
             return None;
         }
@@ -339,23 +351,24 @@ impl<T: Config> InputQueue<T> {
         // We currently don't have a prediction frame
         if self.prediction.frame.as_i32() < 0 {
             //  If the frame requested is in our range, fetch it out of the queue and return it.
-            let mut offset: usize = (requested_frame - self.inputs[self.tail].frame) as usize;
+            let mut offset: usize = (requested_frame - tail_input.frame) as usize;
 
             if offset < self.length {
                 offset = (offset + self.tail) % self.queue_length;
                 // Verify circular buffer indexing correctness
-                if self.inputs[offset].frame != requested_frame {
+                let input_at_offset = self.inputs.get(offset)?;
+                if input_at_offset.frame != requested_frame {
                     report_violation!(
                         ViolationSeverity::Critical,
                         ViolationKind::InputQueue,
                         "Circular buffer index mismatch: expected frame {}, got frame {} at offset {}",
                         requested_frame,
-                        self.inputs[offset].frame,
+                        input_at_offset.frame,
                         offset
                     );
                     return None;
                 }
-                return Some((self.inputs[offset].input, InputStatus::Confirmed));
+                return Some((input_at_offset.input, InputStatus::Confirmed));
             }
 
             // The requested frame isn't in the queue. This means we need to return a prediction frame.
@@ -425,20 +438,42 @@ impl<T: Config> InputQueue<T> {
             );
             return false;
         }
-        if frame_number != 0 && self.inputs[previous_position].frame != frame_number - 1 {
-            report_violation!(
-                ViolationSeverity::Error,
-                ViolationKind::InputQueue,
-                "Previous input frame {} does not precede current frame {}",
-                self.inputs[previous_position].frame,
-                frame_number
-            );
-            return false;
+        if frame_number != 0 {
+            if let Some(prev_input) = self.inputs.get(previous_position) {
+                if prev_input.frame != frame_number - 1 {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::InputQueue,
+                        "Previous input frame {} does not precede current frame {}",
+                        prev_input.frame,
+                        frame_number
+                    );
+                    return false;
+                }
+            } else {
+                report_violation!(
+                    ViolationSeverity::Critical,
+                    ViolationKind::InputQueue,
+                    "Invalid previous_position {} in add_input_by_frame",
+                    previous_position
+                );
+                return false;
+            }
         }
 
         // Add the frame to the back of the queue
-        self.inputs[self.head] = input;
-        self.inputs[self.head].frame = frame_number;
+        if let Some(head_input) = self.inputs.get_mut(self.head) {
+            *head_input = input;
+            head_input.frame = frame_number;
+        } else {
+            report_violation!(
+                ViolationSeverity::Critical,
+                ViolationKind::InputQueue,
+                "Invalid head index {} in add_input_by_frame",
+                self.head
+            );
+            return false;
+        }
         self.head = (self.head + 1) % self.queue_length;
         self.length += 1;
 
@@ -519,7 +554,18 @@ impl<T: Config> InputQueue<T> {
         let mut expected_frame = if self.first_frame {
             Frame::new(0)
         } else {
-            self.inputs[previous_position].frame + 1
+            match self.inputs.get(previous_position) {
+                Some(prev_input) => prev_input.frame + 1,
+                None => {
+                    report_violation!(
+                        ViolationSeverity::Critical,
+                        ViolationKind::InputQueue,
+                        "Invalid previous_position {} in advance_queue_head",
+                        previous_position
+                    );
+                    return Frame::NULL;
+                },
+            }
         };
 
         input_frame += self.frame_delay as i32;
@@ -532,7 +578,18 @@ impl<T: Config> InputQueue<T> {
         // Fill any gap between expected_frame and input_frame by replicating the previous input.
         // This handles the initial delay setup when frame_delay > 0.
         while expected_frame < input_frame {
-            let input_to_replicate = self.inputs[previous_position];
+            let input_to_replicate = match self.inputs.get(previous_position) {
+                Some(input) => *input,
+                None => {
+                    report_violation!(
+                        ViolationSeverity::Critical,
+                        ViolationKind::InputQueue,
+                        "Invalid previous_position {} in gap fill loop",
+                        previous_position
+                    );
+                    return Frame::NULL;
+                },
+            };
             if !self.add_input_by_frame(input_to_replicate, expected_frame) {
                 return Frame::NULL;
             }
@@ -544,15 +601,30 @@ impl<T: Config> InputQueue<T> {
             0 => self.queue_length - 1,
             _ => self.head - 1,
         };
-        if input_frame != 0 && input_frame != self.inputs[previous_position].frame + 1 {
-            report_violation!(
-                ViolationSeverity::Error,
-                ViolationKind::InputQueue,
-                "Frame sequencing broken after gap fill: input_frame={}, prev_frame={}",
-                input_frame,
-                self.inputs[previous_position].frame
-            );
-            return Frame::NULL;
+        if input_frame != 0 {
+            match self.inputs.get(previous_position) {
+                Some(prev_input) => {
+                    if input_frame != prev_input.frame + 1 {
+                        report_violation!(
+                            ViolationSeverity::Error,
+                            ViolationKind::InputQueue,
+                            "Frame sequencing broken after gap fill: input_frame={}, prev_frame={}",
+                            input_frame,
+                            prev_input.frame
+                        );
+                        return Frame::NULL;
+                    }
+                },
+                None => {
+                    report_violation!(
+                        ViolationSeverity::Critical,
+                        ViolationKind::InputQueue,
+                        "Invalid previous_position {} after gap fill",
+                        previous_position
+                    );
+                    return Frame::NULL;
+                },
+            }
         }
         input_frame
     }

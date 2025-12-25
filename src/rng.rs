@@ -262,7 +262,9 @@ pub trait Rng {
         let remainder = chunks.into_remainder();
         if !remainder.is_empty() {
             let val = self.next_u32().to_le_bytes();
-            remainder.copy_from_slice(&val[..remainder.len()]);
+            if let Some(val_slice) = val.get(..remainder.len()) {
+                remainder.copy_from_slice(val_slice);
+            }
         }
     }
 }

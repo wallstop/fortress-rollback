@@ -100,7 +100,17 @@ pub fn delta_decode(
     for inp in 0..out_size {
         let mut buffer = vec![0u8; ref_bytes.len()];
         for i in 0..ref_bytes.len() {
-            buffer[i] = ref_bytes[i] ^ data[ref_bytes.len() * inp + i];
+            let data_idx = ref_bytes.len() * inp + i;
+            let ref_byte = ref_bytes
+                .get(i)
+                .ok_or_else(|| format!("delta_decode: ref_bytes index {} out of bounds", i))?;
+            let data_byte = data
+                .get(data_idx)
+                .ok_or_else(|| format!("delta_decode: data index {} out of bounds", data_idx))?;
+            let buffer_slot = buffer
+                .get_mut(i)
+                .ok_or_else(|| format!("delta_decode: buffer index {} out of bounds", i))?;
+            *buffer_slot = ref_byte ^ data_byte;
         }
         output.push(buffer);
     }

@@ -37,6 +37,8 @@
 
 use std::error::Error;
 
+use crate::FortressError;
+
 /// Error type for RLE decoding failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RleDecodeError {
@@ -83,12 +85,20 @@ mod varint {
     pub fn encode(mut value: u64, buf: &mut [u8]) -> usize {
         let mut i = 0;
         while value >= 0x80 {
-            buf[i] = (value as u8) | 0x80;
+            if let Some(byte) = buf.get_mut(i) {
+                *byte = (value as u8) | 0x80;
+            } else {
+                return i; // Buffer too small, return bytes written so far
+            }
             value >>= 7;
             i += 1;
         }
-        buf[i] = value as u8;
-        i + 1
+        if let Some(byte) = buf.get_mut(i) {
+            *byte = value as u8;
+            i + 1
+        } else {
+            i // Buffer too small, return bytes written so far
+        }
     }
 
     /// Encodes a value as a varint, returning a Vec.
@@ -108,11 +118,10 @@ mod varint {
         let mut i = offset;
 
         loop {
-            if i >= buf.len() {
-                // Truncated varint - return what we have
-                break;
-            }
-            let byte = buf[i];
+            let byte = match buf.get(i) {
+                Some(&b) => b,
+                None => break, // Truncated varint - return what we have
+            };
             value |= ((byte & 0x7F) as u64) << shift;
             i += 1;
 
@@ -165,7 +174,12 @@ fn encode_with_offset(buf: &[u8], offset: usize) -> Vec<u8> {
     let mut prev_bits: u8 = 0;
     let mut noncontiguous_bits: Vec<u8> = Vec::new();
 
-    for (i, &byte) in buf[offset..].iter().enumerate() {
+    let slice = match buf.get(offset..) {
+        Some(s) => s,
+        None => return enc, // Invalid offset, return empty
+    };
+
+    for (i, &byte) in slice.iter().enumerate() {
         if contiguous && byte == prev_bits {
             // Continue the contiguous run
             contiguous_len += 1;
@@ -236,7 +250,12 @@ fn encode_len_with_offset(buf: &[u8], offset: usize) -> usize {
     let mut contiguous = false;
     let mut prev_bits: u8 = 0;
 
-    for (i, &byte) in buf[offset..].iter().enumerate() {
+    let slice = match buf.get(offset..) {
+        Some(s) => s,
+        None => return 0, // Invalid offset, return 0
+    };
+
+    for (i, &byte) in slice.iter().enumerate() {
         if contiguous && byte == prev_bits {
             partial_len += 1;
             continue;
@@ -324,7 +343,11 @@ fn decode_with_offset(buf: &[u8], mut offset: usize) -> RleResult<Vec<u8>> {
                 // Fill with 0xFF
                 for i in 0..len {
                     if ptr + i < bitfield.len() {
-                        bitfield[ptr + i] = 255;
+                        *bitfield.get_mut(ptr + i).ok_or_else(|| {
+                            FortressError::InternalError {
+                                context: "RLE decode bitfield index out of bounds".into(),
+                            }
+                        })? = 255;
                     }
                 }
             }
@@ -336,7 +359,18 @@ fn decode_with_offset(buf: &[u8], mut offset: usize) -> RleResult<Vec<u8>> {
             let dst_end = (ptr + src_len).min(bitfield.len());
             let actual_len = dst_end - ptr;
             if actual_len > 0 && offset + actual_len <= buf.len() {
-                bitfield[ptr..dst_end].copy_from_slice(&buf[offset..offset + actual_len]);
+                let dst_slice =
+                    bitfield
+                        .get_mut(ptr..dst_end)
+                        .ok_or_else(|| FortressError::InternalError {
+                            context: "RLE decode destination slice out of bounds".into(),
+                        })?;
+                let src_slice = buf.get(offset..offset + actual_len).ok_or_else(|| {
+                    FortressError::InternalError {
+                        context: "RLE decode source slice out of bounds".into(),
+                    }
+                })?;
+                dst_slice.copy_from_slice(src_slice);
             }
             offset += len;
         }
