@@ -141,10 +141,13 @@ impl<T: Config> SyncLayer<T> {
 
     /// Advances the simulation by one frame.
     ///
+    /// Uses saturating arithmetic to prevent overflow panics. In practice, at 60 FPS,
+    /// it would take over a year to reach `i32::MAX`, but we handle it gracefully.
+    ///
     /// # Note
     /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
     pub fn advance_frame(&mut self) {
-        self.current_frame += 1;
+        self.current_frame = self.current_frame.saturating_add(1);
     }
 
     /// Saves the current game state.
@@ -420,7 +423,7 @@ impl<T: Config> SyncLayer<T> {
         if self.last_confirmed_frame.as_i32() > 0 {
             for i in 0..self.num_players {
                 if let Some(queue) = self.input_queues.get_mut(i) {
-                    queue.discard_confirmed_frames(frame - 1);
+                    queue.discard_confirmed_frames(frame.saturating_sub(1));
                 }
             }
         }

@@ -1014,7 +1014,7 @@ impl<T: Config> P2PSession<T> {
                 if self.sync_layer.current_frame() > last_frame {
                     // remember to adjust simulation to account for the fact that the player disconnected a few frames ago,
                     // resimulating with correct disconnect flags (to account for user having some AI kick in).
-                    self.disconnect_frame = last_frame + 1;
+                    self.disconnect_frame = last_frame.saturating_add(1);
                 }
             },
             PlayerType::Spectator(addr) => {
@@ -1200,7 +1200,7 @@ impl<T: Config> P2PSession<T> {
                     self.num_players,
                     self.next_spectator_frame
                 );
-                self.next_spectator_frame += 1;
+                self.next_spectator_frame = self.next_spectator_frame.saturating_add(1);
                 continue;
             }
 
@@ -1228,7 +1228,7 @@ impl<T: Config> P2PSession<T> {
             }
 
             // onto the next frame
-            self.next_spectator_frame += 1;
+            self.next_spectator_frame = self.next_spectator_frame.saturating_add(1);
         }
 
         Ok(())
@@ -1460,14 +1460,13 @@ impl<T: Config> P2PSession<T> {
                 if !status.disconnected {
                     // check if the input comes in the correct sequence
                     let current_remote_frame = status.last_frame;
-                    if current_remote_frame != Frame::NULL
-                        && current_remote_frame + 1 != input.frame
-                    {
+                    let expected_frame = current_remote_frame.saturating_add(1);
+                    if current_remote_frame != Frame::NULL && expected_frame != input.frame {
                         report_violation!(
                             ViolationSeverity::Error,
                             ViolationKind::NetworkProtocol,
                             "Input sequence violation: expected frame {}, got {}",
-                            current_remote_frame + 1,
+                            expected_frame,
                             input.frame
                         );
                         return;

@@ -397,11 +397,24 @@ impl Frame {
     }
 
     // === Checked Arithmetic Methods ===
-    // These methods provide overflow-safe alternatives to the standard operators.
-    // While overflow-checks are enabled in release mode (which panics on overflow),
-    // these methods allow graceful handling of edge cases.
+    //
+    // Design Philosophy: Graceful error handling over panics.
+    //
+    // These methods are the PREFERRED way to perform Frame arithmetic in production code.
+    // They allow the library to handle edge cases gracefully rather than panicking.
+    //
+    // Guidelines:
+    // - Use `checked_*` when you need to detect and handle overflow explicitly
+    // - Use `saturating_*` when clamping to bounds is acceptable behavior
+    // - Use `abs_diff` when calculating frame distances (order-independent)
+    // - Avoid raw `+` and `-` operators except in tests or where overflow is impossible
+    //
+    // Note: While `overflow-checks = true` in release catches overflow as panics,
+    // the goal is zero panics in production - use these methods proactively.
 
     /// Adds a value to this frame, returning `None` if overflow occurs.
+    ///
+    /// This is the preferred method for frame arithmetic when overflow must be handled.
     ///
     /// # Examples
     ///
@@ -423,6 +436,8 @@ impl Frame {
 
     /// Subtracts a value from this frame, returning `None` if overflow occurs.
     ///
+    /// This is the preferred method for frame arithmetic when overflow must be handled.
+    ///
     /// # Examples
     ///
     /// ```
@@ -443,6 +458,9 @@ impl Frame {
 
     /// Adds a value to this frame, saturating at the numeric bounds.
     ///
+    /// Use this when clamping to bounds is acceptable (e.g., frame counters that
+    /// should never go negative or exceed maximum).
+    ///
     /// # Examples
     ///
     /// ```
@@ -459,6 +477,9 @@ impl Frame {
     }
 
     /// Subtracts a value from this frame, saturating at the numeric bounds.
+    ///
+    /// Use this when clamping to bounds is acceptable (e.g., ensuring frame
+    /// never goes below zero or `i32::MIN`).
     ///
     /// # Examples
     ///

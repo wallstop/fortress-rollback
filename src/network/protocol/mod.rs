@@ -509,9 +509,8 @@ impl<T: Config> UdpProtocol<T> {
 
         if let Some(input) = self.pending_output.front() {
             // Verify input frames are sequential relative to last acked
-            if self.last_acked_input.frame != Frame::NULL
-                && self.last_acked_input.frame + 1 != input.frame
-            {
+            let expected_frame = self.last_acked_input.frame.saturating_add(1);
+            if self.last_acked_input.frame != Frame::NULL && expected_frame != input.frame {
                 report_violation!(
                     ViolationSeverity::Error,
                     ViolationKind::NetworkProtocol,
@@ -753,7 +752,8 @@ impl<T: Config> UdpProtocol<T> {
         // If we receive an input for a frame that's too far ahead, we can't decode it
         // because we don't have the reference frame. This is normal UDP behavior -
         // packets can be lost or reordered. We just drop it and wait for retransmission.
-        if self.last_recv_frame() != Frame::NULL && self.last_recv_frame() + 1 < body.start_frame {
+        let next_expected = self.last_recv_frame().saturating_add(1);
+        if self.last_recv_frame() != Frame::NULL && next_expected < body.start_frame {
             report_violation!(
                 ViolationSeverity::Warning,
                 ViolationKind::NetworkProtocol,
@@ -769,7 +769,7 @@ impl<T: Config> UdpProtocol<T> {
         let decode_frame = if self.last_recv_frame() == Frame::NULL {
             Frame::NULL
         } else {
-            body.start_frame - 1
+            body.start_frame.saturating_sub(1)
         };
 
         // if we have the necessary input saved, we decode
@@ -867,7 +867,9 @@ impl<T: Config> UdpProtocol<T> {
 
         let max_history = self.protocol_config.max_checksum_history;
         if self.pending_checksums.len() >= max_history {
-            let oldest_frame_to_keep = body.frame - (max_history as i32 - 1) * interval as i32;
+            // Calculate frames to keep, using saturating arithmetic to prevent underflow
+            let frames_to_subtract = (max_history as i32 - 1).saturating_mul(interval as i32);
+            let oldest_frame_to_keep = body.frame.saturating_sub(frames_to_subtract);
             self.pending_checksums
                 .retain(|&frame, _| frame >= oldest_frame_to_keep);
         }

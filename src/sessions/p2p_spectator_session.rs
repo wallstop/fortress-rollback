@@ -163,7 +163,7 @@ impl<T: Config> SpectatorSession<T> {
 
         for _ in 0..frames_to_advance {
             // get inputs for the next frame
-            let frame_to_grab = self.current_frame + 1;
+            let frame_to_grab = self.current_frame.saturating_add(1);
             let synced_inputs = self.inputs_at_frame(frame_to_grab)?;
 
             requests.push(FortressRequest::AdvanceFrame {
@@ -171,7 +171,7 @@ impl<T: Config> SpectatorSession<T> {
             });
 
             // advance the frame, but only if grabbing the inputs succeeded
-            self.current_frame += 1;
+            self.current_frame = self.current_frame.saturating_add(1);
         }
 
         Ok(requests)
