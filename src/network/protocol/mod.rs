@@ -897,8 +897,7 @@ impl<T: Config> UdpProtocol<T> {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::needless_collect,
-    clippy::unchecked_duration_subtraction
+    clippy::needless_collect
 )]
 mod tests {
     use super::*;
@@ -1489,7 +1488,7 @@ mod tests {
         protocol.state = ProtocolState::Disconnected;
 
         // Set shutdown timeout to the past
-        protocol.shutdown_timeout = Instant::now() - Duration::from_secs(1);
+        protocol.shutdown_timeout = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
 
         let connect_status = vec![ConnectionStatus::default(); 2];
         let _events: Vec<_> = protocol.poll(&connect_status).collect();
