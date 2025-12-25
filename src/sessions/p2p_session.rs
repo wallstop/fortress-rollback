@@ -2,7 +2,6 @@ use crate::error::FortressError;
 use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::network::network_stats::NetworkStats;
-use crate::report_violation;
 use crate::sessions::config::{ProtocolConfig, SaveMode};
 use crate::sessions::player_registry::PlayerRegistry;
 use crate::sessions::sync_health::SyncHealth;
@@ -15,6 +14,7 @@ use crate::{
     network::protocol::Event, Config, FortressEvent, FortressRequest, Frame, NonBlockingSocket,
     PlayerHandle, PlayerType, SessionState,
 };
+use crate::{report_violation, safe_frame_add};
 use tracing::{debug, trace};
 
 use std::collections::vec_deque::Drain;
@@ -1014,7 +1014,8 @@ impl<T: Config> P2PSession<T> {
                 if self.sync_layer.current_frame() > last_frame {
                     // remember to adjust simulation to account for the fact that the player disconnected a few frames ago,
                     // resimulating with correct disconnect flags (to account for user having some AI kick in).
-                    self.disconnect_frame = last_frame.saturating_add(1);
+                    self.disconnect_frame =
+                        safe_frame_add!(last_frame, 1, "P2PSession::disconnect_player_at_frame");
                 }
             },
             PlayerType::Spectator(addr) => {
@@ -1200,7 +1201,11 @@ impl<T: Config> P2PSession<T> {
                     self.num_players,
                     self.next_spectator_frame
                 );
-                self.next_spectator_frame = self.next_spectator_frame.saturating_add(1);
+                self.next_spectator_frame = safe_frame_add!(
+                    self.next_spectator_frame,
+                    1,
+                    "P2PSession::send_confirmed_inputs skip"
+                );
                 continue;
             }
 
@@ -1228,7 +1233,11 @@ impl<T: Config> P2PSession<T> {
             }
 
             // onto the next frame
-            self.next_spectator_frame = self.next_spectator_frame.saturating_add(1);
+            self.next_spectator_frame = safe_frame_add!(
+                self.next_spectator_frame,
+                1,
+                "P2PSession::send_confirmed_inputs next"
+            );
         }
 
         Ok(())
@@ -1460,7 +1469,11 @@ impl<T: Config> P2PSession<T> {
                 if !status.disconnected {
                     // check if the input comes in the correct sequence
                     let current_remote_frame = status.last_frame;
-                    let expected_frame = current_remote_frame.saturating_add(1);
+                    let expected_frame = safe_frame_add!(
+                        current_remote_frame,
+                        1,
+                        "P2PSession::handle_event input sequence"
+                    );
                     if current_remote_frame != Frame::NULL && expected_frame != input.frame {
                         report_violation!(
                             ViolationSeverity::Error,

@@ -17,8 +17,8 @@ mod prediction;
 pub use prediction::{BlankPrediction, PredictionStrategy, RepeatLastConfirmed};
 
 use crate::frame_info::PlayerInput;
-use crate::report_violation;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
+use crate::{report_violation, safe_frame_add, safe_frame_sub};
 use crate::{Config, FortressError, Frame, InputStatus};
 use std::cmp;
 
@@ -402,10 +402,14 @@ impl<T: Config> InputQueue<T> {
     /// Adds an input frame to the queue. Will consider the set frame delay.
     pub fn add_input(&mut self, input: PlayerInput<T::Input>) -> Frame {
         // Verify that inputs are passed in sequentially by the user, regardless of frame delay.
-        if !self.last_added_frame.is_null()
-            && input.frame.saturating_add(self.frame_delay as i32)
-                != self.last_added_frame.saturating_add(1)
-        {
+        let input_with_delay = safe_frame_add!(
+            input.frame,
+            self.frame_delay as i32,
+            "InputQueue::add_input delay"
+        );
+        let expected_frame =
+            safe_frame_add!(self.last_added_frame, 1, "InputQueue::add_input expected");
+        if !self.last_added_frame.is_null() && input_with_delay != expected_frame {
             // drop the input if not given sequentially
             return Frame::NULL;
         }
@@ -429,9 +433,12 @@ impl<T: Config> InputQueue<T> {
         };
 
         // Verify inputs are added sequentially
-        if !self.last_added_frame.is_null()
-            && frame_number != self.last_added_frame.saturating_add(1)
-        {
+        let expected_next = safe_frame_add!(
+            self.last_added_frame,
+            1,
+            "InputQueue::add_input_by_frame expected"
+        );
+        if !self.last_added_frame.is_null() && frame_number != expected_next {
             report_violation!(
                 ViolationSeverity::Error,
                 ViolationKind::InputQueue,
@@ -442,8 +449,10 @@ impl<T: Config> InputQueue<T> {
             return false;
         }
         if frame_number != 0 {
+            let expected_prev =
+                safe_frame_sub!(frame_number, 1, "InputQueue::add_input_by_frame prev");
             if let Some(prev_input) = self.inputs.get(previous_position) {
-                if prev_input.frame != frame_number.saturating_sub(1) {
+                if prev_input.frame != expected_prev {
                     report_violation!(
                         ViolationSeverity::Error,
                         ViolationKind::InputQueue,
@@ -526,7 +535,11 @@ impl<T: Config> InputQueue<T> {
             {
                 self.prediction.frame = Frame::NULL;
             } else {
-                self.prediction.frame = self.prediction.frame.saturating_add(1);
+                self.prediction.frame = safe_frame_add!(
+                    self.prediction.frame,
+                    1,
+                    "InputQueue::add_input_by_frame prediction"
+                );
             }
         }
 
@@ -558,7 +571,13 @@ impl<T: Config> InputQueue<T> {
             Frame::new(0)
         } else {
             match self.inputs.get(previous_position) {
-                Some(prev_input) => prev_input.frame.saturating_add(1),
+                Some(prev_input) => {
+                    safe_frame_add!(
+                        prev_input.frame,
+                        1,
+                        "InputQueue::advance_queue_head expected"
+                    )
+                },
                 None => {
                     report_violation!(
                         ViolationSeverity::Critical,
@@ -571,7 +590,11 @@ impl<T: Config> InputQueue<T> {
             }
         };
 
-        input_frame = input_frame.saturating_add(self.frame_delay as i32);
+        input_frame = safe_frame_add!(
+            input_frame,
+            self.frame_delay as i32,
+            "InputQueue::advance_queue_head delay"
+        );
 
         // If the expected frame is ahead of the input (frame delay decreased), reject the input
         if expected_frame > input_frame {
@@ -596,7 +619,8 @@ impl<T: Config> InputQueue<T> {
             if !self.add_input_by_frame(input_to_replicate, expected_frame) {
                 return Frame::NULL;
             }
-            expected_frame = expected_frame.saturating_add(1);
+            expected_frame =
+                safe_frame_add!(expected_frame, 1, "InputQueue::advance_queue_head gap fill");
         }
 
         // After filling gaps, verify the frame is sequential
@@ -607,7 +631,12 @@ impl<T: Config> InputQueue<T> {
         if input_frame != 0 {
             match self.inputs.get(previous_position) {
                 Some(prev_input) => {
-                    if input_frame != prev_input.frame.saturating_add(1) {
+                    let expected = safe_frame_add!(
+                        prev_input.frame,
+                        1,
+                        "InputQueue::advance_queue_head verify"
+                    );
+                    if input_frame != expected {
                         report_violation!(
                             ViolationSeverity::Error,
                             ViolationKind::InputQueue,

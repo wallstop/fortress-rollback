@@ -18,9 +18,9 @@ pub use saved_states::SavedStates;
 use crate::frame_info::PlayerInput;
 use crate::input_queue::InputQueue;
 use crate::network::messages::ConnectionStatus;
-use crate::report_violation;
 use crate::sessions::config::SaveMode;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
+use crate::{report_violation, safe_frame_add, safe_frame_sub};
 use crate::{Config, FortressError, FortressRequest, Frame, InputStatus, InputVec, PlayerHandle};
 
 /// The synchronization layer manages game state, input queues, and rollback operations.
@@ -141,13 +141,14 @@ impl<T: Config> SyncLayer<T> {
 
     /// Advances the simulation by one frame.
     ///
-    /// Uses saturating arithmetic to prevent overflow panics. In practice, at 60 FPS,
-    /// it would take over a year to reach `i32::MAX`, but we handle it gracefully.
+    /// Uses safe arithmetic that reports a violation if overflow would occur.
+    /// In practice, at 60 FPS, it would take over a year to reach `i32::MAX`,
+    /// but we detect and report it gracefully rather than panicking.
     ///
     /// # Note
     /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
     pub fn advance_frame(&mut self) {
-        self.current_frame = self.current_frame.saturating_add(1);
+        self.current_frame = safe_frame_add!(self.current_frame, 1, "SyncLayer::advance_frame");
     }
 
     /// Saves the current game state.
@@ -421,9 +422,10 @@ impl<T: Config> SyncLayer<T> {
 
         self.last_confirmed_frame = frame;
         if self.last_confirmed_frame.as_i32() > 0 {
+            let discard_frame = safe_frame_sub!(frame, 1, "SyncLayer::confirm_frame");
             for i in 0..self.num_players {
                 if let Some(queue) = self.input_queues.get_mut(i) {
-                    queue.discard_confirmed_frames(frame.saturating_sub(1));
+                    queue.discard_confirmed_frames(discard_frame);
                 }
             }
         }
