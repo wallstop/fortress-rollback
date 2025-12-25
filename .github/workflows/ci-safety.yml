@@ -291,11 +291,6 @@ jobs:
       - name: Check for panic-prone patterns
         id: panic-check
         run: |
-          {
-            echo "## Panic-Prone Pattern Analysis"
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
-
           # Count potentially dangerous patterns in src/ (excluding tests, examples)
           UNWRAP_COUNT=$(grep -rc "\.unwrap()" src/ --include="*.rs" 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
           EXPECT_COUNT=$(grep -rc "\.expect(" src/ --include="*.rs" 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
@@ -305,6 +300,8 @@ jobs:
           UNREACHABLE_COUNT=$(grep -rc "unreachable!" src/ --include="*.rs" 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
 
           {
+            echo "## Panic-Prone Pattern Analysis"
+            echo ""
             echo "### Production Code (src/)"
             echo ""
             echo "| Pattern | Count | Status |"
@@ -318,12 +315,14 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           # Store counts for later steps
-          echo "unwrap_count=$UNWRAP_COUNT" >> "$GITHUB_OUTPUT"
-          echo "expect_count=$EXPECT_COUNT" >> "$GITHUB_OUTPUT"
-          echo "panic_count=$PANIC_COUNT" >> "$GITHUB_OUTPUT"
-          echo "todo_count=$TODO_COUNT" >> "$GITHUB_OUTPUT"
-          echo "unimplemented_count=$UNIMPLEMENTED_COUNT" >> "$GITHUB_OUTPUT"
-          echo "unreachable_count=$UNREACHABLE_COUNT" >> "$GITHUB_OUTPUT"
+          {
+            echo "unwrap_count=$UNWRAP_COUNT"
+            echo "expect_count=$EXPECT_COUNT"
+            echo "panic_count=$PANIC_COUNT"
+            echo "todo_count=$TODO_COUNT"
+            echo "unimplemented_count=$UNIMPLEMENTED_COUNT"
+            echo "unreachable_count=$UNREACHABLE_COUNT"
+          } >> "$GITHUB_OUTPUT"
 
           # Fail if there are any todo! or unimplemented! in production code
           if [ "$TODO_COUNT" -gt 0 ]; then

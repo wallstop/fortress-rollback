@@ -240,7 +240,8 @@ impl<T: Config> SpectatorSession<T> {
             })?;
 
         // We haven't received the input from the host yet. Wait.
-        let first_input = player_inputs.first()
+        let first_input = player_inputs
+            .first()
             .ok_or_else(|| FortressError::InternalError {
                 context: "Player inputs vector is empty".into(),
             })?;
