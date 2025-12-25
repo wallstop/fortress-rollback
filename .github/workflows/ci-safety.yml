@@ -119,6 +119,9 @@ jobs:
           - check: debug-assertions
             rustflags: "-C debug-assertions=on"
             description: "Debug assertions in release mode"
+          - check: warnings-as-errors
+            rustflags: "-D warnings"
+            description: "All warnings treated as errors"
 
     steps:
       - name: Checkout code
@@ -418,12 +421,100 @@ jobs:
           retention-days: 30
 
   # ============================================================================
+  # PANIC PREVENTION - Block PRs with panic-prone code
+  # ============================================================================
+  no-panics:
+    name: No Panics Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-ci
+          cache-on-failure: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Check for panic-prone patterns (library only)
+        run: |
+          {
+            echo "## No-Panics Check"
+            echo ""
+            echo "Verifying library code is free of panic-prone patterns..."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Run clippy with strict panic-prevention lints on LIBRARY code only
+          # Test code is allowed to use unwrap/expect for cleaner assertions
+          # These lints catch code that could panic at runtime:
+          # - clippy::panic: explicit panic!() calls
+          # - clippy::unwrap_used: .unwrap() calls
+          # - clippy::expect_used: .expect() calls
+          # - clippy::todo: todo!() macros
+          # - clippy::unimplemented: unimplemented!() macros
+          # - clippy::unreachable: unreachable!() macros
+          # - clippy::indexing_slicing: unchecked array/slice indexing
+          if cargo clippy --lib -- \
+              -D clippy::panic \
+              -D clippy::unwrap_used \
+              -D clippy::expect_used \
+              -D clippy::todo \
+              -D clippy::unimplemented \
+              -D clippy::unreachable \
+              -D clippy::indexing_slicing \
+              2>&1 | tee clippy-panics.txt; then
+            echo "✅ No panic-prone patterns found in library code" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "❌ Panic-prone patterns detected in library code!"
+              echo ""
+              echo "### Detected Issues"
+              echo ""
+              echo "Your library code contains patterns that could panic at runtime:"
+              echo "- \`.unwrap()\` calls"
+              echo "- \`.expect()\` calls"
+              echo "- \`panic!()\`, \`todo!()\`, \`unimplemented!()\`, \`unreachable!()\` macros"
+              echo "- Unchecked array indexing \`[i]\`"
+              echo ""
+              echo "### How to Fix"
+              echo ""
+              echo "| Pattern | Safe Alternative |"
+              echo "|---------|------------------|"
+              echo "| \`.unwrap()\` | \`.ok_or()?\`, \`.unwrap_or_default()\`, \`.unwrap_or(val)\` |"
+              echo "| \`.expect()\` | \`.ok_or_else(\\|\\| Error::...)?\`, handle with \`match\` |"
+              echo "| \`panic!()\` | Return \`Result::Err\`, use proper error types |"
+              echo "| \`todo!()\` | Implement the functionality or return error |"
+              echo "| \`vec[i]\` | \`vec.get(i)\`, \`vec.first()\`, \`vec.last()\` |"
+              echo ""
+              echo "See \`.llm/context.md\` 'Defensive Programming' section for detailed patterns."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Upload clippy report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: no-panics-clippy-report
+          path: clippy-panics.txt
+          retention-days: 7
+
+  # ============================================================================
   # SUMMARY
   # ============================================================================
   safety-summary:
     name: Safety Check Summary
     runs-on: ubuntu-latest
-    needs: [careful, strict-build, strict-clippy, panic-patterns, doc-verification]
+    needs: [careful, strict-build, strict-clippy, panic-patterns, doc-verification, no-panics]
     if: always()
 
     steps:
@@ -449,6 +540,7 @@ jobs:
             echo "| Strict Clippy (Nursery) | $(map_status '${{ needs.strict-clippy.result }}') |"
             echo "| Panic Patterns | $(map_status '${{ needs.panic-patterns.result }}') |"
             echo "| Documentation | $(map_status '${{ needs.doc-verification.result }}') |"
+            echo "| **No Panics (Library)** | $(map_status '${{ needs.no-panics.result }}') |"
             echo ""
             echo "### Related Checks (in other workflows)"
             echo ""
@@ -479,6 +571,11 @@ jobs:
 
           if [[ "${{ needs.doc-verification.result }}" == "failure" ]]; then
             echo "::error::Documentation verification failed"
+            exit 1
+          fi
+
+          if [[ "${{ needs.no-panics.result }}" == "failure" ]]; then
+            echo "::error::No-panics check failed - library code contains panic-prone patterns"
             exit 1
           fi
 
