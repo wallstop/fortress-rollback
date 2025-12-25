@@ -3129,7 +3129,8 @@ fn test_chaos_conditions_data_driven() {
         },
     ];
 
-    let mut base_port = 9100u16;
+    // Use 9200+ range to avoid conflicts with tests/sessions/p2p.rs (uses 9100-9109)
+    let mut base_port = 9200u16;
 
     for test_case in &test_cases {
         eprintln!("\n[Data-Driven Test] Running: {}", test_case.name);
@@ -3178,8 +3179,9 @@ fn test_chaos_conditions_data_driven() {
 #[test]
 #[serial]
 fn test_sync_timeout_detection() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9150);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9151);
+    // Use 9250+ range to avoid conflicts with tests/sessions/p2p.rs (uses 9100-9109)
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9250);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9251);
 
     // Use very short timeout with heavy packet loss to trigger timeout
     let short_timeout_config = SyncConfig {
@@ -3197,14 +3199,14 @@ fn test_sync_timeout_detection() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(9150, chaos_config.clone());
+    let socket1 = create_chaos_socket(9250, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(short_timeout_config.clone())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9151, chaos_config);
+    let socket2 = create_chaos_socket(9251, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(short_timeout_config)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -3269,8 +3271,9 @@ fn test_sync_timeout_detection() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_burst_loss_matches_sync_packets() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9160);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9161);
+    // Use 9260+ range to avoid conflicts with tests/sessions/p2p.rs (uses 9100-9109)
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9260);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9261);
 
     // Configure burst loss length equal to default sync packets (5)
     // This tests the edge case where a burst could wipe out all initial sync attempts
@@ -3289,14 +3292,14 @@ fn test_burst_loss_matches_sync_packets() -> Result<(), FortressError> {
         keepalive_interval: Duration::from_millis(100),
     };
 
-    let socket1 = create_chaos_socket(9160, chaos_config.clone());
+    let socket1 = create_chaos_socket(9260, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(resilient_config.clone())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9161, chaos_config);
+    let socket2 = create_chaos_socket(9261, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(resilient_config)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
