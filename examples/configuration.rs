@@ -10,12 +10,20 @@
 //!
 //! Run with: `cargo run --example configuration`
 
-// Allow print macros - examples use println! to demonstrate library usage to users
-#![allow(clippy::print_stdout, clippy::print_stderr, clippy::disallowed_macros)]
-// Allow needless_update because we explicitly show `..Default::default()` pattern for
-// forward compatibility - even when all fields are specified, this pattern ensures
-// the example code will continue to compile when new fields are added in future versions.
-#![allow(clippy::needless_update)]
+// Allow example-specific patterns
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::disallowed_macros,
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    // Allow needless_update because we explicitly show `..Default::default()` pattern for
+    // forward compatibility - even when all fields are specified, this pattern ensures
+    // the example code will continue to compile when new fields are added in future versions.
+    clippy::needless_update
+)]
 
 use fortress_rollback::{
     Config, DesyncDetection, ProtocolConfig, SaveMode, SessionBuilder, SpectatorConfig, SyncConfig,

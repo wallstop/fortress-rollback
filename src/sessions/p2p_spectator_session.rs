@@ -21,6 +21,7 @@ use crate::{
 const NORMAL_SPEED: usize = 1;
 
 /// [`SpectatorSession`] provides all functionality to connect to a remote host in a peer-to-peer fashion.
+///
 /// The host will broadcast all confirmed inputs to this session.
 /// This session can be used to spectate a session without contributing to the game input.
 pub struct SpectatorSession<T>
@@ -195,7 +196,7 @@ impl<T: Config> SpectatorSession<T> {
         }
 
         // handle all events locally
-        for (event, addr) in events.drain(..) {
+        for (event, addr) in std::mem::take(&mut events) {
             self.handle_event(event, addr);
         }
 
@@ -228,15 +229,28 @@ impl<T: Config> SpectatorSession<T> {
             });
         }
 
-        let player_inputs = &self.inputs[frame_to_grab.as_i32() as usize % self.buffer_size];
+        let player_inputs = self
+            .inputs
+            .get(frame_to_grab.as_i32() as usize % self.buffer_size)
+            .ok_or_else(|| FortressError::InternalError {
+                context: format!(
+                    "Buffer index out of bounds: frame {} % buffer_size {}",
+                    frame_to_grab, self.buffer_size
+                ),
+            })?;
 
         // We haven't received the input from the host yet. Wait.
-        if player_inputs[0].frame < frame_to_grab {
+        let first_input = player_inputs
+            .first()
+            .ok_or_else(|| FortressError::InternalError {
+                context: "Player inputs vector is empty".into(),
+            })?;
+        if first_input.frame < frame_to_grab {
             return Err(FortressError::PredictionThreshold);
         }
 
         // The host is more than buffer_size frames ahead of the spectator. The input we need is gone forever.
-        if player_inputs[0].frame > frame_to_grab {
+        if first_input.frame > frame_to_grab {
             return Err(FortressError::SpectatorTooFarBehind);
         }
 
@@ -244,11 +258,14 @@ impl<T: Config> SpectatorSession<T> {
             .iter()
             .enumerate()
             .map(|(handle, player_input)| {
-                if self.host_connect_status[handle].disconnected
-                    && self.host_connect_status[handle].last_frame < frame_to_grab
-                {
-                    (player_input.input, InputStatus::Disconnected)
+                if let Some(status) = self.host_connect_status.get(handle) {
+                    if status.disconnected && status.last_frame < frame_to_grab {
+                        (player_input.input, InputStatus::Disconnected)
+                    } else {
+                        (player_input.input, InputStatus::Confirmed)
+                    }
                 } else {
+                    // If we can't get the connection status, assume confirmed
                     (player_input.input, InputStatus::Confirmed)
                 }
             })
@@ -328,8 +345,30 @@ impl<T: Config> SpectatorSession<T> {
                 }
 
                 // save the input
-                self.inputs[input.frame.as_i32() as usize % self.buffer_size][player.as_usize()] =
-                    input;
+                let frame_index = input.frame.as_i32() as usize % self.buffer_size;
+                if let Some(frame_inputs) = self.inputs.get_mut(frame_index) {
+                    if let Some(player_input) = frame_inputs.get_mut(player.as_usize()) {
+                        *player_input = input;
+                    } else {
+                        report_violation!(
+                            ViolationSeverity::Warning,
+                            ViolationKind::InternalError,
+                            "Failed to store input for player {} at frame {} - player index out of bounds",
+                            player,
+                            input.frame
+                        );
+                        return;
+                    }
+                } else {
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::InternalError,
+                        "Failed to store input at frame {} - frame index {} out of bounds",
+                        input.frame,
+                        frame_index
+                    );
+                    return;
+                }
 
                 // Validate frame ordering - should receive frames in order
                 if input.frame < self.last_recv_frame {
@@ -351,8 +390,16 @@ impl<T: Config> SpectatorSession<T> {
 
                 // update the host connection status
                 for i in 0..self.num_players {
-                    self.host_connect_status[i] =
-                        self.host.peer_connect_status(PlayerHandle::new(i));
+                    if let Some(status) = self.host_connect_status.get_mut(i) {
+                        *status = self.host.peer_connect_status(PlayerHandle::new(i));
+                    } else {
+                        report_violation!(
+                            ViolationSeverity::Warning,
+                            ViolationKind::InternalError,
+                            "Failed to update connection status for player {} - index out of bounds",
+                            i
+                        );
+                    }
                 }
             },
         }
@@ -365,6 +412,13 @@ impl<T: Config> SpectatorSession<T> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::needless_collect
+)]
 mod tests {
     use super::*;
     use crate::{Config, Message, NonBlockingSocket, SessionBuilder};

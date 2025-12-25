@@ -18,9 +18,6 @@
 //! - INV-IQ-1: length <= queue_length
 //! - INV-IQ-2: head < queue_length
 //! - INV-IQ-3: tail < queue_length
-
-// Allow hardcoded IP addresses - 127.0.0.1 is appropriate for tests
-#![allow(clippy::ip_constant)]
 //! - INV-IQ-4: first_incorrect_frame is NULL or < last_added_frame (adjusted for delay)
 //!
 //! ## SyncLayer (from check_invariants implementation)
@@ -29,6 +26,15 @@
 //! - INV-SL-3: first_incorrect_frame < current_frame (or NULL)
 //! - INV-SL-4: current_frame >= 0
 //! - INV-SL-5: All input queues pass their invariant checks
+
+// Allow test-specific patterns that are appropriate for test code
+#![allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::ip_constant
+)]
 
 use fortress_rollback::__internal::{InputQueue, PlayerInput, SavedStates, SyncLayer};
 use fortress_rollback::telemetry::{InvariantChecker, InvariantViolation};

@@ -41,11 +41,22 @@ impl<T> SavedStates<T> {
             });
         }
         let pos = frame.as_i32() as usize % self.states.len();
-        Ok(self.states[pos].clone())
+        self.states
+            .get(pos)
+            .cloned()
+            .ok_or_else(|| FortressError::InternalError {
+                context: format!("states index {} out of bounds", pos),
+            })
     }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 

@@ -17,10 +17,18 @@
 //!
 //! Run with: `cargo run --example custom_socket`
 
-// Allow print macros - examples use println! to demonstrate library usage to users
-#![allow(clippy::print_stdout, clippy::print_stderr, clippy::disallowed_macros)]
-// Allow complex types in example code for clarity
-#![allow(clippy::type_complexity)]
+// Allow example-specific patterns
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::disallowed_macros,
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::type_complexity,
+    clippy::use_self
+)]
 
 use fortress_rollback::{Message, NonBlockingSocket};
 use std::collections::VecDeque;

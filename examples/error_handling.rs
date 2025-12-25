@@ -10,8 +10,17 @@
 //!
 //! Run with: `cargo run --example error_handling`
 
-// Allow print macros - examples use println! to demonstrate library usage to users
-#![allow(clippy::print_stdout, clippy::print_stderr, clippy::disallowed_macros)]
+// Allow example-specific patterns
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::disallowed_macros,
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::literal_string_with_formatting_args
+)]
 
 use fortress_rollback::{
     Config, FortressError, PlayerHandle, PlayerType, SessionBuilder, UdpNonBlockingSocket,

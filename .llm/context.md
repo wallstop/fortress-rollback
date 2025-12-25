@@ -297,6 +297,22 @@ z network                                       # Jump to dir matching "network"
 - **All clippy lints pass** — `clippy::all`, `clippy::pedantic`, `clippy::nursery`
 - **No broken doc links** — All intra-doc links must resolve
 - **Public items documented** — Rustdoc with examples
+- **Overflow checks in release** — Integer overflow is caught at runtime
+
+### Safety-Focused CI Checks (ci-safety.yml)
+
+The project runs comprehensive safety checks beyond standard linting:
+
+| Check | Purpose |
+|-------|---------|
+| **Cargo Careful** | Extra runtime safety checks using nightly |
+| **Overflow Checks** | Release builds with `-C overflow-checks=on` |
+| **Debug Assertions** | Release builds with `-C debug-assertions=on` |
+| **Panic Patterns** | Counts `unwrap`, `expect`, `panic!`, `todo!` usage |
+| **Strict Clippy** | Nursery lints enabled for experimental checks |
+| **Documentation** | Doc build with `-D warnings` (warnings as errors) |
+
+See also: `ci-rust.yml` (Miri UB detection), `ci-security.yml` (cargo-geiger, cargo-deny)
 
 ### Documentation Template
 

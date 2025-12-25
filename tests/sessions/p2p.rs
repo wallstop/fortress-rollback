@@ -1,7 +1,29 @@
 //! P2P session integration tests.
+//!
+//! # Port Allocation
+//!
+//! This test file uses ports **9100-9109** (test_desync_detection_intervals_data_driven)
+//! and **19001+** (test_multiple_sessions_isolated). When adding new tests that bind
+//! to UDP ports, ensure they don't conflict with other test files:
+//!
+//! | Test File                     | Port Range      |
+//! |-------------------------------|-----------------|
+//! | tests/config.rs               | 9100-9109       |
+//! | tests/sessions/p2p.rs         | 9100-9109, 19001+ |
+//! | tests/network/resilience.rs   | 9001-9070, 9200-9299 |
+//!
+//! **Important**: Even with `#[serial]`, tests in different crates can run
+//! in parallel. Choose non-overlapping port ranges to avoid "Address already
+//! in use" errors in CI.
 
-// Allow hardcoded IP addresses - 127.0.0.1 is appropriate for tests
-#![allow(clippy::ip_constant)]
+// Allow test-specific patterns that are appropriate for test code
+#![allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::ip_constant
+)]
 
 use crate::common::stubs::{CorruptibleGameStub, GameStub, StubConfig, StubInput};
 use fortress_rollback::{

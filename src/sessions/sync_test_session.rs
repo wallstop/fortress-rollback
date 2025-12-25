@@ -11,6 +11,7 @@ use crate::telemetry::{ViolationKind, ViolationObserver, ViolationSeverity};
 use crate::{Config, FortressRequest, Frame, PlayerHandle};
 
 /// During a [`SyncTestSession`], Fortress Rollback will simulate a rollback every frame and resimulate the last n states, where n is the given check distance.
+///
 /// The resimulated checksums will be compared with the original checksums and report if there was a mismatch.
 pub struct SyncTestSession<T>
 where
@@ -329,6 +330,12 @@ impl<T: Config> SyncTestSession<T> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 #[allow(unreachable_patterns)] // FortressRequest is #[non_exhaustive]
 mod tests {
     use super::*;

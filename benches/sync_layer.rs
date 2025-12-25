@@ -2,6 +2,14 @@
 //!
 //! Run with: cargo bench --bench sync_layer
 
+// Allow benchmark-specific patterns
+#![allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
+
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::hint::black_box;
 

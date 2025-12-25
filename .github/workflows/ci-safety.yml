@@ -1,0 +1,588 @@
+name: CI - Safety & Correctness
+
+# Comprehensive safety verification suite for Rust code
+# Includes:
+# - cargo-careful: Runtime checks for debug assertions
+# - Strict build modes: overflow-checks, debug-assertions
+# - Panic pattern analysis: Detects unwrap/expect/panic/todo/unreachable
+# - Strict clippy: Pedantic + nursery lints
+# - Documentation verification: Warnings as errors
+#
+# Note: Miri, cargo-geiger, and cargo-deny are in separate workflows
+# (ci-rust.yml and ci-security.yml)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'clippy.toml'
+      - '.github/workflows/ci-safety.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'clippy.toml'
+      - '.github/workflows/ci-safety.yml'
+  schedule:
+    # Run weekly on Sundays at 3 AM UTC for thorough analysis
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: safety-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ============================================================================
+  # CARGO CAREFUL - EXTRA RUNTIME CHECKS
+  # ============================================================================
+  careful:
+    name: Cargo Careful (Runtime Safety)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: careful-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: careful-${{ runner.os }}-cargo-
+
+      - name: Install cargo-careful
+        run: cargo install cargo-careful --locked
+
+      - name: Run tests with cargo-careful
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Cargo Careful Report"
+            echo ""
+            echo "Running tests with extra safety checks enabled..."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # cargo-careful enables extra UB checks in the standard library
+          if cargo careful test --lib 2>&1 | tee careful-output.txt; then
+            echo "✅ All careful tests passed" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "⚠️ Some careful tests failed (see logs)" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Upload careful report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: careful-report
+          path: careful-output.txt
+          retention-days: 30
+
+  # ============================================================================
+  # STRICTER BUILD CHECKS
+  # ============================================================================
+  strict-build:
+    name: Strict Build (${{ matrix.check }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: overflow-checks
+            rustflags: "-C overflow-checks=on"
+            description: "Overflow checks in release mode"
+          - check: debug-assertions
+            rustflags: "-C debug-assertions=on"
+            description: "Debug assertions in release mode"
+          - check: warnings-as-errors
+            rustflags: "-D warnings"
+            description: "All warnings treated as errors"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: strict-${{ matrix.check }}-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: strict-${{ matrix.check }}-${{ runner.os }}-cargo-
+
+      - name: Build with ${{ matrix.check }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Strict Build: ${{ matrix.check }}"
+            echo ""
+            echo "${{ matrix.description }}"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          RUSTFLAGS="${{ matrix.rustflags }}" cargo build --release 2>&1 | tee build-${{ matrix.check }}.txt
+          BUILD_EXIT_CODE=${PIPESTATUS[0]}
+
+          if [ "$BUILD_EXIT_CODE" -ne 0 ]; then
+            echo "❌ Build with ${{ matrix.check }} FAILED" >> "$GITHUB_STEP_SUMMARY"
+            exit "$BUILD_EXIT_CODE"
+          fi
+
+          echo "✅ Build with ${{ matrix.check }} passed" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+
+      - name: Run tests with ${{ matrix.check }}
+        run: |
+          RUSTFLAGS="${{ matrix.rustflags }}" cargo test --release --lib 2>&1 | tee test-${{ matrix.check }}.txt
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+
+      - name: Upload build report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: strict-build-${{ matrix.check }}-report
+          path: |
+            build-${{ matrix.check }}.txt
+            test-${{ matrix.check }}.txt
+          retention-days: 30
+
+  # ============================================================================
+  # STRICT CLIPPY LINTS (NURSERY)
+  # ============================================================================
+  strict-clippy:
+    name: Strict Clippy (Nursery)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: strict-clippy-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: strict-clippy-${{ runner.os }}-cargo-
+
+      - name: Run strict clippy lints (nursery)
+        shell: bash
+        run: |
+          {
+            echo "## Strict Clippy Lints (Nursery)"
+            echo ""
+            echo "Running clippy with nursery lints enabled..."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Run clippy with nursery lints enabled
+          # These are experimental but useful for catching additional issues
+          # Lints from Cargo.toml are already applied; here we add nursery
+          cargo clippy --all-targets -- \
+            -D warnings \
+            -W clippy::nursery \
+            -A clippy::significant_drop_tightening \
+            -A clippy::redundant_pub_crate \
+            -A clippy::future_not_send \
+            -A clippy::cognitive_complexity \
+            -A clippy::missing_const_for_fn \
+            -A clippy::option_if_let_else \
+            -A clippy::or_fun_call \
+            -A clippy::branches_sharing_code \
+            -A clippy::collection_is_never_read \
+            -A clippy::debug_assert_with_mut_call \
+            -A clippy::derive_partial_eq_without_eq \
+            -A clippy::empty_line_after_doc_comments \
+            -A clippy::empty_line_after_outer_attr \
+            -A clippy::equatable_if_let \
+            -A clippy::fallible_impl_from \
+            -A clippy::if_then_some_else_none \
+            -A clippy::imprecise_flops \
+            -A clippy::iter_on_empty_collections \
+            -A clippy::iter_on_single_items \
+            -A clippy::iter_with_drain \
+            -A clippy::large_stack_frames \
+            -A clippy::mutex_integer \
+            -A clippy::needless_collect \
+            -A clippy::needless_raw_string_hashes \
+            -A clippy::nonstandard_macro_braces \
+            -A clippy::path_ends_with_ext \
+            -A clippy::read_zero_byte_vec \
+            -A clippy::readonly_write_lock \
+            -A clippy::significant_drop_in_scrutinee \
+            -A clippy::string_lit_as_bytes \
+            -A clippy::suboptimal_flops \
+            -A clippy::suspicious_operation_groupings \
+            -A clippy::trait_duplication_in_bounds \
+            -A clippy::transmute_undefined_repr \
+            -A clippy::trivial_regex \
+            -A clippy::type_repetition_in_bounds \
+            -A clippy::uninhabited_references \
+            -A clippy::unnecessary_struct_initialization \
+            -A clippy::unused_peekable \
+            -A clippy::unused_rounding \
+            -A clippy::use_self \
+            -A clippy::useless_let_if_seq \
+            2>&1 | tee clippy-nursery.txt
+
+          echo "✅ Strict clippy (nursery) passed" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload clippy report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: strict-clippy-nursery-report
+          path: clippy-nursery.txt
+          retention-days: 30
+
+  # ============================================================================
+  # PANIC PATTERN ANALYSIS
+  # ============================================================================
+  panic-patterns:
+    name: Panic Pattern Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Check for panic-prone patterns
+        id: panic-check
+        run: |
+          # Count potentially dangerous patterns in src/ (excluding tests, examples)
+          UNWRAP_COUNT=$(grep -rc "\.unwrap()" src/ --include="*.rs" 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
+          EXPECT_COUNT=$(grep -rc "\.expect(" src/ --include="*.rs" 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
+          PANIC_COUNT=$(grep -rc "panic!" src/ --include="*.rs" 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
+          TODO_COUNT=$(grep -rc "todo!" src/ --include="*.rs" 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
+          UNIMPLEMENTED_COUNT=$(grep -rc "unimplemented!" src/ --include="*.rs" 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
+          UNREACHABLE_COUNT=$(grep -rc "unreachable!" src/ --include="*.rs" 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
+
+          {
+            echo "## Panic-Prone Pattern Analysis"
+            echo ""
+            echo "### Production Code (src/)"
+            echo ""
+            echo "| Pattern | Count | Status |"
+            echo "|---------|-------|--------|"
+            echo "| .unwrap() | $UNWRAP_COUNT | $([ "$UNWRAP_COUNT" -gt 50 ] && echo '⚠️ Review needed' || echo '✅ OK') |"
+            echo "| .expect() | $EXPECT_COUNT | $([ "$EXPECT_COUNT" -gt 50 ] && echo '⚠️ Review needed' || echo '✅ OK') |"
+            echo "| panic! | $PANIC_COUNT | $([ "$PANIC_COUNT" -gt 10 ] && echo '⚠️ Review needed' || echo '✅ OK') |"
+            echo "| todo! | $TODO_COUNT | $([ "$TODO_COUNT" -gt 0 ] && echo '❌ Must fix' || echo '✅ None') |"
+            echo "| unimplemented! | $UNIMPLEMENTED_COUNT | $([ "$UNIMPLEMENTED_COUNT" -gt 0 ] && echo '❌ Must fix' || echo '✅ None') |"
+            echo "| unreachable! | $UNREACHABLE_COUNT | $([ "$UNREACHABLE_COUNT" -gt 5 ] && echo '⚠️ Review needed' || echo '✅ OK') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Store counts for later steps
+          {
+            echo "unwrap_count=$UNWRAP_COUNT"
+            echo "expect_count=$EXPECT_COUNT"
+            echo "panic_count=$PANIC_COUNT"
+            echo "todo_count=$TODO_COUNT"
+            echo "unimplemented_count=$UNIMPLEMENTED_COUNT"
+            echo "unreachable_count=$UNREACHABLE_COUNT"
+          } >> "$GITHUB_OUTPUT"
+
+          # Fail if there are any todo! or unimplemented! in production code
+          if [ "$TODO_COUNT" -gt 0 ]; then
+            echo "::error::Found $TODO_COUNT todo! macros in production code"
+            echo "FAIL_TODO=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "$UNIMPLEMENTED_COUNT" -gt 0 ]; then
+            echo "::error::Found $UNIMPLEMENTED_COUNT unimplemented! macros in production code"
+            echo "FAIL_UNIMPLEMENTED=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: List unwrap/expect locations
+        run: |
+          {
+            echo ""
+            echo "### Locations of .unwrap() and .expect() calls"
+            echo ""
+            echo "<details>"
+            echo "<summary>Click to expand</summary>"
+            echo ""
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # List all unwrap and expect locations (limited to first 100)
+          grep -rn "\.unwrap()\|\.expect(" src/ --include="*.rs" 2>/dev/null | head -100 >> "$GITHUB_STEP_SUMMARY" || echo "None found" >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "\`\`\`"
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check for must-fix issues
+        if: steps.panic-check.outputs.FAIL_TODO == 'true' || steps.panic-check.outputs.FAIL_UNIMPLEMENTED == 'true'
+        run: exit 1
+
+  # ============================================================================
+  # DOCUMENTATION VERIFICATION
+  # ============================================================================
+  doc-verification:
+    name: Documentation Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: doc-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: doc-${{ runner.os }}-cargo-
+
+      - name: Build documentation with warnings as errors
+        run: |
+          {
+            echo "## Documentation Build"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Build docs and treat warnings as errors
+          if RUSTDOCFLAGS="-D warnings" cargo doc --no-deps 2>&1 | tee doc-build.txt; then
+            echo "✅ Documentation builds without warnings" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "❌ Documentation has warnings (treated as errors)" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Run documentation tests
+        run: |
+          if cargo test --doc 2>&1 | tee doc-tests.txt; then
+            echo "✅ All doc tests passed" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "❌ Some doc tests failed" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Upload documentation report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: doc-report
+          path: |
+            doc-build.txt
+            doc-tests.txt
+          retention-days: 30
+
+  # ============================================================================
+  # PANIC PREVENTION - Block PRs with panic-prone code
+  # ============================================================================
+  no-panics:
+    name: No Panics Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-ci
+          cache-on-failure: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Check for panic-prone patterns (library only)
+        run: |
+          {
+            echo "## No-Panics Check"
+            echo ""
+            echo "Verifying library code is free of panic-prone patterns..."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Run clippy with strict panic-prevention lints on LIBRARY code only
+          # Test code is allowed to use unwrap/expect for cleaner assertions
+          # These lints catch code that could panic at runtime:
+          # - clippy::panic: explicit panic!() calls
+          # - clippy::unwrap_used: .unwrap() calls
+          # - clippy::expect_used: .expect() calls
+          # - clippy::todo: todo!() macros
+          # - clippy::unimplemented: unimplemented!() macros
+          # - clippy::unreachable: unreachable!() macros
+          # - clippy::indexing_slicing: unchecked array/slice indexing
+          if cargo clippy --lib -- \
+              -D clippy::panic \
+              -D clippy::unwrap_used \
+              -D clippy::expect_used \
+              -D clippy::todo \
+              -D clippy::unimplemented \
+              -D clippy::unreachable \
+              -D clippy::indexing_slicing \
+              2>&1 | tee clippy-panics.txt; then
+            echo "✅ No panic-prone patterns found in library code" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "❌ Panic-prone patterns detected in library code!"
+              echo ""
+              echo "### Detected Issues"
+              echo ""
+              echo "Your library code contains patterns that could panic at runtime:"
+              echo "- \`.unwrap()\` calls"
+              echo "- \`.expect()\` calls"
+              echo "- \`panic!()\`, \`todo!()\`, \`unimplemented!()\`, \`unreachable!()\` macros"
+              echo "- Unchecked array indexing \`[i]\`"
+              echo ""
+              echo "### How to Fix"
+              echo ""
+              echo "| Pattern | Safe Alternative |"
+              echo "|---------|------------------|"
+              echo "| \`.unwrap()\` | \`.ok_or()?\`, \`.unwrap_or_default()\`, \`.unwrap_or(val)\` |"
+              echo "| \`.expect()\` | \`.ok_or_else(\\|\\| Error::...)?\`, handle with \`match\` |"
+              echo "| \`panic!()\` | Return \`Result::Err\`, use proper error types |"
+              echo "| \`todo!()\` | Implement the functionality or return error |"
+              echo "| \`vec[i]\` | \`vec.get(i)\`, \`vec.first()\`, \`vec.last()\` |"
+              echo ""
+              echo "See \`.llm/context.md\` 'Defensive Programming' section for detailed patterns."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Upload clippy report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: no-panics-clippy-report
+          path: clippy-panics.txt
+          retention-days: 7
+
+  # ============================================================================
+  # SUMMARY
+  # ============================================================================
+  safety-summary:
+    name: Safety Check Summary
+    runs-on: ubuntu-latest
+    needs: [careful, strict-build, strict-clippy, panic-patterns, doc-verification, no-panics]
+    if: always()
+
+    steps:
+      - name: Generate summary
+        run: |
+          map_status() {
+            case "$1" in
+              success) echo "✅ Passed" ;;
+              failure) echo "❌ Failed" ;;
+              skipped) echo "⏭️ Skipped" ;;
+              cancelled) echo "🚫 Cancelled" ;;
+              *) echo "❓ Unknown" ;;
+            esac
+          }
+
+          {
+            echo "## Safety Check Summary"
+            echo ""
+            echo "| Check | Status |"
+            echo "|-------|--------|"
+            echo "| Cargo Careful | $(map_status '${{ needs.careful.result }}') |"
+            echo "| Strict Builds | $(map_status '${{ needs.strict-build.result }}') |"
+            echo "| Strict Clippy (Nursery) | $(map_status '${{ needs.strict-clippy.result }}') |"
+            echo "| Panic Patterns | $(map_status '${{ needs.panic-patterns.result }}') |"
+            echo "| Documentation | $(map_status '${{ needs.doc-verification.result }}') |"
+            echo "| **No Panics (Library)** | $(map_status '${{ needs.no-panics.result }}') |"
+            echo ""
+            echo "### Related Checks (in other workflows)"
+            echo ""
+            echo "- **Miri (UB Detection)**: See ci-rust.yml"
+            echo "- **Unsafe Code Audit (cargo-geiger)**: See ci-security.yml"
+            echo "- **Supply Chain Security (cargo-deny)**: See ci-security.yml"
+            echo ""
+            echo "### Recommendations"
+            echo ""
+            echo "- Review any warnings in the individual job logs"
+            echo "- Replace \`.unwrap()\` with proper error handling where possible"
+            echo "- Ensure all \`panic!\` calls are intentional and documented"
+            echo "- Run \`cargo clippy --all-targets\` locally before pushing"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check for critical failures
+        run: |
+          # Fail if any critical checks failed
+          if [[ "${{ needs.strict-build.result }}" == "failure" ]]; then
+            echo "::error::Strict build checks failed"
+            exit 1
+          fi
+
+          if [[ "${{ needs.panic-patterns.result }}" == "failure" ]]; then
+            echo "::error::Panic pattern analysis failed (todo! or unimplemented! found)"
+            exit 1
+          fi
+
+          if [[ "${{ needs.doc-verification.result }}" == "failure" ]]; then
+            echo "::error::Documentation verification failed"
+            exit 1
+          fi
+
+          if [[ "${{ needs.no-panics.result }}" == "failure" ]]; then
+            echo "::error::No-panics check failed - library code contains panic-prone patterns"
+            exit 1
+          fi
+
+          # Log warnings for non-critical failures
+          if [[ "${{ needs.careful.result }}" == "failure" ]]; then
+            echo "::warning::Cargo careful tests failed"
+          fi
+
+          if [[ "${{ needs.strict-clippy.result }}" == "failure" ]]; then
+            echo "::warning::Strict clippy (nursery) checks failed - review for improvement opportunities"
+          fi

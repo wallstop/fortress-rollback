@@ -262,7 +262,9 @@ pub trait Rng {
         let remainder = chunks.into_remainder();
         if !remainder.is_empty() {
             let val = self.next_u32().to_le_bytes();
-            remainder.copy_from_slice(&val[..remainder.len()]);
+            if let Some(val_slice) = val.get(..remainder.len()) {
+                remainder.copy_from_slice(val_slice);
+            }
         }
     }
 }
@@ -270,12 +272,12 @@ pub trait Rng {
 impl Rng for Pcg32 {
     #[inline]
     fn next_u32(&mut self) -> u32 {
-        Pcg32::next_u32(self)
+        Self::next_u32(self)
     }
 
     #[inline]
     fn next_u64(&mut self) -> u64 {
-        Pcg32::next_u64(self)
+        Self::next_u64(self)
     }
 }
 
@@ -287,13 +289,13 @@ pub trait RandomValue {
 
 impl RandomValue for u8 {
     fn random<R: Rng + ?Sized>(rng: &mut R) -> Self {
-        rng.next_u32() as u8
+        rng.next_u32() as Self
     }
 }
 
 impl RandomValue for u16 {
     fn random<R: Rng + ?Sized>(rng: &mut R) -> Self {
-        rng.next_u32() as u16
+        rng.next_u32() as Self
     }
 }
 
@@ -311,32 +313,32 @@ impl RandomValue for u64 {
 
 impl RandomValue for i8 {
     fn random<R: Rng + ?Sized>(rng: &mut R) -> Self {
-        rng.next_u32() as i8
+        rng.next_u32() as Self
     }
 }
 
 impl RandomValue for i16 {
     fn random<R: Rng + ?Sized>(rng: &mut R) -> Self {
-        rng.next_u32() as i16
+        rng.next_u32() as Self
     }
 }
 
 impl RandomValue for i32 {
     fn random<R: Rng + ?Sized>(rng: &mut R) -> Self {
-        rng.next_u32() as i32
+        rng.next_u32() as Self
     }
 }
 
 impl RandomValue for i64 {
     fn random<R: Rng + ?Sized>(rng: &mut R) -> Self {
-        rng.next_u64() as i64
+        rng.next_u64() as Self
     }
 }
 
 impl RandomValue for u128 {
     fn random<R: Rng + ?Sized>(rng: &mut R) -> Self {
-        let high = u128::from(rng.next_u64());
-        let low = u128::from(rng.next_u64());
+        let high = Self::from(rng.next_u64());
+        let low = Self::from(rng.next_u64());
         (high << 64) | low
     }
 }
@@ -346,7 +348,7 @@ impl RandomValue for f32 {
     fn random<R: Rng + ?Sized>(rng: &mut R) -> Self {
         // Use the upper 24 bits (f32 has 24 bits of mantissa precision)
         let val = rng.next_u32() >> 8;
-        val as f32 / (1u32 << 24) as f32
+        val as Self / (1u32 << 24) as Self
     }
 }
 
@@ -355,7 +357,7 @@ impl RandomValue for f64 {
     fn random<R: Rng + ?Sized>(rng: &mut R) -> Self {
         // Use the upper 53 bits (f64 has 53 bits of mantissa precision)
         let val = rng.next_u64() >> 11;
-        val as f64 / (1u64 << 53) as f64
+        val as Self / (1u64 << 53) as Self
     }
 }
 
@@ -448,6 +450,12 @@ fn timing_entropy_seed() -> u64 {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 
@@ -772,6 +780,12 @@ mod tests {
 // =============================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod property_tests {
     use super::*;
     use proptest::prelude::*;

@@ -153,8 +153,13 @@ impl TimeSync {
             );
             return;
         }
-        self.local[frame.as_i32() as usize % self.window_size] = local_adv;
-        self.remote[frame.as_i32() as usize % self.window_size] = remote_adv;
+        let index = frame.as_i32() as usize % self.window_size;
+        if let Some(local_slot) = self.local.get_mut(index) {
+            *local_slot = local_adv;
+        }
+        if let Some(remote_slot) = self.remote.get_mut(index) {
+            *remote_slot = remote_adv;
+        }
     }
 
     /// Calculates the average frame advantage between local and remote peers.
@@ -176,6 +181,12 @@ impl TimeSync {
 // #########
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod sync_layer_tests {
 
     use super::*;
@@ -542,6 +553,12 @@ mod sync_layer_tests {
 // =============================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod property_tests {
     use super::*;
     use proptest::prelude::*;

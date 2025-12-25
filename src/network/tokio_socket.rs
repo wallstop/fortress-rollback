@@ -580,6 +580,12 @@ impl NonBlockingSocket<SocketAddr> for TokioUdpSocket {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
     use crate::network::messages::{MessageBody, MessageHeader};

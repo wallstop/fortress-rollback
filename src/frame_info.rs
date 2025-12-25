@@ -1,6 +1,8 @@
 use crate::Frame;
 
-/// Represents the game state of your game for a single frame. The `data` holds the game state, `frame` indicates the associated frame number
+/// Represents the game state of your game for a single frame.
+///
+/// The `data` holds the game state, `frame` indicates the associated frame number
 /// and `checksum` can additionally be provided for use during a `SyncTestSession`.
 ///
 /// # Note
@@ -33,7 +35,7 @@ impl<S> Default for GameState<S> {
 ///
 /// This type is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
 /// It is not part of the stable public API.
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct PlayerInput<I>
 where
     I: Copy + Clone + PartialEq,
@@ -69,6 +71,12 @@ impl<I: Copy + Clone + PartialEq + Default> PlayerInput<I> {
 // #########
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod game_state_tests {
     use super::*;
 
@@ -198,6 +206,12 @@ mod game_state_tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod player_input_tests {
     use super::*;
 

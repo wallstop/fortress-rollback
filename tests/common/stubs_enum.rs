@@ -1,5 +1,16 @@
 //! Game stub implementations for testing with enum-based inputs.
 
+// Allow test-specific patterns that are appropriate for test code
+#![allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_ref_mut,
+    clippy::use_self,
+    clippy::derive_partial_eq_without_eq
+)]
+
 use std::hash::Hash;
 use std::net::SocketAddr;
 

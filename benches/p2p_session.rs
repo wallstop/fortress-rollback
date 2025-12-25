@@ -5,6 +5,16 @@
 //! These benchmarks measure the performance of key session operations that run
 //! every frame (60+ times/second in typical games).
 
+// Allow benchmark-specific patterns
+#![allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_ref_mut,
+    clippy::use_self
+)]
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use fortress_rollback::{
     Config, FortressRequest, Frame, PlayerHandle, SessionBuilder, SyncTestSession,

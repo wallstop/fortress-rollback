@@ -11,6 +11,14 @@
 //! 2. **Timing Invariance**: Relative timing relationships are preserved
 //! 3. **Replay Consistency**: Replaying same sequence produces identical results
 
+// Allow test-specific patterns that are appropriate for test code
+#![allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
+
 use fortress_rollback::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

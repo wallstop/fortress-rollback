@@ -204,7 +204,15 @@ impl<T: Config> SyncLayer<T> {
                 max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
             });
         }
-        self.input_queues[player_handle.as_usize()].set_frame_delay(delay)?;
+        self.input_queues
+            .get_mut(player_handle.as_usize())
+            .ok_or_else(|| FortressError::InternalError {
+                context: format!(
+                    "input_queues index {} out of bounds",
+                    player_handle.as_usize()
+                ),
+            })?
+            .set_frame_delay(delay)?;
         Ok(())
     }
 
@@ -214,7 +222,9 @@ impl<T: Config> SyncLayer<T> {
     /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
     pub fn reset_prediction(&mut self) {
         for i in 0..self.num_players {
-            self.input_queues[i].reset_prediction();
+            if let Some(queue) = self.input_queues.get_mut(i) {
+                queue.reset_prediction();
+            }
         }
     }
 
@@ -307,7 +317,9 @@ impl<T: Config> SyncLayer<T> {
             );
             return Frame::NULL;
         }
-        self.input_queues[player_handle.as_usize()].add_input(input)
+        self.input_queues
+            .get_mut(player_handle.as_usize())
+            .map_or(Frame::NULL, |queue| queue.add_input(input))
     }
 
     /// Adds remote input to the corresponding input queue.
@@ -317,7 +329,9 @@ impl<T: Config> SyncLayer<T> {
         player_handle: PlayerHandle,
         input: PlayerInput<T::Input>,
     ) {
-        self.input_queues[player_handle.as_usize()].add_input(input);
+        if let Some(queue) = self.input_queues.get_mut(player_handle.as_usize()) {
+            queue.add_input(input);
+        }
     }
 
     /// Returns inputs for all players for the current frame of the sync layer. If there are none for a specific player, return predictions.
@@ -341,7 +355,8 @@ impl<T: Config> SyncLayer<T> {
             if con_stat.disconnected && con_stat.last_frame < self.current_frame {
                 inputs.push((T::Input::default(), InputStatus::Disconnected));
             } else {
-                inputs.push(self.input_queues[i].input(self.current_frame)?);
+                let queue = self.input_queues.get_mut(i)?;
+                inputs.push(queue.input(self.current_frame)?);
             }
         }
         Some(inputs)
@@ -358,7 +373,13 @@ impl<T: Config> SyncLayer<T> {
             if con_stat.disconnected && con_stat.last_frame < frame {
                 inputs.push(PlayerInput::blank_input(Frame::NULL));
             } else {
-                inputs.push(self.input_queues[i].confirmed_input(frame)?);
+                let queue =
+                    self.input_queues
+                        .get(i)
+                        .ok_or_else(|| FortressError::InternalError {
+                            context: format!("input_queues index {} out of bounds", i),
+                        })?;
+                inputs.push(queue.confirmed_input(frame)?);
             }
         }
         Ok(inputs)
@@ -369,10 +390,9 @@ impl<T: Config> SyncLayer<T> {
         // don't set the last confirmed frame after the first incorrect frame before a rollback has happened
         let mut first_incorrect: Frame = Frame::NULL;
         for handle in 0..self.num_players {
-            first_incorrect = std::cmp::max(
-                first_incorrect,
-                self.input_queues[handle].first_incorrect_frame(),
-            );
+            if let Some(queue) = self.input_queues.get(handle) {
+                first_incorrect = std::cmp::max(first_incorrect, queue.first_incorrect_frame());
+            }
         }
 
         // if sparse saving option is turned on, don't set the last confirmed frame after the last saved frame
@@ -399,7 +419,9 @@ impl<T: Config> SyncLayer<T> {
         self.last_confirmed_frame = frame;
         if self.last_confirmed_frame.as_i32() > 0 {
             for i in 0..self.num_players {
-                self.input_queues[i].discard_confirmed_frames(frame - 1);
+                if let Some(queue) = self.input_queues.get_mut(i) {
+                    queue.discard_confirmed_frames(frame - 1);
+                }
             }
         }
     }
@@ -407,9 +429,13 @@ impl<T: Config> SyncLayer<T> {
     /// Finds the earliest incorrect frame detected by the individual input queues
     pub(crate) fn check_simulation_consistency(&self, mut first_incorrect: Frame) -> Frame {
         for handle in 0..self.num_players {
-            let incorrect = self.input_queues[handle].first_incorrect_frame();
-            if !incorrect.is_null() && (first_incorrect.is_null() || incorrect < first_incorrect) {
-                first_incorrect = incorrect;
+            if let Some(queue) = self.input_queues.get(handle) {
+                let incorrect = queue.first_incorrect_frame();
+                if !incorrect.is_null()
+                    && (first_incorrect.is_null() || incorrect < first_incorrect)
+                {
+                    first_incorrect = incorrect;
+                }
             }
         }
         first_incorrect
@@ -558,6 +584,12 @@ impl<T: Config> InvariantChecker for SyncLayer<T> {
 // #########
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod sync_layer_tests {
 
     use super::*;

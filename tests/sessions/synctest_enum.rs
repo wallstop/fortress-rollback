@@ -1,5 +1,13 @@
 //! SyncTest session integration tests with enum-based inputs.
 
+// Allow test-specific patterns that are appropriate for test code
+#![allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
+
 use crate::common::stubs_enum::{EnumInput, GameStubEnum, StubEnumConfig};
 use fortress_rollback::{FortressError, PlayerHandle, SessionBuilder};
 

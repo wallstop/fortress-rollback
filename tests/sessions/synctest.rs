@@ -1,5 +1,13 @@
 //! SyncTest session integration tests.
 
+// Allow test-specific patterns that are appropriate for test code
+#![allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
+
 use crate::common::stubs::{GameStub, RandomChecksumGameStub, StubConfig, StubInput};
 use fortress_rollback::{FortressError, FortressRequest, PlayerHandle, SessionBuilder};
 

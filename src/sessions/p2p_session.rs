@@ -130,7 +130,7 @@ impl<T: Config> P2PSession<T> {
         let mut sync_layer =
             SyncLayer::with_queue_length(num_players, max_prediction, queue_length);
         for (player_handle, player_type) in players.handles.iter() {
-            if let PlayerType::Local = player_type {
+            if matches!(player_type, PlayerType::Local) {
                 // This should never fail during construction as player handles are validated
                 if let Err(e) = sync_layer.set_frame_delay(*player_handle, input_delay) {
                     report_violation!(
@@ -350,7 +350,15 @@ impl<T: Config> P2PSession<T> {
             player_input.frame = actual_frame;
             // if the input has not been dropped
             if actual_frame != Frame::NULL {
-                self.local_connect_status[handle.as_usize()].last_frame = actual_frame;
+                self.local_connect_status
+                    .get_mut(handle.as_usize())
+                    .ok_or_else(|| FortressError::InternalError {
+                        context: format!(
+                            "Invalid player handle {} when updating connection status",
+                            handle
+                        ),
+                    })?
+                    .last_frame = actual_frame;
             }
         }
 
@@ -454,7 +462,7 @@ impl<T: Config> P2PSession<T> {
         }
 
         // handle all events locally
-        for (event, handles, addr) in events.drain(..) {
+        for (event, handles, addr) in std::mem::take(&mut events) {
             self.handle_event(event, handles, addr);
         }
 
@@ -483,8 +491,17 @@ impl<T: Config> P2PSession<T> {
             }),
             // a remote player can only be disconnected if not already disconnected, since there is some additional logic attached
             Some(PlayerType::Remote(_)) => {
-                if !self.local_connect_status[player_handle.as_usize()].disconnected {
-                    let last_frame = self.local_connect_status[player_handle.as_usize()].last_frame;
+                let status = self
+                    .local_connect_status
+                    .get(player_handle.as_usize())
+                    .ok_or_else(|| FortressError::InternalError {
+                        context: format!(
+                            "Invalid player handle {} when checking disconnect status",
+                            player_handle
+                        ),
+                    })?;
+                if !status.disconnected {
+                    let last_frame = status.last_frame;
                     self.disconnect_player_at_frame(player_handle, last_frame);
                     return Ok(());
                 }
@@ -981,7 +998,16 @@ impl<T: Config> P2PSession<T> {
 
                 // mark the affected players as disconnected
                 for &handle in endpoint.handles() {
-                    self.local_connect_status[handle.as_usize()].disconnected = true;
+                    let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) else {
+                        report_violation!(
+                            ViolationSeverity::Warning,
+                            ViolationKind::InternalError,
+                            "Invalid player handle {} when marking as disconnected - skipping",
+                            handle
+                        );
+                        continue;
+                    };
+                    status.disconnected = true;
                 }
                 endpoint.disconnect();
 
@@ -1230,8 +1256,17 @@ impl<T: Config> P2PSession<T> {
             }
 
             // check our local info for that player
-            let local_connected = !self.local_connect_status[handle_idx].disconnected;
-            let local_min_confirmed = self.local_connect_status[handle_idx].last_frame;
+            let Some(status) = self.local_connect_status.get(handle_idx) else {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::InternalError,
+                    "Invalid player index {} when checking connection status - skipping",
+                    handle_idx
+                );
+                continue;
+            };
+            let local_connected = !status.disconnected;
+            let local_min_confirmed = status.last_frame;
 
             if local_connected {
                 queue_min_confirmed = std::cmp::min(queue_min_confirmed, local_min_confirmed);
@@ -1253,7 +1288,16 @@ impl<T: Config> P2PSession<T> {
         let mut interval = i32::MIN;
         for endpoint in self.player_reg.remotes.values() {
             for &handle in endpoint.handles() {
-                if !self.local_connect_status[handle.as_usize()].disconnected {
+                let Some(status) = self.local_connect_status.get(handle.as_usize()) else {
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::InternalError,
+                        "Invalid player handle {} when checking frame advantage - skipping",
+                        handle
+                    );
+                    continue;
+                };
+                if !status.disconnected {
                     interval = std::cmp::max(interval, endpoint.average_frame_advantage());
                 }
             }
@@ -1361,8 +1405,21 @@ impl<T: Config> P2PSession<T> {
             // disconnect the player, then forward to user
             Event::Disconnected => {
                 for handle in player_handles {
+                    // unwrap_or_else has side effects (violation reporting)
+                    #[allow(clippy::map_unwrap_or)]
                     let last_frame = if handle.is_valid_player_for(self.num_players) {
-                        self.local_connect_status[handle.as_usize()].last_frame
+                        self.local_connect_status
+                            .get(handle.as_usize())
+                            .map(|s| s.last_frame)
+                            .unwrap_or_else(|| {
+                                report_violation!(
+                                    ViolationSeverity::Warning,
+                                    ViolationKind::InternalError,
+                                    "Invalid player handle {} when handling disconnect event - using NULL frame",
+                                    handle
+                                );
+                                Frame::NULL
+                            })
                     } else {
                         Frame::NULL // spectator
                     };
@@ -1391,10 +1448,18 @@ impl<T: Config> P2PSession<T> {
                     );
                     return;
                 }
-                if !self.local_connect_status[player.as_usize()].disconnected {
+                let Some(status) = self.local_connect_status.get_mut(player.as_usize()) else {
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::InternalError,
+                        "Invalid player handle {} when handling input event - ignoring",
+                        player
+                    );
+                    return;
+                };
+                if !status.disconnected {
                     // check if the input comes in the correct sequence
-                    let current_remote_frame =
-                        self.local_connect_status[player.as_usize()].last_frame;
+                    let current_remote_frame = status.last_frame;
                     if current_remote_frame != Frame::NULL
                         && current_remote_frame + 1 != input.frame
                     {
@@ -1408,7 +1473,7 @@ impl<T: Config> P2PSession<T> {
                         return;
                     }
                     // update our info
-                    self.local_connect_status[player.as_usize()].last_frame = input.frame;
+                    status.last_frame = input.frame;
                     // add the remote input
                     self.sync_layer.add_remote_input(player, input);
                 }
@@ -1559,6 +1624,13 @@ impl<T: Config> InvariantChecker for P2PSession<T> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::needless_collect
+)]
 mod tests {
     use super::*;
     use crate::network::messages::Message;
@@ -2361,8 +2433,9 @@ mod tests {
         let session = create_two_player_session();
         let health = session.all_sync_health();
         assert_eq!(health.len(), 1);
-        assert_eq!(health[0].0, PlayerHandle::new(1));
-        assert_eq!(health[0].1, SyncHealth::Pending);
+        let first = health.first().expect("Expected at least one entry");
+        assert_eq!(first.0, PlayerHandle::new(1));
+        assert_eq!(first.1, SyncHealth::Pending);
     }
 
     // ==========================================
