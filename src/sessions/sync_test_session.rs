@@ -330,6 +330,12 @@ impl<T: Config> SyncTestSession<T> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 #[allow(unreachable_patterns)] // FortressRequest is #[non_exhaustive]
 mod tests {
     use super::*;

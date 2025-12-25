@@ -450,6 +450,12 @@ fn timing_entropy_seed() -> u64 {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 
@@ -774,6 +780,12 @@ mod tests {
 // =============================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod property_tests {
     use super::*;
     use proptest::prelude::*;

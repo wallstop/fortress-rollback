@@ -764,6 +764,12 @@ impl<T: Config> InvariantChecker for InputQueue<T> {
 // #########
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod input_queue_tests {
 
     use std::net::SocketAddr;
@@ -1709,6 +1715,12 @@ mod input_queue_tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod property_tests {
     use super::*;
     use proptest::prelude::*;

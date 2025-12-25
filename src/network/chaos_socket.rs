@@ -763,6 +763,12 @@ where
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod tests {
     // Allow float_cmp for tests - we're comparing exact values set via builder, not computed values
     #![allow(clippy::float_cmp)]

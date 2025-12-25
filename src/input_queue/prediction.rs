@@ -110,6 +110,12 @@ impl<I: Copy + Default> PredictionStrategy<I> for BlankPrediction {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};

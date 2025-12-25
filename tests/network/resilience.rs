@@ -2247,6 +2247,10 @@ fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
 
 /// Test rapid connect/disconnect cycles to stress connection handling.
 /// Simulates network flapping.
+///
+/// Note: This test uses harsh network conditions (15% burst loss, 8-packet bursts)
+/// which exceed the default SyncConfig capabilities. We use SyncConfig::extreme()
+/// which is designed for 10%+ burst loss scenarios with longer timeouts.
 #[test]
 #[serial]
 fn test_network_flapping_simulation() -> Result<(), FortressError> {
@@ -2254,6 +2258,8 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
     let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9058);
 
     // Simulate flapping with burst loss
+    // 15% burst probability with 8-packet bursts is very aggressive
+    // Requires SyncConfig::extreme() for reliable synchronization
     let chaos_config = ChaosConfig::builder()
         .latency_ms(25)
         .burst_loss(0.15, 8) // 15% chance of dropping 8 consecutive packets
@@ -2262,18 +2268,21 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
 
     let socket1 = create_chaos_socket(9057, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_sync_config(SyncConfig::extreme()) // Required for harsh conditions
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
     let socket2 = create_chaos_socket(9058, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_sync_config(SyncConfig::extreme()) // Required for harsh conditions
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
     // Synchronize with extra tolerance for bursts
-    for _ in 0..400 {
+    // SyncConfig::extreme() has 30s timeout, so we use 800 iterations × 40ms = 32s
+    for _ in 0..800 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
         std::thread::sleep(Duration::from_millis(40));
@@ -2288,12 +2297,14 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
     assert_eq!(
         sess1.current_state(),
         SessionState::Running,
-        "Session 1 failed to synchronize under flapping"
+        "Session 1 failed to synchronize under flapping (state: {:?})",
+        sess1.current_state()
     );
     assert_eq!(
         sess2.current_state(),
         SessionState::Running,
-        "Session 2 failed to synchronize under flapping"
+        "Session 2 failed to synchronize under flapping (state: {:?})",
+        sess2.current_state()
     );
 
     // Advance frames

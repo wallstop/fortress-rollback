@@ -181,6 +181,12 @@ impl TimeSync {
 // #########
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod sync_layer_tests {
 
     use super::*;
@@ -547,6 +553,12 @@ mod sync_layer_tests {
 // =============================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod property_tests {
     use super::*;
     use proptest::prelude::*;

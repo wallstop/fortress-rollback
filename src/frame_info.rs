@@ -71,6 +71,12 @@ impl<I: Copy + Clone + PartialEq + Default> PlayerInput<I> {
 // #########
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod game_state_tests {
     use super::*;
 
@@ -200,6 +206,12 @@ mod game_state_tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod player_input_tests {
     use super::*;
 

@@ -121,6 +121,12 @@ pub fn delta_decode(
   // #########
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod compression_tests {
     use super::*;
 
@@ -226,6 +232,12 @@ mod compression_tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod property_tests {
     use super::*;
     use proptest::prelude::*;
