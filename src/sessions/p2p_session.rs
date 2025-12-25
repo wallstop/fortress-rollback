@@ -1405,6 +1405,8 @@ impl<T: Config> P2PSession<T> {
             // disconnect the player, then forward to user
             Event::Disconnected => {
                 for handle in player_handles {
+                    // unwrap_or_else has side effects (violation reporting)
+                    #[allow(clippy::map_unwrap_or)]
                     let last_frame = if handle.is_valid_player_for(self.num_players) {
                         self.local_connect_status
                             .get(handle.as_usize())
@@ -1626,7 +1628,8 @@ impl<T: Config> InvariantChecker for P2PSession<T> {
     clippy::panic,
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::needless_collect
 )]
 mod tests {
     use super::*;

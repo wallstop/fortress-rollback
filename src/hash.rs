@@ -281,7 +281,8 @@ mod tests {
     clippy::panic,
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::tuple_array_conversions
 )]
 mod property_tests {
     use super::*;

@@ -896,7 +896,9 @@ impl<T: Config> UdpProtocol<T> {
     clippy::panic,
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::needless_collect,
+    clippy::unchecked_duration_subtraction
 )]
 mod tests {
     use super::*;

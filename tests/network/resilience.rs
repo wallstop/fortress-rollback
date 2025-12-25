@@ -7,8 +7,14 @@
 //! - Jitter (variable latency)
 //! - Combined conditions
 
-// Allow hardcoded IP addresses - 127.0.0.1 is appropriate for tests
-#![allow(clippy::ip_constant)]
+// Allow test-specific patterns that are appropriate for test code
+#![allow(
+    clippy::ip_constant,
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 
 use crate::common::stubs::{GameStub, StubConfig, StubInput};
 use fortress_rollback::{

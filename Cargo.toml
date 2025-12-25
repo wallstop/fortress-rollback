@@ -155,8 +155,8 @@ semicolon_if_nothing_returned = "allow"
 struct_excessive_bools = "allow"
 # Allow trivially copy pass by ref (API consistency)
 trivially_copy_pass_by_ref = "allow"
-# Allow unchecked duration subtraction (validated)
-unchecked_duration_subtraction = "allow"
+# Allow unchecked time subtraction (validated)
+unchecked_time_subtraction = "allow"
 
 # Note: wildcard_enum_match_arm is NOT enabled because public enums use #[non_exhaustive],
 # which already forces external users to handle wildcards. Internal test code uses wildcards

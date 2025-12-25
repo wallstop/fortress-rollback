@@ -3,6 +3,14 @@
 //! These tests verify that the macro correctly dispatches to the appropriate
 //! handlers and processes requests in order.
 
+// Allow test-specific patterns that are appropriate for test code
+#![allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
+
 use fortress_rollback::{handle_requests, Config, FortressRequest, Frame, GameStateCell, InputVec};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;

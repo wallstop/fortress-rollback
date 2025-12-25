@@ -18,6 +18,13 @@
 //! - **Chaos conditions**: Testing with packet loss, latency, jitter
 //! - **Stress tests**: High frame counts, aggressive network conditions
 
+// Allow test-specific patterns that are appropriate for test code
+#![allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 // Allow print macros for test debugging output
 #![allow(clippy::print_stdout, clippy::print_stderr, clippy::disallowed_macros)]
 

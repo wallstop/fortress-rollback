@@ -497,10 +497,8 @@ where
             } else {
                 // Negative jitter reduces latency but not below zero
                 let reduction = Duration::from_nanos((-jitter_offset) as u64);
-                if reduction > base_latency {
-                    return Instant::now(); // Clamp to now
-                }
-                return Instant::now() + base_latency - reduction;
+                // saturating_sub ensures we never get a negative duration
+                return Instant::now() + base_latency.saturating_sub(reduction);
             }
         } else {
             Duration::ZERO
@@ -767,12 +765,10 @@ where
     clippy::panic,
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::float_cmp
 )]
 mod tests {
-    // Allow float_cmp for tests - we're comparing exact values set via builder, not computed values
-    #![allow(clippy::float_cmp)]
-
     use super::*;
     use std::net::SocketAddr;
 

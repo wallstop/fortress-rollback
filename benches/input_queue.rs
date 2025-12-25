@@ -5,6 +5,14 @@
 //! Note: InputQueue is internal, so we benchmark through the public session APIs.
 //! For direct InputQueue benchmarks, the module would need to be made public.
 
+// Allow benchmark-specific patterns
+#![allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use fortress_rollback::Frame;
 use std::hint::black_box;

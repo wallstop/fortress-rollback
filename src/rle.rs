@@ -112,6 +112,7 @@ mod varint {
     /// Decodes a varint from the buffer starting at offset.
     /// Returns (decoded_value, bytes_consumed).
     #[inline]
+    #[allow(clippy::while_let_loop)] // Multiple break conditions make while-let less clear
     pub fn decode(buf: &[u8], offset: usize) -> (u64, usize) {
         let mut value: u64 = 0;
         let mut shift = 0;

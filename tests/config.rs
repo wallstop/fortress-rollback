@@ -7,8 +7,14 @@
 //! 4. Preset methods return sensible values
 //! 5. Configs are properly applied to sessions
 
-// Allow hardcoded IP addresses - 127.0.0.1 is appropriate for tests
-#![allow(clippy::ip_constant)]
+// Allow test-specific patterns that are appropriate for test code
+#![allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::ip_constant
+)]
 
 // Shared test infrastructure
 #[path = "common/mod.rs"]

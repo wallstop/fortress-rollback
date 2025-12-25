@@ -21,6 +21,14 @@
 //! - INV-SL6: Multiple players get correct inputs
 //! - INV-SL7: Checksums are deterministic (same state → same checksum)
 
+// Allow test-specific patterns that are appropriate for test code
+#![allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
+
 use fortress_rollback::__internal::{InputQueue, PlayerInput, SavedStates, SyncLayer};
 use fortress_rollback::telemetry::InvariantChecker;
 use fortress_rollback::{Config, FortressRequest, Frame, InputStatus};
