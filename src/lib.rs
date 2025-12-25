@@ -395,6 +395,106 @@ impl Frame {
             None => Self::NULL,
         }
     }
+
+    // === Checked Arithmetic Methods ===
+    // These methods provide overflow-safe alternatives to the standard operators.
+    // While overflow-checks are enabled in release mode (which panics on overflow),
+    // these methods allow graceful handling of edge cases.
+
+    /// Adds a value to this frame, returning `None` if overflow occurs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// let frame = Frame::new(100);
+    /// assert_eq!(frame.checked_add(50), Some(Frame::new(150)));
+    /// assert_eq!(Frame::new(i32::MAX).checked_add(1), None);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn checked_add(self, rhs: i32) -> Option<Self> {
+        match self.0.checked_add(rhs) {
+            Some(result) => Some(Self(result)),
+            None => None,
+        }
+    }
+
+    /// Subtracts a value from this frame, returning `None` if overflow occurs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// let frame = Frame::new(100);
+    /// assert_eq!(frame.checked_sub(50), Some(Frame::new(50)));
+    /// assert_eq!(Frame::new(i32::MIN).checked_sub(1), None);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn checked_sub(self, rhs: i32) -> Option<Self> {
+        match self.0.checked_sub(rhs) {
+            Some(result) => Some(Self(result)),
+            None => None,
+        }
+    }
+
+    /// Adds a value to this frame, saturating at the numeric bounds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// let frame = Frame::new(100);
+    /// assert_eq!(frame.saturating_add(50), Frame::new(150));
+    /// assert_eq!(Frame::new(i32::MAX).saturating_add(1), Frame::new(i32::MAX));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn saturating_add(self, rhs: i32) -> Self {
+        Self(self.0.saturating_add(rhs))
+    }
+
+    /// Subtracts a value from this frame, saturating at the numeric bounds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// let frame = Frame::new(100);
+    /// assert_eq!(frame.saturating_sub(50), Frame::new(50));
+    /// assert_eq!(Frame::new(i32::MIN).saturating_sub(1), Frame::new(i32::MIN));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn saturating_sub(self, rhs: i32) -> Self {
+        Self(self.0.saturating_sub(rhs))
+    }
+
+    /// Returns the absolute difference between two frames.
+    ///
+    /// This is useful for calculating frame distances without worrying about
+    /// the order of operands.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// let a = Frame::new(100);
+    /// let b = Frame::new(150);
+    /// assert_eq!(a.abs_diff(b), 50);
+    /// assert_eq!(b.abs_diff(a), 50);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn abs_diff(self, other: Self) -> u32 {
+        self.0.abs_diff(other.0)
+    }
 }
 
 impl std::fmt::Display for Frame {

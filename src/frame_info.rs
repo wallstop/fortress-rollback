@@ -48,11 +48,14 @@ where
 
 impl<I: Copy + Clone + PartialEq + Default> PlayerInput<I> {
     /// Creates a new `PlayerInput` with the given frame and input.
+    #[inline]
+    #[must_use]
     pub fn new(frame: Frame, input: I) -> Self {
         Self { frame, input }
     }
 
     /// Creates a blank input with the default value for the input type.
+    #[inline]
     #[must_use]
     pub fn blank_input(frame: Frame) -> Self {
         Self {
@@ -61,6 +64,11 @@ impl<I: Copy + Clone + PartialEq + Default> PlayerInput<I> {
         }
     }
 
+    /// Compares two inputs for equality.
+    ///
+    /// When `compare_mode` is `CompareInputOnly`, only the input data is compared,
+    /// ignoring the frame. When `CompareFrameAndInput`, both frame and input must match.
+    #[inline]
     pub(crate) fn equal(&self, other: &Self, input_only: bool) -> bool {
         (input_only || self.frame == other.frame) && self.input == other.input
     }

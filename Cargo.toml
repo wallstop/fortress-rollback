@@ -236,6 +236,53 @@ string_add = "warn"                         # Use push_str() instead of + for ef
 # Documentation hygiene
 unnecessary_safety_comment = "warn"         # Remove spurious // SAFETY: comments
 unnecessary_safety_doc = "warn"             # Remove spurious /// # Safety sections
+#
+# === Additional defensive restriction lints ===
+# Explicit patterns over implicit behavior
+# NOTE: clone_on_ref_ptr is NOT enabled because `arc.clone()` is idiomatic Rust
+# and clearer than `Arc::clone(&arc)` in most contexts. The explicit form is only
+# needed when there's ambiguity about which clone is being called.
+format_push_string = "warn"                 # Use write! instead of format! + push_str
+mixed_read_write_in_expression = "warn"     # Avoid confusing read+write in same expression
+# NOTE: same_name_method is NOT enabled because PCG32's next_u32/next_u64 intentionally
+# shadow the RngCore trait methods for better API ergonomics.
+# NOTE: std_instead_of_core and alloc_instead_of_core are NOT enabled because this crate
+# is std-only and does not aim for no_std compatibility. Enabling these would require
+# changing hundreds of std:: references for no practical benefit.
+#
+# Additional safety-focused lints
+as_underscore = "warn"                      # Explicit type in `as _` conversions
+# NOTE: assertions_on_result_states is NOT enabled because test code frequently uses
+# assert!(result.is_ok()) and assert!(result.is_err()) for clarity in test assertions.
+# NOTE: decimal_literal_representation is NOT enabled because it triggers on common
+# values like 16384, 1000, etc. that are more readable in decimal in context.
+default_union_representation = "warn"       # Require repr(C) on unions for FFI safety
+empty_structs_with_brackets = "warn"        # Use `struct Foo;` not `struct Foo {}`
+error_impl_error = "warn"                   # Custom Error types should impl std::error::Error
+fn_to_numeric_cast_any = "warn"             # Catch function pointer to int casts
+# NOTE: impl_trait_in_params is NOT enabled because `impl AsRef<[u8]>` is idiomatic
+# and clearer than verbose generic parameters for this use case.
+infinite_loop = "warn"                      # Warn on `loop {}` without break
+iter_over_hash_type = "warn"                # Warn about non-deterministic iteration order
+# NOTE: let_underscore_must_use is NOT enabled because test code frequently uses
+# `let _ = expression` to verify code compiles and doesn't panic, and examples
+# ignore channel send results as best practice for documentation examples.
+# NOTE: min_ident_chars is NOT enabled because it triggers on common idiomatic patterns
+# like `let (k, v)`, `Some(s)`, etc. that are clear from context.
+# NOTE: missing_assert_message is NOT enabled because test code uses hundreds of asserts
+# where the context is already clear from the surrounding test function name.
+needless_raw_strings = "warn"               # Don't use r"" when "" works
+# NOTE: partial_pub_fields is NOT enabled because test stubs intentionally mix pub/private
+# fields to match production structs' field visibility.
+# NOTE: redundant_type_annotations is NOT enabled because test code uses explicit
+# type annotations for documentation purposes to show expected types.
+renamed_function_params = "warn"            # Consistent parameter names across impls
+# NOTE: self_named_module_files is NOT enabled because integration tests use the standard
+# tests/*.rs pattern which is clearer than tests/*/mod.rs for this project.
+# NOTE: tests_outside_test_module is NOT enabled because integration tests are in the
+# standard tests/ directory, not inside #[cfg(test)] modules.
+try_err = "warn"                            # Use ? instead of Err(e)?
+undocumented_unsafe_blocks = "warn"         # Require SAFETY comments on unsafe
 
 [features]
 sync-send = []
