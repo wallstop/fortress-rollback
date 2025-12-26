@@ -3031,29 +3031,36 @@ impl ChaosTestCase {
         let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), base_port);
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), base_port + 1);
 
-        // Build chaos configuration
-        let mut builder = ChaosConfig::builder()
-            .latency_ms(self.latency_ms)
-            .packet_loss_rate(self.packet_loss)
-            .seed(42); // Deterministic for reproducibility
+        // Build chaos configurations with DIFFERENT seeds for each socket.
+        // Using the same seed causes correlated packet loss patterns that can
+        // systematically block synchronization (see module documentation).
+        let build_chaos_config = |seed: u64| {
+            let mut builder = ChaosConfig::builder()
+                .latency_ms(self.latency_ms)
+                .packet_loss_rate(self.packet_loss)
+                .seed(seed);
 
-        if self.burst_loss_probability > 0.0 {
-            builder = builder.burst_loss(self.burst_loss_probability, self.burst_loss_length);
-        }
-        if self.jitter_ms > 0 {
-            builder = builder.jitter_ms(self.jitter_ms);
-        }
+            if self.burst_loss_probability > 0.0 {
+                builder = builder.burst_loss(self.burst_loss_probability, self.burst_loss_length);
+            }
+            if self.jitter_ms > 0 {
+                builder = builder.jitter_ms(self.jitter_ms);
+            }
 
-        let chaos_config = builder.build();
+            builder.build()
+        };
 
-        let socket1 = create_chaos_socket(base_port, chaos_config.clone());
+        let chaos_config1 = build_chaos_config(42);
+        let chaos_config2 = build_chaos_config(43); // Different seed to avoid correlated loss
+
+        let socket1 = create_chaos_socket(base_port, chaos_config1);
         let mut sess1 = SessionBuilder::<StubConfig>::new()
             .with_sync_config(self.sync_config.clone())
             .add_player(PlayerType::Local, PlayerHandle::new(0))?
             .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
             .start_p2p_session(socket1)?;
 
-        let socket2 = create_chaos_socket(base_port + 1, chaos_config);
+        let socket2 = create_chaos_socket(base_port + 1, chaos_config2);
         let mut sess2 = SessionBuilder::<StubConfig>::new()
             .with_sync_config(self.sync_config.clone())
             .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
