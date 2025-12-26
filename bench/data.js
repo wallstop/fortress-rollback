@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1766778477998,
+  "lastUpdate": 1766781005000,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
@@ -4907,6 +4907,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1553,
             "range": "± 103",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0c8e43684bbf9019783dd3325da5fe4ef2f8b313",
+          "message": "Eliminate non-determinism for cross-platform consistency (#32)\n\nThis change addresses non-determinism in the network protocol by:\n\n1. Replacing DefaultHasher with DeterministicHasher in\ntiming_entropy_seed()\n   - DefaultHasher uses a random seed which varies between runs\n- DeterministicHasher (FNV-1a) provides consistent hashing across\nplatforms\n\n2. Adding optional protocol_rng_seed to ProtocolConfig\n   - When set, provides fully deterministic protocol behavior\n   - Useful for replay systems, deterministic testing, and debugging\n   - New ProtocolConfig::deterministic(seed) preset for convenience\n\n3. Updating UdpProtocol to use seeded RNG for:\n   - Magic number generation (session identifiers)\n   - Sync request validation tokens\n\nThis enables fully reproducible network sessions when configured,\nessential for cross-platform determinism in rollback networking.\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+          "timestamp": "2025-12-26T12:25:08-08:00",
+          "tree_id": "ebd87eaa42fc0bc9ae6972a7b3ae33efe6f8aa56",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/0c8e43684bbf9019783dd3325da5fe4ef2f8b313"
+        },
+        "date": 1766781001084,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 100,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 151,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 490,
+            "range": "± 21",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 730,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1043,
+            "range": "± 29",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 104087,
+            "range": "± 406",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 27547,
+            "range": "± 951",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1242,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1554,
+            "range": "± 107",
             "unit": "ns/iter"
           },
           {
