@@ -14,6 +14,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2025-12-26
+
+### Added
+
+- `ProtocolConfig::deterministic(seed)` preset for fully reproducible network sessions
+- `ProtocolConfig::protocol_rng_seed` field for deterministic RNG seeding
+- `SessionBuilder::with_event_queue_size()` for configurable event queue capacity
+- `ProtocolConfig::input_history_multiplier` field with presets (competitive=2, high_latency=3)
+- `ProtocolConfig::validate()` method for configuration validation
+- `#[must_use]` attributes on key session methods (`advance_frame()`, `disconnect_player()`, etc.)
+
+### Changed
+
+- **Breaking:** `SessionBuilder::with_input_delay()` and `with_num_players()` now return `Result<Self, FortressError>` instead of silently clamping invalid values
+- Replaced floating-point arithmetic with integer-only calculation in `TimeSync::average_frame_advantage()` to eliminate potential non-determinism
+- Replaced `DefaultHasher` with `DeterministicHasher` (FNV-1a) in `timing_entropy_seed()` for cross-platform consistency
+- Reduced cloning overhead in `poll_remote_clients()` by using `Arc<[PlayerHandle]>` instead of `Vec<PlayerHandle>`
+- Pre-allocated compression buffers to reduce allocations in network hot paths
+
+### Fixed
+
+- Fixed sync timeout event flooding that could occur under certain conditions
+
 ## [0.2.0] - 2025-12-20
 
 ### Added
