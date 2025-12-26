@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1766711199297,
+  "lastUpdate": 1766711201391,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
@@ -4277,6 +4277,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1553,
             "range": "± 104",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d1404255461374b9390a4fe3c7bc56079fbf0bbc",
+          "message": "Even stricter clippy lints (#27)\n\n## Static Analysis Improvements\n- Add 15+ additional restriction lints with documented rationale:\n  - format_push_string, mixed_read_write_in_expression\n  - as_underscore, default_union_representation\n  - empty_structs_with_brackets, error_impl_error\n  - fn_to_numeric_cast_any, infinite_loop\n  - iter_over_hash_type, needless_raw_strings\n  - renamed_function_params, try_err\n  - undocumented_unsafe_blocks\n- Document explicitly why certain strict lints are NOT enabled:\n  - std_instead_of_core (not no_std compatible)\n  - clone_on_ref_ptr (arc.clone() is idiomatic)\n  - min_ident_chars (triggers on idiomatic patterns)\n  - impl_trait_in_params (impl AsRef is clearer)\n  - And 8 more with detailed rationale\n\n## Panic Safety Improvements\n- Add checked/saturating arithmetic methods to Frame type:\n  - checked_add, checked_sub: return None on overflow\n  - saturating_add, saturating_sub: clamp at bounds\n  - abs_diff: safe frame distance calculation\n- All new methods are const, inline, and documented with examples\n\n## Performance Optimizations\n- Add #[inline] hints to small hot-path functions in frame_info.rs\n- Add Vec::with_capacity hints where sizes are known:\n  - input_bytes.rs: from_inputs and to_player_inputs\n  - rle.rs: noncontiguous_bits pre-allocation\n- Add #[must_use] to PlayerInput::new\n\nAll tests pass (888 tests).\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+          "timestamp": "2025-12-25T17:01:36-08:00",
+          "tree_id": "c8c02e8b78386c62ea91fe817d6ec3d1af901dfc",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/d1404255461374b9390a4fe3c7bc56079fbf0bbc"
+        },
+        "date": 1766711200491,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 99,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 152,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 498,
+            "range": "± 42",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 750,
+            "range": "± 23",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1024,
+            "range": "± 26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 102487,
+            "range": "± 653",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 27678,
+            "range": "± 844",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1242,
+            "range": "± 44",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 81",
             "unit": "ns/iter"
           },
           {
