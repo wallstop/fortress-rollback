@@ -52,6 +52,7 @@ use fortress_rollback::{ChaosConfig, ChaosSocket, UdpNonBlockingSocket};
 
 /// Helper to create a UDP socket wrapped with ChaosSocket for network resilience testing.
 #[allow(dead_code)]
+#[allow(clippy::expect_used)] // expect is acceptable in test utilities
 pub fn create_chaos_socket(
     port: u16,
     config: ChaosConfig,
