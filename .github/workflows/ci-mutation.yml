@@ -115,10 +115,8 @@ jobs:
             echo "<summary>Click to see mutation list</summary>"
             echo ""
             echo "\`\`\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-          cargo mutants --list \
-            ${{ github.event.inputs.file_filter && format('-f {0}', github.event.inputs.file_filter) || '' }} >> "$GITHUB_STEP_SUMMARY"
-          {
+            cargo mutants --list \
+              ${{ github.event.inputs.file_filter && format('-f {0}', github.event.inputs.file_filter) || '' }}
             echo "\`\`\`"
             echo ""
             echo "</details>"
@@ -195,10 +193,8 @@ jobs:
                 echo "<summary>Click to see details</summary>"
                 echo ""
                 echo "\`\`\`"
-              } >> "$GITHUB_STEP_SUMMARY"
-              jq -r '.outcomes[] | select(.outcome == "missed") | "\(.file):\(.line) - \(.function)"' \
-                mutants-out/mutants.json | head -50 >> "$GITHUB_STEP_SUMMARY"
-              {
+                jq -r '.outcomes[] | select(.outcome == "missed") | "\(.file):\(.line) - \(.function)"' \
+                  mutants-out/mutants.json | head -50
                 echo "\`\`\`"
                 echo ""
                 echo "</details>"
