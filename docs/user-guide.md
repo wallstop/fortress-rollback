@@ -83,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let remote_addr: SocketAddr = "127.0.0.1:7001".parse()?;
 
     let mut session = SessionBuilder::<MyConfig>::new()
-        .with_num_players(2)
+        .with_num_players(2)?
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
         .start_p2p_session(socket)?;
@@ -208,10 +208,10 @@ let remote_addr = "192.168.1.100:7000".parse()?;
 
 let mut session = SessionBuilder::<GameConfig>::new()
     // Number of active players (not spectators)
-    .with_num_players(2)
+    .with_num_players(2)?
 
     // Frames of input delay (reduces rollbacks, adds latency)
-    .with_input_delay(2)
+    .with_input_delay(2)?
 
     // How many frames ahead we can predict
     .with_max_prediction_window(8)
@@ -253,7 +253,7 @@ Set `max_prediction_window(0)` for lockstep networking:
 ```rust
 let session = SessionBuilder::<GameConfig>::new()
     .with_max_prediction_window(0) // Lockstep mode
-    .with_input_delay(0)           // No delay needed
+    .with_input_delay(0)?          // No delay needed
     // ...
 ```
 
@@ -591,7 +591,7 @@ Use `SyncTestSession` to verify your game is deterministic:
 
 ```rust
 let mut session = SessionBuilder::<GameConfig>::new()
-    .with_num_players(1)
+    .with_num_players(1)?
     .with_check_distance(2)  // How many frames to resimulate
     .start_synctest_session()?;
 
@@ -725,9 +725,9 @@ use fortress_rollback::{
 use web_time::Duration;
 
 let session = SessionBuilder::<GameConfig>::new()
-    .with_num_players(2)
+    .with_num_players(2)?
     // Zero input delay - immediate response
-    .with_input_delay(0)
+    .with_input_delay(0)?
     // Minimal prediction needed
     .with_max_prediction_window(4)
     // LAN presets for fast sync
@@ -772,9 +772,9 @@ use fortress_rollback::{
 use web_time::Duration;
 
 let session = SessionBuilder::<GameConfig>::new()
-    .with_num_players(2)
+    .with_num_players(2)?
     // Light input delay to reduce rollbacks
-    .with_input_delay(2)
+    .with_input_delay(2)?
     // Standard prediction window
     .with_max_prediction_window(8)
     // Default presets work well for regional
@@ -817,9 +817,9 @@ use fortress_rollback::{
 use web_time::Duration;
 
 let session = SessionBuilder::<GameConfig>::new()
-    .with_num_players(2)
+    .with_num_players(2)?
     // Higher input delay to reduce rollback frequency
-    .with_input_delay(4)
+    .with_input_delay(4)?
     // Large prediction window for latency spikes
     .with_max_prediction_window(12)
     // High-latency presets with longer intervals
@@ -873,9 +873,9 @@ use fortress_rollback::{
 use web_time::Duration;
 
 let session = SessionBuilder::<GameConfig>::new()
-    .with_num_players(2)
+    .with_num_players(2)?
     // Moderate input delay
-    .with_input_delay(3)
+    .with_input_delay(3)?
     // Large prediction window to handle dropped packets
     .with_max_prediction_window(15)
     // Lossy preset with extra sync packets
@@ -923,9 +923,9 @@ use fortress_rollback::{
 use web_time::Duration;
 
 let session = SessionBuilder::<GameConfig>::new()
-    .with_num_players(2)
+    .with_num_players(2)?
     // Minimal input delay for competitive edge
-    .with_input_delay(1)
+    .with_input_delay(1)?
     // Moderate prediction window
     .with_max_prediction_window(6)
     // Competitive presets
@@ -980,9 +980,9 @@ use fortress_rollback::{
 use web_time::Duration;
 
 let session = SessionBuilder::<GameConfig>::new()
-    .with_num_players(4)  // Or up to 8
+    .with_num_players(4)?  // Or up to 8
     // Higher input delay for stability with many players
-    .with_input_delay(3)
+    .with_input_delay(3)?
     // Large prediction window for worst-case latency
     .with_max_prediction_window(12)
     // Default presets work for mixed conditions
@@ -1032,8 +1032,8 @@ use web_time::Duration;
 
 // Host side: P2P session with spectator support
 let host_session = SessionBuilder::<GameConfig>::new()
-    .with_num_players(2)
-    .with_input_delay(2)
+    .with_num_players(2)?
+    .with_input_delay(2)?
     // Spectator-friendly config: larger buffer for varied viewers
     .with_spectator_config(SpectatorConfig {
         buffer_size: 180,      // 3 seconds at 60 FPS
@@ -1049,7 +1049,7 @@ let host_session = SessionBuilder::<GameConfig>::new()
 
 // Spectator side: uses high-latency tolerant config
 let spectator_session = SessionBuilder::<GameConfig>::new()
-    .with_num_players(2)
+    .with_num_players(2)?
     .with_sync_config(SyncConfig::high_latency())
     .with_protocol_config(ProtocolConfig::high_latency())
     .with_max_frames_behind(30)?
@@ -1197,7 +1197,7 @@ If saving state is expensive, enable sparse saving:
 
 ```rust
 let session = SessionBuilder::<GameConfig>::new()
-    .with_sparse_saving_mode(true)
+    .with_save_mode(SaveMode::Sparse)
     // ...
 ```
 
@@ -1319,7 +1319,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Use with SessionBuilder
     let session = SessionBuilder::<MyConfig>::new()
-        .with_num_players(2)
+        .with_num_players(2)?
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
         .start_p2p_session(socket)?;
@@ -1523,7 +1523,7 @@ wasm_bindgen_futures::spawn_local(message_loop);
 
 // Create session with matchbox socket
 let session = SessionBuilder::<GameConfig>::new()
-    .with_num_players(2)
+    .with_num_players(2)?
     .add_player(PlayerType::Local, PlayerHandle::new(0))?
     .add_player(PlayerType::Remote(peer_id), PlayerHandle::new(1))?
     .start_p2p_session(socket)?;
@@ -1602,7 +1602,7 @@ Spectators observe gameplay without contributing inputs:
 let spectator_addr = "192.168.1.200:8000".parse()?;
 
 let session = SessionBuilder::<GameConfig>::new()
-    .with_num_players(2)
+    .with_num_players(2)?
     .add_player(PlayerType::Local, PlayerHandle::new(0))?
     .add_player(PlayerType::Remote(player2_addr), PlayerHandle::new(1))?
     // Add spectator with handle >= num_players
@@ -1617,7 +1617,7 @@ let host_addr = "192.168.1.100:7000".parse()?;
 let socket = UdpNonBlockingSocket::bind_to_port(8000)?;
 
 let mut session = SessionBuilder::<GameConfig>::new()
-    .with_num_players(2)
+    .with_num_players(2)?
     .with_max_frames_behind(10)?  // When to start catching up
     .with_catchup_speed(2)?       // How fast to catch up
     .start_spectator_session(host_addr, socket);
@@ -1646,9 +1646,9 @@ loop {
 
 ```rust
 let mut session = SessionBuilder::<GameConfig>::new()
-    .with_num_players(2)
+    .with_num_players(2)?
     .with_check_distance(4)  // Compare last 4 frames
-    .with_input_delay(2)
+    .with_input_delay(2)?
     .start_synctest_session()?;
 
 // Add players
@@ -1703,7 +1703,7 @@ FortressRequest::AdvanceFrame { inputs } => {
 
 ```rust
 let session = SessionBuilder::<GameConfig>::new()
-    .with_num_players(4)
+    .with_num_players(4)?
     // Two local players, two remote
     .add_player(PlayerType::Local, PlayerHandle::new(0))?
     .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2497,7 +2497,7 @@ use std::sync::Arc;
 // For testing: collect violations for assertions
 let observer = Arc::new(CollectingObserver::new());
 let session = SessionBuilder::<MyConfig>::new()
-    .with_num_players(2)
+    .with_num_players(2)?
     .with_violation_observer(observer.clone())
     // ... other config
     .start_p2p_session(socket)?;
