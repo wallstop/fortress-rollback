@@ -50,16 +50,24 @@ LOOM_CHECKPOINT_INTERVAL=1 LOOM_LOG=trace LOOM_LOCATION=1 \
 
 ## Current Tests
 
-### GameStateCell Tests (5 tests)
+### GameStateCell Tests (`loom_game_state_cell.rs`, 5 tests)
 
 - `test_concurrent_saves` - Multiple threads saving concurrently
-- `test_save_load_consistency` - Save and load never see partial state  
+- `test_save_load_consistency` - Save and load never see partial state
 - `test_multiple_readers_single_writer` - MRSW pattern verification
 - `test_frame_advancement_pattern` - Rollback save pattern simulation
 - `test_concurrent_access_bounded` - Bounded model checking with 3 threads
 
-All tests verify that `GameStateCell` operations are atomic and that no partial
-state can ever be observed.
+### SavedStates Tests (`loom_saved_states.rs`, 5 tests)
+
+- `test_concurrent_save_access` - Multiple threads accessing saved states
+- `test_save_overwrite_ordering` - Proper ordering when overwriting states
+- `test_circular_buffer_wraparound` - Buffer wraparound under concurrency
+- `test_frame_lookup_consistency` - Frame lookup returns correct states
+- `test_concurrent_iteration` - Safe iteration under concurrent access
+
+All tests verify that `GameStateCell` and `SavedStates` operations are atomic
+and that no partial state can ever be observed.
 
 ## Architecture Notes
 

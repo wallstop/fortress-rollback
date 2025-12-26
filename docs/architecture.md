@@ -36,39 +36,42 @@ Fortress Rollback is a Rust implementation of rollback networking for real-time 
 
 ### High-Level Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         User Application                        │
-├─────────────────────────────────────────────────────────────────┤
-│                        Session Layer                            │
-│  ┌─────────────┐  ┌──────────────────┐  ┌───────────────────┐   │
-│  │ P2PSession  │  │ SpectatorSession │  │  SyncTestSession  │   │
-│  └─────────────┘  └──────────────────┘  └───────────────────┘   │
-├─────────────────────────────────────────────────────────────────┤
-│                      Synchronization Layer                      │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                      SyncLayer                          │    │
-│  │  ┌──────────────┐  ┌────────────────┐  ┌─────────────┐  │    │
-│  │  │ InputQueue[] │  │  SavedStates   │  │  TimeSync   │  │    │
-│  │  └──────────────┘  └────────────────┘  └─────────────┘  │    │
-│  └─────────────────────────────────────────────────────────┘    │
-├─────────────────────────────────────────────────────────────────┤
-│                        Network Layer                            │
-│  ┌───────────────────┐  ┌────────────────┐  ┌────────────────┐  │
-│  │   UdpProtocol     │  │   Messages     │  │     Codec      │  │
-│  └───────────────────┘  └────────────────┘  └────────────────┘  │
-│                         ┌────────────────┐                      │
-│                         │  Compression   │                      │
-│                         └────────────────┘                      │
-├─────────────────────────────────────────────────────────────────┤
-│                        Socket Layer                             │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │              NonBlockingSocket (trait)                   │   │
-│  │  ┌─────────────────────┐  ┌────────────────────────────┐ │   │
-│  │  │ UdpNonBlockingSocket│  │      Custom Sockets        │ │   │
-│  │  └─────────────────────┘  └────────────────────────────┘ │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph UA["User Application"]
+    end
+
+    subgraph SL["Session Layer"]
+        P2P["P2PSession"]
+        SPEC["SpectatorSession"]
+        SYNC_TEST["SyncTestSession"]
+    end
+
+    subgraph SYNC_L["Synchronization Layer"]
+        subgraph SyncLayer
+            IQ["InputQueue[]"]
+            SS["SavedStates"]
+            TS["TimeSync"]
+        end
+    end
+
+    subgraph NET["Network Layer"]
+        UDP["UdpProtocol"]
+        MSG["Messages"]
+        CODEC["Codec"]
+        COMP["Compression"]
+    end
+
+    subgraph SOCKET["Socket Layer"]
+        NBS["NonBlockingSocket (trait)"]
+        UDP_SOCK["UdpNonBlockingSocket"]
+        CUSTOM["Custom Sockets"]
+    end
+
+    UA --> SL
+    SL --> SYNC_L
+    SL --> NET
+    NET --> SOCKET
 ```
 
 ---
@@ -352,11 +355,18 @@ Understanding the full lifecycle of a session is critical for proper integration
 
 ### Lifecycle Phases
 
-```
-┌──────────────┐    ┌──────────────────┐    ┌─────────────┐    ┌──────────────┐
-│   Creation   │───►│  Synchronizing   │───►│   Running   │───►│  Terminated  │
-│  (Builder)   │    │ (Handshake)      │    │ (Gameplay)  │    │  (Cleanup)   │
-└──────────────┘    └──────────────────┘    └─────────────┘    └──────────────┘
+```mermaid
+stateDiagram-v2
+    [*] --> Creation: SessionBuilder
+    Creation --> Synchronizing: Start session
+    Synchronizing --> Running: All peers synchronized
+    Running --> Terminated: Cleanup
+    Terminated --> [*]
+
+    Creation: Builder Pattern
+    Synchronizing: Handshake
+    Running: Gameplay
+    Terminated: Cleanup
 ```
 
 ### Phase 1: Creation (Builder Pattern)
@@ -543,37 +553,33 @@ Before dropping a session, verify:
 
 ### Session State Machine
 
-```
-                              ┌─────────────────┐
-                              │  Synchronizing  │
-                              │                 │
-                              │  - Exchanging   │
-                         ┌───►│    sync pkts    │
-                         │    │  - Measuring    │
-                         │    │    RTT          │
-                         │    └────────┬────────┘
-                         │             │ All peers
-                         │             │ synchronized
-    ┌────────────────────┤             ▼
-    │  NetworkInterrupted│    ┌─────────────────┐
-    │  (timeout not      │    │     Running     │
-    │   exceeded)        │    │                 │
-    │                    │    │  - Processing   │
-    │                    │    │    frames       │
-    │                    │    │  - Rollbacks    │
-    │                    │    │  - Checksums    │
-    │                    └────┤                 │
-    │                         └────────┬────────┘
-    │                                  │ Peer disconnected
-    │                                  │ or timeout
-    │                                  ▼
-    │                         ┌─────────────────┐
-    │                         │  Disconnected   │
-    │                         │  (per-peer)     │
-    │                         └─────────────────┘
-    │
-    │  NetworkResumed
-    └─────────────────────────────────────────────
+```mermaid
+stateDiagram-v2
+    [*] --> Synchronizing
+
+    Synchronizing --> Running: All peers synchronized
+    Synchronizing --> Synchronizing: Retry after 200ms
+
+    Running --> NetworkInterrupted: Connection interrupted
+    Running --> Disconnected: Peer timeout (2000ms) or disconnect
+
+    NetworkInterrupted --> Running: Network resumed
+    NetworkInterrupted --> Disconnected: Timeout exceeded
+
+    Disconnected --> Shutdown: UDP_SHUTDOWN_TIMER (5000ms)
+    Shutdown --> [*]
+
+    state Synchronizing {
+        [*] --> ExchangingSyncPkts
+        ExchangingSyncPkts --> MeasuringRTT
+    }
+
+    state Running {
+        [*] --> ProcessingFrames
+        ProcessingFrames --> Rollbacks
+        Rollbacks --> Checksums
+        Checksums --> ProcessingFrames
+    }
 ```
 
 ### FortressRequest Semantics
@@ -617,15 +623,17 @@ Requests generated:
 
 Before gameplay begins, peers exchange sync packets:
 
-```
-Peer A                              Peer B
-   │                                   │
-   │──── SyncRequest(random) ─────────►│
-   │◄──── SyncReply(random) ───────────│
-   │                                   │
-   │    (repeat NUM_SYNC_PACKETS times)│
-   │                                   │
-   │  Both transition to Running state │
+```mermaid
+sequenceDiagram
+    participant A as Peer A
+    participant B as Peer B
+
+    loop NUM_SYNC_PACKETS (5 times)
+        A->>B: SyncRequest(random)
+        B-->>A: SyncReply(random)
+    end
+
+    Note over A,B: Both transition to Running state
 ```
 
 This establishes:
@@ -638,19 +646,28 @@ This establishes:
 
 Regular message exchange:
 
-```
-┌───────────────────────────────────────────────────────────────┐
-│  Message                                                      │
-│  ├── header: MessageHeader                                    │
-│  │   ├── magic: u16          // Identifies this session       │
-│  │   └── sequence: u16       // For ordering/ack              │
-│  └── body: MessageBody                                        │
-│      ├── Input { ... }       // Player inputs                 │
-│      ├── InputAck { ... }    // Acknowledge received input    │
-│      ├── QualityReport       // Frame advantage info          │
-│      ├── QualityReply        // Response to quality report    │
-│      └── ChecksumReport      // For desync detection          │
-└───────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    MSG["Message"]
+    HEADER["MessageHeader"]
+    MAGIC["magic: u16<br/>(Identifies session)"]
+    SEQ["sequence: u16<br/>(For ordering/ack)"]
+    BODY["MessageBody"]
+    INPUT["Input { ... }<br/>(Player inputs)"]
+    INPUTACK["InputAck { ... }<br/>(Acknowledge input)"]
+    QUALITY["QualityReport<br/>(Frame advantage)"]
+    QREPLY["QualityReply<br/>(Response to report)"]
+    CHECKSUM["ChecksumReport<br/>(Desync detection)"]
+
+    MSG --> HEADER
+    MSG --> BODY
+    HEADER --> MAGIC
+    HEADER --> SEQ
+    BODY --> INPUT
+    BODY --> INPUTACK
+    BODY --> QUALITY
+    BODY --> QREPLY
+    BODY --> CHECKSUM
 ```
 
 ### Time Synchronization

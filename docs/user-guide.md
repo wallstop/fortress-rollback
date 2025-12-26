@@ -1069,26 +1069,33 @@ let spectator_session = SessionBuilder::<GameConfig>::new()
 
 Use this guide to choose the right configuration:
 
-```
-Is RTT < 20ms?
-├─ Yes → Use LAN Configuration
-└─ No → Is RTT < 80ms?
-         ├─ Yes → Use Regional Configuration
-         └─ No → Is RTT < 200ms?
-                  ├─ Yes → Use High Latency Configuration
-                  └─ No → Warn user, connection may be too slow
+```mermaid
+flowchart TD
+    START["Start Configuration"] --> RTT1{RTT < 20ms?}
+    RTT1 -->|Yes| LAN["Use LAN Configuration"]
+    RTT1 -->|No| RTT2{RTT < 80ms?}
+    RTT2 -->|Yes| REGIONAL["Use Regional Configuration"]
+    RTT2 -->|No| RTT3{RTT < 200ms?}
+    RTT3 -->|Yes| HIGH_LAT["Use High Latency Configuration"]
+    RTT3 -->|No| WARN["Warn user - connection too slow"]
 
-Is packet loss > 5%?
-├─ Yes → Also apply Lossy Network Configuration
-└─ No → Standard configuration is fine
+    LAN --> LOSS{Packet loss > 5%?}
+    REGIONAL --> LOSS
+    HIGH_LAT --> LOSS
+    WARN --> END["Configuration Complete"]
 
-Is this competitive play?
-├─ Yes → Use Competitive Configuration, enforce RTT limits
-└─ No → Standard configuration with more lenient timeouts
+    LOSS -->|Yes| LOSSY["Also apply Lossy Network Config"]
+    LOSS -->|No| COMP{Competitive play?}
+    LOSSY --> COMP
 
-Are there 4+ players?
-├─ Yes → Use Casual Multiplayer Configuration
-└─ No → Standard 2-player configuration
+    COMP -->|Yes| COMPETITIVE["Use Competitive Config"]
+    COMP -->|No| PLAYERS{4+ players?}
+    COMPETITIVE --> PLAYERS
+
+    PLAYERS -->|Yes| CASUAL["Use Casual Multiplayer Config"]
+    PLAYERS -->|No| STANDARD["Use Standard 2-player Config"]
+    CASUAL --> END
+    STANDARD --> END
 ```
 
 ### Dynamic Configuration

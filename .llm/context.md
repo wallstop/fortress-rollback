@@ -471,30 +471,48 @@ process_data(&data, Compression::Enabled, Encryption::Disabled, Validation::Stri
 
 ```
 src/
-├── lib.rs                    # Public API entry point
-├── error.rs                  # FortressError types
-├── frame_info.rs             # Frame metadata
-├── input_queue.rs            # Input buffering
-├── hash.rs                   # Deterministic FNV-1a hashing
-├── rle.rs                    # Run-length encoding
-├── rng.rs                    # Deterministic PCG32 RNG
-├── time_sync.rs              # Time synchronization
+├── lib.rs                           # Public API entry point
+├── error.rs                         # FortressError types
+├── frame_info.rs                    # Frame metadata
+├── hash.rs                          # Deterministic FNV-1a hashing
+├── rle.rs                           # Run-length encoding
+├── rng.rs                           # Deterministic PCG32 RNG
+├── time_sync.rs                     # Time synchronization
+├── sync.rs                          # Synchronization primitives (loom-compatible)
+├── checksum.rs                      # State checksum utilities
+├── telemetry.rs                     # Structured telemetry pipeline
+│
+├── input_queue/
+│   ├── mod.rs                       # Input buffering
+│   └── prediction.rs                # Input prediction strategies
+│
 ├── sync_layer/
-│   ├── mod.rs                # Core synchronization (SyncLayer)
-│   ├── game_state_cell.rs    # Thread-safe game state
-│   └── saved_states.rs       # Circular buffer for rollback
+│   ├── mod.rs                       # Core synchronization (SyncLayer)
+│   ├── game_state_cell.rs           # Thread-safe game state
+│   └── saved_states.rs              # Circular buffer for rollback
+│
 ├── network/
-│   ├── compression.rs        # Message compression
-│   ├── messages.rs           # Protocol messages
-│   ├── network_stats.rs      # Statistics tracking
-│   ├── chaos_socket.rs       # Testing socket with chaos
-│   ├── udp_socket.rs         # UDP abstraction
-│   └── protocol/             # Network protocol state machine
+│   ├── compression.rs               # Message compression
+│   ├── messages.rs                  # Protocol messages
+│   ├── network_stats.rs             # Statistics tracking
+│   ├── chaos_socket.rs              # Testing socket with chaos
+│   ├── udp_socket.rs                # UDP abstraction
+│   ├── codec.rs                     # Binary codec for serialization
+│   ├── tokio_socket.rs              # Tokio async adapter
+│   └── protocol/
+│       ├── mod.rs                   # UDP protocol implementation
+│       ├── event.rs                 # Protocol events
+│       ├── input_bytes.rs           # Byte-encoded input data
+│       └── state.rs                 # Protocol state machine
+│
 └── sessions/
-    ├── builder.rs            # SessionBuilder pattern
-    ├── p2p_session.rs        # P2P gameplay
-    ├── p2p_spectator_session.rs  # Spectator mode
-    └── sync_test_session.rs  # Determinism testing
+    ├── builder.rs                   # SessionBuilder pattern
+    ├── p2p_session.rs               # P2P gameplay
+    ├── p2p_spectator_session.rs     # Spectator mode
+    ├── sync_test_session.rs         # Determinism testing
+    ├── config.rs                    # Session configuration presets
+    ├── player_registry.rs           # Player tracking and connection states
+    └── sync_health.rs               # Synchronization health status
 ```
 
 ### Key Concepts

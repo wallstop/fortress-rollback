@@ -452,30 +452,18 @@ Transitions:
 
 **State Diagram:**
 
-```
-┌─────────────┐
-│ Initializing│
-└──────┬──────┘
-       │ synchronize()
-       ▼
-┌─────────────┐◄─────┐
-│Synchronizing│      │ retry (200ms)
-└──────┬──────┘──────┘
-       │ NUM_SYNC_PACKETS=5 acks
-       ▼
-┌─────────────┐
-│   Running   │
-└──────┬──────┘
-       │ timeout (2000ms) / disconnect
-       ▼
-┌─────────────┐
-│ Disconnected│
-└──────┬──────┘
-       │ UDP_SHUTDOWN_TIMER (5000ms)
-       ▼
-┌─────────────┐
-│  Shutdown   │
-└─────────────┘
+```mermaid
+stateDiagram-v2
+    [*] --> Initializing
+    Initializing --> Synchronizing: synchronize()
+
+    Synchronizing --> Synchronizing: retry (200ms)
+    Synchronizing --> Running: NUM_SYNC_PACKETS=5 acks
+
+    Running --> Disconnected: timeout (2000ms) / disconnect
+
+    Disconnected --> Shutdown: UDP_SHUTDOWN_TIMER (5000ms)
+    Shutdown --> [*]
 ```
 
 ### Synchronization Protocol

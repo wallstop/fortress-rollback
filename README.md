@@ -99,6 +99,9 @@ For detailed configuration guidance, see the [User Guide](./docs/user-guide.md#n
 | `paranoid` | Runtime invariant checking in release builds |
 | `graphical-examples` | Enables ex_game graphical examples (requires macroquad deps) |
 | `z3-verification` | Z3 formal verification tests (requires system Z3) |
+| `z3-verification-bundled` | Z3 verification with bundled build (slow, ~30+ minutes) |
+| `loom` | Loom-compatible synchronization primitives for concurrency testing |
+| `json` | JSON serialization for telemetry types (`to_json()` methods) |
 
 For detailed feature documentation, see the [User Guide](./docs/user-guide.md#feature-flags).
 
@@ -114,7 +117,7 @@ For networking in the browser, use **[Matchbox](https://github.com/johanhelsing/
 
 ```toml
 [dependencies]
-fortress-rollback = "0.1"
+fortress-rollback = "0.2"
 matchbox_socket = { version = "0.13", features = ["ggrs"] }
 ```
 
