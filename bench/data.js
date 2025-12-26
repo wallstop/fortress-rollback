@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1766783099440,
+  "lastUpdate": 1766783103365,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
@@ -5285,6 +5285,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1555,
             "range": "± 106",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "af0f49fd51f07d0f3d9b6c03882258b29846db71",
+          "message": "Update and improve all documentation and comments (#33)\n\n- Update version references from 0.1 to 0.2 in src/lib.rs and\ntokio_socket.rs\n- Fix examples/README.md: correct --check-distance short flag from -c to\n-d\n- Fix docs/migration.md: update version from 0.11 to 0.2\n- Fix docs/specs/api-contracts.md: update defaults (save_mode,\ndesync_detection)\n- Fix docs/user-guide.md: add missing ? operators to Result-returning\nmethods (with_num_players, with_input_delay), replace deprecated\nwith_sparse_saving_mode with with_save_mode(SaveMode::Sparse)\n- Fix docs/architecture.md: update InputQueue and UdpProtocol structure\ndescriptions to reflect configurable buffer sizes and additional fields\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+          "timestamp": "2025-12-26T13:00:12-08:00",
+          "tree_id": "c1dfe2e04bb0834c5212d4c7fc180dbf2ebf6be4",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/af0f49fd51f07d0f3d9b6c03882258b29846db71"
+        },
+        "date": 1766783102767,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 100,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 151,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 488,
+            "range": "± 36",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 735,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1055,
+            "range": "± 26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 104022,
+            "range": "± 585",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 27515,
+            "range": "± 794",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1242,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1553,
+            "range": "± 86",
             "unit": "ns/iter"
           },
           {
