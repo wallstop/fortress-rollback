@@ -17,7 +17,7 @@
 //!
 //! ### Step 2: Input Handling
 //!
-//! - **Local inputs**: Added immediately via [`SyncLayer::add_local_input`]
+//! - **Local inputs**: Added immediately via `SyncLayer::add_local_input`
 //! - **Remote inputs**: Arrive over the network with variable latency
 //! - Each player has a dedicated [`InputQueue`] tracking confirmed and predicted inputs
 //! - The `input_delay` setting adds buffer frames to smooth network jitter
@@ -87,7 +87,7 @@
 //! - **Floating-point**: Use fixed-point or integers for physics/positions
 //! - **HashMap iteration**: Use `BTreeMap` or sort keys before iterating
 //! - **System time**: Use frame counter, not wall clock
-//! - **Random numbers**: Use the provided deterministic [`Rng`](crate::Rng)
+//! - **Random numbers**: Use the provided deterministic [`Rng`](crate::rng::Rng)
 //! - **Uninitialized memory**: Always initialize all fields
 //! - **Multithreading**: Run simulation on a single thread
 //! - **External I/O**: Only read inputs from the input queue

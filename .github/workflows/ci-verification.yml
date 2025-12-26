@@ -131,10 +131,31 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@master
+      - name: Cache Rust toolchain
+        uses: actions/cache@v5
         with:
-          toolchain: nightly
+          path: |
+            ~/.rustup
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-rust-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-nightly-
+
+      - name: Install Rust nightly with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 5
+          retry_wait_seconds: 30
+          command: |
+            if ! command -v rustup &> /dev/null; then
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal --no-modify-path
+            fi
+            source "$HOME/.cargo/env"
+            rustup default nightly
+            rustup update nightly
 
       - name: Cache Kani
         uses: actions/cache@v5
@@ -145,12 +166,17 @@ jobs:
             ~/.kani
           key: kani-0.66.0-${{ runner.os }}
 
-      - name: Install Kani
-        run: |
-          if ! command -v cargo-kani &> /dev/null; then
-            cargo install --locked kani-verifier
-            cargo kani setup
-          fi
+      - name: Install Kani with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 15
+          max_attempts: 3
+          retry_wait_seconds: 60
+          command: |
+            if ! command -v cargo-kani &> /dev/null; then
+              cargo install --locked kani-verifier
+              cargo kani setup
+            fi
 
       - name: Run Kani verification (Tier 1 - Fast)
         run: ./scripts/verify-kani.sh --quick --tier 1 --fail-fast --verbose
@@ -169,10 +195,31 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@master
+      - name: Cache Rust toolchain
+        uses: actions/cache@v5
         with:
-          toolchain: nightly
+          path: |
+            ~/.rustup
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-rust-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-nightly-
+
+      - name: Install Rust nightly with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 5
+          retry_wait_seconds: 30
+          command: |
+            if ! command -v rustup &> /dev/null; then
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal --no-modify-path
+            fi
+            source "$HOME/.cargo/env"
+            rustup default nightly
+            rustup update nightly
 
       - name: Cache Kani
         uses: actions/cache@v5
@@ -183,12 +230,17 @@ jobs:
             ~/.kani
           key: kani-0.66.0-${{ runner.os }}
 
-      - name: Install Kani
-        run: |
-          if ! command -v cargo-kani &> /dev/null; then
-            cargo install --locked kani-verifier
-            cargo kani setup
-          fi
+      - name: Install Kani with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 15
+          max_attempts: 3
+          retry_wait_seconds: 60
+          command: |
+            if ! command -v cargo-kani &> /dev/null; then
+              cargo install --locked kani-verifier
+              cargo kani setup
+            fi
 
       - name: Run Kani verification (Tier 2 - Part ${{ matrix.part }}/6)
         run: ./scripts/verify-kani.sh --quick --tier 2 --part ${{ matrix.part }} --parts 6 --fail-fast --jobs 2
@@ -207,10 +259,31 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@master
+      - name: Cache Rust toolchain
+        uses: actions/cache@v5
         with:
-          toolchain: nightly
+          path: |
+            ~/.rustup
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-rust-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-nightly-
+
+      - name: Install Rust nightly with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 5
+          retry_wait_seconds: 30
+          command: |
+            if ! command -v rustup &> /dev/null; then
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal --no-modify-path
+            fi
+            source "$HOME/.cargo/env"
+            rustup default nightly
+            rustup update nightly
 
       - name: Cache Kani
         uses: actions/cache@v5
@@ -221,12 +294,17 @@ jobs:
             ~/.kani
           key: kani-0.66.0-${{ runner.os }}
 
-      - name: Install Kani
-        run: |
-          if ! command -v cargo-kani &> /dev/null; then
-            cargo install --locked kani-verifier
-            cargo kani setup
-          fi
+      - name: Install Kani with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 15
+          max_attempts: 3
+          retry_wait_seconds: 60
+          command: |
+            if ! command -v cargo-kani &> /dev/null; then
+              cargo install --locked kani-verifier
+              cargo kani setup
+            fi
 
       - name: Run Kani verification (Tier 3 - Part ${{ matrix.part }}/5)
         run: ./scripts/verify-kani.sh --quick --tier 3 --part ${{ matrix.part }} --parts 5 --fail-fast --jobs 2
