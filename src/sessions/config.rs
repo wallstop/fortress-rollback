@@ -399,6 +399,18 @@ pub struct ProtocolConfig {
     ///
     /// Default: 3000ms
     pub sync_duration_warning_ms: u128,
+
+    /// Multiplier for input history retention.
+    ///
+    /// Determines how many frames of received input history to retain.
+    /// The protocol keeps inputs for `input_history_multiplier * max_prediction` frames
+    /// behind the most recent received frame. This allows for packet reordering
+    /// and delayed decoding without losing the ability to decode old packets.
+    ///
+    /// Higher values use more memory but are more tolerant of extreme packet reordering.
+    ///
+    /// Default: 2
+    pub input_history_multiplier: usize,
 }
 
 impl Default for ProtocolConfig {
@@ -410,6 +422,7 @@ impl Default for ProtocolConfig {
             pending_output_limit: 128,
             sync_retry_warning_threshold: 10,
             sync_duration_warning_ms: 3000,
+            input_history_multiplier: 2,
         }
     }
 }
@@ -432,6 +445,7 @@ impl ProtocolConfig {
             pending_output_limit: 128,
             sync_retry_warning_threshold: 10,
             sync_duration_warning_ms: 2000,
+            input_history_multiplier: 2,
         }
     }
 
@@ -447,6 +461,7 @@ impl ProtocolConfig {
             pending_output_limit: 256,
             sync_retry_warning_threshold: 20,
             sync_duration_warning_ms: 10000,
+            input_history_multiplier: 3,
         }
     }
 
@@ -462,6 +477,7 @@ impl ProtocolConfig {
             pending_output_limit: 64,
             sync_retry_warning_threshold: 5,
             sync_duration_warning_ms: 1000,
+            input_history_multiplier: 4,
         }
     }
 
@@ -489,7 +505,92 @@ impl ProtocolConfig {
             sync_retry_warning_threshold: 25,
             // Longer sync expected on mobile
             sync_duration_warning_ms: 12000,
+            // More history for packet reordering on mobile
+            input_history_multiplier: 3,
         }
+    }
+
+    /// Validates the protocol configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns `FortressError::InvalidRequest` if any configuration value is out of range.
+    pub fn validate(&self) -> Result<(), FortressError> {
+        // Validate quality_report_interval: 1ms to 10000ms
+        if self.quality_report_interval < Duration::from_millis(1)
+            || self.quality_report_interval > Duration::from_millis(10000)
+        {
+            return Err(FortressError::InvalidRequest {
+                info: format!(
+                    "quality_report_interval {:?} is out of range. Must be between 1ms and 10000ms.",
+                    self.quality_report_interval
+                ),
+            });
+        }
+
+        // Validate shutdown_delay: 1ms to 300000ms (5 minutes)
+        if self.shutdown_delay < Duration::from_millis(1)
+            || self.shutdown_delay > Duration::from_millis(300000)
+        {
+            return Err(FortressError::InvalidRequest {
+                info: format!(
+                    "shutdown_delay {:?} is out of range. Must be between 1ms and 300000ms.",
+                    self.shutdown_delay
+                ),
+            });
+        }
+
+        // Validate max_checksum_history: 1 to 1024
+        if self.max_checksum_history < 1 || self.max_checksum_history > 1024 {
+            return Err(FortressError::InvalidRequest {
+                info: format!(
+                    "max_checksum_history {} is out of range. Must be between 1 and 1024.",
+                    self.max_checksum_history
+                ),
+            });
+        }
+
+        // Validate pending_output_limit: 1 to 4096
+        if self.pending_output_limit < 1 || self.pending_output_limit > 4096 {
+            return Err(FortressError::InvalidRequest {
+                info: format!(
+                    "pending_output_limit {} is out of range. Must be between 1 and 4096.",
+                    self.pending_output_limit
+                ),
+            });
+        }
+
+        // Validate sync_retry_warning_threshold: 1 to 1000
+        if self.sync_retry_warning_threshold < 1 || self.sync_retry_warning_threshold > 1000 {
+            return Err(FortressError::InvalidRequest {
+                info: format!(
+                    "sync_retry_warning_threshold {} is out of range. Must be between 1 and 1000.",
+                    self.sync_retry_warning_threshold
+                ),
+            });
+        }
+
+        // Validate sync_duration_warning_ms: 1 to 300000 (5 minutes)
+        if self.sync_duration_warning_ms < 1 || self.sync_duration_warning_ms > 300000 {
+            return Err(FortressError::InvalidRequest {
+                info: format!(
+                    "sync_duration_warning_ms {} is out of range. Must be between 1 and 300000.",
+                    self.sync_duration_warning_ms
+                ),
+            });
+        }
+
+        // Validate input_history_multiplier: 1 to 16
+        if self.input_history_multiplier < 1 || self.input_history_multiplier > 16 {
+            return Err(FortressError::InvalidRequest {
+                info: format!(
+                    "input_history_multiplier {} is out of range. Must be between 1 and 16.",
+                    self.input_history_multiplier
+                ),
+            });
+        }
+
+        Ok(())
     }
 }
 

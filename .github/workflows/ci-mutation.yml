@@ -1,0 +1,306 @@
+name: CI - Mutation Testing
+
+# Mutation testing introduces bugs (mutants) to verify that tests catch them.
+# This helps identify gaps in test coverage and improve test quality.
+#
+# This workflow is designed to run on-demand or on a schedule since mutation
+# testing is computationally expensive and time-consuming.
+
+on:
+  # Manual trigger - allows running mutation tests on demand
+  workflow_dispatch:
+    inputs:
+      file_filter:
+        description: 'File filter (e.g., src/sync_layer/mod.rs) - leave empty for all files'
+        required: false
+        default: ''
+      timeout_multiplier:
+        description: 'Timeout multiplier (default: 10.0)'
+        required: false
+        default: '10.0'
+
+  # Scheduled run - monthly on the first Sunday at 2 AM UTC
+  # Mutation testing is slow, so we run it infrequently
+  schedule:
+    - cron: '0 2 1 * *'  # First day of month at 2 AM UTC
+
+  # Optional: Run on push to main for mutation testing config changes
+  push:
+    branches: [main]
+    paths:
+      - '.cargo/mutants.toml'
+      - '.github/workflows/ci-mutation.yml'
+
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ============================================================================
+  # MUTATION TESTING
+  # ============================================================================
+  mutation-testing:
+    name: Mutation Testing
+    runs-on: ubuntu-latest
+    timeout-minutes: 240  # 4 hours max (mutation testing is slow)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nextest
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-nextest
+
+      - name: Install cargo-mutants
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-mutants
+
+      - name: Run baseline tests
+        run: |
+          {
+            echo "## Mutation Testing - Baseline"
+            echo ""
+            echo "Running baseline tests to ensure all tests pass before mutation testing..."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Run tests with nextest (faster)
+          if cargo nextest run --all-targets --features tokio,json; then
+            echo "✅ Baseline tests passed" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "❌ Baseline tests failed"
+              echo ""
+              echo "Mutation testing requires all tests to pass first."
+              echo "Please fix failing tests before running mutation testing."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: List mutations (dry run)
+        run: |
+          {
+            echo ""
+            echo "## Mutations to Test"
+            echo ""
+            echo "Analyzing code to identify mutation opportunities..."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # List mutations without running them
+          MUTATION_COUNT=$(cargo mutants --list --json \
+            ${{ github.event.inputs.file_filter && format('-f {0}', github.event.inputs.file_filter) || '' }} \
+            | jq '. | length')
+
+          {
+            echo "📊 **Total mutations to test:** $MUTATION_COUNT"
+            echo ""
+            echo "<details>"
+            echo "<summary>Click to see mutation list</summary>"
+            echo ""
+            echo "\`\`\`"
+            cargo mutants --list \
+              ${{ github.event.inputs.file_filter && format('-f {0}', github.event.inputs.file_filter) || '' }}
+            echo "\`\`\`"
+            echo ""
+            echo "</details>"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run mutation testing
+        id: mutants
+        run: |
+          {
+            echo ""
+            echo "## Mutation Testing Results"
+            echo ""
+            echo "Testing each mutation to see if tests catch it..."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Run mutation testing with configuration from .cargo/mutants.toml
+          # The config file specifies:
+          # - test_tool = "nextest" (faster test execution)
+          # - features = ["tokio", "json"] (core features only)
+          # - exclude_globs (skip examples, benchmarks, test utilities)
+          # - timeout_multiplier (prevent infinite loops)
+
+          TIMEOUT_MULTIPLIER="${{ github.event.inputs.timeout_multiplier || '10.0' }}"
+
+          # Run mutation testing and capture output
+          if cargo mutants \
+            --timeout-multiplier "$TIMEOUT_MULTIPLIER" \
+            --output mutants-out \
+            --json \
+            ${{ github.event.inputs.file_filter && format('-f {0}', github.event.inputs.file_filter) || '' }} \
+            2>&1 | tee mutants.log; then
+
+            echo "mutation_status=success" >> "$GITHUB_OUTPUT"
+
+            # Parse results
+            CAUGHT=$(jq -r '.outcomes | map(select(.outcome == "caught")) | length' mutants-out/mutants.json)
+            MISSED=$(jq -r '.outcomes | map(select(.outcome == "missed")) | length' mutants-out/mutants.json)
+            TIMEOUT=$(jq -r '.outcomes | map(select(.outcome == "timeout")) | length' mutants-out/mutants.json)
+            UNVIABLE=$(jq -r '.outcomes | map(select(.outcome == "unviable")) | length' mutants-out/mutants.json)
+            TOTAL=$(jq -r '.outcomes | length' mutants-out/mutants.json)
+
+            # Calculate mutation score (caught / (caught + missed))
+            if [ "$((CAUGHT + MISSED))" -gt 0 ]; then
+              SCORE=$(echo "scale=2; $CAUGHT * 100 / ($CAUGHT + $MISSED)" | bc)
+            else
+              SCORE="N/A"
+            fi
+
+            {
+              echo "### Summary"
+              echo ""
+              echo "| Metric | Count |"
+              echo "|--------|-------|"
+              echo "| ✅ Caught (tests detected mutation) | $CAUGHT |"
+              echo "| ❌ Missed (tests didn't detect mutation) | $MISSED |"
+              echo "| ⏱️ Timeout (mutation caused infinite loop) | $TIMEOUT |"
+              echo "| 🚫 Unviable (mutation didn't compile) | $UNVIABLE |"
+              echo "| 📊 **Total** | **$TOTAL** |"
+              echo "| 🎯 **Mutation Score** | **${SCORE}%** |"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            # Report missed mutations (these indicate test gaps)
+            if [ "$MISSED" -gt 0 ]; then
+              {
+                echo "### ⚠️ Missed Mutations (Test Gaps)"
+                echo ""
+                echo "These mutations were not caught by tests. Consider adding tests for:"
+                echo ""
+                echo "<details>"
+                echo "<summary>Click to see details</summary>"
+                echo ""
+                echo "\`\`\`"
+                jq -r '.outcomes[] | select(.outcome == "missed") | "\(.file):\(.line) - \(.function)"' \
+                  mutants-out/mutants.json | head -50
+                echo "\`\`\`"
+                echo ""
+                echo "</details>"
+                echo ""
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+            # Success criteria: mutation score >= 80%
+            if [ "$MISSED" -gt 0 ] && [ "$SCORE" != "N/A" ]; then
+              SCORE_INT=$(echo "$SCORE" | cut -d. -f1)
+              if [ "$SCORE_INT" -lt 80 ]; then
+                {
+                  echo "⚠️ **Mutation score is below 80% threshold**"
+                  echo ""
+                  echo "While this doesn't fail the build, consider improving test coverage."
+                } >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+
+          else
+            echo "mutation_status=failure" >> "$GITHUB_OUTPUT"
+            {
+              echo "❌ Mutation testing encountered errors"
+              echo ""
+              echo "See logs for details."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+        continue-on-error: true
+
+      - name: Upload mutation report
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: mutation-report
+          path: |
+            mutants-out/
+            mutants.log
+          retention-days: 30
+
+      - name: Upload missed mutations
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: missed-mutations
+          path: mutants-out/mutants.json
+          retention-days: 30
+
+  # ============================================================================
+  # SUMMARY
+  # ============================================================================
+  mutation-summary:
+    name: Mutation Testing Summary
+    runs-on: ubuntu-latest
+    needs: [mutation-testing]
+    if: always()
+
+    steps:
+      - name: Generate summary
+        run: |
+          map_status() {
+            case "$1" in
+              success) echo "✅ Passed" ;;
+              failure) echo "❌ Failed" ;;
+              skipped) echo "⏭️ Skipped" ;;
+              cancelled) echo "🚫 Cancelled" ;;
+              *) echo "❓ Unknown" ;;
+            esac
+          }
+
+          {
+            echo "## Mutation Testing Summary"
+            echo ""
+            echo "Mutation testing helps identify gaps in test coverage by introducing"
+            echo "bugs and verifying that tests catch them."
+            echo ""
+            echo "| Check | Status |"
+            echo "|-------|--------|"
+            echo "| Mutation Testing | $(map_status '${{ needs.mutation-testing.result }}') |"
+            echo ""
+            echo "### What is Mutation Testing?"
+            echo ""
+            echo "Mutation testing works by:"
+            echo "1. Making small changes to the code (mutations)"
+            echo "2. Running the test suite for each mutation"
+            echo "3. Checking if any test fails (catches the mutation)"
+            echo "4. If no test fails, the mutation is 'missed' - indicating a test gap"
+            echo ""
+            echo "### Interpreting Results"
+            echo ""
+            echo "- **Caught**: Tests detected the mutation ✅"
+            echo "- **Missed**: Tests didn't detect the mutation ⚠️ (test gap)"
+            echo "- **Timeout**: Mutation caused infinite loop ⏱️"
+            echo "- **Unviable**: Mutation didn't compile 🚫"
+            echo ""
+            echo "**Mutation Score** = Caught / (Caught + Missed) × 100%"
+            echo ""
+            echo "Target: ≥80% mutation score"
+            echo ""
+            echo "### Running Locally"
+            echo ""
+            echo "\`\`\`bash"
+            echo "# Install cargo-mutants"
+            echo "cargo install cargo-mutants"
+            echo ""
+            echo "# Run mutation testing on all code"
+            echo "cargo mutants"
+            echo ""
+            echo "# Test a specific file"
+            echo "cargo mutants -f src/sync_layer/mod.rs"
+            echo ""
+            echo "# List mutations without running"
+            echo "cargo mutants --list"
+            echo "\`\`\`"
+            echo ""
+            echo "See \`.cargo/mutants.toml\` for configuration."
+          } >> "$GITHUB_STEP_SUMMARY"

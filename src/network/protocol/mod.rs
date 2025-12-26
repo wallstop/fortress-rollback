@@ -828,8 +828,10 @@ impl<T: Config> UdpProtocol<T> {
 
             // delete received inputs that are too old
             let last_recv_frame = self.last_recv_frame();
+            let history_frames = self.protocol_config.input_history_multiplier as i32
+                * self.max_prediction as i32;
             self.recv_inputs
-                .retain(|&k, _| k >= last_recv_frame - 2 * self.max_prediction as i32);
+                .retain(|&k, _| k >= last_recv_frame - history_frames);
         }
     }
 

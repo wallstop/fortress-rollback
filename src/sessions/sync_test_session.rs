@@ -121,6 +121,7 @@ impl<T: Config> SyncTestSession<T> {
     ///
     /// [`Vec<FortressRequest>`]: FortressRequest
     /// [`MismatchedChecksum`]: FortressError::MismatchedChecksum
+    #[must_use = "FortressRequests must be processed to advance the game state"]
     pub fn advance_frame(&mut self) -> Result<Vec<FortressRequest<T>>, FortressError> {
         // Pre-allocate with capacity for typical case: 1 save + 1 advance = 2 requests.
         // During rollback testing, more requests will be added as the Vec grows.

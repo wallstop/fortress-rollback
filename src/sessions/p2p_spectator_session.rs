@@ -8,7 +8,6 @@ use crate::{
         protocol::{Event, UdpProtocol},
     },
     report_violation, safe_frame_add,
-    sessions::builder::MAX_EVENT_QUEUE_SIZE,
     telemetry::{ViolationKind, ViolationObserver, ViolationSeverity},
     Config, FortressError, FortressEvent, FortressRequest, Frame, InputStatus, InputVec,
     NetworkStats, NonBlockingSocket, PlayerHandle, SessionState,
@@ -42,12 +41,15 @@ where
     catchup_speed: usize,
     /// Optional observer for specification violations.
     violation_observer: Option<Arc<dyn ViolationObserver>>,
+    /// Maximum number of events to queue before oldest are dropped.
+    max_event_queue_size: usize,
 }
 
 impl<T: Config> SpectatorSession<T> {
     /// Creates a new [`SpectatorSession`] for a spectator.
     /// The session will receive inputs from all players from the given host directly.
     /// The session will use the provided socket.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         num_players: usize,
         socket: Box<dyn NonBlockingSocket<T::Address>>,
@@ -56,6 +58,7 @@ impl<T: Config> SpectatorSession<T> {
         max_frames_behind: usize,
         catchup_speed: usize,
         violation_observer: Option<Arc<dyn ViolationObserver>>,
+        event_queue_size: usize,
     ) -> Self {
         // host connection status
         let host_connect_status = vec![ConnectionStatus::default(); num_players];
@@ -80,6 +83,7 @@ impl<T: Config> SpectatorSession<T> {
             max_frames_behind,
             catchup_speed,
             violation_observer,
+            max_event_queue_size: event_queue_size,
         }
     }
 
@@ -111,6 +115,7 @@ impl<T: Config> SpectatorSession<T> {
     /// - Returns [`NotSynchronized`] if the session is not connected to other clients yet.
     ///
     /// [`NotSynchronized`]: FortressError::NotSynchronized
+    #[must_use = "network stats should be inspected or logged"]
     pub fn network_stats(&self) -> Result<NetworkStats, FortressError> {
         self.host.network_stats()
     }
@@ -140,6 +145,7 @@ impl<T: Config> SpectatorSession<T> {
     ///
     /// [`Vec<FortressRequest>`]: FortressRequest
     /// [`NotSynchronized`]: FortressError::NotSynchronized
+    #[must_use = "FortressRequests must be processed to advance the game state"]
     pub fn advance_frame(&mut self) -> Result<Vec<FortressRequest<T>>, FortressError> {
         // receive info from host, trigger events and send messages
         self.poll_remote_clients();
@@ -410,7 +416,7 @@ impl<T: Config> SpectatorSession<T> {
         }
 
         // check event queue size and discard oldest events if too big
-        while self.event_queue.len() > MAX_EVENT_QUEUE_SIZE {
+        while self.event_queue.len() > self.max_event_queue_size {
             self.event_queue.pop_front();
         }
     }

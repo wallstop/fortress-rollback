@@ -38,12 +38,16 @@ const RECOMMENDATION_INTERVAL: Frame = Frame::new(60);
 /// and provides enough time for network conditions to improve.
 const MIN_RECOMMENDATION: u32 = 3;
 
-/// Maximum number of events to queue before oldest are dropped.
+/// Default maximum number of events to queue before oldest are dropped.
 ///
 /// This prevents unbounded memory growth if events aren't being consumed.
 /// At 100 events, there's ample buffer for typical network jitter while
 /// providing backpressure if the application isn't processing events.
-const MAX_EVENT_QUEUE_SIZE: usize = 100;
+///
+/// Note: This constant documents the default; the actual value is now
+/// configurable via SessionBuilder::with_event_queue_size().
+#[cfg(test)]
+const DEFAULT_MAX_EVENT_QUEUE_SIZE: usize = 100;
 
 /// A [`P2PSession`] provides all functionality to connect to remote clients in a peer-to-peer fashion, exchange inputs and handle the gamestate by saving, loading and advancing.
 pub struct P2PSession<T>
@@ -99,6 +103,8 @@ where
     violation_observer: Option<Arc<dyn ViolationObserver>>,
     /// Protocol configuration for network behavior.
     protocol_config: ProtocolConfig,
+    /// Maximum number of events to queue before oldest are dropped.
+    max_event_queue_size: usize,
 }
 
 impl<T: Config> P2PSession<T> {
@@ -119,6 +125,7 @@ impl<T: Config> P2PSession<T> {
         violation_observer: Option<Arc<dyn ViolationObserver>>,
         protocol_config: ProtocolConfig,
         queue_length: usize,
+        event_queue_size: usize,
     ) -> Self {
         // local connection status
         let local_connect_status = vec![ConnectionStatus::default(); num_players];
@@ -183,6 +190,7 @@ impl<T: Config> P2PSession<T> {
             last_verified_frame: None,
             violation_observer,
             protocol_config,
+            max_event_queue_size: event_queue_size,
         }
     }
 
@@ -226,6 +234,7 @@ impl<T: Config> P2PSession<T> {
     /// [`Vec<FortressRequest>`]: FortressRequest
     /// [`InvalidRequest`]: FortressError::InvalidRequest
     /// [`NotSynchronized`]: FortressError::NotSynchronized
+    #[must_use = "FortressRequests must be processed to advance the game state"]
     pub fn advance_frame(&mut self) -> Result<Vec<FortressRequest<T>>, FortressError> {
         // receive info from remote players, trigger events and send messages
         self.poll_remote_clients();
@@ -477,6 +486,7 @@ impl<T: Config> P2PSession<T> {
     /// - Returns [`InvalidRequest`] if you try to disconnect a local player or the provided handle is invalid.
     ///
     /// [`InvalidRequest`]: FortressError::InvalidRequest
+    #[must_use = "disconnect errors should be handled"]
     pub fn disconnect_player(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError> {
         match self.player_reg.handles.get(&player_handle) {
             // the local player cannot be disconnected
@@ -737,6 +747,7 @@ impl<T: Config> P2PSession<T> {
     ///     let checksum = compute_checksum(&inputs);
     /// }
     /// ```
+    #[must_use = "confirmed inputs should be used for game state computation"]
     pub fn confirmed_inputs_for_frame(&self, frame: Frame) -> Result<Vec<T::Input>, FortressError> {
         if frame > self.confirmed_frame() {
             return Err(FortressError::InvalidFrame {
@@ -1490,7 +1501,7 @@ impl<T: Config> P2PSession<T> {
         }
 
         // check event queue size and discard oldest events if too big
-        while self.event_queue.len() > MAX_EVENT_QUEUE_SIZE {
+        while self.event_queue.len() > self.max_event_queue_size {
             self.event_queue.pop_front();
         }
     }
@@ -1729,13 +1740,13 @@ mod tests {
     }
 
     #[test]
-    fn max_event_queue_size_is_reasonable() {
+    fn default_max_event_queue_size_is_reasonable() {
         // Should be large enough to buffer network events (at least 50)
         // but not so large as to consume excessive memory (at most 1000)
-        const _: () = assert!(MAX_EVENT_QUEUE_SIZE >= 50);
-        const _: () = assert!(MAX_EVENT_QUEUE_SIZE <= 1000);
+        const _: () = assert!(DEFAULT_MAX_EVENT_QUEUE_SIZE >= 50);
+        const _: () = assert!(DEFAULT_MAX_EVENT_QUEUE_SIZE <= 1000);
         // Verify at runtime the constant is what we expect
-        assert_eq!(MAX_EVENT_QUEUE_SIZE, 100);
+        assert_eq!(DEFAULT_MAX_EVENT_QUEUE_SIZE, 100);
     }
 
     // ==========================================

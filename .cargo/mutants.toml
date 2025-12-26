@@ -1,0 +1,104 @@
+# cargo-mutants configuration for fortress-rollback
+#
+# Mutation testing helps improve test quality by introducing bugs (mutants)
+# and verifying that tests catch them. This config optimizes mutation testing
+# for the fortress-rollback project structure.
+#
+# Run locally: cargo mutants
+# See: https://mutants.rs/
+
+# ============================================================================
+# Test Configuration
+# ============================================================================
+
+# Use nextest for faster test execution (12x faster than cargo test)
+# Nextest exits immediately on first test failure, reducing mutation test time
+test_tool = "nextest"
+
+# Additional cargo test arguments
+# Run all test targets (lib, integration tests, doc tests)
+additional_cargo_test_args = ["--all-targets"]
+
+# ============================================================================
+# Build Configuration
+# ============================================================================
+
+# Respect .gitignore when copying source trees (excludes build artifacts)
+gitignore = true
+
+# ============================================================================
+# Feature Configuration
+# ============================================================================
+
+# Don't enable optional features by default
+# This keeps mutation testing focused on core functionality
+all_features = false
+no_default_features = false
+
+# Test core features only (excludes slow z3-verification and graphical examples)
+# The tokio feature is included to test async socket adapters
+features = ["tokio", "json"]
+
+# ============================================================================
+# File Exclusion Patterns
+# ============================================================================
+
+# Exclude files and directories from mutation testing
+# Focus on core library code; skip examples, benchmarks, and test utilities
+exclude_globs = [
+    # Examples - not part of library API
+    "examples/**/*.rs",
+
+    # Benchmarks - performance code, not correctness-critical
+    "benches/**/*.rs",
+
+    # Loom tests - separate concurrency testing with special cfg
+    "loom-tests/**/*.rs",
+
+    # Fuzz tests - separate fuzzing infrastructure
+    "fuzz/**/*.rs",
+
+    # Test utilities in integration tests
+    "tests/**/common/**/*.rs",
+    "tests/**/test_*.rs",
+
+    # Generated code (if any)
+    # "src/generated/**/*.rs",
+]
+
+# ============================================================================
+# Timeout Configuration
+# ============================================================================
+
+# Set a reasonable timeout multiplier for mutation tests
+# Some mutations may cause infinite loops; this prevents CI hangs
+# Default is 5x the baseline test time; we use 10x for complex rollback logic
+timeout_multiplier = 10.0
+
+# ============================================================================
+# Build Time Optimizations
+# ============================================================================
+
+# Copy the target directory to build directories to reuse build artifacts
+# This significantly speeds up mutation testing by avoiding full rebuilds
+# Note: Only enable if disk space is sufficient (adds ~GB per build dir)
+copy_target = false
+
+# ============================================================================
+# Additional Notes
+# ============================================================================
+
+# To run mutation testing locally:
+#   cargo install cargo-mutants
+#   cargo mutants
+#
+# To test a specific file:
+#   cargo mutants -f src/path/to/file.rs
+#
+# To test with all features enabled (slower, includes z3):
+#   cargo mutants --all-features
+#
+# To see what would be tested without running:
+#   cargo mutants --list
+#
+# For CI/CD integration, see .github/workflows/ci-mutation.yml
