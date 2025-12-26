@@ -1976,6 +1976,50 @@ mod tests {
         };
         assert!(config.validate().is_ok());
     }
+
+    // ========================================================================
+    // ProtocolConfig Deterministic RNG Seed Tests
+    // ========================================================================
+
+    #[test]
+    fn test_protocol_config_deterministic_preset() {
+        let config = ProtocolConfig::deterministic(12345);
+        assert_eq!(config.protocol_rng_seed, Some(12345));
+        // Other fields should be default
+        assert_eq!(
+            config.quality_report_interval,
+            ProtocolConfig::default().quality_report_interval
+        );
+    }
+
+    #[test]
+    fn test_protocol_config_deterministic_different_seeds() {
+        let config1 = ProtocolConfig::deterministic(1);
+        let config2 = ProtocolConfig::deterministic(2);
+        assert_ne!(config1.protocol_rng_seed, config2.protocol_rng_seed);
+    }
+
+    #[test]
+    fn test_protocol_config_default_has_no_seed() {
+        let config = ProtocolConfig::default();
+        assert_eq!(config.protocol_rng_seed, None);
+    }
+
+    #[test]
+    fn test_protocol_config_all_presets_have_no_seed() {
+        // All presets except deterministic() should have no seed
+        assert_eq!(ProtocolConfig::competitive().protocol_rng_seed, None);
+        assert_eq!(ProtocolConfig::high_latency().protocol_rng_seed, None);
+        assert_eq!(ProtocolConfig::debug().protocol_rng_seed, None);
+        assert_eq!(ProtocolConfig::mobile().protocol_rng_seed, None);
+    }
+
+    #[test]
+    fn test_protocol_config_seed_validates_ok() {
+        // Config with seed should validate successfully
+        let config = ProtocolConfig::deterministic(42);
+        assert!(config.validate().is_ok());
+    }
 }
 
 // =============================================================================

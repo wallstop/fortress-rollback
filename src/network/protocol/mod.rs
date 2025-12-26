@@ -2504,4 +2504,100 @@ mod tests {
             "Under normal conditions, should return positive value"
         );
     }
+
+    // ==========================================
+    // Deterministic Protocol RNG Tests
+    // ==========================================
+
+    #[test]
+    fn protocol_with_same_seed_produces_same_magic_number() {
+        let seed = 12345u64;
+        let config = ProtocolConfig::deterministic(seed);
+
+        let protocol1: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
+
+        let protocol2: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(seed),
+        );
+
+        assert_eq!(
+            protocol1.magic, protocol2.magic,
+            "Same seed should produce same magic number"
+        );
+    }
+
+    #[test]
+    fn protocol_with_different_seeds_produces_different_magic_numbers() {
+        let protocol1: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(1),
+        );
+
+        let protocol2: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(2),
+        );
+
+        assert_ne!(
+            protocol1.magic, protocol2.magic,
+            "Different seeds should produce different magic numbers (with very high probability)"
+        );
+    }
+
+    #[test]
+    fn protocol_without_seed_still_works() {
+        // When no seed is provided, protocol should still initialize successfully
+        let protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::default(), // No seed
+        );
+
+        // Magic should be non-zero
+        assert_ne!(protocol.magic, 0, "Magic number should never be zero");
+    }
+
+    #[test]
+    fn protocol_magic_is_never_zero() {
+        // Test that the magic number generation loop correctly handles
+        // the case where the first random value might be zero
+        for seed in 0..100 {
+            let protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+                vec![PlayerHandle::new(0)],
+                2,
+                1,
+                8,
+                SyncConfig::default(),
+                ProtocolConfig::deterministic(seed),
+            );
+            assert_ne!(
+                protocol.magic, 0,
+                "Magic number should never be zero (seed={})",
+                seed
+            );
+        }
+    }
 }
