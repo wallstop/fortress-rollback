@@ -136,8 +136,10 @@ fn run_synctest_session(
 ) -> MetaGameState {
     let mut sess = SessionBuilder::<MetaConfig>::new()
         .with_num_players(num_players)
+        .unwrap()
         .with_max_prediction_window(8)
         .with_input_delay(0)
+        .unwrap()
         .start_synctest_session()
         .expect("Failed to create session");
 
@@ -341,8 +343,10 @@ fn test_metamorphic_input_delay_invariance() {
     let state_delay_0 = {
         let mut sess = SessionBuilder::<MetaConfig>::new()
             .with_num_players(num_players)
+            .unwrap()
             .with_max_prediction_window(8)
             .with_input_delay(0)
+            .unwrap()
             .start_synctest_session()
             .expect("Failed to create session");
 
@@ -377,8 +381,10 @@ fn test_metamorphic_input_delay_invariance() {
     let state_delay_2 = {
         let mut sess = SessionBuilder::<MetaConfig>::new()
             .with_num_players(num_players)
+            .unwrap()
             .with_max_prediction_window(8)
             .with_input_delay(2)
+            .unwrap()
             .start_synctest_session()
             .expect("Failed to create session");
 
@@ -434,8 +440,10 @@ fn test_metamorphic_prediction_window_invariance() {
     let state_small = {
         let mut sess = SessionBuilder::<MetaConfig>::new()
             .with_num_players(num_players)
+            .unwrap()
             .with_max_prediction_window(4)
             .with_input_delay(0)
+            .unwrap()
             .start_synctest_session()
             .expect("Failed to create session");
 
@@ -470,8 +478,10 @@ fn test_metamorphic_prediction_window_invariance() {
     let state_large = {
         let mut sess = SessionBuilder::<MetaConfig>::new()
             .with_num_players(num_players)
+            .unwrap()
             .with_max_prediction_window(12)
             .with_input_delay(0)
+            .unwrap()
             .start_synctest_session()
             .expect("Failed to create session");
 
@@ -760,8 +770,10 @@ mod termination_tests {
         let inputs = generate_input_sequence(num_players, num_frames, seed);
         let mut sess = SessionBuilder::<MetaConfig>::new()
             .with_num_players(num_players)
+            .unwrap()
             .with_max_prediction_window(8)
             .with_input_delay(0)
+            .unwrap()
             .start_synctest_session()
             .expect("Failed to create session");
 
@@ -838,8 +850,10 @@ mod termination_tests {
 
         let mut sess = SessionBuilder::<MetaConfig>::new()
             .with_num_players(num_players)
+            .unwrap()
             .with_max_prediction_window(8)
             .with_input_delay(0)
+            .unwrap()
             .start_synctest_session()
             .expect("Failed to create session");
 
@@ -995,8 +1009,10 @@ mod termination_property_tests {
         let inputs = generate_input_sequence(num_players, num_frames, seed);
         let mut sess = SessionBuilder::<MetaConfig>::new()
             .with_num_players(num_players)
+            .unwrap()
             .with_max_prediction_window(8)
             .with_input_delay(0)
+            .unwrap()
             .start_synctest_session()
             .expect("Failed to create session");
 

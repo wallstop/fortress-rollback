@@ -265,7 +265,7 @@ mod matchbox_reference {
     ///
     /// // Create session - socket already implements NonBlockingSocket!
     /// let session = SessionBuilder::<GameConfig>::new()
-    ///     .with_num_players(2)
+    ///     .with_num_players(2).unwrap()
     ///     .add_player(PlayerType::Local, PlayerHandle::new(0))?
     ///     .add_player(PlayerType::Remote(peer_id), PlayerHandle::new(1))?
     ///     .start_p2p_session(socket)?;
@@ -300,7 +300,7 @@ fn demo_channel_socket() {
     // Note: In a real application, you would use these sockets with SessionBuilder:
     //
     // let session = SessionBuilder::<GameConfig>::new()
-    //     .with_num_players(2)
+    //     .with_num_players(2).unwrap()
     //     .add_player(PlayerType::Local, PlayerHandle::new(0))?
     //     .add_player(PlayerType::Remote(ChannelPeerId(2)), PlayerHandle::new(1))?
     //     .start_p2p_session(socket1)?;

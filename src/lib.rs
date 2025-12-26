@@ -73,7 +73,7 @@ pub use checksum::{compute_checksum, compute_checksum_fletcher16, fletcher16, ha
 ///
 ///     // Use with SessionBuilder
 ///     let session = SessionBuilder::<MyConfig>::new()
-///         .with_num_players(2)
+///         .with_num_players(2).unwrap()
 ///         .add_player(PlayerType::Local, PlayerHandle::new(0))?
 ///         .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
 ///         .start_p2p_session(socket)?;

@@ -103,6 +103,7 @@ mod varint {
 
     /// Encodes a value as a varint, returning a Vec.
     #[inline]
+    #[allow(dead_code)]
     pub fn encode_to_vec(value: u64) -> Vec<u8> {
         let mut buf = vec![0u8; encoded_len(value)];
         encode(value, &mut buf);
@@ -230,7 +231,10 @@ fn write_contiguous(enc: &mut Vec<u8>, len: u64, prev_bits: u8) {
     if prev_bits == 255 {
         value |= 2; // Mark as 0xFF bytes
     }
-    enc.extend_from_slice(&varint::encode_to_vec(value));
+    // Use stack-allocated buffer to avoid heap allocation in hot path
+    let mut temp_buf = [0u8; 10]; // Max varint size for u64
+    let written = varint::encode(value, &mut temp_buf);
+    enc.extend_from_slice(&temp_buf[..written]);
 }
 
 /// Write a non-contiguous (uncompressed) sequence to the output.
@@ -241,7 +245,10 @@ fn write_noncontiguous(enc: &mut Vec<u8>, noncontiguous_bits: &mut Vec<u8>) {
     }
     // Format: length << 1 | 0
     let value = (noncontiguous_bits.len() as u64) << 1;
-    enc.extend_from_slice(&varint::encode_to_vec(value));
+    // Use stack-allocated buffer to avoid heap allocation in hot path
+    let mut temp_buf = [0u8; 10]; // Max varint size for u64
+    let written = varint::encode(value, &mut temp_buf);
+    enc.extend_from_slice(&temp_buf[..written]);
     enc.append(noncontiguous_bits);
 }
 

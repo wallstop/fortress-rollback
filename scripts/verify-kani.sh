@@ -150,10 +150,36 @@ print_usage() {
     echo "  $0 --list                       # List available proofs"
 }
 
+print_diagnostics() {
+    echo -e "${BLUE}=== Environment Diagnostics ===${NC}"
+    echo "  Working directory: $(pwd)"
+    echo "  PATH entries (cargo-related):"
+    echo "$PATH" | tr ':' '\n' | grep -E '(cargo|rust)' | while read -r p; do
+        echo "    - $p"
+    done
+    echo "  Cargo location: $(command -v cargo 2>/dev/null || echo 'NOT FOUND')"
+    echo "  Rustc version: $(rustc --version 2>/dev/null || echo 'NOT FOUND')"
+    echo ""
+}
+
 check_kani() {
+    # First check if cargo is available
+    if ! command -v cargo &> /dev/null; then
+        echo -e "${RED}Error: cargo is not in PATH.${NC}"
+        echo ""
+        print_diagnostics
+        echo "This usually means the Rust toolchain was not properly installed or"
+        echo "the shell environment was not configured correctly."
+        echo ""
+        echo "If running in CI, ensure the 'Install Rust' step uses an action that"
+        echo "properly exports environment variables (e.g., dtolnay/rust-toolchain)."
+        exit 1
+    fi
+
     if ! command -v cargo-kani &> /dev/null; then
         echo -e "${RED}Error: Kani is not installed.${NC}"
         echo ""
+        print_diagnostics
         echo "To install Kani, run:"
         echo "  cargo install --locked kani-verifier"
         echo "  cargo kani setup"
@@ -161,7 +187,7 @@ check_kani() {
         echo "For more information, see: https://model-checking.github.io/kani/install-guide.html"
         exit 1
     fi
-    
+
     local kani_version
     kani_version=$(cargo kani --version 2>&1 | head -n 1 || echo "unknown")
     echo -e "${BLUE}Using Kani: $kani_version${NC}"

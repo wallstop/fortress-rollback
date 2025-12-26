@@ -79,8 +79,10 @@ fn test_synctest_input_iteration_determinism() {
     for _run in 0..3 {
         let mut sess = SessionBuilder::<TestConfig>::new()
             .with_num_players(NUM_PLAYERS)
+            .unwrap()
             .with_max_prediction_window(8)
             .with_input_delay(0)
+            .unwrap()
             .start_synctest_session()
             .unwrap();
 
@@ -127,8 +129,10 @@ fn test_checksum_history_determinism() {
 
     let mut sess = SessionBuilder::<TestConfig>::new()
         .with_num_players(NUM_PLAYERS)
+        .unwrap()
         .with_max_prediction_window(4)
         .with_input_delay(0)
+        .unwrap()
         .with_desync_detection_mode(DesyncDetection::On { interval: 1 })
         .start_synctest_session()
         .unwrap();
@@ -174,8 +178,10 @@ fn test_p2p_player_handles_determinism() {
 
     let mut sess_builder = SessionBuilder::<TestConfig>::new()
         .with_num_players(3)
+        .unwrap()
         .with_max_prediction_window(8)
-        .with_input_delay(2);
+        .with_input_delay(2)
+        .unwrap();
 
     // Add players in specific order
     sess_builder = sess_builder

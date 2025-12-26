@@ -18,6 +18,7 @@ fn test_enum_advance_frames_with_delayed_input() -> Result<(), FortressError> {
     let mut sess = SessionBuilder::<StubEnumConfig>::new()
         .with_check_distance(check_distance)
         .with_input_delay(2)
+        .unwrap()
         .start_synctest_session()?;
 
     let inputs = [EnumInput::Val1, EnumInput::Val2];

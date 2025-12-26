@@ -145,12 +145,25 @@ jobs:
             ~/.kani
           key: kani-0.66.0-${{ runner.os }}
 
-      - name: Install Kani
+      - name: Install Kani with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 15
+          max_attempts: 3
+          retry_wait_seconds: 60
+          command: |
+            if ! command -v cargo-kani &> /dev/null; then
+              cargo install --locked kani-verifier
+              cargo kani setup
+            fi
+
+      - name: Verify toolchain
         run: |
-          if ! command -v cargo-kani &> /dev/null; then
-            cargo install --locked kani-verifier
-            cargo kani setup
-          fi
+          echo "=== Environment Diagnostics ==="
+          echo "PATH: $PATH"
+          echo "Cargo: $(which cargo)"
+          echo "Rustc: $(rustc --version)"
+          echo "Kani: $(cargo kani --version)"
 
       - name: Run Kani verification (Tier 1 - Fast)
         run: ./scripts/verify-kani.sh --quick --tier 1 --fail-fast --verbose
@@ -183,12 +196,25 @@ jobs:
             ~/.kani
           key: kani-0.66.0-${{ runner.os }}
 
-      - name: Install Kani
+      - name: Install Kani with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 15
+          max_attempts: 3
+          retry_wait_seconds: 60
+          command: |
+            if ! command -v cargo-kani &> /dev/null; then
+              cargo install --locked kani-verifier
+              cargo kani setup
+            fi
+
+      - name: Verify toolchain
         run: |
-          if ! command -v cargo-kani &> /dev/null; then
-            cargo install --locked kani-verifier
-            cargo kani setup
-          fi
+          echo "=== Environment Diagnostics ==="
+          echo "PATH: $PATH"
+          echo "Cargo: $(which cargo)"
+          echo "Rustc: $(rustc --version)"
+          echo "Kani: $(cargo kani --version)"
 
       - name: Run Kani verification (Tier 2 - Part ${{ matrix.part }}/6)
         run: ./scripts/verify-kani.sh --quick --tier 2 --part ${{ matrix.part }} --parts 6 --fail-fast --jobs 2
@@ -221,12 +247,25 @@ jobs:
             ~/.kani
           key: kani-0.66.0-${{ runner.os }}
 
-      - name: Install Kani
+      - name: Install Kani with retry
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 15
+          max_attempts: 3
+          retry_wait_seconds: 60
+          command: |
+            if ! command -v cargo-kani &> /dev/null; then
+              cargo install --locked kani-verifier
+              cargo kani setup
+            fi
+
+      - name: Verify toolchain
         run: |
-          if ! command -v cargo-kani &> /dev/null; then
-            cargo install --locked kani-verifier
-            cargo kani setup
-          fi
+          echo "=== Environment Diagnostics ==="
+          echo "PATH: $PATH"
+          echo "Cargo: $(which cargo)"
+          echo "Rustc: $(rustc --version)"
+          echo "Kani: $(cargo kani --version)"
 
       - name: Run Kani verification (Tier 3 - Part ${{ matrix.part }}/5)
         run: ./scripts/verify-kani.sh --quick --tier 3 --part ${{ matrix.part }} --parts 5 --fail-fast --jobs 2

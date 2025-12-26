@@ -1,12 +1,101 @@
-//! Synchronization layer for rollback networking.
+//! # Sync Layer - Rollback Networking Core
 //!
-//! This module provides the core synchronization logic for managing game state,
-//! input queues, and rollback operations.
+//! The sync layer manages game state synchronization for rollback-based netcode.
+//! It handles state saving, input prediction, and rollback/re-simulation.
 //!
-//! # Module Structure
+//! ## How Rollback Works
+//!
+//! Rollback networking allows games to run smoothly despite network latency by
+//! predicting remote player inputs and correcting mistakes when actual inputs arrive.
+//!
+//! ### Step 1: State Saving
+//!
+//! Each frame, the game state is saved to a circular buffer managed by [`SavedStates`].
+//! The buffer holds `max_prediction + 1` frames, allowing rollback up to `max_prediction`
+//! frames into the past. States are stored in [`GameStateCell`] containers for thread-safe
+//! access. When the buffer is full, the oldest state is overwritten.
+//!
+//! ### Step 2: Input Handling
+//!
+//! - **Local inputs**: Added immediately via `SyncLayer::add_local_input`
+//! - **Remote inputs**: Arrive over the network with variable latency
+//! - Each player has a dedicated [`InputQueue`] tracking confirmed and predicted inputs
+//! - The `input_delay` setting adds buffer frames to smooth network jitter
+//!
+//! ### Step 3: Prediction
+//!
+//! When remote inputs haven't arrived for a frame, the sync layer uses the
+//! [`PredictionStrategy`](crate::input_queue::PredictionStrategy) to guess what
+//! the remote player will do:
+//!
+//! - **`RepeatLastConfirmed`** (default): Use the last known input - works well
+//!   for most games since players typically hold inputs for multiple frames
+//! - **`BlankPrediction`**: Use a neutral/default input
+//!
+//! **Critical**: Predictions must be deterministic. Given the same game state and
+//! last confirmed input, all peers must predict the same value.
+//!
+//! ### Step 4: Rollback
+//!
+//! When actual remote inputs arrive and differ from predictions:
+//!
+//! 1. **Detection**: The input queue detects the misprediction
+//! 2. **Load State**: Load the saved state from before the misprediction via
+//!    [`FortressRequest::LoadGameState`]
+//! 3. **Re-simulation**: Advance forward with correct inputs, generating
+//!    [`FortressRequest::AdvanceFrame`] requests
+//! 4. **Bounds**: Rollback is bounded by `max_prediction` frames
+//!
+//! ### Step 5: Desync Detection
+//!
+//! Checksums are compared between peers to detect when game states have diverged.
+//! Desyncs typically indicate non-determinism bugs and cannot be automatically
+//! recovered - the game must be restarted or resynchronized.
+//!
+//! ## Data Flow
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                      Game Loop (per frame)                   │
+//! ├─────────────────────────────────────────────────────────────┤
+//! │  1. Add local inputs    ──►  InputQueue (local player)      │
+//! │  2. Receive network     ──►  InputQueue (remote players)    │
+//! │  3. Check for rollback  ──►  If misprediction detected:     │
+//! │                              └─► LoadGameState request      │
+//! │                              └─► Re-simulate frames         │
+//! │  4. Get synchronized    ──►  All players' inputs for frame  │
+//! │     inputs                                                   │
+//! │  5. Save state          ──►  SavedStates circular buffer    │
+//! │  6. Advance simulation  ──►  AdvanceFrame request           │
+//! └─────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Bounds and Limits
+//!
+//! - **`max_prediction`**: Maximum frames of prediction (default: 8, typical: 7-15)
+//!   - Higher = more latency tolerance, more memory, longer rollbacks
+//!   - At 60 FPS: 8 frames ≈ 133ms, 15 frames ≈ 250ms
+//! - **State buffer size**: `max_prediction + 1` slots in circular buffer
+//! - **Input queue length**: Configurable, default 128 frames (~2.1s at 60 FPS)
+//!
+//! ## Determinism Requirement
+//!
+//! **Critical**: The game simulation MUST be deterministic. Given the same inputs,
+//! every peer must produce identical game states. Non-determinism causes desyncs.
+//!
+//! Common sources of non-determinism to avoid:
+//! - **Floating-point**: Use fixed-point or integers for physics/positions
+//! - **HashMap iteration**: Use `BTreeMap` or sort keys before iterating
+//! - **System time**: Use frame counter, not wall clock
+//! - **Random numbers**: Use the provided deterministic [`Rng`](crate::rng::Rng)
+//! - **Uninitialized memory**: Always initialize all fields
+//! - **Multithreading**: Run simulation on a single thread
+//! - **External I/O**: Only read inputs from the input queue
+//!
+//! ## Module Structure
 //!
 //! - [`GameStateCell`] and [`GameStateAccessor`] - Types for saving/loading game states
-//! - [`SavedStates`] - Container for saved game states used during rollback
+//! - [`SavedStates`] - Circular buffer holding saved game states
 //! - [`SyncLayer`] - The main synchronization layer managing state and inputs
 
 mod game_state_cell;

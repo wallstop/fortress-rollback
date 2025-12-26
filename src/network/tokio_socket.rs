@@ -67,7 +67,7 @@
 //!
 //!     // Use with SessionBuilder as normal
 //!     let mut session = SessionBuilder::<MyConfig>::new()
-//!         .with_num_players(2)
+//!         .with_num_players(2).unwrap()
 //!         .add_player(PlayerType::Local, PlayerHandle::new(0))?
 //!         .add_player(
 //!             PlayerType::Remote("192.168.1.2:7000".parse()?),

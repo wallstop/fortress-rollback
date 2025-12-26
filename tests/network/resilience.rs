@@ -2140,6 +2140,7 @@ fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
     let socket1 = create_chaos_socket(9053, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_input_delay(3)
+        .unwrap()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
@@ -2147,6 +2148,7 @@ fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
     let socket2 = create_chaos_socket(9054, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_input_delay(3)
+        .unwrap()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;

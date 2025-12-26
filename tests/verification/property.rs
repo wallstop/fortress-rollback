@@ -995,6 +995,7 @@ mod p2p_checksum_tests {
         let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
         let sess1 = SessionBuilder::<TestConfig>::new()
             .with_num_players(3)
+            .unwrap()
             .with_desync_detection_mode(DesyncDetection::On { interval: 10 })
             .add_player(PlayerType::Local, PlayerHandle::new(0))
             .unwrap()

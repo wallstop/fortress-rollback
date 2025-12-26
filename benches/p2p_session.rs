@@ -64,6 +64,7 @@ fn bench_advance_frame_no_rollback(c: &mut Criterion) {
                 // Create session with check_distance=0 (no rollback)
                 let mut session: SyncTestSession<BenchConfig> = SessionBuilder::new()
                     .with_num_players(num_players)
+                    .unwrap()
                     .with_check_distance(0)
                     .start_synctest_session()
                     .expect("Failed to create session");
@@ -127,6 +128,7 @@ fn bench_advance_frame_with_rollback(c: &mut Criterion) {
                 // Create session with rollback enabled
                 let mut session: SyncTestSession<BenchConfig> = SessionBuilder::new()
                     .with_num_players(num_players)
+                    .unwrap()
                     .with_check_distance(check_distance)
                     .start_synctest_session()
                     .expect("Failed to create session");

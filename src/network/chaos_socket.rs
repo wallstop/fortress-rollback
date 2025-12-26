@@ -596,9 +596,9 @@ where
             if self.reorder_buffer.len() >= 2 {
                 for i in 0..self.reorder_buffer.len() {
                     if self.should_reorder() {
-                        let j = self.rng.gen_range_usize(0..self.reorder_buffer.len());
-                        if i != j {
-                            self.reorder_buffer.swap(i, j);
+                        let swap_index = self.rng.gen_range_usize(0..self.reorder_buffer.len());
+                        if i != swap_index {
+                            self.reorder_buffer.swap(i, swap_index);
                             self.stats.packets_reordered += 1;
                         }
                     }
