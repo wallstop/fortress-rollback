@@ -4,13 +4,10 @@ use std::sync::Arc;
 use web_time::Duration;
 
 use crate::{
-    network::protocol::UdpProtocol,
-    report_violation,
-    sessions::player_registry::PlayerRegistry,
-    telemetry::{ViolationKind, ViolationObserver, ViolationSeverity},
-    time_sync::TimeSyncConfig,
-    Config, DesyncDetection, FortressError, NonBlockingSocket, P2PSession, PlayerHandle,
-    PlayerType, SpectatorSession, SyncTestSession,
+    network::protocol::UdpProtocol, sessions::player_registry::PlayerRegistry,
+    telemetry::ViolationObserver, time_sync::TimeSyncConfig, Config, DesyncDetection,
+    FortressError, NonBlockingSocket, P2PSession, PlayerHandle, PlayerType, SpectatorSession,
+    SyncTestSession,
 };
 
 // Re-export config types for backwards compatibility with code that imports from builder
@@ -253,11 +250,11 @@ impl<T: Config> SessionBuilder<T> {
 
     /// Change the amount of frames Fortress Rollback will delay the inputs for local players.
     ///
-    /// # Note on Invalid Values
+    /// # Errors
     ///
-    /// If `delay` is greater than or equal to the configured `queue_length`
-    /// (default 128, configurable via [`with_input_queue_config`](Self::with_input_queue_config)),
-    /// a violation is reported and the delay is clamped to the maximum allowed value.
+    /// Returns [`FortressError::InvalidRequest`] if `delay` exceeds the maximum allowed value.
+    /// The maximum delay is `queue_length - 1` (default 127, configurable via
+    /// [`with_input_queue_config`](Self::with_input_queue_config)).
     ///
     /// This limit ensures the circular input buffer doesn't overflow.
     /// At 60fps with default settings, max delay is 127 frames (~2.1 seconds),
@@ -268,7 +265,7 @@ impl<T: Config> SessionBuilder<T> {
     /// # Example
     ///
     /// ```
-    /// use fortress_rollback::{SessionBuilder, Config, InputQueueConfig};
+    /// use fortress_rollback::{SessionBuilder, Config, InputQueueConfig, FortressError};
     ///
     /// # #[derive(Debug)]
     /// # struct TestConfig;
@@ -279,36 +276,49 @@ impl<T: Config> SessionBuilder<T> {
     /// # }
     /// // Default queue allows delays up to 127
     /// let builder = SessionBuilder::<TestConfig>::new()
-    ///     .with_input_delay(8);
+    ///     .with_input_delay(8)?;
     ///
     /// // With custom queue size, max delay changes
     /// let builder = SessionBuilder::<TestConfig>::new()
     ///     .with_input_queue_config(InputQueueConfig::minimal()) // queue_length = 32
-    ///     .with_input_delay(30); // max is now 31
+    ///     .with_input_delay(30)?; // max is now 31
+    ///
+    /// // Exceeding the limit returns an error
+    /// let result = SessionBuilder::<TestConfig>::new()
+    ///     .with_input_delay(200);
+    /// assert!(result.is_err());
+    /// # Ok::<(), FortressError>(())
     /// ```
-    pub fn with_input_delay(mut self, delay: usize) -> Self {
+    pub fn with_input_delay(mut self, delay: usize) -> Result<Self, FortressError> {
         let max_delay = self.input_queue_config.max_frame_delay();
         if delay > max_delay {
-            report_violation!(
-                ViolationSeverity::Warning,
-                ViolationKind::Configuration,
-                "Input delay {} exceeds maximum allowed value of {} (queue_length - 1). \
-                 At 60fps, this would be {:.1}+ seconds of delay. Clamping to max.",
-                delay,
-                max_delay,
-                delay as f64 / 60.0
-            );
-            self.input_delay = max_delay;
-        } else {
-            self.input_delay = delay;
+            return Err(FortressError::InvalidRequest {
+                info: format!(
+                    "Input delay {} exceeds maximum allowed value of {} (queue_length - 1). \
+                     At 60fps, this would be {:.1}+ seconds of delay.",
+                    delay,
+                    max_delay,
+                    delay as f64 / 60.0
+                ),
+            });
         }
-        self
+        self.input_delay = delay;
+        Ok(self)
     }
 
     /// Change number of total players. Default is 2.
-    pub fn with_num_players(mut self, num_players: usize) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FortressError::InvalidRequest`] if `num_players` is 0.
+    pub fn with_num_players(mut self, num_players: usize) -> Result<Self, FortressError> {
+        if num_players == 0 {
+            return Err(FortressError::InvalidRequest {
+                info: "Number of players must be greater than 0".to_owned(),
+            });
+        }
         self.num_players = num_players;
-        self
+        Ok(self)
     }
 
     /// Sets the save mode for game state management.
@@ -899,14 +909,18 @@ mod tests {
 
     #[test]
     fn test_with_input_delay_accepts_zero() {
-        let builder = SessionBuilder::<TestConfig>::new().with_input_delay(0);
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_input_delay(0)
+            .expect("Zero delay should be valid");
         assert_eq!(builder.input_delay, 0);
     }
 
     #[test]
     fn test_with_input_delay_accepts_typical_values() {
         for delay in 1..=8 {
-            let builder = SessionBuilder::<TestConfig>::new().with_input_delay(delay);
+            let builder = SessionBuilder::<TestConfig>::new()
+                .with_input_delay(delay)
+                .expect("Typical delay values should be valid");
             assert_eq!(builder.input_delay, delay);
         }
     }
@@ -915,24 +929,26 @@ mod tests {
     fn test_with_input_delay_accepts_max_valid() {
         use crate::input_queue::INPUT_QUEUE_LENGTH;
         let max_delay = INPUT_QUEUE_LENGTH - 1;
-        let builder = SessionBuilder::<TestConfig>::new().with_input_delay(max_delay);
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_input_delay(max_delay)
+            .expect("Max delay should be valid");
         assert_eq!(builder.input_delay, max_delay);
     }
 
     #[test]
-    fn test_with_input_delay_clamps_excessive_delay() {
+    fn test_with_input_delay_rejects_excessive_delay() {
         use crate::input_queue::INPUT_QUEUE_LENGTH;
-        let builder = SessionBuilder::<TestConfig>::new().with_input_delay(INPUT_QUEUE_LENGTH);
-        // Excessive delay should be clamped to max allowed value (queue_length - 1)
-        assert_eq!(builder.input_delay, INPUT_QUEUE_LENGTH - 1);
+        let result = SessionBuilder::<TestConfig>::new().with_input_delay(INPUT_QUEUE_LENGTH);
+        // Excessive delay should return an error
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_with_input_delay_clamps_to_queue_length() {
+    fn test_with_input_delay_rejects_very_large_delay() {
         use crate::input_queue::INPUT_QUEUE_LENGTH;
-        let builder = SessionBuilder::<TestConfig>::new().with_input_delay(INPUT_QUEUE_LENGTH * 2);
-        // Excessive delay should be clamped to max allowed value (queue_length - 1)
-        assert_eq!(builder.input_delay, INPUT_QUEUE_LENGTH - 1);
+        let result = SessionBuilder::<TestConfig>::new().with_input_delay(INPUT_QUEUE_LENGTH * 2);
+        // Excessive delay should return an error
+        assert!(result.is_err());
     }
 
     // ========================================================================
@@ -951,18 +967,19 @@ mod tests {
         // With minimal config (queue_length=32), max delay is 31
         let builder = SessionBuilder::<TestConfig>::new()
             .with_input_queue_config(InputQueueConfig::minimal())
-            .with_input_delay(31); // Should succeed
+            .with_input_delay(31)
+            .expect("Delay of 31 should be valid with minimal config"); // Should succeed
         assert_eq!(builder.input_delay, 31);
     }
 
     #[test]
-    fn test_input_queue_config_custom_queue_clamps_delay() {
+    fn test_input_queue_config_custom_queue_rejects_excessive_delay() {
         // With minimal config (queue_length=32), max delay is 31
-        // Trying to set delay=32 should clamp to 31
-        let builder = SessionBuilder::<TestConfig>::new()
+        // Trying to set delay=32 should return an error
+        let result = SessionBuilder::<TestConfig>::new()
             .with_input_queue_config(InputQueueConfig::minimal())
             .with_input_delay(32);
-        assert_eq!(builder.input_delay, 31);
+        assert!(result.is_err());
     }
 
     #[test]

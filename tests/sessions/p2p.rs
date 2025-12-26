@@ -181,6 +181,7 @@ fn test_add_more_players() -> Result<(), FortressError> {
 
     let _sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
+        .unwrap()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(remote_addr1), PlayerHandle::new(1))?
         .add_player(PlayerType::Remote(remote_addr2), PlayerHandle::new(2))?
@@ -468,6 +469,7 @@ fn test_desyncs_and_input_delay_no_panic() -> Result<(), FortressError> {
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .with_input_delay(5)
+        .unwrap()
         .with_desync_detection_mode(desync_mode)
         .start_p2p_session(socket1)?;
 
@@ -476,6 +478,7 @@ fn test_desyncs_and_input_delay_no_panic() -> Result<(), FortressError> {
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .with_input_delay(5)
+        .unwrap()
         .with_desync_detection_mode(desync_mode)
         .start_p2p_session(socket2)?;
 
@@ -529,6 +532,7 @@ fn test_three_player_session() -> Result<(), FortressError> {
     let socket1 = UdpNonBlockingSocket::bind_to_port(7001).unwrap();
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_num_players(3)
+        .unwrap()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .add_player(PlayerType::Remote(addr3), PlayerHandle::new(2))?
@@ -538,6 +542,7 @@ fn test_three_player_session() -> Result<(), FortressError> {
     let socket2 = UdpNonBlockingSocket::bind_to_port(7002).unwrap();
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_num_players(3)
+        .unwrap()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .add_player(PlayerType::Remote(addr3), PlayerHandle::new(2))?
@@ -547,6 +552,7 @@ fn test_three_player_session() -> Result<(), FortressError> {
     let socket3 = UdpNonBlockingSocket::bind_to_port(7003).unwrap();
     let mut sess3 = SessionBuilder::<StubConfig>::new()
         .with_num_players(3)
+        .unwrap()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .add_player(PlayerType::Local, PlayerHandle::new(2))?
@@ -628,6 +634,7 @@ fn test_four_player_session() -> Result<(), FortressError> {
     let socket1 = UdpNonBlockingSocket::bind_to_port(7011).unwrap();
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
+        .unwrap()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .add_player(PlayerType::Remote(addr3), PlayerHandle::new(2))?
@@ -638,6 +645,7 @@ fn test_four_player_session() -> Result<(), FortressError> {
     let socket2 = UdpNonBlockingSocket::bind_to_port(7012).unwrap();
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
+        .unwrap()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .add_player(PlayerType::Remote(addr3), PlayerHandle::new(2))?
@@ -648,6 +656,7 @@ fn test_four_player_session() -> Result<(), FortressError> {
     let socket3 = UdpNonBlockingSocket::bind_to_port(7013).unwrap();
     let mut sess3 = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
+        .unwrap()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .add_player(PlayerType::Local, PlayerHandle::new(2))?
@@ -658,6 +667,7 @@ fn test_four_player_session() -> Result<(), FortressError> {
     let socket4 = UdpNonBlockingSocket::bind_to_port(7014).unwrap();
     let mut sess4 = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
+        .unwrap()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .add_player(PlayerType::Remote(addr3), PlayerHandle::new(2))?
@@ -763,12 +773,14 @@ fn test_misprediction_at_frame_0_no_crash() -> Result<(), FortressError> {
     // Create sessions with 0 input delay to maximize prediction window
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_input_delay(0)
+        .unwrap()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_input_delay(0)
+        .unwrap()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -959,6 +971,7 @@ fn run_sync_test_case(
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .with_input_delay(case.input_delay_1)
+        .unwrap()
         .start_p2p_session(socket1)?;
 
     let socket2 = UdpNonBlockingSocket::bind_to_port(port2)?;
@@ -966,6 +979,7 @@ fn run_sync_test_case(
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .with_input_delay(case.input_delay_2)
+        .unwrap()
         .start_p2p_session(socket2)?;
 
     // Synchronize using helper
@@ -1426,6 +1440,7 @@ fn run_timing_test_case(
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .with_input_delay(case.input_delay)
+        .unwrap()
         .start_p2p_session(socket1)?;
 
     let socket2 = UdpNonBlockingSocket::bind_to_port(port2)?;
@@ -1433,6 +1448,7 @@ fn run_timing_test_case(
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .with_input_delay(case.input_delay)
+        .unwrap()
         .start_p2p_session(socket2)?;
 
     // Synchronize using helper

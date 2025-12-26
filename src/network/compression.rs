@@ -44,8 +44,8 @@ pub fn delta_encode<'a>(
             continue;
         }
 
-        for (b1, b2) in ref_bytes.iter().zip(input_bytes.iter()) {
-            bytes.push(b1 ^ b2);
+        for (reference_byte, input_byte) in ref_bytes.iter().zip(input_bytes.iter()) {
+            bytes.push(reference_byte ^ input_byte);
         }
     }
     bytes
@@ -97,20 +97,19 @@ pub fn delta_decode(
     let out_size = data.len() / ref_bytes.len();
     let mut output = Vec::with_capacity(out_size);
 
-    for inp in 0..out_size {
-        let mut buffer = vec![0u8; ref_bytes.len()];
-        for i in 0..ref_bytes.len() {
-            let data_idx = ref_bytes.len() * inp + i;
-            let ref_byte = ref_bytes
-                .get(i)
-                .ok_or_else(|| format!("delta_decode: ref_bytes index {} out of bounds", i))?;
+    for output_index in 0..out_size {
+        // Pre-allocate buffer without zero-initialization to reduce allocations in hot path
+        let mut buffer = Vec::with_capacity(ref_bytes.len());
+        for byte_index in 0..ref_bytes.len() {
+            let data_idx = ref_bytes.len() * output_index + byte_index;
+            let ref_byte = ref_bytes.get(byte_index).ok_or_else(|| {
+                format!("delta_decode: ref_bytes index {} out of bounds", byte_index)
+            })?;
             let data_byte = data
                 .get(data_idx)
                 .ok_or_else(|| format!("delta_decode: data index {} out of bounds", data_idx))?;
-            let buffer_slot = buffer
-                .get_mut(i)
-                .ok_or_else(|| format!("delta_decode: buffer index {} out of bounds", i))?;
-            *buffer_slot = ref_byte ^ data_byte;
+            // Push directly instead of allocating zeros then mutating
+            buffer.push(ref_byte ^ data_byte);
         }
         output.push(buffer);
     }

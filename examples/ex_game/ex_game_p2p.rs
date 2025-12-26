@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Or set the prediction window to 0 to use lockstep netcode instead (i.e. no rollbacks).
         .with_max_prediction_window(8)
         // (optional) set input delay for the local player
-        .with_input_delay(2)
+        .with_input_delay(2).unwrap()
         // (optional) by default, Fortress Rollback will ask you to save the game state every frame. If your
         // saving of game state takes much longer than advancing the game state N times, you can
         // improve performance by turning sparse saving mode on (N == average number of predictions

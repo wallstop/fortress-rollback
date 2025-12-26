@@ -121,10 +121,7 @@ impl<T: Config> P2PSession<T> {
         queue_length: usize,
     ) -> Self {
         // local connection status
-        let mut local_connect_status = Vec::new();
-        for _ in 0..num_players {
-            local_connect_status.push(ConnectionStatus::default());
-        }
+        let local_connect_status = vec![ConnectionStatus::default(); num_players];
 
         // sync layer & set input delay
         let mut sync_layer =
@@ -447,14 +444,14 @@ impl<T: Config> P2PSession<T> {
         // run endpoint poll and get events from players and spectators. This will trigger additional packets to be sent.
         let mut events = VecDeque::new();
         for endpoint in self.player_reg.remotes.values_mut() {
-            let handles = endpoint.handles().clone();
+            let handles = endpoint.handles(); // Returns Arc<[PlayerHandle]>, cheap to clone
             let addr = endpoint.peer_addr();
             for event in endpoint.poll(&self.local_connect_status) {
                 events.push_back((event, handles.clone(), addr.clone()))
             }
         }
         for endpoint in self.player_reg.spectators.values_mut() {
-            let handles = endpoint.handles().clone();
+            let handles = endpoint.handles(); // Returns Arc<[PlayerHandle]>, cheap to clone
             let addr = endpoint.peer_addr();
             for event in endpoint.poll(&self.local_connect_status) {
                 events.push_back((event, handles.clone(), addr.clone()))
@@ -997,7 +994,7 @@ impl<T: Config> P2PSession<T> {
                 };
 
                 // mark the affected players as disconnected
-                for &handle in endpoint.handles() {
+                for &handle in endpoint.handles().iter() {
                     let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) else {
                         report_violation!(
                             ViolationSeverity::Warning,
@@ -1296,7 +1293,7 @@ impl<T: Config> P2PSession<T> {
     fn max_frame_advantage(&self) -> i32 {
         let mut interval = i32::MIN;
         for endpoint in self.player_reg.remotes.values() {
-            for &handle in endpoint.handles() {
+            for &handle in endpoint.handles().iter() {
                 let Some(status) = self.local_connect_status.get(handle.as_usize()) else {
                     report_violation!(
                         ViolationSeverity::Warning,
@@ -1373,7 +1370,7 @@ impl<T: Config> P2PSession<T> {
     fn handle_event(
         &mut self,
         event: Event<T>,
-        player_handles: Vec<PlayerHandle>,
+        player_handles: Arc<[PlayerHandle]>,
         addr: T::Address,
     ) {
         match event {
@@ -1413,7 +1410,7 @@ impl<T: Config> P2PSession<T> {
             },
             // disconnect the player, then forward to user
             Event::Disconnected => {
-                for handle in player_handles {
+                for &handle in player_handles.iter() {
                     // unwrap_or_else has side effects (violation reporting)
                     #[allow(clippy::map_unwrap_or)]
                     let last_frame = if handle.is_valid_player_for(self.num_players) {
@@ -1678,6 +1675,7 @@ mod tests {
     fn create_local_only_session() -> P2PSession<TestConfig> {
         SessionBuilder::new()
             .with_num_players(1)
+            .unwrap()
             .add_player(PlayerType::Local, PlayerHandle::new(0))
             .expect("Failed to add player")
             .start_p2p_session(DummySocket)
@@ -1688,6 +1686,7 @@ mod tests {
     fn create_two_player_session() -> P2PSession<TestConfig> {
         SessionBuilder::new()
             .with_num_players(2)
+            .unwrap()
             .add_player(PlayerType::Local, PlayerHandle::new(0))
             .expect("Failed to add local player")
             .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(1))
@@ -1700,6 +1699,7 @@ mod tests {
     fn create_two_local_players_session() -> P2PSession<TestConfig> {
         SessionBuilder::new()
             .with_num_players(2)
+            .unwrap()
             .add_player(PlayerType::Local, PlayerHandle::new(0))
             .expect("Failed to add player 0")
             .add_player(PlayerType::Local, PlayerHandle::new(1))
@@ -1808,6 +1808,7 @@ mod tests {
     fn p2p_session_max_prediction_returns_configured_value() {
         let session = SessionBuilder::<TestConfig>::new()
             .with_num_players(1)
+            .unwrap()
             .with_max_prediction_window(4)
             .add_player(PlayerType::Local, PlayerHandle::new(0))
             .expect("Failed to add player")
@@ -1826,6 +1827,7 @@ mod tests {
     fn p2p_session_desync_detection_returns_configured_value() {
         let session = SessionBuilder::<TestConfig>::new()
             .with_num_players(1)
+            .unwrap()
             .with_desync_detection_mode(DesyncDetection::Off)
             .add_player(PlayerType::Local, PlayerHandle::new(0))
             .expect("Failed to add player")
@@ -2343,6 +2345,7 @@ mod tests {
     fn in_lockstep_mode_true_with_zero_prediction() {
         let mut session = SessionBuilder::<TestConfig>::new()
             .with_num_players(1)
+            .unwrap()
             .with_max_prediction_window(0)
             .add_player(PlayerType::Local, PlayerHandle::new(0))
             .expect("Failed to add player")
@@ -2372,6 +2375,7 @@ mod tests {
     fn sync_health_remote_with_desync_off_returns_pending() {
         let session = SessionBuilder::<TestConfig>::new()
             .with_num_players(2)
+            .unwrap()
             .with_desync_detection_mode(DesyncDetection::Off)
             .add_player(PlayerType::Local, PlayerHandle::new(0))
             .expect("Failed to add local player")
@@ -2496,6 +2500,7 @@ mod tests {
     fn session_with_spectator() {
         let session = SessionBuilder::<TestConfig>::new()
             .with_num_players(1)
+            .unwrap()
             .add_player(PlayerType::Local, PlayerHandle::new(0))
             .expect("Failed to add local player")
             .add_player(

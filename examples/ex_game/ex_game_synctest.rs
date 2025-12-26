@@ -48,6 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_num_players(opt.num_players)
         .with_check_distance(opt.check_distance)
         .with_input_delay(2)
+        .unwrap()
         .start_synctest_session()?;
 
     // Create a new box game

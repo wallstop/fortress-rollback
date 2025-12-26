@@ -564,7 +564,9 @@ fn run_test(args: &Args) -> TestResult {
 
     let mut sess_builder = SessionBuilder::<TestConfig>::new()
         .with_num_players(num_players)
+        .unwrap()
         .with_input_delay(args.input_delay)
+        .unwrap()
         .with_sync_config(sync_config);
 
     // Add players based on our index

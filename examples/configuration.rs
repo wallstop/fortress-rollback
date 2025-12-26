@@ -59,9 +59,9 @@ fn basic_configuration() {
 
     let builder = SessionBuilder::<GameConfig>::new()
         // Required: Set the number of players
-        .with_num_players(2)
+        .with_num_players(2).unwrap()
         // Optional: Add input delay (reduces rollbacks at cost of latency)
-        .with_input_delay(2)
+        .with_input_delay(2).unwrap()
         // Optional: Set expected framerate for timing calculations
         .with_fps(60)
         .expect("FPS must be > 0")
@@ -83,10 +83,12 @@ fn network_presets() {
     // LAN/Local play - fast connections, minimal latency
     let lan_builder = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
+        .unwrap()
         .with_sync_config(SyncConfig::lan())
         .with_protocol_config(ProtocolConfig::competitive())
         .with_time_sync_config(TimeSyncConfig::responsive())
         .with_input_delay(0)
+        .unwrap()
         .with_max_prediction_window(4);
 
     println!("LAN preset (< 20ms RTT):");
@@ -99,10 +101,12 @@ fn network_presets() {
     // Regional internet (20-80ms RTT)
     let regional_builder = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
+        .unwrap()
         .with_sync_config(SyncConfig::default())
         .with_protocol_config(ProtocolConfig::default())
         .with_time_sync_config(TimeSyncConfig::default())
         .with_input_delay(2)
+        .unwrap()
         .with_max_prediction_window(8);
 
     println!("Regional preset (20-80ms RTT):");
@@ -114,10 +118,12 @@ fn network_presets() {
     // High-latency networks (80-200ms RTT)
     let high_latency_builder = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
+        .unwrap()
         .with_sync_config(SyncConfig::high_latency())
         .with_protocol_config(ProtocolConfig::high_latency())
         .with_time_sync_config(TimeSyncConfig::smooth())
         .with_input_delay(4)
+        .unwrap()
         .with_max_prediction_window(12);
 
     println!("High-latency preset (80-200ms RTT):");
@@ -130,10 +136,12 @@ fn network_presets() {
     // Lossy networks (5-15% packet loss)
     let lossy_builder = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
+        .unwrap()
         .with_sync_config(SyncConfig::lossy())
         .with_protocol_config(ProtocolConfig::default())
         .with_time_sync_config(TimeSyncConfig::smooth())
         .with_input_delay(3)
+        .unwrap()
         .with_max_prediction_window(15);
 
     println!("Lossy network preset (5-15% packet loss):");
@@ -188,6 +196,7 @@ fn custom_configuration() {
 
     let builder = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
+        .unwrap()
         .with_sync_config(custom_sync)
         .with_protocol_config(custom_protocol)
         .with_time_sync_config(custom_time_sync);
@@ -204,9 +213,9 @@ fn competitive_setup() {
     println!("--- Competitive Setup ---");
 
     let builder = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2)
+        .with_num_players(2).unwrap()
         // Minimal input delay for fastest response (accept more rollbacks)
-        .with_input_delay(1)
+        .with_input_delay(1).unwrap()
         // Enable desync detection to catch cheating
         .with_desync_detection_mode(DesyncDetection::On { interval: 30 })
         // Use competitive presets
@@ -236,9 +245,9 @@ fn casual_online_setup() {
     println!("--- Casual Online Setup ---");
 
     let builder = SessionBuilder::<GameConfig>::new()
-        .with_num_players(4) // Support up to 4 players
+        .with_num_players(4).unwrap() // Support up to 4 players
         // Moderate input delay for stability
-        .with_input_delay(3)
+        .with_input_delay(3).unwrap()
         // Less frequent desync checks (performance)
         .with_desync_detection_mode(DesyncDetection::On { interval: 300 })
         // Balanced presets
@@ -306,7 +315,7 @@ fn spectator_setup() {
     };
 
     let builder = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2)
+        .with_num_players(2).unwrap()
         .with_spectator_config(custom_spectator)
         // Use high-latency presets for spectator hosts
         .with_sync_config(SyncConfig::high_latency())
@@ -332,7 +341,9 @@ fn dynamic_configuration() {
 
     let builder = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
+        .unwrap()
         .with_input_delay(input_delay)
+        .unwrap()
         .with_sync_config(sync_config)
         .with_max_prediction_window(prediction_window);
 

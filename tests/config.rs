@@ -381,6 +381,7 @@ fn test_session_with_default_configs() -> Result<(), FortressError> {
 
     let _sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
+        .unwrap()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
         .start_p2p_session(socket)?;
@@ -397,6 +398,7 @@ fn test_session_with_all_custom_configs() -> Result<(), FortressError> {
 
     let _sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
+        .unwrap()
         .with_sync_config(SyncConfig::high_latency())
         .with_protocol_config(ProtocolConfig::competitive())
         .with_spectator_config(SpectatorConfig::fast_paced())
@@ -416,7 +418,7 @@ fn test_session_with_mixed_configs() -> Result<(), FortressError> {
     let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9105);
 
     let _sess = SessionBuilder::<StubConfig>::new()
-        .with_num_players(2)
+        .with_num_players(2).unwrap()
         // Only set sync and time sync config, leave others at defaults
         .with_sync_config(SyncConfig::lan())
         .with_time_sync_config(TimeSyncConfig::lan())
@@ -445,6 +447,7 @@ fn test_session_with_custom_protocol_config() -> Result<(), FortressError> {
 
     let _sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
+        .unwrap()
         .with_protocol_config(custom_protocol_config)
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
@@ -470,6 +473,7 @@ fn test_session_with_custom_sync_config() -> Result<(), FortressError> {
 
     let _sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
+        .unwrap()
         .with_sync_config(custom_sync_config)
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
@@ -484,6 +488,7 @@ fn test_synctest_session_with_default_configs() -> Result<(), FortressError> {
     // SyncTest session should also work with default configs
     let _sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
+        .unwrap()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_synctest_session()?;

@@ -158,9 +158,9 @@ pub trait Rng {
         // Use rejection sampling to avoid bias
         let threshold = span.wrapping_neg() % span;
         loop {
-            let r = self.next_u32();
-            if r >= threshold {
-                return range.start.wrapping_add(r % span);
+            let random_value = self.next_u32();
+            if random_value >= threshold {
+                return range.start.wrapping_add(random_value % span);
             }
         }
     }
@@ -186,9 +186,11 @@ pub trait Rng {
             // Use 32-bit arithmetic for smaller ranges
             let threshold = (span as u32).wrapping_neg() % (span as u32);
             loop {
-                let r = self.next_u32();
-                if r >= threshold {
-                    return range.start.wrapping_add((r % span as u32) as usize);
+                let random_value = self.next_u32();
+                if random_value >= threshold {
+                    return range
+                        .start
+                        .wrapping_add((random_value % span as u32) as usize);
                 }
             }
         } else {
@@ -196,9 +198,9 @@ pub trait Rng {
             let span64 = span as u64;
             let threshold = span64.wrapping_neg() % span64;
             loop {
-                let r = self.next_u64();
-                if r >= threshold {
-                    return range.start.wrapping_add((r % span64) as usize);
+                let random_value = self.next_u64();
+                if random_value >= threshold {
+                    return range.start.wrapping_add((random_value % span64) as usize);
                 }
             }
         }
@@ -234,9 +236,9 @@ pub trait Rng {
         // Use rejection sampling for unbiased results
         let threshold = span.wrapping_neg() % span;
         loop {
-            let r = self.next_u64();
-            if r >= threshold {
-                return start.wrapping_add((r % span) as i64);
+            let random_value = self.next_u64();
+            if random_value >= threshold {
+                return start.wrapping_add((random_value % span) as i64);
             }
         }
     }

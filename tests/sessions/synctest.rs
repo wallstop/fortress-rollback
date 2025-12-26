@@ -78,6 +78,7 @@ fn test_advance_frames_with_delayed_input() -> Result<(), FortressError> {
     let mut sess = SessionBuilder::new()
         .with_check_distance(check_distance)
         .with_input_delay(2)
+        .unwrap()
         .start_synctest_session()?;
 
     for i in 0..200 {
@@ -97,6 +98,7 @@ fn test_advance_frames_with_random_checksums() {
     let mut stub = RandomChecksumGameStub::new();
     let mut sess = SessionBuilder::new()
         .with_input_delay(2)
+        .unwrap()
         .start_synctest_session()
         .unwrap();
 
@@ -204,6 +206,7 @@ fn test_rollback_with_varying_input_delay() -> Result<(), FortressError> {
         let mut sess = SessionBuilder::new()
             .with_check_distance(check_distance)
             .with_input_delay(input_delay)
+            .unwrap()
             .start_synctest_session()?;
 
         for i in 0..100 {

@@ -29,6 +29,7 @@ use std::collections::vec_deque::Drain;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::TryFrom;
 use std::ops::Add;
+use std::sync::Arc;
 use web_time::{Duration, Instant};
 
 use super::network_stats::NetworkStats;
@@ -98,7 +99,7 @@ where
     T: Config,
 {
     num_players: usize,
-    handles: Vec<PlayerHandle>,
+    handles: Arc<[PlayerHandle]>,
     send_queue: VecDeque<Message>,
     event_queue: VecDeque<Event<T>>,
 
@@ -197,12 +198,11 @@ impl<T: Config> UdpProtocol<T> {
 
         handles.sort_unstable();
         let recv_player_num = handles.len();
+        // Convert Vec to Arc<[PlayerHandle]> for cheap cloning in hot path
+        let handles: Arc<[PlayerHandle]> = handles.into();
 
         // peer connection status
-        let mut peer_connect_status = Vec::new();
-        for _ in 0..num_players {
-            peer_connect_status.push(ConnectionStatus::default());
-        }
+        let peer_connect_status = vec![ConnectionStatus::default(); num_players];
 
         // received input history - may fail if serialization is broken
         let mut recv_inputs = BTreeMap::new();
@@ -314,8 +314,8 @@ impl<T: Config> UdpProtocol<T> {
         })
     }
 
-    pub(crate) fn handles(&self) -> &Vec<PlayerHandle> {
-        &self.handles
+    pub(crate) fn handles(&self) -> Arc<[PlayerHandle]> {
+        Arc::clone(&self.handles)
     }
 
     pub(crate) fn is_synchronized(&self) -> bool {
@@ -1530,8 +1530,8 @@ mod tests {
 
         let handles = protocol.handles();
         assert_eq!(
-            handles,
-            &vec![
+            handles.as_ref(),
+            &[
                 PlayerHandle::new(0),
                 PlayerHandle::new(1),
                 PlayerHandle::new(2)

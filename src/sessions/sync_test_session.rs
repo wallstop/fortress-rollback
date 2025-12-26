@@ -59,10 +59,7 @@ impl<T: Config> SyncTestSession<T> {
         violation_observer: Option<Arc<dyn ViolationObserver>>,
         queue_length: usize,
     ) -> Self {
-        let mut dummy_connect_status = Vec::new();
-        for _ in 0..num_players {
-            dummy_connect_status.push(ConnectionStatus::default());
-        }
+        let dummy_connect_status = vec![ConnectionStatus::default(); num_players];
 
         let mut sync_layer =
             SyncLayer::with_queue_length(num_players, max_prediction, queue_length);
@@ -956,6 +953,7 @@ mod tests {
 
         let session: SyncTestSession<TestConfig> = SessionBuilder::new()
             .with_num_players(2)
+            .unwrap()
             .with_max_prediction_window(8)
             .with_check_distance(3)
             .start_synctest_session()
@@ -972,7 +970,9 @@ mod tests {
 
         let session: SyncTestSession<TestConfig> = SessionBuilder::new()
             .with_num_players(2)
+            .unwrap()
             .with_input_delay(3)
+            .unwrap()
             .with_check_distance(2)
             .start_synctest_session()
             .expect("should create session");
@@ -987,6 +987,7 @@ mod tests {
         let observer = Arc::new(CollectingObserver::new());
         let session: SyncTestSession<TestConfig> = SessionBuilder::new()
             .with_num_players(2)
+            .unwrap()
             .with_violation_observer(observer)
             .start_synctest_session()
             .expect("should create session");

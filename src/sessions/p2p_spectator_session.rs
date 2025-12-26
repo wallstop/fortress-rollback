@@ -58,10 +58,7 @@ impl<T: Config> SpectatorSession<T> {
         violation_observer: Option<Arc<dyn ViolationObserver>>,
     ) -> Self {
         // host connection status
-        let mut host_connect_status = Vec::new();
-        for _ in 0..num_players {
-            host_connect_status.push(ConnectionStatus::default());
-        }
+        let host_connect_status = vec![ConnectionStatus::default(); num_players];
 
         // Use at least 1 for buffer size to prevent panics
         let actual_buffer_size = buffer_size.max(1);
@@ -460,6 +457,7 @@ mod tests {
     fn create_test_spectator_session() -> Option<SpectatorSession<TestConfig>> {
         SessionBuilder::new()
             .with_num_players(2)
+            .unwrap()
             .start_spectator_session(test_addr(7000), DummySocket)
     }
 
@@ -472,6 +470,7 @@ mod tests {
         use crate::SpectatorConfig;
         SessionBuilder::new()
             .with_num_players(num_players)
+            .unwrap()
             .with_spectator_config(SpectatorConfig {
                 buffer_size,
                 catchup_speed,
@@ -615,6 +614,7 @@ mod tests {
         let observer = Arc::new(CollectingObserver::new());
         let session: Option<SpectatorSession<TestConfig>> = SessionBuilder::new()
             .with_num_players(2)
+            .unwrap()
             .with_violation_observer(observer)
             .start_spectator_session(test_addr(7002), DummySocket);
 
@@ -963,6 +963,7 @@ mod tests {
 
         let session: Option<SpectatorSession<TestConfig>> = SessionBuilder::new()
             .with_num_players(2)
+            .unwrap()
             .with_violation_observer(observer)
             .start_spectator_session(test_addr(7003), DummySocket);
 

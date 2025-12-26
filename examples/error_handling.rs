@@ -68,6 +68,7 @@ fn configuration_errors() {
     println!("2. Duplicate player handle:");
     let result = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
+        .unwrap()
         .add_player(PlayerType::Local, PlayerHandle::new(0))
         .and_then(|b| b.add_player(PlayerType::Local, PlayerHandle::new(0))); // Same handle!
     match result {
@@ -83,7 +84,7 @@ fn configuration_errors() {
     // Example 3: Invalid player handle for player type
     println!("3. Invalid handle for player type:");
     let result = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2)
+        .with_num_players(2).unwrap()
         // Handle 5 is invalid for a local player in a 2-player game
         .add_player(PlayerType::Local, PlayerHandle::new(5));
     match result {
@@ -100,6 +101,7 @@ fn configuration_errors() {
     println!("4. Invalid max_frames_behind:");
     let result = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
+        .unwrap()
         .with_max_frames_behind(0); // Must be >= 1
     match result {
         Ok(_) => println!("   Unexpected success"),
@@ -133,7 +135,9 @@ fn session_setup_errors() {
     println!("2. Starting P2P session without players:");
     // Create a socket first (on a high port that should work)
     if let Ok(socket) = UdpNonBlockingSocket::bind_to_port(0) {
-        let builder = SessionBuilder::<GameConfig>::new().with_num_players(2);
+        let builder = SessionBuilder::<GameConfig>::new()
+            .with_num_players(2)
+            .unwrap();
         // Don't add any players!
 
         let result = builder.start_p2p_session(socket);
@@ -184,12 +188,14 @@ fn runtime_error_handling() {
     // Create sessions
     let sess1 = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
+        .unwrap()
         .add_player(PlayerType::Local, PlayerHandle::new(0))
         .and_then(|b| b.add_player(PlayerType::Remote(addr2), PlayerHandle::new(1)))
         .and_then(|b| b.start_p2p_session(socket1));
 
     let sess2 = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
+        .unwrap()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))
         .and_then(|b| b.add_player(PlayerType::Local, PlayerHandle::new(1)))
         .and_then(|b| b.start_p2p_session(socket2));

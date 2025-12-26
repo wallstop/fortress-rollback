@@ -163,16 +163,22 @@ impl TimeSync {
     }
 
     /// Calculates the average frame advantage between local and remote peers.
+    ///
+    /// Uses integer-only arithmetic for determinism across platforms.
+    /// The formula `(remote_sum - local_sum) / (2 * count)` is mathematically
+    /// equivalent to `((remote_avg - local_avg) / 2)` but avoids floating-point
+    /// operations that could produce different results due to compiler optimizations,
+    /// FPU rounding modes, or platform-specific implementations.
     #[must_use]
     pub fn average_frame_advantage(&self) -> i32 {
-        // average local and remote frame advantages
         let local_sum: i32 = self.local.iter().sum();
-        let local_avg = local_sum as f32 / self.local.len() as f32;
         let remote_sum: i32 = self.remote.iter().sum();
-        let remote_avg = remote_sum as f32 / self.remote.len() as f32;
+        // local and remote have the same length (both initialized with window_size)
+        let count = self.local.len() as i32;
 
-        // meet in the middle
-        ((remote_avg - local_avg) / 2.0) as i32
+        // Integer division: (remote_sum - local_sum) / (2 * count)
+        // This avoids floating-point non-determinism while producing equivalent results.
+        (remote_sum - local_sum) / (2 * count)
     }
 }
 
