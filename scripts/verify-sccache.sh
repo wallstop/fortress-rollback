@@ -101,7 +101,8 @@ main() {
     local version_ok=false
     local compile_ok=false
     
-    for attempt in $(seq 1 "$MAX_RETRIES"); do
+    # Use bash arithmetic instead of seq for better portability
+    for ((attempt = 1; attempt <= MAX_RETRIES; attempt++)); do
         if [[ $attempt -gt 1 ]]; then
             echo ""
             echo "Retrying after ${RETRY_DELAY_SECONDS}s delay..."

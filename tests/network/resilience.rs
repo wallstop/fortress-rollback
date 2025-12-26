@@ -764,6 +764,9 @@ fn test_out_of_order_delivery() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
+        // Small sleep to allow UDP packets to be delivered between polls.
+        // Without this, tight loops can cause failures on some platforms (macOS CI).
+        std::thread::sleep(Duration::from_millis(5));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -781,11 +784,15 @@ fn test_out_of_order_delivery() -> Result<(), FortressError> {
 
     assert_eq!(
         stub1.gs.frame, 40,
-        "Should advance all frames despite reordering"
+        "Should advance all frames despite reordering. \
+         Actual stub1: {}, stub2: {}",
+        stub1.gs.frame, stub2.gs.frame
     );
     assert_eq!(
         stub2.gs.frame, 40,
-        "Should advance all frames despite reordering"
+        "Should advance all frames despite reordering. \
+         Actual stub1: {}, stub2: {}",
+        stub1.gs.frame, stub2.gs.frame
     );
 
     Ok(())
@@ -929,6 +936,9 @@ fn test_packet_duplication() -> Result<(), FortressError> {
     for i in 0..20 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
+        // Small sleep to allow UDP packets to be delivered between polls.
+        // Without this, tight loops can cause failures on some platforms (macOS CI).
+        std::thread::sleep(Duration::from_millis(5));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -947,11 +957,15 @@ fn test_packet_duplication() -> Result<(), FortressError> {
     // Frames should advance normally despite duplicates
     assert_eq!(
         stub1.gs.frame, 20,
-        "Duplicates should not affect frame count"
+        "Duplicates should not affect frame count. \
+         Actual stub1: {}, stub2: {}",
+        stub1.gs.frame, stub2.gs.frame
     );
     assert_eq!(
         stub2.gs.frame, 20,
-        "Duplicates should not affect frame count"
+        "Duplicates should not affect frame count. \
+         Actual stub1: {}, stub2: {}",
+        stub1.gs.frame, stub2.gs.frame
     );
 
     Ok(())
@@ -1351,6 +1365,9 @@ fn test_temporary_disconnect_reconnect() -> Result<(), FortressError> {
     for i in 0..20 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
+        // Small sleep to allow UDP packets to be delivered between polls.
+        // Without this, tight loops can cause failures on some platforms (macOS CI).
+        std::thread::sleep(Duration::from_millis(5));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -1379,6 +1396,8 @@ fn test_temporary_disconnect_reconnect() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
+        // Small sleep to allow UDP packets to be delivered between polls.
+        std::thread::sleep(Duration::from_millis(5));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -1397,7 +1416,12 @@ fn test_temporary_disconnect_reconnect() -> Result<(), FortressError> {
     // Verify we recovered and continued advancing
     assert!(
         stub1.gs.frame > frames_before_disconnect,
-        "Should continue advancing after recovery"
+        "Should continue advancing after recovery. \
+         Frames before: {}, after: {}. sess1 state: {:?}, sess2 state: {:?}",
+        frames_before_disconnect,
+        stub1.gs.frame,
+        sess1.current_state(),
+        sess2.current_state()
     );
 
     Ok(())
@@ -2983,6 +3007,11 @@ fn test_competitive_preset_fast_sync() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
+        // Small sleep for competitive/LAN conditions - allows UDP packets to be
+        // delivered between polls. Without this, tight polling loops can cause
+        // test failures on some platforms (especially macOS CI) where the OS may
+        // not schedule enough time for packet delivery.
+        std::thread::sleep(Duration::from_millis(5));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -2998,9 +3027,15 @@ fn test_competitive_preset_fast_sync() -> Result<(), FortressError> {
         stub2.handle_requests(requests2);
     }
 
+    // With good network conditions and proper timing, we should advance most frames
     assert!(
         stub1.gs.frame >= 40,
-        "Should advance many frames with competitive preset"
+        "Should advance many frames with competitive preset. \
+         Actual: {} frames (expected >= 40). \
+         sess1 state: {:?}, sess2 state: {:?}",
+        stub1.gs.frame,
+        sess1.current_state(),
+        sess2.current_state()
     );
 
     Ok(())
@@ -3579,4 +3614,594 @@ fn test_seed_pairs_for_decorrelated_sync() -> Result<(), FortressError> {
     }
 
     Ok(())
+}
+
+// =============================================================================
+// Data-Driven Preset Configuration Tests
+// =============================================================================
+//
+// These tests systematically validate all SessionConfig presets (competitive,
+// default, LAN, mobile, etc.) under various network conditions.
+//
+// This prevents regression where tests might pass on some platforms but fail
+// on others due to missing timing sleeps or incorrect configuration assumptions.
+//
+// Port allocation: 9300-9399 (non-overlapping with other test ranges)
+
+/// Parameters for data-driven preset configuration testing.
+#[derive(Clone, Debug)]
+struct PresetTestCase {
+    /// Test case name for diagnostics.
+    name: &'static str,
+    /// Synchronization configuration preset.
+    sync_config: SyncConfig,
+    /// Protocol configuration preset.
+    protocol_config: ProtocolConfig,
+    /// Time synchronization configuration preset.
+    time_sync_config: TimeSyncConfig,
+    /// Optional chaos configuration for network simulation.
+    /// `None` means perfect network (no packet loss, latency, etc.)
+    chaos_config: Option<ChaosConfig>,
+    /// Maximum expected synchronization time in milliseconds.
+    expected_sync_time_ms: u64,
+    /// Number of frames to attempt advancing after synchronization.
+    target_frames: i32,
+    /// Minimum frames that must successfully advance.
+    min_expected_frames: i32,
+}
+
+/// Result of running a preset test case.
+#[derive(Debug)]
+struct PresetTestResult {
+    /// Time taken to synchronize both sessions.
+    sync_time: Duration,
+    /// Whether both sessions synchronized.
+    synchronized: bool,
+    /// Number of frames advanced by session 1.
+    frames_advanced_1: i32,
+    /// Number of frames advanced by session 2.
+    frames_advanced_2: i32,
+    /// Final state of session 1.
+    sess1_state: SessionState,
+    /// Final state of session 2.
+    sess2_state: SessionState,
+}
+
+impl PresetTestCase {
+    /// Run the preset test case and return diagnostic results.
+    fn run(&self, base_port: u16) -> Result<PresetTestResult, FortressError> {
+        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), base_port);
+        let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), base_port + 1);
+
+        // Create sockets - either chaos or plain UDP
+        let (socket1, socket2) = if let Some(ref chaos) = self.chaos_config {
+            // Use different seeds for each socket to avoid correlated packet loss
+            // Access public fields directly from ChaosConfig
+            let latency_ms = chaos.latency.as_millis() as u64;
+            let loss_rate = chaos.send_loss_rate.max(chaos.receive_loss_rate);
+
+            let chaos1 = ChaosConfig::builder()
+                .latency_ms(latency_ms)
+                .packet_loss_rate(loss_rate)
+                .seed(42)
+                .build();
+            let chaos2 = ChaosConfig::builder()
+                .latency_ms(latency_ms)
+                .packet_loss_rate(loss_rate)
+                .seed(43)
+                .build();
+            (
+                create_chaos_socket(base_port, chaos1),
+                create_chaos_socket(base_port + 1, chaos2),
+            )
+        } else {
+            // Perfect network - no chaos
+            let perfect = ChaosConfig::builder().build();
+            (
+                create_chaos_socket(base_port, perfect.clone()),
+                create_chaos_socket(base_port + 1, perfect),
+            )
+        };
+
+        // Build sessions with the preset configurations
+        let mut sess1 = SessionBuilder::<StubConfig>::new()
+            .with_sync_config(self.sync_config)
+            .with_protocol_config(self.protocol_config)
+            .with_time_sync_config(self.time_sync_config)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .start_p2p_session(socket1)?;
+
+        let mut sess2 = SessionBuilder::<StubConfig>::new()
+            .with_sync_config(self.sync_config)
+            .with_protocol_config(self.protocol_config)
+            .with_time_sync_config(self.time_sync_config)
+            .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+            .add_player(PlayerType::Local, PlayerHandle::new(1))?
+            .start_p2p_session(socket2)?;
+
+        // ===== Phase 1: Synchronization =====
+        let sync_start = std::time::Instant::now();
+        let max_sync_iterations = (self.expected_sync_time_ms * 2 / 20) as usize; // 20ms per iteration
+
+        for _ in 0..max_sync_iterations {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+
+            // CRITICAL: Sleep to allow UDP packets to be delivered.
+            // Without this, tight polling loops cause test failures on macOS CI.
+            std::thread::sleep(Duration::from_millis(20));
+
+            if sess1.current_state() == SessionState::Running
+                && sess2.current_state() == SessionState::Running
+            {
+                break;
+            }
+        }
+
+        let sync_time = sync_start.elapsed();
+        let synchronized = sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running;
+
+        if !synchronized {
+            return Ok(PresetTestResult {
+                sync_time,
+                synchronized,
+                frames_advanced_1: 0,
+                frames_advanced_2: 0,
+                sess1_state: sess1.current_state(),
+                sess2_state: sess2.current_state(),
+            });
+        }
+
+        // ===== Phase 2: Frame Advancement =====
+        let mut stub1 = GameStub::new();
+        let mut stub2 = GameStub::new();
+
+        for i in 0..self.target_frames as u32 {
+            // Poll multiple times per frame for better packet handling
+            for _ in 0..4 {
+                sess1.poll_remote_clients();
+                sess2.poll_remote_clients();
+            }
+
+            // CRITICAL: Sleep between frame advances!
+            // This allows UDP packets to be delivered between polls.
+            // Without this sleep, tests fail on macOS CI where the OS may
+            // not schedule enough time for packet delivery.
+            std::thread::sleep(Duration::from_millis(5));
+
+            // Add inputs
+            sess1
+                .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+                .unwrap();
+            sess2
+                .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
+                .unwrap();
+
+            // Advance frames
+            let requests1 = sess1.advance_frame().unwrap();
+            let requests2 = sess2.advance_frame().unwrap();
+
+            stub1.handle_requests(requests1);
+            stub2.handle_requests(requests2);
+        }
+
+        Ok(PresetTestResult {
+            sync_time,
+            synchronized,
+            frames_advanced_1: stub1.gs.frame,
+            frames_advanced_2: stub2.gs.frame,
+            sess1_state: sess1.current_state(),
+            sess2_state: sess2.current_state(),
+        })
+    }
+}
+
+/// Run a preset test case with comprehensive validation and diagnostics.
+fn run_preset_test(case: &PresetTestCase, base_port: u16) {
+    eprintln!("\n[Preset Test] Running: {}", case.name);
+    eprintln!(
+        "  Config: sync={:?}, protocol={:?}, time_sync={:?}",
+        case.sync_config, case.protocol_config, case.time_sync_config
+    );
+    eprintln!(
+        "  Network: {:?}",
+        case.chaos_config
+            .as_ref()
+            .map_or("perfect".to_string(), |c| format!("{c:?}"))
+    );
+
+    let result = case.run(base_port).expect("Test setup failed");
+
+    eprintln!(
+        "[Preset Test] {} completed:\n  \
+         synchronized={}, sync_time={:.2}s (max expected: {}ms)\n  \
+         frames: sess1={}, sess2={} (target={}, min={})\n  \
+         states: sess1={:?}, sess2={:?}",
+        case.name,
+        result.synchronized,
+        result.sync_time.as_secs_f32(),
+        case.expected_sync_time_ms,
+        result.frames_advanced_1,
+        result.frames_advanced_2,
+        case.target_frames,
+        case.min_expected_frames,
+        result.sess1_state,
+        result.sess2_state
+    );
+
+    // Validate synchronization
+    assert!(
+        result.synchronized,
+        "[{}] Sessions failed to synchronize within {}ms.\n  \
+         sess1 state: {:?}\n  \
+         sess2 state: {:?}\n  \
+         actual sync time: {:.2}s\n  \
+         This may indicate:\n  \
+         - Missing sleep() in sync loop\n  \
+         - Sync timeout too short for test conditions\n  \
+         - Network simulation too aggressive",
+        case.name,
+        case.expected_sync_time_ms,
+        result.sess1_state,
+        result.sess2_state,
+        result.sync_time.as_secs_f32()
+    );
+
+    // Validate sync time (allow 50% margin for CI variability)
+    let max_allowed_sync_ms = (case.expected_sync_time_ms as f64 * 1.5) as u64;
+    assert!(
+        result.sync_time.as_millis() <= max_allowed_sync_ms as u128,
+        "[{}] Sync took too long: {:.2}s (expected max: {}ms, allowed: {}ms).\n  \
+         This may indicate network conditions are too harsh for this preset.",
+        case.name,
+        result.sync_time.as_secs_f32(),
+        case.expected_sync_time_ms,
+        max_allowed_sync_ms
+    );
+
+    // Validate frame advancement
+    let min_frames = result.frames_advanced_1.min(result.frames_advanced_2);
+    assert!(
+        min_frames >= case.min_expected_frames,
+        "[{}] Insufficient frames advanced.\n  \
+         sess1 frames: {} (expected >= {})\n  \
+         sess2 frames: {} (expected >= {})\n  \
+         This may indicate:\n  \
+         - Missing sleep() in frame advancement loop\n  \
+         - Input handling issues\n  \
+         - Network conditions causing excessive rollbacks",
+        case.name,
+        result.frames_advanced_1,
+        case.min_expected_frames,
+        result.frames_advanced_2,
+        case.min_expected_frames
+    );
+}
+
+/// Test: Competitive preset under perfect network conditions.
+///
+/// The competitive preset is designed for LAN/esports with:
+/// - Fast sync (4 packets, 100ms retry)
+/// - Quick failure detection
+/// - Strict timeout (3s)
+///
+/// Under perfect conditions, this should sync very quickly and
+/// advance all frames without issues.
+#[test]
+#[serial]
+fn test_preset_competitive_perfect_network() {
+    let case = PresetTestCase {
+        name: "competitive_perfect",
+        sync_config: SyncConfig::competitive(),
+        protocol_config: ProtocolConfig::competitive(),
+        time_sync_config: TimeSyncConfig::competitive(),
+        chaos_config: None,          // Perfect network
+        expected_sync_time_ms: 1000, // Should sync in < 1s
+        target_frames: 60,
+        min_expected_frames: 55, // Allow small margin for rollbacks
+    };
+    // Use port range 9300-9399 for preset tests
+    run_preset_test(&case, 9300);
+}
+
+/// Test: Default preset under perfect network conditions.
+///
+/// The default preset is balanced for typical internet conditions:
+/// - Standard sync (5 packets, 200ms retry)
+/// - No timeout by default
+/// - Moderate tolerance
+///
+/// Under perfect conditions, this should sync reliably and advance
+/// all frames.
+#[test]
+#[serial]
+fn test_preset_default_perfect_network() {
+    let case = PresetTestCase {
+        name: "default_perfect",
+        sync_config: SyncConfig::default(),
+        protocol_config: ProtocolConfig::default(),
+        time_sync_config: TimeSyncConfig::default(),
+        chaos_config: None,          // Perfect network
+        expected_sync_time_ms: 2000, // Slightly longer due to more sync packets
+        target_frames: 60,
+        min_expected_frames: 55,
+    };
+    run_preset_test(&case, 9302);
+}
+
+/// Test: LAN preset under perfect network conditions.
+///
+/// The LAN preset is optimized for local network play:
+/// - Fast sync (3 packets, 100ms retry)
+/// - Short timeout (5s)
+/// - Minimal overhead
+#[test]
+#[serial]
+fn test_preset_lan_perfect_network() {
+    let case = PresetTestCase {
+        name: "lan_perfect",
+        sync_config: SyncConfig::lan(),
+        protocol_config: ProtocolConfig::default(),
+        time_sync_config: TimeSyncConfig::lan(),
+        chaos_config: None,
+        expected_sync_time_ms: 800, // Very fast sync
+        target_frames: 60,
+        min_expected_frames: 55,
+    };
+    run_preset_test(&case, 9304);
+}
+
+/// Test: Mobile preset under simulated mobile conditions.
+///
+/// The mobile preset handles high-latency, lossy connections:
+/// - Many sync packets (10)
+/// - Longer retry intervals (350ms)
+/// - Generous timeout (15s)
+/// - Large time sync window (90 frames)
+///
+/// Note: With 60ms latency and 5% packet loss, frame advancement is slower
+/// due to rollback network operations requiring round trips.
+#[test]
+#[serial]
+fn test_preset_mobile_with_mobile_conditions() {
+    let case = PresetTestCase {
+        name: "mobile_conditions",
+        sync_config: SyncConfig::mobile(),
+        protocol_config: ProtocolConfig::mobile(),
+        time_sync_config: TimeSyncConfig::mobile(),
+        chaos_config: Some(
+            ChaosConfig::builder()
+                .latency_ms(60)
+                .packet_loss_rate(0.05)
+                .build(),
+        ),
+        expected_sync_time_ms: 12000, // Mobile can take longer with 10 sync packets
+        target_frames: 30,            // Fewer frames due to latency
+        min_expected_frames: 15,      // Allow for network variance and rollbacks
+    };
+    run_preset_test(&case, 9306);
+}
+
+/// Test: High latency preset under high latency conditions.
+///
+/// The high_latency preset handles 100-200ms RTT:
+/// - Longer retry intervals (400ms)
+/// - Sync timeout (10s)
+///
+/// Note: With 100ms latency, each frame advancement takes longer due to
+/// the round-trip time for input exchange.
+#[test]
+#[serial]
+fn test_preset_high_latency_with_latency() {
+    let case = PresetTestCase {
+        name: "high_latency_conditions",
+        sync_config: SyncConfig::high_latency(),
+        protocol_config: ProtocolConfig::high_latency(),
+        time_sync_config: TimeSyncConfig::default(),
+        chaos_config: Some(ChaosConfig::builder().latency_ms(100).build()),
+        expected_sync_time_ms: 6000,
+        target_frames: 25,       // Fewer frames due to high latency
+        min_expected_frames: 10, // With 100ms latency, frame advancement is slow
+    };
+    run_preset_test(&case, 9308);
+}
+
+/// Test: Lossy preset under lossy network conditions.
+///
+/// The lossy preset handles 5-15% packet loss:
+/// - More sync packets (8)
+/// - Sync timeout (10s)
+///
+/// Note: 8% bidirectional packet loss compounds to ~15% effective loss.
+/// This requires more sync time and retries.
+#[test]
+#[serial]
+fn test_preset_lossy_with_packet_loss() {
+    let case = PresetTestCase {
+        name: "lossy_conditions",
+        sync_config: SyncConfig::lossy(),
+        protocol_config: ProtocolConfig::default(),
+        time_sync_config: TimeSyncConfig::default(),
+        chaos_config: Some(ChaosConfig::builder().packet_loss_rate(0.08).build()),
+        expected_sync_time_ms: 12000, // 8% loss needs more time for retries
+        target_frames: 40,
+        min_expected_frames: 25, // Some frames may stall due to lost packets
+    };
+    run_preset_test(&case, 9310);
+}
+
+/// Data-driven test for all presets under perfect network conditions.
+///
+/// This test ensures all presets work correctly with no network impairment,
+/// establishing a baseline for expected behavior.
+#[test]
+#[serial]
+fn test_all_presets_perfect_network_data_driven() {
+    let test_cases = [
+        PresetTestCase {
+            name: "competitive_perfect",
+            sync_config: SyncConfig::competitive(),
+            protocol_config: ProtocolConfig::competitive(),
+            time_sync_config: TimeSyncConfig::competitive(),
+            chaos_config: None,
+            expected_sync_time_ms: 1000,
+            target_frames: 50,
+            min_expected_frames: 45,
+        },
+        PresetTestCase {
+            name: "default_perfect",
+            sync_config: SyncConfig::default(),
+            protocol_config: ProtocolConfig::default(),
+            time_sync_config: TimeSyncConfig::default(),
+            chaos_config: None,
+            expected_sync_time_ms: 2000,
+            target_frames: 50,
+            min_expected_frames: 45,
+        },
+        PresetTestCase {
+            name: "lan_perfect",
+            sync_config: SyncConfig::lan(),
+            protocol_config: ProtocolConfig::default(),
+            time_sync_config: TimeSyncConfig::lan(),
+            chaos_config: None,
+            expected_sync_time_ms: 800,
+            target_frames: 50,
+            min_expected_frames: 45,
+        },
+        PresetTestCase {
+            name: "high_latency_perfect",
+            sync_config: SyncConfig::high_latency(),
+            protocol_config: ProtocolConfig::high_latency(),
+            time_sync_config: TimeSyncConfig::default(),
+            chaos_config: None,
+            expected_sync_time_ms: 3000,
+            target_frames: 50,
+            min_expected_frames: 45,
+        },
+        PresetTestCase {
+            name: "lossy_perfect",
+            sync_config: SyncConfig::lossy(),
+            protocol_config: ProtocolConfig::default(),
+            time_sync_config: TimeSyncConfig::default(),
+            chaos_config: None,
+            expected_sync_time_ms: 2000,
+            target_frames: 50,
+            min_expected_frames: 45,
+        },
+        PresetTestCase {
+            name: "mobile_perfect",
+            sync_config: SyncConfig::mobile(),
+            protocol_config: ProtocolConfig::mobile(),
+            time_sync_config: TimeSyncConfig::mobile(),
+            chaos_config: None,
+            expected_sync_time_ms: 4000,
+            target_frames: 50,
+            min_expected_frames: 45,
+        },
+    ];
+
+    // Use ports 9320-9340 for this data-driven test
+    let mut base_port = 9320u16;
+
+    for case in &test_cases {
+        run_preset_test(case, base_port);
+        base_port += 2; // Each test uses 2 ports
+    }
+}
+
+/// Data-driven test for presets matched to appropriate network conditions.
+///
+/// Each preset is tested with network conditions it's designed to handle,
+/// validating that the preset parameters are appropriate for the scenario.
+#[test]
+#[serial]
+fn test_presets_matched_conditions_data_driven() {
+    let test_cases = [
+        // Competitive: LAN-like conditions (minimal latency, no loss)
+        PresetTestCase {
+            name: "competitive_lan_conditions",
+            sync_config: SyncConfig::competitive(),
+            protocol_config: ProtocolConfig::competitive(),
+            time_sync_config: TimeSyncConfig::competitive(),
+            chaos_config: Some(ChaosConfig::builder().latency_ms(5).build()),
+            expected_sync_time_ms: 1200,
+            target_frames: 50,
+            min_expected_frames: 45,
+        },
+        // Default: Typical internet (30ms latency, 2% loss)
+        PresetTestCase {
+            name: "default_typical_internet",
+            sync_config: SyncConfig::default(),
+            protocol_config: ProtocolConfig::default(),
+            time_sync_config: TimeSyncConfig::default(),
+            chaos_config: Some(
+                ChaosConfig::builder()
+                    .latency_ms(30)
+                    .packet_loss_rate(0.02)
+                    .build(),
+            ),
+            expected_sync_time_ms: 5000, // 2% loss + 30ms latency needs more time
+            target_frames: 40,
+            min_expected_frames: 30,
+        },
+        // LAN: Local network (1-5ms latency, no loss)
+        PresetTestCase {
+            name: "lan_local_network",
+            sync_config: SyncConfig::lan(),
+            protocol_config: ProtocolConfig::default(),
+            time_sync_config: TimeSyncConfig::lan(),
+            chaos_config: Some(ChaosConfig::builder().latency_ms(2).build()),
+            expected_sync_time_ms: 1000,
+            target_frames: 50,
+            min_expected_frames: 45,
+        },
+        // High latency: WAN connection (100ms latency)
+        PresetTestCase {
+            name: "high_latency_wan",
+            sync_config: SyncConfig::high_latency(),
+            protocol_config: ProtocolConfig::high_latency(),
+            time_sync_config: TimeSyncConfig::default(),
+            chaos_config: Some(ChaosConfig::builder().latency_ms(100).build()),
+            expected_sync_time_ms: 6000,
+            target_frames: 25,       // Fewer frames due to high latency
+            min_expected_frames: 10, // With 100ms latency, frame advancement is slow
+        },
+        // Lossy: Unreliable connection (8% loss)
+        PresetTestCase {
+            name: "lossy_unreliable",
+            sync_config: SyncConfig::lossy(),
+            protocol_config: ProtocolConfig::default(),
+            time_sync_config: TimeSyncConfig::default(),
+            chaos_config: Some(ChaosConfig::builder().packet_loss_rate(0.08).build()),
+            expected_sync_time_ms: 12000, // 8% loss needs more time for retries
+            target_frames: 40,
+            min_expected_frames: 25,
+        },
+        // Mobile: Cellular conditions (60ms latency, 5% loss)
+        PresetTestCase {
+            name: "mobile_cellular",
+            sync_config: SyncConfig::mobile(),
+            protocol_config: ProtocolConfig::mobile(),
+            time_sync_config: TimeSyncConfig::mobile(),
+            chaos_config: Some(
+                ChaosConfig::builder()
+                    .latency_ms(60)
+                    .packet_loss_rate(0.05)
+                    .build(),
+            ),
+            expected_sync_time_ms: 12000, // Mobile can take longer with 10 sync packets
+            target_frames: 30,
+            min_expected_frames: 15,
+        },
+    ];
+
+    // Use ports 9340-9360 for this data-driven test
+    let mut base_port = 9340u16;
+
+    for case in &test_cases {
+        run_preset_test(case, base_port);
+        base_port += 2;
+    }
 }
