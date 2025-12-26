@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1766725249038,
+  "lastUpdate": 1766778453451,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
@@ -4655,6 +4655,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1554,
             "range": "± 101",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e7b55e500c7ff278aa573642e50d68e6cae11f5f",
+          "message": "More configuration options + linter errors + bugfix for sync timeout event flooding (#31)\n\n- Make event queue size configurable via\nSessionBuilder::with_event_queue_size()\n  - Added event_queue_size field to SessionBuilder\n  - Pass through to P2PSession and SpectatorSession\n  - Validates minimum size of 10 events\n\n- Move timeout constant to ProtocolConfig\n- Added input_history_multiplier field with presets (competitive=2,\nhigh_latency=3)\n- Added validate() method to ProtocolConfig for configuration validation\n\n- Add #[must_use] attributes to key session methods\n  - advance_frame() on all session types\n  - disconnect_player() on P2PSession\n  - confirmed_inputs_for_frame() on P2PSession\n  - network_stats() on SpectatorSession\n\n- Add explicit Error::source() implementation with documentation\n  - Explains design choice of using strings vs wrapped errors\n\n- Consolidate test utilities in tests/common/test_utils.rs\n  - Shared constants (MAX_SYNC_ITERATIONS, POLL_INTERVAL, SYNC_TIMEOUT)\n  - Helper functions for session synchronization\n  - ChaosSocket test helper\n\n- Add mutation testing infrastructure\n  - .cargo/mutants.toml configuration\n  - .github/workflows/ci-mutation.yml for monthly scheduled runs\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+          "timestamp": "2025-12-26T11:42:56-08:00",
+          "tree_id": "03a5d823325056b7d83fe787831424f1fb7c3b36",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/e7b55e500c7ff278aa573642e50d68e6cae11f5f"
+        },
+        "date": 1766778453013,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 89,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 136,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 640,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 963,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1387,
+            "range": "± 21",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 97757,
+            "range": "± 1045",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 24653,
+            "range": "± 676",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 676,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 868,
+            "range": "± 4",
             "unit": "ns/iter"
           },
           {
