@@ -149,7 +149,23 @@ impl Display for FortressError {
     }
 }
 
-impl Error for FortressError {}
+impl Error for FortressError {
+    /// Returns the lower-level source of this error, if any.
+    ///
+    /// Currently, `FortressError` variants store error context as strings rather than
+    /// wrapping underlying error types. This design choice:
+    /// - Keeps the error type `Clone` and `PartialEq` (which `dyn Error` cannot be)
+    /// - Avoids complexity in serializing errors across network boundaries
+    /// - Maintains a simple, stable API
+    ///
+    /// If you need to preserve the original error, consider logging it before
+    /// converting to `FortressError`.
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        // Error context is stored as strings, not wrapped errors.
+        // This is intentional - see documentation above.
+        None
+    }
+}
 
 #[cfg(test)]
 #[allow(

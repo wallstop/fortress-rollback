@@ -155,7 +155,8 @@ semicolon_if_nothing_returned = "allow"
 struct_excessive_bools = "allow"
 # Allow trivially copy pass by ref (API consistency)
 trivially_copy_pass_by_ref = "allow"
-# Allow unchecked duration subtraction (validated)
+# Allow unchecked duration/time subtraction (validated)
+# Note: renamed to unchecked_time_subtraction in rust 1.92+
 unchecked_duration_subtraction = "allow"
 
 # Note: wildcard_enum_match_arm is NOT enabled because public enums use #[non_exhaustive],

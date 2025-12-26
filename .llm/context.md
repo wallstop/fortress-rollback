@@ -378,11 +378,13 @@ fn descriptive_name_explaining_what_is_tested() {
 ### Production Bug vs Test Bug
 
 **It's a production bug if:**
+
 - Test expectations align with documented behavior
 - Multiple tests depend on the same behavior
 - The test logic is simple and clearly correct
 
 **It's a test bug if:**
+
 - Test makes assumptions not guaranteed by the API
 - Test has inherent race conditions or timing issues
 - Test expectations contradict documentation
@@ -597,6 +599,7 @@ PlayerType::Spectator(addr)    // Observer (no input)
 The changelog (`CHANGELOG.md`) is for **users of the library**, not developers.
 
 **Include in changelog:**
+
 - New features, APIs, or configuration options
 - Bug fixes that affect user-visible behavior
 - Breaking changes (with migration guidance)
@@ -604,6 +607,7 @@ The changelog (`CHANGELOG.md`) is for **users of the library**, not developers.
 - Dependency updates that affect compatibility
 
 **Do NOT include in changelog:**
+
 - Internal refactoring (module splits, code reorganization)
 - Test improvements or new tests
 - Documentation-only changes
@@ -633,13 +637,75 @@ This keeps the changelog focused and useful for library consumers.
 
 Before submitting code:
 
-- [ ] Compiles with no warnings
-- [ ] All tests pass
+- [ ] `cargo fmt` run (no formatting changes)
+- [ ] `cargo clippy --all-targets` passes with no warnings
+- [ ] All tests pass (`cargo nextest run` or `cargo test`)
 - [ ] Includes tests for new functionality
 - [ ] Rustdoc comments with examples
 - [ ] 100% safe Rust (no unsafe)
 - [ ] Handles all error cases
 - [ ] Changelog updated if user-facing
+
+---
+
+## Mandatory Pre-Commit Checks
+
+**ALWAYS run these commands before committing ANY changes:**
+
+```bash
+# Format all code (REQUIRED - CI will fail without this)
+cargo fmt
+
+# Check for lint warnings (REQUIRED - CI will fail without this)
+cargo clippy --all-targets
+
+# Run tests
+cargo nextest run  # or: cargo test
+```
+
+**Or use the single combined command:**
+
+```bash
+cargo fmt && cargo clippy --all-targets && cargo nextest run
+```
+
+**Or use the convenient aliases:**
+
+```bash
+cargo c && cargo t  # Defined in .cargo/config.toml
+```
+
+### Why This Matters
+
+- **CI runs `cargo fmt --check`** — Any formatting differences will fail the build
+- **CI runs clippy with warnings as errors** — Any clippy warning fails the build
+- **Agents/sub-agents must also follow this** — All code changes, regardless of source, must be formatted and linted
+
+### For Agents and Sub-Agents
+
+When spawning sub-agents or using Task tools to make code changes:
+
+1. The sub-agent MUST run `cargo fmt` on any files it modifies
+2. The sub-agent MUST verify `cargo clippy --all-targets` passes
+3. If the sub-agent cannot run these commands, the parent agent must run them after receiving the changes
+
+### Additional Linters
+
+For non-Rust files, the following linters are run in CI:
+
+```bash
+# Markdown files (CLAUDE.md, .llm/context.md, etc.)
+npx markdownlint-cli <file.md>
+
+# GitHub Actions workflows
+actionlint  # or: ~/go/bin/actionlint
+```
+
+**Markdownlint rules to remember:**
+
+- Lists must be surrounded by blank lines (MD032)
+- No trailing spaces
+- Proper heading hierarchy
 
 ---
 

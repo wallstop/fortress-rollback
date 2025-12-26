@@ -113,6 +113,8 @@ where
     sync_retry_warning_sent: bool,
     /// Whether we've emitted a sync duration warning (emit only once).
     sync_duration_warning_sent: bool,
+    /// Whether we've emitted a sync timeout event (emit only once per timeout period).
+    sync_timeout_event_sent: bool,
     running_last_quality_report: Instant,
     running_last_input_recv: Instant,
     disconnect_notify_sent: bool,
@@ -224,6 +226,7 @@ impl<T: Config> UdpProtocol<T> {
             sync_requests_sent: 0,
             sync_retry_warning_sent: false,
             sync_duration_warning_sent: false,
+            sync_timeout_event_sent: false,
             running_last_quality_report: Instant::now(),
             running_last_input_recv: Instant::now(),
             disconnect_notify_sent: false,
@@ -369,10 +372,11 @@ impl<T: Config> UdpProtocol<T> {
         let now = Instant::now();
         match self.state {
             ProtocolState::Synchronizing => {
-                // Check for sync timeout if configured
+                // Check for sync timeout if configured (emit event only once)
                 if let Some(timeout) = self.sync_config.sync_timeout {
                     let elapsed = self.stats_start_time.elapsed();
-                    if elapsed > timeout {
+                    if elapsed > timeout && !self.sync_timeout_event_sent {
+                        self.sync_timeout_event_sent = true;
                         self.event_queue.push_back(Event::SyncTimeout {
                             elapsed_ms: elapsed.as_millis(),
                         });
@@ -828,8 +832,10 @@ impl<T: Config> UdpProtocol<T> {
 
             // delete received inputs that are too old
             let last_recv_frame = self.last_recv_frame();
+            let history_frames =
+                self.protocol_config.input_history_multiplier as i32 * self.max_prediction as i32;
             self.recv_inputs
-                .retain(|&k, _| k >= last_recv_frame - 2 * self.max_prediction as i32);
+                .retain(|&k, _| k >= last_recv_frame - history_frames);
         }
     }
 
@@ -1509,6 +1515,71 @@ mod tests {
 
         // Should have transitioned to Shutdown
         assert_eq!(protocol.state, ProtocolState::Shutdown);
+    }
+
+    #[test]
+    fn sync_timeout_event_emitted_only_once() {
+        use std::time::Duration;
+
+        // Create a protocol with a very short sync timeout
+        let sync_config = SyncConfig {
+            sync_timeout: Some(Duration::from_millis(1)),
+            ..SyncConfig::default()
+        };
+
+        let mut protocol: UdpProtocol<TestConfig> = UdpProtocol::new(
+            vec![PlayerHandle::new(0)],
+            test_addr(),
+            2,
+            1,
+            8,
+            Duration::from_millis(5000),
+            Duration::from_millis(3000),
+            60,
+            DesyncDetection::Off,
+            sync_config,
+            ProtocolConfig::default(),
+        )
+        .expect("Failed to create test protocol");
+        protocol.synchronize();
+
+        // Wait for timeout to elapse
+        std::thread::sleep(Duration::from_millis(10));
+
+        let connect_status = vec![ConnectionStatus::default(); 2];
+
+        // First poll - should emit SyncTimeout
+        let events1: Vec<_> = protocol.poll(&connect_status).collect();
+        let timeout_count1 = events1
+            .iter()
+            .filter(|e| matches!(e, Event::SyncTimeout { .. }))
+            .count();
+        assert_eq!(
+            timeout_count1, 1,
+            "First poll should emit exactly one SyncTimeout event"
+        );
+
+        // Second poll - should NOT emit SyncTimeout again
+        let events2: Vec<_> = protocol.poll(&connect_status).collect();
+        let timeout_count2 = events2
+            .iter()
+            .filter(|e| matches!(e, Event::SyncTimeout { .. }))
+            .count();
+        assert_eq!(
+            timeout_count2, 0,
+            "Subsequent polls should not emit additional SyncTimeout events"
+        );
+
+        // Third poll - still no SyncTimeout
+        let events3: Vec<_> = protocol.poll(&connect_status).collect();
+        let timeout_count3 = events3
+            .iter()
+            .filter(|e| matches!(e, Event::SyncTimeout { .. }))
+            .count();
+        assert_eq!(
+            timeout_count3, 0,
+            "SyncTimeout should only be emitted once per timeout"
+        );
     }
 
     // ==========================================

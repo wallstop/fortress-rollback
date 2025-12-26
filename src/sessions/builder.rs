@@ -55,8 +55,9 @@ const DEFAULT_CHECK_DISTANCE: usize = 2;
 const DEFAULT_MAX_FRAMES_BEHIND: usize = 10;
 // The amount of frames the spectator advances in a single step if too far behind
 const DEFAULT_CATCHUP_SPEED: usize = 1;
-// The amount of events a spectator can buffer; should never be an issue if the user polls the events at every step
-pub(crate) const MAX_EVENT_QUEUE_SIZE: usize = 100;
+/// Default event queue size.
+/// Events older than this threshold may be dropped if not polled.
+const DEFAULT_EVENT_QUEUE_SIZE: usize = 100;
 
 /// The [`SessionBuilder`] builds all Fortress Rollback Sessions.
 ///
@@ -95,6 +96,8 @@ where
     time_sync_config: TimeSyncConfig,
     /// Configuration for input queue sizing.
     input_queue_config: InputQueueConfig,
+    /// Maximum number of events to queue before oldest are dropped.
+    event_queue_size: usize,
 }
 
 impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
@@ -121,6 +124,7 @@ impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
             spectator_config,
             time_sync_config,
             input_queue_config,
+            event_queue_size,
         } = self;
 
         f.debug_struct("SessionBuilder")
@@ -143,6 +147,7 @@ impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
             .field("spectator_config", spectator_config)
             .field("time_sync_config", time_sync_config)
             .field("input_queue_config", input_queue_config)
+            .field("event_queue_size", event_queue_size)
             .finish()
     }
 }
@@ -176,6 +181,7 @@ impl<T: Config> SessionBuilder<T> {
             spectator_config: SpectatorConfig::default(),
             time_sync_config: TimeSyncConfig::default(),
             input_queue_config: InputQueueConfig::default(),
+            event_queue_size: DEFAULT_EVENT_QUEUE_SIZE,
         }
     }
 
@@ -568,6 +574,48 @@ impl<T: Config> SessionBuilder<T> {
         self
     }
 
+    /// Sets the maximum number of events to queue before oldest are dropped.
+    ///
+    /// When the event queue exceeds this size, the oldest events are discarded.
+    /// This provides backpressure if the application isn't consuming events quickly enough.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Maximum number of events to buffer. Must be at least 10.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FortressError::InvalidRequest`] if `size` is less than 10.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, FortressError};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// // Increase event queue for high-frequency event scenarios
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_event_queue_size(200)?;
+    /// # Ok::<(), FortressError>(())
+    /// ```
+    pub fn with_event_queue_size(mut self, size: usize) -> Result<Self, FortressError> {
+        if size < 10 {
+            return Err(FortressError::InvalidRequest {
+                info: format!(
+                    "Event queue size {} is too small. Must be at least 10.",
+                    size
+                ),
+            });
+        }
+        self.event_queue_size = size;
+        Ok(self)
+    }
+
     /// Sets the FPS this session is used with. This influences estimations for frame synchronization between sessions.
     /// # Errors
     /// - Returns [`InvalidRequest`] if the fps is 0
@@ -728,7 +776,8 @@ impl<T: Config> SessionBuilder<T> {
             }
         }
 
-        // Validate the input queue configuration
+        // Validate configurations
+        self.protocol_config.validate()?;
         self.input_queue_config.validate()?;
         self.input_queue_config
             .validate_frame_delay(self.input_delay)?;
@@ -744,6 +793,7 @@ impl<T: Config> SessionBuilder<T> {
             self.violation_observer,
             self.protocol_config,
             self.input_queue_config.queue_length,
+            self.event_queue_size,
         ))
     }
 
@@ -759,6 +809,9 @@ impl<T: Config> SessionBuilder<T> {
         host_addr: T::Address,
         socket: impl NonBlockingSocket<T::Address> + 'static,
     ) -> Option<SpectatorSession<T>> {
+        // Validate the protocol configuration
+        self.protocol_config.validate().ok()?;
+
         // create host endpoint
         let mut host = UdpProtocol::new(
             (0..self.num_players).map(PlayerHandle::new).collect(),
@@ -782,6 +835,7 @@ impl<T: Config> SessionBuilder<T> {
             self.spectator_config.max_frames_behind,
             self.spectator_config.catchup_speed,
             self.violation_observer,
+            self.event_queue_size,
         ))
     }
 
@@ -994,5 +1048,50 @@ mod tests {
         let builder =
             SessionBuilder::<TestConfig>::new().with_protocol_config(ProtocolConfig::competitive());
         assert_eq!(builder.protocol_config, ProtocolConfig::competitive());
+    }
+
+    // ========================================================================
+    // Event Queue Size Tests
+    // ========================================================================
+
+    #[test]
+    fn test_with_event_queue_size_rejects_too_small() {
+        // Values less than 10 should be rejected
+        let result = SessionBuilder::<TestConfig>::new().with_event_queue_size(9);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_with_event_queue_size_rejects_zero() {
+        let result = SessionBuilder::<TestConfig>::new().with_event_queue_size(0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_with_event_queue_size_accepts_minimum() {
+        // Minimum value of 10 should be accepted
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_event_queue_size(10)
+            .expect("Event queue size of 10 should be valid");
+        assert_eq!(builder.event_queue_size, 10);
+    }
+
+    #[test]
+    fn test_with_event_queue_size_accepts_valid_values() {
+        // Test various valid values
+        for size in [10, 50, 100, 200, 500] {
+            let builder = SessionBuilder::<TestConfig>::new()
+                .with_event_queue_size(size)
+                .expect("Valid event queue size should be accepted");
+            assert_eq!(builder.event_queue_size, size);
+        }
+    }
+
+    #[test]
+    fn test_builder_default_event_queue_size() {
+        // Default should be 100
+        let builder = SessionBuilder::<TestConfig>::new();
+        assert_eq!(builder.event_queue_size, DEFAULT_EVENT_QUEUE_SIZE);
+        assert_eq!(builder.event_queue_size, 100);
     }
 }
