@@ -633,13 +633,56 @@ This keeps the changelog focused and useful for library consumers.
 
 Before submitting code:
 
-- [ ] Compiles with no warnings
-- [ ] All tests pass
+- [ ] `cargo fmt` run (no formatting changes)
+- [ ] `cargo clippy --all-targets` passes with no warnings
+- [ ] All tests pass (`cargo nextest run` or `cargo test`)
 - [ ] Includes tests for new functionality
 - [ ] Rustdoc comments with examples
 - [ ] 100% safe Rust (no unsafe)
 - [ ] Handles all error cases
 - [ ] Changelog updated if user-facing
+
+---
+
+## Mandatory Pre-Commit Checks
+
+**ALWAYS run these commands before committing ANY changes:**
+
+```bash
+# Format all code (REQUIRED - CI will fail without this)
+cargo fmt
+
+# Check for lint warnings (REQUIRED - CI will fail without this)
+cargo clippy --all-targets
+
+# Run tests
+cargo nextest run  # or: cargo test
+```
+
+**Or use the single combined command:**
+
+```bash
+cargo fmt && cargo clippy --all-targets && cargo nextest run
+```
+
+**Or use the convenient aliases:**
+
+```bash
+cargo c && cargo t  # Defined in .cargo/config.toml
+```
+
+### Why This Matters
+
+- **CI runs `cargo fmt --check`** — Any formatting differences will fail the build
+- **CI runs clippy with warnings as errors** — Any clippy warning fails the build
+- **Agents/sub-agents must also follow this** — All code changes, regardless of source, must be formatted and linted
+
+### For Agents and Sub-Agents
+
+When spawning sub-agents or using Task tools to make code changes:
+1. The sub-agent MUST run `cargo fmt` on any files it modifies
+2. The sub-agent MUST verify `cargo clippy --all-targets` passes
+3. If the sub-agent cannot run these commands, the parent agent must run them after receiving the changes
 
 ---
 
