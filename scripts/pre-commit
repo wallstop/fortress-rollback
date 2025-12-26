@@ -1,0 +1,137 @@
+#!/bin/bash
+# Pre-commit hook for Fortress Rollback
+#
+# This hook runs before each commit to ensure code quality and consistency.
+# It performs the following checks:
+#   1. Version synchronization (if Cargo.toml version changed)
+#   2. Code formatting (cargo fmt --check)
+#   3. Linting (cargo clippy)
+#
+# Installation:
+#   cp scripts/pre-commit .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+#
+# Or use the install script:
+#   ./scripts/install-hooks.sh
+
+set -euo pipefail
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Get the project root
+PROJECT_ROOT="$(git rev-parse --show-toplevel)"
+
+echo -e "${BLUE}Running pre-commit checks...${NC}"
+echo ""
+
+# Track if any check fails
+FAILED=false
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Check 1: Version Synchronization
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Check if Cargo.toml is being committed and version line changed
+CARGO_STAGED=$(git diff --cached --name-only | grep -E '^Cargo\.toml$' || true)
+
+if [[ -n "$CARGO_STAGED" ]]; then
+    # Check if the version line specifically changed
+    VERSION_CHANGED=$(git diff --cached Cargo.toml | grep -E '^\+version = "[0-9]+\.[0-9]+' || true)
+    
+    if [[ -n "$VERSION_CHANGED" ]]; then
+        echo -e "${YELLOW}Cargo.toml version changed, checking version synchronization...${NC}"
+        
+        if [[ -x "$PROJECT_ROOT/scripts/sync-version.sh" ]]; then
+            # Run the sync script
+            if ! "$PROJECT_ROOT/scripts/sync-version.sh"; then
+                echo -e "${YELLOW}Version references were updated. Adding changes to commit...${NC}"
+                
+                # Stage any files that were modified by the sync script
+                # Find files with version patterns that were just modified
+                git diff --name-only | while read -r file; do
+                    if [[ -f "$file" ]]; then
+                        git add "$file"
+                        echo -e "${GREEN}  Added:${NC} $file"
+                    fi
+                done
+            fi
+        else
+            echo -e "${YELLOW}Warning: sync-version.sh not found or not executable${NC}"
+        fi
+    fi
+else
+    # Even if Cargo.toml isn't staged, still check consistency
+    # This catches cases where someone manually edited docs but forgot Cargo.toml
+    if [[ -x "$PROJECT_ROOT/scripts/sync-version.sh" ]]; then
+        if ! "$PROJECT_ROOT/scripts/sync-version.sh" --check 2>/dev/null; then
+            echo -e "${RED}✗ Version references are inconsistent with Cargo.toml${NC}"
+            echo -e "${YELLOW}Run './scripts/sync-version.sh' to fix this.${NC}"
+            FAILED=true
+        else
+            echo -e "${GREEN}✓${NC} Version references consistent"
+        fi
+    fi
+fi
+
+echo ""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Check 2: Rust Formatting
+# ═══════════════════════════════════════════════════════════════════════════════
+
+echo -e "${BLUE}Checking code formatting...${NC}"
+
+# Only check formatting for staged Rust files
+RUST_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.rs$' || true)
+
+if [[ -n "$RUST_FILES" ]]; then
+    if ! cargo fmt --check 2>/dev/null; then
+        echo -e "${RED}✗ Code formatting issues detected${NC}"
+        echo -e "${YELLOW}Run 'cargo fmt' to fix formatting.${NC}"
+        FAILED=true
+    else
+        echo -e "${GREEN}✓${NC} Code formatting OK"
+    fi
+else
+    echo -e "${GREEN}✓${NC} No Rust files to check"
+fi
+
+echo ""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Check 3: Clippy Lints (optional, can be slow)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Uncomment to enable clippy checks (can be slow for large changes)
+# echo -e "${BLUE}Running clippy...${NC}"
+# if ! cargo clippy --all-targets -- -D warnings 2>/dev/null; then
+#     echo -e "${RED}✗ Clippy warnings detected${NC}"
+#     FAILED=true
+# else
+#     echo -e "${GREEN}✓${NC} Clippy OK"
+# fi
+# echo ""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Final Result
+# ═══════════════════════════════════════════════════════════════════════════════
+
+if [[ "$FAILED" == "true" ]]; then
+    echo -e "${RED}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║              Pre-commit checks FAILED                      ║${NC}"
+    echo -e "${RED}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${YELLOW}Please fix the issues above and try again.${NC}"
+    echo -e "${YELLOW}To bypass this hook (not recommended): git commit --no-verify${NC}"
+    exit 1
+else
+    echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║              All pre-commit checks PASSED                  ║${NC}"
+    echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
+    exit 0
+fi

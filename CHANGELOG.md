@@ -162,7 +162,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.1"
+fortress-rollback = "0.2"
 ```
 
 ### Import Path Change
