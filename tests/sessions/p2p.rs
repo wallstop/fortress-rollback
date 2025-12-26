@@ -874,13 +874,13 @@ fn run_sync_test_case(
     let events2: Vec<_> = sess2.events().collect();
     assert!(
         events1.is_empty(),
-        "[{}] sess1 should have no unexpected events, got: {:?}",
+        "[{}] Session 1 should have no unexpected events, got: {:?}",
         case.name,
         events1
     );
     assert!(
         events2.is_empty(),
-        "[{}] sess2 should have no unexpected events, got: {:?}",
+        "[{}] Session 2 should have no unexpected events, got: {:?}",
         case.name,
         events2
     );
@@ -1133,7 +1133,7 @@ fn test_desync_detection_intervals_data_driven() -> Result<(), FortressError> {
         // Both sessions should have detected the desync
         assert!(
             !events1.is_empty(),
-            "[{}] Expected desync event for sess1, got none. \
+            "[{}] Expected desync event for Session 1, got none. \
              Config: interval={}, max_pred={}, corrupt_from={}, total_frames={}, \
              expected_desync_frame={}",
             case.name,
@@ -1145,7 +1145,7 @@ fn test_desync_detection_intervals_data_driven() -> Result<(), FortressError> {
         );
         assert!(
             !events2.is_empty(),
-            "[{}] Expected desync event for sess2, got none. \
+            "[{}] Expected desync event for Session 2, got none. \
              Config: interval={}, max_pred={}, corrupt_from={}, total_frames={}, \
              expected_desync_frame={}",
             case.name,
@@ -1206,13 +1206,13 @@ fn test_desync_detection_intervals_data_driven() -> Result<(), FortressError> {
             );
         }
 
-        // Verify sess2 also detected at the same frame
+        // Verify Session 2 also detected at the same frame
         if let FortressEvent::DesyncDetected { frame, .. } = &events2[0] {
             assert_eq!(
                 *frame,
                 case.expected_desync_frame,
                 "[{}] Session 2 desync frame mismatch. \
-                 All sess2 events: {:?}. \
+                 All Session 2 events: {:?}. \
                  Config: interval={}, max_pred={}, corrupt_from={}, total_frames={}",
                 case.name,
                 events2,
@@ -1222,7 +1222,7 @@ fn test_desync_detection_intervals_data_driven() -> Result<(), FortressError> {
                 case.total_frames
             );
         } else if !events2.is_empty() {
-            // Provide detailed diagnostic if sess2 has wrong first event
+            // Provide detailed diagnostic if Session 2 has wrong first event
             panic!(
                 "[{}] Session 2: Expected DesyncDetected event as first event, got {:?}. \
                  All events: {:?}. \
