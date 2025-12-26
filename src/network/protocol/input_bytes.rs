@@ -57,7 +57,10 @@ impl InputBytes {
         num_players: usize,
         inputs: &BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
     ) -> Self {
-        let mut bytes = Vec::new();
+        // Pre-allocate based on expected size: each input is serialized once
+        // Estimate 8 bytes per input as reasonable starting capacity
+        let estimated_size = num_players.saturating_mul(8);
+        let mut bytes = Vec::with_capacity(estimated_size);
         let mut frame = Frame::NULL;
         // in ascending order
         for handle in 0..num_players {
@@ -104,7 +107,7 @@ impl InputBytes {
     ///
     /// If the data is malformed or deserialization fails, returns an empty vector and logs an error.
     pub fn to_player_inputs<T: Config>(&self, num_players: usize) -> Vec<PlayerInput<T::Input>> {
-        let mut player_inputs = Vec::new();
+        let mut player_inputs = Vec::with_capacity(num_players);
 
         // Validate inputs before processing
         if num_players == 0 {

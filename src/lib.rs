@@ -395,6 +395,127 @@ impl Frame {
             None => Self::NULL,
         }
     }
+
+    // === Checked Arithmetic Methods ===
+    //
+    // Design Philosophy: Graceful error handling over panics.
+    //
+    // These methods are the PREFERRED way to perform Frame arithmetic in production code.
+    // They allow the library to handle edge cases gracefully rather than panicking.
+    //
+    // Guidelines:
+    // - Use `checked_*` when you need to detect and handle overflow explicitly
+    // - Use `saturating_*` when clamping to bounds is acceptable behavior
+    // - Use `abs_diff` when calculating frame distances (order-independent)
+    // - Avoid raw `+` and `-` operators except in tests or where overflow is impossible
+    //
+    // Note: While `overflow-checks = true` in release catches overflow as panics,
+    // the goal is zero panics in production - use these methods proactively.
+
+    /// Adds a value to this frame, returning `None` if overflow occurs.
+    ///
+    /// This is the preferred method for frame arithmetic when overflow must be handled.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// let frame = Frame::new(100);
+    /// assert_eq!(frame.checked_add(50), Some(Frame::new(150)));
+    /// assert_eq!(Frame::new(i32::MAX).checked_add(1), None);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn checked_add(self, rhs: i32) -> Option<Self> {
+        match self.0.checked_add(rhs) {
+            Some(result) => Some(Self(result)),
+            None => None,
+        }
+    }
+
+    /// Subtracts a value from this frame, returning `None` if overflow occurs.
+    ///
+    /// This is the preferred method for frame arithmetic when overflow must be handled.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// let frame = Frame::new(100);
+    /// assert_eq!(frame.checked_sub(50), Some(Frame::new(50)));
+    /// assert_eq!(Frame::new(i32::MIN).checked_sub(1), None);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn checked_sub(self, rhs: i32) -> Option<Self> {
+        match self.0.checked_sub(rhs) {
+            Some(result) => Some(Self(result)),
+            None => None,
+        }
+    }
+
+    /// Adds a value to this frame, saturating at the numeric bounds.
+    ///
+    /// Use this when clamping to bounds is acceptable (e.g., frame counters that
+    /// should never go negative or exceed maximum).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// let frame = Frame::new(100);
+    /// assert_eq!(frame.saturating_add(50), Frame::new(150));
+    /// assert_eq!(Frame::new(i32::MAX).saturating_add(1), Frame::new(i32::MAX));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn saturating_add(self, rhs: i32) -> Self {
+        Self(self.0.saturating_add(rhs))
+    }
+
+    /// Subtracts a value from this frame, saturating at the numeric bounds.
+    ///
+    /// Use this when clamping to bounds is acceptable (e.g., ensuring frame
+    /// never goes below zero or `i32::MIN`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// let frame = Frame::new(100);
+    /// assert_eq!(frame.saturating_sub(50), Frame::new(50));
+    /// assert_eq!(Frame::new(i32::MIN).saturating_sub(1), Frame::new(i32::MIN));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn saturating_sub(self, rhs: i32) -> Self {
+        Self(self.0.saturating_sub(rhs))
+    }
+
+    /// Returns the absolute difference between two frames.
+    ///
+    /// This is useful for calculating frame distances without worrying about
+    /// the order of operands.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// let a = Frame::new(100);
+    /// let b = Frame::new(150);
+    /// assert_eq!(a.abs_diff(b), 50);
+    /// assert_eq!(b.abs_diff(a), 50);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn abs_diff(self, other: Self) -> u32 {
+        self.0.abs_diff(other.0)
+    }
 }
 
 impl std::fmt::Display for Frame {
@@ -1655,6 +1776,159 @@ mod tests {
         let debug = format!("{:?}", frame);
         // Use multi-char string to avoid single_char_pattern lint
         assert!(debug.contains("42"));
+    }
+
+    // ==========================================
+    // Frame Checked/Saturating Arithmetic Tests
+    // ==========================================
+
+    #[test]
+    fn frame_checked_add_normal() {
+        let frame = Frame::new(100);
+        assert_eq!(frame.checked_add(50), Some(Frame::new(150)));
+        assert_eq!(frame.checked_add(-50), Some(Frame::new(50)));
+        assert_eq!(frame.checked_add(0), Some(frame));
+    }
+
+    #[test]
+    fn frame_checked_add_overflow() {
+        let frame = Frame::new(i32::MAX);
+        assert_eq!(frame.checked_add(1), None);
+        assert_eq!(frame.checked_add(100), None);
+
+        // Underflow case
+        let frame = Frame::new(i32::MIN);
+        assert_eq!(frame.checked_add(-1), None);
+    }
+
+    #[test]
+    fn frame_checked_sub_normal() {
+        let frame = Frame::new(100);
+        assert_eq!(frame.checked_sub(50), Some(Frame::new(50)));
+        assert_eq!(frame.checked_sub(-50), Some(Frame::new(150)));
+        assert_eq!(frame.checked_sub(0), Some(frame));
+    }
+
+    #[test]
+    fn frame_checked_sub_overflow() {
+        let frame = Frame::new(i32::MIN);
+        assert_eq!(frame.checked_sub(1), None);
+
+        let frame = Frame::new(i32::MAX);
+        assert_eq!(frame.checked_sub(-1), None);
+    }
+
+    #[test]
+    fn frame_saturating_add_normal() {
+        let frame = Frame::new(100);
+        assert_eq!(frame.saturating_add(50), Frame::new(150));
+        assert_eq!(frame.saturating_add(-50), Frame::new(50));
+    }
+
+    #[test]
+    fn frame_saturating_add_clamps_at_max() {
+        let frame = Frame::new(i32::MAX);
+        assert_eq!(frame.saturating_add(1), Frame::new(i32::MAX));
+        assert_eq!(frame.saturating_add(100), Frame::new(i32::MAX));
+    }
+
+    #[test]
+    fn frame_saturating_add_clamps_at_min() {
+        let frame = Frame::new(i32::MIN);
+        assert_eq!(frame.saturating_add(-1), Frame::new(i32::MIN));
+        assert_eq!(frame.saturating_add(-100), Frame::new(i32::MIN));
+    }
+
+    #[test]
+    fn frame_saturating_sub_normal() {
+        let frame = Frame::new(100);
+        assert_eq!(frame.saturating_sub(50), Frame::new(50));
+        assert_eq!(frame.saturating_sub(-50), Frame::new(150));
+    }
+
+    #[test]
+    fn frame_saturating_sub_clamps_at_min() {
+        let frame = Frame::new(i32::MIN);
+        assert_eq!(frame.saturating_sub(1), Frame::new(i32::MIN));
+    }
+
+    #[test]
+    fn frame_saturating_sub_clamps_at_max() {
+        let frame = Frame::new(i32::MAX);
+        assert_eq!(frame.saturating_sub(-1), Frame::new(i32::MAX));
+    }
+
+    #[test]
+    fn frame_abs_diff_basic() {
+        let f1 = Frame::new(10);
+        let f2 = Frame::new(15);
+
+        // Order-independent
+        assert_eq!(f1.abs_diff(f2), 5);
+        assert_eq!(f2.abs_diff(f1), 5);
+
+        // Same frame
+        assert_eq!(f1.abs_diff(f1), 0);
+    }
+
+    #[test]
+    fn frame_abs_diff_extremes() {
+        // Large positive difference
+        let f1 = Frame::new(0);
+        let f2 = Frame::new(i32::MAX);
+        assert_eq!(f1.abs_diff(f2), i32::MAX as u32);
+
+        // With NULL frame (-1)
+        let null = Frame::NULL;
+        let zero = Frame::new(0);
+        assert_eq!(null.abs_diff(zero), 1);
+    }
+
+    // ==========================================
+    // Safe Frame Macro Tests
+    // ==========================================
+
+    #[test]
+    fn safe_frame_add_normal_operation() {
+        let frame = Frame::new(100);
+        let result = safe_frame_add!(frame, 50, "test_normal_add");
+        assert_eq!(result, Frame::new(150));
+    }
+
+    #[test]
+    fn safe_frame_add_returns_saturated_on_overflow() {
+        let frame = Frame::new(i32::MAX);
+        let result = safe_frame_add!(frame, 1, "test_overflow_add");
+        // Should return saturated value (max) instead of panicking
+        assert_eq!(result, Frame::new(i32::MAX));
+    }
+
+    #[test]
+    fn safe_frame_sub_normal_operation() {
+        let frame = Frame::new(100);
+        let result = safe_frame_sub!(frame, 50, "test_normal_sub");
+        assert_eq!(result, Frame::new(50));
+    }
+
+    #[test]
+    fn safe_frame_sub_returns_saturated_on_underflow() {
+        let frame = Frame::new(i32::MIN);
+        let result = safe_frame_sub!(frame, 1, "test_underflow_sub");
+        // Should return saturated value (min) instead of panicking
+        assert_eq!(result, Frame::new(i32::MIN));
+    }
+
+    #[test]
+    fn safe_frame_macros_accept_negative_deltas() {
+        let frame = Frame::new(100);
+
+        // Negative add = subtract
+        let result = safe_frame_add!(frame, -25, "test_negative_add");
+        assert_eq!(result, Frame::new(75));
+
+        // Negative sub = add
+        let result = safe_frame_sub!(frame, -25, "test_negative_sub");
+        assert_eq!(result, Frame::new(125));
     }
 }
 

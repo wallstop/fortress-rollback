@@ -173,7 +173,8 @@ fn encode_with_offset(buf: &[u8], offset: usize) -> Vec<u8> {
     let mut contiguous_len: u64 = 0;
     let mut contiguous = false;
     let mut prev_bits: u8 = 0;
-    let mut noncontiguous_bits: Vec<u8> = Vec::new();
+    // Pre-allocate for typical non-contiguous runs (16 bytes is a reasonable estimate)
+    let mut noncontiguous_bits: Vec<u8> = Vec::with_capacity(16);
 
     let slice = match buf.get(offset..) {
         Some(s) => s,

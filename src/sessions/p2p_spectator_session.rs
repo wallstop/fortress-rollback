@@ -7,7 +7,7 @@ use crate::{
         messages::ConnectionStatus,
         protocol::{Event, UdpProtocol},
     },
-    report_violation,
+    report_violation, safe_frame_add,
     sessions::builder::MAX_EVENT_QUEUE_SIZE,
     telemetry::{ViolationKind, ViolationObserver, ViolationSeverity},
     Config, FortressError, FortressEvent, FortressRequest, Frame, InputStatus, InputVec,
@@ -163,7 +163,11 @@ impl<T: Config> SpectatorSession<T> {
 
         for _ in 0..frames_to_advance {
             // get inputs for the next frame
-            let frame_to_grab = self.current_frame + 1;
+            let frame_to_grab = safe_frame_add!(
+                self.current_frame,
+                1,
+                "SpectatorSession::advance_frames next"
+            );
             let synced_inputs = self.inputs_at_frame(frame_to_grab)?;
 
             requests.push(FortressRequest::AdvanceFrame {
@@ -171,7 +175,11 @@ impl<T: Config> SpectatorSession<T> {
             });
 
             // advance the frame, but only if grabbing the inputs succeeded
-            self.current_frame += 1;
+            self.current_frame = safe_frame_add!(
+                self.current_frame,
+                1,
+                "SpectatorSession::advance_frames current"
+            );
         }
 
         Ok(requests)

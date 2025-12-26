@@ -153,6 +153,12 @@ pub enum ViolationKind {
     /// - Sync duration exceeding expected time
     /// - Repeated sync failures before connection established
     Synchronization,
+    /// Arithmetic overflow detected.
+    ///
+    /// This indicates that a frame counter or similar value would overflow.
+    /// In practice, this should never happen (at 60 FPS, i32::MAX takes ~1.14 years),
+    /// but detecting it helps catch bugs in edge cases or adversarial inputs.
+    ArithmeticOverflow,
 }
 
 impl ViolationKind {
@@ -169,6 +175,7 @@ impl ViolationKind {
             Self::InternalError => "internal_error",
             Self::Invariant => "invariant",
             Self::Synchronization => "synchronization",
+            Self::ArithmeticOverflow => "arithmetic_overflow",
         }
     }
 }
@@ -671,6 +678,78 @@ macro_rules! report_violation {
             concat!(file!(), ":", line!()),
         );
         $crate::telemetry::TracingObserver.on_violation(&violation);
+    }};
+}
+
+/// Safely adds a value to a Frame, reporting a violation if overflow would occur.
+///
+/// Returns the result of checked addition, or the saturated value if overflow occurs.
+/// When overflow is detected, a violation is reported with the ArithmeticOverflow kind.
+///
+/// # Example
+///
+/// ```ignore
+/// use fortress_rollback::{Frame, safe_frame_add};
+///
+/// let frame = Frame::new(100);
+/// let result = safe_frame_add!(frame, 50, "advancing game frame");
+/// assert_eq!(result, Frame::new(150));
+/// ```
+#[macro_export]
+macro_rules! safe_frame_add {
+    ($frame:expr, $delta:expr, $context:expr) => {{
+        let frame: $crate::Frame = $frame;
+        let delta: i32 = $delta;
+        match frame.checked_add(delta) {
+            Some(result) => result,
+            None => {
+                $crate::report_violation!(
+                    $crate::telemetry::ViolationSeverity::Error,
+                    $crate::telemetry::ViolationKind::ArithmeticOverflow,
+                    "Frame overflow in {}: {} + {} would overflow",
+                    $context,
+                    frame,
+                    delta
+                );
+                frame.saturating_add(delta)
+            },
+        }
+    }};
+}
+
+/// Safely subtracts a value from a Frame, reporting a violation if overflow would occur.
+///
+/// Returns the result of checked subtraction, or the saturated value if overflow occurs.
+/// When overflow is detected, a violation is reported with the ArithmeticOverflow kind.
+///
+/// # Example
+///
+/// ```ignore
+/// use fortress_rollback::{Frame, safe_frame_sub};
+///
+/// let frame = Frame::new(100);
+/// let result = safe_frame_sub!(frame, 50, "rolling back frame");
+/// assert_eq!(result, Frame::new(50));
+/// ```
+#[macro_export]
+macro_rules! safe_frame_sub {
+    ($frame:expr, $delta:expr, $context:expr) => {{
+        let frame: $crate::Frame = $frame;
+        let delta: i32 = $delta;
+        match frame.checked_sub(delta) {
+            Some(result) => result,
+            None => {
+                $crate::report_violation!(
+                    $crate::telemetry::ViolationSeverity::Error,
+                    $crate::telemetry::ViolationKind::ArithmeticOverflow,
+                    "Frame underflow in {}: {} - {} would underflow",
+                    $context,
+                    frame,
+                    delta
+                );
+                frame.saturating_sub(delta)
+            },
+        }
     }};
 }
 
