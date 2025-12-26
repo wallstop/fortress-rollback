@@ -1201,6 +1201,36 @@ fn test_desync_detection_intervals_data_driven() -> Result<(), FortressError> {
             total_frames: 60,
             expected_desync_frame: 30,
         },
+        // Corruption from frame 0: immediate detection at first checksum
+        // Tests that corruption from the very start is caught
+        DesyncTestCase {
+            name: "interval_10_corruption_from_start",
+            interval: 10,
+            max_prediction: 16,
+            corrupt_from_frame: 0,
+            total_frames: 30,
+            expected_desync_frame: 10,
+        },
+        // Large interval with proportional prediction window
+        // Tests that larger intervals work correctly with appropriate prediction windows
+        DesyncTestCase {
+            name: "interval_40_large_detection",
+            interval: 40,
+            max_prediction: 48,
+            corrupt_from_frame: 45,
+            total_frames: 100,
+            expected_desync_frame: 80,
+        },
+        // Corruption exactly at first checksum boundary
+        // Tests edge case where corruption starts exactly at a checksum frame
+        DesyncTestCase {
+            name: "interval_12_corruption_at_first_checksum",
+            interval: 12,
+            max_prediction: 16,
+            corrupt_from_frame: 12,
+            total_frames: 40,
+            expected_desync_frame: 12,
+        },
     ];
 
     for (i, case) in test_cases.iter().enumerate() {
@@ -1246,8 +1276,14 @@ fn test_desync_detection_intervals_data_driven() -> Result<(), FortressError> {
 
         // Run all frames
         for frame_num in 0..case.total_frames {
-            sess1.poll_remote_clients();
-            sess2.poll_remote_clients();
+            // Poll with multiple iterations and sleep to ensure packets are delivered.
+            // This is crucial on systems with different scheduling behavior (e.g., macOS CI)
+            // where tight loops may not give the network stack enough time.
+            for _ in 0..3 {
+                sess1.poll_remote_clients();
+                sess2.poll_remote_clients();
+                thread::sleep(POLL_INTERVAL);
+            }
 
             // Use steady inputs to minimize rollback interference
             sess1
@@ -1327,17 +1363,51 @@ fn test_desync_detection_intervals_data_driven() -> Result<(), FortressError> {
             );
         } else {
             panic!(
-                "[{}] Expected DesyncDetected event, got {:?}",
-                case.name, events1[0]
+                "[{}] Expected DesyncDetected event as first event, got {:?}. \
+                 All events: {:?}. \
+                 Config: interval={}, max_pred={}, corrupt_from={}, total_frames={}, \
+                 expected_desync_frame={}. \
+                 This may indicate insufficient polling - ensure network has time to \
+                 process messages between frames.",
+                case.name,
+                events1[0],
+                events1,
+                case.interval,
+                case.max_prediction,
+                case.corrupt_from_frame,
+                case.total_frames,
+                case.expected_desync_frame
             );
         }
 
         // Verify sess2 also detected at the same frame
         if let FortressEvent::DesyncDetected { frame, .. } = &events2[0] {
             assert_eq!(
-                *frame, case.expected_desync_frame,
-                "[{}] Session 2 desync frame mismatch",
-                case.name
+                *frame,
+                case.expected_desync_frame,
+                "[{}] Session 2 desync frame mismatch. \
+                 All sess2 events: {:?}. \
+                 Config: interval={}, max_pred={}, corrupt_from={}, total_frames={}",
+                case.name,
+                events2,
+                case.interval,
+                case.max_prediction,
+                case.corrupt_from_frame,
+                case.total_frames
+            );
+        } else if !events2.is_empty() {
+            // Provide detailed diagnostic if sess2 has wrong first event
+            panic!(
+                "[{}] Session 2: Expected DesyncDetected event as first event, got {:?}. \
+                 All events: {:?}. \
+                 Config: interval={}, max_pred={}, corrupt_from={}, total_frames={}",
+                case.name,
+                events2[0],
+                events2,
+                case.interval,
+                case.max_prediction,
+                case.corrupt_from_frame,
+                case.total_frames
             );
         }
     }
