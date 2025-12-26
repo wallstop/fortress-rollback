@@ -378,11 +378,13 @@ fn descriptive_name_explaining_what_is_tested() {
 ### Production Bug vs Test Bug
 
 **It's a production bug if:**
+
 - Test expectations align with documented behavior
 - Multiple tests depend on the same behavior
 - The test logic is simple and clearly correct
 
 **It's a test bug if:**
+
 - Test makes assumptions not guaranteed by the API
 - Test has inherent race conditions or timing issues
 - Test expectations contradict documentation
@@ -597,6 +599,7 @@ PlayerType::Spectator(addr)    // Observer (no input)
 The changelog (`CHANGELOG.md`) is for **users of the library**, not developers.
 
 **Include in changelog:**
+
 - New features, APIs, or configuration options
 - Bug fixes that affect user-visible behavior
 - Breaking changes (with migration guidance)
@@ -604,6 +607,7 @@ The changelog (`CHANGELOG.md`) is for **users of the library**, not developers.
 - Dependency updates that affect compatibility
 
 **Do NOT include in changelog:**
+
 - Internal refactoring (module splits, code reorganization)
 - Test improvements or new tests
 - Documentation-only changes
@@ -680,9 +684,28 @@ cargo c && cargo t  # Defined in .cargo/config.toml
 ### For Agents and Sub-Agents
 
 When spawning sub-agents or using Task tools to make code changes:
+
 1. The sub-agent MUST run `cargo fmt` on any files it modifies
 2. The sub-agent MUST verify `cargo clippy --all-targets` passes
 3. If the sub-agent cannot run these commands, the parent agent must run them after receiving the changes
+
+### Additional Linters
+
+For non-Rust files, the following linters are run in CI:
+
+```bash
+# Markdown files (CLAUDE.md, .llm/context.md, etc.)
+npx markdownlint-cli <file.md>
+
+# GitHub Actions workflows
+actionlint  # or: ~/go/bin/actionlint
+```
+
+**Markdownlint rules to remember:**
+
+- Lists must be surrounded by blank lines (MD032)
+- No trailing spaces
+- Proper heading hierarchy
 
 ---
 
