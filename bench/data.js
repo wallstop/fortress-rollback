@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1766711201391,
+  "lastUpdate": 1766725244341,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
@@ -4403,6 +4403,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1556,
             "range": "± 81",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8b78adcba52af1d1e7bba5d1049dd82117a2fa3c",
+          "message": "Minor optimizations (#30)\n\nThis commit implements 7 improvements identified in a deep project\nanalysis across correctness, performance, usability, and\nmaintainability:\n\n1. Return Result from builder config methods (Ease-of-Use)\n- with_input_delay() and with_num_players() now return Result<Self,\nFortressError>\n   - Prevents silent configuration bugs from clamping invalid values\n   - Updated all call sites in examples, tests, and benchmarks\n\n2. Replace floating-point with integer arithmetic in TimeSync\n(Correctness)\n   - average_frame_advantage() now uses integer-only calculation\n   - Eliminates potential non-determinism from floating-point operations\n\n3. Reduce cloning in poll_remote_clients() (Performance)\n- Changed handles storage from Vec<PlayerHandle> to Arc<[PlayerHandle]>\n   - Cloning is now O(1) atomic increment instead of O(n) vector copy\n   - Critical for 60+ FPS game loops\n\n4. Pre-allocate compression buffers (Performance)\n- delta_decode() uses Vec::with_capacity() to avoid zero-initialization\n   - RLE encoding uses stack-allocated buffers for varint encoding\n   - Reduces allocations in network hot paths\n\n5. Add rollback algorithm overview documentation (Understanding)\n   - Added comprehensive module-level docs to sync_layer/mod.rs\n   - Explains state saving, prediction, rollback, and re-simulation\n   - Includes data flow diagram and determinism requirements\n\n6. Use descriptive variable names (Understanding)\n- Renamed single-letter variables in rng.rs, chaos_socket.rs,\ncompression.rs\n   - e.g., 'r' → 'random_value', 'b1/b2' → 'reference_byte/input_byte'\n\n7. Simplify vector initialization patterns (Maintainability)\n   - Replaced imperative Vec::new() + loop patterns with vec![T; n]\n- Applied across p2p_session.rs, spectator_session.rs,\nsync_test_session.rs\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+          "timestamp": "2025-12-25T20:56:01-08:00",
+          "tree_id": "453524834d826186a61731bafbceaba57a3d80db",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/8b78adcba52af1d1e7bba5d1049dd82117a2fa3c"
+        },
+        "date": 1766725244013,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 100,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 152,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 511,
+            "range": "± 16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 739,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1052,
+            "range": "± 34",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 103367,
+            "range": "± 3054",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 27426,
+            "range": "± 820",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1242,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 97",
             "unit": "ns/iter"
           },
           {
