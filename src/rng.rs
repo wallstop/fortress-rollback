@@ -427,28 +427,54 @@ impl Rng for ThreadRng {
 /// Combines multiple entropy sources:
 /// - High-precision timing via `web_time::Instant`
 /// - Thread identity for cross-thread uniqueness
-/// - Memory address randomization (ASLR) where available
+///
+/// # Non-Determinism Warning
+///
+/// This function is intentionally non-deterministic. It uses timing information
+/// that varies between runs. This is appropriate for:
+/// - Casual random number generation via `random()`
+/// - Non-critical randomness in tests
+/// - Network protocol identifiers where uniqueness matters more than reproducibility
+///
+/// For deterministic behavior (required for game state simulation), always use
+/// [`Pcg32::seed_from_u64`] with a fixed seed instead.
 ///
 /// This is NOT cryptographically secure, but provides sufficient
 /// entropy for game PRNGs where unpredictability isn't critical.
 fn timing_entropy_seed() -> u64 {
+    use crate::hash::DeterministicHasher;
+    use std::hash::{Hash, Hasher};
     use web_time::Instant;
 
-    // Use the instant's internal representation for entropy
+    // Use timing for entropy - this is intentionally non-deterministic
     let now = Instant::now();
-    let ptr = std::ptr::from_ref(&now) as usize;
 
     // Mix in thread ID for additional entropy across threads
+    // Use DeterministicHasher to ensure consistent hashing across platforms
+    // (DefaultHasher uses a random seed which adds another layer of non-determinism)
     let thread_id = std::thread::current().id();
     let thread_hash = {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = DeterministicHasher::new();
         thread_id.hash(&mut hasher);
         hasher.finish()
     };
 
-    // Combine with timing info
-    (ptr as u64).wrapping_mul(thread_hash)
+    // Use elapsed nanoseconds for timing entropy
+    // This is still non-deterministic (timing varies between runs) but uses
+    // DeterministicHasher for consistent cross-platform behavior
+    let timing_hash = {
+        let mut hasher = DeterministicHasher::new();
+        // Hash the debug representation of Instant for entropy
+        // (Instant doesn't implement Hash, but its timing is captured here)
+        let elapsed = now.elapsed();
+        elapsed.as_nanos().hash(&mut hasher);
+        hasher.finish()
+    };
+
+    // Combine timing and thread identity
+    thread_hash
+        .wrapping_mul(timing_hash)
+        .wrapping_add(0x9e3779b97f4a7c15)
 }
 
 #[cfg(test)]

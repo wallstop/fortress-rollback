@@ -17,7 +17,7 @@ use crate::network::messages::{
     ChecksumReport, ConnectionStatus, Input, InputAck, Message, MessageBody, MessageHeader,
     QualityReply, QualityReport, SyncReply, SyncRequest,
 };
-use crate::rng::random;
+use crate::rng::{random, Pcg32, Rng, SeedableRng};
 use crate::sessions::config::{ProtocolConfig, SyncConfig};
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::time_sync::TimeSync;
@@ -163,6 +163,13 @@ where
     // debug desync
     pub(crate) pending_checksums: BTreeMap<Frame, u128>,
     desync_detection: DesyncDetection,
+
+    /// Optional deterministic RNG for protocol randomness.
+    ///
+    /// When set (via `ProtocolConfig::protocol_rng_seed`), this RNG is used for
+    /// generating magic numbers and sync request IDs, enabling fully reproducible
+    /// protocol behavior. When `None`, the thread-local RNG is used instead.
+    protocol_rng: Option<Pcg32>,
 }
 
 impl<T: Config> PartialEq for UdpProtocol<T> {
@@ -193,9 +200,19 @@ impl<T: Config> UdpProtocol<T> {
         sync_config: SyncConfig,
         protocol_config: ProtocolConfig,
     ) -> Option<Self> {
-        let mut magic: u16 = random();
+        // Initialize protocol RNG if a deterministic seed is provided
+        let mut protocol_rng = protocol_config.protocol_rng_seed.map(Pcg32::seed_from_u64);
+
+        // Generate magic number using either deterministic or thread-local RNG
+        let mut magic: u16 = match &mut protocol_rng {
+            Some(rng) => rng.gen(),
+            None => random(),
+        };
         while magic == 0 {
-            magic = random();
+            magic = match &mut protocol_rng {
+                Some(rng) => rng.gen(),
+                None => random(),
+            };
         }
 
         handles.sort_unstable();
@@ -272,6 +289,9 @@ impl<T: Config> UdpProtocol<T> {
             // debug desync
             pending_checksums: BTreeMap::new(),
             desync_detection,
+
+            // deterministic protocol RNG (if configured)
+            protocol_rng,
         })
     }
 
@@ -600,7 +620,11 @@ impl<T: Config> UdpProtocol<T> {
             );
         }
 
-        let random_number: u32 = random();
+        // Generate random number using deterministic RNG if configured, otherwise thread-local
+        let random_number: u32 = match &mut self.protocol_rng {
+            Some(rng) => rng.gen(),
+            None => random(),
+        };
         self.sync_random_requests.insert(random_number);
         let body = SyncRequest {
             random_request: random_number,
