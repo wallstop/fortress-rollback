@@ -30,6 +30,7 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | `InputQueue.tla` | `InputQueue.cfg` | ✓ CI | Circular buffer input queue |
 | `Rollback.tla` | `Rollback.cfg` | ✓ CI | Rollback mechanism |
 | `Concurrency.tla` | `Concurrency.cfg` | ✓ CI | GameStateCell thread safety |
+| `ChecksumExchange.tla` | `ChecksumExchange.cfg` | ✓ CI | Checksum exchange for desync detection |
 
 ## Properties Verified
 
@@ -93,6 +94,19 @@ This directory contains TLA+ specifications for formally verifying the correctne
 **Linearizability:**
 
 - Operations appear atomic (guaranteed by mutex)
+
+### ChecksumExchange.tla
+
+**Safety:**
+
+- Checksums are computed deterministically for each frame
+- Checksum reports are only sent for confirmed frames
+- Desync detection compares matching frame checksums
+
+**Liveness:**
+
+- Checksum exchange eventually completes for confirmed frames
+- Desync is detected within bounded time after occurrence
 
 ## Running the Specifications
 
@@ -229,10 +243,11 @@ These specifications model the key algorithms from:
 
 | TLA+ Module | Rust Implementation |
 |-------------|---------------------|
-| `NetworkProtocol` | `src/network/protocol.rs` (UdpProtocol) |
-| `InputQueue` | `src/input_queue.rs` (InputQueue) |
-| `Rollback` | `src/sync_layer.rs` (SyncLayer), `src/sessions/p2p_session.rs` |
-| `Concurrency` | `src/sync_layer.rs` (GameStateCell, GameStateAccessor) |
+| `NetworkProtocol` | `src/network/protocol/mod.rs` (UdpProtocol) |
+| `InputQueue` | `src/input_queue/mod.rs` (InputQueue) |
+| `Rollback` | `src/sync_layer/mod.rs` (SyncLayer), `src/sessions/p2p_session.rs` |
+| `Concurrency` | `src/sync_layer/game_state_cell.rs` (GameStateCell, GameStateAccessor) |
+| `ChecksumExchange` | `src/checksum.rs`, `src/network/messages.rs` (ChecksumReport) |
 
 ## Extending the Specifications
 
