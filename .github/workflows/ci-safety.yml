@@ -95,7 +95,7 @@ jobs:
           fi
 
       - name: Upload careful report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: careful-report
@@ -170,7 +170,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
 
       - name: Upload build report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: strict-build-${{ matrix.check }}-report
@@ -269,7 +269,7 @@ jobs:
           echo "✅ Strict clippy (nursery) passed" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload clippy report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: strict-clippy-nursery-report
@@ -410,7 +410,7 @@ jobs:
           fi
 
       - name: Upload documentation report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: doc-report
@@ -500,7 +500,7 @@ jobs:
           fi
 
       - name: Upload clippy report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: no-panics-clippy-report
