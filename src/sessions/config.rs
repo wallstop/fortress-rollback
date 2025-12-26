@@ -411,6 +411,40 @@ pub struct ProtocolConfig {
     ///
     /// Default: 2
     pub input_history_multiplier: usize,
+
+    /// Optional seed for protocol RNG, enabling deterministic behavior.
+    ///
+    /// When set to `Some(seed)`, the protocol will use a deterministic RNG seeded
+    /// with this value for generating:
+    /// - Session magic numbers (protocol identifiers)
+    /// - Sync request validation tokens
+    ///
+    /// This enables fully reproducible network sessions, which is useful for:
+    /// - Replay systems
+    /// - Deterministic testing
+    /// - Debugging network issues
+    ///
+    /// When `None` (the default), the protocol uses non-deterministic random values
+    /// for security (harder to predict session IDs) and uniqueness (different magic
+    /// numbers for each session).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::ProtocolConfig;
+    ///
+    /// // For deterministic testing
+    /// let config = ProtocolConfig {
+    ///     protocol_rng_seed: Some(12345),
+    ///     ..ProtocolConfig::default()
+    /// };
+    ///
+    /// // Or use the deterministic preset
+    /// let config = ProtocolConfig::deterministic(42);
+    /// ```
+    ///
+    /// Default: `None` (non-deterministic)
+    pub protocol_rng_seed: Option<u64>,
 }
 
 impl Default for ProtocolConfig {
@@ -423,6 +457,7 @@ impl Default for ProtocolConfig {
             sync_retry_warning_threshold: 10,
             sync_duration_warning_ms: 3000,
             input_history_multiplier: 2,
+            protocol_rng_seed: None,
         }
     }
 }
@@ -446,6 +481,7 @@ impl ProtocolConfig {
             sync_retry_warning_threshold: 10,
             sync_duration_warning_ms: 2000,
             input_history_multiplier: 2,
+            protocol_rng_seed: None,
         }
     }
 
@@ -462,6 +498,7 @@ impl ProtocolConfig {
             sync_retry_warning_threshold: 20,
             sync_duration_warning_ms: 10000,
             input_history_multiplier: 3,
+            protocol_rng_seed: None,
         }
     }
 
@@ -478,6 +515,7 @@ impl ProtocolConfig {
             sync_retry_warning_threshold: 5,
             sync_duration_warning_ms: 1000,
             input_history_multiplier: 4,
+            protocol_rng_seed: None,
         }
     }
 
@@ -507,6 +545,36 @@ impl ProtocolConfig {
             sync_duration_warning_ms: 12000,
             // More history for packet reordering on mobile
             input_history_multiplier: 3,
+            protocol_rng_seed: None,
+        }
+    }
+
+    /// Configuration preset for deterministic/reproducible sessions.
+    ///
+    /// Uses a fixed RNG seed to ensure protocol behavior is reproducible
+    /// across runs. This is essential for:
+    /// - Replay systems
+    /// - Deterministic testing
+    /// - Debugging network issues
+    /// - Cross-platform consistency
+    ///
+    /// # Arguments
+    ///
+    /// * `seed` - The RNG seed for protocol randomness
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::ProtocolConfig;
+    ///
+    /// // Create a deterministic config with seed 42
+    /// let config = ProtocolConfig::deterministic(42);
+    /// assert_eq!(config.protocol_rng_seed, Some(42));
+    /// ```
+    pub fn deterministic(seed: u64) -> Self {
+        Self {
+            protocol_rng_seed: Some(seed),
+            ..Self::default()
         }
     }
 
@@ -1891,6 +1959,7 @@ mod tests {
             sync_retry_warning_threshold: 1,
             sync_duration_warning_ms: 1,
             input_history_multiplier: 1,
+            protocol_rng_seed: None,
         };
         assert!(config.validate().is_ok());
 
@@ -1903,7 +1972,52 @@ mod tests {
             sync_retry_warning_threshold: 1000,
             sync_duration_warning_ms: 300000,
             input_history_multiplier: 16,
+            protocol_rng_seed: None,
         };
+        assert!(config.validate().is_ok());
+    }
+
+    // ========================================================================
+    // ProtocolConfig Deterministic RNG Seed Tests
+    // ========================================================================
+
+    #[test]
+    fn test_protocol_config_deterministic_preset() {
+        let config = ProtocolConfig::deterministic(12345);
+        assert_eq!(config.protocol_rng_seed, Some(12345));
+        // Other fields should be default
+        assert_eq!(
+            config.quality_report_interval,
+            ProtocolConfig::default().quality_report_interval
+        );
+    }
+
+    #[test]
+    fn test_protocol_config_deterministic_different_seeds() {
+        let config1 = ProtocolConfig::deterministic(1);
+        let config2 = ProtocolConfig::deterministic(2);
+        assert_ne!(config1.protocol_rng_seed, config2.protocol_rng_seed);
+    }
+
+    #[test]
+    fn test_protocol_config_default_has_no_seed() {
+        let config = ProtocolConfig::default();
+        assert_eq!(config.protocol_rng_seed, None);
+    }
+
+    #[test]
+    fn test_protocol_config_all_presets_have_no_seed() {
+        // All presets except deterministic() should have no seed
+        assert_eq!(ProtocolConfig::competitive().protocol_rng_seed, None);
+        assert_eq!(ProtocolConfig::high_latency().protocol_rng_seed, None);
+        assert_eq!(ProtocolConfig::debug().protocol_rng_seed, None);
+        assert_eq!(ProtocolConfig::mobile().protocol_rng_seed, None);
+    }
+
+    #[test]
+    fn test_protocol_config_seed_validates_ok() {
+        // Config with seed should validate successfully
+        let config = ProtocolConfig::deterministic(42);
         assert!(config.validate().is_ok());
     }
 }

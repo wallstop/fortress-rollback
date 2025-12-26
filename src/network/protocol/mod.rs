@@ -17,7 +17,7 @@ use crate::network::messages::{
     ChecksumReport, ConnectionStatus, Input, InputAck, Message, MessageBody, MessageHeader,
     QualityReply, QualityReport, SyncReply, SyncRequest,
 };
-use crate::rng::random;
+use crate::rng::{random, Pcg32, Rng, SeedableRng};
 use crate::sessions::config::{ProtocolConfig, SyncConfig};
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::time_sync::TimeSync;
@@ -163,6 +163,13 @@ where
     // debug desync
     pub(crate) pending_checksums: BTreeMap<Frame, u128>,
     desync_detection: DesyncDetection,
+
+    /// Optional deterministic RNG for protocol randomness.
+    ///
+    /// When set (via `ProtocolConfig::protocol_rng_seed`), this RNG is used for
+    /// generating magic numbers and sync request IDs, enabling fully reproducible
+    /// protocol behavior. When `None`, the thread-local RNG is used instead.
+    protocol_rng: Option<Pcg32>,
 }
 
 impl<T: Config> PartialEq for UdpProtocol<T> {
@@ -193,9 +200,19 @@ impl<T: Config> UdpProtocol<T> {
         sync_config: SyncConfig,
         protocol_config: ProtocolConfig,
     ) -> Option<Self> {
-        let mut magic: u16 = random();
+        // Initialize protocol RNG if a deterministic seed is provided
+        let mut protocol_rng = protocol_config.protocol_rng_seed.map(Pcg32::seed_from_u64);
+
+        // Generate magic number using either deterministic or thread-local RNG
+        let mut magic: u16 = match &mut protocol_rng {
+            Some(rng) => rng.gen(),
+            None => random(),
+        };
         while magic == 0 {
-            magic = random();
+            magic = match &mut protocol_rng {
+                Some(rng) => rng.gen(),
+                None => random(),
+            };
         }
 
         handles.sort_unstable();
@@ -272,6 +289,9 @@ impl<T: Config> UdpProtocol<T> {
             // debug desync
             pending_checksums: BTreeMap::new(),
             desync_detection,
+
+            // deterministic protocol RNG (if configured)
+            protocol_rng,
         })
     }
 
@@ -600,7 +620,11 @@ impl<T: Config> UdpProtocol<T> {
             );
         }
 
-        let random_number: u32 = random();
+        // Generate random number using deterministic RNG if configured, otherwise thread-local
+        let random_number: u32 = match &mut self.protocol_rng {
+            Some(rng) => rng.gen(),
+            None => random(),
+        };
         self.sync_random_requests.insert(random_number);
         let body = SyncRequest {
             random_request: random_number,
@@ -2479,5 +2503,101 @@ mod tests {
             result.unwrap() > 0,
             "Under normal conditions, should return positive value"
         );
+    }
+
+    // ==========================================
+    // Deterministic Protocol RNG Tests
+    // ==========================================
+
+    #[test]
+    fn protocol_with_same_seed_produces_same_magic_number() {
+        let seed = 12345u64;
+        let config = ProtocolConfig::deterministic(seed);
+
+        let protocol1: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
+
+        let protocol2: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(seed),
+        );
+
+        assert_eq!(
+            protocol1.magic, protocol2.magic,
+            "Same seed should produce same magic number"
+        );
+    }
+
+    #[test]
+    fn protocol_with_different_seeds_produces_different_magic_numbers() {
+        let protocol1: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(1),
+        );
+
+        let protocol2: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(2),
+        );
+
+        assert_ne!(
+            protocol1.magic, protocol2.magic,
+            "Different seeds should produce different magic numbers (with very high probability)"
+        );
+    }
+
+    #[test]
+    fn protocol_without_seed_still_works() {
+        // When no seed is provided, protocol should still initialize successfully
+        let protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::default(), // No seed
+        );
+
+        // Magic should be non-zero
+        assert_ne!(protocol.magic, 0, "Magic number should never be zero");
+    }
+
+    #[test]
+    fn protocol_magic_is_never_zero() {
+        // Test that the magic number generation loop correctly handles
+        // the case where the first random value might be zero
+        for seed in 0..100 {
+            let protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+                vec![PlayerHandle::new(0)],
+                2,
+                1,
+                8,
+                SyncConfig::default(),
+                ProtocolConfig::deterministic(seed),
+            );
+            assert_ne!(
+                protocol.magic, 0,
+                "Magic number should never be zero (seed={})",
+                seed
+            );
+        }
     }
 }
