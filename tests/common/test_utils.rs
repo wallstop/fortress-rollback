@@ -48,11 +48,9 @@ pub fn test_addr(port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
 }
 
-#[cfg(test)]
 use fortress_rollback::{ChaosConfig, ChaosSocket, UdpNonBlockingSocket};
 
 /// Helper to create a UDP socket wrapped with ChaosSocket for network resilience testing.
-#[cfg(test)]
 #[allow(dead_code)]
 pub fn create_chaos_socket(
     port: u16,

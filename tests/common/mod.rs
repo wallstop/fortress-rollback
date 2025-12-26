@@ -28,6 +28,5 @@ pub use test_utils::{
     SyncConfig, MAX_SYNC_ITERATIONS, POLL_INTERVAL, SYNC_TIMEOUT,
 };
 
-#[cfg(test)]
 #[allow(unused_imports)]
 pub use test_utils::create_chaos_socket;

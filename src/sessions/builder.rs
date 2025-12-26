@@ -776,7 +776,8 @@ impl<T: Config> SessionBuilder<T> {
             }
         }
 
-        // Validate the input queue configuration
+        // Validate configurations
+        self.protocol_config.validate()?;
         self.input_queue_config.validate()?;
         self.input_queue_config
             .validate_frame_delay(self.input_delay)?;
@@ -808,6 +809,9 @@ impl<T: Config> SessionBuilder<T> {
         host_addr: T::Address,
         socket: impl NonBlockingSocket<T::Address> + 'static,
     ) -> Option<SpectatorSession<T>> {
+        // Validate the protocol configuration
+        self.protocol_config.validate().ok()?;
+
         // create host endpoint
         let mut host = UdpProtocol::new(
             (0..self.num_players).map(PlayerHandle::new).collect(),
@@ -1044,5 +1048,50 @@ mod tests {
         let builder =
             SessionBuilder::<TestConfig>::new().with_protocol_config(ProtocolConfig::competitive());
         assert_eq!(builder.protocol_config, ProtocolConfig::competitive());
+    }
+
+    // ========================================================================
+    // Event Queue Size Tests
+    // ========================================================================
+
+    #[test]
+    fn test_with_event_queue_size_rejects_too_small() {
+        // Values less than 10 should be rejected
+        let result = SessionBuilder::<TestConfig>::new().with_event_queue_size(9);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_with_event_queue_size_rejects_zero() {
+        let result = SessionBuilder::<TestConfig>::new().with_event_queue_size(0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_with_event_queue_size_accepts_minimum() {
+        // Minimum value of 10 should be accepted
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_event_queue_size(10)
+            .expect("Event queue size of 10 should be valid");
+        assert_eq!(builder.event_queue_size, 10);
+    }
+
+    #[test]
+    fn test_with_event_queue_size_accepts_valid_values() {
+        // Test various valid values
+        for size in [10, 50, 100, 200, 500] {
+            let builder = SessionBuilder::<TestConfig>::new()
+                .with_event_queue_size(size)
+                .expect("Valid event queue size should be accepted");
+            assert_eq!(builder.event_queue_size, size);
+        }
+    }
+
+    #[test]
+    fn test_builder_default_event_queue_size() {
+        // Default should be 100
+        let builder = SessionBuilder::<TestConfig>::new();
+        assert_eq!(builder.event_queue_size, DEFAULT_EVENT_QUEUE_SIZE);
+        assert_eq!(builder.event_queue_size, 100);
     }
 }

@@ -1410,6 +1410,502 @@ mod tests {
             }
         }
     }
+
+    // ========================================================================
+    // ProtocolConfig Validation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_protocol_config_validate_default_is_valid() {
+        let config = ProtocolConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_protocol_config_validate_all_presets_are_valid() {
+        let presets: &[(&str, ProtocolConfig)] = &[
+            ("default", ProtocolConfig::default()),
+            ("competitive", ProtocolConfig::competitive()),
+            ("high_latency", ProtocolConfig::high_latency()),
+            ("debug", ProtocolConfig::debug()),
+            ("mobile", ProtocolConfig::mobile()),
+        ];
+
+        for (name, config) in presets {
+            assert!(
+                config.validate().is_ok(),
+                "Preset '{}' should be valid, but validation failed: {:?}",
+                name,
+                config.validate()
+            );
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_quality_report_interval_valid() {
+        // Valid: minimum boundary (1ms)
+        let config = ProtocolConfig {
+            quality_report_interval: Duration::from_millis(1),
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Valid: maximum boundary (10000ms)
+        let config = ProtocolConfig {
+            quality_report_interval: Duration::from_millis(10000),
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Valid: middle value
+        let config = ProtocolConfig {
+            quality_report_interval: Duration::from_millis(500),
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_protocol_config_validate_quality_report_interval_too_low() {
+        // Invalid: 0ms (below minimum)
+        let config = ProtocolConfig {
+            quality_report_interval: Duration::from_millis(0),
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FortressError::InvalidRequest { .. }));
+        if let FortressError::InvalidRequest { info } = err {
+            assert!(info.contains("quality_report_interval"));
+            assert!(info.contains("1ms"));
+            assert!(info.contains("10000ms"));
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_quality_report_interval_too_high() {
+        // Invalid: 10001ms (above maximum)
+        let config = ProtocolConfig {
+            quality_report_interval: Duration::from_millis(10001),
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FortressError::InvalidRequest { .. }));
+        if let FortressError::InvalidRequest { info } = err {
+            assert!(info.contains("quality_report_interval"));
+            assert!(info.contains("1ms"));
+            assert!(info.contains("10000ms"));
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_shutdown_delay_valid() {
+        // Valid: minimum boundary (1ms)
+        let config = ProtocolConfig {
+            shutdown_delay: Duration::from_millis(1),
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Valid: maximum boundary (300000ms)
+        let config = ProtocolConfig {
+            shutdown_delay: Duration::from_millis(300000),
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Valid: middle value
+        let config = ProtocolConfig {
+            shutdown_delay: Duration::from_millis(10000),
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_protocol_config_validate_shutdown_delay_too_low() {
+        // Invalid: 0ms (below minimum)
+        let config = ProtocolConfig {
+            shutdown_delay: Duration::from_millis(0),
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FortressError::InvalidRequest { .. }));
+        if let FortressError::InvalidRequest { info } = err {
+            assert!(info.contains("shutdown_delay"));
+            assert!(info.contains("1ms"));
+            assert!(info.contains("300000ms"));
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_shutdown_delay_too_high() {
+        // Invalid: 300001ms (above maximum)
+        let config = ProtocolConfig {
+            shutdown_delay: Duration::from_millis(300001),
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FortressError::InvalidRequest { .. }));
+        if let FortressError::InvalidRequest { info } = err {
+            assert!(info.contains("shutdown_delay"));
+            assert!(info.contains("1ms"));
+            assert!(info.contains("300000ms"));
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_max_checksum_history_valid() {
+        // Valid: minimum boundary (1)
+        let config = ProtocolConfig {
+            max_checksum_history: 1,
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Valid: maximum boundary (1024)
+        let config = ProtocolConfig {
+            max_checksum_history: 1024,
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Valid: middle value
+        let config = ProtocolConfig {
+            max_checksum_history: 64,
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_protocol_config_validate_max_checksum_history_too_low() {
+        // Invalid: 0 (below minimum)
+        let config = ProtocolConfig {
+            max_checksum_history: 0,
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FortressError::InvalidRequest { .. }));
+        if let FortressError::InvalidRequest { info } = err {
+            assert!(info.contains("max_checksum_history"));
+            assert!(info.contains("between 1"));
+            assert!(info.contains("1024"));
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_max_checksum_history_too_high() {
+        // Invalid: 1025 (above maximum)
+        let config = ProtocolConfig {
+            max_checksum_history: 1025,
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FortressError::InvalidRequest { .. }));
+        if let FortressError::InvalidRequest { info } = err {
+            assert!(info.contains("max_checksum_history"));
+            assert!(info.contains("between 1"));
+            assert!(info.contains("1024"));
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_pending_output_limit_valid() {
+        // Valid: minimum boundary (1)
+        let config = ProtocolConfig {
+            pending_output_limit: 1,
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Valid: maximum boundary (4096)
+        let config = ProtocolConfig {
+            pending_output_limit: 4096,
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Valid: middle value
+        let config = ProtocolConfig {
+            pending_output_limit: 256,
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_protocol_config_validate_pending_output_limit_too_low() {
+        // Invalid: 0 (below minimum)
+        let config = ProtocolConfig {
+            pending_output_limit: 0,
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FortressError::InvalidRequest { .. }));
+        if let FortressError::InvalidRequest { info } = err {
+            assert!(info.contains("pending_output_limit"));
+            assert!(info.contains("between 1"));
+            assert!(info.contains("4096"));
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_pending_output_limit_too_high() {
+        // Invalid: 4097 (above maximum)
+        let config = ProtocolConfig {
+            pending_output_limit: 4097,
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FortressError::InvalidRequest { .. }));
+        if let FortressError::InvalidRequest { info } = err {
+            assert!(info.contains("pending_output_limit"));
+            assert!(info.contains("between 1"));
+            assert!(info.contains("4096"));
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_sync_retry_warning_threshold_valid() {
+        // Valid: minimum boundary (1)
+        let config = ProtocolConfig {
+            sync_retry_warning_threshold: 1,
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Valid: maximum boundary (1000)
+        let config = ProtocolConfig {
+            sync_retry_warning_threshold: 1000,
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Valid: middle value
+        let config = ProtocolConfig {
+            sync_retry_warning_threshold: 25,
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_protocol_config_validate_sync_retry_warning_threshold_too_low() {
+        // Invalid: 0 (below minimum)
+        let config = ProtocolConfig {
+            sync_retry_warning_threshold: 0,
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FortressError::InvalidRequest { .. }));
+        if let FortressError::InvalidRequest { info } = err {
+            assert!(info.contains("sync_retry_warning_threshold"));
+            assert!(info.contains("between 1"));
+            assert!(info.contains("1000"));
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_sync_retry_warning_threshold_too_high() {
+        // Invalid: 1001 (above maximum)
+        let config = ProtocolConfig {
+            sync_retry_warning_threshold: 1001,
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FortressError::InvalidRequest { .. }));
+        if let FortressError::InvalidRequest { info } = err {
+            assert!(info.contains("sync_retry_warning_threshold"));
+            assert!(info.contains("between 1"));
+            assert!(info.contains("1000"));
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_sync_duration_warning_ms_valid() {
+        // Valid: minimum boundary (1)
+        let config = ProtocolConfig {
+            sync_duration_warning_ms: 1,
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Valid: maximum boundary (300000)
+        let config = ProtocolConfig {
+            sync_duration_warning_ms: 300000,
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Valid: middle value
+        let config = ProtocolConfig {
+            sync_duration_warning_ms: 5000,
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_protocol_config_validate_sync_duration_warning_ms_too_low() {
+        // Invalid: 0 (below minimum)
+        let config = ProtocolConfig {
+            sync_duration_warning_ms: 0,
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FortressError::InvalidRequest { .. }));
+        if let FortressError::InvalidRequest { info } = err {
+            assert!(info.contains("sync_duration_warning_ms"));
+            assert!(info.contains("between 1"));
+            assert!(info.contains("300000"));
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_sync_duration_warning_ms_too_high() {
+        // Invalid: 300001 (above maximum)
+        let config = ProtocolConfig {
+            sync_duration_warning_ms: 300001,
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FortressError::InvalidRequest { .. }));
+        if let FortressError::InvalidRequest { info } = err {
+            assert!(info.contains("sync_duration_warning_ms"));
+            assert!(info.contains("between 1"));
+            assert!(info.contains("300000"));
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_input_history_multiplier_valid() {
+        // Valid: minimum boundary (1)
+        let config = ProtocolConfig {
+            input_history_multiplier: 1,
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Valid: maximum boundary (16)
+        let config = ProtocolConfig {
+            input_history_multiplier: 16,
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // Valid: middle value
+        let config = ProtocolConfig {
+            input_history_multiplier: 4,
+            ..ProtocolConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_protocol_config_validate_input_history_multiplier_too_low() {
+        // Invalid: 0 (below minimum)
+        let config = ProtocolConfig {
+            input_history_multiplier: 0,
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FortressError::InvalidRequest { .. }));
+        if let FortressError::InvalidRequest { info } = err {
+            assert!(info.contains("input_history_multiplier"));
+            assert!(info.contains("between 1"));
+            assert!(info.contains("16"));
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_input_history_multiplier_too_high() {
+        // Invalid: 17 (above maximum)
+        let config = ProtocolConfig {
+            input_history_multiplier: 17,
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FortressError::InvalidRequest { .. }));
+        if let FortressError::InvalidRequest { info } = err {
+            assert!(info.contains("input_history_multiplier"));
+            assert!(info.contains("between 1"));
+            assert!(info.contains("16"));
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_multiple_invalid_fields() {
+        // Test that validation stops at the first invalid field
+        // (quality_report_interval is checked first)
+        let config = ProtocolConfig {
+            quality_report_interval: Duration::from_millis(0), // Invalid
+            shutdown_delay: Duration::from_millis(0),          // Also invalid
+            max_checksum_history: 0,                           // Also invalid
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        if let FortressError::InvalidRequest { info } = err {
+            // Should report the first field that failed
+            assert!(info.contains("quality_report_interval"));
+        }
+    }
+
+    #[test]
+    fn test_protocol_config_validate_all_fields_at_boundaries() {
+        // Test a config with all fields at their minimum valid values
+        let config = ProtocolConfig {
+            quality_report_interval: Duration::from_millis(1),
+            shutdown_delay: Duration::from_millis(1),
+            max_checksum_history: 1,
+            pending_output_limit: 1,
+            sync_retry_warning_threshold: 1,
+            sync_duration_warning_ms: 1,
+            input_history_multiplier: 1,
+        };
+        assert!(config.validate().is_ok());
+
+        // Test a config with all fields at their maximum valid values
+        let config = ProtocolConfig {
+            quality_report_interval: Duration::from_millis(10000),
+            shutdown_delay: Duration::from_millis(300000),
+            max_checksum_history: 1024,
+            pending_output_limit: 4096,
+            sync_retry_warning_threshold: 1000,
+            sync_duration_warning_ms: 300000,
+            input_history_multiplier: 16,
+        };
+        assert!(config.validate().is_ok());
+    }
 }
 
 // =============================================================================

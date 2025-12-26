@@ -19,7 +19,7 @@ on:
         required: false
         default: '10.0'
 
-  # Scheduled run - monthly on the first Sunday at 2 AM UTC
+  # Scheduled run - First day of month at 2 AM UTC
   # Mutation testing is slow, so we run it infrequently
   schedule:
     - cron: '0 2 1 * *'  # First day of month at 2 AM UTC
