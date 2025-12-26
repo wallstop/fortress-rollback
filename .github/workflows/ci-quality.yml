@@ -87,7 +87,7 @@ jobs:
         continue-on-error: true
 
       - name: Upload shear report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: shear-report
@@ -147,7 +147,7 @@ jobs:
         continue-on-error: true
 
       - name: Upload spellcheck report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: spellcheck-report
