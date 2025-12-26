@@ -72,58 +72,70 @@ jobs:
 
       - name: Run baseline tests
         run: |
-          echo "## Mutation Testing - Baseline (${{ matrix.os }})" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Running baseline tests to ensure all tests pass before mutation testing..." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Mutation Testing - Baseline (${{ matrix.os }})"
+            echo ""
+            echo "Running baseline tests to ensure all tests pass before mutation testing..."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
 
           # Run tests with nextest (faster)
           if cargo nextest run --all-targets --features tokio,json; then
-            echo "✅ Baseline tests passed" >> $GITHUB_STEP_SUMMARY
+            echo "✅ Baseline tests passed" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "❌ Baseline tests failed" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Mutation testing requires all tests to pass first." >> $GITHUB_STEP_SUMMARY
-            echo "Please fix failing tests before running mutation testing." >> $GITHUB_STEP_SUMMARY
+            {
+              echo "❌ Baseline tests failed"
+              echo ""
+              echo "Mutation testing requires all tests to pass first."
+              echo "Please fix failing tests before running mutation testing."
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
         shell: bash
 
       - name: List mutations (dry run)
         run: |
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Mutations to Test (${{ matrix.os }})" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Analyzing code to identify mutation opportunities..." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          {
+            echo ""
+            echo "## Mutations to Test (${{ matrix.os }})"
+            echo ""
+            echo "Analyzing code to identify mutation opportunities..."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
 
           # List mutations without running them
           MUTATION_COUNT=$(cargo mutants --list --json \
             ${{ github.event.inputs.file_filter && format('-f {0}', github.event.inputs.file_filter) || '' }} \
             | jq '. | length')
 
-          echo "📊 **Total mutations to test:** $MUTATION_COUNT" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "<details>" >> $GITHUB_STEP_SUMMARY
-          echo "<summary>Click to see mutation list</summary>" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "📊 **Total mutations to test:** $MUTATION_COUNT"
+            echo ""
+            echo "<details>"
+            echo "<summary>Click to see mutation list</summary>"
+            echo ""
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
           cargo mutants --list \
-            ${{ github.event.inputs.file_filter && format('-f {0}', github.event.inputs.file_filter) || '' }} >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "</details>" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+            ${{ github.event.inputs.file_filter && format('-f {0}', github.event.inputs.file_filter) || '' }} >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "\`\`\`"
+            echo ""
+            echo "</details>"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
         shell: bash
 
       - name: Run mutation testing
         id: mutants
         run: |
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Mutation Testing Results (${{ matrix.os }})" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Testing each mutation to see if tests catch it..." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          {
+            echo ""
+            echo "## Mutation Testing Results (${{ matrix.os }})"
+            echo ""
+            echo "Testing each mutation to see if tests catch it..."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
 
           # Run mutation testing with configuration from .cargo/mutants.toml
           # The config file specifies:
@@ -142,7 +154,7 @@ jobs:
             ${{ github.event.inputs.file_filter && format('-f {0}', github.event.inputs.file_filter) || '' }} \
             2>&1 | tee mutants.log; then
 
-            echo "mutation_status=success" >> $GITHUB_OUTPUT
+            echo "mutation_status=success" >> "$GITHUB_OUTPUT"
 
             # Parse results
             CAUGHT=$(jq -r '.outcomes | map(select(.outcome == "caught")) | length' mutants-out/mutants.json)
@@ -158,51 +170,61 @@ jobs:
               SCORE="N/A"
             fi
 
-            echo "### Summary (${{ matrix.os }})" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
-            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-            echo "| ✅ Caught (tests detected mutation) | $CAUGHT |" >> $GITHUB_STEP_SUMMARY
-            echo "| ❌ Missed (tests didn't detect mutation) | $MISSED |" >> $GITHUB_STEP_SUMMARY
-            echo "| ⏱️ Timeout (mutation caused infinite loop) | $TIMEOUT |" >> $GITHUB_STEP_SUMMARY
-            echo "| 🚫 Unviable (mutation didn't compile) | $UNVIABLE |" >> $GITHUB_STEP_SUMMARY
-            echo "| 📊 **Total** | **$TOTAL** |" >> $GITHUB_STEP_SUMMARY
-            echo "| 🎯 **Mutation Score** | **${SCORE}%** |" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
+            {
+              echo "### Summary (${{ matrix.os }})"
+              echo ""
+              echo "| Metric | Count |"
+              echo "|--------|-------|"
+              echo "| ✅ Caught (tests detected mutation) | $CAUGHT |"
+              echo "| ❌ Missed (tests didn't detect mutation) | $MISSED |"
+              echo "| ⏱️ Timeout (mutation caused infinite loop) | $TIMEOUT |"
+              echo "| 🚫 Unviable (mutation didn't compile) | $UNVIABLE |"
+              echo "| 📊 **Total** | **$TOTAL** |"
+              echo "| 🎯 **Mutation Score** | **${SCORE}%** |"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
 
             # Report missed mutations (these indicate test gaps)
             if [ "$MISSED" -gt 0 ]; then
-              echo "### ⚠️ Missed Mutations (Test Gaps)" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "These mutations were not caught by tests. Consider adding tests for:" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "<details>" >> $GITHUB_STEP_SUMMARY
-              echo "<summary>Click to see details</summary>" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+              {
+                echo "### ⚠️ Missed Mutations (Test Gaps)"
+                echo ""
+                echo "These mutations were not caught by tests. Consider adding tests for:"
+                echo ""
+                echo "<details>"
+                echo "<summary>Click to see details</summary>"
+                echo ""
+                echo "\`\`\`"
+              } >> "$GITHUB_STEP_SUMMARY"
               jq -r '.outcomes[] | select(.outcome == "missed") | "\(.file):\(.line) - \(.function)"' \
-                mutants-out/mutants.json | head -50 >> $GITHUB_STEP_SUMMARY
-              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "</details>" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
+                mutants-out/mutants.json | head -50 >> "$GITHUB_STEP_SUMMARY"
+              {
+                echo "\`\`\`"
+                echo ""
+                echo "</details>"
+                echo ""
+              } >> "$GITHUB_STEP_SUMMARY"
             fi
 
             # Success criteria: mutation score >= 80%
             if [ "$MISSED" -gt 0 ] && [ "$SCORE" != "N/A" ]; then
               SCORE_INT=$(echo "$SCORE" | cut -d. -f1)
               if [ "$SCORE_INT" -lt 80 ]; then
-                echo "⚠️ **Mutation score is below 80% threshold**" >> $GITHUB_STEP_SUMMARY
-                echo "" >> $GITHUB_STEP_SUMMARY
-                echo "While this doesn't fail the build, consider improving test coverage." >> $GITHUB_STEP_SUMMARY
+                {
+                  echo "⚠️ **Mutation score is below 80% threshold**"
+                  echo ""
+                  echo "While this doesn't fail the build, consider improving test coverage."
+                } >> "$GITHUB_STEP_SUMMARY"
               fi
             fi
 
           else
-            echo "mutation_status=failure" >> $GITHUB_OUTPUT
-            echo "❌ Mutation testing encountered errors" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "See logs for details." >> $GITHUB_STEP_SUMMARY
+            echo "mutation_status=failure" >> "$GITHUB_OUTPUT"
+            {
+              echo "❌ Mutation testing encountered errors"
+              echo ""
+              echo "See logs for details."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
         continue-on-error: true
         shell: bash
