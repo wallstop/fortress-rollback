@@ -296,7 +296,8 @@ main() {
                         done
                     else
                         # Replace the version, keeping the simple format
-                        sed -i -E "s/fortress-rollback = \"[0-9]+\.[0-9]+(\.[0-9]+)?\"/fortress-rollback = \"$MAJOR_MINOR\"/g" "$file"
+                        # Use sd (modern sed replacement) for portable cross-platform compatibility
+                        sd 'fortress-rollback = "[0-9]+\.[0-9]+(\.[0-9]+)?"' "fortress-rollback = \"$MAJOR_MINOR\"" "$file"
                         file_changed=true
                         local diff_count=$((matches - current_matches))
                         TOTAL_REPLACEMENTS=$((TOTAL_REPLACEMENTS + diff_count))
@@ -342,7 +343,8 @@ main() {
                         done
                     else
                         # Replace the version in the complex format
-                        sed -i -E "s/(fortress-rollback = \{ version = \")[0-9]+\.[0-9]+(\.[0-9]+)?(\")/\1$MAJOR_MINOR\3/g" "$file"
+                        # Use sd (modern sed replacement) for portable cross-platform compatibility
+                        sd '(fortress-rollback = \{ version = ")[0-9]+\.[0-9]+(\.[0-9]+)?(")' "\${1}$MAJOR_MINOR\${3}" "$file"
                         file_changed=true
                         local diff_count=$((matches - current_matches))
                         TOTAL_REPLACEMENTS=$((TOTAL_REPLACEMENTS + diff_count))
