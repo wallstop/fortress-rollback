@@ -100,7 +100,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! fortress-rollback = { version = "0.1", features = ["tokio"] }
+//! fortress-rollback = { version = "0.2", features = ["tokio"] }
 //! ```
 //!
 //! [`UdpNonBlockingSocket`]: crate::UdpNonBlockingSocket

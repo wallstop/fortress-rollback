@@ -54,8 +54,8 @@ Each API is documented with:
 - `max_prediction = 8`
 - `fps = 60`
 - `input_delay = 0`
-- `sparse_saving = false`
-- `desync_detection = Off`
+- `save_mode = SaveMode::EveryFrame`
+- `desync_detection = On { interval: 60 }`
 - `disconnect_timeout = 2000ms`
 - `disconnect_notify_start = 500ms`
 

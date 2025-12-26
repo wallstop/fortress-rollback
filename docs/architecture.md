@@ -168,22 +168,30 @@ SyncLayer
 
 Each player has an `InputQueue` that:
 
-- Stores confirmed inputs in a circular buffer (128 entries)
+- Stores confirmed inputs in a circular buffer (configurable size, default 128 entries via `InputQueueConfig`)
 - Generates predictions when inputs haven't arrived
 - Tracks the first incorrect prediction for rollback detection
+- Uses deterministic prediction based on last confirmed input
 
 ```
 InputQueue
-├── inputs: Vec<PlayerInput>     // Circular buffer [128]
-├── head/tail: usize             // Buffer pointers
-├── frame_delay: usize           // Input delay setting
-├── prediction: PlayerInput      // Current prediction
-├── first_incorrect_frame: Frame // First wrong prediction
-└── last_requested_frame: Frame  // For discard protection
+├── inputs: Vec<PlayerInput<T::Input>>  // Circular buffer (configurable size)
+├── head/tail: usize                    // Buffer pointers
+├── length: usize                       // Current number of inputs in queue
+├── queue_length: usize                 // Maximum buffer capacity (configurable)
+├── frame_delay: usize                  // Input delay setting
+├── player_index: usize                 // For deterministic prediction
+├── last_confirmed_input: Option<Input> // Basis for predictions
+├── prediction: PlayerInput<T::Input>   // Pre-allocated prediction slot
+├── first_incorrect_frame: Frame        // First wrong prediction
+└── last_requested_frame: Frame         // For discard protection
 ```
 
+**Buffer Size Configuration:**
+The buffer size is configurable via `SessionBuilder::with_input_queue_config()`. See `InputQueueConfig` in `/src/sessions/config.rs` for available presets like `InputQueueConfig::high_latency()`.
+
 **Prediction Strategy:**
-When an input hasn't arrived, the queue predicts the player will repeat their last input. This works well for games where players hold buttons (e.g., holding "forward" to move).
+When an input hasn't arrived, the queue predicts the player will repeat their last confirmed input. This works well for games where players hold buttons (e.g., holding "forward" to move).
 
 ### GameStateCell
 
@@ -211,14 +219,27 @@ The `UdpProtocol` manages communication with a single remote endpoint:
 
 ```
 UdpProtocol
-├── state: ProtocolState         // Initializing/Synchronizing/Running/etc.
-├── peer_addr: Address           // Remote address
-├── pending_output: VecDeque     // Inputs waiting to be sent
-├── recv_inputs: BTreeMap        // Received inputs by frame
-├── time_sync_layer: TimeSync    // Frame advantage calculation
-├── peer_connect_status: Vec     // Remote's view of all players
-└── pending_checksums: BTreeMap  // For desync detection
+├── state: ProtocolState              // Initializing/Synchronizing/Running/etc.
+├── peer_addr: T::Address             // Remote endpoint address
+├── num_players: usize                // Total players in session
+├── handles: Arc<[PlayerHandle]>      // Managed player handles
+│
+├── send_queue: VecDeque<Message>     // Outgoing messages
+├── event_queue: VecDeque<Event<T>>   // Events for session
+├── pending_output: VecDeque<InputBytes>  // Compressed inputs to send
+├── recv_inputs: BTreeMap<Frame, InputBytes>  // Received inputs by frame
+├── last_acked_input: InputBytes      // Last acknowledged input
+│
+├── sync_remaining_roundtrips: u32    // Handshake progress
+├── sync_random_requests: BTreeSet    // Sync packet tracking
+├── time_sync_layer: TimeSync         // Frame advantage calculation
+├── peer_connect_status: Vec<ConnectionStatus>  // Remote's view of all players
+│
+├── pending_checksums: BTreeMap<Frame, u128>  // For desync detection
+└── desync_detection: DesyncDetection // Detection configuration
 ```
+
+See `/src/network/protocol/mod.rs` for the complete structure.
 
 **Protocol States:**
 

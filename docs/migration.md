@@ -22,7 +22,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.11"  # rename; version tracks the fork
+fortress-rollback = "0.2"  # current version
 ```
 
 If you were using a git/path dependency, point it to the new repository:
