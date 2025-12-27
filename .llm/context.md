@@ -6,12 +6,13 @@
 
 **Fortress Rollback** is a correctness-first fork of GGRS (Good Game Rollback System), written in 100% safe Rust. It provides peer-to-peer rollback networking for deterministic multiplayer games.
 
-### The Four Pillars
+### The Five Pillars
 
-1. **>90% test coverage** — All code must be thoroughly tested
-2. **Formal verification** — TLA+, Z3, and Kani for critical components
-3. **Enhanced usability** — Intuitive, type-safe, hard-to-misuse APIs
-4. **Code clarity** — Readable, maintainable, well-documented
+1. **Zero-panic production code** — All errors returned as `Result`, never panic
+2. **>90% test coverage** — All code must be thoroughly tested
+3. **Formal verification** — TLA+, Z3, and Kani for critical components
+4. **Enhanced usability** — Intuitive, type-safe, hard-to-misuse APIs
+5. **Code clarity** — Readable, maintainable, well-documented
 
 ### Quick Commands
 
@@ -293,11 +294,120 @@ z network                                       # Jump to dir matching "network"
 ### Non-Negotiable Requirements
 
 - **100% safe Rust** — `#![forbid(unsafe_code)]`
-- **No panics in library code** — Always use `Result`
+- **ZERO-PANIC POLICY** — Production code must NEVER panic; all errors as `Result`
 - **All clippy lints pass** — `clippy::all`, `clippy::pedantic`, `clippy::nursery`
 - **No broken doc links** — All intra-doc links must resolve
 - **Public items documented** — Rustdoc with examples
 - **Overflow checks in release** — Integer overflow is caught at runtime
+- **Deterministic behavior** — Same inputs must always produce same outputs
+
+### Code Design Principles
+
+These principles apply to **all code** — production, tests, CI/CD, documentation, and examples.
+
+#### Minimal Comments
+
+- **Rely on descriptive names** — Function, variable, and type names should be self-documenting
+- **Comment only the "why"** — Explain non-obvious design decisions, not what the code does
+- **Avoid redundant comments** — If the code is clear, don't add noise
+- **Rustdoc is different** — Public API documentation is mandatory and valuable
+
+```rust
+// ❌ Avoid: Redundant comment
+// Increment the frame counter
+frame_counter += 1;
+
+// ✅ Prefer: Self-documenting code, no comment needed
+frame_counter += 1;
+
+// ✅ Good: Explains non-obvious "why"
+// Skip checksum validation for spectators to reduce bandwidth
+if player.is_spectator() { return Ok(()); }
+```
+
+#### SOLID Principles
+
+- **Single Responsibility** — Each module, struct, and function does one thing well
+- **Open/Closed** — Extend behavior through traits and generics, not modification
+- **Liskov Substitution** — Trait implementations must honor the trait's contract
+- **Interface Segregation** — Prefer small, focused traits over large monolithic ones
+- **Dependency Inversion** — Depend on abstractions (traits), not concrete types
+
+#### DRY (Don't Repeat Yourself)
+
+- **Extract common patterns** — If code appears twice, consider abstracting it
+- **Prefer composition** — Build complex behavior from simple, reusable pieces
+- **Centralize constants** — Magic numbers and strings belong in named constants
+- **Share test utilities** — Common test setup belongs in shared modules
+
+```rust
+// ❌ Avoid: Duplicated validation logic
+fn process_input(input: Input) -> Result<(), Error> {
+    if input.frame < 0 { return Err(Error::InvalidFrame); }
+    // ... process
+}
+fn validate_input(input: Input) -> Result<(), Error> {
+    if input.frame < 0 { return Err(Error::InvalidFrame); }
+    // ... validate
+}
+
+// ✅ Prefer: Single source of truth
+impl Input {
+    fn validate(&self) -> Result<(), Error> {
+        if self.frame < 0 { return Err(Error::InvalidFrame); }
+        Ok(())
+    }
+}
+```
+
+#### Clean Architecture
+
+- **Separate concerns** — Keep business logic independent of I/O and frameworks
+- **Layer dependencies inward** — Core logic shouldn't know about network or storage details
+- **Define clear boundaries** — Use traits to define interfaces between layers
+
+#### Design Patterns
+
+Use established patterns where appropriate:
+
+- **Builder** — For complex object construction (see `SessionBuilder`)
+- **State Machine** — For protocol and connection state management
+- **Strategy** — For swappable algorithms (e.g., input prediction)
+- **Factory** — For creating related objects with consistent configuration
+- **Iterator** — Leverage Rust's iterator combinators over manual loops
+
+#### Lightweight Abstractions
+
+When creating abstractions for common patterns:
+
+- **Prefer value types** — Use `Copy` types and stack allocation when possible
+- **Minimize allocations** — Avoid `Box`, `Vec`, `String` in hot paths unless necessary
+- **Use zero-cost abstractions** — Generics and traits over dynamic dispatch
+- **Function-based over object-based** — Simple functions often beat complex types
+
+```rust
+// ❌ Avoid: Unnecessary allocation for simple abstraction
+struct FrameValidator {
+    valid_range: Box<dyn Fn(Frame) -> bool>,
+}
+
+// ✅ Prefer: Zero-cost, value-typed abstraction
+#[derive(Clone, Copy)]
+struct FrameRange { min: Frame, max: Frame }
+
+impl FrameRange {
+    const fn contains(self, frame: Frame) -> bool {
+        frame >= self.min && frame <= self.max
+    }
+}
+```
+
+#### Code Consolidation
+
+- **Look for patterns first** — Before writing new code, search for similar existing code
+- **Extract shared utilities** — Test helpers, validation logic, formatting
+- **Avoid copy-paste** — If tempted to copy code, create a shared abstraction instead
+- **Refactor proactively** — When adding features, improve structure of touched code
 
 ### Safety-Focused CI Checks (ci-safety.yml)
 
@@ -421,6 +531,78 @@ Add comprehensive test coverage:
 
 ## Defensive Programming Patterns
 
+> **See also:** The complete guides in `.llm/skills/`:
+>
+> - [defensive-programming.md](.llm/skills/defensive-programming.md) — Zero-panic policy, error handling, safe patterns
+> - [type-driven-design.md](.llm/skills/type-driven-design.md) — Parse don't validate, newtypes, typestate
+> - [rust-pitfalls.md](.llm/skills/rust-pitfalls.md) — Common bugs that compile but cause problems
+
+### Zero-Panic Policy (CRITICAL)
+
+**Production code must NEVER panic.** This is non-negotiable.
+
+- All errors must be returned as `Result<T, FortressError>`
+- APIs must be robust and resilient to all possible inputs
+- Internal state must remain consistent even when errors occur
+- Callers must be forced to handle potential failures explicitly
+
+```rust
+// ❌ FORBIDDEN in production code
+value.unwrap()                    // Panics on None
+value.expect("msg")               // Panics with message
+array[index]                      // Panics on out-of-bounds
+panic!("something went wrong")   // Explicit panic
+todo!()                           // Panics as placeholder
+unreachable!()                    // Panics (use only when TRULY unreachable)
+assert!(condition)                // Panics on false (tests only)
+
+// ✅ REQUIRED - Return Results, let caller decide
+value.ok_or(FortressError::MissingValue)?          // Convert Option to Result
+array.get(index).ok_or(FortressError::OutOfBounds)?  // Safe indexing
+if !valid { return Err(FortressError::InvalidState); }  // Explicit error
+```
+
+### Never Swallow Errors
+
+Errors must be propagated to callers, not hidden:
+
+```rust
+// ❌ FORBIDDEN - Silently swallows errors
+let _ = fallible_operation();           // Ignores Result
+if let Ok(v) = operation() { use(v); }  // Silently ignores Err
+match result { Ok(v) => v, Err(_) => default }  // Hides error
+
+// ✅ REQUIRED - Propagate or explicitly handle
+fallible_operation()?;                   // Propagate with ?
+fallible_operation().map_err(|e| {       // Transform and propagate
+    FortressError::Wrapped(e)
+})?;
+match result {
+    Ok(v) => v,
+    Err(e) => return Err(e.into()),      // Explicit propagation
+}
+```
+
+### Assume Nothing, Validate Everything
+
+Do not assume inputs or internal state are valid:
+
+```rust
+// ❌ Avoid: Assumes state is valid
+fn process(&self) {
+    let player = &self.players[self.current_player];  // May panic
+    player.process();
+}
+
+// ✅ Prefer: Validate and return errors
+fn process(&self) -> Result<(), FortressError> {
+    let player = self.players
+        .get(self.current_player)
+        .ok_or(FortressError::InvalidPlayerIndex(self.current_player))?;
+    player.process()
+}
+```
+
 ### Prefer Pattern Matching Over Indexing
 
 ```rust
@@ -463,6 +645,45 @@ process_data(&data, true, false, true);
 
 // ✅ Prefer: Self-documenting
 process_data(&data, Compression::Enabled, Encryption::Disabled, Validation::Strict);
+```
+
+### Maintain Invariants
+
+Internal state must always be consistent:
+
+```rust
+// ❌ Avoid: Partial updates can leave inconsistent state
+fn update(&mut self, new_count: usize) {
+    self.count = new_count;          // Updated
+    self.items.resize(new_count, 0); // May fail, leaving count wrong
+}
+
+// ✅ Prefer: Atomic updates or rollback on failure
+fn update(&mut self, new_count: usize) -> Result<(), FortressError> {
+    let mut new_items = self.items.clone();
+    new_items.resize(new_count, 0);  // Prepare new state
+    // Only update if all operations succeed
+    self.items = new_items;
+    self.count = new_count;
+    Ok(())
+}
+```
+
+### Use Type System for Safety
+
+```rust
+// ❌ Avoid: Runtime checks for compile-time guarantees
+fn set_frame(frame: i32) -> Result<(), Error> {
+    if frame < 0 { return Err(Error::NegativeFrame); }
+    // ...
+}
+
+// ✅ Prefer: Make invalid states unrepresentable
+struct Frame(u32);  // Cannot be negative by construction
+
+fn set_frame(frame: Frame) {
+    // frame is guaranteed valid by the type system
+}
 ```
 
 ---
