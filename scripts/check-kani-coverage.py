@@ -11,7 +11,6 @@ Note: Kani itself doesn't support Windows, but this validation script
 can still run to catch issues before pushing to CI.
 """
 
-import os
 import re
 import sys
 from pathlib import Path

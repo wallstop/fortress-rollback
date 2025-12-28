@@ -182,7 +182,7 @@ def check_version_sync(project_root: Path) -> bool:
                     )
                     return False
         except (subprocess.CalledProcessError, FileNotFoundError):
-            pass
+            pass  # Script not found or failed; skip auto-sync and rely on consistency check below
 
     # Always check consistency
     try:
