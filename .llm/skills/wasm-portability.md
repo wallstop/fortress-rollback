@@ -20,6 +20,7 @@ WASM uses a **stack-based virtual machine** rather than targeting hardware regis
 ```
 
 This abstraction means:
+
 - No assumptions about CPU register count
 - No platform-specific calling conventions
 - Runtime translates to native instructions

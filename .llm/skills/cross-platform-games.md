@@ -59,6 +59,7 @@ rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
 ```
 
 Or set via environment:
+
 ```bash
 RUSTFLAGS='--cfg getrandom_backend="wasm_js"' cargo build --target wasm32-unknown-unknown
 ```
@@ -81,6 +82,7 @@ strip = true              # Strip symbols
 ```
 
 **Measure your binary:**
+
 ```bash
 cargo install twiggy
 twiggy top target/wasm32-unknown-unknown/release/game.wasm
@@ -187,8 +189,10 @@ fn setup_input(canvas: &HtmlCanvasElement, input_state: Rc<RefCell<InputState>>)
 ### iOS Setup
 
 **Prerequisites:**
+
 - macOS with Xcode 12+
 - Install targets:
+
   ```bash
   rustup target add aarch64-apple-ios        # Device
   rustup target add aarch64-apple-ios-sim    # Simulator (Apple Silicon)
@@ -196,6 +200,7 @@ fn setup_input(canvas: &HtmlCanvasElement, input_state: Rc<RefCell<InputState>>)
   ```
 
 **Build Commands:**
+
 ```bash
 # Device build
 cargo build --release --target aarch64-apple-ios
@@ -206,6 +211,7 @@ cargo build --release --target x86_64-apple-ios       # Intel Mac
 ```
 
 **Tools:**
+
 | Tool | Purpose |
 |------|---------|
 | `cargo-xcode` | Generate Xcode project from Cargo |
@@ -215,8 +221,10 @@ cargo build --release --target x86_64-apple-ios       # Intel Mac
 ### Android Setup
 
 **Prerequisites:**
+
 - Android NDK (r25+ recommended)
 - Install targets:
+
   ```bash
   rustup target add aarch64-linux-android    # ARM64 (most devices)
   rustup target add armv7-linux-androideabi  # ARMv7 (legacy)
@@ -225,6 +233,7 @@ cargo build --release --target x86_64-apple-ios       # Intel Mac
   ```
 
 **Using cargo-ndk:**
+
 ```bash
 cargo install cargo-ndk
 
@@ -236,12 +245,14 @@ cargo ndk --platform 24 -t arm64-v8a build --release
 ```
 
 **Activity Types:**
+
 - `NativeActivity`: Simpler, no Java/Kotlin required initially
 - `GameActivity`: Better input (keyboard, controllers), based on AppCompatActivity
 
 ### Mobile-Specific Patterns
 
 **Touch Input Abstraction:**
+
 ```rust
 pub struct Touch {
     pub id: u64,
@@ -271,6 +282,7 @@ fn get_touches() -> Vec<Touch> { /* Android impl */ }
 ```
 
 **Lifecycle Handling:**
+
 ```rust
 pub trait GameLifecycle {
     /// Called when app goes to background
@@ -856,27 +868,32 @@ impl GameLifecycle for MyGame {
 ## Checklist for Cross-Platform Games
 
 ### Project Setup
+
 - [ ] Workspace structure separating core from platform code
 - [ ] Feature flags for platform capabilities
 - [ ] Shared asset directory
 
 ### Build Configuration
+
 - [ ] All target triplets in `rust-toolchain.toml`
 - [ ] WASM runner configured in `.cargo/config.toml`
 - [ ] Release profile optimized for size (WASM) or speed (native)
 
 ### Code Quality
+
 - [ ] Platform traits for clock, random, assets, audio
 - [ ] No `std::time::Instant` in core (use trait)
 - [ ] Assets embedded for WASM, loaded from disk for native
 - [ ] Deterministic collections (`BTreeMap` over `HashMap`)
 
 ### Testing
+
 - [ ] Core logic tests run on all platforms
 - [ ] WASM tests with `wasm_bindgen_test`
 - [ ] CI builds for all target platforms
 
 ### Mobile Specific
+
 - [ ] Lifecycle handling (pause/resume/destroy)
 - [ ] Touch input abstraction
 - [ ] Signed builds for device testing

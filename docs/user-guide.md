@@ -17,7 +17,7 @@ This guide walks you through integrating Fortress Rollback into your game. By th
 7. [Determinism Requirements](#determinism-requirements)
 8. [Network Requirements](#network-requirements)
    - [Network Scenario Configuration Guide](#network-scenario-configuration-guide)
-     - [LAN / Local Network](#lan-local-network-20ms-rtt)
+     - [LAN / Local Network](#lan--local-network--20ms-rtt)
      - [Regional Internet](#regional-internet-20-80ms-rtt)
      - [High Latency](#high-latency-80-200ms-rtt)
      - [Lossy Network](#lossy-network-5-15-packet-loss)
@@ -28,7 +28,7 @@ This guide walks you through integrating Fortress Rollback into your game. By th
 10. [Feature Flags](#feature-flags)
     - [Feature Flag Reference](#feature-flag-reference)
     - [Feature Flag Combinations](#feature-flag-combinations)
-    - [Web / WASM Integration](#web-wasm-integration)
+    - [Web / WASM Integration](#web--wasm-integration)
     - [Platform-Specific Features](#platform-specific-features)
 11. [Spectator Sessions](#spectator-sessions)
 12. [Testing with SyncTest](#testing-with-synctest)
@@ -1264,7 +1264,7 @@ Fortress Rollback provides several Cargo feature flags to customize behavior for
 | `z3-verification-bundled` | Z3 with bundled build (builds from source) | CI environments without system Z3 | `z3` crate |
 | `graphical-examples` | Enables the ex_game graphical examples | Running visual demos | `macroquad` crate |
 
-> **Note:** WASM support is automatic — no feature flag needed. See [Web / WASM Integration](#web-wasm-integration) below.
+> **Note:** WASM support is automatic — no feature flag needed. See [Web / WASM Integration](#web--wasm-integration) below.
 
 ### Feature Details
 

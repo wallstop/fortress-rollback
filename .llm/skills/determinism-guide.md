@@ -7,6 +7,7 @@
 Determinism means: **given identical inputs, the game produces bit-identical outputs on every run, on every machine.**
 
 This is required for:
+
 - **Rollback netcode** — Peers must reach the same state
 - **Replay systems** — Must reproduce exact gameplay
 - **Competitive integrity** — Identical game state for all players
@@ -71,6 +72,7 @@ glam = { version = "0.29", features = ["libm"] }
 ```
 
 This:
+
 - Disables SIMD optimizations
 - Uses portable software implementations
 - Trades performance for determinism
@@ -379,6 +381,7 @@ let game_time = frame_number * TICK_DURATION;
 ### See Also
 
 For complete WASM development guidance:
+
 - [wasm-rust-guide.md](wasm-rust-guide.md) — Rust to WASM compilation
 - [wasm-threading.md](wasm-threading.md) — Threading and concurrency in WASM
 - [wasm-portability.md](wasm-portability.md) — WASM determinism and sandboxing
@@ -848,6 +851,7 @@ fn stress_test_determinism() {
 ### The Risk
 
 Proc macros execute arbitrary code at compile time and can:
+
 - Access filesystem
 - Make network requests
 - Use system RNG
@@ -1066,6 +1070,7 @@ rand_pcg = "0.3"  # Seeded only
 ## Quick Reference: Determinism Checklist
 
 ### Setup
+
 - [ ] Using `BTreeMap`/`BTreeSet` instead of `HashMap`/`HashSet`
 - [ ] Using seeded RNG (`rand_pcg` or `rand_chacha`)
 - [ ] Frame counter instead of wall clock time
@@ -1074,6 +1079,7 @@ rand_pcg = "0.3"  # Seeded only
 - [ ] Toolchain version pinned in `rust-toolchain.toml`
 
 ### Floating Point
+
 - [ ] `libm` feature enabled OR using fixed-point math
 - [ ] No transcendental functions without library
 - [ ] Float comparisons handle NaN/epsilon properly
@@ -1081,23 +1087,27 @@ rand_pcg = "0.3"  # Seeded only
 - [ ] Kahan/compensated summation for large sums
 
 ### Collections & Dependencies
+
 - [ ] No HashMap iteration without sorting
 - [ ] `ahash` using `default-features = false`
 - [ ] Run `cargo tree -f "{p} {f}"` to audit features
 - [ ] Check for `const-random`, `compile-time-rng` features
 
 ### ECS (Bevy)
+
 - [ ] All queries sorted by stable Rollback ID
 - [ ] RNG state included in snapshots
 - [ ] All game-affecting state registered for rollback
 
 ### WASM/Cross-Platform
+
 - [ ] WASM builds reproducible (SHA comparison)
 - [ ] CI tests on multiple platforms
 - [ ] No proc-macro compile-time randomness
 - [ ] Consider WASM for cross-platform float determinism
 
 ### Testing
+
 - [ ] Replay test passes (same inputs = same output)
 - [ ] SyncTest mode works (forced rollback every frame)
 - [ ] Cross-platform CI compares checksums

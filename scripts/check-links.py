@@ -34,19 +34,28 @@ def get_project_root() -> Path:
 
 
 def extract_markdown_anchors(content: str) -> set[str]:
-    """Extract anchor IDs from markdown content."""
+    """Extract anchor IDs from markdown content.
+
+    Uses the same algorithm as markdownlint (GitHub-flavored Markdown):
+    1. Convert to lowercase
+    2. Replace spaces with hyphens
+    3. Remove special characters (keep alphanumeric and hyphens)
+    4. Do NOT collapse multiple hyphens (slashes become double hyphens)
+    """
     anchors = set()
 
     # Match headers: # Header, ## Header, etc.
     header_pattern = re.compile(r"^#+\s+(.+)$", re.MULTILINE)
     for match in header_pattern.finditer(content):
         header_text = match.group(1).strip()
-        # Convert to anchor format (lowercase, spaces to hyphens, remove special chars)
-        # Keep alphanumeric, spaces, and hyphens; remove everything else
-        anchor = re.sub(r"[^\w\s-]", "", header_text.lower())
-        # Collapse multiple spaces/hyphens and convert spaces to hyphens
-        anchor = re.sub(r"[\s-]+", "-", anchor)
-        # Strip leading/trailing hyphens
+        # Convert to anchor format matching markdownlint/GFM:
+        # 1. Lowercase
+        anchor = header_text.lower()
+        # 2. Replace spaces with hyphens
+        anchor = anchor.replace(" ", "-")
+        # 3. Remove special chars (keep alphanumeric and hyphens)
+        anchor = re.sub(r"[^\w-]", "", anchor)
+        # 4. Strip leading/trailing hyphens
         anchor = anchor.strip("-")
         anchors.add(anchor)
 

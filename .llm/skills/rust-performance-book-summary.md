@@ -51,6 +51,7 @@ RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
 ```
 
 Or in `.cargo/config.toml`:
+
 ```toml
 [build]
 rustflags = ["-C", "force-frame-pointers=yes"]
@@ -108,20 +109,24 @@ This enables AVX/SSE instructions specific to your CPU. Only use when broad comp
 ### Tip 9: Consider Alternative Allocators
 
 **jemalloc** (Linux/Mac):
+
 ```toml
 [dependencies]
 tikv-jemallocator = "0.5"
 ```
+
 ```rust
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 ```
 
 **mimalloc** (Cross-platform):
+
 ```toml
 [dependencies]
 mimalloc = "0.1"
 ```
+
 ```rust
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -130,11 +135,13 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 ### Tip 10: Use Faster Linkers
 
 **mold** (fastest, Linux):
+
 ```bash
 RUSTFLAGS="-C link-arg=-fuse-ld=mold" cargo build --release
 ```
 
 **lld** (fast, cross-platform):
+
 ```bash
 RUSTFLAGS="-C link-arg=-fuse-ld=lld" cargo build --release
 ```

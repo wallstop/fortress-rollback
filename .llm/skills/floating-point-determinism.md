@@ -96,11 +96,13 @@ let b: f64 = a - 1.0;
 ```
 
 **x87 FPU Issues:**
+
 - Uses per-thread precision settings (control word)
 - Settings can be changed by any library (Direct3D, older DirectX)
 - 80-bit internal precision causes "double rounding"
 
 **SSE2/AVX:**
+
 - Uses per-instruction precision
 - More predictable, matches standard double/float
 - Default on 64-bit x86
@@ -154,6 +156,7 @@ IEEE-754 guarantees **correctly rounded results** for only five basic operations
 | `sqrt` | ✅ Correctly rounded |
 
 **Everything else is NOT guaranteed by IEEE-754:**
+
 - Transcendental functions (sin, cos, exp, log, etc.)
 - Power functions
 - Special functions
@@ -708,6 +711,7 @@ fn replay_and_verify(recording_path: &Path, expected_checksum: u64) {
 ### For Maximum Determinism
 
 1. **Replace all std math with libm:**
+
    ```rust
    use libm::{sin, cos, atan2, sqrt, pow, exp, log};
    ```
@@ -717,11 +721,13 @@ fn replay_and_verify(recording_path: &Path, expected_checksum: u64) {
 3. **Avoid parallel reductions on floats**
 
 4. **Use compensated summation for large sums:**
+
    ```rust
    use accurate::sum::Sum2;
    ```
 
 5. **Consider fixed-point for critical game state:**
+
    ```rust
    use fixed::types::I20F12;
    ```

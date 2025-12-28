@@ -755,6 +755,7 @@ enum StateDiff {
 ## Summary: Integration Checklist
 
 ### Before Integration
+
 - [ ] Game loop uses fixed timestep
 - [ ] All game state is serializable/cloneable
 - [ ] No HashMap iteration in game logic
@@ -762,6 +763,7 @@ enum StateDiff {
 - [ ] Deterministic RNG implemented
 
 ### During Integration
+
 - [ ] Request-response pattern implemented
 - [ ] All rollback components registered
 - [ ] Query iteration sorted by stable ID
@@ -769,12 +771,14 @@ enum StateDiff {
 - [ ] Checksum computation implemented
 
 ### Testing
+
 - [ ] SyncTest mode works (forced rollback every frame)
 - [ ] Replay system verifies determinism
 - [ ] Desync detection alerts on mismatch
 - [ ] Network simulation tested (latency, jitter, loss)
 
 ### Performance
+
 - [ ] State save/load under 1ms
 - [ ] Can resimulate 8 frames in 16ms
 - [ ] Checksum computation under 0.5ms

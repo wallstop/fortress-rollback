@@ -86,12 +86,14 @@ let result = tokio::task::spawn_blocking(|| {
 ### 3. Choose the Right Concurrency Primitive
 
 **Sequential Execution** (one after another):
+
 ```rust
 let a = fetch_a().await?;
 let b = fetch_b().await?;
 ```
 
 **Concurrent Execution** (all at once, wait for all):
+
 ```rust
 // Using join! - runs concurrently, returns tuple
 let (a, b, c) = tokio::join!(fetch_a(), fetch_b(), fetch_c());
@@ -101,6 +103,7 @@ let (a, b) = tokio::try_join!(fetch_a(), fetch_b())?;
 ```
 
 **Concurrent Execution** (first to complete wins):
+
 ```rust
 tokio::select! {
     result = fetch_a() => { /* a completed first */ }
@@ -110,6 +113,7 @@ tokio::select! {
 ```
 
 **Dynamic Number of Futures**:
+
 ```rust
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -325,16 +329,19 @@ while let Some(result) = set.join_next().await {
 ### 11. Configure Runtime Appropriately
 
 **For applications** - use full features:
+
 ```toml
 tokio = { version = "1", features = ["full"] }
 ```
 
 **For libraries** - use minimal features:
+
 ```toml
 tokio = { version = "1", features = ["rt", "sync"] }
 ```
 
 **For single-threaded scenarios**:
+
 ```rust
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -343,6 +350,7 @@ async fn main() {
 ```
 
 **For custom configuration**:
+
 ```rust
 let runtime = tokio::runtime::Builder::new_multi_thread()
     .worker_threads(4)
@@ -638,14 +646,14 @@ async fn test_cancellation_cleanup() {
 
 ## When to Use Async vs Sync
 
-### Use Async When:
+### Use Async When
 
 - **High concurrency** - Thousands of concurrent connections
 - **I/O-bound workloads** - Network servers, database clients
 - **External library requires it** - Many modern Rust libraries are async-first
 - **Natural fit** - Event-driven architectures, websockets, streaming
 
-### Use Sync (Threads) When:
+### Use Sync (Threads) When
 
 - **CPU-bound computation** - Use `rayon` for parallelism
 - **Simple I/O patterns** - Reading a few files, one-shot HTTP requests

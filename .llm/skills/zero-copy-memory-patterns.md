@@ -96,6 +96,7 @@ assert!(matches!(normalized, Cow::Owned(_))); // Had to allocate
 ```
 
 **When to use**:
+
 - Parsing where most inputs are already valid
 - Transformation functions where modification is rare
 - APIs that accept both owned and borrowed data

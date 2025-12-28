@@ -28,6 +28,7 @@ for (id, player) in &map {
 ```
 
 This is particularly insidious because:
+
 - The bug is **non-deterministic** — it may work in testing but fail in production
 - The bug is **platform-dependent** — it may work on your machine but fail on others
 - The bug is **run-dependent** — it may work 99 times and fail on the 100th
@@ -98,6 +99,7 @@ ahash = { version = "0.8", features = ["compile-time-rng"] }
 ```
 
 With `compile-time-rng`, ahash generates random constants **at compile time**, meaning:
+
 - Different builds produce different binaries
 - Even `cargo clean && cargo build` creates a different binary
 - CI builds may differ from local builds
@@ -120,6 +122,7 @@ cargo tree | grep -E "ahash|getrandom|const-random"
 ```
 
 Common culprits:
+
 - `hashbrown` (powers `std::collections::HashMap`)
 - `bevy_utils` (Bevy's default hasher)
 - `indexmap` with default features
@@ -148,6 +151,7 @@ for (k, v) in &map {
 ```
 
 **Requirements:**
+
 - Keys must implement `Ord` (not just `Hash + Eq`)
 - Iteration is O(n) regardless of access pattern
 
@@ -604,17 +608,20 @@ ahash = { version = "0.8", features = ["compile-time-rng"] }
 **Mitigation strategies:**
 
 1. **Audit dependencies:**
+
    ```bash
    cargo tree -f '{p} {f}' | grep ahash
    ```
 
 2. **Use `default-features = false`:**
+
    ```toml
    [dependencies]
    some-crate = { version = "1.0", default-features = false }
    ```
 
 3. **Pin dependency versions** and audit changes:
+
    ```toml
    [dependencies]
    ahash = "=0.8.11"  # Exact version
@@ -732,23 +739,27 @@ pub type PlayerMap<V> = std::collections::BTreeMap<PlayerId, V>;
 ### When to Use Each
 
 **Use `BTreeMap` when:**
+
 - You iterate frequently
 - Data set is small to medium (<10,000 entries)
 - You need range queries (`range()`, `range_mut()`)
 - Keys naturally have an ordering
 
 **Use `IndexMap` when:**
+
 - You need O(1) lookups AND deterministic iteration
 - Insertion order has meaning
 - Data set is large
 - You're migrating from HashMap with minimal changes
 
 **Use `HashMap` + sort when:**
+
 - Lookups vastly outnumber iterations
 - You only occasionally need to iterate
 - Memory is a concern
 
 **Use `HashMap` with fixed hasher when:**
+
 - You NEVER iterate over entries
 - You only need deterministic hashes (for checksums)
 - Maximum lookup performance is required

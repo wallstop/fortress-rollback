@@ -50,6 +50,7 @@ tokio::spawn(async { /* ... */ });  // Under DST runtime control
 ```
 
 **Key patterns:**
+
 - Use async/await with a controlled executor
 - Tasks yield at known points (`.await`)
 - Scheduler picks next task deterministically (often FIFO or seeded random)
@@ -73,6 +74,7 @@ tokio::time::sleep(Duration::from_secs(1)).await;
 ```
 
 **Implementation approaches:**
+
 1. **Override libc functions** (`gettimeofday`, `clock_gettime`) — madsim approach
 2. **Conditional compilation** — Replace `std::time` with simulation version
 3. **Dependency injection** — Pass time source as parameter
@@ -97,6 +99,7 @@ let x: u32 = rng.gen();  // Same seed = same sequence
 ```
 
 **Best practices:**
+
 - Single global RNG for the simulation
 - All random decisions flow from this RNG
 - Include RNG state in saved states for rollback
@@ -120,6 +123,7 @@ if buggify() {
 ```
 
 **Types of failures to inject:**
+
 - Network partitions and message loss
 - Message delays and reordering
 - Disk I/O failures
@@ -132,7 +136,7 @@ if buggify() {
 
 ### 1. madsim — Drop-in Tokio Replacement
 
-**Repository:** https://github.com/madsim-rs/madsim
+**Repository:** <https://github.com/madsim-rs/madsim>
 
 **Philosophy:** Replace tokio and external dependencies at compile time.
 
@@ -252,7 +256,7 @@ if buggify_with_prob(0.1) {  // 10% chance
 
 ### 2. turmoil — Tokio-Native DST
 
-**Repository:** https://github.com/tokio-rs/turmoil
+**Repository:** <https://github.com/tokio-rs/turmoil>
 
 **Philosophy:** Minimal API surface, integrate with existing tokio code.
 
@@ -348,7 +352,7 @@ file.sync_all()?;  // Data survives sim.crash()
 
 ### 3. Manual DST (sled-style)
 
-**Repository:** https://sled.rs/simulation.html
+**Repository:** <https://sled.rs/simulation.html>
 
 **Philosophy:** Design your system as a state machine from the start.
 
@@ -423,6 +427,7 @@ impl<A: Actor> Simulator<A> {
 ```
 
 **Benefits of manual approach:**
+
 - Total control over simulation behavior
 - Minimal dependencies
 - Easy to extend with custom failure modes

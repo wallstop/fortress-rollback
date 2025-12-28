@@ -5,6 +5,7 @@
 ## Overview
 
 Threading in WebAssembly is **possible but complex**. It requires:
+
 - Browser security headers (COOP/COEP)
 - Shared memory (`SharedArrayBuffer`)
 - Nightly Rust (for full support)
@@ -377,6 +378,7 @@ impl ThreadPool {
 **⚠️ Important for rollback netcode:**
 
 Threading introduces non-determinism due to:
+
 - Scheduling order variations
 - Race conditions
 - Memory ordering differences

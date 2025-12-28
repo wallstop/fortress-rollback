@@ -105,6 +105,55 @@ Works everywhere
 Anchors are lowercase, spaces become hyphens
 ```
 
+---
+
+## Heading Anchor Generation Rules
+
+Markdown heading anchors are auto-generated with specific transformation rules. **MD051 (link-fragments) errors occur when your `#fragment` doesn't match the actual generated anchor.**
+
+### Transformation Rules
+
+1. **Lowercase** — All letters converted to lowercase
+2. **Spaces → hyphens** — Spaces become single hyphens (`-`)
+3. **Remove special chars** — Parentheses `()`, brackets `[]`, and most punctuation removed
+4. **Slashes with spaces → double hyphens** — ` / ` becomes `--`
+5. **Tildes removed** — `~` characters are stripped
+
+### Examples
+
+| Heading | Generated Anchor |
+|---------|------------------|
+| `## Quick Start` | `#quick-start` |
+| `## LAN / Local Network (~20ms RTT)` | `#lan--local-network-20ms-rtt` |
+| `## Web / WASM Integration` | `#web--wasm-integration` |
+| `## P2P Session (peer-to-peer)` | `#p2p-session-peer-to-peer` |
+| `## Advanced Configuration [Optional]` | `#advanced-configuration-optional` |
+
+### Common MD051 Mistakes
+
+```text
+❌ WRONG: #lan-/-local-network   ← Slash not converted correctly
+✅ RIGHT: #lan--local-network-20ms-rtt
+
+❌ WRONG: #web-wasm-integration  ← Missing double hyphen for slash
+✅ RIGHT: #web--wasm-integration
+
+❌ WRONG: #quick-start-(guide)   ← Parens should be removed
+✅ RIGHT: #quick-start-guide
+```
+
+### Verify Before Committing
+
+**Always verify fragment links match actual headings:**
+
+```bash
+# Check for MD051 errors
+npx markdownlint 'docs/user-guide.md' --config .markdownlint.json
+
+# Search for a heading to see its exact text
+grep -n "^##" docs/user-guide.md | grep -i "network"
+```
+
 ## Directory Reference
 
 Quick reference for common link patterns in this repository:

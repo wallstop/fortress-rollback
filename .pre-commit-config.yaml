@@ -88,6 +88,13 @@ repos:
       # ══════════════════════════════════════════════════════════════════════
       # Documentation checks
       # ══════════════════════════════════════════════════════════════════════
+      - id: markdownlint
+        name: markdownlint (autofix)
+        entry: python scripts/hooks/markdownlint.py
+        language: python
+        types: [markdown]
+        exclude: '^(target/|fuzz/target/|loom-tests/target/|progress/|PLAN\.md)'
+
       - id: check-links
         name: check links
         entry: python scripts/check-links.py

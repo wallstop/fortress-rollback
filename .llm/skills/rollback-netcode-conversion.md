@@ -189,6 +189,7 @@ struct GameState {
 ### Snapshot Strategies
 
 **Full State Copy (Simple)**
+
 ```rust
 impl GameState {
     fn save(&self) -> SavedState {
@@ -205,6 +206,7 @@ impl GameState {
 ```
 
 **Delta State (Optimized)**
+
 ```rust
 // Only save what changed
 struct DeltaSnapshot {
@@ -283,6 +285,7 @@ unsafe impl bytemuck::Zeroable for FrameInput {}
 ### Input Prediction Strategies
 
 **Strategy 1: Repeat Last Input (Default)**
+
 ```rust
 fn predict_input(last_known: FrameInput) -> FrameInput {
     last_known  // Assume player continues doing same thing
@@ -290,6 +293,7 @@ fn predict_input(last_known: FrameInput) -> FrameInput {
 ```
 
 **Strategy 2: Input Decay (Rocket League Style)**
+
 ```rust
 fn predict_input(last_known: FrameInput, frames_since_known: u32) -> FrameInput {
     let decay = match frames_since_known {
@@ -347,11 +351,13 @@ enum InputStatus {
 ### Use UDP, Not TCP
 
 **Why UDP:**
+
 - No head-of-line blocking
 - No automatic retransmission of stale data
 - Lower latency for real-time data
 
 **What You Need to Build on UDP:**
+
 - Packet sequencing
 - Selective acknowledgment
 - Redundant input sending (send last N inputs in each packet)
@@ -488,12 +494,14 @@ fn movement_system(mut query: Query<(&Rollback, &mut Transform, &Velocity)>) {
 ### Frame Budget Constraint
 
 At 60 FPS with potential 8-frame rollback:
+
 - Total frame budget: 16.67ms
 - If rolling back 8 frames: ~2ms per tick maximum
 
 ### Optimization Techniques
 
 **1. Separate Physics from Rendering**
+
 ```rust
 struct PhysicsState {
     // Only simulation-relevant data
@@ -509,6 +517,7 @@ struct RenderState {
 ```
 
 **2. Delta Rollback (Only Track Changes)**
+
 ```rust
 struct PropertyManager {
     changes: Vec<PropertyChange>,
@@ -527,6 +536,7 @@ struct PropertyChange {
 ```
 
 **3. Deferred Destruction**
+
 ```rust
 struct DeferredDestruction {
     entity: EntityId,
@@ -539,6 +549,7 @@ struct DeferredDestruction {
 ```
 
 **4. Sparse Saving**
+
 ```rust
 // Only save confirmed frames, not every prediction
 impl Session {

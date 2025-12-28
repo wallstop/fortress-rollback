@@ -7,6 +7,7 @@
 Rust's zero-cost abstractions and explicit platform handling make it excellent for cross-platform development. The key is a **shared core library** with platform-specific binding layers.
 
 **Related Skills:**
+
 - [cross-platform-games.md](cross-platform-games.md) — Game-specific cross-platform patterns
 - [wasm-rust-guide.md](wasm-rust-guide.md) — WebAssembly deep dive
 - [no-std-guide.md](no-std-guide.md) — `no_std` for embedded/WASM
@@ -37,6 +38,7 @@ cross test --target aarch64-unknown-linux-gnu  # Runs via QEMU!
 ```
 
 **Configuration (Cross.toml):**
+
 ```toml
 [build]
 default-target = "x86_64-unknown-linux-gnu"
@@ -85,6 +87,7 @@ rustup target add aarch64-apple-ios
 ```
 
 **rust-toolchain.toml:**
+
 ```toml
 [toolchain]
 channel = "1.83.0"
@@ -833,6 +836,7 @@ cargo build --release --target x86_64-apple-ios       # Intel
 ```
 
 **Key iOS Tools:**
+
 | Tool | Purpose |
 |------|---------|
 | `cargo-swift` | Generate Swift Packages from UniFFI |
@@ -859,6 +863,7 @@ cargo ndk --platform 24 -t arm64-v8a build --release
 ```
 
 **Android Activity Types:**
+
 - **NativeActivity**: Simpler, full Rust app without Java/Kotlin
 - **GameActivity**: Better input handling (AGDK-based), recommended for games
 
@@ -898,6 +903,7 @@ pub fn get_version() -> String {
 ```
 
 Generate bindings:
+
 ```bash
 # Swift (iOS)
 cargo swift package -p my-game -n MyGame
@@ -1062,6 +1068,7 @@ cargo zigbuild --target x86_64-unknown-linux-gnu.2.17
 ## Checklist
 
 ### Project Setup
+
 - [ ] Workspace structure with core library
 - [ ] Platform-specific binding crates
 - [ ] Feature flags for optional capabilities
@@ -1069,6 +1076,7 @@ cargo zigbuild --target x86_64-unknown-linux-gnu.2.17
 - [ ] `rust-toolchain.toml` with all targets listed
 
 ### Code Organization
+
 - [ ] Core logic uses traits for platform abstraction
 - [ ] No `std` dependency in core (use `alloc` if needed)
 - [ ] Errors implement platform-specific conversions
@@ -1076,6 +1084,7 @@ cargo zigbuild --target x86_64-unknown-linux-gnu.2.17
 - [ ] `build.rs` uses modern `cargo::` syntax
 
 ### Build & Test
+
 - [ ] CI tests all target platforms
 - [ ] Platform-specific tests exist
 - [ ] Release builds are optimized
@@ -1083,6 +1092,7 @@ cargo zigbuild --target x86_64-unknown-linux-gnu.2.17
 - [ ] cross-rs or cargo-zigbuild configured for cross-compilation
 
 ### Mobile
+
 - [ ] UniFFI bindings for Swift/Kotlin
 - [ ] cargo-ndk for Android builds
 - [ ] XCFramework generation for iOS

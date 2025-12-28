@@ -702,17 +702,20 @@ jobs:
 ## Checklist
 
 ### Basic CI
+
 - [ ] Format check (`cargo fmt --check`)
 - [ ] Lint check (`cargo clippy -- -D warnings`)
 - [ ] Unit tests (`cargo test`)
 - [ ] Build verification for all targets
 
 ### Security
+
 - [ ] cargo-deny for licenses
 - [ ] cargo-audit for vulnerabilities
 - [ ] Dependabot or Renovate for updates
 
 ### Multi-Platform
+
 - [ ] Linux (glibc and musl)
 - [ ] macOS (Intel and Apple Silicon)
 - [ ] Windows (MSVC)
@@ -720,12 +723,14 @@ jobs:
 - [ ] Mobile targets (if applicable)
 
 ### Optimization
+
 - [ ] Cargo caching enabled
 - [ ] Cross-compilation on Linux where possible
 - [ ] Expensive jobs gated to main/tags
 - [ ] Matrix fail-fast disabled for visibility
 
 ### Release
+
 - [ ] Automated release on tag
 - [ ] Artifacts for all platforms
 - [ ] Release notes generation
