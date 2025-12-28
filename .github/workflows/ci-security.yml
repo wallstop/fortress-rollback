@@ -191,3 +191,49 @@ jobs:
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
+
+  # Dependency freshness check
+  outdated:
+    name: Dependency Freshness
+    runs-on: ubuntu-latest
+    # Only run on schedule or manual trigger (not on every PR)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Install cargo-outdated
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-outdated
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: outdated-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            outdated-${{ runner.os }}-cargo-
+
+      - name: Check for outdated dependencies
+        id: outdated
+        run: |
+          echo "## Dependency Freshness Check" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if cargo outdated --root-deps-only --exit-code 1 2>&1 | tee outdated-report.txt; then
+            echo "✅ All direct dependencies are up to date!" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "⚠️ Some dependencies have newer versions available:" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            cat outdated-report.txt >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+        continue-on-error: true  # Advisory, not blocking

@@ -9,7 +9,11 @@ on:
       - 'docs/**'
       - '.markdownlint.json'
       - '.markdown-link-check.json'
+      - '.lychee.toml'
+      - '.vale.ini'
+      - '.vale/**'
       - 'scripts/check-links.sh'
+      - 'scripts/verify-markdown-code.sh'
       - '.github/workflows/ci-docs.yml'
   pull_request:
     branches: [main]
@@ -19,11 +23,35 @@ on:
       - 'docs/**'
       - '.markdownlint.json'
       - '.markdown-link-check.json'
+      - '.lychee.toml'
+      - '.vale.ini'
+      - '.vale/**'
       - 'scripts/check-links.sh'
+      - 'scripts/verify-markdown-code.sh'
       - '.github/workflows/ci-docs.yml'
   workflow_dispatch:
 
 jobs:
+  # ============================================================================
+  # VALE PROSE LINT - Check documentation prose quality
+  # ============================================================================
+  vale-lint:
+    name: Vale Prose Lint
+    runs-on: ubuntu-latest
+    continue-on-error: true  # Advisory, not blocking initially
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Vale prose linter
+        uses: errata-ai/vale-action@v2
+        with:
+          files: docs/
+          reporter: github-check
+          fail_on_error: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   markdown-lint:
     name: Markdown Lint
     runs-on: ubuntu-latest
@@ -68,6 +96,51 @@ jobs:
 
       - name: Check local file links
         run: ./scripts/check-links.sh
+
+  # ============================================================================
+  # LYCHEE LINK CHECK - Fast link checking with caching
+  # ============================================================================
+  lychee-link-check:
+    name: Lychee Link Check
+    runs-on: ubuntu-latest
+    continue-on-error: true  # Advisory initially, may find different issues
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Restore lychee cache
+        uses: actions/cache@v5
+        with:
+          path: .lycheecache
+          key: lychee-cache-${{ github.sha }}
+          restore-keys: |
+            lychee-cache-
+
+      - name: Run lychee link checker
+        uses: lycheeverse/lychee-action@v2
+        with:
+          # Check docs and top-level markdown files
+          args: >-
+            --config .lychee.toml
+            --cache
+            --no-progress
+            'docs/**/*.md'
+            'README.md'
+            'CHANGELOG.md'
+            'CONTRIBUTING.md'
+            'LICENSE*'
+            '*.md'
+          fail: false  # Don't fail the workflow on broken links initially
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload lychee report
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: lychee-report
+          path: lychee-report.md
+          retention-days: 7
 
   rustdoc-links:
     name: Rustdoc Link Check
@@ -285,3 +358,58 @@ jobs:
           name: doc-coverage-report
           path: doc-coverage.txt
           retention-days: 30
+
+  # ============================================================================
+  # MARKDOWN CODE VERIFY - Verify code samples in markdown docs compile
+  # ============================================================================
+  markdown-code-verify:
+    name: Markdown Code Samples
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: markdown-code-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            markdown-code-${{ runner.os }}-cargo-
+
+      - name: Verify markdown code samples
+        run: |
+          {
+            echo "## Markdown Code Sample Verification"
+            echo ""
+            echo "Verifying Rust code samples in docs/ directory compile..."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Run verification on docs/ directory with fail-fast for CI
+          if ./scripts/verify-markdown-code.sh --fail-fast docs/ 2>&1 | tee markdown-code-output.txt; then
+            echo "✅ All markdown code samples compile successfully" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "❌ Some markdown code samples failed to compile:"
+              echo ""
+              echo "\`\`\`"
+              tail -100 markdown-code-output.txt
+              echo "\`\`\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Upload verification report
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: markdown-code-report
+          path: markdown-code-output.txt
+          retention-days: 7

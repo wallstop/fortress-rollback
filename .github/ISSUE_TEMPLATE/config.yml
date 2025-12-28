@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/gschup/ggrs/blob/main/docs/README.md
+    about: Read the documentation before opening an issue
+  - name: GitHub Discussions
+    url: https://github.com/gschup/ggrs/discussions
+    about: Ask questions and discuss features in GitHub Discussions

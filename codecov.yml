@@ -1,0 +1,28 @@
+# Codecov configuration
+# https://docs.codecov.com/docs/codecov-yaml
+
+coverage:
+  # Overall project coverage targets
+  status:
+    project:
+      default:
+        target: 80%
+        threshold: 2%  # Allow 2% drop without failing
+    # Coverage for changed lines in PRs
+    patch:
+      default:
+        target: 70%
+        threshold: 5%  # More lenient for patches
+
+# Ignore paths from coverage calculation
+ignore:
+  - "tests/**/*"
+  - "examples/**/*"
+  - "benches/**/*"
+  - "fuzz/**/*"
+
+# PR comment behavior
+comment:
+  layout: "reach,diff,flags,files"
+  behavior: default
+  require_changes: true  # Only comment when coverage changes
