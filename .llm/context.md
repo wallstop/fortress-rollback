@@ -1394,9 +1394,11 @@ npx markdownlint '<file.md>' --config .markdownlint.json
 # Example: lint this file
 npx markdownlint '.llm/context.md' --config .markdownlint.json
 
-# Link checking (validates all internal links)
+# Link checking (validates all internal links) — RUN AFTER EVERY MARKDOWN CHANGE
 ./scripts/check-links.sh
 ```
+
+> **⚠️ CI will fail on broken links.** The link checker runs in CI — always validate locally first.
 
 **Key markdown rules to remember:**
 
@@ -1406,18 +1408,69 @@ npx markdownlint '.llm/context.md' --config .markdownlint.json
 | MD031 | Code blocks must have blank lines      | Add blank line before and after fences   |
 | MD032 | Lists must have blank lines            | Add blank line before and after lists    |
 
-**Relative link paths from `.llm/context.md`:**
+**Relative link path rules (critical for avoiding broken links):**
 
-- ✅ CORRECT: `[Text](skills/defensive-programming.md)` — relative to current file
-- ❌ WRONG: `[Text]` + `(.llm/skills/...)` — don't include `.llm/` prefix
+Links resolve **from the directory containing the markdown file**, not from repo root.
 
-### Additional Linters
+| File Location | Linking To | Correct Path Syntax |
+|---------------|------------|---------------------|
+| Root (`README.md`) | `docs/user-guide.md` | `[Guide]` + `(docs/user-guide.md)` |
+| `docs/user-guide.md` | Root `README.md` | `[README]` + `(../README.md)` |
+| `.github/*.md` | `.llm/context.md` | `[Context]` + `(../.llm/context.md)` |
+| `.github/*.md` | Root files | `[README]` + `(../README.md)` |
+| `.llm/context.md` | Skills files | `[Skill]` + `(skills/defensive-programming.md)` |
 
-For GitHub Actions workflows:
+**Common mistakes:**
+
+- ❌ WRONG from `.github/`: `[Context]` + `(.llm/context.md)` — missing `../` prefix
+- ❌ WRONG from `.llm/`: `[Skill]` + `(.llm/skills/foo.md)` — don't repeat current dir
+- ✅ CORRECT from `.github/`: `[Context]` + `(../.llm/context.md)` — go up first
+- ✅ CORRECT from `.llm/`: `[Skill]` + `(skills/foo.md)` — relative to current dir
+
+**See also:** [Markdown Link Validation](skills/markdown-link-validation.md) — comprehensive guide with examples
+
+### GitHub Actions Workflow Linting (REQUIRED)
+
+**ALWAYS run `actionlint` after modifying ANY workflow file in `.github/workflows/`:**
 
 ```bash
-actionlint  # or: ~/go/bin/actionlint
+# Lint all workflow files
+actionlint
+
+# Lint a specific workflow
+actionlint .github/workflows/ci-security.yml
 ```
+
+`actionlint` catches:
+
+- YAML syntax errors
+- Invalid GitHub Actions expressions (`${{ }}`)
+- Shell script errors via embedded shellcheck
+- Invalid runner labels, missing permissions, etc.
+
+**Common shellcheck issues in workflows:**
+
+| Issue | Problem | Fix |
+|-------|---------|-----|
+| SC2129 | Multiple `>> file` redirects | Use `{ cmd1; cmd2; } >> file` |
+| SC2086 | Unquoted variables | Quote: `"$VAR"` |
+| SC2155 | `export x=$(cmd)` | Separate: `x=$(cmd); export x` |
+
+**Example — SC2129 fix for GITHUB_OUTPUT:**
+
+```yaml
+# ❌ WRONG: Individual redirects
+echo "foo=bar" >> "$GITHUB_OUTPUT"
+echo "baz=qux" >> "$GITHUB_OUTPUT"
+
+# ✅ CORRECT: Grouped redirects
+{
+  echo "foo=bar"
+  echo "baz=qux"
+} >> "$GITHUB_OUTPUT"
+```
+
+**See also:** [GitHub Actions Best Practices](skills/github-actions-best-practices.md) for comprehensive guidance.
 
 ---
 

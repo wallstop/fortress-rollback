@@ -23,7 +23,7 @@
 
 ### Required
 
-- [ ] I have read the [CONTRIBUTING guide](docs/contributing.md)
+- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)
 - [ ] I have followed the **zero-panic policy**:
   - No `unwrap()` in production code
   - No `expect()` in production code

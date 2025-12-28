@@ -225,15 +225,19 @@ jobs:
       - name: Check for outdated dependencies
         id: outdated
         run: |
-          echo "## Dependency Freshness Check" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Dependency Freshness Check"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
           if cargo outdated --root-deps-only --exit-code 1 2>&1 | tee outdated-report.txt; then
             echo "✅ All direct dependencies are up to date!" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "⚠️ Some dependencies have newer versions available:" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            cat outdated-report.txt >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "⚠️ Some dependencies have newer versions available:"
+              echo ""
+              echo '```'
+              cat outdated-report.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
         continue-on-error: true  # Advisory, not blocking
