@@ -152,7 +152,7 @@
     stroke: var(--fortress-rust-orange);
 }
 
-[data-md-color-scheme="slate"] .mermaid .stateGroup .composit {
+[data-md-color-scheme="slate"] .mermaid .stateGroup .composite {
     fill: var(--fortress-bg-dark-secondary);
 }
 

@@ -23,6 +23,9 @@ cargo fmt && cargo clippy --all-targets && cargo nextest run
 # Or use the convenient aliases defined in .cargo/config.toml
 cargo c && cargo t
 
+# Check for typos (CI will fail if typos are found)
+typos
+
 # Standard cargo test (slower, but useful for doc tests)
 cargo test
 
@@ -1368,6 +1371,38 @@ cargo fmt && cargo clippy --all-targets && cargo nextest run
 ```bash
 cargo c && cargo t  # Defined in .cargo/config.toml
 ```
+
+### Spell Checking with typos (REQUIRED)
+
+**ALWAYS run `typos` locally before committing to catch spelling errors early:**
+
+```bash
+# Check for typos in the entire project
+typos
+
+# Or explicitly check from current directory
+typos .
+
+# Check specific files
+typos src/lib.rs README.md
+```
+
+**Installation:**
+
+```bash
+cargo install typos-cli
+```
+
+**Configuration:**
+
+- See [.typos.toml](../.typos.toml) for project-specific word exceptions
+- Add project-specific terms (e.g., `ggrs`, `desync`, `resimulation`) to `[default.extend-words]`
+
+**Why this matters:**
+
+- **CI runs typos** — The `ci-quality.yml` workflow will fail if typos are found
+- **Catch errors early** — Running locally prevents CI failures and review churn
+- **Fast** — `typos` is extremely fast, typically completing in under a second
 
 ### Why This Matters
 
