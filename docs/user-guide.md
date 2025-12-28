@@ -1391,6 +1391,10 @@ RUSTFLAGS="--cfg loom" cargo test --release
 
 See `loom-tests/README.md` for details on running concurrency tests.
 
+### Development/Contributor Feature Flags
+
+These feature flags are primarily for library development and CI, not typical user applications.
+
 #### `z3-verification`
 
 Enables Z3 formal verification tests. Requires the Z3 SMT solver library to be installed on your system.

@@ -409,6 +409,16 @@ impl FrameRange {
 - **Avoid copy-paste** — If tempted to copy code, create a shared abstraction instead
 - **Refactor proactively** — When adding features, improve structure of touched code
 
+> **See also:** Performance and code quality guides in `.llm/skills/`:
+>
+> - [high-performance-rust.md](.llm/skills/high-performance-rust.md) — Performance optimization patterns and build configuration
+> - [rust-refactoring-guide.md](.llm/skills/rust-refactoring-guide.md) — Safe code transformation patterns with verification
+> - [rust-idioms-patterns.md](.llm/skills/rust-idioms-patterns.md) — Idiomatic Rust patterns and best practices
+> - [clippy-configuration.md](.llm/skills/clippy-configuration.md) — Clippy lint configuration and enforcement
+> - [zero-copy-memory-patterns.md](.llm/skills/zero-copy-memory-patterns.md) — Zero-copy and memory efficiency patterns
+> - [async-rust-best-practices.md](.llm/skills/async-rust-best-practices.md) — Async Rust patterns for concurrent code
+> - [rust-compile-time-optimization.md](.llm/skills/rust-compile-time-optimization.md) — Build and compile time optimization
+
 ### Safety-Focused CI Checks (ci-safety.yml)
 
 The project runs comprehensive safety checks beyond standard linting:
@@ -452,7 +462,27 @@ pub fn function(param1: Type) -> Result<ReturnType, FortressError> {
 }
 ```
 
-### Test Structure (Arrange-Act-Assert)
+### Test Writing Best Practices
+
+> **See also:** Complete testing guides in `.llm/skills/`:
+>
+> - [rust-testing-guide.md](.llm/skills/rust-testing-guide.md) — Comprehensive testing best practices and patterns
+> - [testing-tools-reference.md](.llm/skills/testing-tools-reference.md) — Tool ecosystem reference (nextest, proptest, mockall, etc.)
+> - [property-testing.md](.llm/skills/property-testing.md) — Property-based testing to find edge cases automatically
+> - [mutation-testing.md](.llm/skills/mutation-testing.md) — Mutation testing for test quality verification
+> - [cross-platform-ci-cd.md](.llm/skills/cross-platform-ci-cd.md) — CI/CD workflows for multi-platform builds
+
+#### Test Organization
+
+| Location | Use Case |
+|----------|----------|
+| `src/*.rs` with `#[cfg(test)] mod tests` | Unit tests (access private functions) |
+| `tests/it/*.rs` (single crate) | Integration tests (public API only) |
+| `tests/common/mod.rs` | Shared test utilities |
+
+**Critical:** Integration tests in `tests/` should be consolidated into a single crate (`tests/it/main.rs`) to avoid slow compilation.
+
+#### Test Structure (Arrange-Act-Assert)
 
 ```rust
 #[test]
@@ -468,6 +498,43 @@ fn descriptive_name_explaining_what_is_tested() {
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), expected_value);
 }
+```
+
+#### The `check` Helper Pattern (Recommended)
+
+Decouple tests from API changes with helper functions:
+
+```rust
+#[track_caller]  // Shows actual test location on failure
+fn check_parse(input: &str, expected: Option<Ast>) {
+    let actual = parse(input).ok();
+    assert_eq!(actual, expected, "parse({:?})", input);
+}
+
+#[test]
+fn parse_empty_returns_none() {
+    check_parse("", None);
+}
+
+#[test]
+fn parse_valid_expression() {
+    check_parse("1 + 2", Some(expected_ast()));
+}
+```
+
+#### Test Naming Convention
+
+Names should describe: **what** + **condition** + **expected behavior**
+
+```rust
+// ❌ BAD
+fn test1() { }
+fn it_works() { }
+
+// ✅ GOOD  
+fn parse_empty_input_returns_none() { }
+fn session_with_zero_players_returns_error() { }
+fn rollback_preserves_confirmed_frames() { }
 ```
 
 ---
@@ -512,10 +579,356 @@ fn descriptive_name_explaining_what_is_tested() {
 
 ## Formal Verification Philosophy
 
+> **See also:** Complete guides in `.llm/skills/`:
+>
+> - [tla-plus-modeling.md](.llm/skills/tla-plus-modeling.md) — TLA+ specification patterns and best practices
+> - [kani-verification.md](.llm/skills/kani-verification.md) — Kani proof harnesses and Rust formal verification
+> - [z3-verification.md](.llm/skills/z3-verification.md) — Z3 SMT solver proofs for algorithm correctness
+> - [loom-testing.md](.llm/skills/loom-testing.md) — Loom concurrency permutation testing
+> - [miri-verification.md](.llm/skills/miri-verification.md) — Miri undefined behavior detection
+> - [miri-adaptation-guide.md](.llm/skills/miri-adaptation-guide.md) — Step-by-step Miri error fixes for agents
+> - [mutation-testing.md](.llm/skills/mutation-testing.md) — Mutation testing for test quality verification
+> - [property-testing.md](.llm/skills/property-testing.md) — Property-based testing to find edge cases automatically
+
 - **Specs model production** — TLA+/Kani/Z3 specs represent real code behavior
 - **When verification fails, assume production bug first** — Investigate before relaxing specs
 - **Never "fix" specs just to make them pass** — That defeats the purpose
 - **Invariants represent real safety properties** — Only relax with strong justification
+- **Specs are abstract models, not code translations** — Model essential behavior, skip implementation details
+
+### Kani Quick Reference
+
+```bash
+# Run all Kani proofs
+cargo kani
+
+# Run specific harness
+cargo kani --harness verify_specific_function
+
+# Verbose output
+cargo kani -v
+```
+
+**Key Kani patterns:**
+
+```rust
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    #[kani::proof]
+    #[kani::unwind(10)]  // Set loop bound
+    fn verify_no_panics() {
+        let input: u32 = kani::any();           // Symbolic input (all values)
+        kani::assume(input < 1000);             // Constrain state space
+        let result = function_under_test(input);
+        assert!(result.is_ok());                // Property to verify
+    }
+}
+```
+
+| Attribute | Purpose |
+|-----------|---------|
+| `#[kani::proof]` | Mark function as proof harness |
+| `#[kani::unwind(N)]` | Set loop unwinding bound |
+| `#[kani::stub(orig, repl)]` | Replace function for verification |
+| `kani::any::<T>()` | Generate symbolic value (all possible T) |
+| `kani::assume(cond)` | Narrow state space |
+
+### TLA+ Quick Reference
+
+```bash
+# Run all TLA+ verification
+./scripts/verify-tla.sh
+
+# Run specific spec
+./scripts/verify-tla.sh NetworkProtocol
+
+# Quick verification (smaller bounds)
+./scripts/verify-tla.sh --quick
+```
+
+**Key specs in `specs/tla/`:**
+
+| Spec | Verifies |
+|------|----------|
+| `Rollback.tla` | Rollback mechanism (bounded depth, state availability) |
+| `InputQueue.tla` | Input queue (FIFO order, bounded length) |
+| `NetworkProtocol.tla` | Protocol state machine (valid transitions) |
+| `Concurrency.tla` | Thread safety (mutual exclusion) |
+| `ChecksumExchange.tla` | Desync detection |
+
+### Z3 Quick Reference
+
+```bash
+# Run Z3 verification tests (requires system Z3: apt install libz3-dev)
+cargo test --features z3-verification
+
+# Bundled build (slow, ~30+ minutes - compiles Z3 from source)
+cargo test --features z3-verification-bundled
+
+# Run specific Z3 test
+cargo test --features z3-verification -- z3_proof_circular_index
+```
+
+**Key Z3 patterns:**
+
+```rust
+#[cfg(feature = "z3-verification")]
+use z3::{ast::Int, with_z3_config, Config, SatResult, Solver};
+
+#[test]
+fn z3_proof_property_holds() {
+    let cfg = Config::new();
+    with_z3_config(&cfg, || {
+        let solver = Solver::new();
+        
+        let x = Int::fresh_const("x");        // Symbolic variable
+        solver.assert(x.ge(0));               // Precondition
+        
+        let result = &x % 128;                // Computation
+        solver.assert(result.ge(128));        // Negate property to prove
+        
+        // UNSAT = property holds (no counterexample)
+        assert_eq!(solver.check(), SatResult::Unsat);
+    });
+}
+```
+
+| Function | Purpose |
+|----------|---------|
+| `Int::fresh_const("name")` | Create symbolic integer variable |
+| `solver.assert(constraint)` | Add constraint to solver |
+| `solver.check()` | Check satisfiability |
+| `x.ge(n)` / `x.lt(n)` | Comparisons (return Bool) |
+| `&x + &y` / `&x % n` | Arithmetic operations |
+| `SatResult::Unsat` | No solution exists (property proved!) |
+
+**Key Z3 proofs in `tests/verification/z3.rs`:**
+
+| Proof | Verifies |
+|-------|----------|
+| `z3_proof_circular_index_valid` | Modulo always produces valid index |
+| `z3_proof_rollback_target_in_past` | Rollback target < current frame |
+| `z3_proof_frame_delay_prevents_overflow` | Frame delay validation |
+| `z3_proof_desync_detection_no_false_positives` | Desync only on mismatch |
+
+### Loom Quick Reference
+
+```bash
+# Run loom tests (from loom-tests/ directory)
+cd loom-tests
+RUSTFLAGS="--cfg loom" cargo test --release
+
+# Run specific loom test
+RUSTFLAGS="--cfg loom" cargo test --release test_concurrent_saves
+
+# With debugging output
+LOOM_LOG=trace LOOM_LOCATION=1 RUSTFLAGS="--cfg loom" cargo test --release
+
+# Limit state space for larger tests
+LOOM_MAX_PREEMPTIONS=2 RUSTFLAGS="--cfg loom" cargo test --release
+```
+
+**Key loom patterns:**
+
+```rust
+#![cfg(loom)]  // Only compile under loom
+
+use loom::sync::Arc;
+use loom::sync::atomic::{AtomicUsize, Ordering};
+use loom::thread;
+
+#[test]
+fn test_concurrent_access() {
+    loom::model(|| {
+        let data = Arc::new(AtomicUsize::new(0));
+        let data2 = data.clone();
+        
+        let t = thread::spawn(move || {
+            data2.fetch_add(1, Ordering::SeqCst);
+        });
+        
+        data.fetch_add(1, Ordering::SeqCst);
+        t.join().unwrap();
+        
+        assert_eq!(data.load(Ordering::SeqCst), 2);
+    });
+}
+```
+
+| Environment Variable | Purpose |
+|---------------------|---------|
+| `LOOM_LOG=trace` | Enable detailed logging |
+| `LOOM_LOCATION=1` | Include source locations in output |
+| `LOOM_MAX_PREEMPTIONS=N` | Limit preemptions (for large tests) |
+| `LOOM_CHECKPOINT_FILE=f.json` | Save/restore test progress |
+
+**Key loom tests in `loom-tests/tests/`:**
+
+| Test File | Verifies |
+|-----------|----------|
+| `game_state_cell.rs` | Thread-safe game state storage |
+| `saved_states.rs` | Circular buffer concurrency |
+
+### Miri Quick Reference
+
+```bash
+# Install Miri (requires nightly)
+rustup +nightly component add miri
+
+# Run Miri on tests
+cargo +nightly miri test
+
+# Run with isolation disabled (for env/file access)
+MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test
+
+# Test multiple random executions (find race conditions)
+MIRIFLAGS="-Zmiri-many-seeds=0..16" cargo +nightly miri test
+
+# Use Tree Borrows (more permissive aliasing model)
+MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly miri test
+
+# Cross-platform test (big-endian)
+cargo +nightly miri test --target s390x-unknown-linux-gnu
+
+# Debug specific allocation/pointer
+MIRIFLAGS="-Zmiri-track-alloc-id=<id>" cargo +nightly miri test
+```
+
+**Key Miri flags:**
+
+| Flag | Purpose |
+|------|---------|
+| `-Zmiri-disable-isolation` | Access host filesystem, env vars |
+| `-Zmiri-tree-borrows` | Use Tree Borrows instead of Stacked Borrows |
+| `-Zmiri-many-seeds=0..N` | Test N different random executions |
+| `-Zmiri-strict-provenance` | Enforce strict pointer provenance |
+| `-Zmiri-symbolic-alignment-check` | Stricter alignment checking |
+
+**Adapting code for Miri:**
+
+```rust
+// Skip unsupported tests under Miri
+#[test]
+#[cfg_attr(miri, ignore)]
+fn uses_ffi_or_networking() { /* ... */ }
+
+// Reduce iterations for Miri (very slow interpreter)
+let iterations = if cfg!(miri) { 10 } else { 10_000 };
+```
+
+**What Miri detects:**
+
+- Out-of-bounds access, use-after-free
+- Uninitialized memory reads
+- Misaligned pointers/references
+- Invalid type invariants (bad `bool`, enum discriminant)
+- Data races
+- Stacked Borrows / Tree Borrows aliasing violations
+- Memory leaks
+
+**What Miri does NOT detect:**
+
+- All thread interleavings (use Loom)
+- Complete weak memory behaviors (use Loom)
+- FFI/foreign function UB
+- Platform-specific API issues
+
+### Mutation Testing Quick Reference
+
+```bash
+# Install cargo-mutants
+cargo install --locked cargo-mutants
+
+# Run on specific module (recommended)
+cargo mutants -f src/rle.rs --timeout 30 --jobs 4 -- --lib
+
+# List mutations without running
+cargo mutants --list -f src/module.rs
+
+# Run with nextest (faster)
+cargo mutants -- --all-targets
+```
+
+**Understanding results:**
+
+| Outcome | Meaning | Action |
+|---------|---------|--------|
+| **Caught** ✅ | Test failed → mutant killed | Good coverage |
+| **Missed** ⚠️ | Tests still pass → gap | Improve tests |
+| **Timeout** ⏱️ | Test hung (infinite loop) | Usually acceptable |
+| **Unviable** 🔨 | Doesn't compile | Inconclusive |
+
+**Key principle**: Code coverage shows code runs. Mutation testing shows tests would notice if code broke.
+
+```rust
+// ❌ Weak test — mutation can survive
+assert!(result.is_ok());
+
+// ✅ Strong test — catches mutations
+assert_eq!(result, Ok(expected_value));
+```
+
+**Configuration:** See `.cargo/mutants.toml` for project settings.
+
+### Property Testing Quick Reference
+
+```bash
+# Add to Cargo.toml [dev-dependencies]
+proptest = "1.9"
+
+# Run property tests
+cargo test
+
+# Run specific property test
+cargo test prop_roundtrip
+```
+
+**Common patterns:**
+
+```rust
+use proptest::prelude::*;
+
+proptest! {
+    #[test]
+    fn prop_roundtrip(data in any::<Vec<u8>>()) {
+        let encoded = encode(&data)?;
+        let decoded = decode(&encoded)?;
+        prop_assert_eq!(data, decoded);
+    }
+    
+    #[test]
+    fn prop_invariant_maintained(ops in prop::collection::vec(any::<Op>(), 0..100)) {
+        let mut state = State::new();
+        for op in ops {
+            state.apply(op)?;
+            prop_assert!(state.check_invariants());
+        }
+    }
+}
+```
+
+**Key patterns:**
+
+| Pattern | Property | Example |
+|---------|----------|---------|
+| **Round-trip** | `decode(encode(x)) == x` | Serialization |
+| **Commutativity** | `a + b == b + a` | Math operations |
+| **Idempotency** | `f(f(x)) == f(x)` | Normalization |
+| **Invariants** | Property always holds | Sorted order |
+| **Oracle** | Compare with reference impl | Optimized vs naive |
+
+**Strategy cheat sheet:**
+
+| Need | Strategy |
+|------|----------|
+| Any value | `any::<T>()` |
+| Range | `0..100i32` |
+| Bounded vec | `prop::collection::vec(any::<T>(), 0..100)` |
+| Regex string | `"[a-z]+"` |
+| Choose variants | `prop_oneof![a, b, c]` |
+| Transform | `strategy.prop_map(\|x\| f(x))` |
 
 ### After Finding a Bug via Verification
 
@@ -529,6 +942,44 @@ Add comprehensive test coverage:
 
 ---
 
+## Rollback Netcode Development
+
+> **See also:** The rollback netcode guides in `.llm/skills/`:
+>
+> - [rollback-netcode-conversion.md](.llm/skills/rollback-netcode-conversion.md) — Complete guide to converting games to rollback netcode
+> - [rollback-engine-integration.md](.llm/skills/rollback-engine-integration.md) — Patterns for Bevy and custom engine integration
+> - [determinism-guide.md](.llm/skills/determinism-guide.md) — Achieving and verifying determinism in Rust games (includes reproducible builds, WASM, float handling, crate recommendations)
+> - [deterministic-simulation-testing.md](.llm/skills/deterministic-simulation-testing.md) — DST frameworks (madsim, turmoil), failure injection, controlled concurrency
+> - [cross-platform-games.md](.llm/skills/cross-platform-games.md) — Cross-platform game development (WASM, mobile, desktop)
+> - [cross-platform-rust.md](.llm/skills/cross-platform-rust.md) — Multi-platform project architecture and tooling
+> - [wasm-rust-guide.md](.llm/skills/wasm-rust-guide.md) — Rust to WebAssembly compilation and toolchain
+> - [no-std-guide.md](.llm/skills/no-std-guide.md) — `no_std` patterns for WASM and embedded
+> - [wasm-threading.md](.llm/skills/wasm-threading.md) — Threading and concurrency in WebAssembly
+> - [wasm-portability.md](.llm/skills/wasm-portability.md) — WASM determinism and sandboxing
+
+### Essential Rollback Concepts
+
+| Concept | Description |
+|---------|-------------|
+| **Determinism** | Same inputs MUST produce identical outputs on all machines |
+| **State Serialization** | Must save/restore complete game state efficiently |
+| **Input Prediction** | Guess remote inputs and continue simulation without waiting |
+| **Rollback** | Restore saved state when prediction was wrong, resimulate |
+| **Desync Detection** | Compare checksums between peers to catch divergence |
+| **DST** | Deterministic Simulation Testing — control time, I/O, and concurrency for reproducible tests |
+
+### Critical Determinism Rules
+
+1. **No `HashMap` iteration** — Use `BTreeMap` or sort before iterating
+2. **Control floating-point** — Use `libm` feature or fixed-point math
+3. **Seeded RNG only** — `rand_pcg` or `rand_chacha` with shared seed
+4. **Frame counters, not time** — Never use `Instant::now()` in simulation
+5. **Sort ECS queries** — Bevy queries are non-deterministic; sort by stable ID
+6. **Pin toolchain** — Use `rust-toolchain.toml` for reproducible builds
+7. **Audit features** — Check for `ahash`, `const-random` feature leaks with `cargo tree -f "{p} {f}"`
+
+---
+
 ## Defensive Programming Patterns
 
 > **See also:** The complete guides in `.llm/skills/`:
@@ -536,6 +987,11 @@ Add comprehensive test coverage:
 > - [defensive-programming.md](.llm/skills/defensive-programming.md) — Zero-panic policy, error handling, safe patterns
 > - [type-driven-design.md](.llm/skills/type-driven-design.md) — Parse don't validate, newtypes, typestate
 > - [rust-pitfalls.md](.llm/skills/rust-pitfalls.md) — Common bugs that compile but cause problems
+> - [loom-testing.md](.llm/skills/loom-testing.md) — Loom concurrency permutation testing
+> - [miri-verification.md](.llm/skills/miri-verification.md) — Miri undefined behavior detection
+> - [concurrency-patterns.md](.llm/skills/concurrency-patterns.md) — Thread-safe Rust patterns
+> - [mutation-testing.md](.llm/skills/mutation-testing.md) — Mutation testing to verify test quality
+> - [property-testing.md](.llm/skills/property-testing.md) — Property-based testing for invariant verification
 
 ### Zero-Panic Policy (CRITICAL)
 
@@ -742,11 +1198,16 @@ src/
 
 | Concept | Description |
 |---------|-------------|
-| **Frame** | Discrete time step in game simulation |
+| **Frame** | Discrete time step in game simulation (typically 60 FPS) |
 | **Rollback** | Restoring previous state when predictions are wrong |
-| **Input Delay** | Buffer frames to smooth network jitter |
-| **Prediction** | Continue simulation before inputs arrive |
+| **Input Delay** | Buffer frames to reduce network jitter (typically 2-3 frames) |
+| **Prediction** | Continue simulation before remote inputs arrive |
+| **Prediction Window** | Maximum frames ahead we'll predict (typically 6-8) |
 | **Desync** | State divergence between peers (detected via checksums) |
+| **Determinism** | Same inputs must always produce same outputs |
+| **Checksum** | Hash of game state for desync detection |
+| **Confirmed Frame** | Oldest frame where all inputs are known |
+| **Resimulation** | Re-running frames with corrected inputs after rollback |
 | **Determinism** | Same inputs → same outputs (critical requirement) |
 
 ### Session Types
@@ -809,11 +1270,23 @@ PlayerType::Spectator(addr)    // Observer (no input)
 
 ### Test Coverage Requirements
 
+> **See also:** [rust-testing-guide.md](.llm/skills/rust-testing-guide.md) for comprehensive testing patterns.
+
 - All new features must include tests
 - Aim for >90% code coverage
 - Include positive and negative test cases
 - Test edge cases and error conditions
 - Use integration tests for cross-component behavior
+- Use `cargo nextest run` for faster test execution
+- Run mutation testing (`cargo mutants`) to verify test quality
+
+**Testing anti-patterns to avoid:**
+
+- `assert!(result.is_ok())` — Use `assert_eq!` with specific values
+- Multiple assertions testing different behaviors in one test
+- Sleep-based synchronization — Use proper channels/signals
+- Testing implementation details instead of behavior
+- Ignoring tests without documented fix plan
 
 ### Changelog Policy
 

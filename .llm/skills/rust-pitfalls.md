@@ -202,6 +202,108 @@ let data = mutex.lock()
     .map_err(|_| Error::MutexPoisoned)?;
 ```
 
+### RwLock Read-Before-Write Deadlock
+
+```rust
+// ❌ DEADLOCK - Holding read lock while acquiring write lock
+fn update_if_needed(lock: &RwLock<Data>) {
+    let guard = lock.read().unwrap();
+    if needs_update(&guard) {
+        // Still holding read lock!
+        let mut write_guard = lock.write().unwrap();  // DEADLOCK
+        update(&mut write_guard);
+    }
+}
+
+// ✅ SAFE - Drop read lock first
+fn update_if_needed(lock: &RwLock<Data>) {
+    let needs_write = {
+        let guard = lock.read().unwrap();
+        needs_update(&guard)
+    };  // Read lock dropped here
+    
+    if needs_write {
+        let mut guard = lock.write().unwrap();
+        // Re-check under write lock (another thread may have updated)
+        if needs_update(&guard) {
+            update(&mut guard);
+        }
+    }
+}
+```
+
+### Spin Loops Without Yield
+
+```rust
+// ❌ DANGEROUS - Burns CPU, unfair to other threads, breaks loom testing
+fn wait_for_flag(flag: &AtomicBool) {
+    while !flag.load(Ordering::Acquire) {
+        // Hot loop consuming 100% CPU
+    }
+}
+
+// ✅ BETTER - CPU hint for spin loops
+fn wait_for_flag(flag: &AtomicBool) {
+    while !flag.load(Ordering::Acquire) {
+        std::hint::spin_loop();  // Hints to CPU to save power
+    }
+}
+
+// ✅ BEST for loom testing - explicit yield
+fn wait_for_flag_loom_compatible(flag: &AtomicBool) {
+    while !flag.load(Ordering::Acquire) {
+        #[cfg(loom)]
+        loom::thread::yield_now();  // Required for loom to make progress
+        
+        #[cfg(not(loom))]
+        std::hint::spin_loop();
+    }
+}
+
+// ✅ BEST for production - Use proper synchronization
+use parking_lot::{Mutex, Condvar};
+
+fn wait_for_condition(pair: &(Mutex<bool>, Condvar)) {
+    let (lock, cvar) = pair;
+    let mut started = lock.lock();
+    while !*started {
+        cvar.wait(&mut started);  // Sleeps until signaled
+    }
+}
+```
+
+### Using std Types Under Loom
+
+```rust
+// ❌ INVISIBLE TO LOOM - Operations not tracked
+#[cfg(loom)]
+fn broken_loom_test() {
+    use std::sync::Arc;  // Wrong! Should use loom::sync::Arc
+    use std::thread;     // Wrong! Should use loom::thread
+    
+    loom::model(|| {
+        let data = Arc::new(AtomicUsize::new(0));
+        thread::spawn(/* ... */);  // Loom can't see this thread!
+    });
+}
+
+// ✅ CORRECT - Use loom types in loom tests
+#[cfg(loom)]
+fn correct_loom_test() {
+    use loom::sync::Arc;
+    use loom::sync::atomic::AtomicUsize;
+    use loom::thread;
+    
+    loom::model(|| {
+        let data = Arc::new(AtomicUsize::new(0));
+        let d = data.clone();
+        thread::spawn(move || {
+            d.fetch_add(1, Ordering::SeqCst);
+        });
+    });
+}
+```
+
 ### Arc::clone Is Cheap, Cloning Inner Is Not
 
 ```rust
@@ -439,6 +541,159 @@ fn test_timeout() {
 
 ---
 
+## Iterator and Performance Pitfalls
+
+### collect() Then Iterate
+
+```rust
+// ❌ WASTEFUL - Allocates intermediate Vec
+let result: Vec<_> = items.iter()
+    .filter(|x| x.is_valid())
+    .collect();
+for item in result {
+    process(item);
+}
+
+// ✅ EFFICIENT - Chain iterators
+for item in items.iter().filter(|x| x.is_valid()) {
+    process(item);
+}
+```
+
+**Clippy lint:** `clippy::needless_collect`
+
+### filter_map Instead of filter().map()
+
+```rust
+// ⚠️ Two passes
+let valid: Vec<_> = items.iter()
+    .filter(|x| x.value.is_some())
+    .map(|x| x.value.unwrap())  // unwrap after filter - still a code smell
+    .collect();
+
+// ✅ Single pass, no unwrap
+let valid: Vec<_> = items.iter()
+    .filter_map(|x| x.value)
+    .collect();
+```
+
+### find() Then get()
+
+```rust
+// ❌ REDUNDANT - find already returns the value
+let idx = items.iter().position(|x| x.id == target_id);
+let item = idx.map(|i| &items[i]);
+
+// ✅ DIRECT
+let item = items.iter().find(|x| x.id == target_id);
+```
+
+### cloned() vs copied()
+
+```rust
+// ⚠️ cloned() works but implies Clone trait (may be expensive)
+let bytes: Vec<u8> = source.iter().cloned().collect();
+
+// ✅ copied() is explicit about Copy semantics (cheap)
+let bytes: Vec<u8> = source.iter().copied().collect();
+```
+
+**Clippy lint:** `clippy::cloned_instead_of_copied`
+
+### Inefficient String Building
+
+```rust
+// ❌ SLOW - Many allocations
+let mut result = String::new();
+for item in items {
+    result = result + &item.name + ", ";
+}
+
+// ✅ FAST - Pre-allocate and push
+let mut result = String::with_capacity(items.len() * 20);
+for item in items {
+    result.push_str(&item.name);
+    result.push_str(", ");
+}
+
+// ✅ BETTER - Use join
+let result = items.iter()
+    .map(|item| item.name.as_str())
+    .collect::<Vec<_>>()
+    .join(", ");
+```
+
+### Vec::remove() in Loop
+
+```rust
+// ❌ O(n²) - Each remove shifts remaining elements
+fn remove_invalids(items: &mut Vec<Item>) {
+    let mut i = 0;
+    while i < items.len() {
+        if !items[i].valid {
+            items.remove(i);  // O(n) shift
+        } else {
+            i += 1;
+        }
+    }
+}
+
+// ✅ O(n) - retain is optimized
+fn remove_invalids(items: &mut Vec<Item>) {
+    items.retain(|item| item.valid);
+}
+
+// ✅ O(1) per removal if order doesn't matter
+fn remove_invalids_unordered(items: &mut Vec<Item>) {
+    let mut i = 0;
+    while i < items.len() {
+        if !items[i].valid {
+            items.swap_remove(i);  // O(1) - swaps with last
+        } else {
+            i += 1;
+        }
+    }
+}
+```
+
+### clone() in Hot Loop
+
+```rust
+// ❌ EXPENSIVE - Clones String each iteration
+for item in &items {
+    let name = item.name.clone();
+    if cache.contains_key(&name) {  // Could borrow instead
+        // ...
+    }
+}
+
+// ✅ EFFICIENT - Borrow where possible
+for item in &items {
+    if cache.contains_key(&item.name) {  // Borrow, no clone
+        // ...
+    }
+}
+```
+
+### extend() vs push() Loop
+
+```rust
+// ❌ MANY REALLOCATIONS - Each push may resize
+let mut result = Vec::new();
+for item in source {
+    result.push(item.clone());
+}
+
+// ✅ SINGLE ALLOCATION
+let mut result = Vec::with_capacity(source.len());
+result.extend(source.iter().cloned());
+
+// ✅ OR collect directly
+let result: Vec<_> = source.iter().cloned().collect();
+```
+
+---
+
 ## Summary Checklist
 
 When reviewing code, watch for:
@@ -453,7 +708,10 @@ When reviewing code, watch for:
 - [ ] PartialEq implementations that aren't reflexive
 - [ ] Serde `#[serde(default)]` on fields that shouldn't be empty
 - [ ] Tests that might pass due to panics
+- [ ] RwLock read guards held while acquiring write lock (deadlock)
+- [ ] Spin loops without yield (breaks loom, wastes CPU)
+- [ ] Using `std::sync`/`std::thread` instead of `loom::` in loom tests
 
 ---
 
-*See also: [defensive-programming.md](defensive-programming.md) for zero-panic patterns.*
+*See also: [defensive-programming.md](defensive-programming.md) for zero-panic patterns, [loom-testing.md](loom-testing.md) for concurrency testing, [concurrency-patterns.md](concurrency-patterns.md) for thread-safe patterns.*

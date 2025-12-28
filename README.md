@@ -70,9 +70,9 @@ Alpha / experimental only.
 ### Key Improvements in Fortress Rollback
 
 - **100% Deterministic**: All collections use `BTreeMap`/`BTreeSet` for guaranteed iteration order; new `hash` module provides FNV-1a deterministic hashing
-- **Correctness-First**: 1100+ tests including multi-process network tests, network resilience tests, and formal TLA+ specifications
-- **Panic-Free API**: All public APIs return `Result` types instead of panicking
-- **Enhanced Testing**: Full desync detection with confirmed input checksums via `P2PSession::confirmed_inputs_for_frame()`
+- **Panic-Free API**: All public APIs return `Result` types instead of panicking — no unexpected crashes
+- **Correctness-First**: Formally verified with TLA+ and Z3 proofs; 1100+ tests (~92% coverage) including multi-process network and resilience scenarios
+- **Enhanced Desync Detection**: Built-in checksum validation with `P2PSession::confirmed_inputs_for_frame()` for debugging state divergence
 
 📋 **[Complete comparison with GGRS →](./docs/fortress-vs-ggrs.md)** — See all differences, bug fixes, and migration steps
 
@@ -98,8 +98,6 @@ For detailed configuration guidance, see the [User Guide](./docs/user-guide.md#n
 | `tokio` | Enables `TokioUdpSocket` for async Tokio applications |
 | `paranoid` | Runtime invariant checking in release builds |
 | `graphical-examples` | Enables ex_game graphical examples (requires macroquad deps) |
-| `z3-verification` | Z3 formal verification tests (requires system Z3) |
-| `z3-verification-bundled` | Z3 verification with bundled build (slow, ~30+ minutes) |
 | `loom` | Loom-compatible synchronization primitives for concurrency testing |
 | `json` | JSON serialization for telemetry types (`to_json()` methods) |
 
