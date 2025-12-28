@@ -25,13 +25,13 @@ Floating-point non-determinism stems from multiple sources that can cause the sa
 ```rust
 // These can produce different results on different platforms!
 // The Rust std documentation explicitly states:
-// "The precision of this function is non-deterministic. 
-//  This means it varies by platform, Rust version, and 
-//  can even differ within the same execution from one 
+// "The precision of this function is non-deterministic.
+//  This means it varies by platform, Rust version, and
+//  can even differ within the same execution from one
 //  invocation to the next."
 
 let x = (1.0_f64).sin();      // ⚠️ NON-DETERMINISTIC
-let y = (2.0_f64).exp();      // ⚠️ NON-DETERMINISTIC  
+let y = (2.0_f64).exp();      // ⚠️ NON-DETERMINISTIC
 let z = (3.0_f64).ln();       // ⚠️ NON-DETERMINISTIC
 let w = (1.0_f64).atan2(1.0); // ⚠️ NON-DETERMINISTIC
 ```
@@ -76,7 +76,7 @@ use rayon::prelude::*;
 // ⚠️ NON-DETERMINISTIC: Order of partial sums varies per run
 let sum: f64 = values.par_iter().sum();
 
-// ⚠️ NON-DETERMINISTIC: fold order depends on thread scheduling  
+// ⚠️ NON-DETERMINISTIC: fold order depends on thread scheduling
 let product: f64 = values.par_iter().fold(|| 1.0, |a, &b| a * b).sum();
 ```
 
@@ -279,7 +279,7 @@ let sum: f64 = values.iter().cloned().sum_with_accumulator::<Sum2<_>>();
 fn kahan_sum(values: &[f64]) -> f64 {
     let mut sum = 0.0;
     let mut compensation = 0.0;
-    
+
     for &value in values {
         let y = value - compensation;
         let t = sum + y;
@@ -543,7 +543,7 @@ jobs:
         with:
           name: checksums
           path: checksum-*.txt
-  
+
   compare:
     needs: test
     runs-on: ubuntu-latest
@@ -570,7 +570,7 @@ fn test_game_determinism() {
         .with_desync_detection_mode(DesyncDetection::On { interval: 1 })
         .start_synctest_session()
         .expect("session");
-    
+
     // Run simulation
     for frame in 0..1000 {
         let requests = session.advance_frame(inputs);
@@ -591,7 +591,7 @@ use std::collections::hash_map::DefaultHasher;
 /// Deterministic checksum of game state
 fn compute_checksum(state: &GameState) -> u64 {
     let mut hasher = DefaultHasher::new();
-    
+
     // Hash in deterministic order
     state.frame.hash(&mut hasher);
     for (id, entity) in state.entities.iter() {  // BTreeMap!
@@ -600,7 +600,7 @@ fn compute_checksum(state: &GameState) -> u64 {
         entity.x.to_bits().hash(&mut hasher);
         entity.y.to_bits().hash(&mut hasher);
     }
-    
+
     hasher.finish()
 }
 
@@ -611,13 +611,13 @@ fn test_simulation_determinism() {
         simulate(&mut state, &inputs);
         compute_checksum(&state)
     };
-    
+
     let checksum2 = {
         let mut state = GameState::new();
         simulate(&mut state, &inputs);
         compute_checksum(&state)
     };
-    
+
     assert_eq!(checksum1, checksum2, "Simulation is non-deterministic!");
 }
 ```
@@ -637,10 +637,10 @@ proptest! {
     ) {
         let entity1 = Entity { x, y, vx, vy };
         let entity2 = Entity { x, y, vx, vy };
-        
+
         let result1 = simulate_physics(entity1, 100);
         let result2 = simulate_physics(entity2, 100);
-        
+
         // Compare bit-for-bit
         assert_eq!(result1.x.to_bits(), result2.x.to_bits());
         assert_eq!(result1.y.to_bits(), result2.y.to_bits());
@@ -660,7 +660,7 @@ impl InputRecorder {
     fn record(&mut self, frame: Frame, inputs: Vec<PlayerInput>) {
         self.inputs.push((frame, inputs));
     }
-    
+
     fn save(&self, path: &Path) -> io::Result<()> {
         let encoded = bincode::serialize(&self.inputs)?;
         std::fs::write(path, encoded)
@@ -671,14 +671,14 @@ impl InputRecorder {
 fn replay_and_verify(recording_path: &Path, expected_checksum: u64) {
     let data = std::fs::read(recording_path).unwrap();
     let inputs: Vec<(Frame, Vec<PlayerInput>)> = bincode::deserialize(&data).unwrap();
-    
+
     let mut state = GameState::new();
     for (frame, frame_inputs) in inputs {
         state.advance(frame_inputs);
     }
-    
+
     let actual_checksum = compute_checksum(&state);
-    assert_eq!(actual_checksum, expected_checksum, 
+    assert_eq!(actual_checksum, expected_checksum,
         "Replay produced different result!");
 }
 ```

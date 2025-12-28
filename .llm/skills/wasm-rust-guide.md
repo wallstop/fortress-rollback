@@ -97,7 +97,7 @@ import init, { add, Counter } from './pkg/my_wasm_lib.js';
 async function main() {
     await init();
     console.log(add(2, 3));  // 5
-    
+
     const counter = new Counter();
     counter.increment();
     console.log(counter.value());  // 1
@@ -187,7 +187,7 @@ extern "C" {
 
     // alert
     fn alert(s: &str);
-    
+
     // Document.getElementById
     #[wasm_bindgen(js_namespace = document)]
     fn getElementById(id: &str) -> JsValue;
@@ -338,7 +338,7 @@ pub fn safe_operation(input: &str) -> Result<String, JsValue> {
     if input.is_empty() {
         return Err(JsValue::from_str("Input cannot be empty"));
     }
-    
+
     serde_json::from_str::<serde_json::Value>(input)
         .map(|v| v.to_string())
         .map_err(|e| JsValue::from_str(&format!("Parse error: {}", e)))
@@ -514,7 +514,7 @@ mod native_impl {
 pub fn do_work() {
     #[cfg(target_arch = "wasm32")]
     wasm_impl::work();
-    
+
     #[cfg(not(target_arch = "wasm32"))]
     native_impl::work();
 }

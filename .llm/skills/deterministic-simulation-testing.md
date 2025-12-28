@@ -176,21 +176,21 @@ use std::time::Duration;
 async fn my_deterministic_test() {
     // Create virtual nodes
     let handle = madsim::runtime::Handle::current();
-    
+
     let server = handle.create_node().build();
     let client = handle.create_node().build();
-    
+
     // Spawn tasks on nodes
     server.spawn(async {
         let listener = TcpListener::bind("0.0.0.0:8080").await?;
         // ...
     });
-    
+
     client.spawn(async {
         let stream = TcpStream::connect("server:8080").await?;
         // ...
     });
-    
+
     // Inject failures
     handle.kill(server.id());  // Kill a node
     madsim::time::sleep(Duration::from_secs(1)).await;  // Simulated time
@@ -359,14 +359,14 @@ file.sync_all()?;  // Data survives sim.crash()
 trait Actor {
     type Message;
     type Response;
-    
+
     /// Process incoming message, return outgoing messages
     fn receive(
         &mut self,
         msg: Self::Message,
         at: Instant,
     ) -> Vec<(Self::Message, NodeId)>;
-    
+
     /// Periodic tick for timeouts, elections, etc.
     fn tick(&mut self, at: Instant) -> Vec<(Self::Message, NodeId)>;
 }
@@ -394,15 +394,15 @@ impl<A: Actor> Simulator<A> {
     fn step(&mut self) -> Option<(NodeId, A::Response)> {
         let event = self.events.pop()?;
         self.current_time = event.delivery_time;
-        
+
         let node = self.nodes.get_mut(&event.destination)?;
         let responses = node.receive(event.message, self.current_time);
-        
+
         for (msg, dest) in responses {
             // Deterministically assign delivery time
             let delay = self.random_delay();
             let should_deliver = self.rng.gen_bool(1.0 - self.drop_rate);
-            
+
             if should_deliver {
                 self.events.push(Event {
                     delivery_time: self.current_time + delay,
@@ -411,10 +411,10 @@ impl<A: Actor> Simulator<A> {
                 });
             }
         }
-        
+
         None
     }
-    
+
     fn random_delay(&mut self) -> Duration {
         let micros = self.rng.gen_range(100..10_000);
         Duration::from_micros(micros)
@@ -473,7 +473,7 @@ impl Clock for SystemClock {
     fn now(&self) -> Instant {
         Instant::now()
     }
-    
+
     async fn sleep(&self, duration: Duration) {
         tokio::time::sleep(duration).await
     }
@@ -528,7 +528,7 @@ mod real_impl {
     pub fn current_time() -> Instant {
         Instant::now()
     }
-    
+
     pub async fn sleep(duration: Duration) {
         tokio::time::sleep(duration).await
     }
@@ -539,7 +539,7 @@ mod sim_impl {
     pub fn current_time() -> Instant {
         madsim::time::Instant::now()
     }
-    
+
     pub async fn sleep(duration: Duration) {
         madsim::time::sleep(duration).await
     }
@@ -571,12 +571,12 @@ proptest! {
         let mut sim = Builder::new()
             .rng_seed(seed)
             .build();
-        
+
         // Apply operations and partitions
         for op in operations {
             apply_operation(&mut sim, op);
         }
-        
+
         // Check linearizability
         let history = sim.collect_history();
         assert!(is_linearizable(&history));
@@ -672,10 +672,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Run DST tests
         run: RUSTFLAGS="--cfg madsim" cargo test --release
-        
+
       - name: Check determinism
         run: |
           MADSIM_TEST_CHECK_DETERMINISM=1 \
@@ -754,10 +754,10 @@ fn my_test() -> turmoil::Result {
     let mut sim = turmoil::Builder::new()
         .rng_seed(42)
         .build();
-    
+
     sim.host("server", || async { /* ... */ Ok(()) });
     sim.client("client", async { /* ... */ Ok(()) });
-    
+
     sim.run()
 }
 ```

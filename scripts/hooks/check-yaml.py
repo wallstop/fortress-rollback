@@ -16,7 +16,7 @@ def check_file(filepath: str) -> bool:
     if not HAS_YAML:
         # Skip if PyYAML not installed
         return True
-    
+
     path = Path(filepath)
     try:
         content = path.read_text(encoding="utf-8")
@@ -33,16 +33,16 @@ def check_file(filepath: str) -> bool:
 def main() -> int:
     if len(sys.argv) < 2:
         return 0
-    
+
     if not HAS_YAML:
         print("Warning: PyYAML not installed, skipping YAML validation")
         return 0
-    
+
     all_valid = True
     for filepath in sys.argv[1:]:
         if not check_file(filepath):
             all_valid = False
-    
+
     return 0 if all_valid else 1
 
 

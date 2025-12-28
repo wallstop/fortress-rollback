@@ -12,7 +12,7 @@ Add to `Cargo.toml`:
 # Correctness (bugs)
 correctness = { level = "deny", priority = -1 }
 
-# Suspicious patterns (likely bugs)  
+# Suspicious patterns (likely bugs)
 suspicious = { level = "warn", priority = -1 }
 
 # Zero-panic code (critical for production)

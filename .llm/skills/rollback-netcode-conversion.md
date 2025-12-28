@@ -164,20 +164,20 @@ Every piece of game state that affects simulation must be serialized:
 struct GameState {
     // Player state
     players: Vec<Player>,
-    
+
     // Entity state
     entities: Vec<Entity>,
     positions: Vec<Position>,
     velocities: Vec<Velocity>,
-    
+
     // Global state
     frame_number: u32,
     rng_state: Pcg64,
-    
+
     // Game-specific
     score: [u32; 2],
     timer: u32,
-    
+
     // DO NOT INCLUDE:
     // - Render state (animations, particles)
     // - Audio state
@@ -197,7 +197,7 @@ impl GameState {
             frame: self.frame_number,
         }
     }
-    
+
     fn load(&mut self, saved: &SavedState) {
         *self = saved.data.clone();
     }
@@ -234,7 +234,7 @@ impl StateBuffer {
         let index = (frame as usize) % MAX_ROLLBACK_FRAMES;
         self.states[index] = Some(state);
     }
-    
+
     fn load(&self, frame: u32) -> Option<&GameState> {
         let index = (frame as usize) % MAX_ROLLBACK_FRAMES;
         self.states[index].as_ref()
@@ -298,7 +298,7 @@ fn predict_input(last_known: FrameInput, frames_since_known: u32) -> FrameInput 
         2 => 0.33,
         _ => 0.0,
     };
-    
+
     FrameInput {
         buttons: if decay > 0.5 { last_known.buttons } else { PlayerInput::empty() },
         stick_x: (last_known.stick_x as f32 * decay) as i8,
@@ -321,13 +321,13 @@ impl InputQueue {
         self.inputs.push_back((frame, input));
         self.last_confirmed_frame = frame;
     }
-    
+
     fn get_input(&self, frame: Frame) -> (FrameInput, InputStatus) {
         // Check if we have confirmed input
         if let Some((_, input)) = self.inputs.iter().find(|(f, _)| *f == frame) {
             return (*input, InputStatus::Confirmed);
         }
-        
+
         // Predict based on last known
         let predicted = self.predict_for_frame(frame);
         (predicted, InputStatus::Predicted)
@@ -374,7 +374,7 @@ struct GamePacket {
     sequence_number: u32,
     ack: u32,
     ack_bits: u32,  // Bitfield for last 32 packets
-    
+
     // Include inputs for frames [start_frame, start_frame + count)
     input_start_frame: u32,
     input_count: u8,
@@ -415,7 +415,7 @@ pub enum GgrsRequest<T: Config> {
 loop {
     // Collect local input
     session.add_local_input(local_handle, input)?;
-    
+
     // Advance frame - returns requests
     match session.advance_frame() {
         Ok(requests) => {
@@ -474,7 +474,7 @@ fn main() {
 fn movement_system(mut query: Query<(&Rollback, &mut Transform, &Velocity)>) {
     let mut items: Vec<_> = query.iter_mut().collect();
     items.sort_by_key(|(rb, _, _)| rb.id());
-    
+
     for (_, mut transform, velocity) in items {
         transform.translation += velocity.0;
     }
@@ -609,7 +609,7 @@ impl ReplayRecorder {
     fn record(&mut self, frame: Frame, player: PlayerId, input: FrameInput) {
         self.inputs.push((frame, player, input));
     }
-    
+
     fn verify_determinism(&self) -> bool {
         // Run simulation twice with same inputs
         let result1 = self.simulate();

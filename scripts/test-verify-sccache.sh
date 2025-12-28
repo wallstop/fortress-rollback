@@ -25,7 +25,7 @@ log_test() {
     local name="$1"
     local status="$2"
     local message="${3:-}"
-    
+
     if [[ "$status" == "PASS" ]]; then
         echo -e "${GREEN}✓${NC} $name"
         ((TESTS_PASSED++)) || true
@@ -168,16 +168,16 @@ test_functional_with_sccache() {
         log_test "Functional test with sccache" "SKIP" "sccache not installed"
         return 0
     fi
-    
+
     if ! command -v rustc &> /dev/null; then
         log_test "Functional test with sccache" "SKIP" "rustc not installed"
         return 0
     fi
-    
+
     # Create a temporary GITHUB_OUTPUT file
     local temp_output
     temp_output=$(mktemp)
-    
+
     # Run the verification script
     if env GITHUB_OUTPUT="$temp_output" "$VERIFY_SCRIPT" > /dev/null 2>&1; then
         if grep -q "working=true" "$temp_output"; then
@@ -209,12 +209,12 @@ test_functional_with_sccache() {
 test_ci_workflow_env_vars() {
     local workflows_dir="$SCRIPT_DIR/../.github/workflows"
     local missing_vars=()
-    
+
     if [[ ! -d "$workflows_dir" ]]; then
         log_test "CI workflow environment variables" "SKIP" "Workflows directory not found"
         return 0
     fi
-    
+
     # Check each workflow file that uses sccache
     for workflow in "$workflows_dir"/*.yml; do
         if grep -q "SCCACHE_IGNORE_SERVER_IO_ERROR" "$workflow"; then
@@ -226,7 +226,7 @@ test_ci_workflow_env_vars() {
             fi
         fi
     done
-    
+
     if [[ ${#missing_vars[@]} -eq 0 ]]; then
         log_test "CI workflow environment variables" "PASS"
         return 0
@@ -244,7 +244,7 @@ main() {
     echo "Testing verify-sccache.sh"
     echo "=============================================="
     echo ""
-    
+
     # Run all tests
     test_script_exists || true
     test_script_shebang || true
@@ -257,7 +257,7 @@ main() {
     test_sccache_server_cleanup || true
     test_functional_with_sccache || true
     test_ci_workflow_env_vars || true
-    
+
     echo ""
     echo "=============================================="
     echo "Test Summary"
@@ -265,7 +265,7 @@ main() {
     echo -e "${GREEN}Passed: $TESTS_PASSED${NC}"
     echo -e "${RED}Failed: $TESTS_FAILED${NC}"
     echo ""
-    
+
     if [[ $TESTS_FAILED -gt 0 ]]; then
         echo -e "${RED}Some tests failed!${NC}"
         exit 1

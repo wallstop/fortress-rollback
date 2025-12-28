@@ -42,8 +42,12 @@ def extract_markdown_anchors(content: str) -> set[str]:
     for match in header_pattern.finditer(content):
         header_text = match.group(1).strip()
         # Convert to anchor format (lowercase, spaces to hyphens, remove special chars)
+        # Keep alphanumeric, spaces, and hyphens; remove everything else
         anchor = re.sub(r"[^\w\s-]", "", header_text.lower())
-        anchor = re.sub(r"\s+", "-", anchor)
+        # Collapse multiple spaces/hyphens and convert spaces to hyphens
+        anchor = re.sub(r"[\s-]+", "-", anchor)
+        # Strip leading/trailing hyphens
+        anchor = anchor.strip("-")
         anchors.add(anchor)
 
     # Match explicit anchor definitions: {#anchor-id}
@@ -184,7 +188,7 @@ def main() -> int:
     if total_errors > 0:
         return 1
 
-    print("✓ All links valid")
+    print("[OK] All links valid")
     return 0
 
 

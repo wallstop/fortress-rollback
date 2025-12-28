@@ -87,7 +87,7 @@ check_java() {
         echo "Please install Java 11+ and try again."
         exit 1
     fi
-    
+
     local java_version
     java_version=$(java -version 2>&1 | head -n 1 | cut -d'"' -f2 | cut -d'.' -f1)
     if [[ "$java_version" -lt 11 ]] 2>/dev/null; then
@@ -99,10 +99,10 @@ download_tla_tools() {
     if [[ -f "$TLA_TOOLS_JAR" ]]; then
         return 0
     fi
-    
+
     echo -e "${BLUE}Downloading TLA+ tools...${NC}"
     mkdir -p "$TOOLS_DIR"
-    
+
     if command -v curl &> /dev/null; then
         curl -L -o "$TLA_TOOLS_JAR" "$TLA_TOOLS_URL"
     elif command -v wget &> /dev/null; then
@@ -111,7 +111,7 @@ download_tla_tools() {
         echo -e "${RED}Error: curl or wget required to download TLA+ tools${NC}"
         exit 1
     fi
-    
+
     echo -e "${GREEN}Downloaded TLA+ tools to $TLA_TOOLS_JAR${NC}"
 }
 
@@ -119,10 +119,10 @@ verify_spec() {
     local spec_name="$1"
     local quick="${2:-false}"
     local verbose="${3:-false}"
-    
+
     local tla_file="$TLA_DIR/$spec_name.tla"
     local cfg_file="$TLA_DIR/$spec_name.cfg"
-    
+
     # Check files exist
     if [[ ! -f "$tla_file" ]]; then
         echo -e "${RED}Error: $tla_file not found${NC}"
@@ -130,16 +130,16 @@ verify_spec() {
         ((SKIPPED++))
         return 1
     fi
-    
+
     if [[ ! -f "$cfg_file" ]]; then
         echo -e "${RED}Error: $cfg_file not found${NC}"
         RESULTS[$spec_name]="SKIP"
         ((SKIPPED++))
         return 1
     fi
-    
+
     echo -e "${BLUE}Verifying $spec_name...${NC}"
-    
+
     # Build TLC command
     local tlc_cmd=(
         java
@@ -148,56 +148,56 @@ verify_spec() {
         -jar "$TLA_TOOLS_JAR"
         -deadlock
     )
-    
+
     # Add worker count
     if [[ "$TLA_WORKERS" != "auto" ]]; then
         tlc_cmd+=(-workers "$TLA_WORKERS")
     fi
-    
+
     # Add depth limit if set
     if [[ -n "$TLA_DEPTH" ]]; then
         tlc_cmd+=(-depth "$TLA_DEPTH")
     fi
-    
+
     # Add config and spec files
     tlc_cmd+=(-config "$cfg_file" "$tla_file")
-    
+
     # Run TLC
     local start_time
     start_time=$(date +%s)
-    
+
     local output_file
     output_file=$(mktemp)
-    
+
     local exit_code=0
     if [[ "$verbose" == "true" ]]; then
         "${tlc_cmd[@]}" 2>&1 | tee "$output_file" || exit_code=$?
     else
         "${tlc_cmd[@]}" > "$output_file" 2>&1 || exit_code=$?
     fi
-    
+
     local end_time
     end_time=$(date +%s)
     local duration=$((end_time - start_time))
-    
+
     # Check results
     if [[ $exit_code -eq 0 ]] && grep -q "Model checking completed. No error has been found." "$output_file"; then
         echo -e "${GREEN}✓ $spec_name passed (${duration}s)${NC}"
-        
+
         # Extract stats
         local states
         states=$(grep -oP '\d+ states generated' "$output_file" | head -1 || echo "")
         if [[ -n "$states" ]]; then
             echo "  $states"
         fi
-        
+
         RESULTS[$spec_name]="PASS"
         ((PASSED++))
         rm -f "$output_file"
         return 0
     else
         echo -e "${RED}✗ $spec_name failed (${duration}s)${NC}"
-        
+
         # Show error details
         if grep -q "Error:" "$output_file"; then
             echo -e "${RED}Error details:${NC}"
@@ -209,7 +209,7 @@ verify_spec() {
             echo "TLC output (last 20 lines):"
             tail -20 "$output_file"
         fi
-        
+
         RESULTS[$spec_name]="FAIL"
         ((FAILED++))
         rm -f "$output_file"
@@ -222,21 +222,21 @@ print_summary() {
     echo "=========================================="
     echo "TLA+ Verification Summary"
     echo "=========================================="
-    
+
     for spec in "${SPECS[@]}"; do
         local result="${RESULTS[$spec]:-SKIP}"
         local color="$NC"
         local symbol="?"
-        
+
         case "$result" in
             PASS) color="$GREEN"; symbol="✓" ;;
             FAIL) color="$RED"; symbol="✗" ;;
             SKIP) color="$YELLOW"; symbol="-" ;;
         esac
-        
+
         echo -e "  $symbol $spec: ${color}$result${NC}"
     done
-    
+
     echo "=========================================="
     echo -e "  ${GREEN}Passed: $PASSED${NC}  ${RED}Failed: $FAILED${NC}  ${YELLOW}Skipped: $SKIPPED${NC}"
     echo "=========================================="
@@ -247,7 +247,7 @@ main() {
     local verbose=false
     local fail_fast=false
     local target_spec=""
-    
+
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -282,15 +282,15 @@ main() {
                 ;;
         esac
     done
-    
+
     echo "=========================================="
     echo "Fortress Rollback TLA+ Verification"
     echo "=========================================="
-    
+
     # Check prerequisites
     check_java
     download_tla_tools
-    
+
     # Determine which specs to verify
     local specs_to_verify=("${SPECS[@]}")
     if [[ -n "$target_spec" ]]; then
@@ -302,24 +302,24 @@ main() {
                 break
             fi
         done
-        
+
         if [[ "$found" == "false" ]]; then
             echo -e "${RED}Error: Unknown spec '$target_spec'${NC}"
             print_specs
             exit 1
         fi
-        
+
         specs_to_verify=("$target_spec")
     fi
-    
+
     # Apply quick mode settings
     if [[ "$quick" == "true" ]]; then
         echo -e "${YELLOW}Quick mode: using reduced bounds${NC}"
         export TLA_DEPTH="${TLA_DEPTH:-100}"
     fi
-    
+
     echo ""
-    
+
     # Verify each spec
     local any_failed=false
     for spec in "${specs_to_verify[@]}"; do
@@ -332,10 +332,10 @@ main() {
         fi
         echo ""
     done
-    
+
     # Print summary
     print_summary
-    
+
     # Exit with appropriate code
     if [[ "$any_failed" == "true" ]]; then
         exit 1

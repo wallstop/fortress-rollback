@@ -42,15 +42,15 @@ CARGO_STAGED=$(git diff --cached --name-only | grep -E '^Cargo\.toml$' || true)
 if [[ -n "$CARGO_STAGED" ]]; then
     # Check if the version line specifically changed
     VERSION_CHANGED=$(git diff --cached Cargo.toml | grep -E '^\+version = "[0-9]+\.[0-9]+' || true)
-    
+
     if [[ -n "$VERSION_CHANGED" ]]; then
         echo -e "${YELLOW}Cargo.toml version changed, checking version synchronization...${NC}"
-        
+
         if [[ -x "$PROJECT_ROOT/scripts/sync-version.sh" ]]; then
             # Run the sync script
             if ! "$PROJECT_ROOT/scripts/sync-version.sh"; then
                 echo -e "${YELLOW}Version references were updated. Adding changes to commit...${NC}"
-                
+
                 # Stage any files that were modified by the sync script
                 # Find files with version patterns that were just modified
                 git diff --name-only | while read -r file; do

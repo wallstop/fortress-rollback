@@ -113,7 +113,7 @@ The most important pattern for loom compatibility is creating an abstraction lay
 // src/sync.rs - The canonical pattern
 
 /// Synchronization primitives that work with both std and loom.
-/// 
+///
 /// Under normal compilation, uses high-performance std/parking_lot types.
 /// Under loom testing (`RUSTFLAGS="--cfg loom"`), uses loom's model-checkable types.
 
@@ -232,21 +232,21 @@ fn test_concurrent_increment() {
     loom::model(|| {
         // Arrange: Set up shared state
         let counter = Arc::new(AtomicUsize::new(0));
-        
+
         // Act: Spawn concurrent operations
         let counter1 = counter.clone();
         let t1 = thread::spawn(move || {
             counter1.fetch_add(1, Ordering::SeqCst);
         });
-        
+
         let counter2 = counter.clone();
         let t2 = thread::spawn(move || {
             counter2.fetch_add(1, Ordering::SeqCst);
         });
-        
+
         t1.join().unwrap();
         t2.join().unwrap();
-        
+
         // Assert: Verify invariants hold for ALL interleavings
         assert_eq!(counter.load(Ordering::SeqCst), 2);
     });
@@ -299,18 +299,18 @@ fn test_with_many_threads() {
 
     builder.check(|| {
         let data = Arc::new(Mutex::new(Vec::new()));
-        
+
         let handles: Vec<_> = (0..4).map(|i| {
             let data = data.clone();
             thread::spawn(move || {
                 data.lock().unwrap().push(i);
             })
         }).collect();
-        
+
         for h in handles {
             h.join().unwrap();
         }
-        
+
         assert_eq!(data.lock().unwrap().len(), 4);
     });
 }
@@ -349,7 +349,7 @@ fn wait_for_value(flag: &AtomicBool) {
     while !flag.load(Ordering::Acquire) {
         #[cfg(loom)]
         loom::thread::yield_now();
-        
+
         #[cfg(not(loom))]
         std::hint::spin_loop();
     }
@@ -384,7 +384,7 @@ Some APIs (like `MappedMutexGuard`) don't exist in loom. Handle gracefully:
 ```rust
 impl<T> GameStateCell<T> {
     /// Returns accessor to inner data.
-    /// 
+    ///
     /// # Note
     /// Under loom testing, this returns `None` because loom's `MutexGuard`
     /// doesn't support projection. Use `load()` instead in loom tests.
@@ -485,14 +485,14 @@ LOOM_CHECKPOINT_FILE=debug.json RUSTFLAGS="--cfg loom" cargo test --release fail
 fn test_with_debug() {
     loom::model(|| {
         let state = Arc::new(AtomicUsize::new(0));
-        
+
         let s1 = state.clone();
         let t1 = thread::spawn(move || {
             let old = s1.fetch_add(1, Ordering::SeqCst);
             // This will appear in LOOM_LOG=trace output
             tracing::debug!("Thread 1: {} -> {}", old, old + 1);
         });
-        
+
         // ...
     });
 }
@@ -746,7 +746,7 @@ loom-tests:
   steps:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@stable
-    
+
     - name: Run loom tests
       run: |
         cd loom-tests

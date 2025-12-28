@@ -259,7 +259,7 @@ impl<T> BadList<T> {
     fn push(&mut self, elem: T) {
         let node = Box::new(Node { elem, next: ptr::null_mut() });
         let raw = &*node as *const _ as *mut Node<T>;
-        
+
         // Accessing self.head here invalidates `raw`!
         if let Some(ref mut head) = self.head {
             // ...
@@ -276,7 +276,7 @@ struct GoodList<T> {
 impl<T> GoodList<T> {
     fn push(&mut self, elem: T) {
         let new = Box::into_raw(Box::new(Node { elem, next: ptr::null_mut() }));
-        
+
         unsafe {
             if !self.tail.is_null() {
                 (*self.tail).next = new;
@@ -286,7 +286,7 @@ impl<T> GoodList<T> {
             self.tail = new;
         }
     }
-    
+
     // Remember to free with Box::from_raw in Drop!
 }
 ```
@@ -321,13 +321,13 @@ miri:
   runs-on: ubuntu-latest
   steps:
     - uses: actions/checkout@v4
-    
+
     - name: Install Miri
       run: |
         rustup toolchain install nightly --component miri
         rustup override set nightly
         cargo miri setup
-    
+
     - name: Run Miri tests
       run: cargo miri test --lib
       env:

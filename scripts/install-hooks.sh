@@ -56,14 +56,14 @@ mkdir -p "$HOOKS_DIR"
 
 if [[ "$UNINSTALL" == "true" ]]; then
     echo -e "${BLUE}Uninstalling git hooks...${NC}"
-    
+
     if [[ -f "$HOOKS_DIR/pre-commit" ]]; then
         rm "$HOOKS_DIR/pre-commit"
         echo -e "${GREEN}✓${NC} Removed pre-commit hook"
     else
         echo -e "${YELLOW}•${NC} pre-commit hook not installed"
     fi
-    
+
     echo -e "${GREEN}Done!${NC}"
     exit 0
 fi
@@ -84,7 +84,7 @@ if [[ -f "$HOOK_SOURCE" ]]; then
             echo -e "${YELLOW}•${NC} Backed up existing pre-commit hook to: ${BACKUP#$PROJECT_ROOT/}"
         fi
     fi
-    
+
     cp "$HOOK_SOURCE" "$HOOK_DEST"
     chmod +x "$HOOK_DEST"
     echo -e "${GREEN}✓${NC} Installed pre-commit hook"

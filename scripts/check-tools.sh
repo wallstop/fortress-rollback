@@ -23,7 +23,7 @@ check_tool() {
     local name="$1"
     local cmd="$2"
     local required="${3:-true}"
-    
+
     printf "  %-25s" "$name"
     if eval "$cmd" > /dev/null 2>&1; then
         echo -e "${GREEN}✓ installed${NC}"

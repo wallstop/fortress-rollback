@@ -149,54 +149,54 @@ should_exclude_file() {
     local file="$1"
     local basename
     basename=$(basename "$file")
-    
+
     # Exclude specific files
     case "$basename" in
         Cargo.toml|Cargo.lock|sync-version.sh)
             return 0  # true = exclude
             ;;
     esac
-    
+
     # Exclude paths containing these directories
     case "$file" in
         */target/*|*/.git/*|*/node_modules/*)
             return 0  # true = exclude
             ;;
     esac
-    
+
     return 1  # false = don't exclude
 }
 
 # Main logic
 main() {
     cd "$PROJECT_ROOT"
-    
+
     echo -e "${CYAN}╔════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║         Fortress Rollback Version Synchronization                      ║${NC}"
     echo -e "${CYAN}╚════════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    
+
     # Get current version
     local VERSION
     VERSION=$(get_cargo_version)
     local MAJOR_MINOR
     MAJOR_MINOR=$(get_major_minor_version "$VERSION")
-    
+
     echo -e "${BLUE}Current Cargo.toml version:${NC} ${GREEN}$VERSION${NC}"
     echo -e "${BLUE}Major.Minor version:${NC} ${GREEN}$MAJOR_MINOR${NC}"
     echo ""
-    
+
     local FILES_CHANGED=0
     local TOTAL_REPLACEMENTS=0
     local INCONSISTENT_FILES=()
     local SCANNED_COUNT=0
-    
+
     # ═══════════════════════════════════════════════════════════════════════════
     # File Discovery - Comprehensive file type coverage
     # ═══════════════════════════════════════════════════════════════════════════
-    
+
     log "${MAGENTA}Discovering files to scan...${NC}"
-    
+
     # Find all relevant files
     # Extensions: .rs .md .toml .yml .yaml .sh .txt .json
     local FILES_TO_SCAN
@@ -218,48 +218,48 @@ main() {
         ! -name "Cargo.toml" \
         ! -name "Cargo.lock" \
         2>/dev/null | sort || true)
-    
+
     # ═══════════════════════════════════════════════════════════════════════════
     # Pattern Definitions
     # ═══════════════════════════════════════════════════════════════════════════
-    
+
     # Pattern 1: Simple dependency declaration
     # Examples:
     #   fortress-rollback = "0.2"
     #   fortress-rollback = "0.2.0"
     local PATTERN1='fortress-rollback = "[0-9]+\.[0-9]+(\.[0-9]+)?"'
-    
+
     # Pattern 2: Dependency with features/options (inline table)
     # Examples:
     #   fortress-rollback = { version = "0.2", features = ["tokio"] }
     #   /// fortress-rollback = { version = "0.2", features = ["tokio"] }
     #   //! fortress-rollback = { version = "0.2", features = ["tokio"] }
     local PATTERN2='fortress-rollback = \{ version = "[0-9]+\.[0-9]+(\.[0-9]+)?"'
-    
+
     echo -e "${BLUE}Scanning files for version references...${NC}"
     echo ""
-    
+
     # ═══════════════════════════════════════════════════════════════════════════
     # File Processing
     # ═══════════════════════════════════════════════════════════════════════════
-    
+
     while IFS= read -r file; do
         [[ -z "$file" ]] && continue
         [[ ! -f "$file" ]] && continue
-        
+
         # Skip excluded files
         if should_exclude_file "$file"; then
             continue
         fi
-        
+
         ((SCANNED_COUNT++)) || true
-        
+
         local file_changed=false
         local relative_path="${file#$PROJECT_ROOT/}"
         local file_ext="${file##*.}"
-        
+
         log "  Scanning: $relative_path"
-        
+
         # ─────────────────────────────────────────────────────────────────────
         # Check for Pattern 1: fortress-rollback = "X.Y.Z"
         # ─────────────────────────────────────────────────────────────────────
@@ -267,15 +267,15 @@ main() {
             local matches
             matches=$(grep -cE "$PATTERN1" "$file" 2>/dev/null | tr -d '[:space:]' || true)
             matches=${matches:-0}
-            
+
             # Check if any don't match the current version
             local current_matches
             current_matches=$(grep -E "$PATTERN1" "$file" 2>/dev/null | grep -c "\"$MAJOR_MINOR\"" | tr -d '[:space:]' || true)
             current_matches=${current_matches:-0}
-            
+
             if [[ "$matches" != "$current_matches" ]]; then
                 log "${YELLOW}  → Found outdated version (pattern 1): $relative_path${NC}"
-                
+
                 # Add to inconsistent list if not already there
                 local already_listed=false
                 for f in "${INCONSISTENT_FILES[@]+"${INCONSISTENT_FILES[@]}"}"; do
@@ -287,7 +287,7 @@ main() {
                 if [[ "$already_listed" == "false" ]]; then
                     INCONSISTENT_FILES+=("$relative_path")
                 fi
-                
+
                 if [[ "$CHECK_ONLY" == "false" ]]; then
                     if [[ "$DRY_RUN" == "true" ]]; then
                         echo -e "${YELLOW}Would update:${NC} $relative_path ${MAGENTA}($file_ext)${NC}"
@@ -305,7 +305,7 @@ main() {
                 fi
             fi
         fi
-        
+
         # ─────────────────────────────────────────────────────────────────────
         # Check for Pattern 2: fortress-rollback = { version = "X.Y.Z"
         # This covers both TOML tables and doc comments
@@ -314,15 +314,15 @@ main() {
             local matches
             matches=$(grep -cE "$PATTERN2" "$file" 2>/dev/null | tr -d '[:space:]' || true)
             matches=${matches:-0}
-            
+
             # Check if any don't match the current version
             local current_matches
             current_matches=$(grep -E "$PATTERN2" "$file" 2>/dev/null | grep -c "version = \"$MAJOR_MINOR\"" | tr -d '[:space:]' || true)
             current_matches=${current_matches:-0}
-            
+
             if [[ "$matches" != "$current_matches" ]]; then
                 log "${YELLOW}  → Found outdated version (pattern 2): $relative_path${NC}"
-                
+
                 # Add to inconsistent list if not already there
                 local already_listed=false
                 for f in "${INCONSISTENT_FILES[@]+"${INCONSISTENT_FILES[@]}"}"; do
@@ -334,7 +334,7 @@ main() {
                 if [[ "$already_listed" == "false" ]]; then
                     INCONSISTENT_FILES+=("$relative_path")
                 fi
-                
+
                 if [[ "$CHECK_ONLY" == "false" ]]; then
                     if [[ "$DRY_RUN" == "true" ]]; then
                         echo -e "${YELLOW}Would update:${NC} $relative_path ${MAGENTA}($file_ext)${NC}"
@@ -352,22 +352,22 @@ main() {
                 fi
             fi
         fi
-        
+
         if [[ "$file_changed" == "true" ]]; then
             ((FILES_CHANGED++)) || true
             echo -e "${GREEN}✓ Updated:${NC} $relative_path ${MAGENTA}($file_ext)${NC}"
         fi
-        
+
     done <<< "$FILES_TO_SCAN"
-    
+
     # ═══════════════════════════════════════════════════════════════════════════
     # Summary Report
     # ═══════════════════════════════════════════════════════════════════════════
-    
+
     echo ""
     echo -e "${CYAN}════════════════════════════════════════════════════════════════════════${NC}"
     log "${BLUE}Files scanned:${NC} $SCANNED_COUNT"
-    
+
     if [[ "$CHECK_ONLY" == "true" ]]; then
         if [[ ${#INCONSISTENT_FILES[@]} -gt 0 ]]; then
             echo -e "${RED}✗ Version inconsistencies found in ${#INCONSISTENT_FILES[@]} file(s):${NC}"
@@ -398,11 +398,11 @@ main() {
             echo -e "${GREEN}✓ All version references are already consistent with Cargo.toml ($VERSION)${NC}"
         fi
     fi
-    
+
     # ═══════════════════════════════════════════════════════════════════════════
     # Coverage Summary (verbose mode)
     # ═══════════════════════════════════════════════════════════════════════════
-    
+
     if [[ "$VERBOSE" == "true" ]]; then
         echo ""
         echo -e "${BLUE}File types coverage:${NC}"

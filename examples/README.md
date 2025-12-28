@@ -132,7 +132,7 @@ run these commands in separate terminals:
 ```shell
 cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7000 --players localhost 127.0.0.1:7001 --spectators 127.0.0.1:7002
 cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7001 --players 127.0.0.1:7000 localhost
-cargo run --example ex_game_spectator --features graphical-examples -- --local-port 7002 --num-players 2 --host 127.0.0.1:7000 
+cargo run --example ex_game_spectator --features graphical-examples -- --local-port 7002 --num-players 2 --host 127.0.0.1:7000
 ```
 
 In order to run a three-player game with two players playing in the same client and a third player playing on a second client,

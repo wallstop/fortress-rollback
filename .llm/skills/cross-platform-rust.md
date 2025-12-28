@@ -233,22 +233,22 @@ fn main() {
     let target = std::env::var("TARGET").unwrap();
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-    
+
     // Register custom cfgs (required since Rust 1.80)
     println!("cargo::rustc-check-cfg=cfg(is_mobile)");
     println!("cargo::rustc-check-cfg=cfg(has_threading)");
-    
+
     // Set custom cfg flags based on platform
     match target_os.as_str() {
         "ios" | "android" => println!("cargo::rustc-cfg=is_mobile"),
         _ => {}
     }
-    
+
     // WASM doesn't have native threading
     if target_arch != "wasm32" {
         println!("cargo::rustc-cfg=has_threading");
     }
-    
+
     // Rerun only when build.rs changes
     println!("cargo::rerun-if-changed=build.rs");
 }
@@ -262,7 +262,7 @@ fn main() {
     cc::Build::new()
         .file("src/native_helper.c")
         .compile("native_helper");
-    
+
     // Link system libraries platform-specifically
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
     match target_os.as_str() {
@@ -271,7 +271,7 @@ fn main() {
         "windows" => println!("cargo::rustc-link-lib=user32"),
         _ => {}
     }
-    
+
     println!("cargo::rerun-if-changed=src/native_helper.c");
 }
 ```
@@ -571,7 +571,7 @@ impl GameState {
 // build.gradle
 android {
     // ...
-    
+
     externalNativeBuild {
         cmake {
             path "CMakeLists.txt"
@@ -650,9 +650,9 @@ mod tests {
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_tests {
     use wasm_bindgen_test::*;
-    
+
     wasm_bindgen_test_configure!(run_in_browser);
-    
+
     #[wasm_bindgen_test]
     fn test_wasm_binding() {
         let state = super::GameState::new();
@@ -748,7 +748,7 @@ pub trait Platform {
     type Clock: Clock;
     type Random: Random;
     type Network: NetworkSocket;
-    
+
     fn clock(&self) -> &Self::Clock;
     fn random(&mut self) -> &mut Self::Random;
     fn network(&mut self) -> &mut Self::Network;
@@ -780,7 +780,7 @@ impl GameState {
         // Use a deterministic serialization format
         bincode::serialize(self).expect("serialization should not fail")
     }
-    
+
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         bincode::deserialize(bytes)
             .map_err(|e| Error::ParseError { details: e.to_string() })
@@ -881,11 +881,11 @@ impl GameEngine {
     pub fn new() -> Self {
         Self { state: GameState::default() }
     }
-    
+
     pub fn update(&mut self, delta_time: f32) {
         self.state.update(delta_time);
     }
-    
+
     pub fn get_score(&self) -> u32 {
         self.state.score
     }
@@ -935,11 +935,11 @@ jobs:
             os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-          
+
           # WASM
           - target: wasm32-unknown-unknown
             os: ubuntu-latest
-          
+
           # Mobile (build only)
           - target: aarch64-linux-android
             os: ubuntu-latest
@@ -948,33 +948,33 @@ jobs:
             os: macos-latest
 
     runs-on: ${{ matrix.os }}
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      
+
       - name: Install cross
         if: matrix.use_cross
         run: cargo install cross --git https://github.com/cross-rs/cross
-      
+
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-latest' && !matrix.use_cross && matrix.target != 'wasm32-unknown-unknown'
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libudev-dev
-      
+
       - name: Build (native)
         if: ${{ !matrix.use_cross }}
         run: cargo build --release --target ${{ matrix.target }}
-      
+
       - name: Build (cross)
         if: matrix.use_cross
         run: cross build --release --target ${{ matrix.target }}
-      
+
       - name: Test (native, non-mobile)
         if: ${{ !matrix.use_cross && !contains(matrix.target, 'ios') && !contains(matrix.target, 'android') && matrix.target != 'wasm32-unknown-unknown' }}
         run: cargo test --target ${{ matrix.target }}
@@ -1001,7 +1001,7 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
       - name: Build
         run: cross build --release --target ${{ matrix.target }}
-  
+
   # Native runners only for final verification
   verify-macos:
     runs-on: macos-latest
@@ -1090,4 +1090,3 @@ cargo zigbuild --target x86_64-unknown-linux-gnu.2.17
 ---
 
 *Cross-platform Rust enables writing high-performance code once and deploying everywhere.*
-

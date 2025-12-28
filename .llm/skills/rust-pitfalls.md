@@ -221,7 +221,7 @@ fn update_if_needed(lock: &RwLock<Data>) {
         let guard = lock.read().unwrap();
         needs_update(&guard)
     };  // Read lock dropped here
-    
+
     if needs_write {
         let mut guard = lock.write().unwrap();
         // Re-check under write lock (another thread may have updated)
@@ -254,7 +254,7 @@ fn wait_for_flag_loom_compatible(flag: &AtomicBool) {
     while !flag.load(Ordering::Acquire) {
         #[cfg(loom)]
         loom::thread::yield_now();  // Required for loom to make progress
-        
+
         #[cfg(not(loom))]
         std::hint::spin_loop();
     }
@@ -280,7 +280,7 @@ fn wait_for_condition(pair: &(Mutex<bool>, Condvar)) {
 fn broken_loom_test() {
     use std::sync::Arc;  // Wrong! Should use loom::sync::Arc
     use std::thread;     // Wrong! Should use loom::thread
-    
+
     loom::model(|| {
         let data = Arc::new(AtomicUsize::new(0));
         thread::spawn(/* ... */);  // Loom can't see this thread!
@@ -293,7 +293,7 @@ fn correct_loom_test() {
     use loom::sync::Arc;
     use loom::sync::atomic::AtomicUsize;
     use loom::thread;
-    
+
     loom::model(|| {
         let data = Arc::new(AtomicUsize::new(0));
         let d = data.clone();

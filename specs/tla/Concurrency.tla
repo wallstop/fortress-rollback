@@ -50,17 +50,17 @@ VARIABLES
     cellFrame,          \* The frame stored in the cell
     cellData,           \* The data stored (simplified to a Nat)
     cellChecksum,       \* Checksum stored (optional, Nat or NULL)
-    
+
     \* Mutex state
     lockHolder,         \* Which thread holds the lock (NULL_FRAME if unlocked)
     waitQueue,          \* Queue of threads waiting for lock
-    
+
     \* Per-thread state
     threadState,        \* threadState[t] = current state of thread t
     threadOp,           \* threadOp[t] = current operation thread is performing
     threadFrame,        \* threadFrame[t] = frame argument for operation
     threadData,         \* threadData[t] = data to save or loaded data
-    
+
     \* Auxiliary variables for verification
     saveCount,          \* Count of completed save operations
     loadCount,          \* Count of completed load operations
@@ -187,7 +187,7 @@ AcquireLock(t) ==
     /\ lockHolder' = t
     /\ waitQueue' = Tail(waitQueue)
     /\ threadState' = [threadState EXCEPT ![t] = "holding"]
-    /\ UNCHANGED <<cellFrame, cellData, cellChecksum, threadOp, 
+    /\ UNCHANGED <<cellFrame, cellData, cellChecksum, threadOp,
                    threadFrame, threadData, saveCount, loadCount, history>>
 
 (***************************************************************************)
@@ -219,7 +219,7 @@ ExecuteLoad(t) ==
     /\ threadState' = [threadState EXCEPT ![t] = "loading"]
     /\ loadCount' = loadCount + 1
     /\ history' = Append(history, [op |-> "load", frame |-> cellFrame, thread |-> t])
-    /\ UNCHANGED <<cellFrame, cellData, cellChecksum, lockHolder, waitQueue, 
+    /\ UNCHANGED <<cellFrame, cellData, cellChecksum, lockHolder, waitQueue,
                    threadOp, saveCount>>
 
 (***************************************************************************)
@@ -234,7 +234,7 @@ ExecuteData(t) ==
     /\ threadFrame' = [threadFrame EXCEPT ![t] = cellFrame]
     /\ threadState' = [threadState EXCEPT ![t] = "loading"]  \* Reuse loading state
     /\ history' = Append(history, [op |-> "data", frame |-> cellFrame, thread |-> t])
-    /\ UNCHANGED <<cellFrame, cellData, cellChecksum, lockHolder, waitQueue, 
+    /\ UNCHANGED <<cellFrame, cellData, cellChecksum, lockHolder, waitQueue,
                    threadOp, saveCount, loadCount>>
 
 (***************************************************************************)
@@ -248,7 +248,7 @@ ReleaseLock(t) ==
     /\ threadState' = [threadState EXCEPT ![t] = "idle"]
     /\ threadOp' = [threadOp EXCEPT ![t] = "none"]
     \* Keep threadData for verification (it would be returned to caller)
-    /\ UNCHANGED <<cellFrame, cellData, cellChecksum, waitQueue, 
+    /\ UNCHANGED <<cellFrame, cellData, cellChecksum, waitQueue,
                    threadFrame, threadData, saveCount, loadCount, history>>
 
 (***************************************************************************)

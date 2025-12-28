@@ -11,7 +11,7 @@ def fix_file(filepath: str) -> bool:
     try:
         content = path.read_text(encoding="utf-8")
         lines = content.splitlines(keepends=True)
-        
+
         fixed_lines = []
         modified = False
         for line in lines:
@@ -26,16 +26,16 @@ def fix_file(filepath: str) -> bool:
             elif line.endswith("\r"):
                 ending = "\r"
                 line = line[:-1]
-            
+
             stripped = line.rstrip()
             if stripped != line:
                 modified = True
             fixed_lines.append(stripped + ending)
-        
+
         if modified:
             path.write_text("".join(fixed_lines), encoding="utf-8")
             print(f"Fixed: {filepath}")
-        
+
         return modified
     except (OSError, UnicodeDecodeError):
         return False
@@ -44,12 +44,12 @@ def fix_file(filepath: str) -> bool:
 def main() -> int:
     if len(sys.argv) < 2:
         return 0
-    
+
     modified = False
     for filepath in sys.argv[1:]:
         if fix_file(filepath):
             modified = True
-    
+
     return 1 if modified else 0
 
 

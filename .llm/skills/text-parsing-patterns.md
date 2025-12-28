@@ -32,7 +32,7 @@ pattern = r'<div class="grid"[^>]*>[\s\S]*?</div>'
 def remove_grid_divs(content: str) -> str:
     result = []
     i = 0
-    
+
     while i < len(content):
         # Look for opening grid div
         grid_match = re.match(r'<div\s+class="grid"[^>]*>', content[i:], re.I)
@@ -40,27 +40,27 @@ def remove_grid_divs(content: str) -> str:
             # Track nesting depth
             depth = 1
             j = i + grid_match.end()
-            
+
             while j < len(content) and depth > 0:
                 open_match = re.match(r'<div[^>]*>', content[j:], re.I)
                 if open_match:
                     depth += 1
                     j += open_match.end()
                     continue
-                    
+
                 close_match = re.match(r'</div\s*>', content[j:], re.I)
                 if close_match:
                     depth -= 1
                     j += close_match.end()
                     continue
-                    
+
                 j += 1
-            
+
             i = j  # Skip the entire matched div
         else:
             result.append(content[i])
             i += 1
-    
+
     return ''.join(result)
 ```
 
@@ -111,7 +111,7 @@ pattern = r'\[([^\]]*)\]\(([^)]+)\)'
 ```python
 def extract_links(content: str) -> list[tuple[str, str]]:
     """Extract markdown links.
-    
+
     Known limitations:
     - Nested brackets in link text won't match
     - Parentheses in URLs won't match
@@ -130,7 +130,7 @@ def extract_links_with_parens(content: str) -> list[tuple[str, str]]:
     """Extract links, handling parentheses in URLs."""
     links = []
     i = 0
-    
+
     while i < len(content):
         # Find link start
         if content[i] == '[':
@@ -143,7 +143,7 @@ def extract_links_with_parens(content: str) -> list[tuple[str, str]]:
                 elif content[j] == ']':
                     bracket_depth -= 1
                 j += 1
-            
+
             # Check for (
             if j < len(content) and content[j] == '(':
                 # Find matching ) with balanced counting
@@ -155,15 +155,15 @@ def extract_links_with_parens(content: str) -> list[tuple[str, str]]:
                     elif content[k] == ')':
                         paren_depth -= 1
                     k += 1
-                
+
                 text = content[i+1:j-1]
                 url = content[j+1:k-1]
                 links.append((text, url))
                 i = k
                 continue
-        
+
         i += 1
-    
+
     return links
 ```
 
@@ -188,27 +188,27 @@ pattern = r'`[^`\n]+`'
 ```python
 def find_inline_code_ranges(content: str) -> list[tuple[int, int]]:
     """Find inline code spans with proper handling.
-    
+
     Handles:
     - Standard: `code`
     - Empty: ``
     - Double backticks: ``code with ` inside``
-    
+
     Limitation: Does not handle inline code with newlines
     (rare in practice, would need multi-line mode).
     """
     ranges = []
-    
+
     # Handle double backticks first (can contain single `)
     for match in re.finditer(r'``[^`\n]*``', content):
         ranges.append((match.start(), match.end()))
-    
+
     # Then single backticks, avoiding overlaps
     for match in re.finditer(r'`[^`\n]*`', content):
         start, end = match.start(), match.end()
         if not any(s <= start < e for s, e in ranges):
             ranges.append((start, end))
-    
+
     return ranges
 ```
 
@@ -230,19 +230,19 @@ def find_code_fence_ranges(content: str) -> list[tuple[int, int]]:
     ranges = []
     lines = content.split('\n')
     pos = 0
-    
+
     fence_start = None
     fence_char = None
     fence_len = 0
-    
+
     for line in lines:
         line_start = pos
         stripped = line.lstrip()
-        
+
         if stripped.startswith('```') or stripped.startswith('~~~'):
             char = stripped[0]
             count = len(stripped) - len(stripped.lstrip(char))
-            
+
             if fence_start is None:
                 # Opening fence
                 fence_start = line_start
@@ -254,13 +254,13 @@ def find_code_fence_ranges(content: str) -> list[tuple[int, int]]:
                 fence_start = None
                 fence_char = None
                 fence_len = 0
-        
+
         pos += len(line) + 1
-    
+
     # Handle unclosed fence at EOF
     if fence_start is not None:
         ranges.append((fence_start, len(content)))
-    
+
     return ranges
 ```
 
@@ -370,7 +370,7 @@ def test_link_conversion_roundtrip():
     """Converting links should preserve structure."""
     original = "[Guide]" + "(user-guide.md)"  # Note: split to avoid link checker
     content = "See the " + original + " for details."
-    
+
     # Convert and verify link is still present
     converted = convert_links(content)
     assert "[Guide]" in converted

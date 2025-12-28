@@ -46,10 +46,10 @@
 <!-- Include any relevant details about your testing environment -->
 
 **Tests added/modified:**
-- 
+-
 
 **Manual testing performed:**
-- 
+-
 
 ## Related Issues
 

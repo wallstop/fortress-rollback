@@ -114,7 +114,7 @@ def main() -> int:
             print(f"  - {proof}")
 
     if not has_errors:
-        print(f"✓ All {len(source_proofs)} Kani proofs are covered in verify-kani.sh")
+        print(f"[OK] All {len(source_proofs)} Kani proofs are covered in verify-kani.sh")
         return 0
 
     return 1

@@ -58,7 +58,7 @@ struct SyncResult {
 ///
 /// # Arguments
 /// * `spec_sess` - The spectator session to synchronize
-/// * `host_sess` - The host P2P session to synchronize  
+/// * `host_sess` - The host P2P session to synchronize
 /// * `timeout` - Maximum time to wait for synchronization
 ///
 /// # Returns

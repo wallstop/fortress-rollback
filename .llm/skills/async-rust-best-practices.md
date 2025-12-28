@@ -359,13 +359,13 @@ Remember: dropping a future cancels it. Ensure cleanup happens:
 ```rust
 async fn safe_operation() {
     let temp_file = create_temp_file().await?;
-    
+
     // Use a guard to ensure cleanup
     let _guard = scopeguard::guard((), |_| {
         // This runs even if the future is cancelled
         let _ = std::fs::remove_file(&temp_file);
     });
-    
+
     process_file(&temp_file).await?;
     // Guard drops here, cleaning up
 }
@@ -605,7 +605,7 @@ async fn test_protocol() {
     let writer = tokio_test::io::Builder::new()
         .write(b"world\r\n")
         .build();
-    
+
     handle_connection(reader, writer).await.unwrap();
 }
 ```
@@ -616,19 +616,19 @@ async fn test_protocol() {
 #[tokio::test]
 async fn test_cancellation_cleanup() {
     let (tx, rx) = oneshot::channel();
-    
+
     let handle = tokio::spawn(async move {
         // Setup
         let _guard = scopeguard::guard(tx, |tx| {
             let _ = tx.send(());  // Signal cleanup happened
         });
-        
+
         tokio::time::sleep(Duration::from_secs(100)).await;
     });
-    
+
     // Cancel the task
     handle.abort();
-    
+
     // Verify cleanup occurred
     rx.await.expect("cleanup should have run");
 }
@@ -658,7 +658,7 @@ async fn test_cancellation_cleanup() {
 // CPU-bound work on rayon, communicate via channel
 async fn process_with_rayon(data: Vec<Item>) -> Vec<Result> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    
+
     rayon::spawn(move || {
         let results: Vec<_> = data
             .par_iter()
@@ -666,7 +666,7 @@ async fn process_with_rayon(data: Vec<Item>) -> Vec<Result> {
             .collect();
         let _ = tx.send(results);
     });
-    
+
     rx.await.expect("rayon task completed")
 }
 ```

@@ -426,7 +426,7 @@ During synchronization, peers exchange packets to establish:
 // Poll until synchronized
 loop {
     session.poll_remote_clients();
-    
+
     // Check synchronization events
     for event in session.events() {
         match event {
@@ -439,12 +439,12 @@ loop {
             _ => {}
         }
     }
-    
+
     // Session transitions to Running when all peers synchronized
     if session.current_state() == SessionState::Running {
         break;
     }
-    
+
     std::thread::sleep(Duration::from_millis(16));
 }
 ```
@@ -464,17 +464,17 @@ This is the main gameplay phase where frames are processed:
 while game_running {
     // 1. Poll network (critical - do this frequently)
     session.poll_remote_clients();
-    
+
     // 2. Handle events
     for event in session.events() {
         handle_event(event);
     }
-    
+
     // 3. Only advance frames when Running
     if session.current_state() == SessionState::Running {
         // Add local input
         session.add_local_input(local_handle, input)?;
-        
+
         // Process frame
         for request in session.advance_frame()? {
             match request {
@@ -532,25 +532,25 @@ use fortress_rollback::SyncHealth;
 // Continue until sync verified
 loop {
     session.poll_remote_clients();
-    
+
     // Check if synchronized
     let all_synced = session.local_player_handles()
         .iter()
         .filter_map(|h| session.sync_health(*h))
         .all(|health| matches!(health, SyncHealth::InSync));
-    
+
     if all_synced && session.confirmed_frame() >= target_frame {
         // Safe to terminate - checksums match
         break;
     }
-    
+
     // Check for desync
     for handle in session.local_player_handles() {
         if let Some(SyncHealth::DesyncDetected { frame, .. }) = session.sync_health(handle) {
             panic!("Desync detected at frame {}!", frame);
         }
     }
-    
+
     // Continue processing
     if session.current_state() == SessionState::Running {
         session.add_local_input(handle, input)?;
@@ -558,7 +558,7 @@ loop {
             handle_request(request, &mut state);
         }
     }
-    
+
     std::thread::sleep(Duration::from_millis(1));
 }
 ```

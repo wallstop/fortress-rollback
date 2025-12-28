@@ -372,7 +372,7 @@ act push -s GITHUB_TOKEN="$(gh auth token)"
     # The token is never embedded in the URL string
     git config --global credential.helper '!f() { echo "password=${GITHUB_TOKEN}"; }; f'
     git config --global credential.https://github.com.username "x-access-token"
-    
+
     # Clone using plain URL (credentials provided by helper)
     git clone "https://github.com/owner/repo.wiki.git" wiki
 ```

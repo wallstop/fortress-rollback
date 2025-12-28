@@ -295,9 +295,9 @@ for x in slice.iter().copied() {
 ```rust
 impl Iterator for MyIterator {
     type Item = Item;
-    
+
     fn next(&mut self) -> Option<Self::Item> { /* ... */ }
-    
+
     // ✅ Enables pre-allocation in collect()
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.remaining, Some(self.remaining))
@@ -503,7 +503,7 @@ Rust reorders struct fields by default for better packing, but consider:
 mod tests {
     use super::*;
     use std::mem::size_of;
-    
+
     #[test]
     fn type_sizes_are_optimal() {
         assert!(size_of::<MyStruct>() <= 64);  // Fits in cache line

@@ -514,14 +514,14 @@ fn load_config() -> Config {
 // ✅ AFTER: Rich error types with context
 fn load_config() -> Result<Config, ConfigError> {
     let content = fs::read_to_string("config.toml")
-        .map_err(|e| ConfigError::ReadFailed { 
-            path: "config.toml".into(), 
-            source: e 
+        .map_err(|e| ConfigError::ReadFailed {
+            path: "config.toml".into(),
+            source: e
         })?;
     toml::from_str(&content)
-        .map_err(|e| ConfigError::ParseFailed { 
-            path: "config.toml".into(), 
-            source: e 
+        .map_err(|e| ConfigError::ParseFailed {
+            path: "config.toml".into(),
+            source: e
         })
 }
 ```
@@ -556,9 +556,9 @@ fn get_player(players: &[Player], index: usize) -> Option<&Player> {
 // ✅ AFTER Result: Returns Result with context
 fn get_player(players: &[Player], index: usize) -> Result<&Player, PlayerError> {
     players.get(index)
-        .ok_or(PlayerError::InvalidIndex { 
-            index, 
-            player_count: players.len() 
+        .ok_or(PlayerError::InvalidIndex {
+            index,
+            player_count: players.len()
         })
 }
 ```
@@ -801,7 +801,7 @@ impl Game {
         self.update_state();
         self.render_state();
     }
-    
+
     fn update_state(&mut self) { /* uses self.state */ }
     fn render_state(&mut self) { /* uses self.renderer and self.state */ }
 }
@@ -822,7 +822,7 @@ impl Game {
     fn parts_mut(&mut self) -> (&mut State, &mut Renderer) {
         (&mut self.state, &mut self.renderer)
     }
-    
+
     fn update(&mut self) {
         let (state, renderer) = self.parts_mut();
         state.tick();
@@ -1104,7 +1104,7 @@ use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
 
 fn benchmark_before(c: &mut Criterion) {
     let data = generate_test_data();
-    
+
     c.bench_function("operation_before", |b| {
         b.iter(|| operation_before(&data))
     });
@@ -1112,7 +1112,7 @@ fn benchmark_before(c: &mut Criterion) {
 
 fn benchmark_after(c: &mut Criterion) {
     let data = generate_test_data();
-    
+
     c.bench_function("operation_after", |b| {
         b.iter(|| operation_after(&data))
     });
@@ -1121,19 +1121,19 @@ fn benchmark_after(c: &mut Criterion) {
 // Compare multiple input sizes
 fn benchmark_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("scaling");
-    
+
     for size in [100, 1000, 10000, 100000].iter() {
         let data = generate_data_of_size(*size);
-        
+
         group.bench_with_input(BenchmarkId::new("before", size), &data, |b, data| {
             b.iter(|| operation_before(data))
         });
-        
+
         group.bench_with_input(BenchmarkId::new("after", size), &data, |b, data| {
             b.iter(|| operation_after(data))
         });
     }
-    
+
     group.finish();
 }
 ```

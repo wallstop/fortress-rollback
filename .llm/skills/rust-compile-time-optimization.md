@@ -537,10 +537,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      
+
       - name: Check
         run: cargo check --all-targets --all-features
-      
+
       - name: Clippy
         run: cargo clippy --all-targets --all-features
 
@@ -551,10 +551,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      
+
       - name: Compile tests
         run: cargo test --no-run --locked
-      
+
       - name: Run tests
         run: cargo nextest run
 ```

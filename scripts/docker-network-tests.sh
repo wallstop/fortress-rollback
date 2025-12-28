@@ -171,7 +171,7 @@ run_test() {
     local result
     result=$(awk '
         /"success": *true/ { success_count++ }
-        /"checksum": *[0-9]/ { 
+        /"checksum": *[0-9]/ {
             # Extract checksum value using gsub to strip non-digits
             gsub(/.*"checksum": */, "")
             gsub(/[^0-9].*/, "")

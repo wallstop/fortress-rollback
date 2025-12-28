@@ -19,18 +19,18 @@ Instead of callbacks, return requests that the caller must fulfill in order. Thi
 /// Requests returned by advance_frame()
 pub enum RollbackRequest<T: Config> {
     /// Save the current game state for potential rollback
-    SaveGameState { 
-        cell: GameStateCell<T>, 
-        frame: Frame 
+    SaveGameState {
+        cell: GameStateCell<T>,
+        frame: Frame
     },
     /// Load a previously saved state (rollback is happening)
-    LoadGameState { 
-        cell: GameStateCell<T>, 
-        frame: Frame 
+    LoadGameState {
+        cell: GameStateCell<T>,
+        frame: Frame
     },
     /// Advance the simulation one frame with these inputs
-    AdvanceFrame { 
-        inputs: PlayerInputs<T> 
+    AdvanceFrame {
+        inputs: PlayerInputs<T>
     },
 }
 
@@ -38,11 +38,11 @@ pub enum RollbackRequest<T: Config> {
 fn game_loop(session: &mut Session<Config>, game: &mut Game) -> Result<(), Error> {
     // 1. Poll network
     session.poll_remote_clients();
-    
+
     // 2. Add local input
     let input = game.read_local_input();
     session.add_local_input(local_handle, input)?;
-    
+
     // 3. Process requests in order
     for request in session.advance_frame()? {
         match request {
@@ -58,7 +58,7 @@ fn game_loop(session: &mut Session<Config>, game: &mut Game) -> Result<(), Error
             }
         }
     }
-    
+
     Ok(())
 }
 ```
@@ -96,7 +96,7 @@ impl Game {
     fn advance_frame(&mut self, inputs: &PlayerInputs) {
         // Update simulation (deterministic)
         self.sim.update(inputs);
-        
+
         // Derive presentation from simulation
         // (re-derived after rollback, so always correct)
         self.presentation.sync_with(&self.sim);
@@ -124,7 +124,7 @@ impl RollbackBuilder {
         self.components.push(ComponentRegistration::new::<C>());
         self
     }
-    
+
     /// Register a resource for automatic snapshot/restore
     pub fn register_resource<R: Clone + Send + Sync + 'static>(&mut self) -> &mut Self {
         self.resources.push(ResourceRegistration::new::<R>());
@@ -206,7 +206,7 @@ fn bad_system(query: Query<&mut Position>) {
 fn good_system(mut query: Query<(&Rollback, &mut Position)>) {
     let mut items: Vec<_> = query.iter_mut().collect();
     items.sort_by_key(|(rb, _)| rb.id());
-    
+
     for (_, mut pos) in items {
         // ✅ Deterministic order
     }
@@ -234,11 +234,11 @@ pub struct CloneStrategy;
 
 impl<C: Clone> SnapshotStrategy<C> for CloneStrategy {
     type Snapshot = C;
-    
+
     fn save(component: &C) -> C {
         component.clone()
     }
-    
+
     fn load(snapshot: &C) -> C {
         snapshot.clone()
     }
@@ -249,11 +249,11 @@ pub struct CopyStrategy;
 
 impl<C: Copy> SnapshotStrategy<C> for CopyStrategy {
     type Snapshot = C;
-    
+
     fn save(component: &C) -> C {
         *component
     }
-    
+
     fn load(snapshot: &C) -> C {
         *snapshot
     }
@@ -264,11 +264,11 @@ pub struct SerdeStrategy;
 
 impl<C: Serialize + DeserializeOwned> SnapshotStrategy<C> for SerdeStrategy {
     type Snapshot = Vec<u8>;
-    
+
     fn save(component: &C) -> Vec<u8> {
         bincode::serialize(component).expect("serialization failed")
     }
-    
+
     fn load(snapshot: &Vec<u8>) -> C {
         bincode::deserialize(snapshot).expect("deserialization failed")
     }
@@ -324,19 +324,19 @@ Define the minimum interface your rollback system needs:
 pub trait RollbackEngine {
     /// The type representing complete game state
     type State: Clone;
-    
+
     /// The type representing player input
     type Input: Copy + Default;
-    
+
     /// Save the current state
     fn save_state(&self) -> Self::State;
-    
+
     /// Restore to a previous state
     fn load_state(&mut self, state: &Self::State);
-    
+
     /// Advance simulation by one frame with given inputs
     fn advance(&mut self, inputs: &[Self::Input]);
-    
+
     /// Compute checksum for desync detection
     fn checksum(&self) -> u64;
 }
@@ -354,7 +354,7 @@ impl<E: RollbackEngine> RollbackManager<E> {
             self.engine.load_state(state);
         }
     }
-    
+
     pub fn resimulate_to(&mut self, target_frame: Frame) {
         let current = self.current_frame();
         for frame in current..target_frame {
@@ -386,7 +386,7 @@ struct DeltaRollback {
 
 impl DeltaRollback {
     /// Record a property change
-    fn record_change(&mut self, entity: EntityId, property: PropertyId, 
+    fn record_change(&mut self, entity: EntityId, property: PropertyId,
                      old: PropertyValue, frame: Frame) {
         self.changes.push(PropertyChange {
             entity,
@@ -394,11 +394,11 @@ impl DeltaRollback {
             old_value: old,
             frame,
         });
-        
+
         // Prune old changes
         self.changes.retain(|c| frame - c.frame < self.max_frames);
     }
-    
+
     /// Rollback all changes since target frame
     fn rollback_to(&self, world: &mut World, target_frame: Frame) {
         // Apply changes in reverse order
@@ -490,16 +490,16 @@ impl<I: Copy + Default> PlayerInputQueue<I> {
     pub fn get(&self, frame: Frame) -> (I, InputStatus) {
         // Check for confirmed input
         if let Some(input) = self.inputs.iter()
-            .find(|i| i.frame == frame && i.status == InputStatus::Confirmed) 
+            .find(|i| i.frame == frame && i.status == InputStatus::Confirmed)
         {
             return (input.input, InputStatus::Confirmed);
         }
-        
+
         // Predict based on last confirmed
         let predicted = self.predict_for(frame);
         (predicted, InputStatus::Predicted)
     }
-    
+
     fn predict_for(&self, _frame: Frame) -> I {
         // Default: repeat last known input
         self.inputs.back()
@@ -526,22 +526,22 @@ fn checksum_hasher() -> impl Hasher {
 /// Compute checksum of game state
 fn compute_checksum(state: &GameState) -> u64 {
     let mut hasher = checksum_hasher();
-    
+
     // Hash in deterministic order
     hasher.write_u32(state.frame);
-    
+
     for player in &state.players {
         player.hash(&mut hasher);
     }
-    
+
     // Sort entities by ID before hashing
     let mut entities: Vec<_> = state.entities.iter().collect();
     entities.sort_by_key(|e| e.id);
-    
+
     for entity in entities {
         entity.hash(&mut hasher);
     }
-    
+
     hasher.finish()
 }
 
@@ -576,10 +576,10 @@ impl DesyncDetector {
             // Send checksum to remote peer
         }
     }
-    
+
     fn on_remote_checksum(&mut self, frame: Frame, checksum: u64) -> Option<DesyncInfo> {
         self.remote_checksums.insert(frame, checksum);
-        
+
         // Check for mismatch
         if let Some(&local) = self.local_checksums.get(&frame) {
             if local != checksum {
@@ -621,7 +621,7 @@ impl TimeSynchronizer {
     fn frames_ahead(&self) -> i32 {
         self.local_frame as i32 - self.remote_frame as i32
     }
-    
+
     /// Recommended frame delay to apply
     fn recommended_delay(&self) -> f32 {
         let ahead = self.frames_ahead();
@@ -641,7 +641,7 @@ impl TimeSynchronizer {
 fn game_loop_with_sync(sync: &TimeSynchronizer, base_fps: f32) {
     let adjusted_fps = base_fps * sync.recommended_delay();
     let frame_duration = Duration::from_secs_f32(1.0 / adjusted_fps);
-    
+
     // Use adjusted frame duration for timing
 }
 ```
@@ -659,7 +659,7 @@ fn handle_wait_recommendation(rec: WaitRecommendation, game: &mut Game) {
     for _ in 0..rec.skip_frames {
         game.advance_simulation_only();
     }
-    
+
     // Option 2: Add artificial delay
     // std::thread::sleep(Duration::from_millis(rec.skip_frames as u64 * 16));
 }
@@ -691,18 +691,18 @@ impl RollbackDebugOverlay {
             rollback_frames: current_frame - target_frame,
             timestamp: Instant::now(),
         });
-        
+
         if self.recent_rollbacks.len() > self.max_display {
             self.recent_rollbacks.pop_front();
         }
     }
-    
+
     fn render(&self, ui: &mut Ui) {
         ui.label(format!("Recent rollbacks: {}", self.recent_rollbacks.len()));
         for event in &self.recent_rollbacks {
             let age = event.timestamp.elapsed().as_secs_f32();
             if age < 2.0 {
-                ui.label(format!("Frame {}: rolled back {} frames", 
+                ui.label(format!("Frame {}: rolled back {} frames",
                     event.frame, event.rollback_frames));
             }
         }
@@ -716,20 +716,20 @@ impl RollbackDebugOverlay {
 /// Compare two states to find divergence
 fn diff_states(a: &GameState, b: &GameState) -> Vec<StateDiff> {
     let mut diffs = Vec::new();
-    
+
     if a.frame != b.frame {
         diffs.push(StateDiff::Frame { a: a.frame, b: b.frame });
     }
-    
+
     for i in 0..a.players.len().max(b.players.len()) {
         let player_a = a.players.get(i);
         let player_b = b.players.get(i);
-        
+
         match (player_a, player_b) {
             (Some(pa), Some(pb)) if pa != pb => {
-                diffs.push(StateDiff::Player { 
-                    index: i, 
-                    diff: diff_players(pa, pb) 
+                diffs.push(StateDiff::Player {
+                    index: i,
+                    diff: diff_players(pa, pb)
                 });
             }
             (Some(_), None) => diffs.push(StateDiff::PlayerMissing { index: i, in_a: true }),
@@ -737,7 +737,7 @@ fn diff_states(a: &GameState, b: &GameState) -> Vec<StateDiff> {
             _ => {}
         }
     }
-    
+
     diffs
 }
 

@@ -342,7 +342,7 @@ cargo tree -i getrandom
 #[test]
 fn test_deterministic_iteration() {
     use std::collections::BTreeMap;
-    
+
     // Run multiple times with same data in different insertion orders
     for _ in 0..10 {
         let mut map1 = BTreeMap::new();
@@ -357,7 +357,7 @@ fn test_deterministic_iteration() {
 
         let vec1: Vec<_> = map1.iter().collect();
         let vec2: Vec<_> = map2.iter().collect();
-        
+
         assert_eq!(vec1, vec2, "Iteration order must be deterministic");
     }
 }
@@ -366,11 +366,11 @@ fn test_deterministic_iteration() {
 fn test_game_state_reproducibility() {
     let seed = 12345u64;
     let inputs = generate_test_inputs();
-    
+
     // Run game twice with same inputs
     let state1 = run_game(seed, &inputs);
     let state2 = run_game(seed, &inputs);
-    
+
     // Must produce identical checksums
     assert_eq!(
         state1.checksum, state2.checksum,
@@ -393,7 +393,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    
+
     steps:
       - uses: actions/checkout@v4
       - name: Generate checksum
@@ -402,7 +402,7 @@ jobs:
         with:
           name: checksum-${{ matrix.os }}
           path: checksum.txt
-  
+
   verify:
     needs: test
     runs-on: ubuntu-latest
@@ -464,7 +464,7 @@ impl PlayerRegistry {
             player.update(delta);
         }
     }
-    
+
     fn compute_checksum(&self) -> u64 {
         let mut hasher = DeterministicHasher::new();
         // Order is guaranteed, so checksum is deterministic
@@ -517,22 +517,22 @@ impl<T> ComponentStore<T> {
     fn new() -> Self {
         Self { components: IndexMap::new() }
     }
-    
+
     fn insert(&mut self, id: EntityId, component: T) {
         // Insertion order is preserved
         self.components.insert(id, component);
     }
-    
+
     fn get(&self, id: &EntityId) -> Option<&T> {
         // O(1) lookup
         self.components.get(id)
     }
-    
+
     fn iter(&self) -> impl Iterator<Item = (&EntityId, &T)> {
         // Iterates in insertion order (deterministic if insertions are)
         self.components.iter()
     }
-    
+
     /// Sort by key for fully deterministic iteration
     fn iter_sorted(&self) -> impl Iterator<Item = (&EntityId, &T)>
     where
@@ -553,7 +553,7 @@ impl<T> ComponentStore<T> {
 /// Deterministic map - iteration order guaranteed by key ordering
 pub type DetMap<K, V> = std::collections::BTreeMap<K, V>;
 
-/// Deterministic set - iteration order guaranteed by value ordering  
+/// Deterministic set - iteration order guaranteed by value ordering
 pub type DetSet<T> = std::collections::BTreeSet<T>;
 
 /// Insertion-order map - deterministic if insertion order is deterministic
@@ -762,11 +762,11 @@ use indexmap::IndexMap;
 
 fn benchmark_iteration(c: &mut Criterion) {
     let n = 10_000;
-    
+
     let hash_map: HashMap<i32, i32> = (0..n).map(|i| (i, i)).collect();
     let btree_map: BTreeMap<i32, i32> = (0..n).map(|i| (i, i)).collect();
     let index_map: IndexMap<i32, i32> = (0..n).map(|i| (i, i)).collect();
-    
+
     c.bench_function("HashMap iterate", |b| {
         b.iter(|| {
             let mut keys: Vec<_> = hash_map.keys().collect();
@@ -774,11 +774,11 @@ fn benchmark_iteration(c: &mut Criterion) {
             keys.iter().map(|k| hash_map[k]).sum::<i32>()
         })
     });
-    
+
     c.bench_function("BTreeMap iterate", |b| {
         b.iter(|| hash_map.values().sum::<i32>())
     });
-    
+
     c.bench_function("IndexMap iterate", |b| {
         b.iter(|| index_map.values().sum::<i32>())
     });

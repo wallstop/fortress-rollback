@@ -101,7 +101,7 @@ impl Position {
             y: I32F32::from_num(y),
         }
     }
-    
+
     fn distance_squared(&self, other: &Self) -> I32F32 {
         let dx = self.x - other.x;
         let dy = self.y - other.y;
@@ -132,21 +132,21 @@ struct SubpixelPosition {
 
 impl SubpixelPosition {
     const SCALE: i32 = 256;
-    
+
     fn from_pixels(x: f32, y: f32) -> Self {
         Self {
             x: (x * Self::SCALE as f32) as i32,
             y: (y * Self::SCALE as f32) as i32,
         }
     }
-    
+
     fn to_pixels(&self) -> (f32, f32) {
         (
             self.x as f32 / Self::SCALE as f32,
             self.y as f32 / Self::SCALE as f32,
         )
     }
-    
+
     fn add_velocity(&mut self, vx: i32, vy: i32) {
         self.x = self.x.wrapping_add(vx);
         self.y = self.y.wrapping_add(vy);
@@ -178,7 +178,7 @@ impl GameState {
             rng: Pcg64::seed_from_u64(seed),
         }
     }
-    
+
     fn random_range(&mut self, min: i32, max: i32) -> i32 {
         self.rng.gen_range(min..max)
     }
@@ -195,7 +195,7 @@ impl GameState {
             // ... other state
         }
     }
-    
+
     fn load(&mut self, saved: &SavedState) {
         self.rng = saved.rng.clone();  // ← Restore RNG too!
         // ... other state
@@ -411,7 +411,7 @@ pub struct Rollback(pub u32);
 fn update_system(mut query: Query<(&Rollback, &mut Position)>) {
     let mut items: Vec<_> = query.iter_mut().collect();
     items.sort_by_key(|(rb, _)| *rb);
-    
+
     for (_, mut pos) in items {
         // Now deterministic!
     }
@@ -427,11 +427,11 @@ pub trait DeterministicIter<'w, 's> {
     fn iter_sorted(&'w mut self) -> Vec<Self::Item>;
 }
 
-impl<'w, 's, T: Component> DeterministicIter<'w, 's> 
-    for Query<'w, 's, (&Rollback, &mut T)> 
+impl<'w, 's, T: Component> DeterministicIter<'w, 's>
+    for Query<'w, 's, (&Rollback, &mut T)>
 {
     type Item = (Mut<'w, T>,);
-    
+
     fn iter_sorted(&'w mut self) -> Vec<Self::Item> {
         let mut items: Vec<_> = self.iter_mut().collect();
         items.sort_by_key(|(rb, _)| rb.0);
@@ -467,7 +467,7 @@ pub struct FrameCount(pub u32);
 
 fn good_system(mut frame: ResMut<FrameCount>) {
     frame.0 += 1;
-    
+
     // Time in seconds (deterministic)
     let time_seconds = frame.0 as f32 / 60.0;
 }
@@ -493,11 +493,11 @@ fn physics_update(mut pos: Mut<Position>, vel: &Velocity) {
 fn test_determinism_via_replay() {
     let seed = 12345u64;
     let inputs = generate_test_inputs();
-    
+
     // Run twice with same seed and inputs
     let result1 = run_game(seed, &inputs);
     let result2 = run_game(seed, &inputs);
-    
+
     // Must be identical
     assert_eq!(result1.final_state, result2.final_state);
     assert_eq!(result1.checksum, result2.checksum);
@@ -511,12 +511,12 @@ fn test_determinism_via_replay() {
 fn test_determinism_multi_instance() {
     let seed = 12345u64;
     let inputs = generate_test_inputs();
-    
+
     // Run many times
     let results: Vec<_> = (0..10)
         .map(|_| run_game(seed, &inputs))
         .collect();
-    
+
     // All must match first
     let first = &results[0];
     for (i, result) in results.iter().enumerate().skip(1) {
@@ -542,11 +542,11 @@ impl SyncTestSession {
         // Advance both copies
         self.game.advance(input);
         self.shadow_game.advance(input);
-        
+
         // Compare checksums
         let checksum1 = self.game.checksum();
         let checksum2 = self.shadow_game.checksum();
-        
+
         assert_eq!(
             checksum1, checksum2,
             "DESYNC at frame {}: {} != {}",
@@ -570,20 +570,20 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    
+
     steps:
       - uses: actions/checkout@v4
       - name: Run determinism tests
         run: cargo test determinism -- --nocapture
-      
+
       - name: Save checksum
         run: cargo run --example generate_checksum > checksum-${{ matrix.os }}.txt
-      
+
       - uses: actions/upload-artifact@v4
         with:
           name: checksums
           path: checksum-*.txt
-  
+
   verify:
     needs: test
     runs-on: ubuntu-latest
@@ -611,22 +611,22 @@ fn portable_hasher() -> impl Hasher {
 
 fn compute_checksum(state: &GameState) -> u64 {
     let mut hasher = portable_hasher();
-    
+
     // Hash all game state in deterministic order
     state.frame.hash(&mut hasher);
-    
+
     // Players in index order (deterministic)
     for player in &state.players {
         hash_player(player, &mut hasher);
     }
-    
+
     // Entities sorted by ID
     let mut entities: Vec<_> = state.entities.iter().collect();
     entities.sort_by_key(|e| e.id);
     for entity in entities {
         hash_entity(entity, &mut hasher);
     }
-    
+
     hasher.finish()
 }
 
@@ -647,16 +647,16 @@ fn component_checksum<C: Component + Hash>(
     query: Query<(&Rollback, &C)>
 ) -> u64 {
     let mut hasher = portable_hasher();
-    
+
     // Sort by Rollback ID
     let mut items: Vec<_> = query.iter().collect();
     items.sort_by_key(|(rb, _)| rb.0);
-    
+
     for (rb, component) in items {
         rb.0.hash(&mut hasher);
         component.hash(&mut hasher);
     }
-    
+
     hasher.finish()
 }
 ```
@@ -797,18 +797,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Build first time
         run: cargo build --release
-        
+
       - name: Save checksum
         run: sha256sum target/release/myapp > first.sha256
-        
+
       - name: Clean and rebuild
         run: |
           cargo clean
           cargo build --release
-          
+
       - name: Compare checksums
         run: sha256sum -c first.sha256
 ```
@@ -820,10 +820,10 @@ jobs:
 #[test]
 fn test_runtime_determinism() {
     let inputs = vec![/* test inputs */];
-    
+
     let result1 = run_simulation(42, &inputs);  // Seed 42
     let result2 = run_simulation(42, &inputs);  // Same seed
-    
+
     assert_eq!(result1, result2, "Non-determinism detected!");
 }
 
@@ -831,9 +831,9 @@ fn test_runtime_determinism() {
 #[test]
 fn stress_test_determinism() {
     let inputs = vec![/* test inputs */];
-    
+
     let baseline = run_simulation(42, &inputs);
-    
+
     for _ in 0..1000 {
         let result = run_simulation(42, &inputs);
         assert_eq!(baseline, result, "Rare non-determinism found!");
@@ -849,7 +849,7 @@ fn stress_test_determinism() {
 
 Proc macros execute arbitrary code at compile time and can:
 - Access filesystem
-- Make network requests  
+- Make network requests
 - Use system RNG
 - Behave differently based on environment
 
@@ -919,14 +919,14 @@ let sum = values.iter().copied().collect::<Sum2<_>>().sum();
 fn kahan_sum(values: &[f64]) -> f64 {
     let mut sum = 0.0;
     let mut compensation = 0.0;
-    
+
     for &value in values {
         let y = value - compensation;
         let t = sum + y;
         compensation = (t - sum) - y;
         sum = t;
     }
-    
+
     sum
 }
 ```
@@ -1106,4 +1106,3 @@ rand_pcg = "0.3"  # Seeded only
 ---
 
 *Determinism is the foundation of rollback netcode. Get this right first, then build networking on top.*
-

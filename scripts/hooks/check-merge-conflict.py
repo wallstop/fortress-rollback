@@ -30,12 +30,12 @@ def check_file(filepath: str) -> bool:
 def main() -> int:
     if len(sys.argv) < 2:
         return 0
-    
+
     all_clean = True
     for filepath in sys.argv[1:]:
         if not check_file(filepath):
             all_clean = False
-    
+
     return 0 if all_clean else 1
 
 

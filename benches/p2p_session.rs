@@ -32,7 +32,7 @@ struct BenchInput {
     stick_y: i8,
 }
 
-/// Simple test state type for benchmarking  
+/// Simple test state type for benchmarking
 #[derive(Clone, Debug, Default)]
 struct BenchState {
     frame: i32,

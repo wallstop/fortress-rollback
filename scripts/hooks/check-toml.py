@@ -20,7 +20,7 @@ def check_file(filepath: str) -> bool:
     """Check if TOML file is valid. Returns True if valid."""
     if not HAS_TOML:
         return True
-    
+
     path = Path(filepath)
     try:
         content = path.read_bytes()
@@ -34,16 +34,16 @@ def check_file(filepath: str) -> bool:
 def main() -> int:
     if len(sys.argv) < 2:
         return 0
-    
+
     if not HAS_TOML:
         print("Warning: tomllib/tomli not available, skipping TOML validation")
         return 0
-    
+
     all_valid = True
     for filepath in sys.argv[1:]:
         if not check_file(filepath):
             all_valid = False
-    
+
     return 0 if all_valid else 1
 
 

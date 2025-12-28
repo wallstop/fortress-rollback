@@ -436,7 +436,7 @@ fn process() {
 mod tests {
     #![allow(clippy::unwrap_used)]  // OK in tests
     #![allow(clippy::panic)]         // OK in tests
-    
+
     #[test]
     fn it_works() {
         assert_eq!(2 + 2, 4);

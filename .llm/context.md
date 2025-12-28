@@ -493,10 +493,10 @@ fn descriptive_name_explaining_what_is_tested() {
     // Arrange: Set up test conditions
     let mut session = create_test_session();
     let input = prepare_test_input();
-    
+
     // Act: Execute the behavior being tested
     let result = session.some_operation(input);
-    
+
     // Assert: Verify expected outcomes
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), expected_value);
@@ -534,7 +534,7 @@ Names should describe: **what** + **condition** + **expected behavior**
 fn test1() { }
 fn it_works() { }
 
-// ✅ GOOD  
+// ✅ GOOD
 fn parse_empty_input_returns_none() { }
 fn session_with_zero_players_returns_error() { }
 fn rollback_preserves_confirmed_frames() { }
@@ -685,13 +685,13 @@ fn z3_proof_property_holds() {
     let cfg = Config::new();
     with_z3_config(&cfg, || {
         let solver = Solver::new();
-        
+
         let x = Int::fresh_const("x");        // Symbolic variable
         solver.assert(x.ge(0));               // Precondition
-        
+
         let result = &x % 128;                // Computation
         solver.assert(result.ge(128));        // Negate property to prove
-        
+
         // UNSAT = property holds (no counterexample)
         assert_eq!(solver.check(), SatResult::Unsat);
     });
@@ -747,14 +747,14 @@ fn test_concurrent_access() {
     loom::model(|| {
         let data = Arc::new(AtomicUsize::new(0));
         let data2 = data.clone();
-        
+
         let t = thread::spawn(move || {
             data2.fetch_add(1, Ordering::SeqCst);
         });
-        
+
         data.fetch_add(1, Ordering::SeqCst);
         t.join().unwrap();
-        
+
         assert_eq!(data.load(Ordering::SeqCst), 2);
     });
 }
@@ -900,7 +900,7 @@ proptest! {
         let decoded = decode(&encoded)?;
         prop_assert_eq!(data, decoded);
     }
-    
+
     #[test]
     fn prop_invariant_maintained(ops in prop::collection::vec(any::<Op>(), 0..100)) {
         let mut state = State::new();
