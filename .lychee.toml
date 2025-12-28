@@ -1,0 +1,122 @@
+# Lychee link checker configuration
+# https://lychee.cli.rs/configuration/
+
+# ============================================================================
+# Output settings
+# ============================================================================
+verbose = false
+no_progress = true
+format = "markdown"
+
+# ============================================================================
+# Network settings
+# ============================================================================
+# Accept these status codes as valid
+accept = [200, 204, 301, 302, 307, 308]
+
+# Timeout for network requests
+timeout = 30
+
+# Number of retries before giving up on a link
+max_retries = 3
+
+# Maximum concurrent requests (lower to avoid rate limiting)
+max_concurrency = 8
+
+# User agent to avoid being blocked (version-agnostic to avoid maintenance burden)
+user_agent = "Mozilla/5.0 (compatible; lychee; +https://github.com/lycheeverse/lychee)"
+
+# ============================================================================
+# Cache settings (faster subsequent runs)
+# ============================================================================
+cache = true
+max_cache_age = "1d"
+
+# ============================================================================
+# Exclusions - URLs to ignore
+# ============================================================================
+exclude = [
+    # Localhost and private network URLs
+    "^https?://localhost",
+    "^https?://127\\.0\\.0\\.1",
+    "^https?://\\[::1\\]",
+    "^https?://0\\.0\\.0\\.0",
+    "^https?://192\\.168\\.",
+    "^https?://10\\.",
+    "^https?://172\\.(1[6-9]|2[0-9]|3[0-1])\\.",
+
+    # Placeholder and example URLs
+    "^https?://example\\.com",
+    "^https?://example\\.org",
+    "^https?://example\\.net",
+    "^https?://(www\\.)?your-domain",
+    "^https?://(www\\.)?placeholder",
+
+    # Not-yet-published crate/docs URLs (will 404 until published)
+    "^https://docs\\.rs/fortress-rollback",
+    "^https://crates\\.io/crates/fortress-rollback",
+    "^https://github\\.com/wallstop/fortress-rollback/compare/v",
+    "^https://github\\.com/wallstop/fortress-rollback/releases/tag/v",
+    "^https://github\\.com/wallstop/fortress-rollback/issues/new\\?.*template=",
+
+    # Rate-limited sites
+    "^https://twitter\\.com",
+    "^https://x\\.com",
+    "^https://www\\.linkedin\\.com",
+
+    # Sites that block automated requests
+    "^https://medium\\.com",
+]
+
+# Exclude mail links
+exclude_mail = true
+
+# Exclude these paths from being checked
+exclude_path = [
+    "target",
+    "fuzz/target",
+    "loom-tests/target",
+    ".git",
+    "node_modules",
+    # Progress notes may have temporary/draft links
+    "progress",
+]
+
+# ============================================================================
+# File type settings
+# ============================================================================
+# Include hidden files
+include_verbatim = true
+
+# Check links in these file extensions
+include_fragments = true
+
+# Treat relative links as valid if they point to existing files
+fallback_extensions = ["html", "htm", "md"]
+
+# ============================================================================
+# Request settings
+# ============================================================================
+# Don't follow redirects (we accept redirect status codes)
+max_redirects = 10
+
+# Skip these schemes
+exclude_all_private = true
+
+# Require HTTPS for external links (warn only, don't fail)
+require_https = false
+
+# Include links in source code comments
+include_fragments = true
+
+# ============================================================================
+# GitHub-specific settings
+# ============================================================================
+# GitHub token can be set via GITHUB_TOKEN env var for higher rate limits
+# github_token = ""
+
+# ============================================================================
+# Glob patterns for files to check (when not specified on command line)
+# ============================================================================
+# This is used when running lychee without file arguments
+# glob_ignore_case = true

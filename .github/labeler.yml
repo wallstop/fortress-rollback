@@ -1,0 +1,42 @@
+# Configuration for actions/labeler@v5
+# See: https://github.com/actions/labeler
+
+# Area labels based on changed paths
+area/core:
+  - changed-files:
+      - any-glob-to-any-file: 'src/**'
+
+area/tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'tests/**'
+          - 'fuzz/**'
+          - 'loom-tests/**'
+
+area/docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+          - 'docs/**'
+
+area/ci:
+  - changed-files:
+      - any-glob-to-any-file: '.github/**'
+
+area/benchmarks:
+  - changed-files:
+      - any-glob-to-any-file: 'benches/**'
+
+area/examples:
+  - changed-files:
+      - any-glob-to-any-file: 'examples/**'
+
+area/specs:
+  - changed-files:
+      - any-glob-to-any-file: 'specs/**'
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/Cargo.toml'
+          - '**/Cargo.lock'

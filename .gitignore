@@ -43,3 +43,5 @@ states.dot
 loom-tests/target/**
 mutants.out/**
 progress/**
+# Lychee link checker cache
+.lycheecache

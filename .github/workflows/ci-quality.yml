@@ -2,6 +2,7 @@ name: CI - Code Quality
 
 # Additional static analysis tools for enhanced code quality
 # Includes:
+# - typos: Fast spell checker for source code
 # - cargo-spellcheck: Spelling and grammar in documentation
 # - cargo-shear: Fast unused dependency detection
 #
@@ -40,6 +41,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ============================================================================
+  # TYPOS - FAST SOURCE CODE SPELL CHECKER
+  # ============================================================================
+  typos:
+    name: Spell Check (typos)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Check spelling with typos
+        uses: crate-ci/typos@v1.28.4
+        with:
+          config: .typos.toml
+
   # ============================================================================
   # CARGO SHEAR - FAST UNUSED DEPENDENCY DETECTION
   # ============================================================================
@@ -160,7 +178,7 @@ jobs:
   quality-summary:
     name: Quality Summary
     runs-on: ubuntu-latest
-    needs: [unused-deps-fast, spellcheck]
+    needs: [typos, unused-deps-fast, spellcheck]
     if: always()
 
     steps:
@@ -183,12 +201,14 @@ jobs:
             echo ""
             echo "| Check | Status |"
             echo "|-------|--------|"
+            echo "| Spell Check (typos) | $(map_status '${{ needs.typos.result }}') |"
             echo "| Unused Dependencies (cargo-shear) | $(map_status '${{ needs.unused-deps-fast.result }}') |"
             echo "| Documentation Spelling | $(map_status '${{ needs.spellcheck.result }}') |"
             echo ""
             echo "### Recommendations"
             echo ""
             echo "- Review any warnings in the individual job logs"
+            echo "- Run \`typos\` locally to check for spelling issues in source code"
             echo "- Run \`cargo shear\` locally to check for unused dependencies"
             echo "- Run \`cargo spellcheck fix\` to auto-fix spelling issues"
           } >> "$GITHUB_STEP_SUMMARY"

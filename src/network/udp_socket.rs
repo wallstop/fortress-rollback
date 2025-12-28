@@ -173,7 +173,7 @@ impl UdpNonBlockingSocket {
         // encode well). So we should let the user of fortress-rollback know about that, so they can fix it by
         // reducing the size of their input struct.
         //
-        // On the other hand, the occaisional large packet is kind of harmless - whether it gets
+        // On the other hand, the occasional large packet is kind of harmless - whether it gets
         // fragmented or not, the odds are that it will get through unless the connection is truly
         // horrible. So, we'll just log a warning.
         if buf.len() > IDEAL_MAX_UDP_PACKET_SIZE {

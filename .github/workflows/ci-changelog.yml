@@ -1,0 +1,235 @@
+name: CI - Changelog
+
+# Validates that CHANGELOG.md is updated for user-facing changes.
+# This is an informational check that warns but does not fail the PR.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  changelog-check:
+    name: Changelog Reminder
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    # Skip for dependabot PRs
+    if: github.actor != 'dependabot[bot]'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check for skip conditions
+        id: skip-check
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            const labels = pr.labels.map(l => l.name);
+
+            // Skip if PR has skip labels
+            const skipLabels = ['skip-changelog', 'dependencies', 'chore', 'ci', 'internal'];
+            const hasSkipLabel = labels.some(label => skipLabels.includes(label));
+
+            if (hasSkipLabel) {
+              console.log(`Skipping: PR has skip label (${labels.join(', ')})`);
+              core.setOutput('skip', 'true');
+              return;
+            }
+
+            // Get list of changed files (with pagination for PRs with >100 files)
+            let allFiles = [];
+            let page = 1;
+            while (true) {
+              const { data: files } = await github.rest.pulls.listFiles({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                per_page: 100,
+                page: page
+              });
+              allFiles = allFiles.concat(files);
+              if (files.length < 100) break;
+              page++;
+            }
+
+            const changedFiles = allFiles.map(f => f.filename);
+            console.log(`Changed files: ${changedFiles.join(', ')}`);
+
+            // Patterns for files that don't require changelog updates
+            const internalPatterns = [
+              /^\.github\//,           // CI workflows and GitHub config
+              /^\.llm\//,              // LLM context files
+              /^progress\//,           // Session progress files
+              /^scripts\//,            // Internal scripts
+              /^docker\//,             // Docker config
+              /^fuzz\//,               // Fuzz testing
+              /^loom-tests\//,         // Loom concurrency tests
+              /^proptest-regressions\//, // Proptest regressions
+              /^supply-chain\//,       // Supply chain audit
+              /^specs\//,              // TLA+ specs
+              /^states\//,             // State diagrams
+              /^benches\//,            // Benchmarks
+              /^\..*$/,                // Dotfiles (but not .github already matched)
+              /^codecov\.yml$/,        // Code coverage config
+              /^deny\.toml$/,          // Cargo deny config
+              /^clippy\.toml$/,        // Clippy config
+              /^rustfmt\.toml$/,       // Rustfmt config
+              /^AGENTS\.md$/,          // AI agent instructions
+              /^CLAUDE\.md$/,          // Claude instructions
+              /^PLAN\.md$/,            // Planning docs
+              /^llms\.txt$/,           // LLM context
+            ];
+
+            // Check if all changed files are internal/CI-only
+            const allInternal = changedFiles.every(file =>
+              internalPatterns.some(pattern => pattern.test(file))
+            );
+
+            if (allInternal) {
+              console.log('Skipping: All changed files are internal/CI files');
+              core.setOutput('skip', 'true');
+              return;
+            }
+
+            core.setOutput('skip', 'false');
+
+      - name: Check if CHANGELOG.md was modified
+        id: changelog-modified
+        if: steps.skip-check.outputs.skip != 'true'
+        run: |
+          # Get the list of changed files in this PR
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          if echo "$CHANGED_FILES" | grep -q "^CHANGELOG.md$"; then
+            echo "modified=true" >> "$GITHUB_OUTPUT"
+            echo "✅ CHANGELOG.md was modified"
+          else
+            echo "modified=false" >> "$GITHUB_OUTPUT"
+            echo "⚠️ CHANGELOG.md was NOT modified"
+          fi
+
+      - name: Post or update reminder comment
+        if: steps.skip-check.outputs.skip != 'true' && steps.changelog-modified.outputs.modified == 'false'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const marker = '<!-- changelog-reminder-bot -->';
+
+            const body = `${marker}
+            ## 📝 Changelog Reminder
+
+            This PR does not appear to update \`CHANGELOG.md\`.
+
+            **If this PR includes user-facing changes**, please consider adding an entry to the changelog under the appropriate section:
+            - **Added** - New features
+            - **Changed** - Changes in existing functionality
+            - **Deprecated** - Soon-to-be removed features
+            - **Removed** - Removed features
+            - **Fixed** - Bug fixes
+            - **Security** - Vulnerability fixes
+
+            **You can skip this reminder** by adding one of these labels: \`skip-changelog\`, \`dependencies\`, \`chore\`, \`ci\`, \`internal\`
+
+            <details>
+            <summary>When is a changelog entry needed?</summary>
+
+            A changelog entry is typically needed for:
+            - New public API methods or types
+            - Bug fixes that affect users
+            - Performance improvements
+            - Breaking changes
+            - New features or configuration options
+
+            A changelog entry is typically NOT needed for:
+            - Internal refactoring with no API changes
+            - CI/tooling improvements
+            - Documentation fixes (unless significant)
+            - Test additions/fixes
+
+            </details>
+
+            ---
+            *This is an automated reminder. The PR will not be blocked by this check.*`;
+
+            // Check for existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+
+            const existingComment = comments.find(c => c.body.includes(marker));
+
+            if (existingComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: body
+              });
+              console.log('Updated existing changelog reminder comment');
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: body
+              });
+              console.log('Created new changelog reminder comment');
+            }
+
+      - name: Remove reminder comment if changelog was updated
+        if: steps.skip-check.outputs.skip != 'true' && steps.changelog-modified.outputs.modified == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const marker = '<!-- changelog-reminder-bot -->';
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+
+            const existingComment = comments.find(c => c.body.includes(marker));
+
+            if (existingComment) {
+              await github.rest.issues.deleteComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+              });
+              console.log('Removed changelog reminder comment (changelog was updated)');
+            }
+
+      - name: Summary
+        run: |
+          {
+            echo "## Changelog Validation"
+            echo ""
+            if [ "${{ steps.skip-check.outputs.skip }}" == "true" ]; then
+              echo "✅ **Skipped** - PR contains only internal files or has a skip label"
+            elif [ "${{ steps.changelog-modified.outputs.modified }}" == "true" ]; then
+              echo "✅ **CHANGELOG.md was updated**"
+            else
+              echo "⚠️ **CHANGELOG.md was not updated** - Consider adding an entry for user-facing changes"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

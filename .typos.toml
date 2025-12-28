@@ -1,0 +1,42 @@
+# typos configuration for fortress-rollback
+# https://github.com/crate-ci/typos
+
+[default]
+locale = "en"
+
+[default.extend-words]
+# Project-specific terms
+ggrs = "ggrs"
+rollback = "rollback"
+netcode = "netcode"
+desync = "desync"
+desyncs = "desyncs"
+desynchronization = "desynchronization"
+resimulation = "resimulation"
+resimulate = "resimulate"
+resimulates = "resimulates"
+resimulating = "resimulating"
+
+# Mathematical/algorithmic variable names
+ba = "ba" # b minus a
+
+# Technical terms
+clonable = "clonable"
+flate = "flate"       # flate2 crate (zlib compression)
+rle = "rle"           # run-length encoding
+rkyv = "rkyv"         # serialization crate
+repr = "repr"         # Rust repr attribute
+bitcode = "bitcode"   # serialization crate
+
+# Common Rust/crate names that look like typos
+proptest = "proptest"
+nextest = "nextest"
+
+[files]
+extend-exclude = [
+    "target/",
+    "supply-chain/",
+    "*.lock",
+    "fuzz/corpus/",
+    "fuzz/artifacts/",
+]
