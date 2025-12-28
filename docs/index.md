@@ -133,7 +133,7 @@ Get up and running with Fortress Rollback in minutes.
 
     Full API reference with types, traits, and function signatures.
 
-    [:octicons-arrow-right-24: docs.rs](https://docs.rs/ggrs)
+    [:octicons-arrow-right-24: docs.rs](https://docs.rs/fortress-rollback)
 
 -   :material-sitemap:{ .lg .middle } **Architecture**
 

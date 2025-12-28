@@ -344,12 +344,14 @@ def strip_mkdocs_features(content: str) -> str:
     content = re.sub(r":octicons-[a-z-]+:", "", content)
     content = re.sub(r":fontawesome-[a-z-]+:", "", content)
 
-    # Remove { .lg .middle } and similar attribute annotations
-    content = re.sub(r"\{[^}]*\}", "", content)
+    # Remove { .lg .middle } and similar Markdown attribute annotations
+    # Only matches braces containing class (.) or id (#) selectors to avoid
+    # removing legitimate content like {variable} placeholders
+    content = re.sub(r"\{\s*[.#][^}]*\}", "", content)
 
-    # Remove grid cards divs
-    content = re.sub(r'<div class="grid cards"[^>]*markdown>', "", content)
-    content = re.sub(r"</div>", "", content)
+    # Remove Material grid cards divs (opening and corresponding closing tags)
+    # Note: This is a simplified pattern that assumes grid divs don't nest
+    content = re.sub(r'<div class="grid cards"[^>]*markdown>[\s\S]*?</div>', "", content)
 
     return content
 

@@ -1400,8 +1400,8 @@ cargo install typos-cli
 
 **Why this matters:**
 
-- **CI runs typos** — The `ci-quality.yml` workflow will fail if typos are found
-- **Catch errors early** — Running locally prevents CI failures and review churn
+- **CI runs typos** — The `ci-quality.yml` workflow runs typos as an advisory check (non-blocking)
+- **Catch errors early** — Running locally surfaces issues before code review
 - **Fast** — `typos` is extremely fast, typically completing in under a second
 
 ### Why This Matters
