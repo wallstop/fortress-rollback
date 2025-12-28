@@ -63,9 +63,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
+          # Use --local to avoid affecting other git operations in the runner
           WIKI_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.wiki.git"
 
           # Clone the wiki repo
@@ -77,6 +75,10 @@ jobs:
 
           echo "Wiki cloned successfully"
           cd wiki
+
+          # Configure git locally for wiki repo only
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
 
           # Get the current branch name with error handling
           if ! WIKI_BRANCH=$(git rev-parse --abbrev-ref HEAD); then

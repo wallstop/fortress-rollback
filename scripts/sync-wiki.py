@@ -90,11 +90,53 @@ class LinkMatch(NamedTuple):
 
 
 def find_code_fence_ranges(content: str) -> list[tuple[int, int]]:
-    """Find ranges of fenced code blocks (``` or ~~~) to skip."""
+    """Find ranges of fenced code blocks (``` or ~~~) to skip.
+
+    Uses a state-based parser to properly handle:
+    - Different fence lengths (``` vs ````)
+    - Both backtick and tilde fences
+    - Nested fences (longer fence can contain shorter)
+    """
     ranges = []
-    pattern = re.compile(r"^(`{3,}|~{3,}).*?^\1", re.MULTILINE | re.DOTALL)
-    for match in pattern.finditer(content):
-        ranges.append((match.start(), match.end()))
+    lines = content.split("\n")
+    pos = 0
+    fence_start: int | None = None
+    fence_char: str | None = None
+    fence_len: int = 0
+
+    for line in lines:
+        line_start = pos
+        stripped = line.lstrip()
+
+        # Check for fence opening/closing
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            char = stripped[0]
+            # Count consecutive fence characters
+            count = 0
+            for c in stripped:
+                if c == char:
+                    count += 1
+                else:
+                    break
+
+            if fence_start is None:
+                # Opening fence
+                fence_start = line_start
+                fence_char = char
+                fence_len = count
+            elif char == fence_char and count >= fence_len:
+                # Closing fence (same char, at least same length)
+                ranges.append((fence_start, pos + len(line)))
+                fence_start = None
+                fence_char = None
+                fence_len = 0
+
+        pos += len(line) + 1  # +1 for newline
+
+    # Handle unclosed fence at end of file
+    if fence_start is not None:
+        ranges.append((fence_start, len(content)))
+
     return ranges
 
 
@@ -216,7 +258,6 @@ def convert_links(content: str, source_file: str, wiki_structure: dict[str, str]
 
     # Process links in reverse order to maintain correct positions
     result = content
-    unmapped_links = []
 
     for link_match in reversed(links):
         # Skip links inside code blocks
@@ -281,10 +322,6 @@ def convert_links(content: str, source_file: str, wiki_structure: dict[str, str]
         new_link = f"[{link_text}]({wiki_name}{anchor})"
         result = result[: link_match.start] + new_link + result[link_match.end :]
         logger.debug(f"  Converted: {link_match.full_match} -> {new_link}")
-
-    if unmapped_links:
-        for source, href, reason in unmapped_links:
-            logger.warning(f"  {source}: [{href}] - {reason}")
 
     return result
 
@@ -365,9 +402,11 @@ def process_file(
     relative_path = normalize_path(relative_path)
 
     # Transform content
+    # Note: Order matters - convert links first, then strip MkDocs features
+    # to avoid stripping curly braces or divs inside URLs/link text
     content = strip_mkdocs_frontmatter(content)
-    content = strip_mkdocs_features(content)
     content = convert_links(content, relative_path, wiki_structure)
+    content = strip_mkdocs_features(content)
 
     # Write to wiki
     dest_path = wiki_dir / f"{wiki_name}.md"
@@ -463,7 +502,7 @@ def generate_sidebar(wiki_structure: dict[str, str]) -> str:
 
 ---
 
-[View on GitHub](https://github.com/gschup/ggrs)
+[View on GitHub](https://github.com/wallstop/fortress-rollback)
 """
     return sidebar
 
@@ -508,7 +547,7 @@ networking in deterministic multiplayer games.
 ---
 
 This wiki is automatically synced from the
-[main repository](https://github.com/gschup/ggrs).
+[main repository](https://github.com/wallstop/fortress-rollback).
 """
 
 

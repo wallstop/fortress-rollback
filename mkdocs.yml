@@ -9,9 +9,9 @@ site_name: Fortress Rollback
 site_description: >-
   A correctness-first fork of GGRS providing peer-to-peer rollback networking
   for deterministic multiplayer games
-site_url: https://gschup.github.io/ggrs/
-repo_url: https://github.com/gschup/ggrs
-repo_name: gschup/ggrs
+site_url: https://wallstop.github.io/fortress-rollback/
+repo_url: https://github.com/wallstop/fortress-rollback
+repo_name: wallstop/fortress-rollback
 edit_uri: edit/main/docs/
 docs_dir: docs
 copyright: >-
@@ -148,8 +148,8 @@ markdown_extensions:
   # Magic links for GitHub references
   - pymdownx.magiclink:
       repo_url_shorthand: true
-      user: gschup
-      repo: ggrs
+      user: wallstop
+      repo: fortress-rollback
 
 # =============================================================================
 # Extra Configuration
@@ -158,13 +158,13 @@ extra:
   # Social links
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/gschup/ggrs
+      link: https://github.com/wallstop/fortress-rollback
       name: Fortress Rollback on GitHub
     - icon: fontawesome/brands/rust
-      link: https://crates.io/crates/ggrs
-      name: ggrs on crates.io
+      link: https://crates.io/crates/fortress-rollback
+      name: fortress-rollback on crates.io
     - icon: fontawesome/solid/book
-      link: https://docs.rs/ggrs
+      link: https://docs.rs/fortress-rollback
       name: API Documentation on docs.rs
   # Version provider (uncomment for versioned docs)
   # version:
