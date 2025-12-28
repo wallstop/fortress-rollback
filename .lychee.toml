@@ -23,8 +23,8 @@ max_retries = 3
 # Maximum concurrent requests (lower to avoid rate limiting)
 max_concurrency = 8
 
-# User agent to avoid being blocked
-user_agent = "Mozilla/5.0 (compatible; lychee/0.17; +https://github.com/lycheeverse/lychee)"
+# User agent to avoid being blocked (version-agnostic to avoid maintenance burden)
+user_agent = "Mozilla/5.0 (compatible; lychee; +https://github.com/lycheeverse/lychee)"
 
 # ============================================================================
 # Cache settings (faster subsequent runs)

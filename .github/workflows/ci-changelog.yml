@@ -46,15 +46,23 @@ jobs:
               return;
             }
 
-            // Get list of changed files
-            const { data: files } = await github.rest.pulls.listFiles({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: pr.number,
-              per_page: 100
-            });
+            // Get list of changed files (with pagination for PRs with >100 files)
+            let allFiles = [];
+            let page = 1;
+            while (true) {
+              const { data: files } = await github.rest.pulls.listFiles({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                per_page: 100,
+                page: page
+              });
+              allFiles = allFiles.concat(files);
+              if (files.length < 100) break;
+              page++;
+            }
 
-            const changedFiles = files.map(f => f.filename);
+            const changedFiles = allFiles.map(f => f.filename);
             console.log(`Changed files: ${changedFiles.join(', ')}`);
 
             // Patterns for files that don't require changelog updates

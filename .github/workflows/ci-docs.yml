@@ -130,6 +130,7 @@ jobs:
             'CONTRIBUTING.md'
             'LICENSE*'
             '*.md'
+          output: lychee-report.md
           fail: false  # Don't fail the workflow on broken links initially
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
