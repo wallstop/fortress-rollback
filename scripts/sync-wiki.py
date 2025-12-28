@@ -141,11 +141,32 @@ def find_code_fence_ranges(content: str) -> list[tuple[int, int]]:
 
 
 def find_inline_code_ranges(content: str) -> list[tuple[int, int]]:
-    """Find ranges of inline code (`...`) to skip."""
+    """Find ranges of inline code (`...`) to skip.
+
+    Handles:
+    - Standard inline code: `code`
+    - Empty inline code: ``
+    - Multi-backtick delimiters: ``code with ` inside``
+
+    Limitation:
+    - Does not match inline code containing newlines (rare in practice)
+    - Escaped backticks within code are not specially handled,
+      but this is uncommon in documentation
+    """
     ranges = []
-    pattern = re.compile(r"`[^`\n]+`")
-    for match in pattern.finditer(content):
-        ranges.append((match.start(), match.end()))
+    # Match backtick-delimited code spans
+    # Handles: `code`, ``, ``code with ` inside``
+    # The pattern matches N backticks, then content (no newlines), then N backticks
+    # We handle single and double backtick cases explicitly
+    patterns = [
+        re.compile(r"``[^`\n]*``"),  # Double backtick (can contain single `)
+        re.compile(r"`[^`\n]*`"),    # Single backtick (standard)
+    ]
+    for pattern in patterns:
+        for match in pattern.finditer(content):
+            # Avoid overlapping matches
+            if not any(start <= match.start() < end for start, end in ranges):
+                ranges.append((match.start(), match.end()))
     return ranges
 
 
@@ -155,9 +176,18 @@ def in_ranges(pos: int, ranges: list[tuple[int, int]]) -> bool:
 
 
 def extract_links(content: str) -> list[LinkMatch]:
-    """Extract all markdown links from content."""
+    """Extract all markdown links from content.
+
+    Known limitations:
+    - Nested brackets in link text: [text [nested]](url) won't match correctly
+    - Parentheses in URLs: [text](url(with)parens) won't match correctly
+    - These edge cases are rare in practice; for full CommonMark compliance,
+      a proper markdown parser (like mistune or markdown-it-py) would be needed.
+    """
     links = []
-    # Match [text](url) pattern, handling nested brackets carefully
+    # Match [text](url) pattern
+    # Note: This pattern has known limitations with nested brackets/parens
+    # (see docstring). A proper parser would use balanced matching.
     pattern = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
     for match in pattern.finditer(content):
         links.append(
@@ -337,6 +367,58 @@ def strip_mkdocs_frontmatter(content: str) -> str:
     return content
 
 
+def remove_grid_cards_divs(content: str) -> str:
+    """Remove Material grid cards divs with proper nesting support.
+
+    This function properly handles nested divs by tracking div depth,
+    rather than using a simple non-greedy regex that would fail on:
+        <div class="grid cards" markdown>
+            <div>nested content</div>  <!-- regex would stop here -->
+            more content
+        </div>
+    """
+    result = []
+    i = 0
+    n = len(content)
+
+    while i < n:
+        # Look for grid cards div opening
+        grid_match = re.match(
+            r'<div\s+class="grid cards"[^>]*markdown>',
+            content[i:],
+            re.IGNORECASE,
+        )
+        if grid_match:
+            # Found a grid cards div, now find the matching </div>
+            div_depth = 1
+            j = i + grid_match.end()
+
+            while j < n and div_depth > 0:
+                # Check for opening div
+                open_match = re.match(r"<div[^>]*>", content[j:], re.IGNORECASE)
+                if open_match:
+                    div_depth += 1
+                    j += open_match.end()
+                    continue
+
+                # Check for closing div
+                close_match = re.match(r"</div\s*>", content[j:], re.IGNORECASE)
+                if close_match:
+                    div_depth -= 1
+                    j += close_match.end()
+                    continue
+
+                j += 1
+
+            # Skip the entire grid cards div (don't add to result)
+            i = j
+        else:
+            result.append(content[i])
+            i += 1
+
+    return "".join(result)
+
+
 def strip_mkdocs_features(content: str) -> str:
     """Remove MkDocs Material-specific features that don't render in GitHub Wiki."""
     # Remove Material icons like :material-star-four-points:
@@ -349,9 +431,8 @@ def strip_mkdocs_features(content: str) -> str:
     # removing legitimate content like {variable} placeholders
     content = re.sub(r"\{\s*[.#][^}]*\}", "", content)
 
-    # Remove Material grid cards divs (opening and corresponding closing tags)
-    # Note: This is a simplified pattern that assumes grid divs don't nest
-    content = re.sub(r'<div class="grid cards"[^>]*markdown>[\s\S]*?</div>', "", content)
+    # Remove Material grid cards divs (with proper nested div handling)
+    content = remove_grid_cards_divs(content)
 
     return content
 

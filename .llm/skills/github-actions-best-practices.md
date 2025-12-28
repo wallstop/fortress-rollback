@@ -316,6 +316,41 @@ act push -s GITHUB_TOKEN="$(gh auth token)"
 
 ## Security Considerations
 
+### Avoid Embedding Credentials in URLs
+
+**Problem:** Embedding tokens directly in URLs risks exposure in logs, error messages, or shell traces.
+
+```yaml
+# ❌ DANGEROUS: Token embedded in URL string
+- name: Clone wiki
+  env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  run: |
+    # Token could be exposed in error messages or if set -x is enabled
+    WIKI_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/owner/repo.wiki.git"
+    git clone "$WIKI_URL" wiki
+
+# ✅ SECURE: Use git credential helper
+- name: Clone wiki
+  env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  run: |
+    # Configure credential helper to provide token from environment
+    # The token is never embedded in the URL string
+    git config --global credential.helper '!f() { echo "password=${GITHUB_TOKEN}"; }; f'
+    git config --global credential.https://github.com.username "x-access-token"
+    
+    # Clone using plain URL (credentials provided by helper)
+    git clone "https://github.com/owner/repo.wiki.git" wiki
+```
+
+**Why this matters:**
+
+- Error messages may include the URL with embedded credentials
+- If `set -x` (shell tracing) is accidentally enabled, the URL is printed
+- Subprocess output may expose the URL
+- GitHub masks secrets in logs, but other tools might not
+
 ### Avoid Command Injection
 
 ```yaml

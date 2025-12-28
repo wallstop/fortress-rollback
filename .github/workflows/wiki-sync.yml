@@ -34,9 +34,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Try to access the wiki repo to see if it exists
-          WIKI_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.wiki.git"
-          if git ls-remote "$WIKI_URL" &>/dev/null; then
+          # Configure git credential helper to use token from environment
+          # This avoids embedding the token directly in URLs, which could be
+          # exposed in error messages or if shell tracing were enabled
+          git config --global credential.helper '!f() { echo "password=${GITHUB_TOKEN}"; }; f'
+          git config --global credential.https://github.com.username "x-access-token"
+
+          WIKI_REPO="https://github.com/${{ github.repository }}.wiki.git"
+          if git ls-remote "$WIKI_REPO" &>/dev/null; then
             echo "Wiki repository exists"
             echo "wiki_exists=true" >> "$GITHUB_OUTPUT"
           else
@@ -63,11 +68,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Use --local to avoid affecting other git operations in the runner
-          WIKI_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.wiki.git"
+          # Configure git credential helper to use token from environment
+          # This avoids embedding the token directly in URLs, which could be
+          # exposed in error messages or if shell tracing were enabled
+          git config --global credential.helper '!f() { echo "password=${GITHUB_TOKEN}"; }; f'
+          git config --global credential.https://github.com.username "x-access-token"
+
+          WIKI_REPO="https://github.com/${{ github.repository }}.wiki.git"
 
           # Clone the wiki repo
-          if ! git clone "$WIKI_URL" wiki; then
+          if ! git clone "$WIKI_REPO" wiki; then
             echo "::error::Failed to clone wiki repository."
             echo "::error::This is unexpected since the check-wiki job succeeded."
             exit 1
