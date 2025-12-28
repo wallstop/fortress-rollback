@@ -1,0 +1,859 @@
+/* ==========================================================================
+   Fortress Rollback - Custom MkDocs Theme
+   A Rust/gaming-inspired theme for documentation
+   ========================================================================== */
+
+/* ==========================================================================
+   1. CSS Custom Properties (Color Variables)
+   ========================================================================== */
+
+:root {
+    /* Primary Rust-inspired colors */
+    --fortress-rust-orange: #F74C00;
+    --fortress-rust-orange-light: #FF6B2C;
+    --fortress-rust-orange-dark: #D94000;
+
+    /* Dark theme backgrounds */
+    --fortress-bg-dark: #0d1117;
+    --fortress-bg-dark-secondary: #161b22;
+    --fortress-bg-code: #1e1e1e;
+    --fortress-bg-code-highlight: #2d2d2d;
+
+    /* Light theme backgrounds */
+    --fortress-bg-light: #ffffff;
+    --fortress-bg-light-secondary: #f6f8fa;
+    --fortress-bg-code-light: #f5f5f5;
+
+    /* Semantic colors */
+    --fortress-success: #2ea44f;
+    --fortress-success-light: #3fb950;
+    --fortress-warning: #d29922;
+    --fortress-warning-light: #e3b341;
+    --fortress-error: #da3633;
+    --fortress-error-light: #f85149;
+    --fortress-info: #58a6ff;
+    --fortress-info-dark: #388bfd;
+
+    /* Text colors */
+    --fortress-text-dark: #c9d1d9;
+    --fortress-text-muted: #8b949e;
+    --fortress-text-light: #24292f;
+
+    /* Custom admonition colors */
+    --fortress-safety-bg: rgba(46, 164, 79, 0.15);
+    --fortress-safety-border: #2ea44f;
+    --fortress-performance-bg: rgba(247, 76, 0, 0.15);
+    --fortress-performance-border: #F74C00;
+    --fortress-determinism-bg: rgba(88, 166, 255, 0.15);
+    --fortress-determinism-border: #58a6ff;
+
+    /* Transitions */
+    --fortress-transition-fast: 150ms ease-in-out;
+    --fortress-transition-normal: 250ms ease-in-out;
+
+    /* Custom admonition icons */
+    --md-admonition-icon--safety: url('data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/></svg>');
+    --md-admonition-icon--performance: url('data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19.46 10a1 1 0 00-.07 1 7.55 7.55 0 01.52 1.81 8 8 0 01-.69 4.73 1 1 0 01-.89.53H5.68a1 1 0 01-.89-.54A8 8 0 0112 6a7.93 7.93 0 014.6 1.46 1 1 0 001-.07l1.42-1a1 1 0 00.22-1.31 10 10 0 00-14.5 13.42 3 3 0 002.68 1.5h7.16a3 3 0 002.68-1.5A10 10 0 0020.9 9.69a1 1 0 00-1.31-.22zM12 12a1.5 1.5 0 10-3 0 1.5 1.5 0 003 0zm5.59-5.17l-4.24 2.95a3.48 3.48 0 00-1.35-.28 3.5 3.5 0 103.5 3.5 3.48 3.48 0 00-.28-1.35l2.95-4.24a.5.5 0 00-.58-.58z"/></svg>');
+    --md-admonition-icon--determinism: url('data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0020 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 004 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>');
+}
+
+/* ==========================================================================
+   2. Dark Theme Overrides [data-md-color-scheme="slate"]
+   ========================================================================== */
+
+[data-md-color-scheme="slate"] {
+    /* Primary accent color */
+    --md-primary-fg-color: var(--fortress-rust-orange);
+    --md-primary-fg-color--light: var(--fortress-rust-orange-light);
+    --md-primary-fg-color--dark: var(--fortress-rust-orange-dark);
+
+    /* Accent color */
+    --md-accent-fg-color: var(--fortress-rust-orange-light);
+    --md-accent-fg-color--transparent: rgba(247, 76, 0, 0.1);
+
+    /* Background colors */
+    --md-default-bg-color: var(--fortress-bg-dark);
+    --md-default-bg-color--light: var(--fortress-bg-dark-secondary);
+    --md-default-bg-color--lighter: #21262d;
+    --md-default-bg-color--lightest: #30363d;
+
+    /* Code block colors */
+    --md-code-bg-color: var(--fortress-bg-code);
+    --md-code-fg-color: var(--fortress-text-dark);
+    --md-code-hl-color: rgba(247, 76, 0, 0.2);
+
+    /* Typeset colors */
+    --md-typeset-color: var(--fortress-text-dark);
+    --md-typeset-a-color: var(--fortress-rust-orange-light);
+
+    /* Footer */
+    --md-footer-bg-color: var(--fortress-bg-dark-secondary);
+    --md-footer-bg-color--dark: var(--fortress-bg-dark);
+}
+
+/* Dark theme code blocks */
+[data-md-color-scheme="slate"] .md-typeset code {
+    background-color: var(--fortress-bg-code);
+    border: 1px solid #30363d;
+}
+
+[data-md-color-scheme="slate"] .md-typeset pre {
+    background-color: var(--fortress-bg-code);
+    border: 1px solid #30363d;
+    border-radius: 6px;
+}
+
+[data-md-color-scheme="slate"] .md-typeset pre>code {
+    border: none;
+}
+
+/* Dark theme highlighted lines in code */
+[data-md-color-scheme="slate"] .md-typeset .highlight .hll {
+    background-color: var(--fortress-bg-code-highlight);
+    border-left: 3px solid var(--fortress-rust-orange);
+    margin-left: -0.5em;
+    padding-left: calc(0.5em - 3px);
+}
+
+/* Mermaid diagrams - Dark theme */
+[data-md-color-scheme="slate"] .mermaid {
+    background: transparent;
+}
+
+[data-md-color-scheme="slate"] .mermaid .node rect,
+[data-md-color-scheme="slate"] .mermaid .node circle,
+[data-md-color-scheme="slate"] .mermaid .node polygon {
+    fill: #30363d;
+    stroke: var(--fortress-rust-orange);
+    stroke-width: 2px;
+}
+
+[data-md-color-scheme="slate"] .mermaid .nodeLabel {
+    color: var(--fortress-text-dark);
+}
+
+[data-md-color-scheme="slate"] .mermaid .edgePath .path {
+    stroke: var(--fortress-text-muted);
+}
+
+[data-md-color-scheme="slate"] .mermaid .edgeLabel {
+    background-color: var(--fortress-bg-dark-secondary);
+    color: var(--fortress-text-dark);
+}
+
+[data-md-color-scheme="slate"] .mermaid .cluster rect {
+    fill: var(--fortress-bg-dark-secondary);
+    stroke: #30363d;
+}
+
+/* Dark theme state diagram styling */
+[data-md-color-scheme="slate"] .mermaid .statediagram-state rect {
+    fill: #30363d;
+    stroke: var(--fortress-rust-orange);
+}
+
+[data-md-color-scheme="slate"] .mermaid .stateGroup .composit {
+    fill: var(--fortress-bg-dark-secondary);
+}
+
+/* ==========================================================================
+   3. Light Theme Overrides [data-md-color-scheme="default"]
+   ========================================================================== */
+
+[data-md-color-scheme="default"] {
+    /* Primary accent color */
+    --md-primary-fg-color: var(--fortress-rust-orange);
+    --md-primary-fg-color--light: var(--fortress-rust-orange-light);
+    --md-primary-fg-color--dark: var(--fortress-rust-orange-dark);
+
+    /* Accent color */
+    --md-accent-fg-color: var(--fortress-rust-orange-dark);
+    --md-accent-fg-color--transparent: rgba(247, 76, 0, 0.1);
+
+    /* Code block colors */
+    --md-code-bg-color: var(--fortress-bg-code-light);
+    --md-code-fg-color: var(--fortress-text-light);
+    --md-code-hl-color: rgba(247, 76, 0, 0.15);
+
+    /* Typeset colors */
+    --md-typeset-a-color: var(--fortress-rust-orange-dark);
+}
+
+/* Light theme code blocks */
+[data-md-color-scheme="default"] .md-typeset code {
+    background-color: var(--fortress-bg-code-light);
+    border: 1px solid #e1e4e8;
+}
+
+[data-md-color-scheme="default"] .md-typeset pre {
+    background-color: var(--fortress-bg-code-light);
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+}
+
+[data-md-color-scheme="default"] .md-typeset pre>code {
+    border: none;
+}
+
+/* Light theme highlighted lines in code */
+[data-md-color-scheme="default"] .md-typeset .highlight .hll {
+    background-color: rgba(247, 76, 0, 0.1);
+    border-left: 3px solid var(--fortress-rust-orange);
+    margin-left: -0.5em;
+    padding-left: calc(0.5em - 3px);
+}
+
+/* Mermaid diagrams - Light theme */
+[data-md-color-scheme="default"] .mermaid {
+    background: transparent;
+}
+
+[data-md-color-scheme="default"] .mermaid .node rect,
+[data-md-color-scheme="default"] .mermaid .node circle,
+[data-md-color-scheme="default"] .mermaid .node polygon {
+    fill: #ffffff;
+    stroke: var(--fortress-rust-orange);
+    stroke-width: 2px;
+}
+
+[data-md-color-scheme="default"] .mermaid .nodeLabel {
+    color: var(--fortress-text-light);
+}
+
+[data-md-color-scheme="default"] .mermaid .edgePath .path {
+    stroke: #57606a;
+}
+
+[data-md-color-scheme="default"] .mermaid .edgeLabel {
+    background-color: var(--fortress-bg-light);
+    color: var(--fortress-text-light);
+}
+
+[data-md-color-scheme="default"] .mermaid .cluster rect {
+    fill: var(--fortress-bg-light-secondary);
+    stroke: #e1e4e8;
+}
+
+/* ==========================================================================
+   4. Custom Admonitions
+   ========================================================================== */
+
+/* Safety Admonition - Shield icon, green theme */
+.md-typeset .admonition.safety,
+.md-typeset details.safety {
+    border-color: var(--fortress-safety-border);
+}
+
+.md-typeset .safety>.admonition-title,
+.md-typeset .safety>summary {
+    background-color: var(--fortress-safety-bg);
+    border-color: var(--fortress-safety-border);
+}
+
+.md-typeset .safety>.admonition-title::before,
+.md-typeset .safety>summary::before {
+    background-color: var(--fortress-safety-border);
+    -webkit-mask-image: var(--md-admonition-icon--safety);
+    mask-image: var(--md-admonition-icon--safety);
+}
+
+/* Performance Admonition - Speedometer icon, orange theme */
+.md-typeset .admonition.performance,
+.md-typeset details.performance {
+    border-color: var(--fortress-performance-border);
+}
+
+.md-typeset .performance>.admonition-title,
+.md-typeset .performance>summary {
+    background-color: var(--fortress-performance-bg);
+    border-color: var(--fortress-performance-border);
+}
+
+.md-typeset .performance>.admonition-title::before,
+.md-typeset .performance>summary::before {
+    background-color: var(--fortress-performance-border);
+    -webkit-mask-image: var(--md-admonition-icon--performance);
+    mask-image: var(--md-admonition-icon--performance);
+}
+
+/* Determinism Admonition - Sync/repeat icon, blue theme */
+.md-typeset .admonition.determinism,
+.md-typeset details.determinism {
+    border-color: var(--fortress-determinism-border);
+}
+
+.md-typeset .determinism>.admonition-title,
+.md-typeset .determinism>summary {
+    background-color: var(--fortress-determinism-bg);
+    border-color: var(--fortress-determinism-border);
+}
+
+.md-typeset .determinism>.admonition-title::before,
+.md-typeset .determinism>summary::before {
+    background-color: var(--fortress-determinism-border);
+    -webkit-mask-image: var(--md-admonition-icon--determinism);
+    mask-image: var(--md-admonition-icon--determinism);
+}
+
+/* ==========================================================================
+   5. Enhanced Code Blocks
+   ========================================================================== */
+
+/* Code block container */
+.md-typeset pre {
+    position: relative;
+    overflow: visible;
+}
+
+/* Syntax highlighting enhancements for Rust */
+.md-typeset .highlight {
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+/* Inline code styling */
+.md-typeset code {
+    border-radius: 4px;
+    padding: 0.1em 0.4em;
+}
+
+/* Rust keywords */
+.highlight .k,
+/* Keyword */
+.highlight .kd,
+/* Keyword.Declaration */
+.highlight .kn,
+/* Keyword.Namespace */
+.highlight .kp,
+/* Keyword.Pseudo */
+.highlight .kr,
+/* Keyword.Reserved */
+.highlight .kt {
+    /* Keyword.Type */
+    color: #ff7b72;
+    font-weight: 500;
+}
+
+/* Rust types and traits */
+[data-md-color-scheme="slate"] .highlight .nc,
+/* Name.Class */
+[data-md-color-scheme="slate"] .highlight .nn {
+    /* Name.Namespace */
+    color: #ffa657;
+}
+
+/* Rust functions */
+[data-md-color-scheme="slate"] .highlight .nf,
+/* Name.Function */
+[data-md-color-scheme="slate"] .highlight .fm {
+    /* Name.Function.Magic */
+    color: #d2a8ff;
+}
+
+/* Rust strings */
+[data-md-color-scheme="slate"] .highlight .s,
+/* String */
+[data-md-color-scheme="slate"] .highlight .s1,
+/* String.Single */
+[data-md-color-scheme="slate"] .highlight .s2,
+/* String.Double */
+[data-md-color-scheme="slate"] .highlight .sb,
+/* String.Backtick */
+[data-md-color-scheme="slate"] .highlight .sc,
+/* String.Char */
+[data-md-color-scheme="slate"] .highlight .sd,
+/* String.Doc */
+[data-md-color-scheme="slate"] .highlight .se,
+/* String.Escape */
+[data-md-color-scheme="slate"] .highlight .sh,
+/* String.Heredoc */
+[data-md-color-scheme="slate"] .highlight .si,
+/* String.Interpol */
+[data-md-color-scheme="slate"] .highlight .sx,
+/* String.Other */
+[data-md-color-scheme="slate"] .highlight .sr {
+    /* String.Regex */
+    color: #a5d6ff;
+}
+
+/* Rust comments */
+[data-md-color-scheme="slate"] .highlight .c,
+/* Comment */
+[data-md-color-scheme="slate"] .highlight .c1,
+/* Comment.Single */
+[data-md-color-scheme="slate"] .highlight .cm,
+/* Comment.Multiline */
+[data-md-color-scheme="slate"] .highlight .cs,
+/* Comment.Special */
+[data-md-color-scheme="slate"] .highlight .cp {
+    /* Comment.Preproc */
+    color: #8b949e;
+    font-style: italic;
+}
+
+/* Rust numbers */
+[data-md-color-scheme="slate"] .highlight .m,
+/* Number */
+[data-md-color-scheme="slate"] .highlight .mi,
+/* Number.Integer */
+[data-md-color-scheme="slate"] .highlight .mf,
+/* Number.Float */
+[data-md-color-scheme="slate"] .highlight .mh,
+/* Number.Hex */
+[data-md-color-scheme="slate"] .highlight .mo {
+    /* Number.Oct */
+    color: #79c0ff;
+}
+
+/* Rust macros */
+[data-md-color-scheme="slate"] .highlight .n+.p+.nf {
+    color: #79c0ff;
+}
+
+/* Light mode syntax overrides */
+[data-md-color-scheme="default"] .highlight .nc,
+[data-md-color-scheme="default"] .highlight .nn {
+    color: #953800;
+}
+
+[data-md-color-scheme="default"] .highlight .nf,
+[data-md-color-scheme="default"] .highlight .fm {
+    color: #8250df;
+}
+
+[data-md-color-scheme="default"] .highlight .s,
+[data-md-color-scheme="default"] .highlight .s1,
+[data-md-color-scheme="default"] .highlight .s2,
+[data-md-color-scheme="default"] .highlight .sb,
+[data-md-color-scheme="default"] .highlight .sc {
+    color: #0a3069;
+}
+
+[data-md-color-scheme="default"] .highlight .c,
+[data-md-color-scheme="default"] .highlight .c1,
+[data-md-color-scheme="default"] .highlight .cm,
+[data-md-color-scheme="default"] .highlight .cs,
+[data-md-color-scheme="default"] .highlight .cp {
+    color: #6e7781;
+    font-style: italic;
+}
+
+[data-md-color-scheme="default"] .highlight .m,
+[data-md-color-scheme="default"] .highlight .mi,
+[data-md-color-scheme="default"] .highlight .mf,
+[data-md-color-scheme="default"] .highlight .mh,
+[data-md-color-scheme="default"] .highlight .mo {
+    color: #0550ae;
+}
+
+/* Copy button styling */
+.md-clipboard {
+    color: var(--fortress-text-muted);
+    transition: color var(--fortress-transition-fast);
+}
+
+.md-clipboard:hover,
+.md-clipboard:focus {
+    color: var(--fortress-rust-orange);
+}
+
+.md-clipboard::after {
+    background-color: var(--fortress-rust-orange);
+}
+
+/* Line numbers styling */
+.md-typeset .highlight .linenos {
+    background-color: transparent;
+    border-right: 1px solid #30363d;
+    color: var(--fortress-text-muted);
+    padding-right: 1em;
+    margin-right: 1em;
+    user-select: none;
+}
+
+[data-md-color-scheme="default"] .md-typeset .highlight .linenos {
+    border-right-color: #e1e4e8;
+}
+
+/* Line number table styling */
+.md-typeset .highlighttable {
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+[data-md-color-scheme="default"] .md-typeset .highlighttable {
+    border-color: #e1e4e8;
+}
+
+.md-typeset .highlighttable td.linenos {
+    background-color: rgba(0, 0, 0, 0.1);
+}
+
+.md-typeset .highlighttable td.code {
+    width: 100%;
+}
+
+/* Code annotations */
+.md-typeset .md-annotation {
+    outline-color: var(--fortress-rust-orange);
+}
+
+.md-typeset .md-annotation__index {
+    background-color: var(--fortress-rust-orange);
+    color: white;
+}
+
+/* ==========================================================================
+   6. Navigation Styling
+   ========================================================================== */
+
+/* Smooth scrolling for the whole document */
+html {
+    scroll-behavior: smooth;
+}
+
+/* Active navigation tab highlighting */
+.md-nav__link--active {
+    color: var(--fortress-rust-orange) !important;
+    font-weight: 600;
+}
+
+.md-nav__item--active>.md-nav__link {
+    color: var(--fortress-rust-orange);
+}
+
+/* Navigation hover effects */
+.md-nav__link {
+    transition: color var(--fortress-transition-fast);
+}
+
+.md-nav__link:hover {
+    color: var(--fortress-rust-orange-light);
+}
+
+/* Tab navigation styling */
+.md-tabs__link {
+    transition: color var(--fortress-transition-fast),
+        opacity var(--fortress-transition-fast);
+}
+
+.md-tabs__link--active,
+.md-tabs__link:hover {
+    color: var(--fortress-rust-orange-light);
+    opacity: 1;
+}
+
+/* Header styling */
+.md-header {
+    background-color: var(--md-primary-fg-color);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+/* Search bar styling */
+.md-search__input {
+    background-color: rgba(255, 255, 255, 0.1);
+    transition: background-color var(--fortress-transition-fast);
+}
+
+.md-search__input:hover,
+.md-search__input:focus {
+    background-color: rgba(255, 255, 255, 0.15);
+}
+
+/* Custom scrollbar for webkit browsers */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+[data-md-color-scheme="slate"] ::-webkit-scrollbar-track {
+    background: var(--fortress-bg-dark);
+}
+
+::-webkit-scrollbar-thumb {
+    background: #888;
+    border-radius: 5px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--fortress-rust-orange);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+
+/* Firefox scrollbar styling */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: #888 transparent;
+}
+
+[data-md-color-scheme="slate"] * {
+    scrollbar-color: #888 var(--fortress-bg-dark);
+}
+
+/* Table of contents current item */
+.md-nav__link--passed {
+    color: var(--fortress-text-muted);
+}
+
+/* Sidebar styling */
+.md-sidebar {
+    transition: transform var(--fortress-transition-normal);
+}
+
+/* Footer navigation */
+.md-footer__link {
+    transition: opacity var(--fortress-transition-fast);
+}
+
+.md-footer__link:hover {
+    opacity: 0.8;
+}
+
+/* Footer background */
+[data-md-color-scheme="slate"] .md-footer {
+    background-color: var(--fortress-bg-dark-secondary);
+    border-top: 1px solid #30363d;
+}
+
+/* ==========================================================================
+   7. Additional UI Enhancements
+   ========================================================================== */
+
+/* Links */
+.md-typeset a {
+    transition: color var(--fortress-transition-fast);
+}
+
+.md-typeset a:hover {
+    color: var(--fortress-rust-orange-light);
+}
+
+/* Tables */
+.md-typeset table:not([class]) {
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.md-typeset table:not([class]) th {
+    background-color: var(--fortress-rust-orange);
+    color: white;
+}
+
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) th {
+    background-color: var(--fortress-rust-orange-dark);
+}
+
+/* Striped tables */
+.md-typeset table:not([class]) tbody tr:nth-child(odd) {
+    background-color: rgba(0, 0, 0, 0.03);
+}
+
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) tbody tr:nth-child(odd) {
+    background-color: rgba(255, 255, 255, 0.02);
+}
+
+/* Keyboard keys */
+.md-typeset kbd {
+    background-color: var(--fortress-bg-code);
+    border-color: #30363d;
+    box-shadow: 0 2px 0 #30363d;
+}
+
+[data-md-color-scheme="default"] .md-typeset kbd {
+    border-color: #e1e4e8;
+    box-shadow: 0 2px 0 #e1e4e8;
+}
+
+/* Horizontal rule */
+.md-typeset hr {
+    border-color: #30363d;
+}
+
+[data-md-color-scheme="default"] .md-typeset hr {
+    border-color: #e1e4e8;
+}
+
+/* Blockquotes */
+.md-typeset blockquote {
+    border-left-color: var(--fortress-rust-orange);
+}
+
+/* Details/Summary (collapsible sections) */
+.md-typeset details {
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.md-typeset details[open]>summary {
+    border-bottom: 1px solid rgba(247, 76, 0, 0.2);
+}
+
+/* Tabs */
+.md-typeset .tabbed-set>input:checked+label {
+    border-color: var(--fortress-rust-orange);
+    color: var(--fortress-rust-orange);
+}
+
+/* Content tabs highlight */
+.md-typeset .tabbed-labels>label:hover {
+    color: var(--fortress-rust-orange-light);
+}
+
+/* Task lists */
+.md-typeset [type="checkbox"]:checked+.task-list-indicator::before {
+    background-color: var(--fortress-success);
+    border-color: var(--fortress-success);
+}
+
+/* Definition lists */
+.md-typeset dt {
+    font-weight: 600;
+    color: var(--fortress-rust-orange);
+}
+
+/* ==========================================================================
+   8. Print Styles
+   ========================================================================== */
+
+@media print {
+
+    /* Hide navigation and non-essential elements */
+    .md-header,
+    .md-footer,
+    .md-sidebar,
+    .md-tabs,
+    .md-search,
+    .md-clipboard,
+    .md-source,
+    .md-top {
+        display: none !important;
+    }
+
+    /* Full width content */
+    .md-main__inner {
+        margin: 0;
+        padding: 0;
+    }
+
+    .md-content {
+        max-width: 100%;
+        margin: 0;
+        padding: 0;
+    }
+
+    /* Black text for printing */
+    .md-typeset {
+        color: #000 !important;
+    }
+
+    .md-typeset a {
+        color: #000 !important;
+        text-decoration: underline;
+    }
+
+    /* Show URLs after links */
+    .md-typeset a[href^="http"]::after {
+        content: " (" attr(href) ")";
+        font-size: 0.8em;
+        color: #666;
+    }
+
+    /* Code blocks for print */
+    .md-typeset pre {
+        border: 1px solid #ccc;
+        background-color: #f5f5f5 !important;
+        page-break-inside: avoid;
+    }
+
+    .md-typeset code {
+        background-color: #f5f5f5 !important;
+        border: 1px solid #ddd;
+    }
+
+    /* Admonitions for print */
+    .md-typeset .admonition,
+    .md-typeset details {
+        border: 2px solid #333;
+        page-break-inside: avoid;
+    }
+
+    /* Tables for print */
+    .md-typeset table {
+        page-break-inside: avoid;
+    }
+
+    /* Headers - avoid orphans */
+    .md-typeset h1,
+    .md-typeset h2,
+    .md-typeset h3,
+    .md-typeset h4,
+    .md-typeset h5,
+    .md-typeset h6 {
+        page-break-after: avoid;
+        color: #000 !important;
+    }
+
+    /* Images */
+    .md-typeset img {
+        max-width: 100%;
+        page-break-inside: avoid;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+        page-break-inside: avoid;
+    }
+}
+
+/* ==========================================================================
+   9. Accessibility Enhancements
+   ========================================================================== */
+
+/* Focus indicators */
+a:focus,
+button:focus,
+input:focus,
+select:focus,
+textarea:focus {
+    outline: 2px solid var(--fortress-rust-orange);
+    outline-offset: 2px;
+}
+
+/* Reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+    html {
+        scroll-behavior: auto;
+    }
+
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}
+
+/* High contrast mode adjustments */
+@media (prefers-contrast: high) {
+    :root {
+        --fortress-rust-orange: #ff5500;
+        --fortress-success: #00cc00;
+        --fortress-warning: #ffcc00;
+        --fortress-error: #ff0000;
+    }
+
+    .md-typeset a {
+        text-decoration: underline;
+    }
+}
