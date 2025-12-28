@@ -10,12 +10,14 @@ GitHub Actions workflows combine YAML configuration with embedded shell scripts.
 
 ## Mandatory Linting
 
-### actionlint
+### actionlint (MUST Run After EVERY Change)
 
-**Always run `actionlint` after modifying any workflow file:**
+**⚠️ CRITICAL: Run `actionlint` after EVERY modification to ANY workflow file — no exceptions.**
+
+Workflow linting catches errors that are impossible to detect without running CI. A single missing quote or syntax error can break the entire workflow. **Always lint before committing.**
 
 ```bash
-# Lint all workflow files
+# Lint all workflow files (run this!)
 actionlint
 
 # Lint a specific workflow
@@ -104,6 +106,22 @@ GitHub Actions `run:` blocks are shell scripts and must follow shellcheck rules.
 - run: echo "$HOME is here"
 ```
 
+**When SC2016 is intentional — use suppression with comment:**
+
+Sometimes you WANT single quotes to prevent expansion at definition time (e.g., shell functions that should expand at call time):
+
+```yaml
+# ✅ CORRECT: Intentional suppression with explanation
+- name: Configure git credential helper
+  run: |
+    # shellcheck disable=SC2016  # Intentional: function body expands at call time, not definition
+    git config --global credential.helper '!f() { echo "password=${GITHUB_TOKEN}"; }; f'
+```
+
+**Why this works:** The git credential helper is a shell function invoked by git. The `${GITHUB_TOKEN}` must expand when git calls the function, not when we define it. Single quotes preserve the literal `${GITHUB_TOKEN}` text.
+
+**Always include the comment explaining WHY** — future maintainers need to understand this is intentional, not a bug.
+
 ### SC2028: echo Escape Sequences
 
 **Problem:** `echo` doesn't interpret escape sequences portably.
@@ -151,15 +169,30 @@ GitHub Actions `run:` blocks are shell scripts and must follow shellcheck rules.
 
 | Issue | Symptom | Fix |
 |-------|---------|-----|
-| SC2129 | Multiple individual redirects | Use `{ cmd1; cmd2; } >> file` |
-| SC2086 | Unquoted variables | Quote: `"$VAR"` |
-| SC2016 | Variables in single quotes | Use double quotes |
+| SC2016 | Variables in single quotes | Use double quotes, or suppress if intentional (see below) |
 | SC2028 | `echo` with escapes | Use `printf` |
 | SC2035 | Unsafe glob patterns | Prefix with `./` |
+| SC2086 | Unquoted variables | Quote: `"$VAR"` |
+| SC2129 | Multiple individual redirects | Use `{ cmd1; cmd2; } >> file` |
 | SC2155 | `export x=$(cmd)` | Separate: `x=$(cmd); export x` |
 | Invalid expression | `${{ }}` syntax error | Check contexts, use `toJSON()` for debugging |
 | Unknown runner | Invalid `runs-on` | Use `ubuntu-latest`, `macos-latest`, `windows-latest` |
 | Missing permissions | GITHUB_TOKEN scope | Add `permissions:` block |
+
+### Intentional Shellcheck Suppressions
+
+When a shellcheck warning is triggered by intentional code, suppress it with a comment explaining WHY:
+
+```bash
+# shellcheck disable=SC2016  # Intentional: function body expands at call time, not definition
+git config --global credential.helper '!f() { echo "password=${GITHUB_TOKEN}"; }; f'
+```
+
+**Rules for suppressions:**
+
+1. **Always add a comment** explaining why the suppression is needed
+2. **Be specific** — disable only the specific code, not entire files
+3. **Document the intent** — future maintainers must understand it's not a bug
 
 ---
 

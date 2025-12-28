@@ -37,6 +37,7 @@ jobs:
           # Configure git credential helper to use token from environment
           # This avoids embedding the token directly in URLs, which could be
           # exposed in error messages or if shell tracing were enabled
+          # shellcheck disable=SC2016
           git config --global credential.helper '!f() { echo "password=${GITHUB_TOKEN}"; }; f'
           git config --global credential.https://github.com.username "x-access-token"
 
@@ -71,6 +72,7 @@ jobs:
           # Configure git credential helper to use token from environment
           # This avoids embedding the token directly in URLs, which could be
           # exposed in error messages or if shell tracing were enabled
+          # shellcheck disable=SC2016
           git config --global credential.helper '!f() { echo "password=${GITHUB_TOKEN}"; }; f'
           git config --global credential.https://github.com.username "x-access-token"
 

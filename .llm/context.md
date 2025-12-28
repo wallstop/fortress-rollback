@@ -1487,9 +1487,19 @@ actionlint .github/workflows/ci-security.yml
 
 | Issue | Problem | Fix |
 |-------|---------|-----|
-| SC2129 | Multiple `>> file` redirects | Use `{ cmd1; cmd2; } >> file` |
+| SC2016 | Variables in single quotes won't expand | Use double quotes, or suppress if intentional |
 | SC2086 | Unquoted variables | Quote: `"$VAR"` |
+| SC2129 | Multiple `>> file` redirects | Use `{ cmd1; cmd2; } >> file` |
 | SC2155 | `export x=$(cmd)` | Separate: `x=$(cmd); export x` |
+
+**When shellcheck warnings are intentional — suppress with comment:**
+
+```bash
+# shellcheck disable=SC2016  # Intentional: function body expands at call time, not definition
+git config --global credential.helper '!f() { echo "password=${GITHUB_TOKEN}"; }; f'
+```
+
+**Always explain WHY** the suppression is needed — future readers must understand the intent.
 
 **Example — SC2129 fix for GITHUB_OUTPUT:**
 

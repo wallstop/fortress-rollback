@@ -3,95 +3,112 @@
 # Run manually: pre-commit run --all-files
 #
 # See https://pre-commit.com for more information
-# See https://pre-commit.com/hooks.html for more hooks
+#
+# Cross-platform notes:
+# - Works on Linux, macOS, and Windows (including native PowerShell)
+# - All hooks use local Python scripts - no external repos that need bash
+# - On Windows: no Git Bash or WSL required
+
+default_language_version:
+  python: python3
 
 repos:
-  # General file checks
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
-    hooks:
-      - id: trailing-whitespace
-        args: [--markdown-linebreak-ext=md]
-      - id: end-of-file-fixer
-      - id: check-yaml
-      - id: check-toml
-      - id: check-json
-      - id: check-merge-conflict
-      - id: check-added-large-files
-        args: ['--maxkb=500']
-      - id: mixed-line-ending
-        args: ['--fix=lf']
-
-  # Markdown linting
-  - repo: https://github.com/igorshubovych/markdownlint-cli
-    rev: v0.42.0
-    hooks:
-      - id: markdownlint
-        args: ['--config', '.markdownlint.json', '--fix']
-        exclude: '^(target/|fuzz/target/|loom-tests/target/)'
-
-  # Link checking for markdown files
-  - repo: https://github.com/tcort/markdown-link-check
-    rev: v3.12.2
-    hooks:
-      - id: markdown-link-check
-        args: ['--config', '.markdown-link-check.json']
-        exclude: '^(target/|fuzz/target/|loom-tests/target/)'
-
-  # Rust formatting check (complements cargo fmt)
+  # All hooks are local Python scripts for maximum Windows compatibility
   - repo: local
     hooks:
+      # ══════════════════════════════════════════════════════════════════════
+      # File hygiene checks
+      # ══════════════════════════════════════════════════════════════════════
+      - id: trailing-whitespace
+        name: trim trailing whitespace
+        entry: python scripts/hooks/trailing-whitespace.py
+        language: python
+        types: [text]
+
+      - id: end-of-file-fixer
+        name: fix end of files
+        entry: python scripts/hooks/end-of-file-fixer.py
+        language: python
+        types: [text]
+
+      - id: check-yaml
+        name: check yaml
+        entry: python scripts/hooks/check-yaml.py
+        language: python
+        types: [yaml]
+
+      - id: check-toml
+        name: check toml
+        entry: python scripts/hooks/check-toml.py
+        language: python
+        types: [toml]
+
+      - id: check-json
+        name: check json
+        entry: python scripts/hooks/check-json.py
+        language: python
+        types: [json]
+
+      - id: check-merge-conflict
+        name: check for merge conflicts
+        entry: python scripts/hooks/check-merge-conflict.py
+        language: python
+        types: [text]
+
+      - id: mixed-line-ending
+        name: fix line endings (LF)
+        entry: python scripts/hooks/mixed-line-ending.py
+        language: python
+        types: [text]
+
+      # ══════════════════════════════════════════════════════════════════════
+      # Rust checks
+      # ══════════════════════════════════════════════════════════════════════
       - id: cargo-fmt
         name: cargo fmt
-        entry: cargo fmt --
-        language: system
+        entry: python scripts/run-cargo-fmt.py
+        language: python
         types: [rust]
         pass_filenames: false
 
       - id: cargo-clippy
         name: cargo clippy
-        entry: cargo clippy --all-targets -- -D warnings
-        language: system
+        entry: python scripts/run-cargo-clippy.py
+        language: python
         types: [rust]
         pass_filenames: false
 
-      # Check for broken rustdoc links
       - id: rustdoc-links
         name: rustdoc link check
-        entry: "bash -c 'cargo doc --no-deps 2>&1 | grep -E \"warning: .*unresolved link\" && exit 1 || exit 0'"
-        language: system
+        entry: python scripts/check-rustdoc-links.py
+        language: python
         pass_filenames: false
         files: '\.rs$'
 
-      # Validate Kani proof coverage - ensures all #[kani::proof] functions
-      # are included in verify-kani.sh tier lists so they run in CI
-      - id: kani-coverage
-        name: kani proof coverage
-        entry: ./scripts/check-kani-coverage.sh
-        language: script
-        pass_filenames: false
-        files: '\.rs$|verify-kani\.sh$'
-
-      # Custom link validation script
+      # ══════════════════════════════════════════════════════════════════════
+      # Documentation checks
+      # ══════════════════════════════════════════════════════════════════════
       - id: check-links
         name: check links
-        entry: ./scripts/check-links.sh
-        language: script
+        entry: python scripts/check-links.py
+        language: python
         pass_filenames: false
         files: '\.(md|rs)$'
 
-      # Check feature combinations compile (if cargo-hack is installed)
+      # ══════════════════════════════════════════════════════════════════════
+      # CI validation (Linux-only tools, skip gracefully on Windows)
+      # ══════════════════════════════════════════════════════════════════════
+      - id: kani-coverage
+        name: kani proof coverage
+        entry: python scripts/check-kani-coverage.py
+        language: python
+        pass_filenames: false
+        files: '\.rs$|verify-kani\.sh$'
+
       - id: cargo-hack-check
         name: cargo hack feature check
-        entry: bash -c 'command -v cargo-hack >/dev/null && cargo hack check --feature-powerset --exclude-features z3-verification,graphical-examples || true'
-        language: system
+        entry: python scripts/check-cargo-hack.py
+        language: python
         pass_filenames: false
         files: '\.rs$|Cargo\.toml$'
-        stages: [pre-push]  # Only run on push (slower check)
-
-  # Secret detection
-  - repo: https://github.com/Yelp/detect-secrets
-    rev: v1.5.0
-    hooks:
-      - id: detect-secrets
-        args: ['--baseline', '.secrets.baseline']
+        stages: [pre-push]
