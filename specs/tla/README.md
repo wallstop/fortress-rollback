@@ -265,6 +265,53 @@ These specifications model the key algorithms from:
 4. Update `Next` to include new actions
 5. Add invariants/properties to verify
 
+## Best Practices for TLA+ Development
+
+> **See also:** [/.llm/skills/tla-plus-modeling.md](../../.llm/skills/tla-plus-modeling.md) — Complete guide to TLA+ patterns
+
+### Specification Design
+
+| Do | Don't |
+|----|-------|
+| Model essential behavior | Model implementation details |
+| Use small constants for checking | Start with production-sized constants |
+| Write type invariants first | Skip type checking |
+| Add helper operators | Write monolithic actions |
+| Separate safety and liveness | Mix them in one model run |
+
+### Common Patterns
+
+```tla
+(* State machines: explicit states *)
+States == {"Init", "Running", "Done"}
+Trans(from, to) == state = from /\ state' = to
+
+(* Bounded resources *)
+ASSUME MAX_VALUE > 0
+x' \in 0..MAX_VALUE
+
+(* Nondeterministic choice *)
+\/ action_a
+\/ action_b
+
+(* Existential: any valid value *)
+\E v \in ValidValues: x' = v
+```
+
+### When Verification Fails
+
+1. **Read the counterexample trace** — TLC shows exact state sequence
+2. **Check if spec matches intent** — Is the model correct?
+3. **Check if code matches spec** — Is the implementation correct?
+4. **Add regression test** — Capture the bug scenario in Rust tests
+
+### Performance Tips
+
+- Start with tiny constants (MAX_FRAME=3, NUM_PLAYERS=2)
+- Run safety checks before liveness
+- Use `-workers auto` for parallel checking
+- Add state constraints to limit exploration
+
 ## References
 
 - [TLA+ Resources](https://lamport.azurewebsites.net/tla/tla.html)

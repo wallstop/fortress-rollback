@@ -25,8 +25,20 @@ This devcontainer provides a complete environment for developing, testing, and f
 
 - **cargo-audit** - Vulnerability scanning
 - **cargo-deny** - License/dependency checking
+- **cargo-geiger** - Unsafe code auditing
+- **cargo-shear** - Unused dependency detection
+- **cargo-spellcheck** - Documentation spelling
+- **cargo-careful** - Extra runtime safety checks
 - **clippy** - Rust linter
 - **rustfmt** - Code formatter
+
+### CI/CD Linting
+
+- **actionlint** - GitHub Actions workflow linting
+- **yamllint** - YAML file linting
+- **markdownlint** - Markdown file linting
+- **markdown-link-check** - Verify markdown links
+- **pre-commit** - Pre-commit hook framework
 
 ### Profiling
 
@@ -109,12 +121,63 @@ rustup +nightly component add miri
 
 # Other cargo tools
 cargo install cargo-nextest cargo-audit cargo-deny cargo-llvm-cov cargo-mutants
+cargo install cargo-shear cargo-spellcheck cargo-geiger cargo-careful
+
+# CI/CD linting tools
+pip3 install --break-system-packages yamllint pre-commit
+npm install -g markdownlint-cli markdown-link-check
+
+# actionlint (GitHub Actions linter)
+# Download the script first, then run with bash (avoids shell issues)
+curl -sL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash -o /tmp/download-actionlint.bash
+bash /tmp/download-actionlint.bash latest /tmp
+sudo mv /tmp/actionlint /usr/local/bin/
+rm /tmp/download-actionlint.bash
 
 # Z3
 pip3 install z3-solver
 ```
 
 ## Troubleshooting
+
+### Container Build Fails
+
+#### Syntax error "(" unexpected
+
+This error occurs when bash-specific syntax (like process substitution `<(...)`) is used
+with `/bin/sh` (dash). The Dockerfile now uses `SHELL ["/bin/bash", "-c"]` to prevent this.
+
+If you see this error in other scripts, ensure they are run with bash explicitly:
+
+```bash
+# Instead of piping to sh
+curl -sL https://example.com/script.sh | bash
+
+# Download first, then run with bash
+curl -sL https://example.com/script.sh -o /tmp/script.sh
+bash /tmp/script.sh
+rm /tmp/script.sh
+```
+
+#### Docker Desktop WSL Integration Issues
+
+If you're using Docker Desktop with WSL2 on Windows:
+
+1. Ensure WSL2 backend is enabled in Docker Desktop settings
+2. Enable integration with your WSL distro under **Resources > WSL Integration**
+3. Restart Docker Desktop and VS Code if needed
+
+#### Container fails to start after rebuild
+
+Try removing old containers and images:
+
+```bash
+# List and remove devcontainer images
+docker images | grep vsc-ggrs | awk '{print $3}' | xargs -r docker rmi -f
+
+# Or prune all unused images
+docker system prune -a
+```
 
 ### Kani Setup Fails
 

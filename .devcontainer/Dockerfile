@@ -10,6 +10,10 @@
 
 FROM mcr.microsoft.com/devcontainers/rust:2-1-trixie
 
+# Use bash for all RUN commands to ensure consistent shell behavior
+# This prevents issues with bash-specific syntax (like process substitution)
+SHELL ["/bin/bash", "-c"]
+
 # Avoid prompts from apt
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -76,8 +80,15 @@ RUN mkdir -p /opt/tla && \
 
 ENV TLA_TOOLS_JAR=/opt/tla/tla2tools.jar
 
-# Install Z3 via pip
-RUN pip3 install --break-system-packages z3-solver
+# Install Z3 and yamllint via pip
+RUN pip3 install --break-system-packages z3-solver yamllint
+
+# Install actionlint (GitHub Actions linter)
+# Download the script first, then run with bash (avoids process substitution issues with /bin/sh)
+RUN curl -sL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash -o /tmp/download-actionlint.bash && \
+    bash /tmp/download-actionlint.bash latest /usr/local/bin && \
+    rm /tmp/download-actionlint.bash && \
+    chmod +x /usr/local/bin/actionlint
 
 # Switch to vscode user for remaining installations
 USER vscode
@@ -106,6 +117,11 @@ RUN cargo install cargo-audit && \
     cargo install cargo-nextest && \
     cargo install cargo-watch && \
     cargo install sccache && \
+    # CI/CD linting and quality tools
+    cargo install cargo-shear && \
+    cargo install cargo-spellcheck && \
+    cargo install cargo-geiger && \
+    cargo install cargo-careful && \
     # High-performance CLI tools (Rust-based, not available in Debian apt)
     cargo install eza && \
     cargo install git-delta && \
@@ -119,9 +135,12 @@ RUN cargo install cargo-audit && \
     cargo install tealdeer && \
     cargo install bottom || echo "bottom (btm) optional"
 
-# Install Node.js and markdown tools (for pre-commit hooks)
+# Install Node.js and markdown/linting tools (for CI/CD and pre-commit hooks)
+# Note: Download and run as separate steps to avoid shell compatibility issues
 USER root
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/nodesource_setup.sh && \
+    bash /tmp/nodesource_setup.sh && \
+    rm /tmp/nodesource_setup.sh && \
     apt-get install -y nodejs && \
     npm install -g markdownlint-cli markdown-link-check && \
     pip3 install --break-system-packages pre-commit && \
