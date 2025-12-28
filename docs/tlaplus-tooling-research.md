@@ -52,6 +52,7 @@ The TLA+ ecosystem includes several tools bundled in `tla2tools.jar`, plus addit
 The **TLA+ Toolbox** is the official Eclipse-based IDE maintained by the TLA+ Foundation.
 
 **Features:**
+
 - Integrated SANY parser with syntax highlighting
 - TLC model checker integration with visualization
 - PlusCal translator support
@@ -59,17 +60,22 @@ The **TLA+ Toolbox** is the official Eclipse-based IDE maintained by the TLA+ Fo
 - Model configuration via `.cfg` files
 
 **Installation:**
+
 - **macOS (Homebrew):**
+
   ```bash
   brew tap homebrew/cask-versions
   brew install tla-plus-toolbox-nightly
   ```
+
 - **Debian/Ubuntu:**
+
   ```bash
   echo "deb https://nightly.tlapl.us/toolboxUpdate/ ./" | sudo tee /etc/apt/sources.list.d/tlaplus.list
   curl -fsSL https://tla.msr-inria.inria.fr/jenkins.pub | sudo apt-key add -
   sudo apt update && sudo apt install tla-toolbox
   ```
+
 - **Releases:** [github.com/tlaplus/tlaplus/releases](https://github.com/tlaplus/tlaplus/releases)
 - **Nightly builds:** [nightly.tlapl.us/products/](https://nightly.tlapl.us/products/)
 
@@ -78,6 +84,7 @@ The **TLA+ Toolbox** is the official Eclipse-based IDE maintained by the TLA+ Fo
 The **TLA+ for Visual Studio Code** extension (ID: `alygin.vscode-tlaplus`) provides modern IDE support.
 
 **Features:**
+
 - TLA+ and PlusCal syntax highlighting
 - Code snippets and completion
 - PlusCal-to-TLA+ translation
@@ -87,6 +94,7 @@ The **TLA+ for Visual Studio Code** extension (ID: `alygin.vscode-tlaplus`) prov
 - On-type code formatting
 
 **Installation:**
+
 ```bash
 code --install-extension alygin.vscode-tlaplus
 ```
@@ -385,19 +393,19 @@ SPECS := $(wildcard specs/*.tla)
 .PHONY: parse check simulate clean
 
 parse: $(TLA_JAR)
-	java -cp $(TLA_JAR) tla2sany.SANY $(SPECS)
+    java -cp $(TLA_JAR) tla2sany.SANY $(SPECS)
 
 check: $(TLA_JAR)
-	java -cp $(TLA_JAR) tlc2.TLC -config specs/MySpec.cfg specs/MySpec.tla
+    java -cp $(TLA_JAR) tlc2.TLC -config specs/MySpec.cfg specs/MySpec.tla
 
 simulate: $(TLA_JAR)
-	java -cp $(TLA_JAR) tlc2.TLC -simulate -depth 100 specs/MySpec.tla
+    java -cp $(TLA_JAR) tlc2.TLC -simulate -depth 100 specs/MySpec.tla
 
 $(TLA_JAR):
-	./setup-tlaplus.sh deps
+    ./setup-tlaplus.sh deps
 
 clean:
-	rm -rf deps states
+    rm -rf deps states
 ```
 
 ---

@@ -411,13 +411,13 @@ impl FrameRange {
 
 > **See also:** Performance and code quality guides in `.llm/skills/`:
 >
-> - [high-performance-rust.md](.llm/skills/high-performance-rust.md) — Performance optimization patterns and build configuration
-> - [rust-refactoring-guide.md](.llm/skills/rust-refactoring-guide.md) — Safe code transformation patterns with verification
-> - [rust-idioms-patterns.md](.llm/skills/rust-idioms-patterns.md) — Idiomatic Rust patterns and best practices
-> - [clippy-configuration.md](.llm/skills/clippy-configuration.md) — Clippy lint configuration and enforcement
-> - [zero-copy-memory-patterns.md](.llm/skills/zero-copy-memory-patterns.md) — Zero-copy and memory efficiency patterns
-> - [async-rust-best-practices.md](.llm/skills/async-rust-best-practices.md) — Async Rust patterns for concurrent code
-> - [rust-compile-time-optimization.md](.llm/skills/rust-compile-time-optimization.md) — Build and compile time optimization
+> - [high-performance-rust.md](skills/high-performance-rust.md) — Performance optimization patterns and build configuration
+> - [rust-refactoring-guide.md](skills/rust-refactoring-guide.md) — Safe code transformation patterns with verification
+> - [rust-idioms-patterns.md](skills/rust-idioms-patterns.md) — Idiomatic Rust patterns and best practices
+> - [clippy-configuration.md](skills/clippy-configuration.md) — Clippy lint configuration and enforcement
+> - [zero-copy-memory-patterns.md](skills/zero-copy-memory-patterns.md) — Zero-copy and memory efficiency patterns
+> - [async-rust-best-practices.md](skills/async-rust-best-practices.md) — Async Rust patterns for concurrent code
+> - [rust-compile-time-optimization.md](skills/rust-compile-time-optimization.md) — Build and compile time optimization
 
 ### Safety-Focused CI Checks (ci-safety.yml)
 
@@ -466,11 +466,11 @@ pub fn function(param1: Type) -> Result<ReturnType, FortressError> {
 
 > **See also:** Complete testing guides in `.llm/skills/`:
 >
-> - [rust-testing-guide.md](.llm/skills/rust-testing-guide.md) — Comprehensive testing best practices and patterns
-> - [testing-tools-reference.md](.llm/skills/testing-tools-reference.md) — Tool ecosystem reference (nextest, proptest, mockall, etc.)
-> - [property-testing.md](.llm/skills/property-testing.md) — Property-based testing to find edge cases automatically
-> - [mutation-testing.md](.llm/skills/mutation-testing.md) — Mutation testing for test quality verification
-> - [cross-platform-ci-cd.md](.llm/skills/cross-platform-ci-cd.md) — CI/CD workflows for multi-platform builds
+> - [rust-testing-guide.md](skills/rust-testing-guide.md) — Comprehensive testing best practices and patterns
+> - [testing-tools-reference.md](skills/testing-tools-reference.md) — Tool ecosystem reference (nextest, proptest, mockall, etc.)
+> - [property-testing.md](skills/property-testing.md) — Property-based testing to find edge cases automatically
+> - [mutation-testing.md](skills/mutation-testing.md) — Mutation testing for test quality verification
+> - [cross-platform-ci-cd.md](skills/cross-platform-ci-cd.md) — CI/CD workflows for multi-platform builds
 
 #### Test Organization
 
@@ -581,14 +581,14 @@ fn rollback_preserves_confirmed_frames() { }
 
 > **See also:** Complete guides in `.llm/skills/`:
 >
-> - [tla-plus-modeling.md](.llm/skills/tla-plus-modeling.md) — TLA+ specification patterns and best practices
-> - [kani-verification.md](.llm/skills/kani-verification.md) — Kani proof harnesses and Rust formal verification
-> - [z3-verification.md](.llm/skills/z3-verification.md) — Z3 SMT solver proofs for algorithm correctness
-> - [loom-testing.md](.llm/skills/loom-testing.md) — Loom concurrency permutation testing
-> - [miri-verification.md](.llm/skills/miri-verification.md) — Miri undefined behavior detection
-> - [miri-adaptation-guide.md](.llm/skills/miri-adaptation-guide.md) — Step-by-step Miri error fixes for agents
-> - [mutation-testing.md](.llm/skills/mutation-testing.md) — Mutation testing for test quality verification
-> - [property-testing.md](.llm/skills/property-testing.md) — Property-based testing to find edge cases automatically
+> - [tla-plus-modeling.md](skills/tla-plus-modeling.md) — TLA+ specification patterns and best practices
+> - [kani-verification.md](skills/kani-verification.md) — Kani proof harnesses and Rust formal verification
+> - [z3-verification.md](skills/z3-verification.md) — Z3 SMT solver proofs for algorithm correctness
+> - [loom-testing.md](skills/loom-testing.md) — Loom concurrency permutation testing
+> - [miri-verification.md](skills/miri-verification.md) — Miri undefined behavior detection
+> - [miri-adaptation-guide.md](skills/miri-adaptation-guide.md) — Step-by-step Miri error fixes for agents
+> - [mutation-testing.md](skills/mutation-testing.md) — Mutation testing for test quality verification
+> - [property-testing.md](skills/property-testing.md) — Property-based testing to find edge cases automatically
 
 - **Specs model production** — TLA+/Kani/Z3 specs represent real code behavior
 - **When verification fails, assume production bug first** — Investigate before relaxing specs
@@ -946,16 +946,16 @@ Add comprehensive test coverage:
 
 > **See also:** The rollback netcode guides in `.llm/skills/`:
 >
-> - [rollback-netcode-conversion.md](.llm/skills/rollback-netcode-conversion.md) — Complete guide to converting games to rollback netcode
-> - [rollback-engine-integration.md](.llm/skills/rollback-engine-integration.md) — Patterns for Bevy and custom engine integration
-> - [determinism-guide.md](.llm/skills/determinism-guide.md) — Achieving and verifying determinism in Rust games (includes reproducible builds, WASM, float handling, crate recommendations)
-> - [deterministic-simulation-testing.md](.llm/skills/deterministic-simulation-testing.md) — DST frameworks (madsim, turmoil), failure injection, controlled concurrency
-> - [cross-platform-games.md](.llm/skills/cross-platform-games.md) — Cross-platform game development (WASM, mobile, desktop)
-> - [cross-platform-rust.md](.llm/skills/cross-platform-rust.md) — Multi-platform project architecture and tooling
-> - [wasm-rust-guide.md](.llm/skills/wasm-rust-guide.md) — Rust to WebAssembly compilation and toolchain
-> - [no-std-guide.md](.llm/skills/no-std-guide.md) — `no_std` patterns for WASM and embedded
-> - [wasm-threading.md](.llm/skills/wasm-threading.md) — Threading and concurrency in WebAssembly
-> - [wasm-portability.md](.llm/skills/wasm-portability.md) — WASM determinism and sandboxing
+> - [rollback-netcode-conversion.md](skills/rollback-netcode-conversion.md) — Complete guide to converting games to rollback netcode
+> - [rollback-engine-integration.md](skills/rollback-engine-integration.md) — Patterns for Bevy and custom engine integration
+> - [determinism-guide.md](skills/determinism-guide.md) — Achieving and verifying determinism in Rust games (includes reproducible builds, WASM, float handling, crate recommendations)
+> - [deterministic-simulation-testing.md](skills/deterministic-simulation-testing.md) — DST frameworks (madsim, turmoil), failure injection, controlled concurrency
+> - [cross-platform-games.md](skills/cross-platform-games.md) — Cross-platform game development (WASM, mobile, desktop)
+> - [cross-platform-rust.md](skills/cross-platform-rust.md) — Multi-platform project architecture and tooling
+> - [wasm-rust-guide.md](skills/wasm-rust-guide.md) — Rust to WebAssembly compilation and toolchain
+> - [no-std-guide.md](skills/no-std-guide.md) — `no_std` patterns for WASM and embedded
+> - [wasm-threading.md](skills/wasm-threading.md) — Threading and concurrency in WebAssembly
+> - [wasm-portability.md](skills/wasm-portability.md) — WASM determinism and sandboxing
 
 ### Essential Rollback Concepts
 
@@ -984,14 +984,14 @@ Add comprehensive test coverage:
 
 > **See also:** The complete guides in `.llm/skills/`:
 >
-> - [defensive-programming.md](.llm/skills/defensive-programming.md) — Zero-panic policy, error handling, safe patterns
-> - [type-driven-design.md](.llm/skills/type-driven-design.md) — Parse don't validate, newtypes, typestate
-> - [rust-pitfalls.md](.llm/skills/rust-pitfalls.md) — Common bugs that compile but cause problems
-> - [loom-testing.md](.llm/skills/loom-testing.md) — Loom concurrency permutation testing
-> - [miri-verification.md](.llm/skills/miri-verification.md) — Miri undefined behavior detection
-> - [concurrency-patterns.md](.llm/skills/concurrency-patterns.md) — Thread-safe Rust patterns
-> - [mutation-testing.md](.llm/skills/mutation-testing.md) — Mutation testing to verify test quality
-> - [property-testing.md](.llm/skills/property-testing.md) — Property-based testing for invariant verification
+> - [defensive-programming.md](skills/defensive-programming.md) — Zero-panic policy, error handling, safe patterns
+> - [type-driven-design.md](skills/type-driven-design.md) — Parse don't validate, newtypes, typestate
+> - [rust-pitfalls.md](skills/rust-pitfalls.md) — Common bugs that compile but cause problems
+> - [loom-testing.md](skills/loom-testing.md) — Loom concurrency permutation testing
+> - [miri-verification.md](skills/miri-verification.md) — Miri undefined behavior detection
+> - [concurrency-patterns.md](skills/concurrency-patterns.md) — Thread-safe Rust patterns
+> - [mutation-testing.md](skills/mutation-testing.md) — Mutation testing to verify test quality
+> - [property-testing.md](skills/property-testing.md) — Property-based testing for invariant verification
 
 ### Zero-Panic Policy (CRITICAL)
 
@@ -1270,7 +1270,7 @@ PlayerType::Spectator(addr)    // Observer (no input)
 
 ### Test Coverage Requirements
 
-> **See also:** [rust-testing-guide.md](.llm/skills/rust-testing-guide.md) for comprehensive testing patterns.
+> **See also:** [rust-testing-guide.md](skills/rust-testing-guide.md) for comprehensive testing patterns.
 
 - All new features must include tests
 - Aim for >90% code coverage
@@ -1383,23 +1383,41 @@ When spawning sub-agents or using Task tools to make code changes:
 2. The sub-agent MUST verify `cargo clippy --all-targets` passes
 3. If the sub-agent cannot run these commands, the parent agent must run them after receiving the changes
 
-### Additional Linters
+### Markdown Linting and Link Checking (REQUIRED)
 
-For non-Rust files, the following linters are run in CI:
+**ALWAYS run these checks after modifying ANY markdown file:**
 
 ```bash
-# Markdown files (CLAUDE.md, .llm/context.md, etc.)
-npx markdownlint-cli <file.md>
+# Markdown linting (uses project config)
+npx markdownlint '<file.md>' --config .markdownlint.json
 
-# GitHub Actions workflows
-actionlint  # or: ~/go/bin/actionlint
+# Example: lint this file
+npx markdownlint '.llm/context.md' --config .markdownlint.json
+
+# Link checking (validates all internal links)
+./scripts/check-links.sh
 ```
 
-**Markdownlint rules to remember:**
+**Key markdown rules to remember:**
 
-- Lists must be surrounded by blank lines (MD032)
-- No trailing spaces
-- Proper heading hierarchy
+| Rule  | Description                            | Fix                                      |
+|-------|----------------------------------------|------------------------------------------|
+| MD010 | Hard tabs                              | Use spaces, never hard tabs              |
+| MD031 | Code blocks must have blank lines      | Add blank line before and after fences   |
+| MD032 | Lists must have blank lines            | Add blank line before and after lists    |
+
+**Relative link paths from `.llm/context.md`:**
+
+- ✅ CORRECT: `[Text](skills/defensive-programming.md)` — relative to current file
+- ❌ WRONG: `[Text]` + `(.llm/skills/...)` — don't include `.llm/` prefix
+
+### Additional Linters
+
+For GitHub Actions workflows:
+
+```bash
+actionlint  # or: ~/go/bin/actionlint
+```
 
 ---
 

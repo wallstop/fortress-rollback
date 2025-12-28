@@ -80,6 +80,17 @@ check_tool "markdownlint" "markdownlint --version" "false"
 check_tool "markdown-link-check" "markdown-link-check --version" "false"
 echo ""
 
+echo "CI/CD Linting:"
+check_tool "actionlint" "actionlint --version" "false"
+check_tool "yamllint" "yamllint --version" "false"
+echo ""
+
+echo "Cargo Quality Tools:"
+check_tool "cargo-shear" "cargo shear --version" "false"
+check_tool "cargo-spellcheck" "cargo spellcheck --version" "false"
+check_tool "cargo-careful" "which cargo-careful" "false"
+echo ""
+
 echo "Profiling:"
 check_tool "flamegraph" "cargo flamegraph --version" "false"
 check_tool "valgrind" "valgrind --version" "false"
