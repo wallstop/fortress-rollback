@@ -17,6 +17,7 @@ Usage:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import argparse
 import logging
 import re
@@ -478,7 +479,7 @@ def remove_grid_cards_divs(content: str) -> str:
 
 
 def transform_outside_code_blocks(
-    content: str, transform_fn: callable
+    content: str, transform_fn: Callable[[str], str]
 ) -> str:
     """Apply a transformation function only to content outside code blocks.
 

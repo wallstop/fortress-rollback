@@ -257,11 +257,11 @@ Checksums must be computed deterministically:
 ```rust,ignore
 use fortress_rollback::network::codec::encode;
 
-fn compute_checksum(state: &GameState) -> u128 {
+fn compute_checksum(state: &GameState) -> Option<u128> {
     // Use the library's codec for deterministic serialization
-    let bytes = encode(state).expect("serialize");
+    let bytes = encode(state).ok()?;
     // Use a deterministic hash
-    fletcher16(&bytes) as u128
+    Some(fletcher16(&bytes) as u128)
 }
 ```
 

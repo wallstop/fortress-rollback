@@ -129,7 +129,11 @@ impl Game {
 
     // load gamestate and overwrite
     fn load_game_state(&mut self, cell: GameStateCell<State>) {
-        self.game_state = cell.load().expect("No data found.");
+        // LoadGameState is only requested for previously saved frames.
+        // Missing state indicates a bug - for this example, we use a fallback.
+        if let Some(loaded) = cell.load() {
+            self.game_state = loaded;
+        }
     }
 
     fn advance_frame(&mut self, inputs: InputVec<Input>) {
@@ -139,12 +143,12 @@ impl Game {
         // remember checksum to render it later
         // Note: it's more efficient to only compute checksums periodically for display
         // For actual desync detection, use the checksum passed to cell.save() in SaveGameState
-        let buffer = fortress_rollback::network::codec::encode(&self.game_state)
-            .expect("serialization should succeed");
-        let checksum = u64::from(fletcher16(&buffer));
-        self.last_checksum = (Frame::new(self.game_state.frame), checksum);
-        if self.game_state.frame % CHECKSUM_PERIOD == 0 {
-            self.periodic_checksum = (Frame::new(self.game_state.frame), checksum);
+        if let Ok(buffer) = fortress_rollback::network::codec::encode(&self.game_state) {
+            let checksum = u64::from(fletcher16(&buffer));
+            self.last_checksum = (Frame::new(self.game_state.frame), checksum);
+            if self.game_state.frame % CHECKSUM_PERIOD == 0 {
+                self.periodic_checksum = (Frame::new(self.game_state.frame), checksum);
+            }
         }
     }
 

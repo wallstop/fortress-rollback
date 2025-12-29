@@ -431,7 +431,8 @@ loop {
                         cell.save(frame, Some(game_state.clone()), checksum);
                     }
                     GgrsRequest::LoadGameState { cell, frame } => {
-                        game_state = cell.load().expect("State must exist");
+                        // LoadGameState is only requested for previously saved frames
+                        game_state = cell.load().ok_or(SessionError::MissingState)?;
                     }
                     GgrsRequest::AdvanceFrame { inputs } => {
                         game_state.advance(inputs);

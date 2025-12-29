@@ -112,7 +112,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         cell.save(frame, Some(game_state.clone()), None);
                     }
                     FortressRequest::LoadGameState { cell, .. } => {
-                        game_state = cell.load().expect("State should exist");
+                        // LoadGameState is only requested for previously saved frames
+                        if let Some(state) = cell.load() {
+                            game_state = state;
+                        }
                     }
                     FortressRequest::AdvanceFrame { inputs } => {
                         // Apply inputs to your game state
@@ -360,11 +363,12 @@ fn handle_requests(
             }
 
             FortressRequest::LoadGameState { cell, frame } => {
-                // Load the saved state
-                *game_state = cell.load().expect("State should exist");
-
-                // Optionally verify frame
-                assert_eq!(game_state.frame, frame.as_i32());
+                // Load the saved state - LoadGameState is only requested for previously saved frames
+                if let Some(state) = cell.load() {
+                    *game_state = state;
+                    // Optionally verify frame
+                    assert_eq!(game_state.frame, frame.as_i32());
+                }
             }
 
             FortressRequest::AdvanceFrame { inputs } => {
@@ -405,7 +409,7 @@ use fortress_rollback::{
 fn handle_requests_simple(
     requests: Vec<FortressRequest<GameConfig>>,
     game_state: &mut GameState,
-) {
+) -> Result<(), GameError> {
     handle_requests!(
         requests,
         save: |cell: GameStateCell<GameState>, frame: Frame| {
@@ -413,7 +417,9 @@ fn handle_requests_simple(
             cell.save(frame, Some(game_state.clone()), checksum);
         },
         load: |cell: GameStateCell<GameState>, _frame: Frame| {
-            *game_state = cell.load().expect("State must exist");
+            // LoadGameState is only requested for previously saved frames.
+            // Missing state indicates a bug - handle appropriately for your game.
+            *game_state = cell.load().ok_or(GameError::MissingState)?;
         },
         advance: |inputs: InputVec<Input>| {
             for (_input, _status) in inputs.iter() {
@@ -422,6 +428,7 @@ fn handle_requests_simple(
             game_state.frame += 1;
         }
     );
+    Ok(())
 }
 ```
 
@@ -453,8 +460,8 @@ struct GameState {
     players: Vec<Player>,
 }
 
-// One-liner checksum computation
-let checksum = compute_checksum(&game_state).expect("Serialization failed");
+// One-liner checksum computation (returns Result)
+let checksum = compute_checksum(&game_state)?;
 
 // Use in SaveGameState handler
 cell.save(frame, Some(game_state.clone()), Some(checksum));
@@ -474,8 +481,7 @@ For a faster but weaker checksum, use `compute_checksum_fletcher16`:
 use fortress_rollback::compute_checksum_fletcher16;
 
 // Faster, simpler checksum (16-bit result stored as u128)
-let checksum = compute_checksum_fletcher16(&game_state)
-    .expect("Serialization failed");
+let checksum = compute_checksum_fletcher16(&game_state)?;
 ```
 
 #### Manual Checksumming
@@ -487,7 +493,7 @@ use fortress_rollback::checksum::{hash_bytes_fnv1a, fletcher16};
 use fortress_rollback::network::codec::encode;
 
 // Serialize state to bytes
-let bytes = encode(&game_state).expect("Serialization failed");
+let bytes = encode(&game_state)?;
 
 // Hash with FNV-1a (64-bit hash as u128)
 let fnv_checksum = hash_bytes_fnv1a(&bytes);
@@ -1793,7 +1799,7 @@ loop {
                 #     cell.save(frame, Some(game_state.clone()), None);
                 # }
                 # FortressRequest::LoadGameState { cell, .. } => {
-                #     game_state = cell.load().expect("State should exist");
+                #     if let Some(state) = cell.load() { game_state = state; }
                 # }
                 # FortressRequest::AdvanceFrame { inputs } => {
                 #     game_state.update(&inputs);
