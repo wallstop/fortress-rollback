@@ -61,11 +61,42 @@ WIKI_STRUCTURE = {
 **Critical:** Sidebar link names MUST exactly match the wiki page filenames (without `.md` extension).
 
 ```markdown
-<!-- ✅ CORRECT: Link matches filename -->
-- [[TLAplus-Tooling|TLA+ Tooling]]  <!-- Links to TLAplus-Tooling.md -->
+<!-- ✅ CORRECT: Link matches filename, display text uses safe characters -->
+- [[TLAplus-Tooling|TLA Plus Tooling]]  <!-- Links to TLAplus-Tooling.md -->
 
 <!-- ❌ BROKEN: Link doesn't match any file -->
-- [[TLA--Tooling|TLA+ Tooling]]     <!-- TLA--Tooling.md doesn't exist -->
+- [[TLA--Tooling|TLA Plus Tooling]]     <!-- TLA--Tooling.md doesn't exist -->
+```
+
+### CRITICAL: Wiki-Link Display Text Characters
+
+GitHub Wiki's `[[PageName|Display Text]]` syntax has a severe quirk: **certain characters in the display text can corrupt the generated URL**, even if the page name is correct.
+
+| Character | Problem | Example |
+|-----------|---------|---------|
+| `+` | Decoded as space, creates double-dashes | `[[Page\|TLA+ Tools]]` → URL `/wiki/TLA--Tools` |
+| `%` | Interferes with URL encoding | `[[Page\|100% Done]]` → broken URL |
+| `#` | Interpreted as anchor | `[[Page\|Issue #1]]` → may break |
+| `?` | Interpreted as query string | `[[Page\|FAQ?]]` → may break |
+| `&` | URL parameter separator | `[[Page\|Q&A]]` → may break |
+| `=` | URL parameter value separator | `[[Page\|Key=Value]]` → may break |
+
+**Real bug example:**
+
+```markdown
+<!-- ❌ BROKEN: The '+' in display text corrupts the URL -->
+- [[TLAplus-Tooling-Research|TLA+ Tooling Research]]
+<!-- GitHub Wiki generates URL: /wiki/TLA--Tooling-Research (BROKEN!) -->
+
+<!-- ✅ CORRECT: Spell out "Plus" in display text -->
+- [[TLAplus-Tooling-Research|TLA Plus Tooling Research]]
+<!-- GitHub Wiki generates URL: /wiki/TLAplus-Tooling-Research (CORRECT) -->
+```
+
+The `check-wiki-consistency.py` script validates this automatically:
+
+```bash
+python3 scripts/check-wiki-consistency.py --verbose
 ```
 
 ---

@@ -195,6 +195,59 @@ def parse_sidebar_wiki_links(sidebar_path: Path) -> list[tuple[str, str, int]]:
     return links
 
 
+# Characters that cause URL encoding issues in GitHub Wiki display text.
+# The '+' character is URL-decoded as a space, causing broken links.
+# Example: [[Page|TLA+ Tools]] generates URL "/wiki/TLA--Tools" instead of "/wiki/Page"
+#
+# GitHub Wiki's wiki-link syntax [[PageName|Display Text]] has a quirk where
+# certain characters in the display text can corrupt the generated URL.
+# This is a known limitation of GitHub Wiki's markdown processor.
+WIKI_LINK_PROBLEMATIC_CHARS = {
+    "+": "plus sign (decoded as space, causing double-dashes in URL)",
+    "%": "percent sign (interferes with URL encoding)",
+    "#": "hash (interpreted as anchor)",
+    "?": "question mark (interpreted as query string)",
+    "&": "ampersand (interpreted as URL parameter separator)",
+    "=": "equals sign (interpreted as URL parameter value separator)",
+}
+
+
+def validate_wiki_link_display_text(
+    sidebar_path: Path, verbose: bool = False
+) -> ValidationResult:
+    """
+    Validate that wiki-link display text doesn't contain problematic characters.
+
+    GitHub Wiki's [[Page|Display]] syntax can break when the display text
+    contains certain characters that interfere with URL generation.
+
+    For example, [[TLAplus-Tooling|TLA+ Tooling]] generates a broken URL
+    because '+' is decoded as a space, creating "/wiki/TLA--Tooling" instead
+    of "/wiki/TLAplus-Tooling".
+    """
+    errors = 0
+    warnings = 0
+
+    links = parse_sidebar_wiki_links(sidebar_path)
+
+    if verbose:
+        print("\nChecking wiki-link display text for problematic characters...")
+
+    for page_name, display_text, line_num in links:
+        for char, reason in WIKI_LINK_PROBLEMATIC_CHARS.items():
+            if char in display_text:
+                errors += 1
+                print(
+                    red("ERROR:")
+                    + f" _Sidebar.md:{line_num}: Wiki link [[{page_name}|{display_text}]] "
+                    + f"contains '{char}' in display text ({reason}). "
+                    + f"This will generate a broken URL."
+                )
+                break  # Only report first problematic character per link
+
+    return ValidationResult(errors=errors, warnings=warnings)
+
+
 def validate_sidebar_links(
     sidebar_path: Path, wiki_pages: set[str], verbose: bool = False
 ) -> ValidationResult:
@@ -418,16 +471,24 @@ def main() -> int:
     if result.errors == 0:
         print(green("   ✓ All sidebar links are valid"))
 
-    # 2. Validate WIKI_STRUCTURE completeness
-    print(f"\n{bold('2. Validating WIKI_STRUCTURE completeness...')}")
+    # 2. Validate wiki-link display text for problematic characters
+    print(f"\n{bold('2. Validating wiki-link display text...')}")
+    result = validate_wiki_link_display_text(sidebar_path, verbose)
+    total_errors += result.errors
+    total_warnings += result.warnings
+    if result.errors == 0:
+        print(green("   ✓ All display text is safe for URL generation"))
+
+    # 3. Validate WIKI_STRUCTURE completeness
+    print(f"\n{bold('3. Validating WIKI_STRUCTURE completeness...')}")
     result = validate_wiki_structure_completeness(wiki_structure, docs_files, verbose)
     total_errors += result.errors
     total_warnings += result.warnings
     if result.errors == 0 and result.warnings == 0:
         print(green("   ✓ All docs files are mapped"))
 
-    # 3. Validate sidebar completeness
-    print(f"\n{bold('3. Validating sidebar completeness...')}")
+    # 4. Validate sidebar completeness
+    print(f"\n{bold('4. Validating sidebar completeness...')}")
     result = validate_sidebar_completeness(
         sidebar_path, wiki_pages, wiki_structure, verbose
     )
@@ -436,8 +497,8 @@ def main() -> int:
     if result.errors == 0 and result.warnings == 0:
         print(green("   ✓ All wiki pages have sidebar entries"))
 
-    # 4. Validate markdown link syntax
-    print(f"\n{bold('4. Validating markdown link syntax...')}")
+    # 5. Validate markdown link syntax
+    print(f"\n{bold('5. Validating markdown link syntax...')}")
     result = validate_markdown_link_syntax(wiki_dir, verbose)
     total_errors += result.errors
     total_warnings += result.warnings

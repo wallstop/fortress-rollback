@@ -21,7 +21,7 @@
 - [[Changelog]]
 - [[GGRS-Changelog-Archive|GGRS Changelog Archive]]
 - [[Fortress-vs-GGRS|Fortress vs GGRS]]
-- [[TLAplus-Tooling-Research|TLA+ Tooling Research]]
+- [[TLAplus-Tooling-Research|TLA Plus Tooling Research]]
 
 ## Community
 
