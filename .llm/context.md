@@ -692,28 +692,48 @@ Before submitting code:
 
 ---
 
-## Mandatory Pre-Commit Checks
+## Mandatory Linting — Run After EVERY Change
 
-**ALWAYS run these commands before committing ANY changes:**
+> **Critical:** Run linters after EVERY code change, not just before committing. This catches errors immediately while context is fresh and prevents accumulating technical debt.
+
+### Rust Code Changes
+
+**Run after EVERY Rust file modification:**
 
 ```bash
-# Format all code (REQUIRED - CI will fail without this)
-cargo fmt
-
-# Check for lint warnings (REQUIRED - CI will fail without this)
-cargo clippy --all-targets
-
-# Run tests
-cargo nextest run  # or: cargo test
+cargo fmt && cargo clippy --all-targets
 ```
 
-**Or use the single combined command:**
+**Or use the alias:**
 
 ```bash
+cargo c  # Defined in .cargo/config.toml
+```
+
+This catches formatting issues and lint warnings immediately. Don't wait until you have multiple changes — lint after each edit.
+
+### GitHub Actions Workflow Changes
+
+**Run `actionlint` IMMEDIATELY after ANY workflow modification — no exceptions:**
+
+```bash
+actionlint
+```
+
+Workflow syntax errors are easy to introduce and tedious to debug in CI. Always validate locally first.
+
+**Workflow reliability:** Workflows that call GitHub APIs (releases, artifact uploads, API queries) should include retry logic. Transient API failures are common; handle them gracefully rather than failing the entire workflow.
+
+### Full Verification (Before Committing)
+
+**Run the complete check before any commit:**
+
+```bash
+# Format + lint + test
 cargo fmt && cargo clippy --all-targets && cargo nextest run
 ```
 
-**Or use the convenient aliases:**
+**Or use the aliases:**
 
 ```bash
 cargo c && cargo t  # Defined in .cargo/config.toml
@@ -722,8 +742,6 @@ cargo c && cargo t  # Defined in .cargo/config.toml
 ### Additional Checks
 
 **Spell checking:** Run `typos` before committing. CI enforces this.
-
-**Workflow files:** Run `actionlint` after ANY workflow changes — no exceptions.
 
 ```bash
 typos                                    # Spell check

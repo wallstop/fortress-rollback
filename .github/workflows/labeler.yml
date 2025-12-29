@@ -24,61 +24,97 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Apply size label
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          retries: 3
+          retry-exempt-status-codes: 400,401,403,404,422
           script: |
-            const { data: pullRequest } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.payload.pull_request.number,
-            });
-
-            const changedFiles = pullRequest.changed_files;
-            const sizeLabels = ['size/XS', 'size/S', 'size/M', 'size/L', 'size/XL'];
-
-            let newLabel;
-            if (changedFiles <= 10) {
-              newLabel = 'size/XS';
-            } else if (changedFiles <= 50) {
-              newLabel = 'size/S';
-            } else if (changedFiles <= 200) {
-              newLabel = 'size/M';
-            } else if (changedFiles <= 500) {
-              newLabel = 'size/L';
-            } else {
-              newLabel = 'size/XL';
+            // Helper function for retrying API calls with exponential backoff
+            async function withRetry(fn, maxRetries = 3, baseDelayMs = 1000) {
+              let lastError;
+              for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                try {
+                  return await fn();
+                } catch (error) {
+                  lastError = error;
+                  const isRetryable = error.status >= 500 || error.status === 429 || error.message?.includes('timeout');
+                  if (!isRetryable || attempt === maxRetries) {
+                    throw error;
+                  }
+                  const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
+                  console.log(`Attempt ${attempt} failed (${error.message}), retrying in ${delayMs}ms...`);
+                  await new Promise(resolve => setTimeout(resolve, delayMs));
+                }
+              }
+              throw lastError;
             }
 
-            // Get current labels on the PR
-            const { data: currentLabels } = await github.rest.issues.listLabelsOnIssue({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-            });
+            try {
+              const { data: pullRequest } = await withRetry(() =>
+                github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.payload.pull_request.number,
+                })
+              );
 
-            const currentLabelNames = currentLabels.map(label => label.name);
+              const changedFiles = pullRequest.changed_files;
+              const sizeLabels = ['size/XS', 'size/S', 'size/M', 'size/L', 'size/XL'];
 
-            // Remove any existing size labels that differ from the new one
-            for (const sizeLabel of sizeLabels) {
-              if (currentLabelNames.includes(sizeLabel) && sizeLabel !== newLabel) {
-                await github.rest.issues.removeLabel({
+              let newLabel;
+              if (changedFiles <= 10) {
+                newLabel = 'size/XS';
+              } else if (changedFiles <= 50) {
+                newLabel = 'size/S';
+              } else if (changedFiles <= 200) {
+                newLabel = 'size/M';
+              } else if (changedFiles <= 500) {
+                newLabel = 'size/L';
+              } else {
+                newLabel = 'size/XL';
+              }
+
+              // Get current labels on the PR
+              const { data: currentLabels } = await withRetry(() =>
+                github.rest.issues.listLabelsOnIssue({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   issue_number: context.payload.pull_request.number,
-                  name: sizeLabel,
-                });
+                })
+              );
+
+              const currentLabelNames = currentLabels.map(label => label.name);
+
+              // Remove any existing size labels that differ from the new one
+              for (const sizeLabel of sizeLabels) {
+                if (currentLabelNames.includes(sizeLabel) && sizeLabel !== newLabel) {
+                  await withRetry(() =>
+                    github.rest.issues.removeLabel({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: context.payload.pull_request.number,
+                      name: sizeLabel,
+                    })
+                  );
+                }
               }
-            }
 
-            // Add the new size label if not already present
-            if (!currentLabelNames.includes(newLabel)) {
-              await github.rest.issues.addLabels({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number,
-                labels: [newLabel],
-              });
-            }
+              // Add the new size label if not already present
+              if (!currentLabelNames.includes(newLabel)) {
+                await withRetry(() =>
+                  github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: context.payload.pull_request.number,
+                    labels: [newLabel],
+                  })
+                );
+              }
 
-            console.log(`PR has ${changedFiles} changed files, labeled as ${newLabel}`);
+              console.log(`PR has ${changedFiles} changed files, labeled as ${newLabel}`);
+            } catch (error) {
+              console.log(`Warning: Failed to apply size label: ${error.message}`);
+              console.log('This is a non-critical failure and will not block the PR.');
+            }
