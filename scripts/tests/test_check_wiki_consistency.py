@@ -9,7 +9,6 @@ problematic patterns that would cause broken links on GitHub Wiki.
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
 
 # Add scripts directory to path for imports
