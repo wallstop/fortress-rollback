@@ -525,7 +525,9 @@ def _parse_grid_cards_content(div_content: str) -> str:
 
         # Check for card start (list item with title)
         # Pattern: -   :icon:{ .attrs } **Title**
-        card_match = re.match(r'^-\s+.*\*\*([^*]+)\*\*', stripped)
+        # Use non-greedy .*? before ** to avoid matching multiple bold markers incorrectly
+        # Use (.+?) to allow asterisks within title (matches up to closing **)
+        card_match = re.match(r'^-\s+.*?\*\*(.+?)\*\*', stripped)
         if card_match:
             # Save previous card if exists
             if current_card:
@@ -552,7 +554,10 @@ def _parse_grid_cards_content(div_content: str) -> str:
                 continue
 
             # Regular content line (description)
-            if stripped and not stripped.startswith(("<", "<!--")):
+            # Skip actual HTML tags and comments, but not content that happens to start
+            # with < like angle brackets in technical docs (e.g., "< 100ms latency")
+            # Pattern matches: <!-- (comment start) or <tagname (tag start)
+            if stripped and not re.match(r'^<(!--|[a-zA-Z])', stripped):
                 if current_card["description"]:
                     current_card["description"] += " " + stripped
                 else:

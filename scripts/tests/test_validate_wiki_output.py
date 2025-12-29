@@ -199,6 +199,85 @@ Content.
         assert issues[0].line == 6
         assert "Empty On Line 6" in issues[0].message
 
+    def test_multi_line_html_comment_section_is_empty(self) -> None:
+        """Section with only multi-line HTML comments should report as empty."""
+        content = """## Header
+
+<!--
+This is a multi-line
+HTML comment
+-->
+
+## Next
+Content.
+"""
+        issues = check_empty_sections(content, "test.md")
+        assert len(issues) == 1
+        assert "Header" in issues[0].message
+
+    def test_multi_line_comment_with_content_after(self) -> None:
+        """Content after a multi-line comment should mark section as non-empty."""
+        content = """## Header
+
+<!--
+This is a multi-line
+HTML comment
+-->
+Actual content here.
+
+## Next
+More content.
+"""
+        issues = check_empty_sections(content, "test.md")
+        assert len(issues) == 0
+
+    def test_content_after_inline_comment_closing(self) -> None:
+        """Content on same line after comment close should mark section non-empty."""
+        content = """## Header
+
+<!-- comment --> Real content here.
+
+## Next
+More content.
+"""
+        issues = check_empty_sections(content, "test.md")
+        assert len(issues) == 0
+
+    def test_multiple_multi_line_comments_no_content(self) -> None:
+        """Multiple multi-line comments with no real content is empty."""
+        content = """## Header
+
+<!--
+Comment one
+-->
+
+<!--
+Comment two
+-->
+
+## Next
+Content.
+"""
+        issues = check_empty_sections(content, "test.md")
+        assert len(issues) == 1
+        assert "Header" in issues[0].message
+
+    def test_nested_looking_comments(self) -> None:
+        """Handles comment-like content inside comments correctly."""
+        content = """## Header
+
+<!--
+This contains --> but keeps going
+Actually this is malformed HTML but we handle it
+-->
+
+## Next
+Content.
+"""
+        issues = check_empty_sections(content, "test.md")
+        # After first -->, the "Actually this is malformed" becomes content
+        assert len(issues) == 0
+
 
 class TestCheckIndentedCodeFences:
     """Tests for check_indented_code_fences function."""

@@ -189,6 +189,8 @@ def check_empty_sections(content: str, filename: str) -> list[Issue]:
 
     This catches issues like grid cards content being removed instead of converted,
     leaving empty sections.
+
+    Handles multi-line HTML comments correctly by tracking comment state across lines.
     """
     issues = []
     lines = content.split("\n")
@@ -207,6 +209,9 @@ def check_empty_sections(content: str, filename: str) -> list[Issue]:
             # the 0-indexed position of the NEXT line (i.e., lines[i] is next line).
             j = i  # 0-indexed position of next line after header
 
+            # Track whether we're inside a multi-line HTML comment
+            in_html_comment = False
+
             while j < len(lines):
                 next_line = lines[j]
 
@@ -218,9 +223,38 @@ def check_empty_sections(content: str, filename: str) -> list[Issue]:
                     if len(next_level) <= len(header_level):
                         break
 
-                # Skip empty lines, horizontal rules, and HTML comments
                 stripped = next_line.strip()
-                if stripped and stripped != "---" and not stripped.startswith("<!--"):
+
+                # Handle multi-line HTML comment tracking
+                if in_html_comment:
+                    # Check if this line ends the comment
+                    if "-->" in stripped:
+                        in_html_comment = False
+                        # Check if there's content after the closing comment
+                        after_comment = stripped.split("-->", 1)[1].strip()
+                        if after_comment:
+                            section_has_content = True
+                            break
+                    j += 1
+                    continue
+
+                # Check for HTML comment start
+                if stripped.startswith("<!--"):
+                    # Check if comment is closed on the same line
+                    if "-->" in stripped:
+                        # Single-line comment - check for content after it
+                        after_comment = stripped.split("-->", 1)[1].strip()
+                        if after_comment:
+                            section_has_content = True
+                            break
+                    else:
+                        # Start of multi-line comment
+                        in_html_comment = True
+                    j += 1
+                    continue
+
+                # Skip empty lines and horizontal rules
+                if stripped and stripped != "---":
                     section_has_content = True
                     break
 

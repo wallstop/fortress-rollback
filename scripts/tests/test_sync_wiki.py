@@ -626,5 +626,112 @@ class TestWikiValidation:
                         )
 
 
+class TestTitleWithAsterisks:
+    """Tests for handling titles containing asterisks."""
+
+    def test_title_with_single_asterisk(self) -> None:
+        """A title containing a single asterisk should be captured correctly."""
+        content = '''<div class="grid cards" markdown>
+
+-   :icon: **Title with * asterisk**
+
+    ---
+
+    Description text.
+
+</div>'''
+        result = convert_grid_cards_to_list(content)
+        assert "**Title with * asterisk**" in result
+        assert "Description text." in result
+
+    def test_multiple_bold_markers_on_line(self) -> None:
+        """Multiple ** markers on same line should capture first title only."""
+        # This tests the greedy vs non-greedy quantifier fix
+        content = '''<div class="grid cards" markdown>
+
+-   :icon: **First** and **Second**
+
+    ---
+
+    Description.
+
+</div>'''
+        result = convert_grid_cards_to_list(content)
+        # Should capture "First" as the title, not "First** and **Second"
+        assert "**First**" in result
+        # The " and **Second**" part becomes description or is separate
+        assert "First** and **Second" not in result
+
+
+class TestAngleBracketContent:
+    """Tests for handling content with angle brackets."""
+
+    def test_angle_bracket_in_description(self) -> None:
+        """Angle brackets in technical content should not be skipped as HTML."""
+        content = '''<div class="grid cards" markdown>
+
+-   :icon: **Performance**
+
+    ---
+
+    < 100ms latency guaranteed.
+
+</div>'''
+        result = convert_grid_cards_to_list(content)
+        assert "**Performance**" in result
+        # Content starting with < should be included as description
+        assert "< 100ms latency guaranteed." in result
+
+    def test_comparison_operator_in_description(self) -> None:
+        """Mathematical comparisons with < should be preserved."""
+        content = '''<div class="grid cards" markdown>
+
+-   :icon: **Limits**
+
+    ---
+
+    Value must be < MAX_SIZE.
+
+</div>'''
+        result = convert_grid_cards_to_list(content)
+        assert "Value must be < MAX_SIZE." in result
+
+    def test_actual_html_tag_still_skipped(self) -> None:
+        """Actual HTML tags like <div> should still be skipped."""
+        content = '''<div class="grid cards" markdown>
+
+-   :icon: **Test**
+
+    ---
+
+    <span class="hidden">hidden</span>
+    Visible content.
+
+</div>'''
+        result = convert_grid_cards_to_list(content)
+        assert "**Test**" in result
+        # HTML tag line should be skipped, but visible content preserved
+        assert "Visible content." in result
+        # The span tag should not appear in description
+        assert "<span" not in result
+
+    def test_html_comment_still_skipped(self) -> None:
+        """HTML comments should still be skipped."""
+        content = '''<div class="grid cards" markdown>
+
+-   :icon: **Test**
+
+    ---
+
+    <!-- TODO: improve this -->
+    Actual description.
+
+</div>'''
+        result = convert_grid_cards_to_list(content)
+        assert "**Test**" in result
+        assert "Actual description." in result
+        assert "<!--" not in result
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

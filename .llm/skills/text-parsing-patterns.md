@@ -315,7 +315,13 @@ def _parse_grid_cards_content(div_content: str) -> str:
         stripped = line.strip()
 
         # Check for card start (list item with title)
-        card_match = re.match(r'^-\s+.*\*\*([^*]+)\*\*', stripped)
+        # Pattern: -   :icon:{ .attrs } **Title**
+        # IMPORTANT: Use non-greedy .*? before ** to avoid matching multiple bold markers
+        # incorrectly (e.g., "**First** and **Second**" should capture "First", not
+        # "First** and **Second").
+        # Use (.+?) instead of [^*]+ to allow asterisks within titles - this correctly
+        # matches up to the closing ** pair (e.g., "Title with * asterisk").
+        card_match = re.match(r'^-\s+.*?\*\*(.+?)\*\*', stripped)
         if card_match:
             if current_card:
                 cards.append(current_card)
@@ -340,7 +346,11 @@ def _parse_grid_cards_content(div_content: str) -> str:
                 continue
 
             # Regular content (description)
-            if stripped and not stripped.startswith(("<", "<!--")):
+            # Skip actual HTML tags and comments, but NOT content that happens to start
+            # with < like angle brackets in technical docs (e.g., "< 100ms latency")
+            # Pattern matches: <!-- (comment start) or <tagname (tag start)
+            # IMPORTANT: Don't use startswith(("<", "<!--")) which is overly broad!
+            if stripped and not re.match(r'^<(!--|[a-zA-Z])', stripped):
                 if current_card["description"]:
                     current_card["description"] += " " + stripped
                 else:
@@ -365,6 +375,28 @@ def _parse_grid_cards_content(div_content: str) -> str:
     return "\n".join(output) + "\n"
 ```
 
+### Common Regex Pitfalls to Avoid
+
+**Pitfall 1: Character class stops at first match**
+
+- ❌ `[^*]+` in `**([^*]+)**` — Stops at first `*`, breaks "Title with * asterisk"
+- ✅ `(.+?)` — Non-greedy match to closing `**`
+
+**Pitfall 2: Greedy quantifier matches too much**
+
+- ❌ `.*` before capture — Matches too much with multiple markers
+- ✅ `.*?` — Non-greedy alternative
+
+**Pitfall 3: Overly broad HTML detection**
+
+- ❌ `startswith(("<", "<!--"))` — Skips legitimate content like "< 100ms"
+- ✅ `re.match(r'^<(!--|[a-zA-Z])')` — Only matches actual HTML tags/comments
+
+**Pitfall 4: Single-line comment assumption**
+
+- ❌ `startswith("<!--")` — Only catches single-line comments
+- ✅ Track multi-line comment state with a boolean flag
+
 ### Validation: Detecting Empty Sections
 
 After conversion, validate that no sections are left empty:
@@ -375,6 +407,11 @@ def check_empty_sections(content: str, filename: str) -> list[Issue]:
 
     This catches issues like grid cards content being removed instead of converted,
     leaving empty sections.
+
+    IMPORTANT: Handles multi-line HTML comments correctly by tracking comment state.
+    A naive check like `startswith("<!--")` will miss cases where a multi-line comment
+    spans several lines (e.g., <!-- comment \\n continues \\n -->), incorrectly
+    treating content-free sections as having content.
     """
     issues = []
     lines = content.split("\n")
@@ -394,6 +431,9 @@ def check_empty_sections(content: str, filename: str) -> list[Issue]:
             # the 0-indexed position of the NEXT line (i.e., lines[i] is next line).
             j = i  # 0-indexed position of next line after header
 
+            # Track multi-line HTML comment state
+            in_html_comment = False
+
             while j < len(lines):
                 next_line = lines[j]
 
@@ -405,9 +445,36 @@ def check_empty_sections(content: str, filename: str) -> list[Issue]:
                     if len(next_level) <= len(header_level):
                         break
 
-                # Skip empty lines, horizontal rules, and HTML comments
                 stripped = next_line.strip()
-                if stripped and stripped != "---" and not stripped.startswith("<!--"):
+
+                # Handle multi-line HTML comment tracking
+                if in_html_comment:
+                    if "-->" in stripped:
+                        in_html_comment = False
+                        # Check for content after closing comment on same line
+                        after_comment = stripped.split("-->", 1)[1].strip()
+                        if after_comment:
+                            section_has_content = True
+                            break
+                    j += 1
+                    continue
+
+                # Check for HTML comment start
+                if stripped.startswith("<!--"):
+                    if "-->" in stripped:
+                        # Single-line comment - check for content after
+                        after_comment = stripped.split("-->", 1)[1].strip()
+                        if after_comment:
+                            section_has_content = True
+                            break
+                    else:
+                        # Start of multi-line comment
+                        in_html_comment = True
+                    j += 1
+                    continue
+
+                # Skip empty lines and horizontal rules
+                if stripped and stripped != "---":
                     section_has_content = True
                     break
 
