@@ -107,7 +107,6 @@ exclude_all_private = true
 require_https = false
 
 # Include links in source code comments
-include_fragments = true
 
 # ============================================================================
 # GitHub-specific settings

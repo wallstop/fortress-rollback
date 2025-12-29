@@ -59,6 +59,7 @@ WIKI_STRUCTURE = {
 MkDocs Material's tabbed content syntax doesn't render on GitHub Wiki.
 
 **Input (MkDocs):**
+
 ```markdown
 === "Cargo.toml"
 
@@ -75,6 +76,7 @@ MkDocs Material's tabbed content syntax doesn't render on GitHub Wiki.
 ```
 
 **Converted (GitHub Wiki):**
+
 ```markdown
 ### Cargo.toml
 
@@ -91,6 +93,7 @@ MkDocs Material's tabbed content syntax doesn't render on GitHub Wiki.
 ```
 
 **Conversion regex:**
+
 ```python
 content = re.sub(r'^=== "([^"]+)"$', r"### \1", content, flags=re.MULTILINE)
 ```
@@ -100,6 +103,7 @@ content = re.sub(r'^=== "([^"]+)"$', r"### \1", content, flags=re.MULTILINE)
 MkDocs admonitions need conversion to blockquotes.
 
 **Input (MkDocs):**
+
 ```markdown
 !!! warning "Be Careful"
 
@@ -107,6 +111,7 @@ MkDocs admonitions need conversion to blockquotes.
 ```
 
 **Converted (GitHub Wiki):**
+
 ```markdown
 > **Be Careful**
 >
@@ -114,6 +119,7 @@ MkDocs admonitions need conversion to blockquotes.
 ```
 
 **Conversion regex:**
+
 ```python
 content = re.sub(
     r'^!!! (\w+)(?: "([^"]*)")?\s*$',
@@ -162,11 +168,13 @@ def remove_grid_cards_divs(content: str) -> str:
 Wiki pages are at the wiki root, so asset paths need adjustment:
 
 **Input (from `docs/user-guide.md`):**
+
 ```markdown
 ![Logo](../assets/logo.svg)
 ```
 
 **Converted:**
+
 ```markdown
 ![Logo](assets/logo.svg)
 ```
@@ -190,11 +198,13 @@ Same conversion for `<img>` tags:
 Links that escape the `docs/` directory should be converted to full GitHub URLs:
 
 **Input (from `docs/index.md`):**
+
 ```markdown
 [Changelog](../CHANGELOG.md)
 ```
 
 **Converted:**
+
 ```markdown
 [Changelog](https://github.com/owner/repo/blob/main/CHANGELOG.md)
 ```
@@ -206,15 +216,18 @@ Links that escape the `docs/` directory should be converted to full GitHub URLs:
 ### 1. Page Doesn't Exist (404 / Redirect to Home)
 
 **Symptoms:**
+
 - Clicking sidebar link shows Home page content
 - URL in browser shows `/wiki/` instead of `/wiki/Page-Name`
 
 **Diagnosis:**
+
 1. Check if the file exists in the wiki directory
 2. Verify sidebar link name matches filename exactly
 3. Check for special characters in the filename
 
 **Fix:**
+
 ```bash
 # List generated wiki files
 ls -la wiki/
@@ -226,25 +239,31 @@ grep -o '\[\[[^]]*\]\]' wiki/_Sidebar.md | sort | uniq
 ### 2. Content Not Rendering
 
 **Symptoms:**
+
 - Raw MkDocs syntax visible (e.g., `=== "Tab"`)
 - Icons showing as `:material-icon:`
 
 **Diagnosis:**
+
 - MkDocs feature stripping is incomplete
 
 **Fix:**
+
 - Add regex patterns to `strip_mkdocs_features()` for the unhandled syntax
 
 ### 3. Broken Internal Links
 
 **Symptoms:**
+
 - Links between wiki pages don't work
 - 404 when clicking cross-references
 
 **Diagnosis:**
+
 - Link conversion isn't mapping to correct wiki page names
 
 **Fix:**
+
 - Verify `WIKI_STRUCTURE` mapping covers all source files
 - Check `convert_links()` function handles the link format
 

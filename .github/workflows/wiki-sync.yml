@@ -78,15 +78,17 @@ jobs:
 
           WIKI_REPO="https://github.com/${{ github.repository }}.wiki.git"
 
-          # Clone the wiki repo
-          if ! git clone "$WIKI_REPO" wiki; then
+          # Clone the wiki repo to github-wiki/ to avoid conflict with
+          # the wiki/ directory that exists in the repository checkout
+          # (wiki/ is the source of truth, github-wiki/ is the destination)
+          if ! git clone "$WIKI_REPO" github-wiki; then
             echo "::error::Failed to clone wiki repository."
             echo "::error::This is unexpected since the check-wiki job succeeded."
             exit 1
           fi
 
-          echo "Wiki cloned successfully"
-          cd wiki
+          echo "Wiki cloned successfully to github-wiki/"
+          cd github-wiki
 
           # Configure git locally for wiki repo only
           git config --local user.name "github-actions[bot]"
@@ -107,13 +109,13 @@ jobs:
           echo "Using wiki branch: $WIKI_BRANCH"
 
       - name: Sync documentation to wiki
-        run: python scripts/sync-wiki.py
+        run: python scripts/sync-wiki.py --dest github-wiki
 
       - name: Push changes to wiki
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cd wiki
+          cd github-wiki
           git add -A
 
           # Check if there are changes to commit
