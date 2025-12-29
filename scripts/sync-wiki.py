@@ -429,7 +429,7 @@ def strip_mkdocs_frontmatter(content: str) -> str:
 def convert_grid_cards_to_list(content: str) -> str:
     """Convert Material grid cards divs to markdown list format.
 
-    Converts this MkDocs Material for MkDocs syntax:
+    Converts this MkDocs Material syntax:
 
         <div class="grid cards" markdown>
 

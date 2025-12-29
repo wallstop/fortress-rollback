@@ -19,7 +19,6 @@ sys.modules["validate_wiki_output"] = _module
 _spec.loader.exec_module(_module)
 
 from validate_wiki_output import (  # noqa: E402
-    Issue,
     check_empty_sections,
     check_indented_code_fences,
     check_orphaned_indented_content,
