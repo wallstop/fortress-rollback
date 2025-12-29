@@ -415,7 +415,13 @@ assert_eq!(machine_a_state, machine_b_state);
 Use proptest to generate random input sequences:
 
 ```rust,ignore
-proptest!
+proptest! {
+    #[test]
+    fn determinism_holds(inputs in any_input_sequence()) {
+        let state1 = simulate(inputs.clone());
+        let state2 = simulate(inputs.clone());
+        assert_eq!(state1, state2);
+    }
 }
 ```
 

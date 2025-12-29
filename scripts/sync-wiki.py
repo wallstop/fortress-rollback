@@ -477,35 +477,215 @@ def remove_grid_cards_divs(content: str) -> str:
     return "".join(result)
 
 
-def strip_mkdocs_features(content: str) -> str:
-    """Remove MkDocs Material-specific features that don't render in GitHub Wiki."""
+def transform_outside_code_blocks(
+    content: str, transform_fn: callable
+) -> str:
+    """Apply a transformation function only to content outside code blocks.
+
+    This protects code blocks from being modified by regex-based transformations
+    that could corrupt code examples (e.g., MkDocs icon syntax in documentation).
+    """
+    code_ranges = find_code_fence_ranges(content)
+    inline_ranges = find_inline_code_ranges(content)
+
+    # Sort all ranges by start position
+    all_ranges = sorted(code_ranges + inline_ranges, key=lambda r: r[0])
+
+    # Merge overlapping ranges (inline code found inside fenced blocks)
+    merged_ranges: list[tuple[int, int]] = []
+    for start, end in all_ranges:
+        if merged_ranges and start <= merged_ranges[-1][1]:
+            # Overlapping or adjacent, extend the last range
+            merged_ranges[-1] = (merged_ranges[-1][0], max(merged_ranges[-1][1], end))
+        else:
+            merged_ranges.append((start, end))
+
+    result = []
+    last_end = 0
+
+    for start, end in merged_ranges:
+        # Transform content before this code block
+        if last_end < start:
+            result.append(transform_fn(content[last_end:start]))
+        # Preserve code block as-is
+        result.append(content[start:end])
+        last_end = end
+
+    # Transform remaining content after last code block
+    if last_end < len(content):
+        result.append(transform_fn(content[last_end:]))
+
+    return "".join(result)
+
+
+def dedent_mkdocs_tabs(content: str) -> str:
+    """Convert MkDocs tabbed content to plain headers and dedent the content.
+
+    MkDocs tabs look like:
+        === "Tab Name"
+
+            ```rust
+            code here
+            ```
+
+    This converts to:
+        ### Tab Name
+
+        ```rust
+        code here
+        ```
+
+    The key is removing the 4-space indentation from the tab content.
+    """
+    lines = content.split("\n")
+    result_lines = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        # Check for tab marker
+        tab_match = re.match(r'^=== "([^"]+)"$', line)
+
+        if tab_match:
+            # Convert tab marker to header
+            result_lines.append(f"### {tab_match.group(1)}")
+            i += 1
+
+            # Process the indented content block that follows
+            # First, skip any blank lines
+            while i < len(lines) and lines[i].strip() == "":
+                result_lines.append("")
+                i += 1
+
+            # Now dedent the 4-space indented content block
+            while i < len(lines):
+                next_line = lines[i]
+
+                # Check if we've hit another tab marker or non-indented content
+                if re.match(r'^=== "([^"]+)"$', next_line):
+                    # Next tab - stop dedenting, let outer loop handle it
+                    break
+                elif next_line.strip() == "":
+                    # Empty line - preserve it
+                    result_lines.append("")
+                    i += 1
+                elif next_line.startswith("    "):
+                    # 4-space indented content - dedent
+                    result_lines.append(next_line[4:])
+                    i += 1
+                elif next_line.startswith("\t"):
+                    # Tab indented content - remove one tab
+                    result_lines.append(next_line[1:])
+                    i += 1
+                else:
+                    # Non-indented content - stop the tab block
+                    break
+        else:
+            result_lines.append(line)
+            i += 1
+
+    return "\n".join(result_lines)
+
+
+def convert_admonitions(content: str) -> str:
+    """Convert MkDocs admonitions to blockquotes with proper content handling.
+
+    MkDocs admonitions look like:
+        !!! note "Title"
+            Content line 1
+            Content line 2
+
+    This converts to:
+        > **Title**
+        >
+        > Content line 1
+        > Content line 2
+    """
+    lines = content.split("\n")
+    result_lines = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        # Check for admonition marker
+        admon_match = re.match(r'^!!! (\w+)(?: "([^"]*)")?\s*$', line)
+
+        if admon_match:
+            admon_type = admon_match.group(1)
+            title = admon_match.group(2) or admon_type.title()
+
+            # Start blockquote with bold title
+            result_lines.append(f"> **{title}**")
+            result_lines.append(">")
+            i += 1
+
+            # Process the indented content block that follows
+            while i < len(lines):
+                next_line = lines[i]
+
+                if next_line.strip() == "":
+                    # Empty line within admonition - preserve as blockquote line
+                    result_lines.append(">")
+                    i += 1
+                elif next_line.startswith("    "):
+                    # 4-space indented content - convert to blockquote
+                    result_lines.append(f"> {next_line[4:]}")
+                    i += 1
+                elif next_line.startswith("\t"):
+                    # Tab indented content - convert to blockquote
+                    result_lines.append(f"> {next_line[1:]}")
+                    i += 1
+                else:
+                    # Non-indented content - end of admonition
+                    break
+        else:
+            result_lines.append(line)
+            i += 1
+
+    return "\n".join(result_lines)
+
+
+def strip_mkdocs_icons(content: str) -> str:
+    """Remove MkDocs Material icon syntax."""
     # Remove Material icons like :material-star-four-points: or :octicons-arrow-right-24:
     # Note: Icon names may include digits (e.g., arrow-right-24), so [a-z0-9-] is needed
     # Also consume trailing whitespace to prevent malformed links like [ Full comparison]
     content = re.sub(r":material-[a-z0-9-]+:\s*", "", content)
     content = re.sub(r":octicons-[a-z0-9-]+:\s*", "", content)
     content = re.sub(r":fontawesome-[a-z0-9-]+:\s*", "", content)
+    return content
 
+
+def strip_mkdocs_attributes(content: str) -> str:
+    """Remove MkDocs Markdown attribute annotations."""
     # Remove { .lg .middle } and similar Markdown attribute annotations
     # Only matches braces containing class (.) or id (#) selectors to avoid
     # removing legitimate content like {variable} placeholders
-    content = re.sub(r"\{\s*[.#][^}]*\}", "", content)
+    return re.sub(r"\{\s*[.#][^}]*\}", "", content)
+
+
+def strip_mkdocs_features(content: str) -> str:
+    """Remove MkDocs Material-specific features that don't render in GitHub Wiki.
+
+    This function applies transformations in a specific order:
+    1. Convert tabbed content (=== "Tab") with proper dedentation
+    2. Convert admonitions (!!! note) with proper content handling
+    3. Remove grid cards divs
+    4. Remove icons and attributes (only outside code blocks)
+    """
+    # Convert MkDocs tabbed content first (handles indentation)
+    content = dedent_mkdocs_tabs(content)
+
+    # Convert admonitions with proper content handling
+    content = convert_admonitions(content)
 
     # Remove Material grid cards divs (with proper nested div handling)
     content = remove_grid_cards_divs(content)
 
-    # Convert MkDocs tabbed content (=== "Tab Name") to plain headers
-    # This converts === "Tab Name" to ### Tab Name for GitHub wiki compatibility
-    content = re.sub(r'^=== "([^"]+)"$', r"### \1", content, flags=re.MULTILINE)
-
-    # Remove MkDocs admonitions syntax (!!! type "title")
-    # Convert to blockquote with bold title for GitHub wiki compatibility
-    content = re.sub(
-        r'^!!! (\w+)(?: "([^"]*)")?\s*$',
-        lambda m: f"> **{m.group(2) or m.group(1).title()}**\n>",
-        content,
-        flags=re.MULTILINE,
-    )
+    # Apply icon and attribute stripping ONLY outside code blocks
+    # to avoid corrupting code examples that discuss MkDocs syntax
+    content = transform_outside_code_blocks(content, strip_mkdocs_icons)
+    content = transform_outside_code_blocks(content, strip_mkdocs_attributes)
 
     return content
 

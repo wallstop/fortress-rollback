@@ -1789,9 +1789,15 @@ loop {
         for request in session.advance_frame()? {
             match request {
                 // Handle requests normally...
-                # FortressRequest::SaveGameState { cell, frame } =>
-                # FortressRequest::LoadGameState { cell, .. } =>
-                # FortressRequest::AdvanceFrame { inputs } =>
+                # FortressRequest::SaveGameState { cell, frame } => {
+                #     cell.save(frame, Some(game_state.clone()), None);
+                # }
+                # FortressRequest::LoadGameState { cell, .. } => {
+                #     game_state = cell.load().expect("State should exist");
+                # }
+                # FortressRequest::AdvanceFrame { inputs } => {
+                #     game_state.update(&inputs);
+                # }
             }
         }
     }
@@ -2368,7 +2374,7 @@ fn handle_error(error: FortressError) -> Action {
 
         // Recoverable: reconnect
         FortressError::SpectatorTooFarBehind => Action::Reconnect,
-        FortressError::SocketError  => Action::Reconnect,
+        FortressError::SocketError { .. } => Action::Reconnect,
 
         // Desync: log and investigate
         FortressError::MismatchedChecksum { current_frame, mismatched_frames } => {

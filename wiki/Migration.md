@@ -63,16 +63,16 @@ Update your pattern matching accordingly:
 ```rust
 // Before
 match request {
-    GgrsRequest::SaveGameState { cell, frame } =>
-    GgrsRequest::LoadGameState { cell, frame } =>
-    GgrsRequest::AdvanceFrame { inputs } =>
+    GgrsRequest::SaveGameState { cell, frame } => { ... }
+    GgrsRequest::LoadGameState { cell, frame } => { ... }
+    GgrsRequest::AdvanceFrame { inputs } => { ... }
 }
 
 // After
 match request {
-    FortressRequest::SaveGameState { cell, frame } =>
-    FortressRequest::LoadGameState { cell, frame } =>
-    FortressRequest::AdvanceFrame { inputs } =>
+    FortressRequest::SaveGameState { cell, frame } => { ... }
+    FortressRequest::LoadGameState { cell, frame } => { ... }
+    FortressRequest::AdvanceFrame { inputs } => { ... }
 }
 ```
 
@@ -85,7 +85,7 @@ instead of `Vec<(T::Input, InputStatus)>`. This avoids heap allocations for game
 
 ```rust
 // These all work unchanged:
-for (input, status) in inputs.iter()
+for (input, status) in inputs.iter() { ... }
 let first_input = inputs[0];
 let len = inputs.len();
 ```
@@ -94,16 +94,16 @@ If you explicitly typed the inputs as `Vec`, update the signature:
 
 ```rust
 // Before
-fn process_inputs(inputs: Vec<(MyInput, InputStatus)>)
+fn process_inputs(inputs: Vec<(MyInput, InputStatus)>) { ... }
 
 // After (two options)
 use fortress_rollback::InputVec;
 
 // Option 1: Use InputVec directly
-fn process_inputs(inputs: InputVec<MyInput>)
+fn process_inputs(inputs: InputVec<MyInput>) { ... }
 
 // Option 2: Accept any slice-like type (most flexible)
-fn process_inputs(inputs: &[(MyInput, InputStatus)])
+fn process_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 // Option 3: Convert to Vec if needed (allocates)
 fn process_inputs(inputs: impl Into<Vec<(MyInput, InputStatus)>>) {
@@ -284,7 +284,7 @@ The correct pattern uses the new `SyncHealth` API:
 if session.confirmed_frame() >= target_frames {
     match session.sync_health(peer_handle) {
         Some(SyncHealth::InSync) => break, // Safe to exit
-        Some(SyncHealth::DesyncDetected ) => panic!("Desync!"),
+        Some(SyncHealth::DesyncDetected { .. }) => panic!("Desync!"),
         _ => continue, // Keep polling until verified
     }
 }

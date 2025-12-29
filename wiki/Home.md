@@ -25,52 +25,52 @@ Get up and running with Fortress Rollback in minutes.
 <!-- markdownlint-disable MD046 -->
 ### Cargo.toml
 
-    ```toml
-    [dependencies]
-    fortress_rollback = "0.11"
-    serde = { version = "1.0", features = ["derive"] }
-    ```
+```toml
+[dependencies]
+fortress_rollback = "0.11"
+serde = { version = "1.0", features = ["derive"] }
+```
 
 ### Basic Session
 
-    ```rust
-    use fortress_rollback::{
-        Config, FortressRequest, PlayerHandle, PlayerType,
-        SessionBuilder, UdpNonBlockingSocket,
-    };
-    use serde::{Deserialize, Serialize};
-    use std::net::SocketAddr;
+```rust
+use fortress_rollback::{
+    Config, FortressRequest, PlayerHandle, PlayerType,
+    SessionBuilder, UdpNonBlockingSocket,
+};
+use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 
-    // Define your input and state types
-    #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
-    struct MyInput { buttons: u8 }
+// Define your input and state types
+#[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+struct MyInput { buttons: u8 }
 
-    #[derive(Clone, Serialize, Deserialize)]
-    struct MyGameState { frame: i32, /* your state */ }
+#[derive(Clone, Serialize, Deserialize)]
+struct MyGameState { frame: i32, /* your state */ }
 
-    // Configure Fortress Rollback
-    struct MyConfig;
-    impl Config for MyConfig {
-        type Input = MyInput;
-        type State = MyGameState;
-        type Address = SocketAddr;
-    }
+// Configure Fortress Rollback
+struct MyConfig;
+impl Config for MyConfig {
+    type Input = MyInput;
+    type State = MyGameState;
+    type Address = SocketAddr;
+}
 
-    fn main() -> Result<(), Box<dyn std::error::Error>> {
-        // Create a UDP socket and session
-        let socket = UdpNonBlockingSocket::bind_to_port(7000)?;
-        let remote: SocketAddr = "127.0.0.1:7001".parse()?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create a UDP socket and session
+    let socket = UdpNonBlockingSocket::bind_to_port(7000)?;
+    let remote: SocketAddr = "127.0.0.1:7001".parse()?;
 
-        let mut session = SessionBuilder::<MyConfig>::new()
-            .with_num_players(2)?
-            .add_player(PlayerType::Local, PlayerHandle::new(0))?
-            .add_player(PlayerType::Remote(remote), PlayerHandle::new(1))?
-            .start_p2p_session(socket)?;
+    let mut session = SessionBuilder::<MyConfig>::new()
+        .with_num_players(2)?
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote), PlayerHandle::new(1))?
+        .start_p2p_session(socket)?;
 
-        // Your game loop handles FortressRequests...
-        Ok(())
-    }
-    ```
+    // Your game loop handles FortressRequests...
+    Ok(())
+}
+```
 <!-- markdownlint-enable MD046 -->
 
 ---
@@ -86,14 +86,15 @@ Get up and running with Fortress Rollback in minutes.
 <!-- markdownlint-disable MD046 -->
 > **Fork of GGRS**
 >
-    Fortress Rollback is a hardened fork of [GGRS](https://github.com/gschup/ggrs) (Good Game Rollback System). It maintains API compatibility where possible while adding formal verification, eliminating panics, and fixing determinism bugs.
-
-    **Key improvements over GGRS:**
-
-    - All `panic!` and `assert!` converted to recoverable errors
-    - Deterministic `BTreeMap`/`BTreeSet` instead of `HashMap`/`HashSet`
-    - 1100+ tests with ~92% code coverage
-    - TLA+, Z3, and Kani formal verification
-
-    [Full comparison](Fortress-vs-GGRS)
+>
+> Fortress Rollback is a hardened fork of [GGRS](https://github.com/gschup/ggrs) (Good Game Rollback System). It maintains API compatibility where possible while adding formal verification, eliminating panics, and fixing determinism bugs.
+>
+> **Key improvements over GGRS:**
+>
+> - All `panic!` and `assert!` converted to recoverable errors
+> - Deterministic `BTreeMap`/`BTreeSet` instead of `HashMap`/`HashSet`
+> - 1100+ tests with ~92% code coverage
+> - TLA+, Z3, and Kani formal verification
+>
+> [Full comparison](Fortress-vs-GGRS)
 <!-- markdownlint-enable MD046 -->
