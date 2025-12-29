@@ -29,7 +29,7 @@ The CI uses [lychee](https://lychee.cli.rs/) for fast, comprehensive link checki
 **Key behaviors:**
 
 - **Caching** — Results are cached for faster subsequent runs (`.lycheecache`)
-- **Fragment validation** — `include_fragments = true` checks `#anchor` links
+- **Fragment validation** — `include_fragments = true` enables validation of `#anchor` links (verifies the target heading/ID exists)
 - **Exclusions** — Rate-limited sites, localhost, and placeholder URLs are skipped
 - **Retries** — Failed requests retry up to 3 times before failing
 
