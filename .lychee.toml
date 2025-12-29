@@ -106,8 +106,6 @@ exclude_all_private = true
 # Require HTTPS for external links (warn only, don't fail)
 require_https = false
 
-# Include links in source code comments
-
 # ============================================================================
 # GitHub-specific settings
 # ============================================================================
