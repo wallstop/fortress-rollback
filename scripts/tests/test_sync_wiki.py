@@ -25,11 +25,11 @@ import pytest
 
 # Import functions from the loaded module
 convert_admonitions = sync_wiki.convert_admonitions
+convert_grid_cards_to_list = sync_wiki.convert_grid_cards_to_list
 dedent_mkdocs_tabs = sync_wiki.dedent_mkdocs_tabs
 find_code_fence_ranges = sync_wiki.find_code_fence_ranges
 find_inline_code_ranges = sync_wiki.find_inline_code_ranges
 path_to_wiki_name = sync_wiki.path_to_wiki_name
-remove_grid_cards_divs = sync_wiki.remove_grid_cards_divs
 strip_mkdocs_attributes = sync_wiki.strip_mkdocs_attributes
 strip_mkdocs_features = sync_wiki.strip_mkdocs_features
 strip_mkdocs_icons = sync_wiki.strip_mkdocs_icons
@@ -243,23 +243,193 @@ class TestStripMkdocsAttributes:
         assert result == "{variable}"
 
 
-class TestRemoveGridCardsDivs:
-    """Tests for remove_grid_cards_divs function."""
+class TestConvertGridCardsList:
+    """Tests for convert_grid_cards_to_list function."""
 
     def test_simple_grid_cards(self) -> None:
-        content = 'before<div class="grid cards" markdown>content</div>after'
-        result = remove_grid_cards_divs(content)
-        assert result == "beforeafter"
+        """Grid cards with single card converts to markdown list."""
+        content = '''<div class="grid cards" markdown>
+
+-   :material-star:{ .lg .middle } **Feature One**
+
+    ---
+
+    Description of feature one.
+
+    [:octicons-arrow-right-24: Learn more](user-guide.md)
+
+</div>'''
+        result = convert_grid_cards_to_list(content)
+        assert "**Feature One**" in result
+        assert "Description of feature one." in result
+        assert "[Learn more](user-guide.md)" in result
+        # Should be a list item
+        assert result.strip().startswith("-")
+
+    def test_multiple_cards(self) -> None:
+        """Multiple cards in grid convert to multiple list items."""
+        content = '''<div class="grid cards" markdown>
+
+-   :material-one: **Card One**
+
+    ---
+
+    First card description.
+
+    [:octicons-arrow-right-24: Link One](page1.md)
+
+-   :material-two: **Card Two**
+
+    ---
+
+    Second card description.
+
+    [:octicons-arrow-right-24: Link Two](page2.md)
+
+</div>'''
+        result = convert_grid_cards_to_list(content)
+        # Both cards should be present
+        assert "**Card One**" in result
+        assert "**Card Two**" in result
+        assert "First card description." in result
+        assert "Second card description." in result
+        assert "[Link One](page1.md)" in result
+        assert "[Link Two](page2.md)" in result
+        # Should have two list items
+        lines = [l for l in result.strip().split('\n') if l.strip().startswith('-')]
+        assert len(lines) == 2
 
     def test_nested_divs(self) -> None:
+        """Grid cards with nested divs are handled correctly."""
         content = '<div class="grid cards" markdown><div>nested</div></div>'
-        result = remove_grid_cards_divs(content)
-        assert result == ""
+        result = convert_grid_cards_to_list(content)
+        # Content may be empty or converted - just verify no crash
+        assert "<div" not in result
 
-    def test_preserves_other_content(self) -> None:
-        content = "regular content"
-        result = remove_grid_cards_divs(content)
+    def test_preserves_surrounding_content(self) -> None:
+        """Content before and after grid cards is preserved."""
+        content = '''before
+
+<div class="grid cards" markdown>
+
+-   :icon: **Title**
+
+    ---
+
+    Desc.
+
+    [:octicons-arrow: Link](url)
+
+</div>
+
+after'''
+        result = convert_grid_cards_to_list(content)
+        assert "before" in result
+        assert "after" in result
+        assert "**Title**" in result
+
+    def test_card_without_link(self) -> None:
+        """Cards without link lines are handled."""
+        content = '''<div class="grid cards" markdown>
+
+-   :icon: **No Link Card**
+
+    ---
+
+    Just a description.
+
+</div>'''
+        result = convert_grid_cards_to_list(content)
+        assert "**No Link Card**" in result
+        assert "Just a description." in result
+
+    def test_empty_grid_cards(self) -> None:
+        """Empty grid cards don't crash."""
+        content = '<div class="grid cards" markdown></div>'
+        result = convert_grid_cards_to_list(content)
+        # Should not crash, result may be empty
+        assert "<div" not in result
+
+    def test_preserves_regular_content(self) -> None:
+        """Content without grid cards is unchanged."""
+        content = "regular content\nwith no grids"
+        result = convert_grid_cards_to_list(content)
         assert result == content
+
+    def test_multiple_grid_sections(self) -> None:
+        """Multiple grid card sections in same document are all converted."""
+        content = '''## Features
+
+<div class="grid cards" markdown>
+
+-   :icon: **Feature 1**
+
+    ---
+
+    Description 1.
+
+    [:octicons-arrow-right-24: Link 1](page1.md)
+
+</div>
+
+## Navigation
+
+<div class="grid cards" markdown>
+
+-   :icon: **Nav Item**
+
+    ---
+
+    Nav description.
+
+    [:octicons-arrow-right-24: Go](nav.md)
+
+</div>'''
+        result = convert_grid_cards_to_list(content)
+        # Both sections should have content
+        assert "**Feature 1**" in result
+        assert "**Nav Item**" in result
+        assert "[Link 1](page1.md)" in result
+        assert "[Go](nav.md)" in result
+        # Headers should be preserved
+        assert "## Features" in result
+        assert "## Navigation" in result
+
+    def test_card_with_only_title(self) -> None:
+        """Card with only a title (no description, no link) is handled."""
+        content = '''<div class="grid cards" markdown>
+
+-   :icon: **Minimal Card**
+
+</div>'''
+        result = convert_grid_cards_to_list(content)
+        assert "**Minimal Card**" in result
+        # Should create a list item
+        assert result.strip().startswith("-")
+
+    def test_closing_div_with_whitespace(self) -> None:
+        """Closing div with whitespace before > is handled."""
+        content = '<div class="grid cards" markdown>-   :i: **Test**\n\n    ---\n\n    Desc.\n\n</div >'
+        result = convert_grid_cards_to_list(content)
+        # Should not crash, should extract content
+        assert "**Test**" in result
+
+    def test_external_url_in_link(self) -> None:
+        """External URLs in card links are preserved."""
+        content = '''<div class="grid cards" markdown>
+
+-   :icon: **External**
+
+    ---
+
+    External link test.
+
+    [:octicons-arrow-right-24: Visit](https://example.com)
+
+</div>'''
+        result = convert_grid_cards_to_list(content)
+        assert "https://example.com" in result
+        assert "[Visit](https://example.com)" in result
 
 
 class TestTransformOutsideCodeBlocks:

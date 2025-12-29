@@ -266,6 +266,139 @@ def find_code_fence_ranges(content: str) -> list[tuple[int, int]]:
 
 ---
 
+## MkDocs Material to GitHub Wiki Conversion
+
+### Grid Cards Content Extraction
+
+MkDocs Material "grid cards" use a specific structure that must be **converted**, not removed,
+when generating GitHub Wiki content:
+
+```markdown
+<!-- Source: MkDocs Material -->
+<div class="grid cards" markdown>
+
+-   :material-icon:{ .lg .middle } **Title**
+
+    ---
+
+    Description text.
+
+    [:octicons-arrow-right-24: Link text](url)
+
+</div>
+```
+
+**Common mistake:** Simply removing the div leaves empty sections. Always **convert to markdown**:
+
+```markdown
+<!-- Target: GitHub Wiki -->
+- **Title** — Description text. [Link text](url)
+```
+
+### Parsing Grid Cards
+
+```python
+def _parse_grid_cards_content(div_content: str) -> str:
+    """Parse grid cards list items and convert to markdown list.
+
+    Each card has this structure:
+        -   :icon:{ .attrs } **Title**
+            ---
+            Description paragraph.
+            [:octicons-arrow-right-24: Link text](url)
+    """
+    lines = div_content.split('\n')
+    cards: list[dict[str, str]] = []
+    current_card: dict[str, str] | None = None
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Check for card start (list item with title)
+        card_match = re.match(r'^-\s+.*\*\*([^*]+)\*\*', stripped)
+        if card_match:
+            if current_card:
+                cards.append(current_card)
+            current_card = {
+                "title": card_match.group(1).strip(),
+                "description": "",
+                "link_text": "",
+                "link_url": "",
+            }
+            continue
+
+        if current_card:
+            # Skip separator lines
+            if stripped == "---":
+                continue
+
+            # Check for link line
+            link_match = re.match(r'^\[:[\w-]+:\s*([^\]]+)\]\(([^)]+)\)', stripped)
+            if link_match:
+                current_card["link_text"] = link_match.group(1).strip()
+                current_card["link_url"] = link_match.group(2).strip()
+                continue
+
+            # Regular content (description)
+            if stripped and not stripped.startswith(("<", "<!--")):
+                if current_card["description"]:
+                    current_card["description"] += " " + stripped
+                else:
+                    current_card["description"] = stripped
+
+    if current_card:
+        cards.append(current_card)
+
+    # Build markdown list
+    output = []
+    for card in cards:
+        parts = [f"- **{card['title']}**"]
+        if card["description"]:
+            parts.append(f" — {card['description']}")
+        if card["link_text"] and card["link_url"]:
+            parts.append(f" [{card['link_text']}]({card['link_url']})")
+        output.append("".join(parts))
+
+    return "\n".join(output) + "\n"
+```
+
+### Validation: Detecting Empty Sections
+
+After conversion, validate that no sections are left empty:
+
+```python
+def check_empty_sections(content: str, filename: str) -> list[Issue]:
+    """Check for empty content sections (headers followed by only whitespace)."""
+    issues = []
+    lines = content.split('\n')
+
+    for i, line in enumerate(lines, 1):
+        header_match = re.match(r'^(#{2,6})\s+(.+)$', line)
+        if header_match:
+            header_level = header_match.group(1)
+            header_text = header_match.group(2).strip()
+
+            # Look ahead for content
+            has_content = False
+            for next_line in lines[i:]:
+                stripped = next_line.strip()
+                # Stop at same/higher level header
+                if re.match(r'^#{2,' + str(len(header_level)) + r'}\s+', next_line):
+                    break
+                # Skip empty lines and comments
+                if stripped and stripped != "---" and not stripped.startswith("<!--"):
+                    has_content = True
+                    break
+
+            if not has_content:
+                issues.append(Issue(filename, i, "error",
+                    f"Empty section: '{header_text}' has no content"))
+
+    return issues
+```
+
+---
+
 ## MkDocs and Static Site Considerations
 
 ### Asset Path Resolution
