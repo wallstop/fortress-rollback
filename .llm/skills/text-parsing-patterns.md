@@ -386,7 +386,10 @@ def check_empty_sections(content: str, filename: str) -> list[Issue]:
             # Look ahead to see if section has content
             # Use while loop with explicit index since we need precise control
             section_has_content = False
-            j = i  # j is 1-indexed like line numbers (enumerate starts at 1)
+            # i is 1-indexed (line number), but lines[] is 0-indexed.
+            # Conveniently, the 1-indexed line number of current line equals
+            # the 0-indexed position of the NEXT line (i.e., lines[i] is next line).
+            j = i  # 0-indexed position of next line after header
 
             while j < len(lines):
                 next_line = lines[j]
@@ -532,6 +535,82 @@ def test_link_conversion_roundtrip():
     converted = convert_links(content)
     assert "[Guide]" in converted
     assert "(" in converted and ")" in converted
+```
+
+---
+
+## Enumerate Indexing Pitfall
+
+### The 1-Indexed vs 0-Indexed Confusion
+
+When using `enumerate(lines, 1)` for human-readable line numbers, be careful when using the index for subsequent list access:
+
+```python
+# ❌ CONFUSING: Comment claims j is 1-indexed but it's used as 0-indexed
+for i, line in enumerate(lines, 1):
+    if is_header(line):
+        j = i  # "j is 1-indexed like line numbers" <- MISLEADING COMMENT
+        while j < len(lines):
+            next_line = lines[j]  # Actually works! But why?
+```
+
+**Why this code works (by coincidence):**
+
+| `i` (1-indexed) | `line` | Want to access | `lines[i]` gives |
+|-----------------|--------|----------------|------------------|
+| 1 | `lines[0]` | Next line: `lines[1]` | ✓ `lines[1]` |
+| 2 | `lines[1]` | Next line: `lines[2]` | ✓ `lines[2]` |
+| N | `lines[N-1]` | Next line: `lines[N]` | ✓ `lines[N]` |
+
+The 1-indexed line number of the current line **happens to equal** the 0-indexed position of the next line! This is a mathematical consequence (`i = (i-1) + 1`), not immediately obvious from the code.
+
+### Clear Alternatives
+
+**Option 1: Use 0-indexed enumerate, calculate line number for reporting:**
+
+```python
+# ✅ CLEAR: Standard 0-indexed loop, line_num only for error messages
+for idx, line in enumerate(lines):
+    line_num = idx + 1  # For error reporting only
+    if is_header(line):
+        # Start checking from next line (idx + 1)
+        j = idx + 1
+        while j < len(lines):
+            next_line = lines[j]  # Obviously 0-indexed access
+```
+
+**Option 2: Keep 1-indexed but document the math explicitly:**
+
+```python
+# ✅ CLEAR: Explicitly convert when needed
+for i, line in enumerate(lines, 1):
+    if is_header(line):
+        # i is 1-indexed (line number), but lines[] is 0-indexed.
+        # Conveniently, the 1-indexed line number of current line equals
+        # the 0-indexed position of the NEXT line (i.e., lines[i] is next line).
+        j = i  # 0-indexed position of next line after header
+        while j < len(lines):
+            next_line = lines[j]
+```
+
+### Test for Index Correctness
+
+When writing code that mixes indexing schemes, add explicit tests:
+
+```python
+def test_enumerate_indexing_edge_cases():
+    """Verify line number to index conversion is correct."""
+    # Single line - no next line to access
+    lines = ["## Header"]
+    # Should not crash, should not access out of bounds
+
+    # Header on last line
+    lines = ["Content", "## Header"]
+    # j = 2, len(lines) = 2, while 2 < 2 is False - no loop entered (correct)
+
+    # Header on first line
+    lines = ["## Header", "Content"]
+    # i = 1, j = 1, lines[1] = "Content" (correct - the next line)
 ```
 
 ---

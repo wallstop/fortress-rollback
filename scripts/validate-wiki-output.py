@@ -202,7 +202,10 @@ def check_empty_sections(content: str, filename: str) -> list[Issue]:
 
             # Look ahead to see if section has content
             section_has_content = False
-            j = i  # j is 1-indexed like line numbers
+            # i is 1-indexed (line number), but lines[] is 0-indexed.
+            # Conveniently, the 1-indexed line number of current line equals
+            # the 0-indexed position of the NEXT line (i.e., lines[i] is next line).
+            j = i  # 0-indexed position of next line after header
 
             while j < len(lines):
                 next_line = lines[j]
