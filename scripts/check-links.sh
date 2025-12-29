@@ -90,6 +90,14 @@ check_local_file() {
     incr_checked
 
     if [[ -z "$resolved_path" ]] || [[ ! -e "$resolved_path" ]]; then
+        # For wiki files, try adding .md extension (GitHub Wiki uses extensionless links)
+        if [[ "$source_file" == *"/wiki/"* ]] && [[ ! "$path" =~ \. ]]; then
+            local wiki_resolved="${resolved_path}.md"
+            if [[ -e "$wiki_resolved" ]]; then
+                log_verbose "  ${GREEN}✓${NC} $link (wiki format)"
+                return 0
+            fi
+        fi
         log_error "Broken link in $source_file: '$link' (resolved to: ${resolved_path:-<invalid path>})"
         return 1
     else
@@ -147,9 +155,24 @@ check_markdown_links() {
 
     log_verbose "${BLUE}Checking:${NC} $file"
 
-    # Extract markdown links: [text](link)
+    # Remove fenced code blocks before extracting links
+    # Uses awk to skip lines between ``` or ~~~ markers
+    local content_without_code
+    content_without_code=$(awk '
+        /^```|^~~~/ {
+            if (in_fence) {
+                in_fence = 0
+            } else {
+                in_fence = 1
+            }
+            next
+        }
+        !in_fence { print }
+    ' "$file" 2>/dev/null)
+
+    # Extract markdown links: [text](link) from content without code blocks
     local links
-    links=$(grep -oE '\[([^]]*)\]\(([^)]+)\)' "$file" 2>/dev/null | sed 's/\[.*\](\(.*\))/\1/' | sed 's/)$//')
+    links=$(echo "$content_without_code" | grep -oE '\[([^]]*)\]\(([^)]+)\)' 2>/dev/null | sed 's/\[.*\](\(.*\))/\1/' | sed 's/)$//')
 
     for link in $links; do
         # Check if it's an anchor-only link
@@ -166,17 +189,17 @@ check_markdown_links() {
         fi
     done
 
-    # Extract reference-style links: [text]: url
+    # Extract reference-style links: [text]: url (also filtered)
     local ref_links
-    ref_links=$(grep -oE '^\[[^]]+\]:[[:space:]]+.+' "$file" 2>/dev/null | sed 's/^\[[^]]*\]:[[:space:]]*//')
+    ref_links=$(echo "$content_without_code" | grep -oE '^\[[^]]+\]:[[:space:]]+.+' 2>/dev/null | sed 's/^\[[^]]*\]:[[:space:]]*//')
 
     for link in $ref_links; do
         check_local_file "$file" "$link"
     done
 
-    # Extract raw HTML links: href="..." and src="..."
+    # Extract raw HTML links: href="..." and src="..." (also filtered)
     local html_links
-    html_links=$(grep -oE '(href|src)="[^"]*"' "$file" 2>/dev/null | sed 's/.*="\([^"]*\)"/\1/')
+    html_links=$(echo "$content_without_code" | grep -oE '(href|src)="[^"]*"' 2>/dev/null | sed 's/.*="\([^"]*\)"/\1/')
 
     for link in $html_links; do
         check_local_file "$file" "$link"

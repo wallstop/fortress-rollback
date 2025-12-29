@@ -67,6 +67,71 @@ def extract_markdown_anchors(content: str) -> set[str]:
     return anchors
 
 
+def find_code_fence_ranges(content: str) -> list[tuple[int, int]]:
+    """Find ranges of fenced code blocks (``` or ~~~) to skip.
+
+    Uses a state-based parser to properly handle:
+    - Different fence lengths (``` vs ````)
+    - Both backtick and tilde fences
+    - Nested fences (longer fence can contain shorter)
+    """
+    ranges = []
+    lines = content.split("\n")
+    pos = 0
+    fence_start: int | None = None
+    fence_char: str | None = None
+    fence_len: int = 0
+
+    for line in lines:
+        line_start = pos
+        stripped = line.lstrip()
+
+        # Check for fence opening/closing
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            char = stripped[0]
+            # Count consecutive fence characters
+            count = 0
+            for c in stripped:
+                if c == char:
+                    count += 1
+                else:
+                    break
+
+            if fence_start is None:
+                # Opening fence
+                fence_start = line_start
+                fence_char = char
+                fence_len = count
+            elif char == fence_char and count >= fence_len:
+                # Closing fence (same char, at least same length)
+                ranges.append((fence_start, pos + len(line)))
+                fence_start = None
+                fence_char = None
+                fence_len = 0
+
+        pos += len(line) + 1  # +1 for newline
+
+    # Handle unclosed fence at end of file
+    if fence_start is not None:
+        ranges.append((fence_start, len(content)))
+
+    return ranges
+
+
+def in_code_block(pos: int, code_ranges: list[tuple[int, int]]) -> bool:
+    """Check if a position is within any code block range."""
+    return any(start <= pos < end for start, end in code_ranges)
+
+
+def is_wiki_file(source_file: Path, project_root: Path) -> bool:
+    """Check if a file is in the wiki directory."""
+    try:
+        rel_path = source_file.relative_to(project_root)
+        return rel_path.parts[0] == "wiki"
+    except ValueError:
+        return False
+
+
 def check_markdown_link(
     source_file: Path, link_target: str, project_root: Path, verbose: bool = False
 ) -> tuple[bool, str]:
@@ -103,7 +168,15 @@ def check_markdown_link(
 
     # Check if target exists
     if not target_path.exists():
-        return False, f"Link target not found: {link_target} (from {source_file.relative_to(project_root)})"
+        # For wiki files, try adding .md extension (GitHub Wiki uses extensionless links)
+        if is_wiki_file(source_file, project_root):
+            wiki_target_path = (source_dir / f"{link_target}.md").resolve()
+            if wiki_target_path.exists():
+                target_path = wiki_target_path
+            else:
+                return False, f"Link target not found: {link_target} (from {source_file.relative_to(project_root)})"
+        else:
+            return False, f"Link target not found: {link_target} (from {source_file.relative_to(project_root)})"
 
     # If there's an anchor, check it exists in target file
     if anchor and target_path.suffix.lower() == ".md":
@@ -135,11 +208,18 @@ def check_markdown_file(
         print(f"ERROR: Could not read {file_path}: {e}")
         return LinkCheckResult(errors=1, warnings=0, checked=0)
 
+    # Find code fence ranges to skip
+    code_ranges = find_code_fence_ranges(content)
+
     # Find markdown links: [text](url) and [text][ref]
     # Standard links
     link_pattern = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 
     for match in link_pattern.finditer(content):
+        # Skip links inside code blocks
+        if in_code_block(match.start(), code_ranges):
+            continue
+
         _link_text = match.group(1)  # Captured but unused; kept for debugging
         link_target = match.group(2).strip()
         checked += 1

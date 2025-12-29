@@ -1501,7 +1501,10 @@ Links resolve **from the directory containing the markdown file**, not from repo
 - ✅ CORRECT from `.github/`: `[Context]` + `(../.llm/context.md)` — go up first
 - ✅ CORRECT from `.llm/`: `[Skill]` + `(skills/foo.md)` — relative to current dir
 
-**See also:** [Markdown Link Validation](skills/markdown-link-validation.md) — comprehensive guide with examples
+**See also:**
+
+- [Markdown Link Validation](skills/markdown-link-validation.md) — comprehensive guide with examples
+- [GitHub Wiki Sync](skills/github-wiki-sync.md) — wiki synchronization from MkDocs to GitHub Wiki
 
 ### GitHub Actions Workflow Linting (REQUIRED)
 
