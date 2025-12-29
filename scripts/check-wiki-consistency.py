@@ -303,6 +303,68 @@ def validate_sidebar_completeness(
     return ValidationResult(errors=errors, warnings=warnings)
 
 
+def validate_markdown_link_syntax(wiki_dir: Path, verbose: bool = False) -> ValidationResult:
+    """
+    Validate that markdown links in wiki pages have correct syntax.
+
+    Checks for common malformed patterns:
+    - Space after opening bracket: [ Text](url) should be [Text](url)
+    - Space before closing bracket: [Text ](url) should be [Text](url)
+    - Empty link text: [](url) is suspicious
+    """
+    errors = 0
+    warnings = 0
+
+    # Pattern for malformed links with space after opening bracket
+    space_after_open = re.compile(r"\[\s+[^\]]+\]\([^)]+\)")
+    # Pattern for malformed links with space before closing bracket
+    space_before_close = re.compile(r"\[[^\]]+\s+\]\([^)]+\)")
+    # Pattern for empty link text
+    empty_text = re.compile(r"\[\s*\]\([^)]+\)")
+
+    if verbose:
+        print("\nChecking markdown link syntax in wiki pages...")
+
+    for md_file in sorted(wiki_dir.glob("*.md")):
+        try:
+            content = md_file.read_text(encoding="utf-8")
+            lines = content.splitlines()
+
+            for line_num, line in enumerate(lines, start=1):
+                # Check for space after opening bracket
+                for match in space_after_open.finditer(line):
+                    errors += 1
+                    print(
+                        red("ERROR:")
+                        + f" {md_file.name}:{line_num}: Malformed link with space "
+                        + f"after '[': {match.group()}"
+                    )
+
+                # Check for space before closing bracket
+                for match in space_before_close.finditer(line):
+                    warnings += 1
+                    print(
+                        yellow("WARNING:")
+                        + f" {md_file.name}:{line_num}: Link has trailing space "
+                        + f"before ']': {match.group()}"
+                    )
+
+                # Check for empty link text
+                for match in empty_text.finditer(line):
+                    warnings += 1
+                    print(
+                        yellow("WARNING:")
+                        + f" {md_file.name}:{line_num}: Empty link text: "
+                        + f"{match.group()}"
+                    )
+
+        except (OSError, UnicodeDecodeError) as e:
+            print(red(f"ERROR: Could not read {md_file}: {e}"))
+            errors += 1
+
+    return ValidationResult(errors=errors, warnings=warnings)
+
+
 def main() -> int:
     """Main entry point."""
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
@@ -373,6 +435,14 @@ def main() -> int:
     total_warnings += result.warnings
     if result.errors == 0 and result.warnings == 0:
         print(green("   ✓ All wiki pages have sidebar entries"))
+
+    # 4. Validate markdown link syntax
+    print(f"\n{bold('4. Validating markdown link syntax...')}")
+    result = validate_markdown_link_syntax(wiki_dir, verbose)
+    total_errors += result.errors
+    total_warnings += result.warnings
+    if result.errors == 0 and result.warnings == 0:
+        print(green("   ✓ All markdown links have correct syntax"))
 
     # Print summary
     print("\n" + "=" * 40)

@@ -481,9 +481,10 @@ def strip_mkdocs_features(content: str) -> str:
     """Remove MkDocs Material-specific features that don't render in GitHub Wiki."""
     # Remove Material icons like :material-star-four-points: or :octicons-arrow-right-24:
     # Note: Icon names may include digits (e.g., arrow-right-24), so [a-z0-9-] is needed
-    content = re.sub(r":material-[a-z0-9-]+:", "", content)
-    content = re.sub(r":octicons-[a-z0-9-]+:", "", content)
-    content = re.sub(r":fontawesome-[a-z0-9-]+:", "", content)
+    # Also consume trailing whitespace to prevent malformed links like [ Full comparison]
+    content = re.sub(r":material-[a-z0-9-]+:\s*", "", content)
+    content = re.sub(r":octicons-[a-z0-9-]+:\s*", "", content)
+    content = re.sub(r":fontawesome-[a-z0-9-]+:\s*", "", content)
 
     # Remove { .lg .middle } and similar Markdown attribute annotations
     # Only matches braces containing class (.) or id (#) selectors to avoid

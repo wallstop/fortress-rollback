@@ -90,10 +90,10 @@ Get up and running with Fortress Rollback in minutes.
 
     **Key improvements over GGRS:**
 
-    -  All `panic!` and `assert!` converted to recoverable errors
-    -  Deterministic `BTreeMap`/`BTreeSet` instead of `HashMap`/`HashSet`
-    -  1100+ tests with ~92% code coverage
-    -  TLA+, Z3, and Kani formal verification
+    - All `panic!` and `assert!` converted to recoverable errors
+    - Deterministic `BTreeMap`/`BTreeSet` instead of `HashMap`/`HashSet`
+    - 1100+ tests with ~92% code coverage
+    - TLA+, Z3, and Kani formal verification
 
-    [ Full comparison](Fortress-vs-GGRS)
+    [Full comparison](Fortress-vs-GGRS)
 <!-- markdownlint-enable MD046 -->

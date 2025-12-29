@@ -79,6 +79,43 @@ Markdown lint rules are configured in `.markdownlint.json` at the repository roo
 - Heading style preferences
 - Other project-specific settings
 
+## Link Syntax Rules
+
+### Malformed Links to Avoid
+
+Spaces inside link brackets cause rendering issues:
+
+```markdown
+❌ WRONG:
+[ Text with leading space](url)
+[Text with trailing space ](url)
+[](url)  # Empty link text
+
+✅ CORRECT:
+[Text](url)
+[Descriptive link text](url)
+```
+
+### Common Causes
+
+| Issue | Cause | Fix |
+|-------|-------|-----|
+| `[ Text]` | Icon removal left trailing space | Update regex to include `\s*` |
+| `[Text ]` | Copy-paste with trailing space | Trim link text |
+| `[]` | Missing link text | Add descriptive text |
+
+### Wiki Sync Considerations
+
+When stripping MkDocs icons (`:octicons-*:`, `:material-*:`), ensure trailing whitespace is also removed:
+
+```python
+# ❌ Leaves space: [:octicons-arrow-right-24: Text] -> [ Text]
+re.sub(r":octicons-[a-z0-9-]+:", "", content)
+
+# ✅ Correct: [:octicons-arrow-right-24: Text] -> [Text]
+re.sub(r":octicons-[a-z0-9-]+:\s*", "", content)
+```
+
 ## Quick Reference
 
 ```bash
@@ -87,4 +124,7 @@ npx markdownlint "**/*.md"
 
 # Auto-fix most issues
 npx markdownlint --fix "**/*.md"
+
+# Check wiki link syntax
+python3 scripts/check-wiki-consistency.py
 ```

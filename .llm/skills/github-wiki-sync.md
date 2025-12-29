@@ -149,17 +149,22 @@ content = re.sub(
 
 ### Material Icons
 
-Remove Material/Octicons/FontAwesome icon shortcodes:
+Remove Material/Octicons/FontAwesome icon shortcodes **and trailing whitespace**:
 
 ```python
 # Note: Icon names may include digits (e.g., arrow-right-24)
-content = re.sub(r":material-[a-z0-9-]+:", "", content)
-content = re.sub(r":octicons-[a-z0-9-]+:", "", content)
-content = re.sub(r":fontawesome-[a-z0-9-]+:", "", content)
+# Also consume trailing whitespace (\s*) to prevent malformed links
+# e.g., [:octicons-arrow-right-24: Text] -> [Text] not [ Text]
+content = re.sub(r":material-[a-z0-9-]+:\s*", "", content)
+content = re.sub(r":octicons-[a-z0-9-]+:\s*", "", content)
+content = re.sub(r":fontawesome-[a-z0-9-]+:\s*", "", content)
 ```
 
 > **Critical:** Use `[a-z0-9-]` not just `[a-z-]` — MkDocs Material icons often include
 > size suffixes like `-24`, `-16`, etc. (e.g., `:octicons-arrow-right-24:`).
+> Also include `\s*` at the end of the pattern to consume trailing whitespace.
+> Without this, `[:octicons-arrow-right-24: Full comparison]` becomes `[ Full comparison]`
+> which is a malformed link that won't render correctly.
 
 ### Attribute Annotations
 
