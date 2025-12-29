@@ -486,9 +486,14 @@ def convert_grid_cards_to_list(content: str) -> str:
 
                 j += 1
 
+            # Handle unclosed div: if we exited with div_depth > 0, no closing tag was found
+            # In this case, don't subtract any closing_tag_len to avoid incorrect truncation
+            if div_depth > 0:
+                closing_tag_len = 0
+
             # Extract the div content (excluding the opening and closing tags)
             # Use the captured closing tag length to handle whitespace variations
-            div_content = content[i + grid_match.end():j - closing_tag_len]
+            div_content = content[i + grid_match.end() : j - closing_tag_len]
 
             # Convert the grid cards content to markdown list
             converted = _parse_grid_cards_content(div_content)

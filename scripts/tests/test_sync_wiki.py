@@ -414,6 +414,36 @@ after'''
         # Should not crash, should extract content
         assert "**Test**" in result
 
+    def test_unclosed_grid_cards_div(self) -> None:
+        """Unclosed grid cards div (no matching </div>) is handled gracefully.
+
+        This is a regression test for a bug where an unclosed div would cause
+        incorrect content truncation: when div_depth > 0 after the loop,
+        closing_tag_len retains its default value of 6, causing
+        content[start:end - 6] to incorrectly remove 6 characters.
+        """
+        content = '''<div class="grid cards" markdown>
+
+-   :icon: **Unclosed Card**
+
+    ---
+
+    This div has no closing tag.
+
+    [:octicons-arrow-right-24: Link](url.md)
+
+Some content after that should be preserved'''
+        result = convert_grid_cards_to_list(content)
+        # Should not crash
+        # Should extract the card content
+        assert "**Unclosed Card**" in result
+        assert "This div has no closing tag." in result
+        # The content at the end should NOT be truncated
+        # Before the fix, "preserved" would be cut to "pres" (6 chars removed)
+        # With the unclosed div, everything after opening tag becomes div_content
+        # Critical: "preserved" should NOT be truncated to "pres" or similar
+        assert "preserved" in result
+
     def test_external_url_in_link(self) -> None:
         """External URLs in card links are preserved."""
         content = '''<div class="grid cards" markdown>

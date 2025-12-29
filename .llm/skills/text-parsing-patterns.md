@@ -368,31 +368,55 @@ After conversion, validate that no sections are left empty:
 
 ```python
 def check_empty_sections(content: str, filename: str) -> list[Issue]:
-    """Check for empty content sections (headers followed by only whitespace)."""
+    """Check for empty content sections (headers followed by only whitespace/comments).
+
+    This catches issues like grid cards content being removed instead of converted,
+    leaving empty sections.
+    """
     issues = []
-    lines = content.split('\n')
+    lines = content.split("\n")
 
     for i, line in enumerate(lines, 1):
-        header_match = re.match(r'^(#{2,6})\s+(.+)$', line)
+        # Check for section headers (##, ###, etc.)
+        header_match = re.match(r"^(#{2,6})\s+(.+)$", line)
         if header_match:
             header_level = header_match.group(1)
             header_text = header_match.group(2).strip()
 
-            # Look ahead for content
-            has_content = False
-            for next_line in lines[i:]:
+            # Look ahead to see if section has content
+            # Use while loop with explicit index since we need precise control
+            section_has_content = False
+            j = i  # j is 1-indexed like line numbers (enumerate starts at 1)
+
+            while j < len(lines):
+                next_line = lines[j]
+
+                # Check if we've hit another header of same or higher level
+                next_header_match = re.match(r"^(#{2,6})\s+", next_line)
+                if next_header_match:
+                    next_level = next_header_match.group(1)
+                    # If same or higher level (fewer or equal #), section ends
+                    if len(next_level) <= len(header_level):
+                        break
+
+                # Skip empty lines, horizontal rules, and HTML comments
                 stripped = next_line.strip()
-                # Stop at same/higher level header
-                if re.match(r'^#{2,' + str(len(header_level)) + r'}\s+', next_line):
-                    break
-                # Skip empty lines and comments
                 if stripped and stripped != "---" and not stripped.startswith("<!--"):
-                    has_content = True
+                    section_has_content = True
                     break
 
-            if not has_content:
-                issues.append(Issue(filename, i, "error",
-                    f"Empty section: '{header_text}' has no content"))
+                j += 1
+
+            # If section has no content, report it
+            if not section_has_content:
+                issues.append(
+                    Issue(
+                        file=filename,
+                        line=i,
+                        severity="error",
+                        message=f"Empty section: '{header_text}' has no content (possible conversion issue)",
+                    )
+                )
 
     return issues
 ```
