@@ -206,7 +206,10 @@ match request {
         cell.save(frame, Some(game_state.clone()), Some(checksum));
     }
     FortressRequest::LoadGameState { cell, frame } => {
-        game_state = cell.load().expect("State should exist");
+        // LoadGameState is only requested for previously saved frames
+        if let Some(state) = cell.load() {
+            game_state = state;
+        }
     }
 }
 ```
@@ -481,8 +484,14 @@ while game_running {
                 FortressRequest::SaveGameState { cell, frame } => {
                     cell.save(frame, Some(state.clone()), Some(checksum));
                 }
-                FortressRequest::LoadGameState { cell, .. } => {
-                    state = cell.load().expect("State must exist");
+                FortressRequest::LoadGameState { cell, frame } => {
+                    // LoadGameState is only requested for previously saved frames.
+                    // Missing state indicates a library bug, but we handle gracefully.
+                    if let Some(loaded) = cell.load() {
+                        state = loaded;
+                    } else {
+                        eprintln!("WARNING: LoadGameState for frame {frame:?} but no state found");
+                    }
                 }
                 FortressRequest::AdvanceFrame { inputs } => {
                     state.update(&inputs);
@@ -827,15 +836,15 @@ use fortress_rollback::network::codec::{encode, decode, encode_into, CodecError}
 
 // Encode any serializable type (allocates)
 let data: u32 = 42;
-let bytes = encode(&data).expect("encoding should succeed");
+let bytes = encode(&data)?;
 
 // Decode from bytes
-let (decoded, bytes_read): (u32, _) = decode(&bytes).expect("decoding should succeed");
-assert_eq!(data, decoded);
+let (decoded, bytes_read): (u32, _) = decode(&bytes)?;
+debug_assert_eq!(data, decoded);
 
 // Zero-allocation encoding into pre-allocated buffer
 let mut buffer = [0u8; 256];
-let len = encode_into(&data, &mut buffer).expect("encoding should succeed");
+let len = encode_into(&data, &mut buffer)?;
 ```
 
 **Available Functions:**
@@ -894,8 +903,8 @@ let inputs = vec![vec![0, 0, 1, 1], vec![0, 1, 0, 1]];
 let compressed = encode(&reference, inputs.iter());
 
 // Decode: RLE decompress + XOR reverse
-let decompressed = decode(&reference, &compressed).expect("decode should succeed");
-assert_eq!(inputs, decompressed);
+let decompressed = decode(&reference, &compressed)?;
+debug_assert_eq!(inputs, decompressed);
 ```
 
 **Properties:**

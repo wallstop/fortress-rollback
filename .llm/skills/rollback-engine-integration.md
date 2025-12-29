@@ -50,8 +50,14 @@ fn game_loop(session: &mut Session<Config>, game: &mut Game) -> Result<(), Error
                 let checksum = game.compute_checksum();
                 cell.save(frame, Some(game.state.clone()), Some(checksum));
             }
-            RollbackRequest::LoadGameState { cell, .. } => {
-                game.state = cell.load().expect("saved state must exist");
+            RollbackRequest::LoadGameState { cell, frame } => {
+                // LoadGameState is only requested for previously saved frames.
+                // Missing state indicates a library bug, but we handle gracefully.
+                if let Some(loaded) = cell.load() {
+                    game.state = loaded;
+                } else {
+                    eprintln!("WARNING: LoadGameState for frame {frame:?} but no state found");
+                }
             }
             RollbackRequest::AdvanceFrame { inputs } => {
                 game.advance_frame(&inputs);

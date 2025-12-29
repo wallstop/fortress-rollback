@@ -32,6 +32,8 @@ jobs:
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          retries: 3
+          retry-exempt-status-codes: 400,401,403,404,422
           script: |
             const pr = context.payload.pull_request;
             const labels = pr.labels.map(l => l.name);
@@ -122,10 +124,14 @@ jobs:
 
       - name: Post or update reminder comment
         if: steps.skip-check.outputs.skip != 'true' && steps.changelog-modified.outputs.modified == 'false'
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          retries: 3
+          retry-exempt-status-codes: 400,401,403,404,422
           script: |
+            // Note: Retry logic is handled by the built-in retries option above
             const prNumber = context.payload.pull_request.number;
             const marker = '<!-- changelog-reminder-bot -->';
 
@@ -165,59 +171,75 @@ jobs:
             ---
             *This is an automated reminder. The PR will not be blocked by this check.*`;
 
-            // Check for existing comment
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
-            });
-
-            const existingComment = comments.find(c => c.body.includes(marker));
-
-            if (existingComment) {
-              // Update existing comment
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existingComment.id,
-                body: body
-              });
-              console.log('Updated existing changelog reminder comment');
-            } else {
-              // Create new comment
-              await github.rest.issues.createComment({
+            try {
+              // Check for existing comment
+              const { data: comments } = await github.rest.issues.listComments({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: prNumber,
-                body: body
               });
-              console.log('Created new changelog reminder comment');
+
+              const existingComment = comments.find(c => c.body.includes(marker));
+
+              if (existingComment) {
+                // Update existing comment
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existingComment.id,
+                  body: body
+                });
+                console.log('Updated existing changelog reminder comment');
+              } else {
+                // Create new comment
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body: body
+                });
+                console.log('Created new changelog reminder comment');
+              }
+            } catch (error) {
+              console.log(`Warning: Failed to post changelog reminder comment: ${error.message}`);
+              console.log('This is a non-critical failure and will not block the PR.');
+              // Don't throw - allow the workflow to continue
             }
 
       - name: Remove reminder comment if changelog was updated
         if: steps.skip-check.outputs.skip != 'true' && steps.changelog-modified.outputs.modified == 'true'
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          retries: 3
+          retry-exempt-status-codes: 400,401,403,404,422
           script: |
+            // Note: Retry logic is handled by the built-in retries option above
             const prNumber = context.payload.pull_request.number;
             const marker = '<!-- changelog-reminder-bot -->';
 
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
-            });
-
-            const existingComment = comments.find(c => c.body.includes(marker));
-
-            if (existingComment) {
-              await github.rest.issues.deleteComment({
+            try {
+              const { data: comments } = await github.rest.issues.listComments({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                comment_id: existingComment.id,
+                issue_number: prNumber,
               });
-              console.log('Removed changelog reminder comment (changelog was updated)');
+
+              const existingComment = comments.find(c => c.body.includes(marker));
+
+              if (existingComment) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existingComment.id,
+                });
+                console.log('Removed changelog reminder comment (changelog was updated)');
+              }
+            } catch (error) {
+              console.log(`Warning: Failed to remove changelog reminder comment: ${error.message}`);
+              console.log('This is a non-critical failure and will not block the PR.');
+              // Don't throw - allow the workflow to continue
             }
 
       - name: Summary

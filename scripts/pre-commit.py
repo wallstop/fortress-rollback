@@ -7,6 +7,10 @@ It performs the following checks:
   1. Version synchronization (if Cargo.toml version changed)
   2. Code formatting (cargo fmt --check)
 
+⚠️ NOTE: This is a STANDALONE script that uses --check mode (fails on unformatted code).
+If you use the pre-commit framework (recommended), it uses run-cargo-fmt.py instead,
+which auto-fixes formatting and stages modified files.
+
 Installation (use pre-commit framework instead):
   pip install pre-commit
   pre-commit install

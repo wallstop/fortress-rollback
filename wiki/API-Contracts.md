@@ -626,7 +626,7 @@ FortressRequest::LoadGameState { cell, frame }
 
 **Post (after handling):**
 
-- `game_state = cell.load().expect("must exist")`
+- `if let Some(state) = cell.load() { game_state = state; }`
 - Game state restored to frame `frame`
 
 **User Responsibility:**

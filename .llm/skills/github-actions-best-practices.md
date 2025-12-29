@@ -179,6 +179,176 @@ Sometimes you WANT single quotes to prevent expansion at definition time (e.g., 
 
 ---
 
+## Handling GitHub API Transient Errors
+
+GitHub's API can experience transient failures that cause workflow steps to fail intermittently. Understanding and handling these errors properly improves workflow reliability.
+
+### Why Transient Errors Occur
+
+GitHub's API may return temporary errors under various conditions:
+
+| Error Code | Meaning | Common Causes |
+|------------|---------|---------------|
+| **504 Gateway Timeout** | Request took too long | High API load, complex queries |
+| **503 Service Unavailable** | Service temporarily down | Maintenance, capacity issues |
+| **429 Too Many Requests** | Rate limit exceeded | Burst of API calls, shared limits |
+
+These errors are **not** indicative of bugs in your workflow — they're normal operational conditions that workflows should handle gracefully.
+
+### Using actions/github-script with Retries
+
+The `actions/github-script` action provides built-in retry support:
+
+```yaml
+# ✅ RECOMMENDED: Use built-in retry options
+- name: Add comment with retry
+  uses: actions/github-script@v7
+  with:
+    retries: 3
+    retry-exempt-status-codes: 400 401 403 404 422
+    script: |
+      await github.rest.issues.createComment({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        issue_number: context.issue.number,
+        body: 'Automated comment'
+      });
+```
+
+**Key options:**
+
+- **`retries`**: Number of retry attempts (default: 0)
+- **`retry-exempt-status-codes`**: Status codes that should NOT be retried (client errors)
+
+By setting `retry-exempt-status-codes: 400 401 403 404 422`, only server errors (5xx) and rate limits (429) trigger retries.
+
+> **⚠️ Important:** Use EITHER the built-in `retries` option OR a custom `withRetry()` function — never both. Combining them creates redundant retry logic where each API call could be retried up to N×M times (e.g., 3×3 = 9 times), causing excessive delays on persistent failures.
+
+### Custom Retry Logic with Exponential Backoff
+
+For more control (e.g., custom delay patterns or selective retries), implement a retry helper function. **Only use this if you need behavior the built-in option doesn't provide:**
+
+```yaml
+# ⚠️ ADVANCED: Custom retry (do NOT combine with retries: option above)
+- name: Fetch data with custom retry
+  uses: actions/github-script@v7
+  with:
+    # NOTE: No 'retries' option here - using custom function instead
+    script: |
+      // Retry helper with exponential backoff
+      async function withRetry(fn, maxRetries = 3, baseDelayMs = 1000) {
+        let lastError;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          try {
+            return await fn();
+          } catch (error) {
+            lastError = error;
+            const isRetryable = error.status >= 500 || error.status === 429 || error.message?.includes('timeout');
+            if (!isRetryable || attempt === maxRetries) {
+              throw error;
+            }
+            const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
+            console.log(`Attempt ${attempt} failed (${error.message}), retrying in ${delayMs}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+          }
+        }
+        throw lastError;
+      }
+
+      // Use the retry helper
+      const result = await withRetry(async () => {
+        return await github.rest.repos.get({
+          owner: context.repo.owner,
+          repo: context.repo.repo
+        });
+      });
+
+      console.log(`Repository: ${result.data.full_name}`);
+```
+
+**How exponential backoff works:**
+
+- Attempt 1: Immediate
+- Attempt 2: Wait 1 second (1000ms)
+- Attempt 3: Wait 2 seconds (2000ms)
+- Attempt 4: Wait 4 seconds (4000ms)
+
+This prevents overwhelming an already struggling service.
+
+### When to Use continue-on-error
+
+For **non-critical** steps where failure shouldn't block the workflow:
+
+```yaml
+# ✅ CORRECT: Non-critical step that shouldn't fail the build
+- name: Post status comment
+  uses: actions/github-script@v7
+  continue-on-error: true
+  with:
+    retries: 2
+    script: |
+      await github.rest.issues.createComment({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        issue_number: context.issue.number,
+        body: 'Build completed successfully!'
+      });
+```
+
+**Use `continue-on-error: true` when:**
+
+- The step is informational (comments, labels, status updates)
+- Failure doesn't affect the core workflow outcome
+- You have fallback handling or can live without the result
+
+**Do NOT use `continue-on-error: true` when:**
+
+- The step's output is required by subsequent steps
+- Failure indicates a real problem that needs attention
+- Security-critical operations (secrets, permissions)
+
+### Choosing a Retry Strategy
+
+For most use cases, the built-in `retries` option is sufficient and preferred:
+
+```yaml
+# ✅ RECOMMENDED: Simple and effective for most cases
+- name: API operation with retry
+  uses: actions/github-script@v7
+  with:
+    retries: 3
+    retry-exempt-status-codes: 400 401 403 404 422
+    script: |
+      const data = await github.rest.repos.getContent({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        path: 'important-file.json'
+      });
+      const content = JSON.parse(Buffer.from(data.data.content, 'base64').toString());
+      core.setOutput('data', JSON.stringify(content));
+```
+
+Use a custom `withRetry()` function only when you need specific behavior:
+
+- Custom delay patterns (e.g., longer delays for specific error types)
+- Selective retry based on response content (not just status code)
+- Different retry counts for different API calls within the same step
+
+> **⚠️ Never combine both approaches.** Using `retries: 3` with a custom `withRetry()` function creates redundant retry logic (up to 9 retries total), causing excessive delays on persistent failures.
+
+### Transient Error Handling Checklist
+
+Before deploying workflows with GitHub API calls:
+
+- [ ] Add `retries` option to `actions/github-script` steps
+- [ ] Configure `retry-exempt-status-codes` to skip client errors
+- [ ] Use `continue-on-error: true` for non-critical notifications
+- [ ] Log retry attempts for debugging
+- [ ] Consider rate limit implications when setting retry counts
+- [ ] Avoid combining built-in retries with custom retry wrappers
+
+---
+
 ## Common Workflow Issues Reference
 
 | Issue | Symptom | Fix |

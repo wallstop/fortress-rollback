@@ -10,6 +10,8 @@ on:
       - 'wiki/**'
       - 'scripts/sync-wiki.py'
       - 'scripts/check-wiki-consistency.py'
+      - 'scripts/validate-wiki-output.py'
+      - 'scripts/tests/test_sync_wiki.py'
       - '.markdownlint.json'
       - '.markdown-link-check.json'
       - '.lychee.toml'
@@ -27,6 +29,8 @@ on:
       - 'wiki/**'
       - 'scripts/sync-wiki.py'
       - 'scripts/check-wiki-consistency.py'
+      - 'scripts/validate-wiki-output.py'
+      - 'scripts/tests/test_sync_wiki.py'
       - '.markdownlint.json'
       - '.markdown-link-check.json'
       - '.lychee.toml'
@@ -75,6 +79,33 @@ jobs:
 
       - name: Validate wiki consistency
         run: python scripts/check-wiki-consistency.py
+
+  # ============================================================================
+  # WIKI SYNC DRY-RUN - Validate wiki generation on PRs
+  # ============================================================================
+  wiki-sync-dry-run:
+    name: Wiki Sync Dry-Run
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Run wiki sync tests
+        run: python -m pytest scripts/tests/test_sync_wiki.py -v
+
+      - name: Generate wiki (dry-run)
+        run: python scripts/sync-wiki.py --dest wiki-test-output
+
+      - name: Validate generated wiki format
+        run: python scripts/validate-wiki-output.py --wiki-dir wiki-test-output
 
   markdown-lint:
     name: Markdown Lint

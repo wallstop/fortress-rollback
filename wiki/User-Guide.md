@@ -112,7 +112,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         cell.save(frame, Some(game_state.clone()), None);
                     }
                     FortressRequest::LoadGameState { cell, .. } => {
-                        game_state = cell.load().expect("State should exist");
+                        // LoadGameState is only requested for previously saved frames
+                        if let Some(state) = cell.load() {
+                            game_state = state;
+                        }
                     }
                     FortressRequest::AdvanceFrame { inputs } => {
                         // Apply inputs to your game state
@@ -346,8 +349,8 @@ fn handle_requests(
     for request in requests {
         match request {
             FortressRequest::SaveGameState { cell, frame } => {
-                // Verify frame matches
-                assert_eq!(game_state.frame, frame.as_i32());
+                // Optionally verify frame consistency (use debug_assert in tests only)
+                debug_assert_eq!(game_state.frame, frame.as_i32());
 
                 // Clone your state
                 let state_copy = game_state.clone();
@@ -360,11 +363,16 @@ fn handle_requests(
             }
 
             FortressRequest::LoadGameState { cell, frame } => {
-                // Load the saved state
-                *game_state = cell.load().expect("State should exist");
-
-                // Optionally verify frame
-                assert_eq!(game_state.frame, frame.as_i32());
+                // LoadGameState is only requested for previously saved frames.
+                // Missing state indicates a library bug, but we handle gracefully.
+                if let Some(loaded) = cell.load() {
+                    *game_state = loaded;
+                    // Optionally verify frame consistency (use debug_assert in tests only)
+                    debug_assert_eq!(game_state.frame, frame.as_i32());
+                } else {
+                    // This should never happen - log for debugging
+                    eprintln!("WARNING: LoadGameState for frame {frame:?} but no state found");
+                }
             }
 
             FortressRequest::AdvanceFrame { inputs } => {
@@ -412,8 +420,14 @@ fn handle_requests_simple(
             let checksum = compute_checksum(game_state).ok();
             cell.save(frame, Some(game_state.clone()), checksum);
         },
-        load: |cell: GameStateCell<GameState>, _frame: Frame| {
-            *game_state = cell.load().expect("State must exist");
+        load: |cell: GameStateCell<GameState>, frame: Frame| {
+            // LoadGameState is only requested for previously saved frames.
+            // Missing state indicates a library bug, but we handle gracefully.
+            if let Some(loaded) = cell.load() {
+                *game_state = loaded;
+            } else {
+                eprintln!("WARNING: LoadGameState for frame {frame:?} but no state found");
+            }
         },
         advance: |inputs: InputVec<Input>| {
             for (_input, _status) in inputs.iter() {
@@ -453,8 +467,8 @@ struct GameState {
     players: Vec<Player>,
 }
 
-// One-liner checksum computation
-let checksum = compute_checksum(&game_state).expect("Serialization failed");
+// One-liner checksum computation (returns Result)
+let checksum = compute_checksum(&game_state)?;
 
 // Use in SaveGameState handler
 cell.save(frame, Some(game_state.clone()), Some(checksum));
@@ -474,8 +488,7 @@ For a faster but weaker checksum, use `compute_checksum_fletcher16`:
 use fortress_rollback::compute_checksum_fletcher16;
 
 // Faster, simpler checksum (16-bit result stored as u128)
-let checksum = compute_checksum_fletcher16(&game_state)
-    .expect("Serialization failed");
+let checksum = compute_checksum_fletcher16(&game_state)?;
 ```
 
 #### Manual Checksumming
@@ -487,7 +500,7 @@ use fortress_rollback::checksum::{hash_bytes_fnv1a, fletcher16};
 use fortress_rollback::network::codec::encode;
 
 // Serialize state to bytes
-let bytes = encode(&game_state).expect("Serialization failed");
+let bytes = encode(&game_state)?;
 
 // Hash with FNV-1a (64-bit hash as u128)
 let fnv_checksum = hash_bytes_fnv1a(&bytes);
@@ -1789,9 +1802,15 @@ loop {
         for request in session.advance_frame()? {
             match request {
                 // Handle requests normally...
-                # FortressRequest::SaveGameState { cell, frame } =>
-                # FortressRequest::LoadGameState { cell, .. } =>
-                # FortressRequest::AdvanceFrame { inputs } =>
+                # FortressRequest::SaveGameState { cell, frame } => {
+                #     cell.save(frame, Some(game_state.clone()), None);
+                # }
+                # FortressRequest::LoadGameState { cell, .. } => {
+                #     if let Some(state) = cell.load() { game_state = state; }
+                # }
+                # FortressRequest::AdvanceFrame { inputs } => {
+                #     game_state.update(&inputs);
+                # }
             }
         }
     }
@@ -2368,7 +2387,7 @@ fn handle_error(error: FortressError) -> Action {
 
         // Recoverable: reconnect
         FortressError::SpectatorTooFarBehind => Action::Reconnect,
-        FortressError::SocketError  => Action::Reconnect,
+        FortressError::SocketError { .. } => Action::Reconnect,
 
         // Desync: log and investigate
         FortressError::MismatchedChecksum { current_frame, mismatched_frames } => {

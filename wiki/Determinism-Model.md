@@ -257,11 +257,11 @@ Checksums must be computed deterministically:
 ```rust,ignore
 use fortress_rollback::network::codec::encode;
 
-fn compute_checksum(state: &GameState) -> u128 {
+fn compute_checksum(state: &GameState) -> Option<u128> {
     // Use the library's codec for deterministic serialization
-    let bytes = encode(state).expect("serialize");
+    let bytes = encode(state).ok()?;
     // Use a deterministic hash
-    fletcher16(&bytes) as u128
+    Some(fletcher16(&bytes) as u128)
 }
 ```
 
@@ -415,7 +415,13 @@ assert_eq!(machine_a_state, machine_b_state);
 Use proptest to generate random input sequences:
 
 ```rust,ignore
-proptest!
+proptest! {
+    #[test]
+    fn determinism_holds(inputs in any_input_sequence()) {
+        let state1 = simulate(inputs.clone());
+        let state2 = simulate(inputs.clone());
+        assert_eq!(state1, state2);
+    }
 }
 ```
 

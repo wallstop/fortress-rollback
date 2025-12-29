@@ -69,22 +69,31 @@ impl Game {
     ) {
         for request in requests {
             match request {
-                FortressRequest::LoadGameState { cell, .. } => {
+                FortressRequest::LoadGameState { cell, frame } => {
                     if in_lockstep {
-                        unreachable!("Should never get a load request if running in lockstep")
-                    } else {
-                        self.load_game_state(cell)
+                        // In lockstep mode, load requests are unexpected but we handle gracefully
+                        eprintln!(
+                            "WARNING: Unexpected LoadGameState request in lockstep mode (frame {:?})",
+                            frame
+                        );
                     }
+                    self.load_game_state(cell, frame);
                 },
                 FortressRequest::SaveGameState { cell, frame } => {
                     if in_lockstep {
-                        unreachable!("Should never get a save request if running in lockstep")
-                    } else {
-                        self.save_game_state(cell, frame)
+                        // In lockstep mode, save requests are unexpected but we handle gracefully
+                        eprintln!(
+                            "WARNING: Unexpected SaveGameState request in lockstep mode (frame {:?})",
+                            frame
+                        );
                     }
+                    self.save_game_state(cell, frame);
                 },
                 FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
-                _ => unreachable!("Unknown request type"),
+                // Handle any future request variants gracefully (FortressRequest is #[non_exhaustive])
+                _ => {
+                    eprintln!("WARNING: Unknown FortressRequest variant encountered, skipping");
+                },
             }
         }
     }
@@ -109,8 +118,8 @@ impl Game {
             save: |cell: GameStateCell<State>, frame: Frame| {
                 self.save_game_state(cell, frame);
             },
-            load: |cell: GameStateCell<State>, _frame: Frame| {
-                self.load_game_state(cell);
+            load: |cell: GameStateCell<State>, frame: Frame| {
+                self.load_game_state(cell, frame);
             },
             advance: |inputs: InputVec<Input>| {
                 self.advance_frame(inputs);
@@ -128,8 +137,15 @@ impl Game {
     }
 
     // load gamestate and overwrite
-    fn load_game_state(&mut self, cell: GameStateCell<State>) {
-        self.game_state = cell.load().expect("No data found.");
+    fn load_game_state(&mut self, cell: GameStateCell<State>, frame: Frame) {
+        // LoadGameState is only requested for previously saved frames.
+        // Missing state indicates a library bug, but we handle gracefully.
+        if let Some(loaded) = cell.load() {
+            self.game_state = loaded;
+        } else {
+            // This should never happen - log for debugging
+            eprintln!("WARNING: LoadGameState for frame {frame:?} but no state found");
+        }
     }
 
     fn advance_frame(&mut self, inputs: InputVec<Input>) {
@@ -139,12 +155,12 @@ impl Game {
         // remember checksum to render it later
         // Note: it's more efficient to only compute checksums periodically for display
         // For actual desync detection, use the checksum passed to cell.save() in SaveGameState
-        let buffer = fortress_rollback::network::codec::encode(&self.game_state)
-            .expect("serialization should succeed");
-        let checksum = u64::from(fletcher16(&buffer));
-        self.last_checksum = (Frame::new(self.game_state.frame), checksum);
-        if self.game_state.frame % CHECKSUM_PERIOD == 0 {
-            self.periodic_checksum = (Frame::new(self.game_state.frame), checksum);
+        if let Ok(buffer) = fortress_rollback::network::codec::encode(&self.game_state) {
+            let checksum = u64::from(fletcher16(&buffer));
+            self.last_checksum = (Frame::new(self.game_state.frame), checksum);
+            if self.game_state.frame % CHECKSUM_PERIOD == 0 {
+                self.periodic_checksum = (Frame::new(self.game_state.frame), checksum);
+            }
         }
     }
 

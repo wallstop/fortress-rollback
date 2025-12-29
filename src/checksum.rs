@@ -33,11 +33,12 @@
 //! }
 //!
 //! let state = GameState { frame: 100, player_x: 1.0, player_y: 2.0 };
-//! let checksum = compute_checksum(&state).expect("serialization should succeed");
+//! let checksum = compute_checksum(&state)?;
 //!
 //! // Same state produces same checksum
-//! let checksum2 = compute_checksum(&state).expect("serialization should succeed");
+//! let checksum2 = compute_checksum(&state)?;
 //! assert_eq!(checksum, checksum2);
+//! # Ok::<(), fortress_rollback::checksum::ChecksumError>(())
 //! ```
 //!
 //! # Integration with `SaveGameState`
@@ -118,7 +119,7 @@ use std::hash::Hasher;
 /// # Example
 ///
 /// ```
-/// use fortress_rollback::checksum::compute_checksum;
+/// use fortress_rollback::checksum::{compute_checksum, ChecksumError};
 /// use serde::Serialize;
 ///
 /// #[derive(Serialize)]
@@ -128,10 +129,11 @@ use std::hash::Hasher;
 /// }
 ///
 /// let state = State { frame: 42, position: (1.0, 2.0) };
-/// let checksum = compute_checksum(&state).expect("should succeed");
+/// let checksum = compute_checksum(&state)?;
 ///
 /// // Deterministic: same state = same checksum
-/// assert_eq!(checksum, compute_checksum(&state).unwrap());
+/// assert_eq!(checksum, compute_checksum(&state)?);
+/// # Ok::<(), ChecksumError>(())
 /// ```
 ///
 /// # Integration with SaveGameState

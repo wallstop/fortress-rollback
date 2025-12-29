@@ -98,14 +98,15 @@ pub mod tokio_socket {
 /// # Quick Start
 ///
 /// ```
-/// use fortress_rollback::checksum::compute_checksum;
+/// use fortress_rollback::checksum::{compute_checksum, ChecksumError};
 /// use serde::Serialize;
 ///
 /// #[derive(Serialize)]
 /// struct GameState { frame: u32, x: f32, y: f32 }
 ///
 /// let state = GameState { frame: 100, x: 1.0, y: 2.0 };
-/// let checksum = compute_checksum(&state).expect("serialization failed");
+/// let checksum = compute_checksum(&state)?;
+/// # Ok::<(), ChecksumError>(())
 /// ```
 ///
 /// See module documentation for detailed usage and performance considerations.
@@ -1055,7 +1056,11 @@ where
 ///         cell.save(frame, Some(state.clone()), Some(checksum));
 ///     },
 ///     load: |cell: GameStateCell<MyState>, _frame: Frame| {
-///         state = cell.load().expect("State must exist");
+///         // LoadGameState is only requested for previously saved frames.
+///         // Handle missing state appropriately for your application.
+///         if let Some(loaded) = cell.load() {
+///             state = loaded;
+///         }
 ///     },
 ///     advance: |inputs: InputVec<MyInput>| {
 ///         state.frame += 1;
