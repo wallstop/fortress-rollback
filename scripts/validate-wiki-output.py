@@ -184,6 +184,96 @@ def check_orphaned_indented_content(content: str, filename: str) -> list[Issue]:
     return issues
 
 
+def check_empty_sections(content: str, filename: str) -> list[Issue]:
+    """Check for empty content sections (headers followed by only whitespace/comments).
+
+    This catches issues like grid cards content being removed instead of converted,
+    leaving empty sections.
+
+    Handles multi-line HTML comments correctly by tracking comment state across lines.
+    """
+    issues = []
+    lines = content.split("\n")
+
+    for i, line in enumerate(lines, 1):
+        # Check for section headers (##, ###, etc.)
+        header_match = re.match(r"^(#{2,6})\s+(.+)$", line)
+        if header_match:
+            header_level = header_match.group(1)
+            header_text = header_match.group(2).strip()
+
+            # Look ahead to see if section has content
+            section_has_content = False
+            # i is 1-indexed (line number), but lines[] is 0-indexed.
+            # Conveniently, the 1-indexed line number of current line equals
+            # the 0-indexed position of the NEXT line (i.e., lines[i] is next line).
+            j = i  # 0-indexed position of next line after header
+
+            # Track whether we're inside a multi-line HTML comment
+            in_html_comment = False
+
+            while j < len(lines):
+                next_line = lines[j]
+
+                # Check if we've hit another header of same or higher level
+                next_header_match = re.match(r"^(#{2,6})\s+", next_line)
+                if next_header_match:
+                    next_level = next_header_match.group(1)
+                    # If same or higher level, section ends
+                    if len(next_level) <= len(header_level):
+                        break
+
+                stripped = next_line.strip()
+
+                # Handle multi-line HTML comment tracking
+                if in_html_comment:
+                    # Check if this line ends the comment
+                    if "-->" in stripped:
+                        in_html_comment = False
+                        # Check if there's content after the closing comment
+                        after_comment = stripped.split("-->", 1)[1].strip()
+                        if after_comment:
+                            section_has_content = True
+                            break
+                    j += 1
+                    continue
+
+                # Check for HTML comment start
+                if stripped.startswith("<!--"):
+                    # Check if comment is closed on the same line
+                    if "-->" in stripped:
+                        # Single-line comment - check for content after it
+                        after_comment = stripped.split("-->", 1)[1].strip()
+                        if after_comment:
+                            section_has_content = True
+                            break
+                    else:
+                        # Start of multi-line comment
+                        in_html_comment = True
+                    j += 1
+                    continue
+
+                # Skip empty lines and horizontal rules
+                if stripped and stripped != "---":
+                    section_has_content = True
+                    break
+
+                j += 1
+
+            # If section has no content, report it
+            if not section_has_content:
+                issues.append(
+                    Issue(
+                        file=filename,
+                        line=i,
+                        severity="error",
+                        message=f"Empty section: '{header_text}' has no content (possible conversion issue)",
+                    )
+                )
+
+    return issues
+
+
 def check_broken_wiki_links(content: str, filename: str, wiki_pages: set[str]) -> list[Issue]:
     """Check for wiki links that point to non-existent pages."""
     issues = []
@@ -251,6 +341,7 @@ def validate_wiki(wiki_dir: Path, strict: bool = False) -> int:
         all_issues.extend(check_indented_code_fences(content, filename))
         all_issues.extend(check_unconverted_mkdocs_syntax(content, filename))
         all_issues.extend(check_orphaned_indented_content(content, filename))
+        all_issues.extend(check_empty_sections(content, filename))
         all_issues.extend(check_broken_wiki_links(content, filename, wiki_pages))
 
     # Also validate sidebar

@@ -101,6 +101,9 @@ jobs:
       - name: Run wiki sync tests
         run: python -m pytest scripts/tests/test_sync_wiki.py -v
 
+      - name: Run wiki validation tests
+        run: python -m pytest scripts/tests/test_validate_wiki_output.py -v
+
       - name: Generate wiki (dry-run)
         run: python scripts/sync-wiki.py --dest wiki-test-output
 

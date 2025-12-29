@@ -426,15 +426,28 @@ def strip_mkdocs_frontmatter(content: str) -> str:
     return content
 
 
-def remove_grid_cards_divs(content: str) -> str:
-    """Remove Material grid cards divs with proper nesting support.
+def convert_grid_cards_to_list(content: str) -> str:
+    """Convert Material grid cards divs to markdown list format.
 
-    This function properly handles nested divs by tracking div depth,
-    rather than using a simple non-greedy regex that would fail on:
+    Converts this MkDocs Material syntax:
+
         <div class="grid cards" markdown>
-            <div>nested content</div>  <!-- regex would stop here -->
-            more content
+
+        -   :material-icon:{ .lg .middle } **Title**
+
+            ---
+
+            Description text.
+
+            [:octicons-arrow-right-24: Link text](url)
+
         </div>
+
+    To GitHub-compatible markdown:
+
+        - **Title** — Description text. [Link text](url)
+
+    This preserves the content while making it render correctly on GitHub Wiki.
     """
     result = []
     i = 0
@@ -451,6 +464,9 @@ def remove_grid_cards_divs(content: str) -> str:
             # Found a grid cards div, now find the matching </div>
             div_depth = 1
             j = i + grid_match.end()
+            # Initialize to 0; will be set to actual closing tag length when found,
+            # or remain 0 if the div is unclosed (handled after the loop)
+            closing_tag_len = 0
 
             while j < n and div_depth > 0:
                 # Check for opening div
@@ -464,18 +480,107 @@ def remove_grid_cards_divs(content: str) -> str:
                 close_match = re.match(r"</div\s*>", content[j:], re.IGNORECASE)
                 if close_match:
                     div_depth -= 1
+                    if div_depth == 0:
+                        # Found the matching closing tag
+                        closing_tag_len = close_match.end()
                     j += close_match.end()
                     continue
 
                 j += 1
 
-            # Skip the entire grid cards div (don't add to result)
+            # Extract the div content (excluding the opening and closing tags)
+            # closing_tag_len is 0 if unclosed (default), or the actual tag length if found
+            div_content = content[i + grid_match.end() : j - closing_tag_len]
+
+            # Convert the grid cards content to markdown list
+            converted = _parse_grid_cards_content(div_content)
+            result.append(converted)
+
             i = j
         else:
             result.append(content[i])
             i += 1
 
     return "".join(result)
+
+
+def _parse_grid_cards_content(div_content: str) -> str:
+    """Parse grid cards list items and convert to markdown list.
+
+    Each card has this structure:
+        -   :icon:{ .attrs } **Title**
+
+            ---
+
+            Description paragraph.
+
+            [:octicons-arrow-right-24: Link text](url)
+    """
+    lines = div_content.split("\n")
+    cards: list[dict[str, str]] = []
+    current_card: dict[str, str] | None = None
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Check for card start (list item with title)
+        # Pattern: -   :icon:{ .attrs } **Title**
+        # Use non-greedy .*? before ** to avoid matching multiple bold markers incorrectly
+        # Use (.+?) to allow asterisks within title (matches up to closing **)
+        card_match = re.match(r'^-\s+.*?\*\*(.+?)\*\*', stripped)
+        if card_match:
+            # Save previous card if exists
+            if current_card:
+                cards.append(current_card)
+            current_card = {
+                "title": card_match.group(1).strip(),
+                "description": "",
+                "link_text": "",
+                "link_url": "",
+            }
+            continue
+
+        # If we're in a card, process content
+        if current_card:
+            # Skip separator lines (---)
+            if stripped == "---":
+                continue
+
+            # Check for link line: [:octicons-...: Link text](url)
+            link_match = re.match(r'^\[:[\w-]+:\s*([^\]]+)\]\(([^)]+)\)', stripped)
+            if link_match:
+                current_card["link_text"] = link_match.group(1).strip()
+                current_card["link_url"] = link_match.group(2).strip()
+                continue
+
+            # Regular content line (description)
+            # Skip actual HTML tags and comments, but not content that happens to start
+            # with < like angle brackets in technical docs (e.g., "< 100ms latency")
+            # Pattern matches: <!-- (comment start) or <tagname (tag start)
+            if stripped and not re.match(r'^<(!--|[a-zA-Z])', stripped):
+                if current_card["description"]:
+                    current_card["description"] += " " + stripped
+                else:
+                    current_card["description"] = stripped
+
+    # Don't forget the last card
+    if current_card:
+        cards.append(current_card)
+
+    # Build markdown list output
+    output_lines = []
+    for card in cards:
+        line_parts = [f"- **{card['title']}**"]
+        if card["description"]:
+            line_parts.append(f" — {card['description']}")
+        if card["link_text"] and card["link_url"]:
+            line_parts.append(f" [{card['link_text']}]({card['link_url']})")
+        output_lines.append("".join(line_parts))
+
+    # Return empty string for empty results to avoid adding blank lines
+    if not output_lines:
+        return ""
+    return "\n".join(output_lines) + "\n"
 
 
 def transform_outside_code_blocks(
@@ -671,7 +776,7 @@ def strip_mkdocs_features(content: str) -> str:
     This function applies transformations in a specific order:
     1. Convert tabbed content (=== "Tab") with proper dedentation
     2. Convert admonitions (!!! note) with proper content handling
-    3. Remove grid cards divs
+    3. Convert grid cards divs to markdown lists
     4. Remove icons and attributes (only outside code blocks)
     """
     # Convert MkDocs tabbed content first (handles indentation)
@@ -680,8 +785,8 @@ def strip_mkdocs_features(content: str) -> str:
     # Convert admonitions with proper content handling
     content = convert_admonitions(content)
 
-    # Remove Material grid cards divs (with proper nested div handling)
-    content = remove_grid_cards_divs(content)
+    # Convert Material grid cards divs to markdown lists
+    content = convert_grid_cards_to_list(content)
 
     # Apply icon and attribute stripping ONLY outside code blocks
     # to avoid corrupting code examples that discuss MkDocs syntax

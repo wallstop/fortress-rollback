@@ -13,6 +13,10 @@ Fortress Rollback is a **correctness-first** Rust library for peer-to-peer rollb
 ## Key Features
 
 <!-- markdownlint-disable MD030 -->
+- **Zero-Panic Guarantee** — 100% safe Rust with no panics in production code. All operations return proper `Result` types—your game server won't crash from unexpected states. [Learn about error handling](User-Guide#handling-requests)
+- **Rollback Netcode** — Peer-to-peer architecture with input prediction and rollback. Hides latency by predicting inputs and seamlessly correcting when actual inputs arrive. [Read the architecture](Architecture)
+- **Formally Verified** — Critical paths verified with TLA+ model checking, Z3 SMT proofs, and Kani for Rust. Protocol correctness proven, not just tested. [View specifications](Formal-Specification)
+- **Deterministic by Design** — Same inputs = same outputs, guaranteed. Deterministic data structures, hashing, and RNG throughout. No hidden non-determinism. [Determinism model](Determinism-Model)
 
 <!-- markdownlint-enable MD030 -->
 
@@ -78,6 +82,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Where to Go Next
 
 <!-- markdownlint-disable MD030 -->
+- **User Guide** — Complete walkthrough of sessions, inputs, state management, and network events. [Start learning](User-Guide)
+- **API Documentation** — Full API reference with types, traits, and function signatures. [docs.rs](https://docs.rs/fortress-rollback)
+- **Architecture** — Deep dive into internal architecture, data flow, and protocol design. [Explore](Architecture)
+- **Contributing** — Guidelines for contributors, including our zero-panic policy and testing requirements. [Contribute](Contributing)
 
 <!-- markdownlint-enable MD030 -->
 
