@@ -523,9 +523,7 @@ def _parse_grid_cards_content(div_content: str) -> str:
     cards: list[dict[str, str]] = []
     current_card: dict[str, str] | None = None
 
-    i = 0
-    while i < len(lines):
-        line = lines[i]
+    for line in lines:
         stripped = line.strip()
 
         # Check for card start (list item with title)
@@ -541,14 +539,12 @@ def _parse_grid_cards_content(div_content: str) -> str:
                 "link_text": "",
                 "link_url": "",
             }
-            i += 1
             continue
 
         # If we're in a card, process content
         if current_card:
             # Skip separator lines (---)
             if stripped == "---":
-                i += 1
                 continue
 
             # Check for link line: [:octicons-...: Link text](url)
@@ -556,7 +552,6 @@ def _parse_grid_cards_content(div_content: str) -> str:
             if link_match:
                 current_card["link_text"] = link_match.group(1).strip()
                 current_card["link_url"] = link_match.group(2).strip()
-                i += 1
                 continue
 
             # Regular content line (description)
@@ -565,8 +560,6 @@ def _parse_grid_cards_content(div_content: str) -> str:
                     current_card["description"] += " " + stripped
                 else:
                     current_card["description"] = stripped
-
-        i += 1
 
     # Don't forget the last card
     if current_card:
