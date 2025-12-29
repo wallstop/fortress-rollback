@@ -7,6 +7,10 @@
 #   2. Code formatting (cargo fmt --check)
 #   3. Linting (cargo clippy)
 #
+# ⚠️ NOTE: This is a STANDALONE script that uses --check mode (fails on unformatted code).
+# If you use the pre-commit framework (recommended), it uses run-cargo-fmt.py instead,
+# which auto-fixes formatting and stages modified files.
+#
 # ⚠️ IMPORTANT: AUTO-MODIFICATION BEHAVIOR
 # When Cargo.toml version changes, this hook will:
 #   - Automatically update version references in other files (docs, examples)

@@ -71,20 +71,29 @@ impl Game {
             match request {
                 FortressRequest::LoadGameState { cell, frame } => {
                     if in_lockstep {
-                        unreachable!("Should never get a load request if running in lockstep")
-                    } else {
-                        self.load_game_state(cell, frame)
+                        // In lockstep mode, load requests are unexpected but we handle gracefully
+                        eprintln!(
+                            "WARNING: Unexpected LoadGameState request in lockstep mode (frame {:?})",
+                            frame
+                        );
                     }
+                    self.load_game_state(cell, frame);
                 },
                 FortressRequest::SaveGameState { cell, frame } => {
                     if in_lockstep {
-                        unreachable!("Should never get a save request if running in lockstep")
-                    } else {
-                        self.save_game_state(cell, frame)
+                        // In lockstep mode, save requests are unexpected but we handle gracefully
+                        eprintln!(
+                            "WARNING: Unexpected SaveGameState request in lockstep mode (frame {:?})",
+                            frame
+                        );
                     }
+                    self.save_game_state(cell, frame);
                 },
                 FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
-                _ => unreachable!("Unknown request type"),
+                // Handle any future request variants gracefully (FortressRequest is #[non_exhaustive])
+                _ => {
+                    eprintln!("WARNING: Unknown FortressRequest variant encountered, skipping");
+                },
             }
         }
     }
