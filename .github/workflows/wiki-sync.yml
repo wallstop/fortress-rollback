@@ -4,12 +4,6 @@ name: Sync Documentation to Wiki
 on:
   push:
     branches: [main]
-    paths:
-      - "docs/**"
-      - "README.md"
-      - "CHANGELOG.md"
-      - ".github/workflows/wiki-sync.yml"
-      - "scripts/sync-wiki.py"
   workflow_dispatch:
 
 permissions:
