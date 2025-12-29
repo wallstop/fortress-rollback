@@ -95,7 +95,8 @@ let normalized = normalize_whitespace(messy);
 assert!(matches!(normalized, Cow::Owned(_))); // Had to allocate
 ```
 
-**When to use**: 
+**When to use**:
+
 - Parsing where most inputs are already valid
 - Transformation functions where modification is rare
 - APIs that accept both owned and borrowed data
@@ -126,7 +127,7 @@ impl<'a> Message<'a> {
             tags: Cow::Borrowed(tags),
         }
     }
-    
+
     /// Creates a message with owned content.
     fn from_owned(id: u64, content: String, tags: Vec<String>) -> Self {
         Self {
@@ -135,7 +136,7 @@ impl<'a> Message<'a> {
             tags: Cow::Owned(tags),
         }
     }
-    
+
     /// Converts to owned data for long-term storage.
     fn into_owned(self) -> Message<'static> {
         Message {
@@ -168,15 +169,15 @@ impl<'a> PacketHeader<'a> {
         if data.len() < 4 {
             return None;
         }
-        
+
         let version = data[0];
         let payload_type = data[1];
         let length = u16::from_be_bytes([data[2], data[3]]) as usize;
-        
+
         if data.len() < 4 + length {
             return None;
         }
-        
+
         // Zero-copy: payload is a view into original data
         Some(Self {
             version,
@@ -287,12 +288,12 @@ impl Connection {
     fn take_buffer(&mut self) -> Vec<u8> {
         mem::take(&mut self.buffer) // Replaces with Vec::new()
     }
-    
+
     /// Takes pending data if present.
     fn take_pending(&mut self) -> Option<Vec<u8>> {
         mem::take(&mut self.pending) // Replaces with None
     }
-    
+
     /// Replaces buffer with a new one, returning the old.
     fn swap_buffer(&mut self, new_buffer: Vec<u8>) -> Vec<u8> {
         mem::replace(&mut self.buffer, new_buffer)
@@ -445,14 +446,14 @@ use bumpalo::Bump;
 fn process_request(data: &[u8]) {
     // Create arena for this request
     let arena = Bump::new();
-    
+
     // All allocations are fast bump-pointer allocations
     let parsed: &mut ParsedData = arena.alloc(ParsedData::new());
     let temp_buffer: &mut [u8] = arena.alloc_slice_copy(&[0u8; 1024]);
     let strings: Vec<&str, _> = bumpalo::vec![in &arena; "hello", "world"];
-    
+
     // Process...
-    
+
     // When arena drops, ALL memory is freed at once (single operation)
 }
 
@@ -508,11 +509,11 @@ impl StringParts {
     fn prefix<'a>(&self, source: &'a str) -> &'a str {
         &source[..self.prefix_end]
     }
-    
+
     fn middle<'a>(&self, source: &'a str) -> &'a str {
         &source[self.prefix_end..self.middle_end]
     }
-    
+
     fn suffix<'a>(&self, source: &'a str) -> &'a str {
         &source[self.middle_end..]
     }
@@ -647,7 +648,7 @@ fn copy_file_efficient(src: &str, dst: &str) -> io::Result<u64> {
 fn process_in_chunks(path: &str) -> io::Result<()> {
     let mut reader = BufReader::new(File::open(path)?);
     let mut chunk = [0u8; 8192];
-    
+
     loop {
         match reader.read(&mut chunk)? {
             0 => break,  // EOF
@@ -674,10 +675,10 @@ use std::fs::File;
 
 fn search_large_file(path: &str, pattern: &[u8]) -> std::io::Result<Option<usize>> {
     let file = File::open(path)?;
-    
+
     // SAFETY: File must not be modified while mapped
     let mmap = unsafe { Mmap::map(&file)? };
-    
+
     // Access file contents as a slice (loaded on-demand by OS)
     Ok(mmap.windows(pattern.len())
         .position(|window| window == pattern))
@@ -687,7 +688,7 @@ fn search_large_file(path: &str, pattern: &[u8]) -> std::io::Result<Option<usize
 fn read_header(path: &str) -> std::io::Result<Header> {
     let file = File::open(path)?;
     let mmap = unsafe { Mmap::map(&file)? };
-    
+
     // Zero-copy parse of header
     let header = Header::from_bytes(&mmap[..Header::SIZE])?;
     Ok(header)
@@ -697,7 +698,7 @@ struct Header;
 
 impl Header {
     const SIZE: usize = 64;
-    
+
     fn from_bytes(_data: &[u8]) -> std::io::Result<Self> {
         // Parse header...
         Ok(Self)
@@ -980,7 +981,7 @@ fn get_error() -> &'static str {
 Most Safe                                    Most Performant
     |                                              |
     v                                              v
-    
+
   Clone    Cow     Rc/Arc    Borrowing    Zerocopy    Unsafe
   everything      slices      slices      transmute   pointer ops
 ```

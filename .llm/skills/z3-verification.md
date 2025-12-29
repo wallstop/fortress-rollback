@@ -14,18 +14,18 @@ The key insight: **Z3 proves properties about *abstract models* of algorithms, n
 #[test]
 fn z3_proof_rollback_valid() {
     let solver = Solver::new();
-    
+
     // Model the algorithm mathematically
     let current_frame = Int::fresh_const("current_frame");
     let target_frame = Int::fresh_const("target_frame");
-    
+
     // Assert preconditions (the "given")
     solver.assert(current_frame.ge(0));
     solver.assert(target_frame.lt(&current_frame));
-    
+
     // Try to find a counterexample to our property
     solver.assert(target_frame.ge(&current_frame));  // Negation of property
-    
+
     // If UNSAT, no counterexample exists → property holds!
     assert_eq!(solver.check(), SatResult::Unsat);
 }
@@ -54,7 +54,7 @@ fn z3_proof_rollback_valid() {
 ### Z3 Shines For
 
 - **Arithmetic reasoning** — Overflow, bounds, modular arithmetic
-- **Constraint validation** — Proving bounds checks are sufficient  
+- **Constraint validation** — Proving bounds checks are sufficient
 - **Algorithm correctness** — Circular buffers, frame calculations
 - **Invariant verification** — "This property always holds given these preconditions"
 - **Design validation** — Before implementing, prove the algorithm is sound
@@ -138,7 +138,7 @@ let frame = Int::new_const("frame");
 ```rust
 // Arithmetic
 let sum = &x + &y;                    // Addition
-let diff = &x - &y;                   // Subtraction  
+let diff = &x - &y;                   // Subtraction
 let prod = &x * 3;                    // Multiplication by constant
 let remainder = &x % QUEUE_LENGTH;    // Modulo
 
@@ -150,7 +150,7 @@ let ne = x.ne(&y);                    // x != y
 
 // Boolean operations
 let and = cond1 & cond2;              // AND
-let or = cond1 | cond2;               // OR  
+let or = cond1 | cond2;               // OR
 let not = cond1.not();                // NOT
 let xor = cond1.xor(&cond2);          // XOR
 let implies = cond1.implies(&cond2);  // cond1 → cond2
@@ -165,11 +165,11 @@ let result = cond.ite(&then_val, &else_val);  // if-then-else
 let cfg = Config::new();
 z3::with_z3_config(&cfg, || {
     let solver = Solver::new();
-    
+
     // Add constraints
     solver.assert(x.ge(0));
     solver.assert(x.lt(100));
-    
+
     // Check satisfiability
     match solver.check() {
         SatResult::Sat => {
@@ -203,21 +203,21 @@ fn z3_proof_index_always_valid() {
     let cfg = Config::new();
     z3::with_z3_config(&cfg, || {
         let solver = Solver::new();
-        
+
         let frame = Int::fresh_const("frame");
-        
+
         // PRECONDITIONS: What we know to be true
         solver.assert(frame.ge(0));  // Frame is non-negative
-        
+
         // COMPUTATION: Model the algorithm
         let index = &frame % QUEUE_LENGTH;
-        
+
         // PROPERTY (negated): Try to find a counterexample
         // Property: 0 <= index < QUEUE_LENGTH
         // Negation: index < 0 OR index >= QUEUE_LENGTH
         let invalid = index.lt(0) | index.ge(QUEUE_LENGTH);
         solver.assert(&invalid);
-        
+
         // If UNSAT, no counterexample exists → property HOLDS
         assert_eq!(
             solver.check(),
@@ -239,15 +239,15 @@ fn z3_proof_valid_rollback_exists() {
     let cfg = Config::new();
     z3::with_z3_config(&cfg, || {
         let solver = Solver::new();
-        
+
         let current = Int::fresh_const("current");
         let target = Int::fresh_const("target");
-        
+
         // Constraints defining a valid rollback
         solver.assert(current.ge(1));           // At least frame 1
         solver.assert(target.ge(0));            // Target is valid
         solver.assert(target.lt(&current));     // Target is in past
-        
+
         // SAT means valid rollback states exist
         assert_eq!(
             solver.check(),
@@ -269,24 +269,24 @@ fn z3_proof_skip_and_execute_exclusive() {
     let cfg = Config::new();
     z3::with_z3_config(&cfg, || {
         let solver = Solver::new();
-        
+
         let frame_to_load = Int::fresh_const("frame_to_load");
         let current_frame = Int::fresh_const("current_frame");
-        
+
         // Valid frames
         solver.assert(current_frame.ge(0));
         solver.assert(frame_to_load.ge(0));
-        
+
         // Skip condition: frame_to_load >= current_frame
         let should_skip = frame_to_load.ge(&current_frame);
-        
-        // Execute condition: frame_to_load < current_frame  
+
+        // Execute condition: frame_to_load < current_frame
         let should_execute = frame_to_load.lt(&current_frame);
-        
+
         // Try to find state where both are true
         solver.assert(&should_skip);
         solver.assert(&should_execute);
-        
+
         assert_eq!(
             solver.check(),
             SatResult::Unsat,
@@ -306,26 +306,26 @@ fn z3_proof_sequential_preserved() {
     let cfg = Config::new();
     z3::with_z3_config(&cfg, || {
         let solver = Solver::new();
-        
+
         let frame_n = Int::fresh_const("frame_n");
         let delay = Int::fresh_const("delay");
-        
+
         solver.assert(frame_n.ge(0));
         solver.assert(delay.ge(0));
         solver.assert(delay.le(MAX_DELAY));
-        
+
         // Sequential: frame_n+1 = frame_n + 1
         let frame_next = &frame_n + 1;
-        
+
         // Positions with delay
         let pos_n = &frame_n + &delay;
         let pos_next = &frame_next + &delay;
-        
+
         // Property: positions should be sequential (differ by 1)
         let sequential = pos_next.eq(&(&pos_n + 1));
-        
+
         solver.assert(sequential.not());  // Negate property
-        
+
         assert_eq!(solver.check(), SatResult::Unsat);
     });
 }
@@ -341,40 +341,40 @@ fn z3_proof_valid_state_transitions() {
     let cfg = Config::new();
     z3::with_z3_config(&cfg, || {
         let solver = Solver::new();
-        
+
         // States: 0=Pending, 1=InSync, 2=Desync
         let current = Int::fresh_const("current_state");
         let next = Int::fresh_const("next_state");
         let checksums_match = Int::fresh_const("match");  // 1=yes, 0=no
-        
+
         // Valid states
         solver.assert(current.ge(0));
         solver.assert(current.le(2));
         solver.assert(checksums_match.ge(0));
         solver.assert(checksums_match.le(1));
-        
+
         // Transition function
         // From Pending: InSync if match, Desync if not
         let from_pending = current.eq(0).implies(
             &checksums_match.eq(1).ite(&next.eq(1), &next.eq(2))
         );
-        
+
         // From InSync: Stay InSync if match, Desync if not
         let from_insync = current.eq(1).implies(
             &checksums_match.eq(1).ite(&next.eq(1), &next.eq(2))
         );
-        
+
         // From Desync: Always stay Desync (permanent)
         let from_desync = current.eq(2).implies(&next.eq(2));
-        
+
         solver.assert(&from_pending);
         solver.assert(&from_insync);
         solver.assert(&from_desync);
-        
+
         // Property: Can't go from Desync to InSync
         solver.assert(current.eq(2));
         solver.assert(next.eq(1));
-        
+
         assert_eq!(solver.check(), SatResult::Unsat);
     });
 }
@@ -506,7 +506,7 @@ opt.maximize(&value);
 fn find_max(solver: &Solver, value: &Int, lo: i64, hi: i64) -> i64 {
     if lo >= hi { return lo; }
     let mid = (lo + hi + 1) / 2;
-    
+
     solver.push();
     solver.assert(&value.ge(mid));
     let result = if solver.check() == SatResult::Sat {
@@ -653,7 +653,7 @@ Before committing Z3 proofs:
 - [ ] **Clear purpose**: Comment explains what property is being proved
 - [ ] **Preconditions documented**: All assumptions about inputs are explicit
 - [ ] **Correct proof direction**: Using UNSAT for universal proofs
-- [ ] **Domain constraints**: All variables bounded appropriately  
+- [ ] **Domain constraints**: All variables bounded appropriately
 - [ ] **Model-code link**: Reference to production code being modeled
 - [ ] **Limitation noted**: Document what the model doesn't cover
 - [ ] **Test passes**: `cargo test --features z3-verification`
@@ -704,19 +704,19 @@ fn z3_proof_circular_index_valid() {
     let cfg = Config::new();
     with_z3_config(&cfg, || {
         let solver = Solver::new();
-        
+
         let frame = Int::fresh_const("frame");
-        
+
         // Precondition: frame is non-negative (enforced by Frame type)
         solver.assert(frame.ge(0));
-        
+
         // Computation
         let index = &frame % QUEUE_LENGTH;
-        
+
         // Property (negated): index is out of bounds
         let out_of_bounds = index.lt(0) | index.ge(QUEUE_LENGTH);
         solver.assert(&out_of_bounds);
-        
+
         assert_eq!(
             solver.check(),
             SatResult::Unsat,

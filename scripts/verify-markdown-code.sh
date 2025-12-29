@@ -122,7 +122,7 @@ trap cleanup EXIT
 setup_temp_crate() {
     TEMP_DIR=$(mktemp -d)
     log_verbose "Created temp directory: $TEMP_DIR"
-    
+
     # Create Cargo.toml for the test crate
     cat > "$TEMP_DIR/Cargo.toml" << EOF
 [package]
@@ -145,7 +145,7 @@ dead_code = "allow"
 unused_variables = "allow"
 unused_imports = "allow"
 EOF
-    
+
     mkdir -p "$TEMP_DIR/src"
     echo "fn main() {}" > "$TEMP_DIR/src/main.rs"
 }
@@ -154,7 +154,7 @@ EOF
 # This is more reliable than bash for parsing markdown
 extract_code_blocks() {
     local file="$1"
-    
+
     python3 - "$file" << 'PYTHON_SCRIPT'
 import re
 import sys
@@ -173,13 +173,13 @@ for match in matches:
     block_num += 1
     attrs = match.group(1).strip()
     code = match.group(2)
-    
+
     # Calculate line number
     line_num = content[:match.start()].count('\n') + 1
-    
+
     # Parse language from attributes
     lang = attrs.split(',')[0].split()[0] if attrs else ''
-    
+
     print("---BLOCK_START---")
     print(f"FILE:{file_path}")
     print(f"LINE:{line_num}")
@@ -199,17 +199,17 @@ PYTHON_SCRIPT
 should_skip_block() {
     local lang="$1"
     local attrs="$2"
-    
+
     # Only process Rust code
     if [[ "$lang" != "rust" ]]; then
         return 0
     fi
-    
+
     # Check for skip markers
     if echo "$attrs" | grep -qE '(ignore|no_run|compile_fail)'; then
         return 0
     fi
-    
+
     return 1
 }
 
@@ -217,7 +217,7 @@ should_skip_block() {
 get_skip_reason() {
     local lang="$1"
     local attrs="$2"
-    
+
     if [[ "$lang" != "rust" ]]; then
         echo "not Rust (language: $lang)"
     elif echo "$attrs" | grep -q 'ignore'; then
@@ -235,62 +235,62 @@ get_skip_reason() {
 # Returns: 0 if incomplete (should auto-skip), 1 if complete (should compile)
 is_incomplete_snippet() {
     local code="$1"
-    
+
     # Diff-style markers (+ or - at start of line for additions/removals)
     if echo "$code" | grep -qE '^[+-] '; then
         echo "diff-style snippet"
         return 0
     fi
-    
+
     # Contains ... placeholder (common in documentation)
     if echo "$code" | grep -qE '\.\.\.[^.]|{ \.\.\. }|\{ \.\.\. \}|\.\.\.}'; then
         echo "contains ... placeholder"
         return 0
     fi
-    
+
     # Contains // ... comment placeholder
     if echo "$code" | grep -qE '//\s*\.\.\.|//\s*\.\.\.'; then
         echo "contains // ... comment"
         return 0
     fi
-    
+
     # References to old crate names (migration examples)
     if echo "$code" | grep -qE 'use ggrs::'; then
         echo "references old crate name (migration example)"
         return 0
     fi
-    
+
     # Contains obvious placeholder patterns
     if echo "$code" | grep -qE '<.*>.*//.*placeholder|PLACEHOLDER|TODO:|your_'; then
         echo "contains placeholder text"
         return 0
     fi
-    
+
     # Shell command prefixed with $ (sometimes in markdown)
     if echo "$code" | grep -qE '^\$\s'; then
         echo "appears to be shell command"
         return 0
     fi
-    
+
     # References undefined generic types like MyConfig, GameConfig, etc.
     # These are typically documentation examples
     if echo "$code" | grep -qE '::<(My|Game|Your|Example|Test|Demo)[A-Z][a-z]*>'; then
         echo "uses generic placeholder type (documentation example)"
         return 0
     fi
-    
+
     # References undefined builder variables
     if echo "$code" | grep -qE '^[[:space:]]*builder\.' && ! echo "$code" | grep -qE 'let.*builder'; then
         echo "references undefined builder variable"
         return 0
     fi
-    
+
     # Before/After style documentation
     if echo "$code" | grep -qE '//\s*(Before|After)'; then
         echo "before/after documentation example"
         return 0
     fi
-    
+
     # References undefined session variable (common in documentation)
     # Only skip if session is used but not defined with "let session" or "let mut session"
     if echo "$code" | grep -qE '\bsession\b'; then
@@ -299,19 +299,19 @@ is_incomplete_snippet() {
             return 0
         fi
     fi
-    
+
     # References undefined game_state variable
     if echo "$code" | grep -qE '\bgame_state\b' && ! echo "$code" | grep -qE 'let.*game_state'; then
         echo "references undefined game_state variable (documentation example)"
         return 0
     fi
-    
+
     # References functions that are meant to be user-defined
     if echo "$code" | grep -qE '\b(handle_event|handle_requests|get_local_input|apply_input|compute_checksum|render)\s*\('; then
         echo "references user-defined functions (documentation example)"
         return 0
     fi
-    
+
     # Incomplete match arms with { ... } or similar
     if echo "$code" | grep -qE '\{[[:space:]]*\}|=>[[:space:]]*\{'; then
         # Only skip if it looks like placeholder
@@ -320,13 +320,13 @@ is_incomplete_snippet() {
             return 0
         fi
     fi
-    
+
     # Contains undefined Config type references (GameConfig without definition)
     if echo "$code" | grep -qE 'GameConfig|GameState|GameInput' && ! echo "$code" | grep -qE '(struct|enum|type)[[:space:]]+(GameConfig|GameState|GameInput)'; then
         echo "references undefined Game* types (documentation example)"
         return 0
     fi
-    
+
     # Short snippets (< 5 non-comment lines) that appear to be inline examples
     # These often reference undefined variables
     local non_comment_lines
@@ -340,7 +340,7 @@ is_incomplete_snippet() {
             return 0
         fi
     fi
-    
+
     # Short snippets referencing config variables that need definition
     if echo "$code" | grep -qE '\b(sparse_saving|first_incorrect|last_saved|check_distance)\b'; then
         if ! echo "$code" | grep -qE 'let.*(sparse_saving|first_incorrect|last_saved|check_distance)'; then
@@ -348,7 +348,7 @@ is_incomplete_snippet() {
             return 0
         fi
     fi
-    
+
     # References to types that need to be defined (spectator, player, etc.)
     if echo "$code" | grep -qE '\bspectator\b|\bplayer\b' && echo "$code" | grep -qE '\.(address|handle|socket)'; then
         if ! echo "$code" | grep -qE 'let.*(spectator|player)'; then
@@ -356,7 +356,7 @@ is_incomplete_snippet() {
             return 0
         fi
     fi
-    
+
     # Comment-only blocks
     if echo "$code" | grep -qvE '^[[:space:]]*(//|$)'; then
         : # Has non-comment content
@@ -364,32 +364,32 @@ is_incomplete_snippet() {
         echo "comment-only block"
         return 0
     fi
-    
+
     return 1
 }
 
 # Check if code is a complete program or a snippet
 is_complete_program() {
     local code="$1"
-    
+
     # Check for fn main
     if echo "$code" | grep -q 'fn main()'; then
         return 0
     fi
-    
+
     return 1
 }
 
 # Wrap code snippet to make it compilable
 wrap_code_snippet() {
     local code="$1"
-    
+
     # Check if it already has a main function
     if is_complete_program "$code"; then
         echo "$code"
         return
     fi
-    
+
     # Use Python for more reliable code wrapping
     python3 - << PYTHON_SCRIPT
 import sys
@@ -445,14 +445,14 @@ compile_code_sample() {
     local line="$2"
     local block_num="$3"
     local code="$4"
-    
+
     local test_file="$TEMP_DIR/src/main.rs"
     local wrapped_code
-    
+
     wrapped_code=$(wrap_code_snippet "$code")
-    
+
     echo "$wrapped_code" > "$test_file"
-    
+
     log_verbose "  Compiling block $block_num from $file:$line"
     if $VERBOSE; then
         echo "  Code:"
@@ -461,11 +461,11 @@ compile_code_sample() {
             echo "    ... (truncated)"
         fi
     fi
-    
+
     # Try to compile
     local compile_output
     local compile_result=0
-    
+
     cd "$TEMP_DIR"
     if compile_output=$(cargo check --message-format=short 2>&1); then
         compile_result=0
@@ -473,7 +473,7 @@ compile_code_sample() {
         compile_result=1
     fi
     cd "$PROJECT_ROOT"
-    
+
     if [[ $compile_result -eq 0 ]]; then
         log_success "Block $block_num ($file:$line) compiled successfully"
         ((COMPILED_BLOCKS++)) || true
@@ -494,9 +494,9 @@ compile_code_sample() {
 process_markdown_file() {
     local file="$1"
     local relative_file="${file#$PROJECT_ROOT/}"
-    
+
     log_info "Processing $relative_file"
-    
+
     local block_file=""
     local block_line=""
     local block_num=""
@@ -504,7 +504,7 @@ process_markdown_file() {
     local block_attrs=""
     local block_content=""
     local in_content=false
-    
+
     while IFS= read -r line; do
         case "$line" in
             "---BLOCK_START---")
@@ -531,7 +531,7 @@ process_markdown_file() {
                 ;;
             "---BLOCK_END---")
                 ((TOTAL_BLOCKS++)) || true
-                
+
                 if should_skip_block "$block_lang" "$block_attrs"; then
                     local reason
                     reason=$(get_skip_reason "$block_lang" "$block_attrs")
@@ -551,7 +551,7 @@ process_markdown_file() {
                         fi
                     fi
                 fi
-                
+
                 in_content=false
                 ;;
             *)
@@ -591,7 +591,7 @@ print_summary() {
     echo "  Blocks auto-skipped:        $AUTO_SKIPPED_BLOCKS"
     echo -e "  ${RED}Blocks failed:              $FAILED_BLOCKS${NC}"
     echo ""
-    
+
     if [[ ${#FAILURES[@]} -gt 0 ]]; then
         echo -e "${RED}Failed blocks:${NC}"
         for failure in "${FAILURES[@]}"; do
@@ -599,7 +599,7 @@ print_summary() {
         done
         echo ""
     fi
-    
+
     if $VERBOSE && [[ ${#AUTO_SKIPPED[@]} -gt 0 ]]; then
         echo -e "${YELLOW}Auto-skipped blocks:${NC}"
         for skipped in "${AUTO_SKIPPED[@]}"; do
@@ -607,7 +607,7 @@ print_summary() {
         done
         echo ""
     fi
-    
+
     if [[ ${#WARNINGS[@]} -gt 0 ]]; then
         echo -e "${YELLOW}Warnings:${NC}"
         for warning in "${WARNINGS[@]}"; do
@@ -615,7 +615,7 @@ print_summary() {
         done
         echo ""
     fi
-    
+
     if [[ $FAILED_BLOCKS -eq 0 ]]; then
         echo -e "${GREEN}All code samples compiled successfully!${NC}"
         if [[ $AUTO_SKIPPED_BLOCKS -gt 0 ]]; then
@@ -678,7 +678,7 @@ done
 main() {
     print_header
     setup_temp_crate
-    
+
     local process_result=0
     if [[ -n "$SPECIFIC_FILE" ]]; then
         process_markdown_file "$SPECIFIC_FILE" || process_result=$?
@@ -692,7 +692,7 @@ main() {
             fi
         done < <(find_markdown_files)
     fi
-    
+
     print_summary
 }
 

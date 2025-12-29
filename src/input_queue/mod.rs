@@ -65,7 +65,7 @@ pub const INPUT_QUEUE_LENGTH: usize = 128;
 /// This constant is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
 /// It is not part of the stable public API.
 ///
-/// # Formal Specification Alignment  
+/// # Formal Specification Alignment
 /// - **Kani**: `kani_add_input_no_overflow` proof verifies this constraint
 /// - **Z3**: `z3_proof_frame_delay_prevents_overflow` in `tests/test_z3_verification.rs`
 /// - **formal-spec.md**: Ensures SAFE-1 (no buffer overflow) holds

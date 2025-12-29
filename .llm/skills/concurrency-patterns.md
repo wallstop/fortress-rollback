@@ -72,7 +72,7 @@ fn good_update(counter: Arc<Mutex<u64>>) -> u64 {
         let guard = counter.lock().unwrap();
         *guard  // Copy the value
     };  // Lock released here
-    
+
     expensive_network_call();  // Other threads can proceed
     value
 }
@@ -93,7 +93,7 @@ impl Cache {
         let guard = self.data.read().unwrap();
         guard.get(key).cloned()
     }
-    
+
     // ⚠️ CRITICAL: Drop read lock before acquiring write lock!
     fn get_or_insert(&self, key: String, default: String) -> String {
         // First, try to read
@@ -103,7 +103,7 @@ impl Cache {
                 return value.clone();
             }
         }  // Read lock MUST be dropped here
-        
+
         // Now acquire write lock
         let mut guard = self.data.write().unwrap();
         // Double-check (another thread might have inserted)
@@ -140,7 +140,7 @@ impl Connection {
             Ordering::Acquire,
         ).is_ok()
     }
-    
+
     fn complete_connection(&self) {
         // Connecting -> Connected
         let _ = self.state.compare_exchange(
@@ -180,14 +180,14 @@ fn worker_thread(rx: mpsc::Receiver<Command>) {
 // ✅ Clean producer-consumer separation
 fn run_workers(data: Vec<Data>) {
     let (tx, rx) = mpsc::channel();
-    
+
     let handle = thread::spawn(move || worker_thread(rx));
-    
+
     for item in data {
         tx.send(Command::Process(item)).unwrap();
     }
     tx.send(Command::Shutdown).unwrap();
-    
+
     handle.join().unwrap();
 }
 ```
@@ -318,17 +318,17 @@ fn test_concurrent_counter() {
         use loom::sync::Arc;
         use loom::sync::atomic::{AtomicUsize, Ordering};
         use loom::thread;
-        
+
         let counter = Arc::new(AtomicUsize::new(0));
         let c1 = counter.clone();
         let c2 = counter.clone();
-        
+
         let t1 = thread::spawn(move || c1.fetch_add(1, Ordering::SeqCst));
         let t2 = thread::spawn(move || c2.fetch_add(1, Ordering::SeqCst));
-        
+
         t1.join().unwrap();
         t2.join().unwrap();
-        
+
         assert_eq!(counter.load(Ordering::SeqCst), 2);
     });
 }
@@ -341,11 +341,11 @@ fn test_concurrent_counter() {
 fn stress_test_concurrent_queue() {
     use std::sync::Arc;
     use std::thread;
-    
+
     for _ in 0..100 {  // Run many times to catch races
         let queue = Arc::new(ConcurrentQueue::new());
         let mut handles = vec![];
-        
+
         for i in 0..8 {
             let q = queue.clone();
             handles.push(thread::spawn(move || {
@@ -354,11 +354,11 @@ fn stress_test_concurrent_queue() {
                 }
             }));
         }
-        
+
         for h in handles {
             h.join().unwrap();
         }
-        
+
         assert_eq!(queue.len(), 8 * 1000);
     }
 }
@@ -479,7 +479,7 @@ impl WaitableFlag {
             self.condvar.wait(&mut guard);
         }
     }
-    
+
     fn signal(&self) {
         *self.flag.lock() = true;
         self.condvar.notify_all();

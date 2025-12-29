@@ -57,7 +57,7 @@ impl<T> List<T> {
     fn push(&mut self, elem: T) {
         let node = Box::new(Node { elem, next: ptr::null_mut() });
         let new_tail = &mut *node as *mut Node<T>;
-        
+
         // This Box access invalidates new_tail!
         self.head = Some(node);  // ❌ Moves Box, invalidating new_tail
         self.tail = new_tail;    // ❌ Using invalidated pointer
@@ -78,7 +78,7 @@ impl<T> List<T> {
     fn push(&mut self, elem: T) {
         // Convert Box to raw immediately, never touch Box again
         let new = Box::into_raw(Box::new(Node { elem, next: ptr::null_mut() }));
-        
+
         unsafe {
             if !self.tail.is_null() {
                 (*self.tail).next = new;
@@ -262,7 +262,7 @@ fn get_array() -> [u32; 4] {
 // Or use MaybeUninit properly
 fn get_array_uninit() -> [u32; 4] {
     use std::mem::MaybeUninit;
-    
+
     let mut arr: [MaybeUninit<u32>; 4] = unsafe { MaybeUninit::uninit().assume_init() };
     for (i, elem) in arr.iter_mut().enumerate() {
         elem.write(i as u32);

@@ -3,8 +3,6 @@
 <!-- Provide a clear and concise description of your changes. -->
 <!-- What problem does this solve? Why is this change needed? -->
 
-
-
 ## Type of Change
 
 <!-- Check all that apply -->
@@ -46,17 +44,17 @@
 <!-- Include any relevant details about your testing environment -->
 
 **Tests added/modified:**
-- 
+
+- (None)
 
 **Manual testing performed:**
-- 
+
+- (None)
 
 ## Related Issues
 
 <!-- Link any related issues using GitHub keywords -->
 <!-- Examples: Fixes #123, Closes #456, Relates to #789 -->
-
-
 
 ---
 

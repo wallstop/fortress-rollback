@@ -549,7 +549,7 @@ proptest! {
     fn prop_our_sqrt_matches_stdlib(x in 0.0f64..1e10) {
         let our_result = our_sqrt(x);
         let stdlib_result = x.sqrt();
-        
+
         // Allow small floating-point differences
         let diff = (our_result - stdlib_result).abs();
         prop_assert!(

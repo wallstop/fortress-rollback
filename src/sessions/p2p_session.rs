@@ -634,7 +634,7 @@ impl<T: Config> P2PSession<T> {
     ///
     /// This method tells you "inputs are confirmed locally" but does **not** mean:
     /// - Both peers have simulated to the same frame
-    /// - Game state matches between peers  
+    /// - Game state matches between peers
     /// - The session is safe to terminate
     ///
     /// Peers run asynchronously. When peer A's `confirmed_frame()` returns 100, peer B

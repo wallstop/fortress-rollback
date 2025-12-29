@@ -20,6 +20,7 @@ WASM uses a **stack-based virtual machine** rather than targeting hardware regis
 ```
 
 This abstraction means:
+
 - No assumptions about CPU register count
 - No platform-specific calling conventions
 - Runtime translates to native instructions
@@ -269,13 +270,13 @@ use wasmtime::*;
 fn main() -> Result<()> {
     let engine = Engine::default();
     let module = Module::from_file(&engine, "module.wasm")?;
-    
+
     let mut store = Store::new(&engine, ());
     let instance = Instance::new(&mut store, &module, &[])?;
-    
+
     let compute = instance.get_typed_func::<i32, i32>(&mut store, "compute")?;
     let result = compute.call(&mut store, 42)?;
-    
+
     println!("Result: {}", result);
     Ok(())
 }
@@ -317,7 +318,7 @@ fn main() -> Result<()> {
 // Core game logic - compile to WASM for determinism
 mod simulation {
     /// Advance game state by one frame.
-    /// 
+    ///
     /// This is fully deterministic when compiled to WASM.
     /// Same inputs → same outputs on all platforms.
     pub fn advance_frame(state: &mut GameState, inputs: &[PlayerInput]) {
@@ -327,7 +328,7 @@ mod simulation {
         state.physics_tick();  // Float math is deterministic!
         state.resolve_collisions();
     }
-    
+
     pub fn compute_checksum(state: &GameState) -> u64 {
         state.deterministic_hash()
     }
@@ -356,13 +357,13 @@ impl GameEngine {
     pub fn tick(&mut self, inputs: &[u8]) -> Result<()> {
         // Copy inputs to WASM linear memory
         self.memory.write(&mut self.store, INPUT_OFFSET, inputs)?;
-        
+
         // Run deterministic simulation in WASM
         self.advance_frame.call(
             &mut self.store,
             (INPUT_OFFSET as i32, inputs.len() as i32)
         )?;
-        
+
         Ok(())
     }
 }

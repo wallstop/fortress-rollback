@@ -115,6 +115,7 @@ let result = process_name(&my_string);
 ```
 
 **Transformation Steps:**
+
 1. Change parameter type from `String` to `&str` (or `Vec<T>` to `&[T]`)
 2. Update function body if it needs ownership (rarely)
 3. Update all call sites to pass references
@@ -156,6 +157,7 @@ fn matches(a: &str, b: &str) -> bool {
 ```
 
 **Transformation Steps:**
+
 1. Check if the owned value is actually needed
 2. If only used for comparison/lookup, use the borrowed form directly
 3. Leverage `Borrow` trait for HashMap/HashSet lookups
@@ -196,6 +198,7 @@ fn collect_items(count: usize) -> Vec<Item> {
 ```
 
 **Transformation Steps:**
+
 1. Identify loops that push to a Vec
 2. Determine if the final size is known or bounded
 3. Use `with_capacity()` with the known/estimated size
@@ -237,6 +240,7 @@ fn process_batches(batches: &[Batch]) -> Results {
 ```
 
 **Transformation Steps:**
+
 1. Move collection declaration outside the loop
 2. Add `.clear()` at the start of each iteration
 3. Optionally pre-size with `with_capacity()` based on typical size
@@ -269,6 +273,7 @@ assert!(x.capacity() >= 1000);  // Capacity preserved!
 ```
 
 **Transformation Steps:**
+
 1. Identify `x = y.clone()` patterns
 2. Replace with `x.clone_from(&y)`
 3. Verify `x` implements `Clone` (which provides `clone_from`)
@@ -310,6 +315,7 @@ fn sum_with_index(items: &[Item]) -> i64 {
 ```
 
 **Transformation Steps:**
+
 1. Replace `for i in 0..len` with `.iter()` or `.iter_mut()`
 2. Replace `collection[i]` with the iterator variable
 3. Use `.enumerate()` if index is needed
@@ -348,6 +354,7 @@ for item in items.iter().filter(|i| i.is_valid()) {
 ```
 
 **Transformation Steps:**
+
 1. Change return type from `Vec<T>` to `impl Iterator<Item = T>`
 2. Remove `.collect()` from the function
 3. If needed, add lifetime: `impl Iterator<Item = &'a T> + 'a`
@@ -389,6 +396,7 @@ fn process_pairs(data: &[u8]) {
 ```
 
 **Transformation Steps:**
+
 1. Replace `.chunks(n)` with `.chunks_exact(n)`
 2. Handle `.remainder()` separately if the remainder matters
 3. If remainder should be an error, validate input length first
@@ -421,6 +429,7 @@ fn sum_bytes(data: &[u8]) -> u64 {
 ```
 
 **Transformation Steps:**
+
 1. Add `.copied()` after `.iter()` for `Copy` types
 2. Remove explicit dereference in subsequent closures
 3. Use `|&x|` pattern if preferred for clarity
@@ -452,6 +461,7 @@ fn remove_by_id(items: &mut Vec<Item>, id: u64) {
 ```
 
 **Transformation Steps:**
+
 1. Verify that element order doesn't matter
 2. Replace `.remove(index)` with `.swap_remove(index)`
 3. Document that order is not preserved if it's a public API
@@ -486,6 +496,7 @@ fn get_user_name(id: u64) -> Result<String, UserError> {
 ```
 
 **Transformation Steps:**
+
 1. Change return type to `Result<T, E>` or `Option<T>`
 2. Replace `.unwrap()` with `?` for propagation
 3. Add `.ok_or()` or `.ok_or_else()` to convert `Option` to `Result` with context
@@ -514,19 +525,20 @@ fn load_config() -> Config {
 // ✅ AFTER: Rich error types with context
 fn load_config() -> Result<Config, ConfigError> {
     let content = fs::read_to_string("config.toml")
-        .map_err(|e| ConfigError::ReadFailed { 
-            path: "config.toml".into(), 
-            source: e 
+        .map_err(|e| ConfigError::ReadFailed {
+            path: "config.toml".into(),
+            source: e
         })?;
     toml::from_str(&content)
-        .map_err(|e| ConfigError::ParseFailed { 
-            path: "config.toml".into(), 
-            source: e 
+        .map_err(|e| ConfigError::ParseFailed {
+            path: "config.toml".into(),
+            source: e
         })
 }
 ```
 
 **Transformation Steps:**
+
 1. Define or use appropriate error types
 2. Replace `.expect(msg)` with `.map_err(|e| Error::Variant { context })?`
 3. Include relevant context (file paths, IDs, etc.) in error variants
@@ -556,14 +568,15 @@ fn get_player(players: &[Player], index: usize) -> Option<&Player> {
 // ✅ AFTER Result: Returns Result with context
 fn get_player(players: &[Player], index: usize) -> Result<&Player, PlayerError> {
     players.get(index)
-        .ok_or(PlayerError::InvalidIndex { 
-            index, 
-            player_count: players.len() 
+        .ok_or(PlayerError::InvalidIndex {
+            index,
+            player_count: players.len()
         })
 }
 ```
 
 **Transformation Steps:**
+
 1. Replace `collection[index]` with `collection.get(index)`
 2. Handle the resulting `Option`:
    - Use `?` with `.ok_or()` for Result propagation
@@ -619,6 +632,7 @@ fn process_result(item: Result<Item, Error>) -> Result<(), Error> {
 ```
 
 **Transformation Steps:**
+
 1. Identify `let _ = result` patterns
 2. Decide: propagate with `?`, handle explicitly, or log
 3. If intentionally ignoring, document why: `let _ = result; // Intentionally ignored: reason`
@@ -652,6 +666,7 @@ fn get_value(cache: &HashMap<Key, Value>, key: &Key) -> Value {
 ```
 
 **Transformation Steps:**
+
 1. Identify expensive expressions in `unwrap_or()`, `ok_or()`, `map_or()`, `or()`
 2. Wrap in closure: `unwrap_or(x)` → `unwrap_or_else(|| x)`
 3. For cheap constants (literals, Copy types), `unwrap_or` is fine
@@ -697,6 +712,7 @@ sum(&[1, 2, 3]);
 ```
 
 **Transformation Steps:**
+
 1. Change `&String` to `&str`
 2. Change `&Vec<T>` to `&[T]`
 3. Function body usually needs no changes (deref coercion)
@@ -734,11 +750,13 @@ fn get_name(&self) -> Cow<'_, str> {
 ```
 
 **When to Apply:**
+
 - Callers often need to store the result
 - The clone is cheap (short strings, small types)
 - Lifetime complexity hurts API ergonomics
 
 **When NOT to Apply:**
+
 - Hot paths where cloning is measurable
 - Large data that shouldn't be copied
 - Internal APIs where lifetime tracking is acceptable
@@ -776,6 +794,7 @@ fn process_and_replace(data: &mut State) -> State {
 ```
 
 **Transformation Steps:**
+
 1. Import `std::mem`
 2. Replace `x.clone()` + clear pattern with `mem::take(&mut x)`
 3. For non-Default types, use `mem::replace(&mut x, replacement_value)`
@@ -801,7 +820,7 @@ impl Game {
         self.update_state();
         self.render_state();
     }
-    
+
     fn update_state(&mut self) { /* uses self.state */ }
     fn render_state(&mut self) { /* uses self.renderer and self.state */ }
 }
@@ -822,7 +841,7 @@ impl Game {
     fn parts_mut(&mut self) -> (&mut State, &mut Renderer) {
         (&mut self.state, &mut self.renderer)
     }
-    
+
     fn update(&mut self) {
         let (state, renderer) = self.parts_mut();
         state.tick();
@@ -832,6 +851,7 @@ impl Game {
 ```
 
 **Transformation Steps:**
+
 1. Identify methods that need simultaneous access to multiple fields
 2. Either access fields directly in the calling code
 3. Or create a helper that returns a tuple of mutable references
@@ -874,6 +894,7 @@ println!("{}", normalized);  // Works for both Borrowed and Owned
 ```
 
 **Transformation Steps:**
+
 1. Change return type from `String` to `Cow<'_, str>` (or `Vec<T>` to `Cow<'_, [T]>`)
 2. Wrap borrowed returns in `Cow::Borrowed(x)`
 3. Wrap owned returns in `Cow::Owned(x)`
@@ -912,6 +933,7 @@ fn transfer(from: AccountId, to: AccountId, amount: Amount) { /* ... */ }
 ```
 
 **Transformation Steps:**
+
 1. Create newtype: `struct TypeName(InnerType);`
 2. Derive useful traits: `Clone, Copy, Debug, PartialEq, Eq, Hash`
 3. Add constructor and accessor methods if needed
@@ -947,6 +969,7 @@ connect("example.com", Security::Secure, CertVerification::Skip);  // Clear!
 ```
 
 **Transformation Steps:**
+
 1. Create an enum for each boolean with meaningful variant names
 2. Replace `bool` parameters with the enum type
 3. Update all call sites to use enum variants
@@ -998,6 +1021,7 @@ fn verify(user: UnverifiedUser, email: String) -> VerifiedUser {
 ```
 
 **Transformation Steps:**
+
 1. Identify Option fields that represent different states
 2. Create separate types for each state
 3. Make state transitions explicit functions
@@ -1042,6 +1066,7 @@ fn is_done(task: &Task) -> bool {
 ```
 
 **Transformation Steps:**
+
 1. Identify all valid string values
 2. Create enum with variants for each value
 3. Replace `String` field with enum type
@@ -1086,6 +1111,7 @@ fn window_around(data: &[u8], center: usize, radius: usize) -> Result<&[u8], Win
 ```
 
 **Transformation Steps:**
+
 1. Replace `a + b` with `a.checked_add(b)?` or `.ok_or(Error)?`
 2. Replace `a - b` with `a.checked_sub(b)?` or `.ok_or(Error)?`
 3. Replace `a * b` with `a.checked_mul(b)?` or `.ok_or(Error)?`
@@ -1104,7 +1130,7 @@ use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
 
 fn benchmark_before(c: &mut Criterion) {
     let data = generate_test_data();
-    
+
     c.bench_function("operation_before", |b| {
         b.iter(|| operation_before(&data))
     });
@@ -1112,7 +1138,7 @@ fn benchmark_before(c: &mut Criterion) {
 
 fn benchmark_after(c: &mut Criterion) {
     let data = generate_test_data();
-    
+
     c.bench_function("operation_after", |b| {
         b.iter(|| operation_after(&data))
     });
@@ -1121,19 +1147,19 @@ fn benchmark_after(c: &mut Criterion) {
 // Compare multiple input sizes
 fn benchmark_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("scaling");
-    
+
     for size in [100, 1000, 10000, 100000].iter() {
         let data = generate_data_of_size(*size);
-        
+
         group.bench_with_input(BenchmarkId::new("before", size), &data, |b, data| {
             b.iter(|| operation_before(data))
         });
-        
+
         group.bench_with_input(BenchmarkId::new("after", size), &data, |b, data| {
             b.iter(|| operation_after(data))
         });
     }
-    
+
     group.finish();
 }
 ```

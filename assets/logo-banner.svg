@@ -6,14 +6,14 @@
       <stop offset="50%" style="stop-color:#4A90D9"/>
       <stop offset="100%" style="stop-color:#2C5282"/>
     </linearGradient>
-    
+
     <!-- Gradient for arrows -->
     <linearGradient id="arrowGrad" x1="0%" y1="0%" x2="100%" y2="0%">
       <stop offset="0%" style="stop-color:#FFB86C"/>
       <stop offset="50%" style="stop-color:#F6AD55"/>
       <stop offset="100%" style="stop-color:#ED8936"/>
     </linearGradient>
-    
+
     <!-- Glow filter for rollback arcs -->
     <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
       <feGaussianBlur stdDeviation="1.5" result="coloredBlur"/>
@@ -22,15 +22,15 @@
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
-    
+
   </defs>
-  
+
   <!-- Logo icon section -->
   <g transform="translate(30, 20)">
     <!-- Background circle with subtle outline -->
     <circle cx="80" cy="80" r="75" fill="#1A365D" opacity="0.08"/>
     <circle cx="80" cy="80" r="74" fill="none" stroke="#2C5282" stroke-width="1" opacity="0.15"/>
-    
+
     <!-- Fortress -->
     <g fill="url(#fortressGrad)">
       <!-- Left tower -->
@@ -38,34 +38,34 @@
       <!-- Left tower battlements -->
       <rect x="35" y="48" width="6" height="14"/>
       <rect x="47" y="48" width="6" height="14"/>
-      
+
       <!-- Center tower (taller) -->
       <rect x="61" y="40" width="38" height="78" rx="1"/>
       <!-- Center tower battlements -->
       <rect x="61" y="28" width="10" height="16"/>
       <rect x="75" y="28" width="10" height="16"/>
       <rect x="89" y="28" width="10" height="16"/>
-      
+
       <!-- Right tower -->
       <rect x="105" y="58" width="20" height="60" rx="1"/>
       <!-- Right tower battlements -->
       <rect x="107" y="48" width="6" height="14"/>
       <rect x="119" y="48" width="6" height="14"/>
-      
+
       <!-- Base wall -->
       <rect x="35" y="112" width="90" height="8" rx="1"/>
     </g>
-    
+
     <!-- Stone texture lines (subtle) -->
     <g stroke="#1A365D" stroke-width="0.5" opacity="0.12">
       <line x1="61" y1="65" x2="99" y2="65"/>
       <line x1="61" y1="90" x2="99" y2="90"/>
     </g>
-    
+
     <!-- Gate -->
     <rect x="71" y="88" width="18" height="26" rx="9" ry="9" fill="#0D1B2A"/>
     <rect x="71" y="100" width="18" height="18" fill="#0D1B2A"/>
-    
+
     <!-- Rollback arcs with glow (following circle edge) -->
     <g fill="none" stroke="url(#arrowGrad)" stroke-width="5" stroke-linecap="round" filter="url(#glow)">
       <!-- Left arc: from ~210° to ~135° -->
@@ -73,44 +73,44 @@
       <!-- Right arc: from ~30° to ~315° -->
       <path d="M 145 42 A 75 75 0 0 1 133 133"/>
     </g>
-    
+
     <!-- R letter overlay on center tower (subtle) -->
-    <text x="80" y="78" 
-          font-family="'Segoe UI', Arial, sans-serif" 
-          font-size="20" 
-          font-weight="bold" 
-          fill="#1A365D" 
-          text-anchor="middle" 
+    <text x="80" y="78"
+          font-family="'Segoe UI', Arial, sans-serif"
+          font-size="20"
+          font-weight="bold"
+          fill="#1A365D"
+          text-anchor="middle"
           opacity="0.25">R</text>
   </g>
-  
+
   <!-- Text section -->
   <g>
-    <text x="220" y="95" 
-          font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" 
-          font-size="52" 
-          font-weight="700" 
+    <text x="220" y="95"
+          font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+          font-size="52"
+          font-weight="700"
           fill="#2C5282">
       fortress
     </text>
-    <text x="220" y="145" 
-          font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" 
-          font-size="42" 
-          font-weight="400" 
+    <text x="220" y="145"
+          font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+          font-size="42"
+          font-weight="400"
           fill="#ED8936">
       rollback
     </text>
   </g>
-  
+
   <!-- Tagline -->
-  <text x="220" y="175" 
-        font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" 
-        font-size="14" 
+  <text x="220" y="175"
+        font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+        font-size="14"
         fill="#4A5568"
         letter-spacing="2">
     SAFE RUST ROLLBACK NETCODE
   </text>
-  
+
   <!-- Rust gear icon (improved) -->
   <g transform="translate(680, 85)" opacity="0.25">
     <!-- Outer gear ring -->

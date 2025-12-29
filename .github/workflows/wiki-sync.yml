@@ -1,0 +1,137 @@
+---
+name: Sync Documentation to Wiki
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "README.md"
+      - "CHANGELOG.md"
+      - ".github/workflows/wiki-sync.yml"
+      - "scripts/sync-wiki.py"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Prevent concurrent wiki syncs to avoid git conflicts
+concurrency:
+  group: wiki-sync
+  cancel-in-progress: false
+
+jobs:
+  check-wiki:
+    name: Check if wiki exists
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      wiki_exists: ${{ steps.check.outputs.wiki_exists }}
+    steps:
+      - name: Check wiki availability
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Configure git credential helper to use token from environment
+          # This avoids embedding the token directly in URLs, which could be
+          # exposed in error messages or if shell tracing were enabled
+          # shellcheck disable=SC2016
+          git config --global credential.helper '!f() { echo "password=${GITHUB_TOKEN}"; }; f'
+          git config --global credential.https://github.com.username "x-access-token"
+
+          WIKI_REPO="https://github.com/${{ github.repository }}.wiki.git"
+          if git ls-remote "$WIKI_REPO" &>/dev/null; then
+            echo "Wiki repository exists"
+            echo "wiki_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Wiki repository does not exist yet."
+            echo "::warning::Create at least one wiki page manually to initialize the wiki."
+            echo "wiki_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  sync-wiki:
+    name: Sync docs to GitHub Wiki
+    runs-on: ubuntu-latest
+    needs: check-wiki
+    if: needs.check-wiki.outputs.wiki_exists == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Clone wiki repository
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Configure git credential helper to use token from environment
+          # This avoids embedding the token directly in URLs, which could be
+          # exposed in error messages or if shell tracing were enabled
+          # shellcheck disable=SC2016
+          git config --global credential.helper '!f() { echo "password=${GITHUB_TOKEN}"; }; f'
+          git config --global credential.https://github.com.username "x-access-token"
+
+          WIKI_REPO="https://github.com/${{ github.repository }}.wiki.git"
+
+          # Clone the wiki repo
+          if ! git clone "$WIKI_REPO" wiki; then
+            echo "::error::Failed to clone wiki repository."
+            echo "::error::This is unexpected since the check-wiki job succeeded."
+            exit 1
+          fi
+
+          echo "Wiki cloned successfully"
+          cd wiki
+
+          # Configure git locally for wiki repo only
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Get the current branch name with error handling
+          if ! WIKI_BRANCH=$(git rev-parse --abbrev-ref HEAD); then
+            echo "::error::Failed to determine wiki branch name."
+            exit 1
+          fi
+
+          if [ -z "$WIKI_BRANCH" ]; then
+            echo "::error::Wiki branch name is empty."
+            exit 1
+          fi
+
+          echo "WIKI_BRANCH=$WIKI_BRANCH" >> "$GITHUB_ENV"
+          echo "Using wiki branch: $WIKI_BRANCH"
+
+      - name: Sync documentation to wiki
+        run: python scripts/sync-wiki.py
+
+      - name: Push changes to wiki
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd wiki
+          git add -A
+
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to sync"
+            exit 0
+          fi
+
+          git commit -m "Sync documentation from main repository
+
+          Source commit: ${{ github.sha }}"
+
+          echo "Pushing changes to wiki..."
+          if ! git push origin "$WIKI_BRANCH"; then
+            echo "::error::Failed to push wiki changes."
+            echo "::error::Note: GITHUB_TOKEN may not have wiki write access."
+            echo "::error::If this persists, you may need to use a PAT with repo scope."
+            exit 1
+          fi
+
+          echo "Wiki sync completed successfully"

@@ -50,6 +50,7 @@ tokio::spawn(async { /* ... */ });  // Under DST runtime control
 ```
 
 **Key patterns:**
+
 - Use async/await with a controlled executor
 - Tasks yield at known points (`.await`)
 - Scheduler picks next task deterministically (often FIFO or seeded random)
@@ -73,6 +74,7 @@ tokio::time::sleep(Duration::from_secs(1)).await;
 ```
 
 **Implementation approaches:**
+
 1. **Override libc functions** (`gettimeofday`, `clock_gettime`) — madsim approach
 2. **Conditional compilation** — Replace `std::time` with simulation version
 3. **Dependency injection** — Pass time source as parameter
@@ -97,6 +99,7 @@ let x: u32 = rng.gen();  // Same seed = same sequence
 ```
 
 **Best practices:**
+
 - Single global RNG for the simulation
 - All random decisions flow from this RNG
 - Include RNG state in saved states for rollback
@@ -120,6 +123,7 @@ if buggify() {
 ```
 
 **Types of failures to inject:**
+
 - Network partitions and message loss
 - Message delays and reordering
 - Disk I/O failures
@@ -132,7 +136,7 @@ if buggify() {
 
 ### 1. madsim — Drop-in Tokio Replacement
 
-**Repository:** https://github.com/madsim-rs/madsim
+**Repository:** <https://github.com/madsim-rs/madsim>
 
 **Philosophy:** Replace tokio and external dependencies at compile time.
 
@@ -176,21 +180,21 @@ use std::time::Duration;
 async fn my_deterministic_test() {
     // Create virtual nodes
     let handle = madsim::runtime::Handle::current();
-    
+
     let server = handle.create_node().build();
     let client = handle.create_node().build();
-    
+
     // Spawn tasks on nodes
     server.spawn(async {
         let listener = TcpListener::bind("0.0.0.0:8080").await?;
         // ...
     });
-    
+
     client.spawn(async {
         let stream = TcpStream::connect("server:8080").await?;
         // ...
     });
-    
+
     // Inject failures
     handle.kill(server.id());  // Kill a node
     madsim::time::sleep(Duration::from_secs(1)).await;  // Simulated time
@@ -252,7 +256,7 @@ if buggify_with_prob(0.1) {  // 10% chance
 
 ### 2. turmoil — Tokio-Native DST
 
-**Repository:** https://github.com/tokio-rs/turmoil
+**Repository:** <https://github.com/tokio-rs/turmoil>
 
 **Philosophy:** Minimal API surface, integrate with existing tokio code.
 
@@ -348,7 +352,7 @@ file.sync_all()?;  // Data survives sim.crash()
 
 ### 3. Manual DST (sled-style)
 
-**Repository:** https://sled.rs/simulation.html
+**Repository:** <https://sled.rs/simulation.html>
 
 **Philosophy:** Design your system as a state machine from the start.
 
@@ -359,14 +363,14 @@ file.sync_all()?;  // Data survives sim.crash()
 trait Actor {
     type Message;
     type Response;
-    
+
     /// Process incoming message, return outgoing messages
     fn receive(
         &mut self,
         msg: Self::Message,
         at: Instant,
     ) -> Vec<(Self::Message, NodeId)>;
-    
+
     /// Periodic tick for timeouts, elections, etc.
     fn tick(&mut self, at: Instant) -> Vec<(Self::Message, NodeId)>;
 }
@@ -394,15 +398,15 @@ impl<A: Actor> Simulator<A> {
     fn step(&mut self) -> Option<(NodeId, A::Response)> {
         let event = self.events.pop()?;
         self.current_time = event.delivery_time;
-        
+
         let node = self.nodes.get_mut(&event.destination)?;
         let responses = node.receive(event.message, self.current_time);
-        
+
         for (msg, dest) in responses {
             // Deterministically assign delivery time
             let delay = self.random_delay();
             let should_deliver = self.rng.gen_bool(1.0 - self.drop_rate);
-            
+
             if should_deliver {
                 self.events.push(Event {
                     delivery_time: self.current_time + delay,
@@ -411,10 +415,10 @@ impl<A: Actor> Simulator<A> {
                 });
             }
         }
-        
+
         None
     }
-    
+
     fn random_delay(&mut self) -> Duration {
         let micros = self.rng.gen_range(100..10_000);
         Duration::from_micros(micros)
@@ -423,6 +427,7 @@ impl<A: Actor> Simulator<A> {
 ```
 
 **Benefits of manual approach:**
+
 - Total control over simulation behavior
 - Minimal dependencies
 - Easy to extend with custom failure modes
@@ -473,7 +478,7 @@ impl Clock for SystemClock {
     fn now(&self) -> Instant {
         Instant::now()
     }
-    
+
     async fn sleep(&self, duration: Duration) {
         tokio::time::sleep(duration).await
     }
@@ -528,7 +533,7 @@ mod real_impl {
     pub fn current_time() -> Instant {
         Instant::now()
     }
-    
+
     pub async fn sleep(duration: Duration) {
         tokio::time::sleep(duration).await
     }
@@ -539,7 +544,7 @@ mod sim_impl {
     pub fn current_time() -> Instant {
         madsim::time::Instant::now()
     }
-    
+
     pub async fn sleep(duration: Duration) {
         madsim::time::sleep(duration).await
     }
@@ -571,12 +576,12 @@ proptest! {
         let mut sim = Builder::new()
             .rng_seed(seed)
             .build();
-        
+
         // Apply operations and partitions
         for op in operations {
             apply_operation(&mut sim, op);
         }
-        
+
         // Check linearizability
         let history = sim.collect_history();
         assert!(is_linearizable(&history));
@@ -672,10 +677,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Run DST tests
         run: RUSTFLAGS="--cfg madsim" cargo test --release
-        
+
       - name: Check determinism
         run: |
           MADSIM_TEST_CHECK_DETERMINISM=1 \
@@ -754,10 +759,10 @@ fn my_test() -> turmoil::Result {
     let mut sim = turmoil::Builder::new()
         .rng_seed(42)
         .build();
-    
+
     sim.host("server", || async { /* ... */ Ok(()) });
     sim.client("client", async { /* ... */ Ok(()) });
-    
+
     sim.run()
 }
 ```

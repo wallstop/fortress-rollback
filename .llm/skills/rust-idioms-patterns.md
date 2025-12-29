@@ -193,11 +193,11 @@ impl Drop for CleanupGuard {
 
 fn do_work() -> Result<(), Error> {
     let _guard = CleanupGuard { resource_id: 42 };
-    
+
     // Even if this returns early with ?, the guard is dropped
     risky_operation()?;
     another_operation()?;
-    
+
     Ok(())
 } // _guard dropped here, cleanup runs
 ```
@@ -224,7 +224,7 @@ fn read_data(use_stdin: bool) -> io::Result<String> {
     } else {
         &mut std::fs::File::open("data.txt")?
     };
-    
+
     let mut buffer = String::new();
     reader.read_to_string(&mut buffer)?;
     Ok(buffer)
@@ -455,7 +455,7 @@ impl Report {
 }
 
 // Closure-based strategy (simpler for single methods)
-fn process_with<F>(items: &[i32], strategy: F) -> i32 
+fn process_with<F>(items: &[i32], strategy: F) -> i32
 where
     F: Fn(i32, i32) -> i32
 {
@@ -504,7 +504,7 @@ impl CommandQueue {
         self.history.push(cmd);
         Ok(())
     }
-    
+
     fn undo_last(&mut self) -> Result<(), Error> {
         if let Some(cmd) = self.history.pop() {
             cmd.undo()?;
@@ -584,7 +584,7 @@ impl Request<Unvalidated> {
     fn new(data: String) -> Self {
         Request { data, _state: std::marker::PhantomData }
     }
-    
+
     fn validate(self) -> Result<Request<Validated>, Error> {
         if self.data.is_empty() {
             return Err(Error::EmptyData);
@@ -639,22 +639,22 @@ impl SessionBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     pub fn players(mut self, n: u32) -> Self {
         self.players = n;
         self
     }
-    
+
     pub fn input_delay(mut self, frames: u32) -> Self {
         self.input_delay = frames;
         self
     }
-    
+
     pub fn max_prediction(mut self, frames: u32) -> Self {
         self.max_prediction = frames;
         self
     }
-    
+
     pub fn build(self) -> Result<Session, BuildError> {
         if self.players == 0 {
             return Err(BuildError::NoPlayers);
@@ -698,14 +698,14 @@ trait Folder {
     fn fold_var(&mut self, name: String) -> Expr {
         Expr::Var(name) // default: identity
     }
-    
+
     fn fold_add(&mut self, left: Box<Expr>, right: Box<Expr>) -> Expr {
         Expr::Add(
             Box::new(self.fold_expr(*left)),
             Box::new(self.fold_expr(*right)),
         )
     }
-    
+
     fn fold_expr(&mut self, expr: Expr) -> Expr {
         match expr {
             Expr::Var(n) => self.fold_var(n),
@@ -787,7 +787,7 @@ impl Game {
 
 ```rust
 // Instead of one mega-crate, have focused crates:
-// 
+//
 // networking/     - Just network transport
 // serialization/  - Just serialization
 // protocol/       - Just protocol definitions
@@ -827,7 +827,7 @@ trait Processor {
 }
 
 // Blanket impl for closures
-impl<F, T> Processor for F 
+impl<F, T> Processor for F
 where
     F: FnMut() -> Result<T, Error>,
     T: Display + Debug + Clone,
@@ -865,7 +865,7 @@ struct MyVec<T> {
 
 impl<T> Deref for MyVec<T> {
     type Target = [T];
-    
+
     fn deref(&self) -> &[T] {
         &self.data
     }

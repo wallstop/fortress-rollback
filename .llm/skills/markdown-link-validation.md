@@ -105,6 +105,55 @@ Works everywhere
 Anchors are lowercase, spaces become hyphens
 ```
 
+---
+
+## Heading Anchor Generation Rules
+
+Markdown heading anchors are auto-generated with specific transformation rules. **MD051 (link-fragments) errors occur when your `#fragment` doesn't match the actual generated anchor.**
+
+### Transformation Rules
+
+1. **Lowercase** — All letters converted to lowercase
+2. **Spaces → hyphens** — Spaces become single hyphens (`-`)
+3. **Remove special chars** — Parentheses `()`, brackets `[]`, and most punctuation removed
+4. **Slashes with spaces → double hyphens** — ` / ` becomes `--`
+5. **Tildes removed** — `~` characters are stripped
+
+### Examples
+
+| Heading | Generated Anchor |
+|---------|------------------|
+| `## Quick Start` | `#quick-start` |
+| `## LAN / Local Network (~20ms RTT)` | `#lan--local-network-20ms-rtt` |
+| `## Web / WASM Integration` | `#web--wasm-integration` |
+| `## P2P Session (peer-to-peer)` | `#p2p-session-peer-to-peer` |
+| `## Advanced Configuration [Optional]` | `#advanced-configuration-optional` |
+
+### Common MD051 Mistakes
+
+```text
+❌ WRONG: #lan-/-local-network   ← Slash not converted correctly
+✅ RIGHT: #lan--local-network-20ms-rtt
+
+❌ WRONG: #web-wasm-integration  ← Missing double hyphen for slash
+✅ RIGHT: #web--wasm-integration
+
+❌ WRONG: #quick-start-(guide)   ← Parens should be removed
+✅ RIGHT: #quick-start-guide
+```
+
+### Verify Before Committing
+
+**Always verify fragment links match actual headings:**
+
+```bash
+# Check for MD051 errors
+npx markdownlint 'docs/user-guide.md' --config .markdownlint.json
+
+# Search for a heading to see its exact text
+grep -n "^##" docs/user-guide.md | grep -i "network"
+```
+
 ## Directory Reference
 
 Quick reference for common link patterns in this repository:
@@ -117,6 +166,78 @@ Quick reference for common link patterns in this repository:
 | `.llm/` | `../` | `[README]` + `(../README.md)` |
 | `.llm/skills/` | `../../` | `[README]` + `(../../README.md)` |
 | `src/` | `../` | `[Docs]` + `(../docs/user-guide.md)` |
+
+---
+
+## MkDocs Path Resolution
+
+When using MkDocs (with `docs_dir: docs`), paths resolve differently than when viewing raw Markdown on GitHub:
+
+### The Problem
+
+```text
+Repository structure:
+/
+├── assets/
+│   └── logo.svg
+├── docs/
+│   └── index.md (contains: img src = "../assets/logo.svg")
+└── mkdocs.yml (docs_dir: docs)
+```
+
+| Context | Path resolves to |
+|---------|------------------|
+| GitHub raw view | `assets/logo.svg` ✅ Works |
+| MkDocs build | Outside `docs/` directory ❌ Broken |
+
+### Solutions
+
+**1. Use absolute GitHub URLs** (recommended for cross-context compatibility):
+
+```markdown
+<!-- Works in GitHub, MkDocs, anywhere -->
+<img src="https://raw.githubusercontent.com/owner/repo/main/assets/logo.svg">
+```
+
+**2. Copy assets into docs/** (add to CI build):
+
+```yaml
+# In workflow
+- run: cp -r assets docs/assets
+```
+
+Then use `assets/logo.svg` (relative to docs/).
+
+**3. Store assets in docs/** (simplest):
+
+Move shared assets to `docs/assets/` and update all references.
+
+### When Paths Work
+
+These patterns work in both GitHub and MkDocs contexts (paths relative to `docs/`):
+
+```text
+✅ Works: Links to other docs files
+   [Guide] + (user-guide.md)
+
+✅ Works: Relative links within docs
+   [Spec] + (specs/formal-spec.md)
+
+✅ Works: Anchor links
+   [Section] + (#my-heading)
+```
+
+These may break in MkDocs (when assets are outside `docs/`):
+
+```text
+⚠️ May break: Parent directory assets
+   <img> with src pointing to "../assets/logo.svg"
+
+⚠️ May break: Root-level files
+   [README] + (../README.md)
+```
+
+---
 
 ## Pre-Commit Checklist
 
@@ -153,4 +274,5 @@ When `check-links.sh` reports a broken link:
 ## See Also
 
 - [GitHub Actions Best Practices](github-actions-best-practices.md) — Workflow file validation
+- [Text Parsing Patterns](text-parsing-patterns.md) — Regex limitations and robust parsing
 - [Main Context](../context.md) — Mandatory pre-commit checks

@@ -59,6 +59,7 @@ rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
 ```
 
 Or set via environment:
+
 ```bash
 RUSTFLAGS='--cfg getrandom_backend="wasm_js"' cargo build --target wasm32-unknown-unknown
 ```
@@ -81,6 +82,7 @@ strip = true              # Strip symbols
 ```
 
 **Measure your binary:**
+
 ```bash
 cargo install twiggy
 twiggy top target/wasm32-unknown-unknown/release/game.wasm
@@ -114,12 +116,12 @@ fn request_animation_frame(f: &Closure<dyn FnMut()>) {
 #[wasm_bindgen(start)]
 fn main() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
-    
+
     let game_state = Rc::new(RefCell::new(GameState::new()));
-    
+
     let f = Rc::new(RefCell::new(None));
     let g = f.clone();
-    
+
     *g.borrow_mut() = Some(Closure::new({
         let game_state = game_state.clone();
         move || {
@@ -129,7 +131,7 @@ fn main() -> Result<(), JsValue> {
             request_animation_frame(f.borrow().as_ref().unwrap());
         }
     }));
-    
+
     request_animation_frame(g.borrow().as_ref().unwrap());
     Ok(())
 }
@@ -159,13 +161,13 @@ fn setup_input(canvas: &HtmlCanvasElement, input_state: Rc<RefCell<InputState>>)
         }
         e.prevent_default();
     });
-    
+
     web_sys::window()
         .unwrap()
         .add_event_listener_with_callback("keydown", keydown.as_ref().unchecked_ref())
         .unwrap();
     keydown.forget();  // Prevent cleanup
-    
+
     // Mouse (for canvas)
     let input = input_state.clone();
     let mousedown = Closure::<dyn FnMut(_)>::new(move |e: MouseEvent| {
@@ -174,7 +176,7 @@ fn setup_input(canvas: &HtmlCanvasElement, input_state: Rc<RefCell<InputState>>)
         state.mouse_y = e.offset_y();
         state.mouse_down = true;
     });
-    
+
     canvas.add_event_listener_with_callback("mousedown", mousedown.as_ref().unchecked_ref()).unwrap();
     mousedown.forget();
 }
@@ -187,8 +189,10 @@ fn setup_input(canvas: &HtmlCanvasElement, input_state: Rc<RefCell<InputState>>)
 ### iOS Setup
 
 **Prerequisites:**
+
 - macOS with Xcode 12+
 - Install targets:
+
   ```bash
   rustup target add aarch64-apple-ios        # Device
   rustup target add aarch64-apple-ios-sim    # Simulator (Apple Silicon)
@@ -196,6 +200,7 @@ fn setup_input(canvas: &HtmlCanvasElement, input_state: Rc<RefCell<InputState>>)
   ```
 
 **Build Commands:**
+
 ```bash
 # Device build
 cargo build --release --target aarch64-apple-ios
@@ -206,6 +211,7 @@ cargo build --release --target x86_64-apple-ios       # Intel Mac
 ```
 
 **Tools:**
+
 | Tool | Purpose |
 |------|---------|
 | `cargo-xcode` | Generate Xcode project from Cargo |
@@ -215,8 +221,10 @@ cargo build --release --target x86_64-apple-ios       # Intel Mac
 ### Android Setup
 
 **Prerequisites:**
+
 - Android NDK (r25+ recommended)
 - Install targets:
+
   ```bash
   rustup target add aarch64-linux-android    # ARM64 (most devices)
   rustup target add armv7-linux-androideabi  # ARMv7 (legacy)
@@ -225,6 +233,7 @@ cargo build --release --target x86_64-apple-ios       # Intel Mac
   ```
 
 **Using cargo-ndk:**
+
 ```bash
 cargo install cargo-ndk
 
@@ -236,12 +245,14 @@ cargo ndk --platform 24 -t arm64-v8a build --release
 ```
 
 **Activity Types:**
+
 - `NativeActivity`: Simpler, no Java/Kotlin required initially
 - `GameActivity`: Better input (keyboard, controllers), based on AppCompatActivity
 
 ### Mobile-Specific Patterns
 
 **Touch Input Abstraction:**
+
 ```rust
 pub struct Touch {
     pub id: u64,
@@ -271,6 +282,7 @@ fn get_touches() -> Vec<Touch> { /* Android impl */ }
 ```
 
 **Lifecycle Handling:**
+
 ```rust
 pub trait GameLifecycle {
     /// Called when app goes to background
@@ -278,13 +290,13 @@ pub trait GameLifecycle {
         self.save_state();
         self.pause_audio();
     }
-    
+
     /// Called when app returns to foreground
     fn on_resume(&mut self) {
         self.restore_state();
         self.resume_audio();
     }
-    
+
     /// Called when app is being terminated
     fn on_destroy(&mut self) {
         self.save_state();
@@ -398,7 +410,7 @@ pub trait Platform {
     type Random: Random;
     type Assets: AssetLoader;
     type Audio: AudioPlayer;
-    
+
     fn clock(&self) -> &Self::Clock;
     fn random(&mut self) -> &mut Self::Random;
     fn assets(&self) -> &Self::Assets;
@@ -437,11 +449,11 @@ pub struct NativeAssets {
 
 impl AssetLoader for NativeAssets {
     type Error = std::io::Error;
-    
+
     fn load_bytes(&self, path: &str) -> Result<Vec<u8>, Self::Error> {
         std::fs::read(self.base_path.join(path))
     }
-    
+
     fn load_string(&self, path: &str) -> Result<String, Self::Error> {
         std::fs::read_to_string(self.base_path.join(path))
     }
@@ -476,7 +488,7 @@ pub struct EmbeddedAssets {
 
 impl AssetLoader for EmbeddedAssets {
     type Error = AssetError;
-    
+
     fn load_bytes(&self, path: &str) -> Result<Vec<u8>, Self::Error> {
         self.data
             .iter()
@@ -484,7 +496,7 @@ impl AssetLoader for EmbeddedAssets {
             .map(|(_, data)| data.to_vec())
             .ok_or(AssetError::NotFound(path.to_string()))
     }
-    
+
     fn load_string(&self, path: &str) -> Result<String, Self::Error> {
         let bytes = self.load_bytes(path)?;
         String::from_utf8(bytes).map_err(|_| AssetError::InvalidUtf8)
@@ -518,26 +530,26 @@ use std::path::Path;
 fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("assets.rs");
-    
+
     let mut code = String::from("pub mod embedded_assets {\n");
-    
+
     // Process each asset file
     for entry in fs::read_dir("assets").unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
         let name = path.file_stem().unwrap().to_str().unwrap();
         let name_upper = name.to_uppercase().replace("-", "_");
-        
+
         code.push_str(&format!(
             "    pub const {}: &[u8] = include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/assets/{}\"));\n",
             name_upper,
             path.file_name().unwrap().to_str().unwrap()
         ));
     }
-    
+
     code.push_str("}\n");
     fs::write(&dest_path, code).unwrap();
-    
+
     println!("cargo::rerun-if-changed=assets/");
 }
 ```
@@ -585,22 +597,22 @@ pub fn create_graphics_backend() -> Backend {
         Backend::WebGl2
         // Or for modern browsers: Backend::WebGpu
     }
-    
+
     #[cfg(target_os = "macos")]
     {
         Backend::Metal
     }
-    
+
     #[cfg(target_os = "windows")]
     {
         Backend::Dx12  // or Vulkan
     }
-    
+
     #[cfg(target_os = "linux")]
     {
         Backend::Vulkan
     }
-    
+
     #[cfg(any(target_os = "ios", target_os = "android"))]
     {
         Backend::OpenGLES
@@ -628,13 +640,13 @@ pub fn create_graphics_backend() -> Backend {
 mod web_audio {
     use wasm_bindgen::prelude::*;
     use web_sys::{AudioContext, OscillatorNode, GainNode};
-    
+
     pub struct WebAudioPlayer {
         context: AudioContext,
         // Store decoded audio buffers
         sounds: std::collections::HashMap<SoundId, web_sys::AudioBuffer>,
     }
-    
+
     impl WebAudioPlayer {
         pub fn new() -> Result<Self, JsValue> {
             let context = AudioContext::new()?;
@@ -643,7 +655,7 @@ mod web_audio {
                 sounds: std::collections::HashMap::new(),
             })
         }
-        
+
         pub fn play(&self, sound_id: SoundId) -> Result<(), JsValue> {
             if let Some(buffer) = self.sounds.get(&sound_id) {
                 let source = self.context.create_buffer_source()?;
@@ -679,7 +691,7 @@ mod tests {
 mod wasm_tests {
     use wasm_bindgen_test::*;
     wasm_bindgen_test_configure!(run_in_browser);
-    
+
     #[wasm_bindgen_test]
     fn test_wasm_rendering() {
         // Test that runs in actual browser
@@ -720,34 +732,34 @@ jobs:
           # WASM
           - os: ubuntu-latest
             target: wasm32-unknown-unknown
-    
+
     runs-on: ${{ matrix.os }}
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      
+
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-latest' && matrix.target != 'wasm32-unknown-unknown'
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
-      
+
       - name: Install wasm-pack
         if: matrix.target == 'wasm32-unknown-unknown'
         run: cargo install wasm-pack
-      
+
       - name: Build
         run: cargo build --target ${{ matrix.target }}
-      
+
       - name: Test (native)
         if: matrix.target != 'wasm32-unknown-unknown'
         run: cargo test --target ${{ matrix.target }}
-      
+
       - name: Test (WASM)
         if: matrix.target == 'wasm32-unknown-unknown'
         run: wasm-pack test --headless --chrome
@@ -856,27 +868,32 @@ impl GameLifecycle for MyGame {
 ## Checklist for Cross-Platform Games
 
 ### Project Setup
+
 - [ ] Workspace structure separating core from platform code
 - [ ] Feature flags for platform capabilities
 - [ ] Shared asset directory
 
 ### Build Configuration
+
 - [ ] All target triplets in `rust-toolchain.toml`
 - [ ] WASM runner configured in `.cargo/config.toml`
 - [ ] Release profile optimized for size (WASM) or speed (native)
 
 ### Code Quality
+
 - [ ] Platform traits for clock, random, assets, audio
 - [ ] No `std::time::Instant` in core (use trait)
 - [ ] Assets embedded for WASM, loaded from disk for native
 - [ ] Deterministic collections (`BTreeMap` over `HashMap`)
 
 ### Testing
+
 - [ ] Core logic tests run on all platforms
 - [ ] WASM tests with `wasm_bindgen_test`
 - [ ] CI builds for all target platforms
 
 ### Mobile Specific
+
 - [ ] Lifecycle handling (pause/resume/destroy)
 - [ ] Touch input abstraction
 - [ ] Signed builds for device testing

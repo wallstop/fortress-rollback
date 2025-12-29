@@ -295,9 +295,9 @@ for x in slice.iter().copied() {
 ```rust
 impl Iterator for MyIterator {
     type Item = Item;
-    
+
     fn next(&mut self) -> Option<Self::Item> { /* ... */ }
-    
+
     // ✅ Enables pre-allocation in collect()
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.remaining, Some(self.remaining))
@@ -503,7 +503,7 @@ Rust reorders struct fields by default for better packing, but consider:
 mod tests {
     use super::*;
     use std::mem::size_of;
-    
+
     #[test]
     fn type_sizes_are_optimal() {
         assert!(size_of::<MyStruct>() <= 64);  // Fits in cache line
@@ -621,9 +621,9 @@ data.par_sort();
 |---------|--------|-------|--------|
 | Pre-allocate | `Vec::new()` | `Vec::with_capacity(n)` | Fewer allocations |
 | Faster hash | `HashMap` | `FxHashMap` | 4-84% faster |
-| O(1) remove | `vec.remove(i)` | `vec.swap_remove(i)` | O(n) → O(1) |
+| O(1) remove | `vec.remove(i)` | `vec.swap_remove(i)` | O(n) to O(1) |
 | Reuse buffer | `String::new()` in loop | `buf.clear()` | Fewer allocations |
-| Lazy default | `unwrap_or(x)` | `unwrap_or_else(|| x)` | Skip computation |
+| Lazy default | `unwrap_or(x)` | `unwrap_or_else(\|\| x)` | Skip computation |
 | Accept ref | `fn f(s: &String)` | `fn f(s: &str)` | More flexible |
 | Iterator | `collect()` + `iter()` | Direct chain | No intermediate Vec |
 | Bounds | `slice[0] + slice[1]` | `&slice[..2]` then index | Fewer checks |

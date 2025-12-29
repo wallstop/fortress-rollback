@@ -258,10 +258,10 @@ fn add_player(&mut self, player: Player) -> Result<(), Error> {
     if self.count >= MAX_PLAYERS {
         return Err(Error::TooManyPlayers);
     }
-    
+
     // Prepare the update (may fail)
     self.prepare_network_update(&player)?;
-    
+
     // Commit atomically (infallible operations only)
     self.players.push(player);
     self.count += 1;
@@ -272,7 +272,7 @@ fn add_player(&mut self, player: Player) -> Result<(), Error> {
 fn add_player(&mut self, player: Player) -> Result<(), Error> {
     self.players.push(player);
     self.count += 1;
-    
+
     if let Err(e) = self.update_network() {
         // Rollback
         self.players.pop();
@@ -305,11 +305,11 @@ impl Drop for ConnectionGuard<'_> {
 fn use_connection(session: &mut Session) -> Result<(), Error> {
     let id = session.acquire_connection()?;
     let _guard = ConnectionGuard { session, connection_id: id };
-    
+
     // If any of this fails, guard ensures cleanup
     do_something()?;
     do_another_thing()?;
-    
+
     Ok(())
     // Guard dropped here, releasing connection
 }
@@ -348,11 +348,11 @@ struct Frame(u32);  // Can never be negative
 
 impl Frame {
     pub const ZERO: Frame = Frame(0);
-    
+
     pub fn new(value: u32) -> Self {
         Frame(value)
     }
-    
+
     pub fn checked_add(self, delta: u32) -> Option<Frame> {
         self.0.checked_add(delta).map(Frame)
     }
@@ -474,20 +474,20 @@ pub enum FortressError {
         index: usize,
         player_count: usize,
     },
-    
+
     /// Frame number is invalid for the current state
     InvalidFrame {
         requested: Frame,
         current: Frame,
         reason: &'static str,
     },
-    
+
     /// Network operation failed
     NetworkError {
         operation: &'static str,
         details: String,
     },
-    
+
     /// Internal invariant violated (indicates a bug)
     InvariantViolation {
         invariant: &'static str,

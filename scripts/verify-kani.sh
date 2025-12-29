@@ -206,34 +206,34 @@ get_tier_proofs() {
 list_harnesses() {
     echo "Kani Proof Harnesses in Fortress Rollback:"
     echo ""
-    
+
     echo -e "${BLUE}Tier 1 - Fast proofs (${#TIER1_PROOFS[@]} proofs, <30s each):${NC}"
     for harness in "${TIER1_PROOFS[@]}"; do
         echo "  - $harness"
     done
-    
+
     echo ""
     echo -e "${YELLOW}Tier 2 - Medium proofs (${#TIER2_PROOFS[@]} proofs, 30s-2min each):${NC}"
     for harness in "${TIER2_PROOFS[@]}"; do
         echo "  - $harness"
     done
-    
+
     echo ""
     echo -e "${RED}Tier 3 - Slow proofs (${#TIER3_PROOFS[@]} proofs, >2min each):${NC}"
     for harness in "${TIER3_PROOFS[@]}"; do
         echo "  - $harness"
     done
-    
+
     local total=$((${#TIER1_PROOFS[@]} + ${#TIER2_PROOFS[@]} + ${#TIER3_PROOFS[@]}))
     echo ""
     echo "Total: $total harnesses"
-    
+
     # Also show any proofs not in tiers (discovered from source)
     cd "$PROJECT_ROOT"
     local all_proofs
     all_proofs=$(grep -rh '#\[kani::proof\]' --include='*.rs' -A 1 src/ 2>/dev/null | \
                 grep -oP 'fn \K[a-zA-Z_][a-zA-Z0-9_]*' | sort -u || echo "")
-    
+
     local uncategorized=()
     while IFS= read -r proof; do
         local found=false
@@ -248,7 +248,7 @@ list_harnesses() {
             uncategorized+=("$proof")
         fi
     done <<< "$all_proofs"
-    
+
     if [[ ${#uncategorized[@]} -gt 0 ]]; then
         echo ""
         echo -e "${YELLOW}Uncategorized proofs (will run with default tier):${NC}"
@@ -263,42 +263,42 @@ run_kani() {
     local quick="${2:-false}"
     local verbose="${3:-false}"
     local jobs="${4:-1}"
-    
+
     cd "$PROJECT_ROOT"
-    
+
     echo -e "${BLUE}Running Kani verification...${NC}"
     echo ""
-    
+
     # Build Kani command
     local kani_cmd=(cargo kani)
-    
+
     # Add harness filter if specified
     if [[ -n "$harness" ]]; then
         kani_cmd+=(--harness "$harness")
     fi
-    
+
     # Add unwind if set
     if [[ -n "$KANI_UNWIND" ]]; then
         kani_cmd+=(--default-unwind "$KANI_UNWIND")
     fi
-    
+
     # Quick mode uses smaller bounds and enables optimizations
     if [[ "$quick" == "true" ]]; then
         kani_cmd+=(--default-unwind 8)
     fi
-    
+
     # Add jobs for parallel execution
     # Note: --jobs requires --output-format=terse in Kani 0.66.0+
     if [[ "$jobs" -gt 1 ]]; then
         kani_cmd+=(--jobs "$jobs" --output-format terse)
     fi
-    
+
     local start_time
     start_time=$(date +%s)
-    
+
     local output_file
     output_file=$(mktemp)
-    
+
     local exit_code=0
     # Disable colors in Kani output to ensure reliable parsing
     export NO_COLOR=1
@@ -414,11 +414,11 @@ run_kani() {
     fi
 
     rm -f "$output_file" "$clean_output"
-    
+
     if [[ $exit_code -ne 0 ]] || [[ $FAILED -gt 0 ]]; then
         return 1
     fi
-    
+
     return 0
 }
 
@@ -430,7 +430,7 @@ run_tier_proofs() {
     local fail_fast=$5
     local part=${6:-0}
     local parts=${7:-0}
-    
+
     local proofs
     case "$tier" in
         1) proofs=("${TIER1_PROOFS[@]}") ;;
@@ -438,7 +438,7 @@ run_tier_proofs() {
         3) proofs=("${TIER3_PROOFS[@]}") ;;
         *) echo "Invalid tier: $tier" >&2; return 1 ;;
     esac
-    
+
     # If part/parts specified, select subset of proofs
     if [[ "$part" -gt 0 ]] && [[ "$parts" -gt 0 ]]; then
         local total_proofs=${#proofs[@]}
@@ -448,22 +448,22 @@ run_tier_proofs() {
         if [[ $end_idx -gt $total_proofs ]]; then
             end_idx=$total_proofs
         fi
-        
+
         local selected_proofs=()
         for ((i=start_idx; i<end_idx; i++)); do
             selected_proofs+=("${proofs[$i]}")
         done
         proofs=("${selected_proofs[@]}")
-        
+
         echo -e "${BLUE}Running Tier $tier Part $part/$parts proofs (${#proofs[@]} harnesses)...${NC}"
     else
         echo -e "${BLUE}Running Tier $tier proofs (${#proofs[@]} harnesses)...${NC}"
     fi
-    
+
     local any_failed=false
     local tier_passed=0
     local tier_failed=0
-    
+
     for harness in "${proofs[@]}"; do
         echo -e "${BLUE}  Verifying: $harness${NC}"
         if run_kani "$harness" "$quick" "$verbose" "$jobs"; then
@@ -479,10 +479,10 @@ run_tier_proofs() {
             fi
         fi
     done
-    
+
     echo ""
     echo "Tier $tier Results: $tier_passed passed, $tier_failed failed"
-    
+
     if [[ "$any_failed" == "true" ]]; then
         return 1
     fi
@@ -499,7 +499,7 @@ main() {
     local jobs=1
     local part=0
     local parts=0
-    
+
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -580,7 +580,7 @@ main() {
                 ;;
         esac
     done
-    
+
     # Validate part/parts combination
     if [[ "$part" -gt 0 ]] && [[ "$parts" -eq 0 ]]; then
         echo "Error: --part requires --parts to be specified"
@@ -594,22 +594,22 @@ main() {
         echo "Error: --part ($part) cannot be greater than --parts ($parts)"
         exit 1
     fi
-    
+
     echo "=========================================="
     echo "Fortress Rollback Kani Verification"
     echo "=========================================="
-    
+
     check_kani
     echo ""
-    
+
     if [[ "$list_only" == "true" ]]; then
         list_harnesses
         exit 0
     fi
-    
+
     # Run verification
     local any_failed=false
-    
+
     if [[ ${#harnesses[@]} -gt 0 ]]; then
         # Run specific harnesses
         for harness in "${harnesses[@]}"; do
@@ -638,11 +638,11 @@ main() {
             any_failed=true
         fi
     fi
-    
+
     if [[ "$any_failed" == "true" ]]; then
         exit 1
     fi
-    
+
     echo ""
     echo -e "${GREEN}All Kani proofs passed!${NC}"
 }

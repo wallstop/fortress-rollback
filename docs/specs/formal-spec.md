@@ -422,7 +422,7 @@ COMMENT:
     target would be at or after the current frame. The typical scenario
     is misprediction detected at frame 0:
         first_incorrect_frame = 0, current_frame = 0
-    
+
     Production code (p2p_session.rs, adjust_gamestate):
         if frame_to_load >= current_frame {
             self.sync_layer.reset_prediction();

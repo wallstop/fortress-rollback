@@ -86,12 +86,14 @@ let result = tokio::task::spawn_blocking(|| {
 ### 3. Choose the Right Concurrency Primitive
 
 **Sequential Execution** (one after another):
+
 ```rust
 let a = fetch_a().await?;
 let b = fetch_b().await?;
 ```
 
 **Concurrent Execution** (all at once, wait for all):
+
 ```rust
 // Using join! - runs concurrently, returns tuple
 let (a, b, c) = tokio::join!(fetch_a(), fetch_b(), fetch_c());
@@ -101,6 +103,7 @@ let (a, b) = tokio::try_join!(fetch_a(), fetch_b())?;
 ```
 
 **Concurrent Execution** (first to complete wins):
+
 ```rust
 tokio::select! {
     result = fetch_a() => { /* a completed first */ }
@@ -110,6 +113,7 @@ tokio::select! {
 ```
 
 **Dynamic Number of Futures**:
+
 ```rust
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -325,16 +329,19 @@ while let Some(result) = set.join_next().await {
 ### 11. Configure Runtime Appropriately
 
 **For applications** - use full features:
+
 ```toml
 tokio = { version = "1", features = ["full"] }
 ```
 
 **For libraries** - use minimal features:
+
 ```toml
 tokio = { version = "1", features = ["rt", "sync"] }
 ```
 
 **For single-threaded scenarios**:
+
 ```rust
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -343,6 +350,7 @@ async fn main() {
 ```
 
 **For custom configuration**:
+
 ```rust
 let runtime = tokio::runtime::Builder::new_multi_thread()
     .worker_threads(4)
@@ -359,13 +367,13 @@ Remember: dropping a future cancels it. Ensure cleanup happens:
 ```rust
 async fn safe_operation() {
     let temp_file = create_temp_file().await?;
-    
+
     // Use a guard to ensure cleanup
     let _guard = scopeguard::guard((), |_| {
         // This runs even if the future is cancelled
         let _ = std::fs::remove_file(&temp_file);
     });
-    
+
     process_file(&temp_file).await?;
     // Guard drops here, cleaning up
 }
@@ -605,7 +613,7 @@ async fn test_protocol() {
     let writer = tokio_test::io::Builder::new()
         .write(b"world\r\n")
         .build();
-    
+
     handle_connection(reader, writer).await.unwrap();
 }
 ```
@@ -616,19 +624,19 @@ async fn test_protocol() {
 #[tokio::test]
 async fn test_cancellation_cleanup() {
     let (tx, rx) = oneshot::channel();
-    
+
     let handle = tokio::spawn(async move {
         // Setup
         let _guard = scopeguard::guard(tx, |tx| {
             let _ = tx.send(());  // Signal cleanup happened
         });
-        
+
         tokio::time::sleep(Duration::from_secs(100)).await;
     });
-    
+
     // Cancel the task
     handle.abort();
-    
+
     // Verify cleanup occurred
     rx.await.expect("cleanup should have run");
 }
@@ -638,14 +646,14 @@ async fn test_cancellation_cleanup() {
 
 ## When to Use Async vs Sync
 
-### Use Async When:
+### Use Async When
 
 - **High concurrency** - Thousands of concurrent connections
 - **I/O-bound workloads** - Network servers, database clients
 - **External library requires it** - Many modern Rust libraries are async-first
 - **Natural fit** - Event-driven architectures, websockets, streaming
 
-### Use Sync (Threads) When:
+### Use Sync (Threads) When
 
 - **CPU-bound computation** - Use `rayon` for parallelism
 - **Simple I/O patterns** - Reading a few files, one-shot HTTP requests
@@ -658,7 +666,7 @@ async fn test_cancellation_cleanup() {
 // CPU-bound work on rayon, communicate via channel
 async fn process_with_rayon(data: Vec<Item>) -> Vec<Result> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    
+
     rayon::spawn(move || {
         let results: Vec<_> = data
             .par_iter()
@@ -666,7 +674,7 @@ async fn process_with_rayon(data: Vec<Item>) -> Vec<Result> {
             .collect();
         let _ = tx.send(results);
     });
-    
+
     rx.await.expect("rayon task completed")
 }
 ```

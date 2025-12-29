@@ -54,7 +54,7 @@ output_success() {
 verify_version_query() {
     local attempt=$1
     echo "Attempt $attempt: Testing sccache version query (rustc -vV)..."
-    
+
     if timeout "$SCCACHE_TIMEOUT" env RUSTC_WRAPPER=sccache rustc -vV 2>"$VERSION_LOG"; then
         echo "  Version query: OK"
         return 0
@@ -73,10 +73,10 @@ verify_version_query() {
 verify_compilation() {
     local attempt=$1
     echo "Attempt $attempt: Testing sccache compilation..."
-    
+
     # Create a minimal Rust program
     echo 'fn main() {}' > "$TEST_FILE"
-    
+
     if timeout "$SCCACHE_TIMEOUT" env RUSTC_WRAPPER=sccache rustc "$TEST_FILE" -o "$TEST_OUTPUT" 2>"$ERROR_LOG"; then
         echo "  Compilation: OK"
         return 0
@@ -97,10 +97,10 @@ main() {
     echo "Max retries: $MAX_RETRIES"
     echo "Timeout per operation: ${SCCACHE_TIMEOUT}s"
     echo ""
-    
+
     local version_ok=false
     local compile_ok=false
-    
+
     # Use bash arithmetic instead of seq for better portability
     for ((attempt = 1; attempt <= MAX_RETRIES; attempt++)); do
         if [[ $attempt -gt 1 ]]; then
@@ -110,7 +110,7 @@ main() {
             # Restart sccache server between retries
             sccache --stop-server 2>/dev/null || true
         fi
-        
+
         # Test version query
         if verify_version_query "$attempt"; then
             version_ok=true
@@ -118,7 +118,7 @@ main() {
             version_ok=false
             continue  # Try again from the beginning
         fi
-        
+
         # Test compilation
         if verify_compilation "$attempt"; then
             compile_ok=true
@@ -126,18 +126,18 @@ main() {
             compile_ok=false
             continue  # Try again from the beginning
         fi
-        
+
         # Both tests passed
         if $version_ok && $compile_ok; then
             echo ""
             output_success
         fi
     done
-    
+
     # All retries exhausted
     echo ""
     echo "All $MAX_RETRIES attempts failed."
-    
+
     if ! $version_ok; then
         output_failure "version query failed after $MAX_RETRIES attempts"
     elif ! $compile_ok; then

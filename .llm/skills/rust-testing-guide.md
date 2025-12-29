@@ -305,9 +305,9 @@ Always test error paths, not just happy paths:
 #[test]
 fn add_player_with_invalid_handle_returns_error() {
     let mut session = Session::new(2).unwrap();
-    
+
     let result = session.add_player(PlayerHandle::new(999));
-    
+
     assert!(matches!(
         result,
         Err(FortressError::InvalidPlayerHandle { handle: 999, .. })
@@ -317,7 +317,7 @@ fn add_player_with_invalid_handle_returns_error() {
 #[test]
 fn parse_malformed_input_provides_error_context() {
     let result = parse("invalid{{");
-    
+
     let err = result.unwrap_err();
     assert!(err.to_string().contains("unexpected token"));
     assert_eq!(err.line(), 1);
@@ -335,7 +335,7 @@ fn complex_setup_with_result() -> Result<(), Box<dyn std::error::Error>> {
     let config = load_test_config()?;
     let session = Session::with_config(config)?;
     let player = session.add_player(PlayerHandle::new(0))?;
-    
+
     assert_eq!(player.state(), PlayerState::Connected);
     Ok(())
 }
@@ -402,7 +402,7 @@ fn slow_network_integration_test() {
         eprintln!("Skipping slow test. Set RUN_SLOW_TESTS=1 to run.");
         return;
     }
-    
+
     // Expensive test...
 }
 ```
@@ -476,10 +476,10 @@ fn test_add() {
 fn test_everything() {
     let mut session = Session::new(4).unwrap();
     assert_eq!(session.player_count(), 0);
-    
+
     session.add_player(PlayerHandle::new(0)).unwrap();
     assert_eq!(session.player_count(), 1);
-    
+
     session.start().unwrap();
     assert_eq!(session.state(), SessionState::Running);
 }

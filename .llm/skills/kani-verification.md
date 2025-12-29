@@ -108,10 +108,10 @@ mod kani_proofs {
         // Generate symbolic inputs
         let x: u32 = kani::any();
         let y: u32 = kani::any();
-        
+
         // Call the function under verification
         let _ = my_function(x, y);
-        
+
         // Kani automatically checks for:
         // - Panics (unwrap, expect, assert failures)
         // - Arithmetic overflow/underflow
@@ -153,14 +153,14 @@ Narrow the state space for tractable verification:
 fn verify_division() {
     let numerator: u32 = kani::any();
     let denominator: u32 = kani::any();
-    
+
     // ❌ Without constraint: Kani will find division by zero
     // let result = numerator / denominator;
-    
+
     // ✅ Constrain to valid inputs
     kani::assume(denominator != 0);
     let result = numerator / denominator;
-    
+
     // Now verify properties
     assert!(result <= numerator);
 }
@@ -183,12 +183,12 @@ Kani needs explicit bounds for loops:
 fn verify_loop() {
     let iterations: usize = kani::any();
     kani::assume(iterations <= 10);
-    
+
     let mut sum = 0u32;
     for i in 0..iterations {
         sum = sum.saturating_add(i as u32);
     }
-    
+
     // Verify property
     assert!(sum <= 45);  // Max sum of 0..10
 }
@@ -247,7 +247,7 @@ pub enum ConnectionState {
 fn verify_handles_all_inputs() {
     let input: PlayerInput = kani::any();
     let state: ConnectionState = kani::any();
-    
+
     // Process all possible combinations
     process(input, state);
 }
@@ -277,7 +277,7 @@ use kani::BoundedArbitrary;
 // For Vec, String, and other unbounded types
 impl BoundedArbitrary for MyBuffer {
     const MAX_LEN: usize = 16;  // Verification bound
-    
+
     fn any_bounded() -> Self {
         let len: usize = kani::any_where(|&l| l <= Self::MAX_LEN);
         let data: [u8; 16] = kani::any();
@@ -297,11 +297,11 @@ impl BoundedArbitrary for MyBuffer {
 fn verify_no_panics() {
     // Generate arbitrary valid inputs
     let input: Input = kani::any();
-    
+
     // The function should never panic
     // Kani will find any path that panics
     let result = process_input(input);
-    
+
     // Optionally verify result properties
     assert!(result.is_ok() || matches!(result, Err(FortressError::_)));
 }
@@ -314,7 +314,7 @@ fn verify_no_panics() {
 fn verify_frame_arithmetic() {
     let frame: u32 = kani::any();
     let delta: u32 = kani::any();
-    
+
     // checked_add should never panic
     if let Some(result) = frame.checked_add(delta) {
         assert!(result >= frame);
@@ -334,9 +334,9 @@ enum State { Init, Running, Paused, Stopped }
 fn verify_valid_transitions() {
     let current: State = kani::any();
     let event: Event = kani::any();
-    
+
     let next = transition(current, event);
-    
+
     // Verify invariant: can't go from Stopped to Running
     kani::assume(matches!(current, State::Stopped));
     assert!(!matches!(next, State::Running));
@@ -356,12 +356,12 @@ fn sum_unchecked(a: u32, b: u32) -> u32 {
 fn verify_unchecked_add_precondition() {
     let a: u32 = kani::any();
     let b: u32 = kani::any();
-    
+
     // Only call if overflow is impossible
     kani::assume(a.checked_add(b).is_some());
-    
+
     let result = sum_unchecked(a, b);
-    
+
     // Verify result correctness
     assert_eq!(result, a.wrapping_add(b));
 }
@@ -373,7 +373,7 @@ fn verify_unchecked_add_precondition() {
 #[kani::proof]
 fn verify_input_validation_is_complete() {
     let raw_input: RawInput = kani::any();
-    
+
     match validate_input(raw_input) {
         Ok(validated) => {
             // All validated inputs must satisfy invariants
@@ -490,12 +490,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Kani
         run: |
           cargo install --locked kani-verifier
           cargo kani setup
-      
+
       - name: Run Kani Proofs
         run: cargo kani --tests
 ```

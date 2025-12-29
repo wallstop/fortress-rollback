@@ -324,10 +324,10 @@ fn test_is_valid_index_boundaries() {
     // At boundary
     assert!(is_valid_index(9, 10));   // index == len - 1
     assert!(!is_valid_index(10, 10)); // index == len
-    
+
     // Zero case
     assert!(is_valid_index(0, 10));
-    
+
     // Edge cases
     assert!(!is_valid_index(0, 0));   // empty collection
 }
@@ -416,16 +416,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: dtolnay/rust-toolchain@stable
-      
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants,cargo-nextest
-      
+
       - name: Run mutation testing
         run: cargo mutants -vV --in-place --timeout 300
-      
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -444,17 +444,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants,cargo-nextest
-      
+
       - name: Generate diff
         run: git diff origin/${{ github.base_ref }}.. > changes.diff
-      
+
       - name: Run incremental mutation testing
         run: cargo mutants --no-shuffle -vV --in-diff changes.diff --in-place
-      
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -483,11 +483,11 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants,cargo-nextest
-      
+
       - name: Run shard ${{ matrix.shard }}/8
         run: |
           cargo mutants --no-shuffle -vV \
@@ -495,7 +495,7 @@ jobs:
             --baseline=skip \
             --timeout 300 \
             --in-place
-      
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -593,7 +593,7 @@ exclude_re = [
     # Display/Debug impls - usually OK
     "impl Debug",
     "impl Display",
-    
+
     # Known equivalent mutants
     "specific_function_name",
 ]
@@ -616,14 +616,14 @@ exclude_re = [
 fn test_rollback_restores_exact_state() {
     let mut session = create_test_session();
     let original_state = session.current_state().clone();
-    
+
     // Advance and save
     session.advance_frame();
     session.advance_frame();
-    
+
     // Rollback
     session.rollback_to(Frame(0));
-    
+
     // Verify EXACT state, not just "some state"
     assert_eq!(session.current_state(), &original_state);
 }
@@ -635,11 +635,11 @@ fn test_rollback_restores_exact_state() {
 #[test]
 fn test_input_acknowledged_exactly() {
     let (mut peer1, mut peer2) = create_connected_peers();
-    
+
     // Send specific input
     peer1.add_local_input(INPUT_VALUE);
     exchange_messages(&mut peer1, &mut peer2);
-    
+
     // Verify exact acknowledgment, not just "acked something"
     assert_eq!(peer2.received_inputs(), vec![(Frame(0), INPUT_VALUE)]);
 }
@@ -652,7 +652,7 @@ fn test_input_acknowledged_exactly() {
 fn test_checksum_detects_single_bit_flip() {
     let state1 = GameState::new();
     let state2 = state1.with_bit_flipped(42);
-    
+
     // Checksums MUST differ
     assert_ne!(checksum(&state1), checksum(&state2));
 }

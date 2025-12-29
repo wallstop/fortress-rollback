@@ -48,23 +48,23 @@ VARIABLES
     \* Frame tracking
     currentFrame,           \* currentFrame[p] = current simulation frame for peer p
     lastConfirmedFrame,     \* lastConfirmedFrame[p] = last confirmed frame for peer p
-    
+
     \* Local checksum tracking
     localChecksums,         \* localChecksums[p] = map from frame -> checksum for peer p
     lastSentChecksumFrame,  \* lastSentChecksumFrame[p] = last frame we sent checksum for
-    
+
     \* Remote checksum tracking (pending_checksums)
     pendingChecksums,       \* pendingChecksums[p] = map from frame -> checksum received from other peer
-    
+
     \* Sync health state
     syncHealth,             \* syncHealth[p] = current sync health state
     lastVerifiedFrame,      \* lastVerifiedFrame[p] = highest frame with successful comparison (or -1)
-    
+
     \* Game state (abstract) - for modeling actual vs predicted checksums
     \* In production, checksum is derived from actual game state
     \* For verification, we model whether peers have the "same" state
     peersHaveSameState,     \* Boolean: TRUE if peers have deterministic identical state
-    
+
     \* Network - checksum messages in transit
     network                 \* Sequence of checksum messages
 
@@ -150,12 +150,12 @@ SendChecksum(p, other) ==
     /\ frameToSend <= MAX_FRAME
     /\ LET checksum == ComputeChecksum(p, frameToSend)
        IN
-        /\ localChecksums' = [localChecksums EXCEPT ![p] = 
+        /\ localChecksums' = [localChecksums EXCEPT ![p] =
             [localChecksums[p] EXCEPT ![frameToSend] = checksum]]
         /\ lastSentChecksumFrame' = [lastSentChecksumFrame EXCEPT ![p] = frameToSend]
-        /\ network' = Append(network, [type |-> "Checksum", from |-> p, to |-> other, 
+        /\ network' = Append(network, [type |-> "Checksum", from |-> p, to |-> other,
                                        frame |-> frameToSend, checksum |-> checksum])
-    /\ UNCHANGED <<currentFrame, lastConfirmedFrame, pendingChecksums, 
+    /\ UNCHANGED <<currentFrame, lastConfirmedFrame, pendingChecksums,
                    syncHealth, lastVerifiedFrame, peersHaveSameState>>
 
 (***************************************************************************)
@@ -169,7 +169,7 @@ ReceiveChecksum(p) ==
         /\ network[i].type = "Checksum"
         /\ LET msg == network[i]
            IN
-            /\ pendingChecksums' = [pendingChecksums EXCEPT ![p] = 
+            /\ pendingChecksums' = [pendingChecksums EXCEPT ![p] =
                 [pendingChecksums[p] EXCEPT ![msg.frame] = msg.checksum]]
             /\ network' = SubSeq(network, 1, i-1) \o SubSeq(network, i+1, Len(network))
     /\ UNCHANGED <<currentFrame, lastConfirmedFrame, localChecksums, lastSentChecksumFrame,
@@ -188,10 +188,10 @@ CompareChecksums(p) ==
                remoteChecksum == pendingChecksums[p][frame]
            IN
             IF localChecksum = remoteChecksum
-            THEN 
+            THEN
                 \* Checksums match - update to InSync, update last_verified_frame
                 /\ syncHealth' = [syncHealth EXCEPT ![p] = "InSync"]
-                /\ lastVerifiedFrame' = [lastVerifiedFrame EXCEPT ![p] = 
+                /\ lastVerifiedFrame' = [lastVerifiedFrame EXCEPT ![p] =
                     IF lastVerifiedFrame[p] < frame THEN frame ELSE lastVerifiedFrame[p]]
                 /\ pendingChecksums' = [pendingChecksums EXCEPT ![p][frame] = -1]  \* Clear after compare
             ELSE
@@ -277,7 +277,7 @@ VerifiedFrameMonotonic ==
 \* SAFE-DESYNC-5: InSync implies all compared checksums matched
 InSyncImpliesMatchingChecksums ==
     \A p \in PEERS:
-        (syncHealth[p] = "InSync") => 
+        (syncHealth[p] = "InSync") =>
             (lastVerifiedFrame[p] >= 0)  \* At least one successful comparison happened
 
 (***************************************************************************)

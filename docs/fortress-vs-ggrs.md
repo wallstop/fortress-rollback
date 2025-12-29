@@ -124,7 +124,7 @@ InvalidFrame { frame: Frame(0), reason: "must load frame in the past" }
 **Issue:** In `P2PSession::advance_frame()`, it was possible for a desync to incorrectly be detected when:
 
 1. A checksum-changing rollback was enqueued
-2. A to-be-rolled-back frame was marked as confirmed  
+2. A to-be-rolled-back frame was marked as confirmed
 3. That frame's still-incorrect checksum was sent to peers
 
 **Fix:** Reordered operations to ensure checksums are computed after rollback completion. (Fixed in upstream GGRS 0.11, carried forward in Fortress)

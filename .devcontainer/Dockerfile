@@ -1,5 +1,5 @@
 # Fortress Rollback Development Container
-# 
+#
 # This container includes all verification tools:
 # - TLA+ model checker
 # - Kani bounded model checker

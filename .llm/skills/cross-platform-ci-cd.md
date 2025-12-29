@@ -57,13 +57,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      
+
       - name: Format check
         run: cargo fmt --all -- --check
-      
+
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
-      
+
       - name: Test
         run: cargo test
 
@@ -82,17 +82,17 @@ jobs:
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-    
+
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
-      
+
       - name: Test
         run: cargo test --target ${{ matrix.target }}
 ```
@@ -113,19 +113,19 @@ jobs:
           - aarch64-unknown-linux-gnu
           - armv7-unknown-linux-gnueabihf
           - x86_64-unknown-linux-musl
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install cross
         run: |
           curl -L --proto '=https' --tlsv1.2 -sSf \
             https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
           cargo binstall cross --no-confirm
-      
+
       - name: Build with cross
         run: cross build --release --target ${{ matrix.target }}
-      
+
       - name: Test with cross (QEMU)
         run: cross test --target ${{ matrix.target }}
 ```
@@ -141,13 +141,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
-      
+
       - name: Install Zig
         uses: goto-bus-stop/setup-zig@v2
-      
+
       - name: Install cargo-zigbuild
         run: cargo install --locked cargo-zigbuild
-      
+
       - name: Build targeting glibc 2.17
         run: cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.17
 ```
@@ -165,16 +165,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      
+
       - name: Install wasm-pack
         run: cargo install wasm-pack
-      
+
       - name: Build WASM
         run: cargo build --target wasm32-unknown-unknown --release
-      
+
       - name: Build with wasm-pack (for web)
         run: wasm-pack build --target web --release
-      
+
       - name: Test in headless browser
         run: wasm-pack test --headless --chrome
 ```
@@ -190,13 +190,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      
+
       - name: Install wasm-pack
         run: cargo install wasm-pack
-      
+
       - name: Setup Chrome
         uses: browser-actions/setup-chrome@latest
-      
+
       - name: Run WASM tests
         run: |
           RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
@@ -218,10 +218,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios, aarch64-apple-ios-sim
-      
+
       - name: Build for iOS device
         run: cargo build --target aarch64-apple-ios --release
-      
+
       - name: Build for iOS simulator
         run: cargo build --target aarch64-apple-ios-sim --release
 ```
@@ -237,20 +237,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android, armv7-linux-androideabi
-      
+
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r25c
-      
+
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
-      
+
       - name: Build for Android
         run: |
           cargo ndk -t arm64-v8a -t armeabi-v7a \
             -o ./jniLibs build --release
-      
+
       - name: Upload Android libraries
         uses: actions/upload-artifact@v4
         with:
@@ -297,40 +297,40 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: my-app-windows-x64
-    
+
     runs-on: ${{ matrix.os }}
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      
+
       - name: Install cross
         if: matrix.use_cross
         run: cargo install cross --git https://github.com/cross-rs/cross
-      
+
       - name: Build (native)
         if: ${{ !matrix.use_cross }}
         run: cargo build --release --target ${{ matrix.target }}
-      
+
       - name: Build (cross)
         if: matrix.use_cross
         run: cross build --release --target ${{ matrix.target }}
-      
+
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
           tar czf ../../../${{ matrix.artifact }}.tar.gz my-app
-      
+
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
           7z a ../../../${{ matrix.artifact }}.zip my-app.exe
-      
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -340,13 +340,13 @@ jobs:
   create-release:
     needs: build-release
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      
+
       - name: Create release
         uses: softprops/action-gh-release@v1
         with:
@@ -363,9 +363,9 @@ jobs:
 ```yaml
 steps:
   - uses: actions/checkout@v4
-  
+
   - uses: dtolnay/rust-toolchain@stable
-  
+
   - name: Cache cargo registry
     uses: actions/cache@v4
     with:
@@ -387,13 +387,13 @@ steps:
     with:
       path: ~/.cargo/registry
       key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-  
+
   - name: Cache cargo index
     uses: actions/cache@v4
     with:
       path: ~/.cargo/git
       key: cargo-git-${{ hashFiles('**/Cargo.lock') }}
-  
+
   - name: Cache target directory
     uses: actions/cache@v4
     with:
@@ -412,12 +412,12 @@ env:
 
 steps:
   - uses: actions/checkout@v4
-  
+
   - name: Setup sccache
     uses: mozilla-actions/sccache-action@v0.0.4
-  
+
   - uses: dtolnay/rust-toolchain@stable
-  
+
   - name: Build
     run: cargo build --release
 ```
@@ -446,7 +446,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: cargo install cross --git https://github.com/cross-rs/cross
       - run: cross build --release --target ${{ matrix.target }}
-  
+
   # Native macOS only for final verification
   macos-verify:
     runs-on: macos-latest
@@ -455,7 +455,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: cargo test
-  
+
   # Native Windows only for MSVC builds
   windows-msvc:
     runs-on: windows-latest
@@ -478,7 +478,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: cargo test
-  
+
   quick-check:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -552,7 +552,7 @@ steps:
         -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
       security set-key-partition-list -S apple-tool:,apple: \
         -s -k temp build.keychain
-  
+
   - name: Sign binary
     if: matrix.os == 'macos-latest'
     run: codesign --force --sign "$SIGNING_IDENTITY" target/release/my-app
@@ -571,10 +571,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-      
+
       - name: Build docs
         run: RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc --all-features --no-deps
-      
+
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         if: github.ref == 'refs/heads/main'
@@ -594,13 +594,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
-      
+
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      
+
       - name: Generate coverage
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info
-      
+
       - name: Upload to Codecov
         uses: codecov/codecov-action@v3
         with:
@@ -702,17 +702,20 @@ jobs:
 ## Checklist
 
 ### Basic CI
+
 - [ ] Format check (`cargo fmt --check`)
 - [ ] Lint check (`cargo clippy -- -D warnings`)
 - [ ] Unit tests (`cargo test`)
 - [ ] Build verification for all targets
 
 ### Security
+
 - [ ] cargo-deny for licenses
 - [ ] cargo-audit for vulnerabilities
 - [ ] Dependabot or Renovate for updates
 
 ### Multi-Platform
+
 - [ ] Linux (glibc and musl)
 - [ ] macOS (Intel and Apple Silicon)
 - [ ] Windows (MSVC)
@@ -720,12 +723,14 @@ jobs:
 - [ ] Mobile targets (if applicable)
 
 ### Optimization
+
 - [ ] Cargo caching enabled
 - [ ] Cross-compilation on Linux where possible
 - [ ] Expensive jobs gated to main/tags
 - [ ] Matrix fail-fast disabled for visibility
 
 ### Release
+
 - [ ] Automated release on tag
 - [ ] Artifacts for all platforms
 - [ ] Release notes generation

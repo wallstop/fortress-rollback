@@ -281,7 +281,7 @@ impl Session {
     pub fn advance_frame(&mut self) {
         self.frame += 1;
     }
-    
+
     /// Get simulation time (deterministic!)
     pub fn elapsed_micros(&self) -> u64 {
         u64::from(self.frame) * self.frame_duration_micros
@@ -309,7 +309,7 @@ impl GameState {
             rng: Xoshiro256PlusPlus::seed_from_u64(seed),
         }
     }
-    
+
     pub fn random_u32(&mut self) -> u32 {
         self.rng.next_u32()
     }
@@ -395,7 +395,7 @@ fn main() {
         static mut HEAP_MEM: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
         unsafe { HEAP.init(HEAP_MEM.as_mut_ptr(), HEAP_SIZE) }
     }
-    
+
     // Now Vec, Box, etc. work
     let v = vec![1, 2, 3];
 }
@@ -518,7 +518,7 @@ Even for no_std libraries, tests typically run with std:
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_something() {
         // Can use std here!
@@ -554,17 +554,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv7em-none-eabihf, wasm32-unknown-unknown
-      
+
       - name: Check no_std + alloc
         run: cargo check --no-default-features --features alloc
-        
+
       - name: Check bare no_std
         run: cargo check --no-default-features
-        
+
       - name: Check WASM
         run: cargo check --target wasm32-unknown-unknown --no-default-features --features alloc
-        
-      - name: Check embedded target  
+
+      - name: Check embedded target
         run: cargo check --target thumbv7em-none-eabihf --no-default-features
 ```
 
@@ -575,10 +575,10 @@ jobs:
 fn test_no_unexpected_allocations() {
     // Use allocation tracking in tests
     let stats_before = allocation_counter::count();
-    
+
     // Your code that shouldn't allocate
     let result = process_fixed_buffer(&mut buffer);
-    
+
     let stats_after = allocation_counter::count();
     assert_eq!(stats_before, stats_after, "unexpected allocation");
 }
@@ -681,7 +681,7 @@ impl Session {
     pub fn connect(addr: &str) -> std::io::Result<Self> {
         // Uses std::net
     }
-    
+
     // Always available version
     pub fn from_socket<S: Socket>(socket: S) -> Self {
         // Works with any socket implementation
@@ -752,9 +752,9 @@ Here's a realistic structure for a no_std-compatible networking library:
 #![warn(missing_docs)]
 
 //! A rollback networking library for games.
-//! 
+//!
 //! # Features
-//! 
+//!
 //! - `std` (default): Full standard library support
 //! - `alloc`: Heap allocation without std (for WASM/embedded)
 //! - `tokio`: Async networking with Tokio runtime
@@ -864,7 +864,7 @@ use crate::frame::Frame;
 pub trait Input: Clone + Default + PartialEq {
     /// Serialize input to bytes
     fn to_bytes(&self, buf: &mut [u8]) -> usize;
-    
+
     /// Deserialize input from bytes
     fn from_bytes(buf: &[u8]) -> Option<Self>;
 }
@@ -885,7 +885,7 @@ impl<I: Input> InputBuffer<I> {
             capacity,
         }
     }
-    
+
     /// Add input for a frame
     pub fn add(&mut self, frame: Frame, input: I) -> crate::Result<()> {
         if self.inputs.len() >= self.capacity {
@@ -894,7 +894,7 @@ impl<I: Input> InputBuffer<I> {
         self.inputs.push_back((frame, input));
         Ok(())
     }
-    
+
     /// Get input for a frame
     pub fn get(&self, frame: Frame) -> Option<&I> {
         self.inputs
@@ -957,7 +957,7 @@ impl<I: Input> Session<I> {
             config,
         })
     }
-    
+
     /// Advance to the next frame
     pub fn advance_frame(&mut self, checksum: Option<u64>) -> Result<Frame> {
         if let Some(cs) = checksum {
@@ -966,7 +966,7 @@ impl<I: Input> Session<I> {
         self.current_frame = self.current_frame.saturating_add(1);
         Ok(self.current_frame)
     }
-    
+
     /// Get current frame number
     pub fn current_frame(&self) -> Frame {
         self.current_frame

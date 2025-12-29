@@ -5,6 +5,7 @@
 ## Overview
 
 Threading in WebAssembly is **possible but complex**. It requires:
+
 - Browser security headers (COOP/COEP)
 - Shared memory (`SharedArrayBuffer`)
 - Nightly Rust (for full support)
@@ -91,7 +92,7 @@ where
         use rayon::prelude::*;
         items.par_iter().map(f).collect()
     }
-    
+
     #[cfg(not(feature = "parallel"))]
     {
         items.iter().map(f).collect()
@@ -118,7 +119,7 @@ where
         use rayon::prelude::*;
         items.par_iter().map(f).collect()
     }
-    
+
     #[cfg(any(target_arch = "wasm32", not(feature = "parallel")))]
     {
         items.iter().map(f).collect()
@@ -144,7 +145,7 @@ where
     I: rayon::iter::IntoParallelIterator,
 {
     type Item = I::Item;
-    
+
     fn process<F, R>(self, f: F) -> Vec<R>
     where
         F: Fn(Self::Item) -> R + Send + Sync,
@@ -162,7 +163,7 @@ where
     I: IntoIterator,
 {
     type Item = I::Item;
-    
+
     fn process<F, R>(self, f: F) -> Vec<R>
     where
         F: Fn(Self::Item) -> R,
@@ -181,7 +182,7 @@ import { threads } from 'wasm-feature-detect';
 
 async function loadModule() {
     const hasThreads = await threads();
-    
+
     if (hasThreads) {
         const { default: init, initThreadPool } = await import('./pkg-threaded/index.js');
         await init();
@@ -232,7 +233,7 @@ import init, { initThreadPool, parallel_sum } from './pkg/index.js';
 async function main() {
     await init();
     await initThreadPool(navigator.hardwareConcurrency);
-    
+
     const numbers = new Int32Array([1, 2, 3, 4, 5]);
     console.log(parallel_sum(numbers)); // 15
 }
@@ -361,7 +362,7 @@ impl ThreadPool {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ThreadPool { workers })
     }
-    
+
     pub fn execute(&self, task: JsValue) {
         // Round-robin task distribution
         let worker = &self.workers[0];
@@ -377,6 +378,7 @@ impl ThreadPool {
 **⚠️ Important for rollback netcode:**
 
 Threading introduces non-determinism due to:
+
 - Scheduling order variations
 - Race conditions
 - Memory ordering differences
@@ -388,7 +390,7 @@ Threading introduces non-determinism due to:
 pub struct GameSession {
     // Simulation runs single-threaded (deterministic)
     simulation: SingleThreadedSimulation,
-    
+
     // I/O can be parallel (doesn't affect game state)
     network_pool: ThreadPool,
 }
@@ -397,7 +399,7 @@ impl GameSession {
     pub fn tick(&mut self, inputs: &[Input]) {
         // Deterministic simulation
         self.simulation.advance(inputs);
-        
+
         // Non-deterministic I/O (doesn't affect simulation)
         self.network_pool.send_state(self.simulation.state());
     }
@@ -420,7 +422,7 @@ fn update_entities_good(entities: &mut [Entity]) {
         .par_iter()
         .map(|e| e.compute_update())
         .collect();
-    
+
     // Apply in deterministic order
     for (entity, update) in entities.iter_mut().zip(updates) {
         entity.apply(update);
@@ -547,7 +549,7 @@ pub fn compute_checksum(state: &GameState) -> u64 {
     {
         state.entities.par_iter().map(|e| e.hash()).sum()
     }
-    
+
     #[cfg(not(feature = "parallel"))]
     {
         state.entities.iter().map(|e| e.hash()).sum()
@@ -567,7 +569,7 @@ parallel = ["rayon"]  # Opt-in
 
 ```rust
 /// Processes inputs for all players.
-/// 
+///
 /// # Determinism
 /// This function is deterministic regardless of threading.
 /// Parallel execution only affects performance, not results.

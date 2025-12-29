@@ -282,6 +282,7 @@ sudo spctl developer-mode enable-terminal
 ### 16. Windows: Use Dev Drive
 
 Move these to a Dev Drive volume:
+
 - `CARGO_HOME` (~/.cargo)
 - Project code
 - Target directory
@@ -389,6 +390,7 @@ cargo build --timings
 ```
 
 Look for:
+
 - **Red bars**: Crates waiting for dependencies (bottleneck)
 - **Long single bars**: Crates that take too long
 - **Proc-macro crates early**: They block dependent crates
@@ -438,6 +440,7 @@ cargo build 2>&1 | grep -i dirty
 ```
 
 Look for:
+
 - `EnvVarChanged`: Environment variable differences
 - `Stale`: File changes
 - Feature flag mismatches
@@ -537,10 +540,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      
+
       - name: Check
         run: cargo check --all-targets --all-features
-      
+
       - name: Clippy
         run: cargo clippy --all-targets --all-features
 
@@ -551,10 +554,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      
+
       - name: Compile tests
         run: cargo test --no-run --locked
-      
+
       - name: Run tests
         run: cargo nextest run
 ```
@@ -575,12 +578,14 @@ opt-level = 1  # Slight optimization for test runtime
 ### Cache Strategy
 
 What to cache:
+
 - `~/.cargo/registry/index/`
 - `~/.cargo/registry/cache/`
 - `~/.cargo/git/db/`
 - `target/` (selectively)
 
 What NOT to cache:
+
 - `target/debug/` or `target/release/` (local crates)
 - `target/.rustc_info.json`
 

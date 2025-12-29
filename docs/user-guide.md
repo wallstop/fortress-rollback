@@ -1782,10 +1782,10 @@ let mut peer_done = false;
 loop {
     // Normal frame advance
     session.poll_remote_clients();
-    
+
     if session.current_state() == SessionState::Running {
         session.add_local_input(local_handle, input)?;
-        
+
         for request in session.advance_frame()? {
             match request {
                 // Handle requests normally...
@@ -1801,18 +1801,18 @@ loop {
             }
         }
     }
-    
+
     // Check if WE think we're done
     if !my_done && session.confirmed_frame() >= target_frames {
         my_done = true;
         send_done_message_to_peer();  // Application-level protocol
     }
-    
+
     // Check if peer says they're done (via your application protocol)
     if received_done_from_peer() {
         peer_done = true;
     }
-    
+
     // Only exit when BOTH are done AND sync health is verified
     if my_done && peer_done {
         match session.sync_health(peer_handle) {
@@ -1877,7 +1877,7 @@ if let Some(last_frame) = stats.last_compared_frame {
     println!("Last compared frame: {}", last_frame);
     println!("Local checksum: {:?}", stats.local_checksum);
     println!("Remote checksum: {:?}", stats.remote_checksum);
-    
+
     // Quick check using the convenience field
     match stats.checksums_match {
         Some(true) => println!("✓ Synchronized"),
@@ -1920,10 +1920,10 @@ use fortress_rollback::SyncHealth;
 pub enum SyncHealth {
     /// Checksums have been compared and match - peers are synchronized.
     InSync,
-    
+
     /// Waiting for checksum data from the peer - status unknown.
     Pending,
-    
+
     /// Checksums were compared and differ - desync detected!
     DesyncDetected {
         frame: Frame,
@@ -2015,22 +2015,22 @@ let mut peer_done = false;
 
 loop {
     session.poll_remote_clients();
-    
+
     if session.current_state() == SessionState::Running {
         // Normal frame processing...
     }
-    
+
     // Mark ourselves done when we reach target
     if !my_done && session.confirmed_frame() >= target_frames {
         my_done = true;
         // Send "I'm done" to peer via your application protocol
     }
-    
+
     // Update when peer says they're done
     if received_done_from_peer() {
         peer_done = true;
     }
-    
+
     // Only exit when BOTH done AND verified in sync
     if my_done && peer_done {
         match session.sync_health(peer_handle) {
@@ -2070,11 +2070,11 @@ match session.sync_health(peer_handle) {
         // Strategy 1: Graceful termination
         show_desync_error_to_user(frame);
         disconnect_and_return_to_menu();
-        
+
         // Strategy 2: Log and continue (debugging)
         log::error!("Desync detected at frame {}", frame);
         // Continue running to gather more diagnostic data
-        
+
         // Strategy 3: Competitive anti-cheat
         report_to_server(peer_handle, frame);
         mark_match_as_invalid();

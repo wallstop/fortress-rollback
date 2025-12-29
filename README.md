@@ -4,6 +4,11 @@
 
 <p align="center">
   <a href="https://crates.io/crates/fortress-rollback"><img src="https://img.shields.io/crates/v/fortress-rollback?style=for-the-badge" alt="crates.io"></a>
+  <a href="https://wallstop.github.io/fortress-rollback/"><img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue?style=for-the-badge" alt="Documentation"></a>
+  <a href="https://github.com/wallstop/fortress-rollback/wiki"><img src="https://img.shields.io/badge/wiki-GitHub%20Wiki-green?style=for-the-badge" alt="Wiki"></a>
+</p>
+
+<p align="center">
   <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/ci-rust.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/ci-rust.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
   <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/publish.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/publish.yml?branch=main&style=for-the-badge&label=Publish" alt="Publish"></a>
   <a href="https://github.com/wallstop/fortress-rollback/actions/workflows/ci-coverage.yml"><img src="https://img.shields.io/github/actions/workflow/status/wallstop/fortress-rollback/ci-coverage.yml?branch=main&style=for-the-badge&label=Coverage" alt="Coverage"></a>
@@ -42,8 +47,10 @@ Fortress Rollback currently ships with the same demos you may know from GGRS. On
 
 To get started with Fortress Rollback, check out the following resources:
 
-- [Examples](./examples/)
-- [Documentation](https://docs.rs/fortress-rollback/newest/fortress_rollback/)
+- 📖 **[User Guide](https://wallstop.github.io/fortress-rollback/)** — Full documentation site with guides, architecture, and API reference
+- 📚 **[GitHub Wiki](https://github.com/wallstop/fortress-rollback/wiki)** — Quick reference and community-editable docs
+- 💻 **[Examples](./examples/)** — Working code examples for common use cases
+- 📋 **[API Documentation](https://docs.rs/fortress-rollback/newest/fortress_rollback/)** — Auto-generated Rust docs on docs.rs
 
 ### System Dependencies for Examples
 
