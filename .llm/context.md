@@ -723,17 +723,33 @@ cargo c && cargo t  # Defined in .cargo/config.toml
 
 **Spell checking:** Run `typos` before committing. CI enforces this.
 
-**Markdown:** Pre-commit auto-fixes most issues. Run `./scripts/check-links.sh` after editing markdown — CI will fail on broken links.
-
 **Workflow files:** Run `actionlint` after ANY workflow changes — no exceptions.
 
 ```bash
-# All checks available
 typos                                    # Spell check
-npx markdownlint 'file.md' --config .markdownlint.json --fix
-./scripts/check-links.sh                 # Link validation
 actionlint                               # GitHub Actions linting
 ```
+
+### Markdown Formatting
+
+**Always run markdownlint after editing any markdown file.** The `--fix` flag auto-fixes most issues:
+
+```bash
+# Fix a specific file
+npx markdownlint 'docs/file.md' --config .markdownlint.json --fix
+
+# Fix all markdown files in a directory
+npx markdownlint 'docs/**/*.md' --config .markdownlint.json --fix
+
+# Check all workspace markdown
+npx markdownlint '**/*.md' --config .markdownlint.json --fix
+```
+
+**Pre-commit hook:** The hook automatically runs markdownlint with `--fix` on staged markdown files.
+
+**Link validation:** Run `./scripts/check-links.sh` after editing markdown — CI will fail on broken links.
+
+**See also:** [markdown-formatting.md](skills/markdown-formatting.md) for complete style rules, common fixes, and CI configuration.
 
 ### For Agents and Sub-Agents
 

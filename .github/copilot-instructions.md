@@ -20,4 +20,7 @@ cargo fmt && cargo clippy --all-targets && cargo nextest run
 
 # Or use the convenient aliases defined in .cargo/config.toml
 cargo c && cargo t
+
+# Markdown linting
+npx markdownlint '**/*.md' --config .markdownlint.json --fix
 ```

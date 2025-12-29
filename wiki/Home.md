@@ -10,7 +10,7 @@ Fortress Rollback is a **correctness-first** Rust library for peer-to-peer rollb
 
 ---
 
-##  Key Features
+## Key Features
 
 <!-- markdownlint-disable MD030 -->
 
@@ -18,7 +18,7 @@ Fortress Rollback is a **correctness-first** Rust library for peer-to-peer rollb
 
 ---
 
-##  Quick Start
+## Quick Start
 
 Get up and running with Fortress Rollback in minutes.
 
@@ -75,7 +75,7 @@ Get up and running with Fortress Rollback in minutes.
 
 ---
 
-##  Where to Go Next
+## Where to Go Next
 
 <!-- markdownlint-disable MD030 -->
 
