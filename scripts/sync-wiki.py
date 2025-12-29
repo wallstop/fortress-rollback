@@ -50,6 +50,13 @@ ROOT_SKIP_FILES = {
 
 # Mapping of source doc paths to wiki page names
 # Keys are relative to docs/, values are wiki page names (without .md)
+# NOTE: Wiki page names must match the actual GitHub wiki URLs:
+#   https://github.com/wallstop/fortress-rollback/wiki/<PAGE-NAME>
+#
+# IMPORTANT: Wiki page names should:
+#   - Use single hyphens only (avoid double hyphens like --)
+#   - Avoid special characters that may be URL-encoded differently
+#   - Match exactly what's used in _Sidebar.md links
 WIKI_STRUCTURE = {
     # Main pages
     "index.md": "Home",
@@ -63,11 +70,11 @@ WIKI_STRUCTURE = {
     "ggrs-changelog-archive.md": "GGRS-Changelog-Archive",
     "tlaplus-tooling-research.md": "TLAplus-Tooling-Research",
     # Specs directory
-    "specs/formal-spec.md": "Formal-Spec",
+    "specs/formal-spec.md": "Formal-Specification",
     "specs/determinism-model.md": "Determinism-Model",
     "specs/api-contracts.md": "API-Contracts",
     "specs/spec-divergences.md": "Spec-Divergences",
-    "specs/README.md": "Specs",
+    "specs/README.md": "Overview",
 }
 
 # Root-level files that may be linked from docs
@@ -77,6 +84,11 @@ ROOT_WIKI_NAMES = {
     "CONTRIBUTING": "Contributing",
     "LICENSE": "License",
 }
+
+# GitHub repository base URL for external links
+GITHUB_REPO_URL = "https://github.com/wallstop/fortress-rollback"
+GITHUB_BLOB_URL = f"{GITHUB_REPO_URL}/blob/main"
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/wallstop/fortress-rollback/main"
 
 
 class LinkMatch(NamedTuple):
@@ -276,7 +288,8 @@ def convert_links(content: str, source_file: str, wiki_structure: dict[str, str]
     Transforms:
         [Guide](user-guide.md) -> [Guide](User-Guide)
         [API](architecture.md#section) -> [API](Architecture#section)
-        [Code](../src/lib.rs) -> keep as-is (external link)
+        [Code](../src/lib.rs) -> [Code](https://github.com/.../blob/main/src/lib.rs)
+        [Logo](../assets/logo.svg) -> [Logo](assets/logo.svg)
     """
     # Get code ranges to skip
     code_ranges = find_code_fence_ranges(content)
@@ -309,17 +322,27 @@ def convert_links(content: str, source_file: str, wiki_structure: dict[str, str]
         if not link_path:
             continue
 
-        # Skip non-markdown files (images, source code, etc.)
-        if not link_path.endswith(".md"):
-            # Keep asset links but update paths if needed
-            continue
-
         # Resolve relative path
         resolved = resolve_relative_path(normalize_path(source_file), link_path)
 
-        # Handle invalid paths (escaping root)
+        # Handle paths that escape docs/ root - convert to GitHub links
         if resolved is None:
-            logger.debug(f"  {source_file}: [{href}] - path escapes documentation root")
+            # Calculate the actual path relative to repo root
+            external_path = compute_external_path(source_file, link_path)
+            if external_path:
+                new_link = f"[{link_text}]({GITHUB_BLOB_URL}/{external_path}{anchor})"
+                result = result[: link_match.start] + new_link + result[link_match.end :]
+                logger.debug(f"  External link: {link_match.full_match} -> {new_link}")
+            continue
+
+        # Handle non-markdown files (images, source code, etc.)
+        if not link_path.endswith(".md"):
+            # Check if it's an asset link that needs path adjustment
+            if "assets/" in resolved or resolved.startswith("assets"):
+                # Assets are copied to wiki/assets/, so use relative path from wiki root
+                new_link = f"[{link_text}](assets/{PurePosixPath(resolved).name})"
+                result = result[: link_match.start] + new_link + result[link_match.end :]
+                logger.debug(f"  Asset link: {link_match.full_match} -> {new_link}")
             continue
 
         # Remove .md extension for matching
@@ -354,6 +377,41 @@ def convert_links(content: str, source_file: str, wiki_structure: dict[str, str]
         logger.debug(f"  Converted: {link_match.full_match} -> {new_link}")
 
     return result
+
+
+def compute_external_path(source_file: str, link_path: str) -> str | None:
+    """
+    Compute the repository-relative path for an external link.
+
+    Given a source file in docs/ and a link that escapes docs/,
+    compute the actual path relative to the repository root.
+
+    Example:
+        source_file="index.md", link_path="../CHANGELOG.md" -> "CHANGELOG.md"
+        source_file="specs/README.md", link_path="../../examples/README.md" -> "examples/README.md"
+    """
+    # Source files are relative to docs/, so we need to prepend docs/
+    source_dir = PurePosixPath("docs") / PurePosixPath(source_file).parent
+    if str(source_dir) == "docs/.":
+        source_dir = PurePosixPath("docs")
+
+    # Resolve the link relative to source
+    target = source_dir / link_path
+
+    # Normalize to handle .. and .
+    parts: list[str] = []
+    for part in target.parts:
+        if part == "..":
+            if parts:
+                parts.pop()
+            # If parts is empty, we're at repo root, ignore further ..
+        elif part != ".":
+            parts.append(part)
+
+    if not parts:
+        return None
+
+    return str(PurePosixPath(*parts))
 
 
 def strip_mkdocs_frontmatter(content: str) -> str:
@@ -434,6 +492,81 @@ def strip_mkdocs_features(content: str) -> str:
     # Remove Material grid cards divs (with proper nested div handling)
     content = remove_grid_cards_divs(content)
 
+    # Convert MkDocs tabbed content (=== "Tab Name") to plain headers
+    # This converts === "Tab Name" to ### Tab Name for GitHub wiki compatibility
+    content = re.sub(r'^=== "([^"]+)"$', r"### \1", content, flags=re.MULTILINE)
+
+    # Remove MkDocs admonitions syntax (!!! type "title")
+    # Convert to blockquote with bold title for GitHub wiki compatibility
+    content = re.sub(
+        r'^!!! (\w+)(?: "([^"]*)")?\s*$',
+        lambda m: f"> **{m.group(2) or m.group(1).title()}**\n>",
+        content,
+        flags=re.MULTILINE,
+    )
+
+    return content
+
+
+def convert_asset_paths(content: str, source_file: str) -> str:
+    """
+    Convert relative asset paths to wiki-relative paths.
+
+    Transforms HTML img src attributes like:
+        <img src="../assets/logo.svg" ...> -> <img src="assets/logo.svg" ...>
+        <img src="../../assets/logo-small.svg" ...> -> <img src="assets/logo-small.svg" ...>
+
+    Also handles markdown image syntax:
+        ![Alt](../assets/image.png) -> ![Alt](assets/image.png)
+    """
+    # Handle HTML img tags
+    def replace_img_src(match: re.Match[str]) -> str:
+        prefix = match.group(1)  # '<img ' and attributes before src
+        src = match.group(2)     # the src value
+        suffix = match.group(3)  # rest of the tag
+
+        # Skip external URLs
+        if src.startswith(("http://", "https://", "//")):
+            return match.group(0)
+
+        # Check if this is an asset path
+        if "assets/" in src:
+            # Extract just the filename from the asset path
+            filename = PurePosixPath(src).name
+            new_src = f"assets/{filename}"
+            logger.debug(f"  Asset path: {src} -> {new_src}")
+            return f'{prefix}{new_src}{suffix}'
+
+        return match.group(0)
+
+    # Match <img ... src="..." ...> or <img ... src='...' ...>
+    content = re.sub(
+        r'(<img\s+[^>]*?src=["\'])([^"\']+)(["\'][^>]*>)',
+        replace_img_src,
+        content,
+        flags=re.IGNORECASE,
+    )
+
+    # Handle markdown image syntax: ![alt](path)
+    def replace_md_img(match: re.Match[str]) -> str:
+        alt = match.group(1)
+        path = match.group(2)
+
+        # Skip external URLs
+        if path.startswith(("http://", "https://", "//")):
+            return match.group(0)
+
+        # Check if this is an asset path
+        if "assets/" in path:
+            filename = PurePosixPath(path).name
+            new_path = f"assets/{filename}"
+            logger.debug(f"  MD image: {path} -> {new_path}")
+            return f"![{alt}]({new_path})"
+
+        return match.group(0)
+
+    content = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", replace_md_img, content)
+
     return content
 
 
@@ -489,6 +622,7 @@ def process_file(
     # to avoid stripping curly braces or divs inside URLs/link text
     content = strip_mkdocs_frontmatter(content)
     content = convert_links(content, relative_path, wiki_structure)
+    content = convert_asset_paths(content, relative_path)
     content = strip_mkdocs_features(content)
 
     # Write to wiki
@@ -552,7 +686,11 @@ def copy_assets(
 
 
 def generate_sidebar(wiki_structure: dict[str, str]) -> str:
-    """Generate the wiki sidebar navigation."""
+    """Generate the wiki sidebar navigation.
+
+    IMPORTANT: Sidebar link names must exactly match the wiki page filenames
+    (without .md extension) as defined in WIKI_STRUCTURE.
+    """
     sidebar = """# Fortress Rollback
 
 **[[Home]]**
@@ -565,8 +703,8 @@ def generate_sidebar(wiki_structure: dict[str, str]) -> str:
 
 ## Specifications
 
-- [[Specs|Overview]]
-- [[Formal-Spec|Formal Specification]]
+- [[Overview]]
+- [[Formal-Specification|Formal Specification]]
 - [[Determinism-Model|Determinism Model]]
 - [[API-Contracts|API Contracts]]
 - [[Spec-Divergences|Spec Divergences]]
@@ -574,9 +712,9 @@ def generate_sidebar(wiki_structure: dict[str, str]) -> str:
 ## Reference
 
 - [[Changelog]]
-- [[GGRS-Changelog-Archive|GGRS Changelog]]
+- [[GGRS-Changelog-Archive|GGRS Changelog Archive]]
 - [[Fortress-vs-GGRS|Fortress vs GGRS]]
-- [[TLAplus-Tooling-Research|TLA+ Tooling]]
+- [[TLAplus-Tooling-Research|TLA+ Tooling Research]]
 
 ## Community
 
@@ -597,8 +735,9 @@ def generate_home(docs_dir: Path, wiki_structure: dict[str, str]) -> str:
 
     if content is not None:
         content = strip_mkdocs_frontmatter(content)
-        content = strip_mkdocs_features(content)
         content = convert_links(content, "index.md", wiki_structure)
+        content = convert_asset_paths(content, "index.md")
+        content = strip_mkdocs_features(content)
         return content
 
     # Fallback content if index.md doesn't exist
@@ -618,7 +757,7 @@ networking in deterministic multiplayer games.
 
 ## Specifications
 
-- [[Formal-Spec|Formal Specification]] - TLA+ and Z3 verified protocols
+- [[Formal-Specification|Formal Specification]] - TLA+ and Z3 verified protocols
 - [[Determinism-Model|Determinism Model]] - How determinism is guaranteed
 - [[API-Contracts|API Contracts]] - Public API guarantees
 
