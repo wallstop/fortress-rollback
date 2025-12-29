@@ -69,11 +69,11 @@ impl Game {
     ) {
         for request in requests {
             match request {
-                FortressRequest::LoadGameState { cell, .. } => {
+                FortressRequest::LoadGameState { cell, frame } => {
                     if in_lockstep {
                         unreachable!("Should never get a load request if running in lockstep")
                     } else {
-                        self.load_game_state(cell)
+                        self.load_game_state(cell, frame)
                     }
                 },
                 FortressRequest::SaveGameState { cell, frame } => {
@@ -109,8 +109,8 @@ impl Game {
             save: |cell: GameStateCell<State>, frame: Frame| {
                 self.save_game_state(cell, frame);
             },
-            load: |cell: GameStateCell<State>, _frame: Frame| {
-                self.load_game_state(cell);
+            load: |cell: GameStateCell<State>, frame: Frame| {
+                self.load_game_state(cell, frame);
             },
             advance: |inputs: InputVec<Input>| {
                 self.advance_frame(inputs);
@@ -128,11 +128,14 @@ impl Game {
     }
 
     // load gamestate and overwrite
-    fn load_game_state(&mut self, cell: GameStateCell<State>) {
+    fn load_game_state(&mut self, cell: GameStateCell<State>, frame: Frame) {
         // LoadGameState is only requested for previously saved frames.
-        // Missing state indicates a bug - for this example, we use a fallback.
+        // Missing state indicates a library bug, but we handle gracefully.
         if let Some(loaded) = cell.load() {
             self.game_state = loaded;
+        } else {
+            // This should never happen - log for debugging
+            eprintln!("WARNING: LoadGameState for frame {frame:?} but no state found");
         }
     }
 

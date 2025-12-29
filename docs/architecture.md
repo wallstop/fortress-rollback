@@ -484,11 +484,14 @@ while game_running {
                 FortressRequest::SaveGameState { cell, frame } => {
                     cell.save(frame, Some(state.clone()), Some(checksum));
                 }
-                FortressRequest::LoadGameState { cell, .. } => {
+                FortressRequest::LoadGameState { cell, frame } => {
                     // LoadGameState is only requested for previously saved frames.
-                    // Missing state indicates a bug - propagate as error.
-                    // Replace `YourError::MissingState` with your game's error type.
-                    state = cell.load().ok_or(YourError::MissingState)?;
+                    // Missing state indicates a library bug, but we handle gracefully.
+                    if let Some(loaded) = cell.load() {
+                        state = loaded;
+                    } else {
+                        eprintln!("WARNING: LoadGameState for frame {frame:?} but no state found");
+                    }
                 }
                 FortressRequest::AdvanceFrame { inputs } => {
                     state.update(&inputs);

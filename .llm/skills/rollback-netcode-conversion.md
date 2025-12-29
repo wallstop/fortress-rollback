@@ -432,8 +432,12 @@ loop {
                     }
                     GgrsRequest::LoadGameState { cell, frame } => {
                         // LoadGameState is only requested for previously saved frames.
-                        // Replace `YourError::MissingState` with your game's error type.
-                        game_state = cell.load().ok_or(YourError::MissingState)?;
+                        // Missing state indicates a library bug, but we handle gracefully.
+                        if let Some(loaded) = cell.load() {
+                            game_state = loaded;
+                        } else {
+                            eprintln!("WARNING: LoadGameState for frame {frame:?} but no state found");
+                        }
                     }
                     GgrsRequest::AdvanceFrame { inputs } => {
                         game_state.advance(inputs);
