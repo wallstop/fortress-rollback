@@ -217,6 +217,93 @@ subprocess.run(["python", "-m", "pip", "list"], check=True)
 
 ### Subprocess Best Practices
 
+#### Output Handling for Linters and Tools
+
+When running linters or tools where output should flow to the user's terminal:
+
+```python
+# ❌ BAD: check=False without capturing output — errors are silent
+result = subprocess.run(cmd, check=False)
+if result.returncode != 0:
+    # What went wrong? No output captured!
+    return result.returncode
+
+# ✅ GOOD: Let output flow naturally to terminal (for linters)
+# No capture needed — actionlint/clippy/etc. print their own output
+result = subprocess.run(cmd, check=False)
+return result.returncode
+
+# ✅ ALSO GOOD: Capture when you need to process/filter output
+result = subprocess.run(cmd, capture_output=True, text=True)
+if result.returncode != 0:
+    print(f"Error:\n{result.stderr}", file=sys.stderr)
+```
+
+#### When to Capture Output
+
+| Scenario | Capture? | Why |
+|----------|----------|-----|
+| Running a linter (actionlint, clippy) | No | Output flows to terminal naturally |
+| Parsing command output | Yes | Need to process the result |
+| Filtering/transforming output | Yes | Need to modify before display |
+| Checking for specific patterns | Yes | Need to search output text |
+
+#### Avoid Redundant Exception Handlers
+
+Don't catch exceptions that can't happen due to prior validation:
+
+```python
+# ❌ BAD: Redundant FileNotFoundError after shutil.which() check
+actionlint = shutil.which("actionlint")
+if actionlint is None:
+    print("actionlint not found")
+    return 0
+
+# ... later ...
+try:
+    result = subprocess.run([actionlint, ...])
+except FileNotFoundError:  # Can't happen! We checked above
+    print("actionlint not found")  # Unreachable
+    return 0
+
+# ✅ GOOD: Trust the prior validation
+actionlint = shutil.which("actionlint")
+if actionlint is None:
+    print("actionlint not found", file=sys.stderr)
+    return 0
+
+# shutil.which() verified it exists — no FileNotFoundError possible
+result = subprocess.run([actionlint, ...])
+return result.returncode
+```
+
+**Why this matters:**
+
+1. Redundant handlers mask real errors — returning success (0) when something actually failed
+2. Dead code confuses readers about what can actually happen
+3. Swallowing OSError hides genuine system problems (permissions, I/O errors)
+
+#### Safe Subprocess Pattern
+
+```python
+# ✅ RECOMMENDED: Validate existence, then run without redundant handling
+def run_tool(tool_name: str, args: list[str]) -> int:
+    """Run an external tool, returning its exit code.
+
+    Returns 0 (skip) if tool is not installed.
+    """
+    tool_path = shutil.which(tool_name)
+    if tool_path is None:
+        print(f"Warning: {tool_name} not found, skipping", file=sys.stderr)
+        return 0
+
+    # Tool exists — run it. Any exception here is a real error.
+    result = subprocess.run([tool_path, *args], check=False)
+    return result.returncode
+```
+
+#### Command Construction
+
 ```python
 # ❌ BAD: shell=True is a security risk and platform-dependent
 result = subprocess.run("cargo fmt --check", shell=True)
@@ -332,11 +419,14 @@ Before committing Python scripts:
 - [ ] No unused imports
 - [ ] No unused variables (prefix with `_` if intentionally unused)
 - [ ] All `except: pass` clauses have explanatory comments
+- [ ] No redundant exception handlers after prior validation (e.g., FileNotFoundError after shutil.which)
 - [ ] Type hints on function signatures
 - [ ] `pathlib.Path` for path operations
 - [ ] f-strings for string formatting
 - [ ] Meaningful exit codes
+- [ ] Errors/warnings printed to `sys.stderr`, not stdout
 - [ ] Works cross-platform (no shell=True, no hardcoded paths)
+- [ ] Subprocess output captured only when needed (let linter output flow naturally)
 
 ---
 
