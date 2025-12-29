@@ -103,8 +103,15 @@ repos:
         files: '\.(md|rs)$'
 
       # ══════════════════════════════════════════════════════════════════════
-      # CI validation (Linux-only tools, skip gracefully on Windows)
+      # CI validation (skip gracefully if tools not installed)
       # ══════════════════════════════════════════════════════════════════════
+      - id: actionlint
+        name: actionlint (GitHub Actions)
+        entry: python scripts/hooks/actionlint.py
+        language: python
+        files: '^\.github/workflows/.*\.ya?ml$'
+        pass_filenames: true
+
       - id: kani-coverage
         name: kani proof coverage
         entry: python scripts/check-kani-coverage.py

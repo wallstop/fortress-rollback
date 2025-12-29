@@ -10,6 +10,20 @@ GitHub Actions workflows combine YAML configuration with embedded shell scripts.
 
 ## Mandatory Linting
 
+### Pre-commit Integration
+
+Pre-commit hooks now include `actionlint` validation. This provides an additional safety net before commits:
+
+```bash
+# Install pre-commit hooks (one-time setup)
+pre-commit install
+
+# Manual run on all workflow files
+pre-commit run actionlint --all-files
+```
+
+The pre-commit hook catches workflow issues before they reach CI, saving time and preventing broken builds.
+
 ### actionlint (MUST Run After EVERY Change)
 
 **⚠️ CRITICAL: Run `actionlint` after EVERY modification to ANY workflow file — no exceptions.**
@@ -412,6 +426,162 @@ act push -s GITHUB_TOKEN="$(gh auth token)"
 permissions:
   contents: read  # Only what's needed
 ```
+
+---
+
+## Directory Conflicts in Workflows
+
+### The Problem
+
+A common and frustrating workflow failure occurs when a `git clone` operation targets a directory that already exists in the repository structure. This causes `git clone` to fail with:
+
+```
+fatal: destination path 'wiki' already exists and is not an empty directory.
+```
+
+**This class of error is particularly insidious because:**
+
+- It passes all local linting checks (`actionlint`, shellcheck)
+- It only fails at runtime in CI
+- The error message doesn't clearly indicate it's a naming conflict
+- It can be caused by adding a new directory to the repo that matches a clone target
+
+### Common Mistake Examples
+
+```yaml
+# ❌ WRONG: 'wiki' directory might exist in repo
+- run: git clone https://github.com/owner/repo.wiki.git wiki
+
+# ❌ WRONG: 'docs' exists in almost every project
+- run: git clone https://github.com/other/docs-repo.git docs
+
+# ❌ WRONG: Common directory names
+- run: |
+    git clone https://github.com/owner/repo.git src
+    git clone https://github.com/owner/tools.git build
+    git clone https://github.com/owner/config.git config
+```
+
+### Correct Approaches
+
+#### 1. Use Unique Prefixed Directory Names
+
+Prefix clone directories with `_` to make them clearly temporary and avoid conflicts:
+
+```yaml
+# ✅ CORRECT: Prefixed temporary directories
+- name: Clone wiki repository
+  run: git clone https://github.com/owner/repo.wiki.git _wiki_clone
+
+- name: Clone external dependency
+  run: git clone https://github.com/other/repo.git _external_repo
+
+- name: Clone multiple repos
+  run: |
+    git clone https://github.com/owner/repo.git _main_clone
+    git clone https://github.com/owner/tools.git _tools_clone
+```
+
+#### 2. Use $RUNNER_TEMP for Complete Isolation
+
+The `$RUNNER_TEMP` directory is guaranteed to be empty and isolated from the workspace:
+
+```yaml
+# ✅ CORRECT: Complete isolation from workspace
+- name: Clone to temp directory
+  run: |
+    git clone https://github.com/owner/repo.wiki.git "$RUNNER_TEMP/wiki"
+
+    # Work with the cloned repo
+    cd "$RUNNER_TEMP/wiki"
+    # ... do work ...
+
+    # Copy results back if needed
+    cp -r "$RUNNER_TEMP/wiki/output" ./results/
+```
+
+#### 3. Clean Before Clone (When Necessary)
+
+If you must use a specific directory name, ensure it doesn't exist first:
+
+```yaml
+# ✅ CORRECT: Defensive cleanup before clone
+- name: Clone wiki (with cleanup)
+  run: |
+    # Remove if exists (from previous run or repo structure)
+    rm -rf _wiki_clone || true
+
+    # Now safe to clone
+    git clone https://github.com/owner/repo.wiki.git _wiki_clone
+```
+
+#### 4. Use Subdirectory of GITHUB_WORKSPACE
+
+Create a dedicated subdirectory for cloned repos:
+
+```yaml
+# ✅ CORRECT: Dedicated clones directory
+- name: Clone external repos
+  run: |
+    mkdir -p _clones
+    git clone https://github.com/owner/wiki.git _clones/wiki
+    git clone https://github.com/owner/tools.git _clones/tools
+```
+
+### Directory Naming Conventions
+
+| ❌ Avoid | ✅ Use Instead | Why |
+|----------|----------------|-----|
+| `wiki` | `_wiki_clone` | `wiki/` folder common in repos |
+| `docs` | `_docs_clone` | `docs/` exists everywhere |
+| `src` | `_src_checkout` | `src/` is standard |
+| `build` | `_build_temp` | `build/` used by many tools |
+| `dist` | `_dist_temp` | `dist/` for distributions |
+| `config` | `_config_clone` | `config/` very common |
+| `scripts` | `_scripts_temp` | `scripts/` exists in most repos |
+| `assets` | `_assets_clone` | `assets/` for resources |
+
+### Defensive Workflow Pattern
+
+Here's a complete defensive pattern for cloning external repositories:
+
+```yaml
+- name: Clone and sync wiki
+  env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  run: |
+    # Always use unique directory name with underscore prefix
+    CLONE_DIR="_wiki_sync"
+
+    # Defensive cleanup
+    rm -rf "$CLONE_DIR" || true
+
+    # Configure git credentials securely
+    git config --global credential.helper '!f() { echo "password=${GITHUB_TOKEN}"; }; f'
+    git config --global credential.https://github.com.username "x-access-token"
+
+    # Clone to safe directory
+    git clone "https://github.com/${{ github.repository }}.wiki.git" "$CLONE_DIR"
+
+    # Do work...
+    cd "$CLONE_DIR"
+    # ...
+
+    # Cleanup when done
+    cd ..
+    rm -rf "$CLONE_DIR"
+```
+
+### Pre-Workflow Checklist for Clone Operations
+
+Before adding `git clone` to any workflow:
+
+- [ ] Check if the target directory exists in the repo (`ls -la`, `fd -t d "name"`)
+- [ ] Use `_` prefix for all clone directories
+- [ ] Consider using `$RUNNER_TEMP` for complete isolation
+- [ ] Add defensive `rm -rf` cleanup before clone
+- [ ] Verify the directory name doesn't match any gitignored directories
+- [ ] Check `.gitignore` for directories that might be created at runtime
 
 ---
 

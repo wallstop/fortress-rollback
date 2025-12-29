@@ -19,26 +19,20 @@ def main() -> int:
         print("Note: cargo-hack not installed, skipping feature check")
         return 0
 
-    try:
-        result = subprocess.run(
-            [
-                "cargo",
-                "hack",
-                "check",
-                "--feature-powerset",
-                "--exclude-features",
-                "z3-verification,graphical-examples",
-            ],
-            capture_output=False,
-        )
-        return result.returncode
-
-    except FileNotFoundError:
-        print("ERROR: cargo not found. Is Rust installed?")
-        return 1
-    except Exception as e:
-        print(f"ERROR: Failed to run cargo hack: {e}")
-        return 1
+    # cargo-hack verified to exist via shutil.which() above.
+    # Output flows directly to terminal (no capture needed).
+    result = subprocess.run(
+        [
+            "cargo",
+            "hack",
+            "check",
+            "--feature-powerset",
+            "--exclude-features",
+            "z3-verification,graphical-examples",
+        ],
+        check=False,
+    )
+    return result.returncode
 
 
 if __name__ == "__main__":

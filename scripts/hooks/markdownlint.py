@@ -68,12 +68,10 @@ def main() -> int:
 
     cmd.extend(filtered_files)
 
-    try:
-        result = subprocess.run(cmd, check=False)
-        return result.returncode
-    except FileNotFoundError:
-        print("markdownlint not found in PATH")
-        return 0  # Don't fail if tool not available
+    # markdownlint verified to exist via shutil.which() above.
+    # Output flows directly to terminal (no capture needed for linters).
+    result = subprocess.run(cmd, check=False)
+    return result.returncode
 
 
 if __name__ == "__main__":

@@ -88,7 +88,8 @@ exclude_path = [
 # Include hidden files
 include_verbatim = true
 
-# Check links in these file extensions
+# Enable validation of fragment/anchor links (e.g., #section-heading)
+# When true, lychee verifies that the target heading/ID exists in the document
 include_fragments = true
 
 # Treat relative links as valid if they point to existing files
@@ -105,9 +106,6 @@ exclude_all_private = true
 
 # Require HTTPS for external links (warn only, don't fail)
 require_https = false
-
-# Include links in source code comments
-include_fragments = true
 
 # ============================================================================
 # GitHub-specific settings

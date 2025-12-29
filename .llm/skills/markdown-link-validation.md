@@ -22,6 +22,30 @@ This script:
 - Validates all internal links (file paths, anchors)
 - Reports broken links with file location and line number
 
+## Tooling: Lychee Link Checker
+
+The CI uses [lychee](https://lychee.cli.rs/) for fast, comprehensive link checking. Configuration is in `.lychee.toml`.
+
+**Key behaviors:**
+
+- **Caching** — Results are cached for faster subsequent runs (`.lycheecache`)
+- **Fragment validation** — `include_fragments = true` enables validation of `#anchor` links (verifies the target heading/ID exists)
+- **Exclusions** — Rate-limited sites, localhost, and placeholder URLs are skipped
+- **Retries** — Failed requests retry up to 3 times before failing
+
+**Useful lychee options (for local debugging):**
+
+```bash
+# Check a single file
+lychee --config .lychee.toml docs/user-guide.md
+
+# Verbose output (show all checked links)
+lychee --config .lychee.toml --verbose docs/
+
+# Skip cache (force re-check)
+lychee --config .lychee.toml --no-cache docs/
+```
+
 ## Understanding Relative Paths
 
 Relative links are resolved **from the directory containing the markdown file**, not from the repository root.
