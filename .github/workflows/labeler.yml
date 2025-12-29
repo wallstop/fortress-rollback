@@ -31,34 +31,13 @@ jobs:
           retries: 3
           retry-exempt-status-codes: 400,401,403,404,422
           script: |
-            // Helper function for retrying API calls with exponential backoff
-            async function withRetry(fn, maxRetries = 3, baseDelayMs = 1000) {
-              let lastError;
-              for (let attempt = 1; attempt <= maxRetries; attempt++) {
-                try {
-                  return await fn();
-                } catch (error) {
-                  lastError = error;
-                  const isRetryable = error.status >= 500 || error.status === 429 || error.message?.includes('timeout');
-                  if (!isRetryable || attempt === maxRetries) {
-                    throw error;
-                  }
-                  const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
-                  console.log(`Attempt ${attempt} failed (${error.message}), retrying in ${delayMs}ms...`);
-                  await new Promise(resolve => setTimeout(resolve, delayMs));
-                }
-              }
-              throw lastError;
-            }
-
+            // Note: Retry logic is handled by the built-in retries option above
             try {
-              const { data: pullRequest } = await withRetry(() =>
-                github.rest.pulls.get({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pull_number: context.payload.pull_request.number,
-                })
-              );
+              const { data: pullRequest } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number,
+              });
 
               const changedFiles = pullRequest.changed_files;
               const sizeLabels = ['size/XS', 'size/S', 'size/M', 'size/L', 'size/XL'];
@@ -77,40 +56,34 @@ jobs:
               }
 
               // Get current labels on the PR
-              const { data: currentLabels } = await withRetry(() =>
-                github.rest.issues.listLabelsOnIssue({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: context.payload.pull_request.number,
-                })
-              );
+              const { data: currentLabels } = await github.rest.issues.listLabelsOnIssue({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+              });
 
               const currentLabelNames = currentLabels.map(label => label.name);
 
               // Remove any existing size labels that differ from the new one
               for (const sizeLabel of sizeLabels) {
                 if (currentLabelNames.includes(sizeLabel) && sizeLabel !== newLabel) {
-                  await withRetry(() =>
-                    github.rest.issues.removeLabel({
-                      owner: context.repo.owner,
-                      repo: context.repo.repo,
-                      issue_number: context.payload.pull_request.number,
-                      name: sizeLabel,
-                    })
-                  );
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: context.payload.pull_request.number,
+                    name: sizeLabel,
+                  });
                 }
               }
 
               // Add the new size label if not already present
               if (!currentLabelNames.includes(newLabel)) {
-                await withRetry(() =>
-                  github.rest.issues.addLabels({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: context.payload.pull_request.number,
-                    labels: [newLabel],
-                  })
-                );
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.pull_request.number,
+                  labels: [newLabel],
+                });
               }
 
               console.log(`PR has ${changedFiles} changed files, labeled as ${newLabel}`);

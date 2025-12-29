@@ -9,22 +9,37 @@ changes the developer may have.
 Works on Windows (PowerShell/cmd), macOS, and Linux.
 """
 
+import hashlib
 import subprocess
 import sys
+from pathlib import Path
 
 
-def get_unstaged_rust_files() -> set[str]:
-    """Get set of currently unstaged Rust file paths."""
+def get_staged_rust_files() -> list[str]:
+    """Get list of staged Rust file paths."""
     result = subprocess.run(
-        ["git", "diff", "--name-only"],
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
-        return set()
+        return []
     all_files = result.stdout.strip().splitlines() if result.stdout.strip() else []
-    # Filter to only .rs files
-    return {f for f in all_files if f.endswith(".rs")}
+    return [f for f in all_files if f.endswith(".rs")]
+
+
+def compute_file_hash(filepath: str) -> str | None:
+    """Compute SHA-256 hash of a file's contents. Returns None if file doesn't exist."""
+    try:
+        content = Path(filepath).read_bytes()
+        return hashlib.sha256(content).hexdigest()
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+
+
+def get_file_hashes(files: list[str]) -> dict[str, str | None]:
+    """Get content hashes for a list of files."""
+    return {f: compute_file_hash(f) for f in files}
 
 
 def run_cargo_fmt() -> bool:
@@ -37,25 +52,18 @@ def run_cargo_fmt() -> bool:
     return result.returncode == 0
 
 
-def stage_formatted_files(rust_files_before: set[str]) -> bool:
-    """Stage only Rust files that cargo fmt modified (not other unstaged changes).
+def stage_modified_files(files_to_stage: list[str]) -> bool:
+    """Stage the specified files.
 
     Args:
-        rust_files_before: Set of unstaged .rs files before cargo fmt ran.
+        files_to_stage: List of file paths to stage.
 
     Returns:
         True on success, False on failure.
     """
-    rust_files_after = get_unstaged_rust_files()
+    if not files_to_stage:
+        return True  # Nothing to stage
 
-    # Files that became newly unstaged = files that cargo fmt touched
-    # (These were either staged files that fmt modified, or new modifications)
-    newly_unstaged = rust_files_after - rust_files_before
-
-    if not newly_unstaged:
-        return True  # Nothing new to stage
-
-    files_to_stage = sorted(newly_unstaged)
     print(f"Staging {len(files_to_stage)} formatted file(s)...")
 
     stage_result = subprocess.run(
@@ -73,18 +81,26 @@ def stage_formatted_files(rust_files_before: set[str]) -> bool:
 
 
 def main() -> int:
-    """Run cargo fmt to auto-fix and stage only newly formatted files. Returns exit code."""
+    """Run cargo fmt to auto-fix and stage only files that were actually modified. Returns exit code."""
     try:
-        # Record unstaged Rust files before running fmt
-        rust_files_before = get_unstaged_rust_files()
+        # Get staged Rust files and their content hashes before running fmt
+        staged_files = get_staged_rust_files()
+        hashes_before = get_file_hashes(staged_files)
 
         # Run cargo fmt to fix formatting
         if not run_cargo_fmt():
             print("\nERROR: cargo fmt failed.")
             return 1
 
-        # Stage only Rust files that cargo fmt modified
-        if not stage_formatted_files(rust_files_before):
+        # Compare hashes to find files that cargo fmt actually modified
+        hashes_after = get_file_hashes(staged_files)
+        files_modified = [
+            f for f in staged_files
+            if hashes_before.get(f) != hashes_after.get(f)
+        ]
+
+        # Stage only the files that cargo fmt modified
+        if not stage_modified_files(files_modified):
             print("\nERROR: Failed to stage formatted files.")
             return 1
 

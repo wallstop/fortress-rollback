@@ -32,6 +32,8 @@ jobs:
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          retries: 3
+          retry-exempt-status-codes: 400,401,403,404,422
           script: |
             const pr = context.payload.pull_request;
             const labels = pr.labels.map(l => l.name);
@@ -129,6 +131,7 @@ jobs:
           retries: 3
           retry-exempt-status-codes: 400,401,403,404,422
           script: |
+            // Note: Retry logic is handled by the built-in retries option above
             const prNumber = context.payload.pull_request.number;
             const marker = '<!-- changelog-reminder-bot -->';
 
@@ -168,59 +171,33 @@ jobs:
             ---
             *This is an automated reminder. The PR will not be blocked by this check.*`;
 
-            // Helper function for retrying API calls with exponential backoff
-            async function withRetry(fn, maxRetries = 3, baseDelayMs = 1000) {
-              let lastError;
-              for (let attempt = 1; attempt <= maxRetries; attempt++) {
-                try {
-                  return await fn();
-                } catch (error) {
-                  lastError = error;
-                  const isRetryable = error.status >= 500 || error.status === 429 || error.message?.includes('timeout');
-                  if (!isRetryable || attempt === maxRetries) {
-                    throw error;
-                  }
-                  const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
-                  console.log(`Attempt ${attempt} failed (${error.message}), retrying in ${delayMs}ms...`);
-                  await new Promise(resolve => setTimeout(resolve, delayMs));
-                }
-              }
-              throw lastError;
-            }
-
             try {
               // Check for existing comment
-              const { data: comments } = await withRetry(() =>
-                github.rest.issues.listComments({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: prNumber,
-                })
-              );
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+              });
 
               const existingComment = comments.find(c => c.body.includes(marker));
 
               if (existingComment) {
                 // Update existing comment
-                await withRetry(() =>
-                  github.rest.issues.updateComment({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    comment_id: existingComment.id,
-                    body: body
-                  })
-                );
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existingComment.id,
+                  body: body
+                });
                 console.log('Updated existing changelog reminder comment');
               } else {
                 // Create new comment
-                await withRetry(() =>
-                  github.rest.issues.createComment({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: prNumber,
-                    body: body
-                  })
-                );
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body: body
+                });
                 console.log('Created new changelog reminder comment');
               }
             } catch (error) {
@@ -238,48 +215,25 @@ jobs:
           retries: 3
           retry-exempt-status-codes: 400,401,403,404,422
           script: |
+            // Note: Retry logic is handled by the built-in retries option above
             const prNumber = context.payload.pull_request.number;
             const marker = '<!-- changelog-reminder-bot -->';
 
-            // Helper function for retrying API calls with exponential backoff
-            async function withRetry(fn, maxRetries = 3, baseDelayMs = 1000) {
-              let lastError;
-              for (let attempt = 1; attempt <= maxRetries; attempt++) {
-                try {
-                  return await fn();
-                } catch (error) {
-                  lastError = error;
-                  const isRetryable = error.status >= 500 || error.status === 429 || error.message?.includes('timeout');
-                  if (!isRetryable || attempt === maxRetries) {
-                    throw error;
-                  }
-                  const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
-                  console.log(`Attempt ${attempt} failed (${error.message}), retrying in ${delayMs}ms...`);
-                  await new Promise(resolve => setTimeout(resolve, delayMs));
-                }
-              }
-              throw lastError;
-            }
-
             try {
-              const { data: comments } = await withRetry(() =>
-                github.rest.issues.listComments({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: prNumber,
-                })
-              );
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+              });
 
               const existingComment = comments.find(c => c.body.includes(marker));
 
               if (existingComment) {
-                await withRetry(() =>
-                  github.rest.issues.deleteComment({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    comment_id: existingComment.id,
-                  })
-                );
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existingComment.id,
+                });
                 console.log('Removed changelog reminder comment (changelog was updated)');
               }
             } catch (error) {
