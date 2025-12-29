@@ -487,7 +487,8 @@ while game_running {
                 FortressRequest::LoadGameState { cell, .. } => {
                     // LoadGameState is only requested for previously saved frames.
                     // Missing state indicates a bug - propagate as error.
-                    state = cell.load().ok_or(SessionError::MissingState)?;
+                    // Replace `YourError::MissingState` with your game's error type.
+                    state = cell.load().ok_or(YourError::MissingState)?;
                 }
                 FortressRequest::AdvanceFrame { inputs } => {
                     state.update(&inputs);
@@ -836,7 +837,7 @@ let bytes = encode(&data)?;
 
 // Decode from bytes
 let (decoded, bytes_read): (u32, _) = decode(&bytes)?;
-assert_eq!(data, decoded);
+debug_assert_eq!(data, decoded);
 
 // Zero-allocation encoding into pre-allocated buffer
 let mut buffer = [0u8; 256];
@@ -900,7 +901,7 @@ let compressed = encode(&reference, inputs.iter());
 
 // Decode: RLE decompress + XOR reverse
 let decompressed = decode(&reference, &compressed)?;
-assert_eq!(inputs, decompressed);
+debug_assert_eq!(inputs, decompressed);
 ```
 
 **Properties:**

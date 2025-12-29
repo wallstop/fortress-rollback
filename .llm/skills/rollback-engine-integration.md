@@ -51,8 +51,9 @@ fn game_loop(session: &mut Session<Config>, game: &mut Game) -> Result<(), Error
                 cell.save(frame, Some(game.state.clone()), Some(checksum));
             }
             RollbackRequest::LoadGameState { cell, .. } => {
-                // LoadGameState is only requested for previously saved frames
-                game.state = cell.load().ok_or(SessionError::MissingState)?;
+                // LoadGameState is only requested for previously saved frames.
+                // Replace `YourError::MissingState` with your game's error type.
+                game.state = cell.load().ok_or(YourError::MissingState)?;
             }
             RollbackRequest::AdvanceFrame { inputs } => {
                 game.advance_frame(&inputs);

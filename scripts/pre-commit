@@ -7,6 +7,13 @@
 #   2. Code formatting (cargo fmt --check)
 #   3. Linting (cargo clippy)
 #
+# ⚠️ IMPORTANT: AUTO-MODIFICATION BEHAVIOR
+# When Cargo.toml version changes, this hook will:
+#   - Automatically update version references in other files (docs, examples)
+#   - Stage the modified files for inclusion in your commit
+# This ensures version consistency across the project.
+# To see which files were modified, check the hook output or use `git status`.
+#
 # Installation:
 #   cp scripts/pre-commit .git/hooks/pre-commit
 #   chmod +x .git/hooks/pre-commit

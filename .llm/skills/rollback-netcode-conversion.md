@@ -431,8 +431,9 @@ loop {
                         cell.save(frame, Some(game_state.clone()), checksum);
                     }
                     GgrsRequest::LoadGameState { cell, frame } => {
-                        // LoadGameState is only requested for previously saved frames
-                        game_state = cell.load().ok_or(SessionError::MissingState)?;
+                        // LoadGameState is only requested for previously saved frames.
+                        // Replace `YourError::MissingState` with your game's error type.
+                        game_state = cell.load().ok_or(YourError::MissingState)?;
                     }
                     GgrsRequest::AdvanceFrame { inputs } => {
                         game_state.advance(inputs);

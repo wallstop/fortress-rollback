@@ -342,15 +342,19 @@ Requests are returned by `advance_frame()` and must be processed in order:
 ```rust
 use fortress_rollback::{FortressRequest, compute_checksum};
 
+// Define your own error type, for example:
+// #[derive(Debug)]
+// enum YourError { MissingState, /* other variants */ }
+
 fn handle_requests(
     requests: Vec<FortressRequest<GameConfig>>,
     game_state: &mut GameState,
-) {
+) -> Result<(), YourError> {
     for request in requests {
         match request {
             FortressRequest::SaveGameState { cell, frame } => {
-                // Verify frame matches
-                assert_eq!(game_state.frame, frame.as_i32());
+                // Optionally verify frame consistency (use debug_assert in tests only)
+                debug_assert_eq!(game_state.frame, frame.as_i32());
 
                 // Clone your state
                 let state_copy = game_state.clone();
@@ -363,12 +367,11 @@ fn handle_requests(
             }
 
             FortressRequest::LoadGameState { cell, frame } => {
-                // Load the saved state - LoadGameState is only requested for previously saved frames
-                if let Some(state) = cell.load() {
-                    *game_state = state;
-                    // Optionally verify frame
-                    assert_eq!(game_state.frame, frame.as_i32());
-                }
+                // Load the saved state - LoadGameState is only requested for previously saved frames.
+                // Replace `YourError::MissingState` with your game's error type.
+                *game_state = cell.load().ok_or(YourError::MissingState)?;
+                // Optionally verify frame consistency (use debug_assert in tests only)
+                debug_assert_eq!(game_state.frame, frame.as_i32());
             }
 
             FortressRequest::AdvanceFrame { inputs } => {
@@ -394,6 +397,7 @@ fn handle_requests(
             }
         }
     }
+    Ok(())
 }
 ```
 
@@ -406,10 +410,14 @@ use fortress_rollback::{
     handle_requests, compute_checksum, FortressRequest, Frame, GameStateCell, InputVec,
 };
 
+// Define your own error type, for example:
+// #[derive(Debug)]
+// enum YourError { MissingState, /* other variants */ }
+
 fn handle_requests_simple(
     requests: Vec<FortressRequest<GameConfig>>,
     game_state: &mut GameState,
-) -> Result<(), GameError> {
+) -> Result<(), YourError> {
     handle_requests!(
         requests,
         save: |cell: GameStateCell<GameState>, frame: Frame| {
@@ -419,7 +427,7 @@ fn handle_requests_simple(
         load: |cell: GameStateCell<GameState>, _frame: Frame| {
             // LoadGameState is only requested for previously saved frames.
             // Missing state indicates a bug - handle appropriately for your game.
-            *game_state = cell.load().ok_or(GameError::MissingState)?;
+            *game_state = cell.load().ok_or(YourError::MissingState)?;
         },
         advance: |inputs: InputVec<Input>| {
             for (_input, _status) in inputs.iter() {

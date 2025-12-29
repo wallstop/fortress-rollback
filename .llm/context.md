@@ -591,8 +591,9 @@ for request in session.advance_frame()? {
             cell.save(frame, Some(game_state.clone()), None);
         }
         FortressRequest::LoadGameState { cell, .. } => {
-            // LoadGameState is only requested for previously saved frames
-            game_state = cell.load().ok_or(SessionError::MissingState)?;
+            // LoadGameState is only requested for previously saved frames.
+            // Replace `YourError::MissingState` with your game's error type.
+            game_state = cell.load().ok_or(YourError::MissingState)?;
         }
         FortressRequest::AdvanceFrame { inputs } => {
             game_state.update(&inputs);
