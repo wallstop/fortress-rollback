@@ -344,11 +344,24 @@ after'''
         assert "Just a description." in result
 
     def test_empty_grid_cards(self) -> None:
-        """Empty grid cards don't crash."""
+        """Empty grid cards produce no output (no blank lines)."""
         content = '<div class="grid cards" markdown></div>'
         result = convert_grid_cards_to_list(content)
-        # Should not crash, result may be empty
+        # Empty grid cards should be completely removed (no blank lines)
+        assert result == ""
         assert "<div" not in result
+
+    def test_empty_grid_cards_surrounded_by_content(self) -> None:
+        """Empty grid cards don't add extra blank lines beyond surrounding whitespace."""
+        # The surrounding newlines are preserved, but empty grid produces no extra output
+        content = 'Before\n<div class="grid cards" markdown></div>\nAfter'
+        result = convert_grid_cards_to_list(content)
+        # One newline before div, one after - no extra added by empty conversion
+        assert result == "Before\n\nAfter"
+        # Verify the div was actually removed
+        assert "<div" not in result
+        # Before the fix, empty grids added an extra "\n" resulting in triple newlines
+        assert "\n\n\n" not in result
 
     def test_preserves_regular_content(self) -> None:
         """Content without grid cards is unchanged."""

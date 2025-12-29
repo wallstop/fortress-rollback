@@ -359,6 +359,9 @@ def _parse_grid_cards_content(div_content: str) -> str:
             parts.append(f" [{card['link_text']}]({card['link_url']})")
         output.append("".join(parts))
 
+    # Return empty string for empty results to avoid blank lines
+    if not output:
+        return ""
     return "\n".join(output) + "\n"
 ```
 
