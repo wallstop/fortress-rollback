@@ -102,6 +102,13 @@ repos:
         pass_filenames: false
         files: '\.(md|rs)$'
 
+      - id: wiki-consistency
+        name: wiki consistency check
+        entry: python scripts/check-wiki-consistency.py
+        language: python
+        pass_filenames: false
+        files: '^(docs/.*\.md|wiki/.*\.md|scripts/sync-wiki\.py)$'
+
       # ══════════════════════════════════════════════════════════════════════
       # CI validation (skip gracefully if tools not installed)
       # ══════════════════════════════════════════════════════════════════════

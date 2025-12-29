@@ -25,7 +25,7 @@ cargo fmt && cargo clippy --all-targets && cargo nextest run
 cargo c && cargo t
 
 # Markdown files (if modified)
-npx markdownlint-cli <file.md>
+npx markdownlint '**/*.md' --config .markdownlint.json --fix
 
 # GitHub Actions workflows (if modified)
 actionlint

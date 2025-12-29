@@ -16,8 +16,12 @@ Key requirements:
 ## Quick Commands
 
 ```bash
+# Rust code
 cargo fmt && cargo clippy --all-targets && cargo nextest run
 
 # Or use the convenient aliases defined in .cargo/config.toml
 cargo c && cargo t
+
+# Markdown files (if modified)
+npx markdownlint '**/*.md' --config .markdownlint.json --fix
 ```
