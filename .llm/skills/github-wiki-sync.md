@@ -359,9 +359,63 @@ git clone "https://github.com/${{ github.repository }}.wiki.git" wiki
 - [ ] `WIKI_STRUCTURE` has mapping for source file
 - [ ] Sidebar link matches wiki page filename exactly
 - [ ] Local `python scripts/sync-wiki.py` succeeds
+- [ ] Local `python scripts/check-wiki-consistency.py` passes
 - [ ] Generated wiki files have expected content
 - [ ] MkDocs-specific syntax is converted/stripped
 
 ---
 
-*See also: [scripts/sync-wiki.py](../../scripts/sync-wiki.py) for implementation details*
+## Wiki Consistency Validation
+
+The `scripts/check-wiki-consistency.py` script validates wiki integrity:
+
+### What It Validates
+
+1. **Sidebar Link Validity** — All `[[Page|Text]]` links in `_Sidebar.md` point to existing `.md` files
+2. **WIKI_STRUCTURE Completeness** — All `docs/*.md` files have mappings in `sync-wiki.py`
+3. **Sidebar Completeness** — All wiki pages have corresponding sidebar entries
+
+### Running the Validation
+
+```bash
+# Basic validation
+python scripts/check-wiki-consistency.py
+
+# Verbose output
+python scripts/check-wiki-consistency.py --verbose
+```
+
+### CI/CD Integration
+
+Wiki consistency is validated in:
+
+- **Pre-commit hook** — `wiki-consistency` hook runs on wiki/docs changes
+- **CI workflow** — `ci-docs.yml` has a `wiki-consistency` job
+- **Wiki sync workflow** — `wiki-sync.yml` validates before syncing
+
+### Common Errors and Fixes
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `Link [[Page\|Text]] points to non-existent page` | Sidebar references missing wiki file | Add file or fix sidebar link |
+| `docs/file.md is not mapped in WIKI_STRUCTURE` | New docs file not in mapping | Add to `WIKI_STRUCTURE` dict |
+| `Wiki page has no entry in _Sidebar.md` | Page generated but not in navigation | Add to `generate_sidebar()` |
+| `WIKI_STRUCTURE maps 'file' but file doesn't exist` | Stale mapping | Remove from `WIKI_STRUCTURE` |
+
+### Adding a New Wiki Page
+
+1. Create source file: `docs/new-page.md`
+2. Add to `WIKI_STRUCTURE` in `scripts/sync-wiki.py`:
+   ```python
+   "new-page.md": "New-Page",
+   ```
+3. Add sidebar entry in `generate_sidebar()`:
+   ```python
+   "- [[New-Page|New Page]]",
+   ```
+4. Run validation: `python scripts/check-wiki-consistency.py`
+5. Sync locally: `python scripts/sync-wiki.py`
+
+---
+
+*See also: [scripts/sync-wiki.py](../../scripts/sync-wiki.py), [scripts/check-wiki-consistency.py](../../scripts/check-wiki-consistency.py)*

@@ -102,6 +102,9 @@ jobs:
           echo "WIKI_BRANCH=$WIKI_BRANCH" >> "$GITHUB_ENV"
           echo "Using wiki branch: $WIKI_BRANCH"
 
+      - name: Validate wiki consistency
+        run: python scripts/check-wiki-consistency.py
+
       - name: Sync documentation to wiki
         run: python scripts/sync-wiki.py --dest github-wiki
 

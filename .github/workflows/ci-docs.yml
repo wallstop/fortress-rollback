@@ -7,6 +7,9 @@ on:
       - '**.md'
       - '**.rs'
       - 'docs/**'
+      - 'wiki/**'
+      - 'scripts/sync-wiki.py'
+      - 'scripts/check-wiki-consistency.py'
       - '.markdownlint.json'
       - '.markdown-link-check.json'
       - '.lychee.toml'
@@ -21,6 +24,9 @@ on:
       - '**.md'
       - '**.rs'
       - 'docs/**'
+      - 'wiki/**'
+      - 'scripts/sync-wiki.py'
+      - 'scripts/check-wiki-consistency.py'
       - '.markdownlint.json'
       - '.markdown-link-check.json'
       - '.lychee.toml'
@@ -51,6 +57,24 @@ jobs:
           fail_on_error: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============================================================================
+  # WIKI CONSISTENCY - Validate wiki links and structure
+  # ============================================================================
+  wiki-consistency:
+    name: Wiki Consistency
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate wiki consistency
+        run: python scripts/check-wiki-consistency.py
 
   markdown-lint:
     name: Markdown Lint
