@@ -464,7 +464,9 @@ def convert_grid_cards_to_list(content: str) -> str:
             # Found a grid cards div, now find the matching </div>
             div_depth = 1
             j = i + grid_match.end()
-            closing_tag_len = len("</div>")  # Default, updated when we find the closing tag
+            # Initialize to 0; will be set to actual closing tag length when found,
+            # or remain 0 if the div is unclosed (handled after the loop)
+            closing_tag_len = 0
 
             while j < n and div_depth > 0:
                 # Check for opening div
@@ -486,13 +488,8 @@ def convert_grid_cards_to_list(content: str) -> str:
 
                 j += 1
 
-            # Handle unclosed div: if we exited with div_depth > 0, no closing tag was found
-            # In this case, don't subtract any closing_tag_len to avoid incorrect truncation
-            if div_depth > 0:
-                closing_tag_len = 0
-
             # Extract the div content (excluding the opening and closing tags)
-            # Use the captured closing tag length to handle whitespace variations
+            # closing_tag_len is 0 if unclosed (default), or the actual tag length if found
             div_content = content[i + grid_match.end() : j - closing_tag_len]
 
             # Convert the grid cards content to markdown list

@@ -243,7 +243,7 @@ class TestStripMkdocsAttributes:
         assert result == "{variable}"
 
 
-class TestConvertGridCardsList:
+class TestConvertGridCardsToList:
     """Tests for convert_grid_cards_to_list function."""
 
     def test_simple_grid_cards(self) -> None:
@@ -418,9 +418,8 @@ after'''
         """Unclosed grid cards div (no matching </div>) is handled gracefully.
 
         This is a regression test for a bug where an unclosed div would cause
-        incorrect content truncation: when div_depth > 0 after the loop,
-        closing_tag_len retains its default value of 6, causing
-        content[start:end - 6] to incorrectly remove 6 characters.
+        incorrect content truncation. Now closing_tag_len is initialized to 0,
+        so unclosed divs naturally don't subtract anything from the end position.
         """
         content = '''<div class="grid cards" markdown>
 

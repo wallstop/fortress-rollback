@@ -334,6 +334,82 @@ print(f"Found {count} errors")
 
 ---
 
+## Testing Conventions
+
+### Test Class Naming
+
+Test classes should follow the pattern `Test<FunctionName>` where `<FunctionName>` is the CamelCase version of the function being tested:
+
+```python
+# Function name: convert_grid_cards_to_list
+# ❌ BAD: Abbreviated or inconsistent naming
+class TestConvertGridCardsList:  # Missing "To"
+    pass
+
+class TestGridCardsConversion:  # Different word order
+    pass
+
+# ✅ GOOD: Matches function name exactly in CamelCase
+class TestConvertGridCardsToList:
+    """Tests for convert_grid_cards_to_list function."""
+    pass
+```
+
+**Examples:**
+
+| Function | Test Class |
+|----------|------------|
+| `convert_admonitions` | `TestConvertAdmonitions` |
+| `strip_mkdocs_attributes` | `TestStripMkdocsAttributes` |
+| `path_to_wiki_name` | `TestPathToWikiName` |
+| `validate_wiki_content` | `TestValidateWikiContent` |
+
+### Test Method Naming
+
+Test methods should describe: **what** + **condition** + **expected behavior**
+
+```python
+# ❌ BAD: Vague names
+def test_basic(self):
+    pass
+
+def test_it_works(self):
+    pass
+
+# ✅ GOOD: Descriptive names
+def test_empty_input_returns_empty_string(self):
+    pass
+
+def test_unclosed_div_is_handled_gracefully(self):
+    pass
+
+def test_multiple_cards_convert_to_list_items(self):
+    pass
+```
+
+### Test Organization
+
+Group related tests in the same class with a descriptive docstring:
+
+```python
+class TestConvertGridCardsToList:
+    """Tests for convert_grid_cards_to_list function."""
+
+    def test_simple_grid_cards(self) -> None:
+        """Grid cards with single card converts to markdown list."""
+        pass
+
+    def test_multiple_cards(self) -> None:
+        """Multiple cards in grid convert to multiple list items."""
+        pass
+
+    def test_unclosed_grid_cards_div(self) -> None:
+        """Unclosed grid cards div is handled gracefully."""
+        pass
+```
+
+---
+
 ## Pre-commit Integration
 
 ### Running Linters
@@ -427,6 +503,8 @@ Before committing Python scripts:
 - [ ] Errors/warnings printed to `sys.stderr`, not stdout
 - [ ] Works cross-platform (no shell=True, no hardcoded paths)
 - [ ] Subprocess output captured only when needed (let linter output flow naturally)
+- [ ] Test classes named `Test<FunctionName>` matching the function under test
+- [ ] Test methods named descriptively: what + condition + expected behavior
 
 ---
 
