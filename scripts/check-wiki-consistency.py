@@ -132,6 +132,100 @@ def get_wiki_pages(wiki_dir: Path) -> set[str]:
     return pages
 
 
+def parse_hardcoded_sidebar_from_sync_script(sync_script_path: Path) -> str | None:
+    """
+    Extract the hardcoded sidebar template string from sync-wiki.py.
+
+    Parses the generate_sidebar function and extracts the string literal
+    assigned to the 'sidebar' variable. This allows us to validate the
+    hardcoded template for problematic characters before deployment.
+
+    Returns the sidebar content as a string, or None if parsing fails.
+    """
+    try:
+        content = sync_script_path.read_text(encoding="utf-8")
+        tree = ast.parse(content, filename=str(sync_script_path))
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "generate_sidebar":
+                # Look for: sidebar = """..."""
+                for stmt in node.body:
+                    if isinstance(stmt, ast.Assign):
+                        for target in stmt.targets:
+                            if isinstance(target, ast.Name) and target.id == "sidebar":
+                                if isinstance(stmt.value, ast.Constant):
+                                    return str(stmt.value.value)
+    except (OSError, SyntaxError) as e:
+        print(red(f"ERROR: Could not parse {sync_script_path}: {e}"))
+
+    return None
+
+
+def parse_wiki_links_from_string(content: str) -> list[tuple[str, str, int]]:
+    """
+    Parse wiki-style links from a string (used for hardcoded sidebar validation).
+
+    Returns list of (page_name, display_text, line_number) tuples.
+    """
+    wiki_link_pattern = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
+    links = []
+
+    for line_num, line in enumerate(content.splitlines(), start=1):
+        for match in wiki_link_pattern.finditer(line):
+            page_name = match.group(1).strip()
+            display_text = match.group(2).strip() if match.group(2) else page_name
+            links.append((page_name, display_text, line_num))
+
+    return links
+
+
+def validate_sync_script_sidebar_template(
+    sync_script_path: Path, verbose: bool = False
+) -> ValidationResult:
+    """
+    Validate the hardcoded sidebar template in sync-wiki.py for problematic characters.
+
+    This catches issues in the source template that would be deployed to wiki/_Sidebar.md,
+    preventing regressions where someone edits the hardcoded template with problematic
+    characters like TLA+ instead of TLA Plus.
+    """
+    errors = 0
+    warnings = 0
+
+    sidebar_content = parse_hardcoded_sidebar_from_sync_script(sync_script_path)
+
+    if sidebar_content is None:
+        errors += 1
+        print(
+            red("ERROR:")
+            + f" Could not extract hardcoded sidebar template from {sync_script_path}"
+        )
+        return ValidationResult(errors=errors, warnings=warnings)
+
+    links = parse_wiki_links_from_string(sidebar_content)
+
+    if verbose:
+        print(
+            f"\nChecking hardcoded sidebar template in {sync_script_path.name} "
+            f"for problematic characters..."
+        )
+
+    for page_name, display_text, line_num in links:
+        for char, reason in WIKI_LINK_PROBLEMATIC_CHARS.items():
+            if char in display_text:
+                errors += 1
+                print(
+                    red("ERROR:")
+                    + f" {sync_script_path.name}:generate_sidebar(): "
+                    + f"Wiki link [[{page_name}|{display_text}]] "
+                    + f"contains '{char}' in display text ({reason}). "
+                    + f"This will generate a broken URL when deployed."
+                )
+                break  # Only report first problematic character per link
+
+    return ValidationResult(errors=errors, warnings=warnings)
+
+
 def get_docs_source_files(docs_dir: Path) -> set[str]:
     """
     Get all source markdown files in docs/ that should be mapped.
@@ -574,6 +668,14 @@ def main() -> int:
     total_warnings += result.warnings
     if result.errors == 0:
         print(green("   ✓ All display text is safe for URL generation"))
+
+    # 2b. Validate hardcoded sidebar template in sync-wiki.py
+    print(f"\n{bold('2b. Validating sync-wiki.py sidebar template...')}")
+    result = validate_sync_script_sidebar_template(sync_script_path, verbose)
+    total_errors += result.errors
+    total_warnings += result.warnings
+    if result.errors == 0:
+        print(green("   ✓ Hardcoded sidebar template is safe for URL generation"))
 
     # 3. Validate WIKI_STRUCTURE completeness
     print(f"\n{bold('3. Validating WIKI_STRUCTURE completeness...')}")

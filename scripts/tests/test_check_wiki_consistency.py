@@ -32,6 +32,13 @@ import pytest
 parse_sidebar_wiki_links = check_wiki_consistency.parse_sidebar_wiki_links
 validate_wiki_link_display_text = check_wiki_consistency.validate_wiki_link_display_text
 validate_sidebar_links = check_wiki_consistency.validate_sidebar_links
+parse_hardcoded_sidebar_from_sync_script = (
+    check_wiki_consistency.parse_hardcoded_sidebar_from_sync_script
+)
+parse_wiki_links_from_string = check_wiki_consistency.parse_wiki_links_from_string
+validate_sync_script_sidebar_template = (
+    check_wiki_consistency.validate_sync_script_sidebar_template
+)
 WIKI_LINK_PROBLEMATIC_CHARS = check_wiki_consistency.WIKI_LINK_PROBLEMATIC_CHARS
 
 
@@ -278,6 +285,173 @@ class TestRealWorldCases:
         result = validate_wiki_link_display_text(sidebar)
         # This should detect the '+' character
         assert result.errors == 1
+
+
+class TestParseHardcodedSidebarFromSyncScript:
+    """Tests for parse_hardcoded_sidebar_from_sync_script function."""
+
+    def test_parse_valid_sync_script(self, tmp_path: Path) -> None:
+        """Successfully parse sidebar template from a valid sync script."""
+        sync_script = tmp_path / "sync-wiki.py"
+        sync_script.write_text(
+            '''
+def generate_sidebar(wiki_structure: dict[str, str]) -> str:
+    """Generate the wiki sidebar navigation."""
+    sidebar = """# Fortress Rollback
+
+**[[Home]]**
+
+## Documentation
+
+- [[User-Guide|User Guide]]
+"""
+    return sidebar
+''',
+            encoding="utf-8",
+        )
+        result = parse_hardcoded_sidebar_from_sync_script(sync_script)
+        assert result is not None
+        assert "[[Home]]" in result
+        assert "[[User-Guide|User Guide]]" in result
+
+    def test_parse_missing_file(self, tmp_path: Path) -> None:
+        """Return None when file doesn't exist."""
+        sync_script = tmp_path / "nonexistent.py"
+        result = parse_hardcoded_sidebar_from_sync_script(sync_script)
+        assert result is None
+
+    def test_parse_invalid_python(self, tmp_path: Path) -> None:
+        """Return None when file has invalid Python syntax."""
+        sync_script = tmp_path / "sync-wiki.py"
+        sync_script.write_text("def broken(:", encoding="utf-8")
+        result = parse_hardcoded_sidebar_from_sync_script(sync_script)
+        assert result is None
+
+    def test_parse_missing_function(self, tmp_path: Path) -> None:
+        """Return None when generate_sidebar function is missing."""
+        sync_script = tmp_path / "sync-wiki.py"
+        sync_script.write_text(
+            '''
+def some_other_function():
+    sidebar = """content"""
+    return sidebar
+''',
+            encoding="utf-8",
+        )
+        result = parse_hardcoded_sidebar_from_sync_script(sync_script)
+        assert result is None
+
+
+class TestParseWikiLinksFromString:
+    """Tests for parse_wiki_links_from_string function."""
+
+    def test_parse_simple_links(self) -> None:
+        """Parse simple wiki links from string."""
+        content = "[[Home]]\n[[Page|Display Text]]"
+        links = parse_wiki_links_from_string(content)
+        assert len(links) == 2
+        assert links[0] == ("Home", "Home", 1)
+        assert links[1] == ("Page", "Display Text", 2)
+
+    def test_parse_empty_string(self) -> None:
+        """Empty string returns no links."""
+        links = parse_wiki_links_from_string("")
+        assert len(links) == 0
+
+    def test_line_numbers_preserved(self) -> None:
+        """Line numbers are correctly tracked."""
+        content = "Line 1\n[[Link1]]\nLine 3\n[[Link2]]"
+        links = parse_wiki_links_from_string(content)
+        assert links[0][2] == 2  # Link1 on line 2
+        assert links[1][2] == 4  # Link2 on line 4
+
+
+class TestValidateSyncScriptSidebarTemplate:
+    """Tests for validate_sync_script_sidebar_template function."""
+
+    def test_safe_template(self, tmp_path: Path) -> None:
+        """Template with safe display text passes validation."""
+        sync_script = tmp_path / "sync-wiki.py"
+        sync_script.write_text(
+            '''
+def generate_sidebar(wiki_structure: dict[str, str]) -> str:
+    sidebar = """# Sidebar
+
+- [[TLAplus-Tooling|TLA Plus Tooling]]
+- [[User-Guide|User Guide]]
+"""
+    return sidebar
+''',
+            encoding="utf-8",
+        )
+        result = validate_sync_script_sidebar_template(sync_script)
+        assert result.errors == 0
+
+    def test_template_with_plus_sign(self, tmp_path: Path) -> None:
+        """Template with '+' in display text is detected as error."""
+        sync_script = tmp_path / "sync-wiki.py"
+        sync_script.write_text(
+            '''
+def generate_sidebar(wiki_structure: dict[str, str]) -> str:
+    sidebar = """# Sidebar
+
+- [[TLAplus-Tooling|TLA+ Tooling]]
+"""
+    return sidebar
+''',
+            encoding="utf-8",
+        )
+        result = validate_sync_script_sidebar_template(sync_script)
+        assert result.errors == 1
+
+    def test_missing_sidebar_function_is_error(self, tmp_path: Path) -> None:
+        """Missing generate_sidebar function causes an error."""
+        sync_script = tmp_path / "sync-wiki.py"
+        sync_script.write_text("# Empty file\n", encoding="utf-8")
+        result = validate_sync_script_sidebar_template(sync_script)
+        assert result.errors == 1
+
+    def test_multiple_problematic_links(self, tmp_path: Path) -> None:
+        """Multiple problematic links are all detected."""
+        sync_script = tmp_path / "sync-wiki.py"
+        sync_script.write_text(
+            '''
+def generate_sidebar(wiki_structure: dict[str, str]) -> str:
+    sidebar = """# Sidebar
+
+- [[Page1|C++ Guide]]
+- [[Page2|100% Complete]]
+- [[Page3|Safe Text]]
+"""
+    return sidebar
+''',
+            encoding="utf-8",
+        )
+        result = validate_sync_script_sidebar_template(sync_script)
+        # Two problematic links (C++ has +, 100% has %)
+        assert result.errors == 2
+
+
+class TestActualSyncWikiScript:
+    """Integration test validating the actual sync-wiki.py script."""
+
+    def test_real_sync_wiki_sidebar_is_valid(self) -> None:
+        """The actual sync-wiki.py sidebar template should have no problematic characters.
+
+        This is a regression test to ensure the TLA+ bug doesn't recur.
+        """
+        # Get the real sync-wiki.py path
+        scripts_dir = Path(__file__).parent.parent
+        sync_script_path = scripts_dir / "sync-wiki.py"
+
+        if not sync_script_path.exists():
+            pytest.skip("sync-wiki.py not found in scripts directory")
+
+        result = validate_sync_script_sidebar_template(sync_script_path)
+        assert result.errors == 0, (
+            "sync-wiki.py sidebar template contains problematic characters. "
+            "Ensure all display text uses safe characters (e.g., 'TLA Plus' not 'TLA+')."
+        )
 
 
 if __name__ == "__main__":
