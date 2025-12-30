@@ -58,6 +58,22 @@ ROOT_SKIP_FILES = {
 #   - Use single hyphens only (avoid double hyphens like --)
 #   - Avoid special characters that may be URL-encoded differently
 #   - Match exactly what's used in _Sidebar.md links
+#
+# IMPORTANT: Wiki-link display text (in _Sidebar.md) must NOT contain:
+#   - '+' (decoded as space, causes broken URLs like "TLA--Tooling")
+#   - '%' (interferes with URL encoding)
+#   - '#' (interpreted as anchor)
+#   - '?' (interpreted as query string)
+#   - '&' (interpreted as URL parameter)
+#   - '=' (interpreted as URL parameter value)
+#
+# Example of broken link:
+#   [[TLAplus-Tooling|TLA+ Tools]] -> URL becomes /wiki/TLA--Tools (BROKEN!)
+#   [[TLAplus-Tooling|TLA Plus Tools]] -> URL is /wiki/TLAplus-Tooling (CORRECT)
+#
+# GitHub Wiki's [[Page|Display]] syntax processes the display text in a way
+# that can corrupt the generated URL. Use check-wiki-consistency.py to detect
+# problematic characters before they cause broken links.
 WIKI_STRUCTURE = {
     # Main pages
     "index.md": "Home",

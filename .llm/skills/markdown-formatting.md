@@ -104,6 +104,26 @@ Spaces inside link brackets cause rendering issues:
 | `[Text ]` | Copy-paste with trailing space | Trim link text |
 | `[]` | Missing link text | Add descriptive text |
 
+## Pipe Characters in Tables
+
+**Pipe characters (`|`) MUST be escaped in markdown tables, even inside code spans (backticks).**
+
+The table parser processes the raw line *before* inline code is evaluated. An unescaped `|` inside backticks is still interpreted as a column delimiter.
+
+```markdown
+❌ WRONG (causes MD056 "Too many columns"):
+| Option | Description |
+|--------|-------------|
+| `-workers <n|auto>` | Number of worker threads |
+
+✅ CORRECT:
+| Option | Description |
+|--------|-------------|
+| `-workers <n\|auto>` | Number of worker threads |
+```
+
+**Common misconception:** "Pipe characters inside backticks don't need escaping" — this is **false** for markdown tables. Always escape pipes with `\|` in table cells.
+
 ### Wiki Sync Considerations
 
 When stripping MkDocs icons (`:octicons-*:`, `:material-*:`), ensure trailing whitespace is also removed:

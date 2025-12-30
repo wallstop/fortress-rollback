@@ -195,6 +195,59 @@ def parse_sidebar_wiki_links(sidebar_path: Path) -> list[tuple[str, str, int]]:
     return links
 
 
+# Characters that cause URL encoding issues in GitHub Wiki display text.
+# The '+' character is URL-decoded as a space, causing broken links.
+# Example: [[Page|TLA+ Tools]] generates URL "/wiki/TLA--Tools" instead of "/wiki/Page"
+#
+# GitHub Wiki's wiki-link syntax [[PageName|Display Text]] has a quirk where
+# certain characters in the display text can corrupt the generated URL.
+# This is a known limitation of GitHub Wiki's markdown processor.
+WIKI_LINK_PROBLEMATIC_CHARS = {
+    "+": "plus sign (decoded as space, causing double-dashes in URL)",
+    "%": "percent sign (interferes with URL encoding)",
+    "#": "hash (interpreted as anchor)",
+    "?": "question mark (interpreted as query string)",
+    "&": "ampersand (interpreted as URL parameter separator)",
+    "=": "equals sign (interpreted as URL parameter value separator)",
+}
+
+
+def validate_wiki_link_display_text(
+    sidebar_path: Path, verbose: bool = False
+) -> ValidationResult:
+    """
+    Validate that wiki-link display text doesn't contain problematic characters.
+
+    GitHub Wiki's [[Page|Display]] syntax can break when the display text
+    contains certain characters that interfere with URL generation.
+
+    For example, [[TLAplus-Tooling|TLA+ Tooling]] generates a broken URL
+    because '+' is decoded as a space, creating "/wiki/TLA--Tooling" instead
+    of "/wiki/TLAplus-Tooling".
+    """
+    errors = 0
+    warnings = 0
+
+    links = parse_sidebar_wiki_links(sidebar_path)
+
+    if verbose:
+        print("\nChecking wiki-link display text for problematic characters...")
+
+    for page_name, display_text, line_num in links:
+        for char, reason in WIKI_LINK_PROBLEMATIC_CHARS.items():
+            if char in display_text:
+                errors += 1
+                print(
+                    red("ERROR:")
+                    + f" _Sidebar.md:{line_num}: Wiki link [[{page_name}|{display_text}]] "
+                    + f"contains '{char}' in display text ({reason}). "
+                    + f"This will generate a broken URL."
+                )
+                break  # Only report first problematic character per link
+
+    return ValidationResult(errors=errors, warnings=warnings)
+
+
 def validate_sidebar_links(
     sidebar_path: Path, wiki_pages: set[str], verbose: bool = False
 ) -> ValidationResult:
@@ -299,6 +352,102 @@ def validate_sidebar_completeness(
                 yellow("WARNING:")
                 + f" Wiki page '{missing}.md' has no entry in _Sidebar.md"
             )
+
+    return ValidationResult(errors=errors, warnings=warnings)
+
+
+def validate_table_pipe_escaping(
+    md_files: list[Path], verbose: bool = False
+) -> ValidationResult:
+    """
+    Validate that pipe characters inside backticks in table cells are escaped.
+
+    Markdown table parsers process the raw line BEFORE inline code is evaluated,
+    so unescaped pipes inside backticks are interpreted as column delimiters.
+
+    Example of problematic pattern:
+        | `[[Page|Text]]` |  ← The pipe is seen as a column delimiter!
+
+    Correct format:
+        | `[[Page\\|Text]]` |  ← Escaped pipe is treated as literal
+
+    Note: Lines inside fenced code blocks (```) are intentionally skipped,
+    as they may contain examples showing what NOT to do.
+    """
+    errors = 0
+    warnings = 0
+
+    # Pattern to detect table rows (lines starting with |)
+    table_row_pattern = re.compile(r"^\s*\|")
+
+    # Pattern to detect fenced code block delimiters
+    fence_pattern = re.compile(r"^(\s*)(`{3,}|~{3,})")
+
+    # Pattern to find backtick-enclosed content with unescaped pipes
+    # Matches: `...text...` where text contains | not preceded by \
+    # We need to be careful not to match \| (escaped pipes)
+    code_span_pattern = re.compile(r"`([^`]+)`")
+
+    # Pattern for unescaped pipes (| not preceded by \)
+    unescaped_pipe_pattern = re.compile(r"(?<!\\)\|")
+
+    if verbose:
+        print("\nChecking table pipe escaping in markdown files...")
+
+    for md_file in sorted(md_files):
+        try:
+            content = md_file.read_text(encoding="utf-8")
+            lines = content.splitlines()
+
+            in_fence = False
+            fence_indent = 0
+            fence_char = ""
+
+            for line_num, line in enumerate(lines, start=1):
+                # Track fenced code blocks
+                fence_match = fence_pattern.match(line)
+                if fence_match:
+                    current_indent = len(fence_match.group(1))
+                    current_char = fence_match.group(2)[0]  # ` or ~
+                    if not in_fence:
+                        # Starting a fence
+                        in_fence = True
+                        fence_indent = current_indent
+                        fence_char = current_char
+                    elif current_char == fence_char and current_indent <= fence_indent:
+                        # Closing the fence (same char type and not more indented)
+                        in_fence = False
+                    continue
+
+                # Skip content inside fenced code blocks
+                if in_fence:
+                    continue
+
+                # Only check table rows
+                if not table_row_pattern.match(line):
+                    continue
+
+                # Find all code spans in this line
+                for match in code_span_pattern.finditer(line):
+                    code_content = match.group(1)
+                    # Check for unescaped pipes (| not preceded by \)
+                    if unescaped_pipe_pattern.search(code_content):
+                        errors += 1
+                        print(
+                            red("ERROR:")
+                            + f" {md_file.name}:{line_num}: Table cell contains "
+                            + f"unescaped pipe in code span: `{code_content}`"
+                        )
+                        print(
+                            "       "
+                            + yellow("Tip:")
+                            + " Escape the pipe with backslash: "
+                            + f"`{code_content.replace('|', chr(92) + '|')}`"
+                        )
+
+        except (OSError, UnicodeDecodeError) as e:
+            print(red(f"ERROR: Could not read {md_file}: {e}"))
+            errors += 1
 
     return ValidationResult(errors=errors, warnings=warnings)
 
@@ -418,16 +567,24 @@ def main() -> int:
     if result.errors == 0:
         print(green("   ✓ All sidebar links are valid"))
 
-    # 2. Validate WIKI_STRUCTURE completeness
-    print(f"\n{bold('2. Validating WIKI_STRUCTURE completeness...')}")
+    # 2. Validate wiki-link display text for problematic characters
+    print(f"\n{bold('2. Validating wiki-link display text...')}")
+    result = validate_wiki_link_display_text(sidebar_path, verbose)
+    total_errors += result.errors
+    total_warnings += result.warnings
+    if result.errors == 0:
+        print(green("   ✓ All display text is safe for URL generation"))
+
+    # 3. Validate WIKI_STRUCTURE completeness
+    print(f"\n{bold('3. Validating WIKI_STRUCTURE completeness...')}")
     result = validate_wiki_structure_completeness(wiki_structure, docs_files, verbose)
     total_errors += result.errors
     total_warnings += result.warnings
     if result.errors == 0 and result.warnings == 0:
         print(green("   ✓ All docs files are mapped"))
 
-    # 3. Validate sidebar completeness
-    print(f"\n{bold('3. Validating sidebar completeness...')}")
+    # 4. Validate sidebar completeness
+    print(f"\n{bold('4. Validating sidebar completeness...')}")
     result = validate_sidebar_completeness(
         sidebar_path, wiki_pages, wiki_structure, verbose
     )
@@ -436,13 +593,26 @@ def main() -> int:
     if result.errors == 0 and result.warnings == 0:
         print(green("   ✓ All wiki pages have sidebar entries"))
 
-    # 4. Validate markdown link syntax
-    print(f"\n{bold('4. Validating markdown link syntax...')}")
+    # 5. Validate markdown link syntax
+    print(f"\n{bold('5. Validating markdown link syntax...')}")
     result = validate_markdown_link_syntax(wiki_dir, verbose)
     total_errors += result.errors
     total_warnings += result.warnings
     if result.errors == 0 and result.warnings == 0:
         print(green("   ✓ All markdown links have correct syntax"))
+
+    # 6. Validate table pipe escaping in key markdown files
+    print(f"\n{bold('6. Validating table pipe escaping...')}")
+    # Check wiki files and LLM skill files (where tables with code spans are common)
+    llm_skills_dir = project_root / ".llm" / "skills"
+    md_files_to_check = list(wiki_dir.glob("*.md"))
+    if llm_skills_dir.exists():
+        md_files_to_check.extend(llm_skills_dir.glob("*.md"))
+    result = validate_table_pipe_escaping(md_files_to_check, verbose)
+    total_errors += result.errors
+    total_warnings += result.warnings
+    if result.errors == 0 and result.warnings == 0:
+        print(green("   ✓ All table pipes are properly escaped"))
 
     # Print summary
     print("\n" + "=" * 40)
