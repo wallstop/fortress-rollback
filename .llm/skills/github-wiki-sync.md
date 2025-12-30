@@ -99,6 +99,26 @@ The `check-wiki-consistency.py` script validates this automatically:
 python3 scripts/check-wiki-consistency.py --verbose
 ```
 
+### Table Pipe Escaping in Markdown
+
+**CRITICAL:** Pipe characters (`|`) inside backticks in markdown table cells MUST be escaped as `\|`.
+
+Markdown table parsers process the raw line **before** inline code is evaluated. An unescaped `|` inside backticks is still interpreted as a column delimiter, causing malformed tables.
+
+```markdown
+<!-- ❌ WRONG: Unescaped pipe breaks table rendering -->
+| Example | Description |
+|---------|-------------|
+| `[[Page|Text]]` | Wiki link syntax |
+
+<!-- ✅ CORRECT: Escaped pipe renders correctly -->
+| Example | Description |
+|---------|-------------|
+| `[[Page\|Text]]` | Wiki link syntax |
+```
+
+The `check-wiki-consistency.py` script validates table pipe escaping in wiki files and LLM skill documents.
+
 ---
 
 ## MkDocs Feature Conversion
