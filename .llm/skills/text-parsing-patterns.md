@@ -183,33 +183,126 @@ pattern = r'`[^`\n]+`'
 #   - `code`     ← works, but what about `` `code` ``?
 ```
 
-### Robust Inline Code Pattern
+### Regex-Based Pattern (Simple but Limited)
 
 ```python
-def find_inline_code_ranges(content: str) -> list[tuple[int, int]]:
-    """Find inline code spans with proper handling.
-
-    Handles:
-    - Standard: `code`
-    - Empty: ``
-    - Double backticks: ``code with ` inside``
-
-    Limitation: Does not handle inline code with newlines
-    (rare in practice, would need multi-line mode).
-    """
+# ⚠️ LIMITED: Does not handle exact backtick count matching
+# This approach will incorrectly match closing backticks that are
+# part of a longer sequence. For example, ``code ``` more will
+# match the first 2 backticks of the 3-backtick sequence.
+def find_inline_code_ranges_simple(content: str) -> list[tuple[int, int]]:
+    """Simple regex-based approach (has edge case issues)."""
     ranges = []
-
     # Handle double backticks first (can contain single `)
     for match in re.finditer(r'``[^`\n]*``', content):
         ranges.append((match.start(), match.end()))
-
     # Then single backticks, avoiding overlaps
     for match in re.finditer(r'`[^`\n]*`', content):
         start, end = match.start(), match.end()
         if not any(s <= start < e for s, e in ranges):
             ranges.append((start, end))
+    return ranges
+```
+
+### Robust Inline Code Pattern (CommonMark Compliant)
+
+The correct approach uses a state-based parser that:
+
+1. Counts consecutive opening backticks
+2. Searches for closing backticks of **exactly** the same count
+3. Validates that closing backticks are not part of a longer sequence
+
+```python
+def find_inline_code_ranges(content: str) -> list[tuple[int, int]]:
+    """Find inline code spans with proper handling per CommonMark spec.
+
+    Handles:
+    - Standard: `code`
+    - Empty: ``
+    - Double backticks: ``code with ` inside``
+    - Arbitrary backtick counts: ````code```` (if not at line start)
+
+    Key feature: Closing delimiter must be EXACTLY N backticks, not part
+    of a longer sequence. For example, ``code ``` more text`` correctly
+    skips the triple backticks and matches the final double backticks.
+
+    Fenced code blocks (3+ backticks at line start) are skipped as they
+    are handled separately.
+
+    Unclosed inline code spans are intentionally not treated as code ranges
+    to prevent masking the rest of the document.
+    """
+    ranges = []
+    i = 0
+    n = len(content)
+
+    while i < n:
+        if content[i] == "`":
+            # Count consecutive backticks
+            start = i
+            backtick_count = 0
+            while i < n and content[i] == "`":
+                backtick_count += 1
+                i += 1
+
+            # Skip if this is a fenced code block marker (3+ backticks at line start)
+            line_start = content.rfind("\n", 0, start) + 1
+            prefix = content[line_start:start]
+            if backtick_count >= 3 and prefix.strip() == "":
+                continue
+
+            # Find the closing backticks (exact count, not part of longer sequence)
+            closing_pattern = "`" * backtick_count
+            search_start = i
+            end_pos = -1
+
+            while True:
+                candidate = content.find(closing_pattern, search_start)
+                if candidate == -1:
+                    break  # No more candidates
+
+                # Verify this is exactly backtick_count backticks
+                # Check character before (if exists) is not a backtick
+                char_before_ok = candidate == 0 or content[candidate - 1] != "`"
+                # Check character after (if exists) is not a backtick
+                after_pos = candidate + backtick_count
+                char_after_ok = after_pos >= n or content[after_pos] != "`"
+
+                if char_before_ok and char_after_ok:
+                    end_pos = candidate
+                    break
+                else:
+                    # This match is part of a longer sequence, keep searching
+                    search_start = candidate + 1
+
+            if end_pos != -1:
+                # Found closing - range is from first backtick to after closing backticks
+                ranges.append((start, end_pos + backtick_count))
+                i = end_pos + backtick_count
+            # else: No closing found - not a valid inline code span.
+        else:
+            i += 1
 
     return ranges
+```
+
+### Why Exact Backtick Count Matching Matters
+
+The CommonMark spec states: *"A code span begins with a backtick string and
+ends with a backtick string of **equal length**."*
+
+```python
+# Test case demonstrating the bug fixed by exact matching:
+content = "``code ``` more text``"
+
+# ❌ Simple find() approach:
+# find("``", 2) returns 7 (inside the ```)
+# Result: "``code `" (WRONG - cuts off mid-sequence)
+
+# ✅ Exact matching approach:
+# Candidate at 7 fails: content[7+2] == '`' (followed by more backticks)
+# Candidate at 18 passes: exactly 2 backticks
+# Result: "``code ``` more text``" (CORRECT)
 ```
 
 ---

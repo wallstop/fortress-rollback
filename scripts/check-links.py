@@ -153,9 +153,29 @@ def find_inline_code_ranges(content: str) -> list[tuple[int, int]]:
             if backtick_count >= 3 and prefix.strip() == "":
                 continue
 
-            # Find the closing backticks (same count)
+            # Find the closing backticks (exact count, not part of longer sequence)
             closing_pattern = "`" * backtick_count
-            end_pos = content.find(closing_pattern, i)
+            search_start = i
+            end_pos = -1
+
+            while True:
+                candidate = content.find(closing_pattern, search_start)
+                if candidate == -1:
+                    break  # No more candidates
+
+                # Verify this is exactly backtick_count backticks, not part of a longer sequence
+                # Check character before (if exists) is not a backtick
+                char_before_ok = candidate == 0 or content[candidate - 1] != "`"
+                # Check character after (if exists) is not a backtick
+                after_pos = candidate + backtick_count
+                char_after_ok = after_pos >= n or content[after_pos] != "`"
+
+                if char_before_ok and char_after_ok:
+                    end_pos = candidate
+                    break
+                else:
+                    # This match is part of a longer sequence, keep searching
+                    search_start = candidate + 1
 
             if end_pos != -1:
                 # Found closing - range is from first backtick to after closing backticks

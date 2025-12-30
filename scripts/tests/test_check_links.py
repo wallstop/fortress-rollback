@@ -133,6 +133,44 @@ class TestFindInlineCodeRanges:
         are treated as fenced code blocks. Triple backticks in the middle of
         a line are inline code spans.
         """
+
+    def test_exact_backtick_count_not_prefix(self) -> None:
+        """Closing delimiter must be exactly N backticks, not part of longer sequence.
+
+        When we have 2 opening backticks, we need exactly 2 closing backticks.
+        A 3-backtick sequence should not match as a closing delimiter for 2 backticks.
+        """
+        content = "``code ``` more text``"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "``code ``` more text``"
+
+    def test_single_backtick_not_matched_by_double(self) -> None:
+        """Single backtick opening should not match double backtick closing."""
+        content = "`code `` more`"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "`code `` more`"
+
+    def test_double_backtick_not_matched_by_triple(self) -> None:
+        """Double backtick opening should not match triple backtick closing."""
+        content = "start ``code ``` more text`` end"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "``code ``` more text``"
+
+    def test_backtick_boundary_check(self) -> None:
+        """Closing backticks should not be part of longer sequences."""
+        content = "``code```more``text"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "``code```more``"
+
+    def test_no_closing_due_to_length_mismatch(self) -> None:
+        """Opening delimiter with only longer sequences available should not close."""
+        content = "``code ```"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 0
         content = "text```code```more"
         ranges = find_inline_code_ranges(content)
         assert len(ranges) == 1
