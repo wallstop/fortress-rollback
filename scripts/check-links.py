@@ -128,6 +128,10 @@ def find_inline_code_ranges(content: str) -> list[tuple[int, int]]:
 
     Handles both single backtick `code` and double backtick ``code`` syntax.
     Does NOT include already-detected fenced code blocks (handled separately).
+
+    Note: Unclosed inline code spans (e.g., `unclosed without closing backtick)
+    are intentionally not treated as code ranges. This prevents an unclosed
+    backtick from incorrectly masking the rest of the document.
     """
     ranges = []
     i = 0
@@ -157,7 +161,9 @@ def find_inline_code_ranges(content: str) -> list[tuple[int, int]]:
                 # Found closing - range is from first backtick to after closing backticks
                 ranges.append((start, end_pos + backtick_count))
                 i = end_pos + backtick_count
-            # If no closing found, continue scanning
+            # else: No closing found - not a valid inline code span.
+            # The opening backticks are treated as literal text.
+            # i is already past the opening backticks, so continue scanning.
         else:
             i += 1
 

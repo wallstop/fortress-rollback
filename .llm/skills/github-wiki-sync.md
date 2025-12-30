@@ -84,7 +84,7 @@ Standard markdown links give you:
 
 If you must use wiki-link syntax `[[Page|Display]]`, be aware of these bugs:
 
-### CRITICAL: Wiki-Link Display Text Characters
+##### CRITICAL: Wiki-Link Display Text Characters
 
 GitHub Wiki's `[[PageName|Display Text]]` syntax has a severe quirk: **certain characters in the display text can corrupt the generated URL**, even if the page name is correct.
 
@@ -113,7 +113,7 @@ GitHub Wiki's `[[PageName|Display Text]]` syntax has a severe quirk: **certain c
 <!-- URL is exactly /wiki/TLAplus-Tooling-Research (CORRECT!) -->
 ```
 
-The `check-wiki-consistency.py` script validates both syntaxes automatically:
+The `check-wiki-consistency.py` script validates wiki-link display text automatically (standard markdown links are immune and not checked):
 
 ```bash
 python3 scripts/check-wiki-consistency.py --verbose
