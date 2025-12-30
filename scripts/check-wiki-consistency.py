@@ -163,27 +163,47 @@ def parse_hardcoded_sidebar_from_sync_script(sync_script_path: Path) -> str | No
 
 def parse_wiki_links_from_string(content: str) -> list[tuple[str, str, int]]:
     """
-    Parse wiki-style links from string content.
+    Parse sidebar links from string content.
 
-    This is the core parsing function used by both parse_sidebar_wiki_links
-    (for file-based parsing) and validate_sync_script_sidebar_template
-    (for hardcoded template validation).
+    Supports two syntaxes:
+    1. Wiki-link syntax: [[PageName|Display Text]] or [[PageName]]
+    2. Standard markdown: [Display Text](PageName)
+
+    We recommend standard markdown links because GitHub Wiki has bugs
+    where spaces in wiki-link display text corrupt the generated URL.
 
     Args:
-        content: String content to parse for wiki links.
+        content: String content to parse for links.
 
     Returns:
         List of (page_name, display_text, line_number) tuples.
-        Wiki links have format: [[PageName|Display Text]] or [[PageName]]
     """
+    # Wiki-link pattern: [[PageName|Display Text]] or [[PageName]]
     wiki_link_pattern = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
+    # Standard markdown pattern: [Display Text](PageName)
+    # Excludes URLs (http/https) and anchors (#)
+    markdown_link_pattern = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+
     links = []
 
     for line_num, line in enumerate(content.splitlines(), start=1):
+        # Parse wiki-links
         for match in wiki_link_pattern.finditer(line):
             page_name = match.group(1).strip()
             display_text = match.group(2).strip() if match.group(2) else page_name
             links.append((page_name, display_text, line_num))
+
+        # Parse standard markdown links (excluding external URLs)
+        for match in markdown_link_pattern.finditer(line):
+            display_text = match.group(1).strip()
+            target = match.group(2).strip()
+            # Skip external URLs and anchors
+            if target.startswith(("http://", "https://", "#", "mailto:")):
+                continue
+            # Skip if this is part of a wiki-link (already parsed above)
+            if f"[[{target}" in line or f"|{target}]]" in line:
+                continue
+            links.append((target, display_text, line_num))
 
     return links
 
@@ -197,6 +217,9 @@ def validate_sync_script_sidebar_template(
     This catches issues in the source template that would be deployed to wiki/_Sidebar.md,
     preventing regressions where someone edits the hardcoded template with problematic
     characters like TLA+ instead of TLA Plus.
+
+    Note: We now use standard markdown syntax [Display](Page) instead of wiki-link
+    syntax [[Page|Display]] to avoid GitHub Wiki's URL generation bugs.
     """
     errors = 0
     warnings = 0
@@ -226,9 +249,9 @@ def validate_sync_script_sidebar_template(
                 print(
                     red("ERROR:")
                     + f" {sync_script_path.name}:generate_sidebar(): "
-                    + f"Wiki link [[{page_name}|{display_text}]] "
+                    + f"Link [{display_text}]({page_name}) "
                     + f"contains '{char}' in display text ({reason}). "
-                    + f"This will generate a broken URL when deployed."
+                    + f"This may cause broken URLs."
                 )
                 break  # Only report first problematic character per link
 
@@ -313,14 +336,18 @@ def validate_wiki_link_display_text(
     sidebar_path: Path, verbose: bool = False
 ) -> ValidationResult:
     """
-    Validate that wiki-link display text doesn't contain problematic characters.
+    Validate that sidebar link display text doesn't contain problematic characters.
 
-    GitHub Wiki's [[Page|Display]] syntax can break when the display text
-    contains certain characters that interfere with URL generation.
+    GitHub Wiki's [[Page|Display]] syntax has severe bugs where the display text
+    can corrupt the generated URL. Standard markdown [Display](Page) is safer,
+    but we still warn about problematic characters for documentation purposes.
 
     For example, [[TLAplus-Tooling|TLA+ Tooling]] generates a broken URL
     because '+' is decoded as a space, creating "/wiki/TLA--Tooling" instead
     of "/wiki/TLAplus-Tooling".
+
+    Recommendation: Use standard markdown syntax [Display](Page) instead of
+    wiki-link syntax [[Page|Display]] to avoid these issues.
     """
     errors = 0
     warnings = 0
@@ -328,7 +355,7 @@ def validate_wiki_link_display_text(
     links = parse_sidebar_wiki_links(sidebar_path)
 
     if verbose:
-        print("\nChecking wiki-link display text for problematic characters...")
+        print("\nChecking sidebar display text for problematic characters...")
 
     for page_name, display_text, line_num in links:
         for char, reason in WIKI_LINK_PROBLEMATIC_CHARS.items():
@@ -336,9 +363,9 @@ def validate_wiki_link_display_text(
                 errors += 1
                 print(
                     red("ERROR:")
-                    + f" _Sidebar.md:{line_num}: Wiki link [[{page_name}|{display_text}]] "
+                    + f" _Sidebar.md:{line_num}: Link [{display_text}]({page_name}) "
                     + f"contains '{char}' in display text ({reason}). "
-                    + f"This will generate a broken URL."
+                    + f"This may cause broken URLs with wiki-link syntax."
                 )
                 break  # Only report first problematic character per link
 
@@ -349,7 +376,10 @@ def validate_sidebar_links(
     sidebar_path: Path, wiki_pages: set[str], verbose: bool = False
 ) -> ValidationResult:
     """
-    Validate that all wiki-style links in _Sidebar.md point to existing pages.
+    Validate that all links in _Sidebar.md point to existing wiki pages.
+
+    Supports both wiki-link syntax [[Page|Display]] and standard markdown
+    syntax [Display](Page).
     """
     errors = 0
     warnings = 0
@@ -357,18 +387,18 @@ def validate_sidebar_links(
     links = parse_sidebar_wiki_links(sidebar_path)
 
     if verbose:
-        print(f"\nChecking {len(links)} wiki links in _Sidebar.md...")
+        print(f"\nChecking {len(links)} sidebar links in _Sidebar.md...")
 
     for page_name, display_text, line_num in links:
         if page_name not in wiki_pages:
             errors += 1
             print(
                 red("ERROR:")
-                + f" _Sidebar.md:{line_num}: Wiki link [[{page_name}]] "
+                + f" _Sidebar.md:{line_num}: Link to '{page_name}' "
                 + f"points to non-existent page '{page_name}.md'"
             )
         elif verbose:
-            print(f"  ✓ [[{page_name}|{display_text}]] -> {page_name}.md")
+            print(f"  ✓ [{display_text}]({page_name}) -> {page_name}.md")
 
     return ValidationResult(errors=errors, warnings=warnings)
 

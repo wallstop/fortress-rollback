@@ -58,15 +58,31 @@ WIKI_STRUCTURE = {
 
 ### Sidebar Link Consistency
 
-**Critical:** Sidebar link names MUST exactly match the wiki page filenames (without `.md` extension).
+**Critical:** Sidebar links MUST point to valid wiki page filenames (without `.md` extension).
+
+#### RECOMMENDED: Standard Markdown Links
+
+**Use standard markdown link syntax `[Display](Page)` instead of wiki-link syntax `[[Page|Display]]`** to avoid GitHub Wiki's URL generation bugs:
 
 ```markdown
-<!-- ✅ CORRECT: Link matches filename, display text uses safe characters -->
-- [[TLAplus-Tooling|TLA Plus Tooling]]  <!-- Links to TLAplus-Tooling.md -->
+# ✅ CORRECT: Standard markdown links (RECOMMENDED)
+- [TLA Plus Tooling Research](TLAplus-Tooling-Research)
+- [User Guide](User-Guide)
+- [Code of Conduct](Code-of-Conduct)
 
-<!-- ❌ BROKEN: Link doesn't match any file -->
-- [[TLA--Tooling|TLA Plus Tooling]]     <!-- TLA--Tooling.md doesn't exist -->
+# ❌ AVOID: Wiki-link syntax has URL generation bugs
+- [[TLAplus-Tooling-Research|TLA Plus Tooling Research]]
 ```
+
+Standard markdown links give you:
+
+1. **Full control over display text** — any characters work correctly
+2. **Explicit URL** — no GitHub Wiki magic that corrupts links
+3. **Consistency** — same syntax works everywhere in markdown
+
+#### Legacy: Wiki-Link Issues
+
+If you must use wiki-link syntax `[[Page|Display]]`, be aware of these bugs:
 
 ### CRITICAL: Wiki-Link Display Text Characters
 
@@ -88,12 +104,16 @@ GitHub Wiki's `[[PageName|Display Text]]` syntax has a severe quirk: **certain c
 - [[TLAplus-Tooling-Research|TLA+ Tooling Research]]
 <!-- GitHub Wiki generates URL: /wiki/TLA--Tooling-Research (BROKEN!) -->
 
-<!-- ✅ CORRECT: Spell out "Plus" in display text -->
+<!-- ⚠️ WORKAROUND: Spell out "Plus" in display text -->
 - [[TLAplus-Tooling-Research|TLA Plus Tooling Research]]
-<!-- GitHub Wiki generates URL: /wiki/TLAplus-Tooling-Research (CORRECT) -->
+<!-- Still risky — spaces can cause issues too! -->
+
+<!-- ✅ BEST: Use standard markdown links instead -->
+- [TLA Plus Tooling Research](TLAplus-Tooling-Research)
+<!-- URL is exactly /wiki/TLAplus-Tooling-Research (CORRECT!) -->
 ```
 
-The `check-wiki-consistency.py` script validates this automatically:
+The `check-wiki-consistency.py` script validates both syntaxes automatically:
 
 ```bash
 python3 scripts/check-wiki-consistency.py --verbose
@@ -449,7 +469,7 @@ The `scripts/check-wiki-consistency.py` script validates wiki integrity:
 
 ### What It Validates
 
-1. **Sidebar Link Validity** — All `[[Page|Text]]` links in `_Sidebar.md` point to existing `.md` files
+1. **Sidebar Link Validity** — All links in `_Sidebar.md` (both `[Text](Page)` and `[[Page|Text]]` syntax) point to existing `.md` files
 2. **WIKI_STRUCTURE Completeness** — All `docs/*.md` files have mappings in `sync-wiki.py`
 3. **Sidebar Completeness** — All wiki pages have corresponding sidebar entries
 
@@ -492,7 +512,7 @@ Wiki consistency is validated in:
 3. Add sidebar entry in `generate_sidebar()`:
 
    ```python
-   "- [[New-Page|New Page]]",
+   "- [New Page](New-Page)",  # Use standard markdown link syntax
    ```
 
 4. Run validation: `python scripts/check-wiki-consistency.py`

@@ -375,6 +375,114 @@ class TestParseWikiLinksFromString:
         assert links[1][2] == 4  # Link2 on line 4
 
 
+class TestStandardMarkdownLinks:
+    """Tests for parsing standard markdown links [Display](Page)."""
+
+    def test_standard_markdown_link(self, tmp_path: Path) -> None:
+        """Standard markdown link [Display](Page) is parsed correctly."""
+        sidebar = tmp_path / "_Sidebar.md"
+        sidebar.write_text("- [User Guide](User-Guide)", encoding="utf-8")
+        links = parse_sidebar_wiki_links(sidebar)
+        assert len(links) == 1
+        assert links[0] == ("User-Guide", "User Guide", 1)
+
+    def test_multiple_standard_links(self, tmp_path: Path) -> None:
+        """Multiple standard markdown links are parsed."""
+        sidebar = tmp_path / "_Sidebar.md"
+        sidebar.write_text(
+            "- [Home](Home)\n- [User Guide](User-Guide)\n- [Changelog](Changelog)",
+            encoding="utf-8",
+        )
+        links = parse_sidebar_wiki_links(sidebar)
+        assert len(links) == 3
+        assert links[0] == ("Home", "Home", 1)
+        assert links[1] == ("User-Guide", "User Guide", 2)
+        assert links[2] == ("Changelog", "Changelog", 3)
+
+    def test_external_links_ignored(self, tmp_path: Path) -> None:
+        """External URLs (http/https) are ignored."""
+        sidebar = tmp_path / "_Sidebar.md"
+        sidebar.write_text(
+            "- [Home](Home)\n- [GitHub](https://github.com)\n- [Docs](http://docs.rs)",
+            encoding="utf-8",
+        )
+        links = parse_sidebar_wiki_links(sidebar)
+        # Only Home should be parsed, not the external URLs
+        assert len(links) == 1
+        assert links[0] == ("Home", "Home", 1)
+
+    def test_anchor_links_ignored(self, tmp_path: Path) -> None:
+        """Anchor links (#section) are ignored."""
+        sidebar = tmp_path / "_Sidebar.md"
+        sidebar.write_text(
+            "- [Home](Home)\n- [Section](#section)",
+            encoding="utf-8",
+        )
+        links = parse_sidebar_wiki_links(sidebar)
+        assert len(links) == 1
+        assert links[0] == ("Home", "Home", 1)
+
+    def test_mixed_wiki_and_markdown_links(self, tmp_path: Path) -> None:
+        """Both wiki-links and standard markdown links are parsed."""
+        sidebar = tmp_path / "_Sidebar.md"
+        sidebar.write_text(
+            "- [[Home]]\n- [User Guide](User-Guide)\n- [[Architecture]]",
+            encoding="utf-8",
+        )
+        links = parse_sidebar_wiki_links(sidebar)
+        assert len(links) == 3
+
+    def test_tla_plus_in_standard_link(self, tmp_path: Path) -> None:
+        """Standard markdown link with TLA Plus displays correctly."""
+        sidebar = tmp_path / "_Sidebar.md"
+        sidebar.write_text(
+            "- [TLA Plus Tooling Research](TLAplus-Tooling-Research)",
+            encoding="utf-8",
+        )
+        links = parse_sidebar_wiki_links(sidebar)
+        assert len(links) == 1
+        assert links[0] == ("TLAplus-Tooling-Research", "TLA Plus Tooling Research", 1)
+        # Validate the display text is safe
+        result = validate_wiki_link_display_text(sidebar)
+        assert result.errors == 0
+
+    def test_standard_link_with_problematic_char(self, tmp_path: Path) -> None:
+        """Standard markdown link with + in display text is still detected."""
+        sidebar = tmp_path / "_Sidebar.md"
+        sidebar.write_text(
+            "- [TLA+ Tooling](TLAplus-Tooling)",
+            encoding="utf-8",
+        )
+        links = parse_sidebar_wiki_links(sidebar)
+        assert len(links) == 1
+        result = validate_wiki_link_display_text(sidebar)
+        # Still warn about problematic chars even with standard links
+        assert result.errors == 1
+
+
+class TestActualSidebarFile:
+    """Integration test validating the actual wiki/_Sidebar.md file."""
+
+    def test_real_sidebar_is_valid(self) -> None:
+        """The actual wiki/_Sidebar.md should have no problematic characters.
+
+        This is a regression test to ensure the TLA+ bug doesn't recur.
+        """
+        # Get the real wiki/_Sidebar.md path
+        project_root = Path(__file__).parent.parent.parent
+        sidebar_path = project_root / "wiki" / "_Sidebar.md"
+
+        if not sidebar_path.exists():
+            pytest.skip("wiki/_Sidebar.md not found in project root")
+
+        # Check for problematic characters
+        result = validate_wiki_link_display_text(sidebar_path)
+        assert result.errors == 0, (
+            "wiki/_Sidebar.md contains problematic characters in link display text. "
+            "Use standard markdown [Display](Page) syntax with safe characters."
+        )
+
+
 class TestValidateSyncScriptSidebarTemplate:
     """Tests for validate_sync_script_sidebar_template function."""
 

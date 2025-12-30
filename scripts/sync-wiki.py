@@ -992,38 +992,50 @@ def copy_assets(
 def generate_sidebar(wiki_structure: dict[str, str]) -> str:
     """Generate the wiki sidebar navigation.
 
+    Uses standard markdown link syntax [Display](PageName) instead of
+    wiki-link syntax [[PageName|Display]] to avoid GitHub Wiki's bug where
+    spaces in display text corrupt the generated URL.
+
+    Example of the bug:
+        [[TLAplus-Tooling-Research|TLA Plus Tooling Research]]
+        -> GitHub generates URL /wiki/TLA-Plus-Tooling-Research (BROKEN!)
+
+    Standard markdown links are immune to this:
+        [TLA Plus Tooling Research](TLAplus-Tooling-Research)
+        -> URL is exactly /wiki/TLAplus-Tooling-Research (CORRECT!)
+
     IMPORTANT: Sidebar link names must exactly match the wiki page filenames
     (without .md extension) as defined in WIKI_STRUCTURE.
     """
     sidebar = """# Fortress Rollback
 
-**[[Home]]**
+**[Home](Home)**
 
 ## Documentation
 
-- [[User-Guide|User Guide]]
-- [[Architecture]]
-- [[Migration]]
+- [User Guide](User-Guide)
+- [Architecture](Architecture)
+- [Migration](Migration)
 
 ## Specifications
 
-- [[Overview]]
-- [[Formal-Specification|Formal Specification]]
-- [[Determinism-Model|Determinism Model]]
-- [[API-Contracts|API Contracts]]
-- [[Spec-Divergences|Spec Divergences]]
+- [Overview](Overview)
+- [Formal Specification](Formal-Specification)
+- [Determinism Model](Determinism-Model)
+- [API Contracts](API-Contracts)
+- [Spec Divergences](Spec-Divergences)
 
 ## Reference
 
-- [[Changelog]]
-- [[GGRS-Changelog-Archive|GGRS Changelog Archive]]
-- [[Fortress-vs-GGRS|Fortress vs GGRS]]
-- [[TLAplus-Tooling-Research|TLA Plus Tooling Research]]
+- [Changelog](Changelog)
+- [GGRS Changelog Archive](GGRS-Changelog-Archive)
+- [Fortress vs GGRS](Fortress-vs-GGRS)
+- [TLA Plus Tooling Research](TLAplus-Tooling-Research)
 
 ## Community
 
-- [[Contributing]]
-- [[Code-of-Conduct|Code of Conduct]]
+- [Contributing](Contributing)
+- [Code of Conduct](Code-of-Conduct)
 
 ---
 
@@ -1054,21 +1066,21 @@ networking in deterministic multiplayer games.
 
 ## Quick Links
 
-- [[User-Guide|User Guide]] - Get started with Fortress Rollback
-- [[Architecture]] - Understand the system design
-- [[Migration]] - Migrate from GGRS
-- [[Changelog]] - See what's new
+- [User Guide](User-Guide) - Get started with Fortress Rollback
+- [Architecture](Architecture) - Understand the system design
+- [Migration](Migration) - Migrate from GGRS
+- [Changelog](Changelog) - See what's new
 
 ## Specifications
 
-- [[Formal-Specification|Formal Specification]] - TLA+ and Z3 verified protocols
-- [[Determinism-Model|Determinism Model]] - How determinism is guaranteed
-- [[API-Contracts|API Contracts]] - Public API guarantees
+- [Formal Specification](Formal-Specification) - TLA+ and Z3 verified protocols
+- [Determinism Model](Determinism-Model) - How determinism is guaranteed
+- [API Contracts](API-Contracts) - Public API guarantees
 
 ## Contributing
 
-- [[Contributing]] - How to contribute
-- [[Code-of-Conduct|Code of Conduct]] - Community guidelines
+- [Contributing](Contributing) - How to contribute
+- [Code of Conduct](Code-of-Conduct) - Community guidelines
 
 ---
 

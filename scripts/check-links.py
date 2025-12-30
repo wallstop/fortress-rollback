@@ -123,6 +123,52 @@ def in_code_block(pos: int, code_ranges: list[tuple[int, int]]) -> bool:
     return any(start <= pos < end for start, end in code_ranges)
 
 
+def find_inline_code_ranges(content: str) -> list[tuple[int, int]]:
+    """Find ranges of inline code spans (single backticks) to skip.
+
+    Handles both single backtick `code` and double backtick ``code`` syntax.
+    Does NOT include already-detected fenced code blocks (handled separately).
+    """
+    ranges = []
+    i = 0
+    n = len(content)
+
+    while i < n:
+        if content[i] == "`":
+            # Count consecutive backticks
+            start = i
+            backtick_count = 0
+            while i < n and content[i] == "`":
+                backtick_count += 1
+                i += 1
+
+            # Skip if this is a fenced code block marker (3+ backticks at line start)
+            # Those are handled by find_code_fence_ranges
+            line_start = content.rfind("\n", 0, start) + 1
+            prefix = content[line_start:start]
+            if backtick_count >= 3 and prefix.strip() == "":
+                continue
+
+            # Find the closing backticks (same count)
+            closing_pattern = "`" * backtick_count
+            end_pos = content.find(closing_pattern, i)
+
+            if end_pos != -1:
+                # Found closing - range is from first backtick to after closing backticks
+                ranges.append((start, end_pos + backtick_count))
+                i = end_pos + backtick_count
+            # If no closing found, continue scanning
+        else:
+            i += 1
+
+    return ranges
+
+
+def in_code_span(pos: int, inline_ranges: list[tuple[int, int]]) -> bool:
+    """Check if a position is within any inline code span."""
+    return any(start <= pos < end for start, end in inline_ranges)
+
+
 def is_wiki_file(source_file: Path, project_root: Path) -> bool:
     """Check if a file is in the wiki directory."""
     try:
@@ -211,13 +257,18 @@ def check_markdown_file(
     # Find code fence ranges to skip
     code_ranges = find_code_fence_ranges(content)
 
+    # Find inline code span ranges to skip
+    inline_code_ranges = find_inline_code_ranges(content)
+
     # Find markdown links: [text](url) and [text][ref]
     # Standard links
     link_pattern = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 
     for match in link_pattern.finditer(content):
-        # Skip links inside code blocks
+        # Skip links inside code blocks or inline code spans
         if in_code_block(match.start(), code_ranges):
+            continue
+        if in_code_span(match.start(), inline_code_ranges):
             continue
 
         _link_text = match.group(1)  # Captured but unused; kept for debugging
