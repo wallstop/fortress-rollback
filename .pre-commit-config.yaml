@@ -62,6 +62,16 @@ repos:
         types: [text]
 
       # ══════════════════════════════════════════════════════════════════════
+      # Python test quality
+      # ══════════════════════════════════════════════════════════════════════
+      - id: check-empty-tests
+        name: check for empty test methods
+        entry: python scripts/hooks/check-empty-tests.py
+        language: python
+        types: [python]
+        files: 'test_.*\.py$|.*_test\.py$'
+
+      # ══════════════════════════════════════════════════════════════════════
       # Rust checks
       # ══════════════════════════════════════════════════════════════════════
       - id: cargo-fmt

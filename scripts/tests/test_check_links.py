@@ -133,6 +133,10 @@ class TestFindInlineCodeRanges:
         are treated as fenced code blocks. Triple backticks in the middle of
         a line are inline code spans.
         """
+        content = "text```code```more"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "```code```"
 
     def test_exact_backtick_count_not_prefix(self) -> None:
         """Closing delimiter must be exactly N backticks, not part of longer sequence.

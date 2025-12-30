@@ -124,14 +124,19 @@ def in_code_block(pos: int, code_ranges: list[tuple[int, int]]) -> bool:
 
 
 def find_inline_code_ranges(content: str) -> list[tuple[int, int]]:
-    """Find ranges of inline code spans (single backticks) to skip.
+    """Find ranges of inline code spans (backtick-delimited) to skip.
 
-    Handles both single backtick `code` and double backtick ``code`` syntax.
-    Does NOT include already-detected fenced code blocks (handled separately).
+    Uses a state-based parser to properly handle:
+    - Standard inline code: `code`
+    - Multi-backtick delimiters: ``code with ` inside``
+    - Arbitrary backtick counts: ```code``` (if not at line start)
 
-    Note: Unclosed inline code spans (e.g., `unclosed without closing backtick)
-    are intentionally not treated as code ranges. This prevents an unclosed
-    backtick from incorrectly masking the rest of the document.
+    Fenced code blocks (3+ backticks at line start) are skipped as they
+    are handled separately by find_code_fence_ranges().
+
+    Unclosed inline code spans are intentionally not treated as code ranges.
+    This prevents an unclosed backtick from incorrectly masking the rest
+    of the document.
     """
     ranges = []
     i = 0
