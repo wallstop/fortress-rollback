@@ -123,6 +123,83 @@ def in_code_block(pos: int, code_ranges: list[tuple[int, int]]) -> bool:
     return any(start <= pos < end for start, end in code_ranges)
 
 
+def find_inline_code_ranges(content: str) -> list[tuple[int, int]]:
+    """Find ranges of inline code spans (backtick-delimited) to skip.
+
+    Uses a state-based parser to properly handle:
+    - Standard inline code: `code`
+    - Multi-backtick delimiters: ``code with ` inside``
+    - Arbitrary backtick counts: ```code``` (if not at line start)
+
+    Fenced code blocks (3+ backticks at line start) are skipped as they
+    are handled separately by find_code_fence_ranges().
+
+    Unclosed inline code spans are intentionally not treated as code ranges.
+    This prevents an unclosed backtick from incorrectly masking the rest
+    of the document.
+    """
+    ranges = []
+    i = 0
+    n = len(content)
+
+    while i < n:
+        if content[i] == "`":
+            # Count consecutive backticks
+            start = i
+            backtick_count = 0
+            while i < n and content[i] == "`":
+                backtick_count += 1
+                i += 1
+
+            # Skip if this is a fenced code block marker (3+ backticks at line start)
+            # Those are handled by find_code_fence_ranges
+            line_start = content.rfind("\n", 0, start) + 1
+            prefix = content[line_start:start]
+            if backtick_count >= 3 and prefix.strip() == "":
+                continue
+
+            # Find the closing backticks (exact count, not part of longer sequence)
+            closing_pattern = "`" * backtick_count
+            search_start = i
+            end_pos = -1
+
+            while True:
+                candidate = content.find(closing_pattern, search_start)
+                if candidate == -1:
+                    break  # No more candidates
+
+                # Verify this is exactly backtick_count backticks, not part of a longer sequence
+                # Check character before (if exists) is not a backtick
+                char_before_ok = candidate == 0 or content[candidate - 1] != "`"
+                # Check character after (if exists) is not a backtick
+                after_pos = candidate + backtick_count
+                char_after_ok = after_pos >= n or content[after_pos] != "`"
+
+                if char_before_ok and char_after_ok:
+                    end_pos = candidate
+                    break
+                else:
+                    # This match is part of a longer sequence, keep searching
+                    search_start = candidate + 1
+
+            if end_pos != -1:
+                # Found closing - range is from first backtick to after closing backticks
+                ranges.append((start, end_pos + backtick_count))
+                i = end_pos + backtick_count
+            # else: No closing found - not a valid inline code span.
+            # The opening backticks are treated as literal text.
+            # i is already past the opening backticks, so continue scanning.
+        else:
+            i += 1
+
+    return ranges
+
+
+def in_code_span(pos: int, inline_ranges: list[tuple[int, int]]) -> bool:
+    """Check if a position is within any inline code span."""
+    return any(start <= pos < end for start, end in inline_ranges)
+
+
 def is_wiki_file(source_file: Path, project_root: Path) -> bool:
     """Check if a file is in the wiki directory."""
     try:
@@ -211,13 +288,18 @@ def check_markdown_file(
     # Find code fence ranges to skip
     code_ranges = find_code_fence_ranges(content)
 
+    # Find inline code span ranges to skip
+    inline_code_ranges = find_inline_code_ranges(content)
+
     # Find markdown links: [text](url) and [text][ref]
     # Standard links
     link_pattern = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 
     for match in link_pattern.finditer(content):
-        # Skip links inside code blocks
+        # Skip links inside code blocks or inline code spans
         if in_code_block(match.start(), code_ranges):
+            continue
+        if in_code_span(match.start(), inline_code_ranges):
             continue
 
         _link_text = match.group(1)  # Captured but unused; kept for debugging

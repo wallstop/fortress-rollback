@@ -36,6 +36,9 @@ parse_hardcoded_sidebar_from_sync_script = (
     check_wiki_consistency.parse_hardcoded_sidebar_from_sync_script
 )
 parse_wiki_links_from_string = check_wiki_consistency.parse_wiki_links_from_string
+parse_wiki_links_from_string_legacy = (
+    check_wiki_consistency.parse_wiki_links_from_string_legacy
+)
 validate_sync_script_sidebar_template = (
     check_wiki_consistency.validate_sync_script_sidebar_template
 )
@@ -51,7 +54,7 @@ class TestParseSidebarWikiLinks:
         sidebar.write_text("[[Home]]", encoding="utf-8")
         links = parse_sidebar_wiki_links(sidebar)
         assert len(links) == 1
-        assert links[0] == ("Home", "Home", 1)
+        assert links[0] == ("Home", "Home", 1, "wiki")
 
     def test_wiki_link_with_display_text(self, tmp_path: Path) -> None:
         """Wiki link with custom display text."""
@@ -59,7 +62,7 @@ class TestParseSidebarWikiLinks:
         sidebar.write_text("[[User-Guide|User Guide]]", encoding="utf-8")
         links = parse_sidebar_wiki_links(sidebar)
         assert len(links) == 1
-        assert links[0] == ("User-Guide", "User Guide", 1)
+        assert links[0] == ("User-Guide", "User Guide", 1, "wiki")
 
     def test_multiple_wiki_links(self, tmp_path: Path) -> None:
         """Multiple wiki links on different lines."""
@@ -70,9 +73,9 @@ class TestParseSidebarWikiLinks:
         )
         links = parse_sidebar_wiki_links(sidebar)
         assert len(links) == 3
-        assert links[0] == ("Home", "Home", 1)
-        assert links[1] == ("User-Guide", "User Guide", 2)
-        assert links[2] == ("Architecture", "Architecture", 3)
+        assert links[0] == ("Home", "Home", 1, "wiki")
+        assert links[1] == ("User-Guide", "User Guide", 2, "wiki")
+        assert links[2] == ("Architecture", "Architecture", 3, "wiki")
 
     def test_wiki_link_in_list(self, tmp_path: Path) -> None:
         """Wiki links inside markdown list items."""
@@ -359,8 +362,8 @@ class TestParseWikiLinksFromString:
         content = "[[Home]]\n[[Page|Display Text]]"
         links = parse_wiki_links_from_string(content)
         assert len(links) == 2
-        assert links[0] == ("Home", "Home", 1)
-        assert links[1] == ("Page", "Display Text", 2)
+        assert links[0] == ("Home", "Home", 1, "wiki")
+        assert links[1] == ("Page", "Display Text", 2, "wiki")
 
     def test_parse_empty_string(self) -> None:
         """Empty string returns no links."""
@@ -373,6 +376,172 @@ class TestParseWikiLinksFromString:
         links = parse_wiki_links_from_string(content)
         assert links[0][2] == 2  # Link1 on line 2
         assert links[1][2] == 4  # Link2 on line 4
+
+    def test_legacy_wrapper_returns_3_tuples(self) -> None:
+        """Legacy wrapper strips syntax type for backwards compatibility."""
+        content = "[[Home]]\n[Guide](User-Guide)"
+        links = parse_wiki_links_from_string_legacy(content)
+        assert len(links) == 2
+        assert links[0] == ("Home", "Home", 1)
+        assert links[1] == ("User-Guide", "Guide", 2)
+
+    def test_no_false_positive_with_wiki_and_markdown_on_same_line(self) -> None:
+        """Both wiki-link and markdown link on same line are both parsed.
+
+        This tests the fix for the false positive issue where
+        `if f"[[{target}" in line or f"|{target}]]" in line` would
+        incorrectly skip markdown links if they shared text with wiki-links.
+
+        Example: "- [[Foo]] and [Bar](Bar)" should parse both links.
+        """
+        content = "- [[Foo]] and [Bar](Bar)"
+        links = parse_wiki_links_from_string(content)
+        assert len(links) == 2
+        assert links[0] == ("Foo", "Foo", 1, "wiki")
+        assert links[1] == ("Bar", "Bar", 1, "markdown")
+
+    def test_no_double_parse_of_wiki_link_target(self) -> None:
+        """Wiki-link target shouldn't be re-parsed as a markdown link.
+
+        When a wiki-link like [[Target|Display]] is parsed, we must avoid
+        also parsing "[Target]" portion as part of a markdown link pattern.
+        """
+        content = "[[User-Guide|User Guide]]"
+        links = parse_wiki_links_from_string(content)
+        # Should only find 1 link (the wiki-link), not also a markdown link
+        assert len(links) == 1
+        assert links[0] == ("User-Guide", "User Guide", 1, "wiki")
+
+
+class TestStandardMarkdownLinks:
+    """Tests for parsing standard markdown links [Display](Page)."""
+
+    def test_standard_markdown_link(self, tmp_path: Path) -> None:
+        """Standard markdown link [Display](Page) is parsed correctly."""
+        sidebar = tmp_path / "_Sidebar.md"
+        sidebar.write_text("- [User Guide](User-Guide)", encoding="utf-8")
+        links = parse_sidebar_wiki_links(sidebar)
+        assert len(links) == 1
+        assert links[0] == ("User-Guide", "User Guide", 1, "markdown")
+
+    def test_multiple_standard_links(self, tmp_path: Path) -> None:
+        """Multiple standard markdown links are parsed."""
+        sidebar = tmp_path / "_Sidebar.md"
+        sidebar.write_text(
+            "- [Home](Home)\n- [User Guide](User-Guide)\n- [Changelog](Changelog)",
+            encoding="utf-8",
+        )
+        links = parse_sidebar_wiki_links(sidebar)
+        assert len(links) == 3
+        assert links[0] == ("Home", "Home", 1, "markdown")
+        assert links[1] == ("User-Guide", "User Guide", 2, "markdown")
+        assert links[2] == ("Changelog", "Changelog", 3, "markdown")
+
+    def test_external_links_ignored(self, tmp_path: Path) -> None:
+        """External URLs (http/https) are ignored."""
+        sidebar = tmp_path / "_Sidebar.md"
+        sidebar.write_text(
+            "- [Home](Home)\n- [GitHub](https://github.com)\n- [Docs](http://docs.rs)",
+            encoding="utf-8",
+        )
+        links = parse_sidebar_wiki_links(sidebar)
+        # Only Home should be parsed, not the external URLs
+        assert len(links) == 1
+        assert links[0] == ("Home", "Home", 1, "markdown")
+
+    def test_anchor_links_ignored(self, tmp_path: Path) -> None:
+        """Anchor links (#section) are ignored."""
+        sidebar = tmp_path / "_Sidebar.md"
+        sidebar.write_text(
+            "- [Home](Home)\n- [Section](#section)",
+            encoding="utf-8",
+        )
+        links = parse_sidebar_wiki_links(sidebar)
+        assert len(links) == 1
+        assert links[0] == ("Home", "Home", 1, "markdown")
+
+    def test_mixed_wiki_and_markdown_links(self, tmp_path: Path) -> None:
+        """Both wiki-links and standard markdown links are parsed."""
+        sidebar = tmp_path / "_Sidebar.md"
+        sidebar.write_text(
+            "- [[Home]]\n- [User Guide](User-Guide)\n- [[Architecture]]",
+            encoding="utf-8",
+        )
+        links = parse_sidebar_wiki_links(sidebar)
+        assert len(links) == 3
+        # Check syntax types
+        assert links[0][3] == "wiki"      # [[Home]]
+        assert links[1][3] == "markdown"  # [User Guide](User-Guide)
+        assert links[2][3] == "wiki"      # [[Architecture]]
+
+    def test_tla_plus_in_standard_link(self, tmp_path: Path) -> None:
+        """Standard markdown link with TLA Plus displays correctly."""
+        sidebar = tmp_path / "_Sidebar.md"
+        sidebar.write_text(
+            "- [TLA Plus Tooling Research](TLAplus-Tooling-Research)",
+            encoding="utf-8",
+        )
+        links = parse_sidebar_wiki_links(sidebar)
+        assert len(links) == 1
+        assert links[0] == ("TLAplus-Tooling-Research", "TLA Plus Tooling Research", 1, "markdown")
+        # Validate the display text is safe
+        result = validate_wiki_link_display_text(sidebar)
+        assert result.errors == 0
+
+    def test_standard_link_with_problematic_char_is_immune(self, tmp_path: Path) -> None:
+        """Standard markdown link with + in display text is immune to validation.
+
+        Standard markdown links explicitly specify the URL, so the display text
+        cannot corrupt the link. This is a key advantage over wiki-link syntax.
+        """
+        sidebar = tmp_path / "_Sidebar.md"
+        sidebar.write_text(
+            "- [TLA+ Tooling](TLAplus-Tooling)",
+            encoding="utf-8",
+        )
+        links = parse_sidebar_wiki_links(sidebar)
+        assert len(links) == 1
+        assert links[0][3] == "markdown"  # Verify it's parsed as markdown
+        result = validate_wiki_link_display_text(sidebar)
+        # Standard markdown links are immune - no errors!
+        assert result.errors == 0
+
+    def test_wiki_link_with_problematic_char_is_detected(self, tmp_path: Path) -> None:
+        """Wiki-link syntax with + in display text is still detected as error."""
+        sidebar = tmp_path / "_Sidebar.md"
+        sidebar.write_text(
+            "- [[TLAplus-Tooling|TLA+ Tooling]]",
+            encoding="utf-8",
+        )
+        links = parse_sidebar_wiki_links(sidebar)
+        assert len(links) == 1
+        assert links[0][3] == "wiki"  # Verify it's parsed as wiki
+        result = validate_wiki_link_display_text(sidebar)
+        # Wiki-links are NOT immune - error detected!
+        assert result.errors == 1
+
+
+class TestActualSidebarFile:
+    """Integration test validating the actual wiki/_Sidebar.md file."""
+
+    def test_real_sidebar_is_valid(self) -> None:
+        """The actual wiki/_Sidebar.md should have no problematic characters.
+
+        This is a regression test to ensure the TLA+ bug doesn't recur.
+        """
+        # Get the real wiki/_Sidebar.md path
+        project_root = Path(__file__).parent.parent.parent
+        sidebar_path = project_root / "wiki" / "_Sidebar.md"
+
+        if not sidebar_path.exists():
+            pytest.skip("wiki/_Sidebar.md not found in project root")
+
+        # Check for problematic characters
+        result = validate_wiki_link_display_text(sidebar_path)
+        assert result.errors == 0, (
+            "wiki/_Sidebar.md contains problematic characters in link display text. "
+            "Use standard markdown [Display](Page) syntax with safe characters."
+        )
 
 
 class TestValidateSyncScriptSidebarTemplate:
@@ -439,6 +608,82 @@ def generate_sidebar(wiki_structure: dict[str, str]) -> str:
         result = validate_sync_script_sidebar_template(sync_script)
         # Two problematic links (C++ has +, 100% has %)
         assert result.errors == 2
+
+
+class TestWikiLinkOverlapDetection:
+    """Tests for markdown/wiki-link overlap detection in parse_wiki_links_from_string."""
+
+    def test_markdown_starts_inside_wiki_link(self) -> None:
+        """Markdown link starting inside a wiki-link is skipped.
+
+        Covers case: wiki_start <= match_start < wiki_end
+        """
+        # Contrived case: [[Page|Display]](extra) shouldn't parse extra as markdown
+        content = "[[Page|Display]](extra)"
+        links = parse_wiki_links_from_string(content)
+        # Should only find the wiki-link
+        assert len(links) == 1
+        assert links[0][3] == "wiki"
+
+    def test_markdown_ends_inside_wiki_link(self) -> None:
+        """Markdown link ending inside a wiki-link is skipped.
+
+        Covers case: wiki_start < match_end <= wiki_end
+        """
+        # If somehow a regex matched something ending inside a wiki-link
+        content = "prefix[[Page]]"
+        links = parse_wiki_links_from_string(content)
+        # Should only find the wiki-link
+        assert len(links) == 1
+        assert links[0] == ("Page", "Page", 1, "wiki")
+
+    def test_markdown_fully_contains_wiki_link(self) -> None:
+        """Markdown link fully containing a wiki-link is skipped.
+
+        This is the new case added: match_start < wiki_start and wiki_end < match_end.
+        When a wiki-link appears in the URL portion of a markdown link, the
+        markdown link spans across (fully contains) the wiki-link.
+        """
+        # Wiki-link in URL: markdown [text](...) where ... contains [[Page]]
+        # Wiki-link is at positions 7-15, markdown would be at 0-16
+        # This exercises the overlap check: 0 < 7 and 15 < 16
+        content = "[text]([[Page]])"
+        links = parse_wiki_links_from_string(content)
+        # Wiki-link should be found; markdown link that contains it is skipped
+        wiki_links = [l for l in links if l[3] == "wiki"]
+        md_links = [l for l in links if l[3] == "markdown"]
+        assert len(wiki_links) == 1
+        assert len(md_links) == 0  # Markdown link skipped due to overlap
+        assert wiki_links[0][:2] == ("Page", "Page")
+
+    def test_non_overlapping_links_both_parsed(self) -> None:
+        """Non-overlapping wiki-link and markdown link are both parsed."""
+        content = "[[WikiPage]] and [MarkdownText](MarkdownTarget)"
+        links = parse_wiki_links_from_string(content)
+        assert len(links) == 2
+        # Both should be found
+        wiki_links = [l for l in links if l[3] == "wiki"]
+        md_links = [l for l in links if l[3] == "markdown"]
+        assert len(wiki_links) == 1
+        assert len(md_links) == 1
+        assert wiki_links[0][:2] == ("WikiPage", "WikiPage")
+        assert md_links[0][:2] == ("MarkdownTarget", "MarkdownText")
+
+    def test_adjacent_links_both_parsed(self) -> None:
+        """Adjacent (but not overlapping) links are both parsed."""
+        content = "[[Wiki]][Markdown](Target)"
+        links = parse_wiki_links_from_string(content)
+        # Both should be found since they don't overlap
+        assert len(links) == 2
+
+    def test_multiple_wiki_links_then_markdown(self) -> None:
+        """Multiple wiki-links followed by markdown link."""
+        content = "[[A]] [[B]] [C](Target)"
+        links = parse_wiki_links_from_string(content)
+        assert len(links) == 3
+        assert links[0][:2] == ("A", "A")
+        assert links[1][:2] == ("B", "B")
+        assert links[2][:2] == ("Target", "C")
 
 
 class TestActualSyncWikiScript:

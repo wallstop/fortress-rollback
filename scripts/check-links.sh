@@ -156,10 +156,10 @@ check_markdown_links() {
     log_verbose "${BLUE}Checking:${NC} $file"
 
     # Remove fenced code blocks before extracting links
-    # Uses awk to skip lines between ``` or ~~~ markers
+    # Uses awk to skip lines between ``` or ~~~ markers (with optional leading whitespace)
     local content_without_code
     content_without_code=$(awk '
-        /^```|^~~~/ {
+        /^[[:space:]]*```|^[[:space:]]*~~~/ {
             if (in_fence) {
                 in_fence = 0
             } else {
@@ -169,6 +169,11 @@ check_markdown_links() {
         }
         !in_fence { print }
     ' "$file" 2>/dev/null)
+
+    # Also remove inline code spans (backticks) to avoid false positives
+    # Handles both single `code` and double ``code`` backtick syntax
+    # Uses perl for proper non-greedy matching across the content
+    content_without_code=$(echo "$content_without_code" | perl -pe 's/``[^`]+``//g; s/`[^`]+`//g' 2>/dev/null || echo "$content_without_code")
 
     # Extract markdown links: [text](link) from content without code blocks
     local links

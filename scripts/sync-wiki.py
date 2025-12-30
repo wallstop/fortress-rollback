@@ -170,32 +170,74 @@ def find_code_fence_ranges(content: str) -> list[tuple[int, int]]:
 
 
 def find_inline_code_ranges(content: str) -> list[tuple[int, int]]:
-    """Find ranges of inline code (`...`) to skip.
+    """Find ranges of inline code spans (backtick-delimited) to skip.
 
-    Handles:
+    Uses a state-based parser to properly handle:
     - Standard inline code: `code`
-    - Empty inline code: ``
     - Multi-backtick delimiters: ``code with ` inside``
+    - Arbitrary backtick counts: ```code``` (if not at line start)
 
-    Limitation:
-    - Does not match inline code containing newlines (rare in practice)
-    - Escaped backticks within code are not specially handled,
-      but this is uncommon in documentation
+    Fenced code blocks (3+ backticks at line start) are skipped as they
+    are handled separately by find_code_fence_ranges().
+
+    Unclosed inline code spans are intentionally not treated as code ranges.
+    This prevents an unclosed backtick from incorrectly masking the rest
+    of the document.
     """
     ranges = []
-    # Match backtick-delimited code spans
-    # Handles: `code`, ``, ``code with ` inside``
-    # The pattern matches N backticks, then content (no newlines), then N backticks
-    # We handle single and double backtick cases explicitly
-    patterns = [
-        re.compile(r"``[^`\n]*``"),  # Double backtick (can contain single `)
-        re.compile(r"`[^`\n]*`"),    # Single backtick (standard)
-    ]
-    for pattern in patterns:
-        for match in pattern.finditer(content):
-            # Avoid overlapping matches
-            if not any(start <= match.start() < end for start, end in ranges):
-                ranges.append((match.start(), match.end()))
+    i = 0
+    n = len(content)
+
+    while i < n:
+        if content[i] == "`":
+            # Count consecutive backticks
+            start = i
+            backtick_count = 0
+            while i < n and content[i] == "`":
+                backtick_count += 1
+                i += 1
+
+            # Skip if this is a fenced code block marker (3+ backticks at line start)
+            # Those are handled by find_code_fence_ranges
+            line_start = content.rfind("\n", 0, start) + 1
+            prefix = content[line_start:start]
+            if backtick_count >= 3 and prefix.strip() == "":
+                continue
+
+            # Find the closing backticks (exact count, not part of longer sequence)
+            closing_pattern = "`" * backtick_count
+            search_start = i
+            end_pos = -1
+
+            while True:
+                candidate = content.find(closing_pattern, search_start)
+                if candidate == -1:
+                    break  # No more candidates
+
+                # Verify this is exactly backtick_count backticks, not part of a longer sequence
+                # Check character before (if exists) is not a backtick
+                char_before_ok = candidate == 0 or content[candidate - 1] != "`"
+                # Check character after (if exists) is not a backtick
+                after_pos = candidate + backtick_count
+                char_after_ok = after_pos >= n or content[after_pos] != "`"
+
+                if char_before_ok and char_after_ok:
+                    end_pos = candidate
+                    break
+                else:
+                    # This match is part of a longer sequence, keep searching
+                    search_start = candidate + 1
+
+            if end_pos != -1:
+                # Found closing - range is from first backtick to after closing backticks
+                ranges.append((start, end_pos + backtick_count))
+                i = end_pos + backtick_count
+            # else: No closing found - not a valid inline code span.
+            # The opening backticks are treated as literal text.
+            # i is already past the opening backticks, so continue scanning.
+        else:
+            i += 1
+
     return ranges
 
 
@@ -992,38 +1034,50 @@ def copy_assets(
 def generate_sidebar(wiki_structure: dict[str, str]) -> str:
     """Generate the wiki sidebar navigation.
 
+    Uses standard markdown link syntax [Display](PageName) instead of
+    wiki-link syntax [[PageName|Display]] to avoid GitHub Wiki's bug where
+    spaces in display text corrupt the generated URL.
+
+    Example of the bug:
+        [[TLAplus-Tooling-Research|TLA Plus Tooling Research]]
+        -> GitHub generates URL /wiki/TLA-Plus-Tooling-Research (BROKEN!)
+
+    Standard markdown links are immune to this:
+        [TLA Plus Tooling Research](TLAplus-Tooling-Research)
+        -> URL is exactly /wiki/TLAplus-Tooling-Research (CORRECT!)
+
     IMPORTANT: Sidebar link names must exactly match the wiki page filenames
     (without .md extension) as defined in WIKI_STRUCTURE.
     """
     sidebar = """# Fortress Rollback
 
-**[[Home]]**
+**[Home](Home)**
 
 ## Documentation
 
-- [[User-Guide|User Guide]]
-- [[Architecture]]
-- [[Migration]]
+- [User Guide](User-Guide)
+- [Architecture](Architecture)
+- [Migration](Migration)
 
 ## Specifications
 
-- [[Overview]]
-- [[Formal-Specification|Formal Specification]]
-- [[Determinism-Model|Determinism Model]]
-- [[API-Contracts|API Contracts]]
-- [[Spec-Divergences|Spec Divergences]]
+- [Overview](Overview)
+- [Formal Specification](Formal-Specification)
+- [Determinism Model](Determinism-Model)
+- [API Contracts](API-Contracts)
+- [Spec Divergences](Spec-Divergences)
 
 ## Reference
 
-- [[Changelog]]
-- [[GGRS-Changelog-Archive|GGRS Changelog Archive]]
-- [[Fortress-vs-GGRS|Fortress vs GGRS]]
-- [[TLAplus-Tooling-Research|TLA Plus Tooling Research]]
+- [Changelog](Changelog)
+- [GGRS Changelog Archive](GGRS-Changelog-Archive)
+- [Fortress vs GGRS](Fortress-vs-GGRS)
+- [TLA Plus Tooling Research](TLAplus-Tooling-Research)
 
 ## Community
 
-- [[Contributing]]
-- [[Code-of-Conduct|Code of Conduct]]
+- [Contributing](Contributing)
+- [Code of Conduct](Code-of-Conduct)
 
 ---
 
@@ -1054,21 +1108,21 @@ networking in deterministic multiplayer games.
 
 ## Quick Links
 
-- [[User-Guide|User Guide]] - Get started with Fortress Rollback
-- [[Architecture]] - Understand the system design
-- [[Migration]] - Migrate from GGRS
-- [[Changelog]] - See what's new
+- [User Guide](User-Guide) - Get started with Fortress Rollback
+- [Architecture](Architecture) - Understand the system design
+- [Migration](Migration) - Migrate from GGRS
+- [Changelog](Changelog) - See what's new
 
 ## Specifications
 
-- [[Formal-Specification|Formal Specification]] - TLA+ and Z3 verified protocols
-- [[Determinism-Model|Determinism Model]] - How determinism is guaranteed
-- [[API-Contracts|API Contracts]] - Public API guarantees
+- [Formal Specification](Formal-Specification) - TLA+ and Z3 verified protocols
+- [Determinism Model](Determinism-Model) - How determinism is guaranteed
+- [API Contracts](API-Contracts) - Public API guarantees
 
 ## Contributing
 
-- [[Contributing]] - How to contribute
-- [[Code-of-Conduct|Code of Conduct]] - Community guidelines
+- [Contributing](Contributing) - How to contribute
+- [Code of Conduct](Code-of-Conduct) - Community guidelines
 
 ---
 

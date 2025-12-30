@@ -91,6 +91,137 @@ class TestFindInlineCodeRanges:
         ranges = find_inline_code_ranges(content)
         assert len(ranges) == 3
 
+    def test_double_backtick_with_embedded_single(self) -> None:
+        """Double backticks correctly handle embedded single backtick.
+
+        The pattern ``code with `embedded` text`` should be detected as
+        a single code span, not multiple spans.
+        """
+        content = "text ``code with `embedded` backticks`` more"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "``code with `embedded` backticks``"
+
+    def test_triple_backticks_inline(self) -> None:
+        """Triple backticks NOT at line start are inline code.
+
+        Only triple backticks at line start (with optional whitespace before)
+        are treated as fenced code blocks.
+        """
+        content = "text```code```more"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "```code```"
+
+    def test_triple_backticks_at_line_start_skipped(self) -> None:
+        """Triple backticks at line start are skipped (handled as fenced code)."""
+        content = "```\ncode\n```"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 0
+
+    def test_unclosed_backticks_not_matched(self) -> None:
+        """Unclosed backticks are not treated as code spans.
+
+        This prevents an unclosed backtick from masking the rest of the document.
+        """
+        content = "text `unclosed code"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 0
+
+    def test_unclosed_double_backticks(self) -> None:
+        """Unclosed double backticks don't mask other valid spans.
+
+        When double backticks don't have a closing pair, they're treated as
+        literal text. Other valid inline code spans later in the content
+        are still detected.
+        """
+        content = "text ``unclosed with `single` inside"
+        ranges = find_inline_code_ranges(content)
+        # The `` at the start has no closing pair, so it's skipped.
+        # But `single` IS a valid single-backtick span and is found.
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "`single`"
+
+    def test_quadruple_backticks_inline(self) -> None:
+        """Quadruple backticks inline are detected as inline code."""
+        content = "text````code````more"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "````code````"
+
+    def test_exact_backtick_count_not_prefix(self) -> None:
+        """Closing delimiter must be exactly N backticks, not part of longer sequence.
+
+        When we have 2 opening backticks, we need exactly 2 closing backticks.
+        A 3-backtick sequence should not match as a closing delimiter for 2 backticks.
+        """
+        # Two opening backticks followed by three backticks - should not match
+        content = "``code ``` more text``"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        # The two backticks at the end should close the span, not the triple backticks
+        assert content[ranges[0][0] : ranges[0][1]] == "``code ``` more text``"
+
+    def test_single_backtick_not_matched_by_double(self) -> None:
+        """Single backtick opening should not match double backtick closing."""
+        content = "`code `` more`"
+        ranges = find_inline_code_ranges(content)
+        # The first ` should find the last ` as its closing
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "`code `` more`"
+
+    def test_double_backtick_not_matched_by_triple(self) -> None:
+        """Double backtick opening should not match triple backtick closing.
+
+        This is the specific bug case: ``code ``` should not close at the first
+        two backticks of the triple backtick sequence.
+        """
+        content = "start ``code ``` more text`` end"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "``code ``` more text``"
+
+    def test_backtick_sequence_boundary_check_before(self) -> None:
+        """Closing backticks should not be preceded by additional backticks.
+
+        If we're looking for ``, a sequence like ``` should not match because
+        the match would have a backtick immediately before.
+        """
+        content = "``x```y``"
+        ranges = find_inline_code_ranges(content)
+        # The ``` in the middle should be skipped (preceded by the end of opening),
+        # and the final `` should close the span
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "``x```y``"
+
+    def test_backtick_sequence_boundary_check_after(self) -> None:
+        """Closing backticks should not be followed by additional backticks.
+
+        If we're looking for ``, a sequence like ``` should not match because
+        the match would have a backtick immediately after.
+        """
+        content = "``code```more``text"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        # Should skip the ``` and find the closing `` at the end
+        assert content[ranges[0][0] : ranges[0][1]] == "``code```more``"
+
+    def test_exact_match_with_surrounding_backticks(self) -> None:
+        """Test that exact matching works with various backtick patterns."""
+        # Four backticks NOT at line start with triple in middle
+        content = "text ````code ``` more```` end"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "````code ``` more````"
+
+    def test_no_closing_due_to_length_mismatch(self) -> None:
+        """Opening delimiter with only longer sequences available should not close."""
+        # Only triple backticks available, but we opened with double
+        content = "``code ```"
+        ranges = find_inline_code_ranges(content)
+        # No valid closing found for the double backticks
+        assert len(ranges) == 0
+
 
 class TestDedentMkdocsTabs:
     """Tests for dedent_mkdocs_tabs function."""
