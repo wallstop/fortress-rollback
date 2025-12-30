@@ -95,6 +95,15 @@ class TestParseSidebarWikiLinks:
         links = parse_sidebar_wiki_links(sidebar)
         assert len(links) == 0
 
+    def test_unicode_decode_error(self, tmp_path: Path) -> None:
+        """Invalid UTF-8 content returns empty list with error message."""
+        sidebar = tmp_path / "_Sidebar.md"
+        # Write invalid UTF-8 bytes
+        sidebar.write_bytes(b"[[Home]]\xff\xfe[[Page]]")
+        links = parse_sidebar_wiki_links(sidebar)
+        # Should return empty list on decode error
+        assert len(links) == 0
+
 
 class TestValidateWikiLinkDisplayText:
     """Tests for validate_wiki_link_display_text function."""

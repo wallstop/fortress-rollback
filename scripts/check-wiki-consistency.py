@@ -163,9 +163,18 @@ def parse_hardcoded_sidebar_from_sync_script(sync_script_path: Path) -> str | No
 
 def parse_wiki_links_from_string(content: str) -> list[tuple[str, str, int]]:
     """
-    Parse wiki-style links from a string (used for hardcoded sidebar validation).
+    Parse wiki-style links from string content.
 
-    Returns list of (page_name, display_text, line_number) tuples.
+    This is the core parsing function used by both parse_sidebar_wiki_links
+    (for file-based parsing) and validate_sync_script_sidebar_template
+    (for hardcoded template validation).
+
+    Args:
+        content: String content to parse for wiki links.
+
+    Returns:
+        List of (page_name, display_text, line_number) tuples.
+        Wiki links have format: [[PageName|Display Text]] or [[PageName]]
     """
     wiki_link_pattern = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
     links = []
@@ -268,25 +277,19 @@ def parse_sidebar_wiki_links(sidebar_path: Path) -> list[tuple[str, str, int]]:
 
     Returns list of (page_name, display_text, line_number) tuples.
     Wiki links have format: [[PageName|Display Text]] or [[PageName]]
+
+    This function delegates to parse_wiki_links_from_string after reading the file,
+    eliminating duplication of the core parsing logic.
     """
-    wiki_link_pattern = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
-
-    links = []
-
     if not sidebar_path.exists():
-        return links
+        return []
 
     try:
         content = sidebar_path.read_text(encoding="utf-8")
-        for line_num, line in enumerate(content.splitlines(), start=1):
-            for match in wiki_link_pattern.finditer(line):
-                page_name = match.group(1).strip()
-                display_text = match.group(2).strip() if match.group(2) else page_name
-                links.append((page_name, display_text, line_num))
+        return parse_wiki_links_from_string(content)
     except (OSError, UnicodeDecodeError) as e:
         print(red(f"ERROR: Could not read {sidebar_path}: {e}"))
-
-    return links
+        return []
 
 
 # Characters that cause URL encoding issues in GitHub Wiki display text.
