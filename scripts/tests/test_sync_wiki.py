@@ -91,6 +91,64 @@ class TestFindInlineCodeRanges:
         ranges = find_inline_code_ranges(content)
         assert len(ranges) == 3
 
+    def test_double_backtick_with_embedded_single(self) -> None:
+        """Double backticks correctly handle embedded single backtick.
+
+        The pattern ``code with `embedded` text`` should be detected as
+        a single code span, not multiple spans.
+        """
+        content = "text ``code with `embedded` backticks`` more"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "``code with `embedded` backticks``"
+
+    def test_triple_backticks_inline(self) -> None:
+        """Triple backticks NOT at line start are inline code.
+
+        Only triple backticks at line start (with optional whitespace before)
+        are treated as fenced code blocks.
+        """
+        content = "text```code```more"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "```code```"
+
+    def test_triple_backticks_at_line_start_skipped(self) -> None:
+        """Triple backticks at line start are skipped (handled as fenced code)."""
+        content = "```\ncode\n```"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 0
+
+    def test_unclosed_backticks_not_matched(self) -> None:
+        """Unclosed backticks are not treated as code spans.
+
+        This prevents an unclosed backtick from masking the rest of the document.
+        """
+        content = "text `unclosed code"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 0
+
+    def test_unclosed_double_backticks(self) -> None:
+        """Unclosed double backticks don't mask other valid spans.
+
+        When double backticks don't have a closing pair, they're treated as
+        literal text. Other valid inline code spans later in the content
+        are still detected.
+        """
+        content = "text ``unclosed with `single` inside"
+        ranges = find_inline_code_ranges(content)
+        # The `` at the start has no closing pair, so it's skipped.
+        # But `single` IS a valid single-backtick span and is found.
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "`single`"
+
+    def test_quadruple_backticks_inline(self) -> None:
+        """Quadruple backticks inline are detected as inline code."""
+        content = "text````code````more"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "````code````"
+
 
 class TestDedentMkdocsTabs:
     """Tests for dedent_mkdocs_tabs function."""

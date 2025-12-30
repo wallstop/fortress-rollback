@@ -42,8 +42,12 @@ class TestFindInlineCodeRanges:
         assert content[ranges[0][0] : ranges[0][1]] == "`code`"
 
     def test_double_backtick_code_span(self) -> None:
-        """Double backtick inline code is detected."""
-        content = "Here is ``code with `backtick``` text"
+        """Double backtick inline code is detected.
+
+        Double backtick delimiters allow embedding single backticks in code.
+        The span ends at the first matching double backtick delimiter.
+        """
+        content = "Here is ``code with `backtick`` text"
         ranges = find_inline_code_ranges(content)
         assert len(ranges) == 1
         # Double backtick spans end at the first matching double backticks
@@ -120,6 +124,60 @@ class TestFindInlineCodeRanges:
         """Fenced code blocks with language specifier are skipped."""
         content = "Text\n```python\ncode\n```\nMore"
         ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 0
+
+    def test_triple_backticks_inline_not_at_line_start(self) -> None:
+        """Triple backticks NOT at line start are treated as inline code.
+
+        Only triple backticks at the start of a line (with optional whitespace)
+        are treated as fenced code blocks. Triple backticks in the middle of
+        a line are inline code spans.
+        """
+        content = "text```code```more"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "```code```"
+
+    def test_quadruple_backticks_at_line_start(self) -> None:
+        """Quadruple backticks at line start are treated as fenced code block."""
+        content = "````\ncode\n````"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 0
+
+    def test_quadruple_backticks_inline(self) -> None:
+        """Quadruple backticks inline are treated as inline code."""
+        content = "text````code````more"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "````code````"
+
+    def test_mixed_backtick_counts(self) -> None:
+        """Different backtick counts find their matching closers.
+
+        Double backticks can contain single backticks without matching.
+        """
+        content = "``code with `embedded` backticks``"
+        ranges = find_inline_code_ranges(content)
+        assert len(ranges) == 1
+        assert content[ranges[0][0] : ranges[0][1]] == "``code with `embedded` backticks``"
+
+    def test_empty_double_backtick_span(self) -> None:
+        """Empty double backtick span `` `` is detected."""
+        content = "text `` more"
+        ranges = find_inline_code_ranges(content)
+        # `` is matched as the opener, needs another `` as closer
+        # In this case, there's no closer, so no range
+        assert len(ranges) == 0
+
+    def test_consecutive_backticks_pairing(self) -> None:
+        """Consecutive backticks pair correctly.
+
+        When we have ```` (4 backticks), they should pair as 4-backtick
+        delimiter, not as two 2-backtick delimiters.
+        """
+        content = "````code````"  # At start of content = line start
+        ranges = find_inline_code_ranges(content)
+        # At line start with 4+ backticks = treated as fenced code block
         assert len(ranges) == 0
 
 

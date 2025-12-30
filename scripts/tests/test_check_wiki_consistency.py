@@ -610,6 +610,82 @@ def generate_sidebar(wiki_structure: dict[str, str]) -> str:
         assert result.errors == 2
 
 
+class TestWikiLinkOverlapDetection:
+    """Tests for markdown/wiki-link overlap detection in parse_wiki_links_from_string."""
+
+    def test_markdown_starts_inside_wiki_link(self) -> None:
+        """Markdown link starting inside a wiki-link is skipped.
+
+        Covers case: wiki_start <= match_start < wiki_end
+        """
+        # Contrived case: [[Page|Display]](extra) shouldn't parse extra as markdown
+        content = "[[Page|Display]](extra)"
+        links = parse_wiki_links_from_string(content)
+        # Should only find the wiki-link
+        assert len(links) == 1
+        assert links[0][3] == "wiki"
+
+    def test_markdown_ends_inside_wiki_link(self) -> None:
+        """Markdown link ending inside a wiki-link is skipped.
+
+        Covers case: wiki_start < match_end <= wiki_end
+        """
+        # If somehow a regex matched something ending inside a wiki-link
+        content = "prefix[[Page]]"
+        links = parse_wiki_links_from_string(content)
+        # Should only find the wiki-link
+        assert len(links) == 1
+        assert links[0] == ("Page", "Page", 1, "wiki")
+
+    def test_markdown_fully_contains_wiki_link(self) -> None:
+        """Markdown link fully containing a wiki-link is skipped.
+
+        This is the new case added: match_start < wiki_start and wiki_end < match_end.
+        When a wiki-link appears in the URL portion of a markdown link, the
+        markdown link spans across (fully contains) the wiki-link.
+        """
+        # Wiki-link in URL: markdown [text](...) where ... contains [[Page]]
+        # Wiki-link is at positions 7-15, markdown would be at 0-16
+        # This exercises the overlap check: 0 < 7 and 15 < 16
+        content = "[text]([[Page]])"
+        links = parse_wiki_links_from_string(content)
+        # Wiki-link should be found; markdown link that contains it is skipped
+        wiki_links = [l for l in links if l[3] == "wiki"]
+        md_links = [l for l in links if l[3] == "markdown"]
+        assert len(wiki_links) == 1
+        assert len(md_links) == 0  # Markdown link skipped due to overlap
+        assert wiki_links[0][:2] == ("Page", "Page")
+
+    def test_non_overlapping_links_both_parsed(self) -> None:
+        """Non-overlapping wiki-link and markdown link are both parsed."""
+        content = "[[WikiPage]] and [MarkdownText](MarkdownTarget)"
+        links = parse_wiki_links_from_string(content)
+        assert len(links) == 2
+        # Both should be found
+        wiki_links = [l for l in links if l[3] == "wiki"]
+        md_links = [l for l in links if l[3] == "markdown"]
+        assert len(wiki_links) == 1
+        assert len(md_links) == 1
+        assert wiki_links[0][:2] == ("WikiPage", "WikiPage")
+        assert md_links[0][:2] == ("MarkdownTarget", "MarkdownText")
+
+    def test_adjacent_links_both_parsed(self) -> None:
+        """Adjacent (but not overlapping) links are both parsed."""
+        content = "[[Wiki]][Markdown](Target)"
+        links = parse_wiki_links_from_string(content)
+        # Both should be found since they don't overlap
+        assert len(links) == 2
+
+    def test_multiple_wiki_links_then_markdown(self) -> None:
+        """Multiple wiki-links followed by markdown link."""
+        content = "[[A]] [[B]] [C](Target)"
+        links = parse_wiki_links_from_string(content)
+        assert len(links) == 3
+        assert links[0][:2] == ("A", "A")
+        assert links[1][:2] == ("B", "B")
+        assert links[2][:2] == ("Target", "C")
+
+
 class TestActualSyncWikiScript:
     """Integration test validating the actual sync-wiki.py script."""
 

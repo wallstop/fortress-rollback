@@ -209,12 +209,17 @@ def parse_wiki_links_from_string(
             if target.startswith(("http://", "https://", "#", "mailto:")):
                 continue
             # Skip if this markdown link overlaps with a wiki-link position
-            # This avoids double-parsing when wiki-link syntax contains brackets
+            # This avoids double-parsing when wiki-link syntax contains brackets.
+            # Three overlap cases:
+            #   1. Markdown link starts within wiki-link
+            #   2. Markdown link ends within wiki-link
+            #   3. Markdown link fully contains wiki-link
             match_start = match.start()
             match_end = match.end()
             overlaps_wiki = any(
-                wiki_start <= match_start < wiki_end
-                or wiki_start < match_end <= wiki_end
+                wiki_start <= match_start < wiki_end  # Start inside wiki-link
+                or wiki_start < match_end <= wiki_end  # End inside wiki-link
+                or (match_start < wiki_start and wiki_end < match_end)  # Contains wiki-link
                 for wiki_start, wiki_end in wiki_link_ranges
             )
             if overlaps_wiki:
