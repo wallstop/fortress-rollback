@@ -826,7 +826,7 @@ impl<T: Config> SessionBuilder<T> {
             self.sync_config,
             self.protocol_config,
         )?;
-        host.synchronize();
+        host.synchronize().ok()?;
         Some(SpectatorSession::new(
             self.num_players,
             Box::new(socket),
@@ -888,7 +888,7 @@ impl<T: Config> SessionBuilder<T> {
             self.protocol_config,
         )?;
         // start the synchronization
-        endpoint.synchronize();
+        endpoint.synchronize().ok()?;
         Some(endpoint)
     }
 }

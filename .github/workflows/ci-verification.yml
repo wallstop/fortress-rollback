@@ -270,3 +270,37 @@ jobs:
       - name: Run Kani verification (Tier 3 - Part ${{ matrix.part }}/5)
         run: ./scripts/verify-kani.sh --quick --tier 3 --part ${{ matrix.part }} --parts 5 --fail-fast --jobs 2
         timeout-minutes: 20
+
+  # Loom Concurrency Testing (cross-platform)
+  loom-tests:
+    name: Loom Concurrency Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            loom-tests/target
+          key: loom-${{ matrix.os }}-cargo-${{ hashFiles('loom-tests/Cargo.lock') }}
+          restore-keys: |
+            loom-${{ matrix.os }}-cargo-
+
+      - name: Run Loom tests
+        working-directory: loom-tests
+        run: cargo test --release
+        env:
+          RUSTFLAGS: "--cfg loom"
+          LOOM_MAX_PREEMPTIONS: 3

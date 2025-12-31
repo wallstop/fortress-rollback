@@ -866,6 +866,7 @@ fn run_two_peer_test(
 /// The library's `sync_health()` API is the authoritative determinism check.
 ///
 /// See progress/session-73-flaky-network-test-analysis.md for details.
+#[track_caller]
 fn verify_determinism(result1: &TestResult, result2: &TestResult, context: &str) {
     // The library's sync_health() API already verified determinism.
     // final_value comparison is disabled because it depends on accumulation timing.

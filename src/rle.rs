@@ -46,6 +46,8 @@ pub struct RleDecodeError {
 }
 
 impl RleDecodeError {
+    #[cold]
+    #[inline(never)]
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -1113,6 +1115,15 @@ mod property_tests {
     use super::*;
     use proptest::prelude::*;
 
+    /// Returns reduced iteration count when running under Miri for faster testing.
+    const fn miri_case_count() -> u32 {
+        if cfg!(miri) {
+            10
+        } else {
+            256
+        }
+    }
+
     /// Maximum size for property tests to keep execution time reasonable
     const MAX_TEST_SIZE: usize = 4096;
 
@@ -1143,6 +1154,10 @@ mod property_tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: miri_case_count(),
+            ..ProptestConfig::default()
+        })]
         /// Property: Roundtrip invariant - decode(encode(data)) == data for ALL inputs.
         ///
         /// This is THE fundamental property of any lossless compression algorithm.

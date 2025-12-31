@@ -100,8 +100,7 @@ mod tests {
     #[test]
     fn get_cell_valid_frame_returns_ok() {
         let saved_states: SavedStates<u32> = SavedStates::new(3);
-        let result = saved_states.get_cell(Frame::new(0));
-        assert!(result.is_ok());
+        saved_states.get_cell(Frame::new(0)).unwrap();
     }
 
     #[test]
@@ -160,11 +159,8 @@ mod tests {
         let saved_states: SavedStates<u32> = SavedStates::new(3); // 4 cells
 
         // Very large frame number should still work via modulo
-        let result = saved_states.get_cell(Frame::new(1_000_000));
-        assert!(result.is_ok());
-
         // Verify it maps to the correct index (1_000_000 % 4 = 0)
-        let cell = result.unwrap();
+        let cell = saved_states.get_cell(Frame::new(1_000_000)).unwrap();
         cell.save(Frame::new(1_000_000), Some(999), None);
         assert_eq!(cell.load(), Some(999));
     }

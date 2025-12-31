@@ -1860,8 +1860,7 @@ mod tests {
     #[test]
     fn add_local_input_for_valid_handle_succeeds() {
         let mut session = create_local_only_session();
-        let result = session.add_local_input(PlayerHandle::new(0), 42u8);
-        assert!(result.is_ok());
+        session.add_local_input(PlayerHandle::new(0), 42u8).unwrap();
     }
 
     #[test]
@@ -2049,8 +2048,7 @@ mod tests {
     fn disconnect_player_remote_succeeds() {
         let mut session = create_two_player_session();
         // Disconnect remote player (handle 1)
-        let result = session.disconnect_player(PlayerHandle::new(1));
-        assert!(result.is_ok());
+        session.disconnect_player(PlayerHandle::new(1)).unwrap();
     }
 
     #[test]
@@ -2472,14 +2470,14 @@ mod tests {
     #[test]
     fn check_invariants_no_desync_passes() {
         let session = create_local_only_session();
-        assert!(session.check_invariants().is_ok());
+        session.check_invariants().unwrap();
     }
 
     #[test]
     fn check_invariants_with_remote_no_desync_passes() {
         let session = create_two_player_session();
         // No desync detected yet
-        assert!(session.check_invariants().is_ok());
+        session.check_invariants().unwrap();
     }
 
     // ==========================================

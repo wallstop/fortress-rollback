@@ -1033,6 +1033,60 @@ jobs:
 
 ---
 
+## Cross-Compilation Ecosystem Challenges
+
+### Understanding the Rust Cross-Compile Landscape
+
+Unlike Go, Rust cross-compilation requires explicit toolchain configuration:
+
+| Aspect | Go | Rust |
+|--------|----|----|
+| **libc dependency** | None (syscall shims) | Required for `std` |
+| **Cross-compile setup** | `GOOS=linux GOARCH=amd64 go build` | Target + linker config |
+| **Static by default** | Yes | No (glibc dynamic) |
+| **Binary portability** | Excellent | Good with musl |
+
+### Known Challenges
+
+1. **Cargo's Linker Detection**: Cargo has no built-in logic for detecting the correct linker; defaults to `cc` requiring manual configuration
+2. **libc Dependency**: Rust's `std` depends on libc; unlike Go, cannot easily bypass for syscalls
+3. **LLD Bundling**: LLVM's `lld` linker not yet bundled with Rust, complicating cross-linking
+4. **Platform-Specific Binaries**: No universal binary format; each OS requires separate builds
+
+### Recommended Solutions
+
+| Tool | Best For | Notes |
+|------|----------|-------|
+| **cross-rs** | Complete cross-compile | Docker-based, pre-configured |
+| **cargo-zigbuild** | glibc version control | Uses Zig's linker, no Docker |
+| **cargo-xwin** | Linux → Windows MSVC | Easy MSVC target without Windows |
+| **musl targets** | Static Linux binaries | Portable but some crate issues |
+| **GitHub Actions matrix** | Release builds | Native runners per platform |
+
+### Static Linux Binaries with musl
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+```
+
+**musl Caveats:**
+
+- DNS resolution requires special handling (no NSS)
+- Some crates with C dependencies may not compile cleanly
+- May need `CC_x86_64_unknown_linux_musl=musl-gcc` environment variable
+
+### Windows MSVC Preference
+
+MSVC toolchain produces significantly smaller binaries than MinGW:
+
+| Toolchain | Binary Size | Reason |
+|-----------|-------------|--------|
+| `x86_64-pc-windows-gnu` | ~100 MB | Embeds debug symbols |
+| `x86_64-pc-windows-msvc` | ~10 MB | Symbols in separate .pdb |
+
+---
+
 ## Common Pitfalls
 
 ### Pitfall: Breaking Other Platforms Silently
@@ -1061,6 +1115,51 @@ jobs:
 
 ```bash
 cargo zigbuild --target x86_64-unknown-linux-gnu.2.17
+```
+
+### Pitfall: Interior Mutability with UniFFI
+
+**Problem:** UniFFI assumes objects may be mutated from multiple threads.
+
+**Solution:** Use interior mutability with `Mutex` or `RwLock`:
+
+```rust
+// ❌ Won't work with UniFFI
+impl MyObject {
+    fn update(&mut self) { ... }
+}
+
+// ✅ Use interior mutability
+use std::sync::Mutex;
+
+#[derive(uniffi::Object)]
+struct MyObject {
+    data: Mutex<InnerData>,
+}
+
+#[uniffi::export]
+impl MyObject {
+    fn update(&self) {
+        let mut data = self.data.lock().unwrap();
+        // mutate data
+    }
+}
+```
+
+### Pitfall: UniFFI Arc Requirements
+
+**Problem:** UniFFI constructors must return `Arc<Self>`.
+
+**Solution:**
+
+```rust
+#[uniffi::export]
+impl RouteAdapter {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self { /* ... */ })
+    }
+}
 ```
 
 ---

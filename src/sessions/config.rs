@@ -1486,7 +1486,7 @@ mod tests {
     #[test]
     fn test_protocol_config_validate_default_is_valid() {
         let config = ProtocolConfig::default();
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1516,21 +1516,21 @@ mod tests {
             quality_report_interval: Duration::from_millis(1),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (10000ms)
         let config = ProtocolConfig {
             quality_report_interval: Duration::from_millis(10000),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             quality_report_interval: Duration::from_millis(500),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1576,21 +1576,21 @@ mod tests {
             shutdown_delay: Duration::from_millis(1),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (300000ms)
         let config = ProtocolConfig {
             shutdown_delay: Duration::from_millis(300000),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             shutdown_delay: Duration::from_millis(10000),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1636,21 +1636,21 @@ mod tests {
             max_checksum_history: 1,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (1024)
         let config = ProtocolConfig {
             max_checksum_history: 1024,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             max_checksum_history: 64,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1696,21 +1696,21 @@ mod tests {
             pending_output_limit: 1,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (4096)
         let config = ProtocolConfig {
             pending_output_limit: 4096,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             pending_output_limit: 256,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1756,21 +1756,21 @@ mod tests {
             sync_retry_warning_threshold: 1,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (1000)
         let config = ProtocolConfig {
             sync_retry_warning_threshold: 1000,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             sync_retry_warning_threshold: 25,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1816,21 +1816,21 @@ mod tests {
             sync_duration_warning_ms: 1,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (300000)
         let config = ProtocolConfig {
             sync_duration_warning_ms: 300000,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             sync_duration_warning_ms: 5000,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1876,21 +1876,21 @@ mod tests {
             input_history_multiplier: 1,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (16)
         let config = ProtocolConfig {
             input_history_multiplier: 16,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             input_history_multiplier: 4,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1961,7 +1961,7 @@ mod tests {
             input_history_multiplier: 1,
             protocol_rng_seed: None,
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Test a config with all fields at their maximum valid values
         let config = ProtocolConfig {
@@ -1974,7 +1974,7 @@ mod tests {
             input_history_multiplier: 16,
             protocol_rng_seed: None,
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     // ========================================================================
@@ -2018,7 +2018,7 @@ mod tests {
     fn test_protocol_config_seed_validates_ok() {
         // Config with seed should validate successfully
         let config = ProtocolConfig::deterministic(42);
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 }
 

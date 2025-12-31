@@ -205,12 +205,20 @@ impl FrameRange {
 > **See also:** Performance and code quality guides in `.llm/skills/`:
 >
 > - [high-performance-rust.md](skills/high-performance-rust.md) — Performance optimization patterns and build configuration
+> - [rust-binary-size-optimization.md](skills/rust-binary-size-optimization.md) — Minimizing binary size for WASM, embedded, and containers
 > - [rust-refactoring-guide.md](skills/rust-refactoring-guide.md) — Safe code transformation patterns with verification
 > - [rust-idioms-patterns.md](skills/rust-idioms-patterns.md) — Idiomatic Rust patterns and best practices
 > - [clippy-configuration.md](skills/clippy-configuration.md) — Clippy lint configuration and enforcement
 > - [zero-copy-memory-patterns.md](skills/zero-copy-memory-patterns.md) — Zero-copy and memory efficiency patterns
 > - [async-rust-best-practices.md](skills/async-rust-best-practices.md) — Async Rust patterns for concurrent code
 > - [rust-compile-time-optimization.md](skills/rust-compile-time-optimization.md) — Build and compile time optimization
+>
+> **Crate publishing and organization guides:**
+>
+> - [crate-publishing-guide.md](skills/crate-publishing-guide.md) — Publishing crates to crates.io with best practices
+> - [workspace-organization.md](skills/workspace-organization.md) — Workspace structure, module organization, when to split crates
+> - [public-api-design.md](skills/public-api-design.md) — Designing stable, ergonomic public APIs
+> - [dependency-management.md](skills/dependency-management.md) — Evaluating, managing, and securing dependencies
 
 ### Safety-Focused CI Checks (ci-safety.yml)
 
@@ -263,6 +271,7 @@ pub fn function(param1: Type) -> Result<ReturnType, FortressError> {
 > - [testing-tools-reference.md](skills/testing-tools-reference.md) — Tool ecosystem reference (nextest, proptest, mockall, etc.)
 > - [property-testing.md](skills/property-testing.md) — Property-based testing to find edge cases automatically
 > - [mutation-testing.md](skills/mutation-testing.md) — Mutation testing for test quality verification
+> - [rust-fuzzing-guide.md](skills/rust-fuzzing-guide.md) — Fuzz testing with cargo-fuzz, LibAFL, and structured fuzzing
 > - [cross-platform-ci-cd.md](skills/cross-platform-ci-cd.md) — CI/CD workflows for multi-platform builds
 
 #### Test Organization
@@ -432,6 +441,8 @@ cargo mutants -f src/module.rs --timeout 30 --jobs 4
 > - [deterministic-simulation-testing.md](skills/deterministic-simulation-testing.md) — DST frameworks (madsim, turmoil), failure injection, controlled concurrency
 > - [cross-platform-games.md](skills/cross-platform-games.md) — Cross-platform game development (WASM, mobile, desktop)
 > - [cross-platform-rust.md](skills/cross-platform-rust.md) — Multi-platform project architecture and tooling
+> - [rust-binary-size-optimization.md](skills/rust-binary-size-optimization.md) — Minimizing binary size for WASM, embedded, and containers
+> - [rust-ffi-best-practices.md](skills/rust-ffi-best-practices.md) — Hybrid Rust/C/C++ applications and FFI patterns
 > - [wasm-rust-guide.md](skills/wasm-rust-guide.md) — Rust to WebAssembly compilation and toolchain
 > - [no-std-guide.md](skills/no-std-guide.md) — `no_std` patterns for WASM and embedded
 > - [wasm-threading.md](skills/wasm-threading.md) — Threading and concurrency in WebAssembly
@@ -496,6 +507,12 @@ if !valid { return Err(FortressError::InvalidState); }  // Explicit error
 ---
 
 ## Project Architecture
+
+> **See also:** Organization and publishing guides in `.llm/skills/`:
+>
+> - [workspace-organization.md](skills/workspace-organization.md) — When to split crates, module patterns, test organization
+> - [public-api-design.md](skills/public-api-design.md) — Designing stable, ergonomic public APIs
+> - [crate-publishing-guide.md](skills/crate-publishing-guide.md) — Publishing crates to crates.io
 
 ### Repository Structure
 

@@ -413,11 +413,8 @@ mod tests {
     fn add_local_input_valid_handle_succeeds() {
         let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 0, 0, None);
 
-        let result = session.add_local_input(PlayerHandle::new(0), 42);
-        assert!(result.is_ok());
-
-        let result = session.add_local_input(PlayerHandle::new(1), 100);
-        assert!(result.is_ok());
+        session.add_local_input(PlayerHandle::new(0), 42).unwrap();
+        session.add_local_input(PlayerHandle::new(1), 100).unwrap();
     }
 
     #[test]
@@ -498,10 +495,7 @@ mod tests {
             .add_local_input(PlayerHandle::new(1), 100)
             .expect("should succeed");
 
-        let requests = session.advance_frame();
-        assert!(requests.is_ok());
-
-        let requests = requests.unwrap();
+        let requests = session.advance_frame().unwrap();
         // With check_distance 0, we should only get AdvanceFrame
         assert!(requests
             .iter()

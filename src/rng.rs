@@ -818,7 +818,20 @@ mod property_tests {
     use super::*;
     use proptest::prelude::*;
 
+    /// Returns reduced iteration count when running under Miri for faster testing.
+    const fn miri_case_count() -> u32 {
+        if cfg!(miri) {
+            10
+        } else {
+            256
+        }
+    }
+
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: miri_case_count(),
+            ..ProptestConfig::default()
+        })]
         /// Property: Same seed always produces identical sequence.
         ///
         /// This is critical for rollback networking - game state must be

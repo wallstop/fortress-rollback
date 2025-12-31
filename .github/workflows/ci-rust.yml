@@ -11,6 +11,8 @@ on:
       - '.cargo/**'
       - 'clippy.toml'
       - 'rustfmt.toml'
+      - 'scripts/verify-kani.sh'
+      - 'scripts/check-kani-coverage.sh'
       - '.github/workflows/ci-rust.yml'
   pull_request:
     branches: [main]
@@ -22,6 +24,8 @@ on:
       - '.cargo/**'
       - 'clippy.toml'
       - 'rustfmt.toml'
+      - 'scripts/verify-kani.sh'
+      - 'scripts/check-kani-coverage.sh'
       - '.github/workflows/ci-rust.yml'
   workflow_dispatch:
 
@@ -29,6 +33,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Quick validation that all Kani proofs are in tier lists
+  kani-coverage:
+    name: Kani Proof Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate Kani proof coverage
+        run: ./scripts/check-kani-coverage.sh
+        # Ensures all #[kani::proof] functions are in tier lists in verify-kani.sh
+
   # Primary build and test job (cross-platform matrix)
   build:
     name: Build & Test (${{ matrix.os }})
@@ -134,10 +151,15 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
-  # Miri undefined behavior check
+  # Miri undefined behavior check (cross-platform)
   miri:
-    name: Miri UB Check
-    runs-on: ubuntu-latest
+    name: Miri UB Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v6
@@ -155,15 +177,21 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: miri-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: miri-${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            miri-${{ runner.os }}-cargo-
+            miri-${{ matrix.os }}-cargo-
 
       - name: Setup Miri
         run: cargo miri setup
 
       - name: Run Miri tests (library)
-        run: cargo miri test --lib -- --skip property_tests
+        run: cargo miri test --lib
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-many-seeds=0..16 -Zmiri-symbolic-alignment-check"
+
+      - name: Run Miri tests (big-endian)
+        if: runner.os == 'Linux'
+        run: cargo miri test --lib --target s390x-unknown-linux-gnu -- --skip property_tests
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
 
@@ -307,3 +335,140 @@ jobs:
       - name: Check semver compatibility
         uses: obi1kenobi/cargo-semver-checks-action@v2
         continue-on-error: true  # Warn but don't fail - breaking changes are acceptable if documented
+
+  # WASM build verification
+  wasm-check:
+    name: WASM Build Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain with WASM target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Configure sccache
+        id: sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        continue-on-error: true
+
+      - name: Verify sccache is working
+        id: sccache-check
+        if: steps.sccache.outcome == 'success'
+        run: ./scripts/verify-sccache.sh
+        continue-on-error: true
+
+      - name: Clear sccache env on failure
+        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
+        run: |
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: wasm-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            wasm-${{ runner.os }}-cargo-
+
+      - name: Check WASM build (no default features)
+        run: cargo check --target wasm32-unknown-unknown --no-default-features
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Check WASM build (with sync-send feature)
+        run: cargo check --target wasm32-unknown-unknown --features sync-send
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Check WASM build (with paranoid feature)
+        run: cargo check --target wasm32-unknown-unknown --features paranoid
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Check WASM build (with json feature)
+        run: cargo check --target wasm32-unknown-unknown --features json
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Run clippy for WASM target
+        run: cargo clippy --target wasm32-unknown-unknown --no-default-features -- -D warnings
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+  # ARM64 (aarch64) cross-compilation verification
+  arm64-cross:
+    name: ARM64 Cross-Compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: arm64-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            arm64-${{ runner.os }}-cargo-
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cross
+
+      - name: Check ARM64 build (no default features)
+        run: cross check --target aarch64-unknown-linux-gnu --no-default-features
+
+      - name: Check ARM64 build (default features)
+        run: cross check --target aarch64-unknown-linux-gnu
+
+      - name: Check ARM64 build (with sync-send feature)
+        run: cross check --target aarch64-unknown-linux-gnu --features sync-send
+
+      - name: Check ARM64 build (with paranoid feature)
+        run: cross check --target aarch64-unknown-linux-gnu --features paranoid
+
+      - name: Check ARM64 build (with json feature)
+        run: cross check --target aarch64-unknown-linux-gnu --features json
+
+      - name: Check ARM64 build (with tokio feature)
+        run: cross check --target aarch64-unknown-linux-gnu --features tokio
+
+      - name: Build ARM64 release (verify full compilation)
+        run: cross build --target aarch64-unknown-linux-gnu --release

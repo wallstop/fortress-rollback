@@ -20,6 +20,48 @@
 use std::{fmt::Debug, hash::Hash};
 
 pub use error::FortressError;
+
+/// A specialized `Result` type for Fortress Rollback operations.
+///
+/// This type alias provides a convenient way to write function signatures
+/// that return [`FortressError`] as the error type. It supports an optional
+/// second type parameter to override the error type if needed.
+///
+/// # Examples
+///
+/// Using the default error type:
+///
+/// ```
+/// use fortress_rollback::{Result, FortressError};
+///
+/// fn process_frame() -> Result<()> {
+///     // Returns Result<(), FortressError>
+///     Ok(())
+/// }
+/// ```
+///
+/// Overriding the error type:
+///
+/// ```
+/// use fortress_rollback::Result;
+///
+/// fn custom_operation() -> Result<String, std::io::Error> {
+///     // Returns Result<String, std::io::Error>
+///     Ok("success".to_string())
+/// }
+/// ```
+///
+/// # Note
+///
+/// This type alias does not conflict with `std::result::Result` because
+/// it has the same name but different defaults. If you need both, you can
+/// use the fully qualified path `std::result::Result` or alias this type:
+///
+/// ```
+/// use fortress_rollback::Result as FortressResult;
+/// ```
+pub type Result<T, E = FortressError> = std::result::Result<T, E>;
+
 pub use network::chaos_socket::{ChaosConfig, ChaosConfigBuilder, ChaosSocket, ChaosStats};
 pub use network::messages::Message;
 pub use network::network_stats::NetworkStats;
@@ -111,6 +153,15 @@ pub mod tokio_socket {
 ///
 /// See module documentation for detailed usage and performance considerations.
 pub mod checksum;
+
+/// Convenient re-exports for common usage.
+///
+/// This module provides a "prelude" that re-exports the most commonly used types
+/// from Fortress Rollback, allowing you to import them all at once with
+/// `use fortress_rollback::prelude::*;`
+///
+/// See the [`prelude`] module documentation for the full list of included types.
+pub mod prelude;
 
 // Internal modules - made pub for re-export in __internal, but doc(hidden) for API cleanliness
 #[doc(hidden)]

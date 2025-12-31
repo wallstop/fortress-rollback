@@ -795,6 +795,7 @@ fn test_synchronization_data_driven() {
 }
 
 /// Runs a single synchronization test case.
+#[track_caller]
 fn run_sync_test_case(
     case: &SyncTestCase,
     port1: u16,
@@ -1323,6 +1324,7 @@ fn test_polling_robustness_data_driven() {
 }
 
 /// Runs a single timing robustness test case.
+#[track_caller]
 fn run_timing_test_case(
     case: &TimingTestCase,
     port1: u16,

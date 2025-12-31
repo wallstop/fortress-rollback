@@ -289,7 +289,20 @@ mod property_tests {
     use proptest::prelude::*;
     use std::hash::BuildHasher;
 
+    /// Returns reduced iteration count when running under Miri for faster testing.
+    const fn miri_case_count() -> u32 {
+        if cfg!(miri) {
+            10
+        } else {
+            256
+        }
+    }
+
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: miri_case_count(),
+            ..ProptestConfig::default()
+        })]
         /// Property: Determinism - Same input always produces same hash
         ///
         /// This is critical for rollback networking where peers must agree on checksums.

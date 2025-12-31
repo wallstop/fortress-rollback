@@ -101,6 +101,7 @@ fn wait_for_sync(
 }
 
 /// Asserts that synchronization completed successfully, with detailed diagnostics on failure.
+#[track_caller]
 fn assert_synchronized(
     spec_sess: &SpectatorSession<StubConfig>,
     host_sess: &P2PSession<StubConfig>,

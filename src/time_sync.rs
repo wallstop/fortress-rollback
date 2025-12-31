@@ -569,6 +569,15 @@ mod property_tests {
     use super::*;
     use proptest::prelude::*;
 
+    /// Returns reduced iteration count when running under Miri for faster testing.
+    const fn miri_case_count() -> u32 {
+        if cfg!(miri) {
+            10
+        } else {
+            256
+        }
+    }
+
     /// Maximum frame value for property tests (keep tractable)
     const MAX_FRAME: i32 = 10_000;
 
@@ -591,6 +600,10 @@ mod property_tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: miri_case_count(),
+            ..ProptestConfig::default()
+        })]
         /// Property: Window index is always in bounds.
         ///
         /// For any valid frame number and window size, the computed index

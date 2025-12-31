@@ -8,6 +8,42 @@ Cross-platform CI/CD for Rust projects requires careful orchestration of builds 
 
 ---
 
+## Core Principle: Test Everything Cross-Platform
+
+**All builds and tests should run on a cross-platform matrix whenever possible.** Platform-specific bugs (memory layout differences, threading behavior, endianness, OS-specific syscalls) can cause production failures that are invisible when testing on only one platform.
+
+### What Should Run Cross-Platform
+
+| Category | Cross-Platform Priority | Rationale |
+|----------|------------------------|-----------|
+| **Unit tests** | Required | Catch platform-specific logic bugs |
+| **Integration tests** | Required | OS-specific behavior differences |
+| **Loom concurrency tests** | Required | Threading/scheduler behavior varies |
+| **Miri UB checks** | Required | Memory layout, alignment differ by platform |
+| **Clippy/fmt** | One platform OK | Code is platform-agnostic |
+| **Coverage** | One platform OK | Measures same code paths |
+| **Security scanning** | One platform OK | Dependency analysis is platform-agnostic |
+| **Formal verification (Kani)** | One platform OK | Proofs are platform-agnostic (Linux-only tool) |
+
+### Standard Cross-Platform Matrix
+
+```yaml
+strategy:
+  fail-fast: false  # Run all platforms even if one fails
+  matrix:
+    os: [ubuntu-latest, windows-latest, macos-latest]
+```
+
+### Why `fail-fast: false`?
+
+Setting `fail-fast: false` ensures all platforms run to completion. This is critical because:
+
+1. A Linux-only failure might mask a different Windows-only failure
+2. Developers can fix multiple platform issues in one PR cycle
+3. Provides complete visibility into cross-platform health
+
+---
+
 ## Target Platform Matrix
 
 ### Common Rust Targets

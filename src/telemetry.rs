@@ -21,8 +21,8 @@
 //! assert!(observer.violations().is_empty(), "unexpected violations");
 //! ```
 
+use crate::sync::Mutex;
 use crate::Frame;
-use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -242,6 +242,11 @@ pub struct SpecViolation {
 
 impl SpecViolation {
     /// Creates a new specification violation.
+    ///
+    /// Marked `#[cold]` because violations should be rare in normal operation.
+    /// `#[inline(never)]` prevents error-path code from polluting caller instruction cache.
+    #[cold]
+    #[inline(never)]
     #[must_use]
     pub fn new(
         severity: ViolationSeverity,
@@ -260,6 +265,8 @@ impl SpecViolation {
     }
 
     /// Sets the frame at which this violation occurred.
+    #[cold]
+    #[inline(never)]
     #[must_use]
     pub fn with_frame(mut self, frame: Frame) -> Self {
         self.frame = Some(frame);
@@ -267,6 +274,8 @@ impl SpecViolation {
     }
 
     /// Adds a context key-value pair.
+    #[cold]
+    #[inline(never)]
     #[must_use]
     pub fn with_context(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.context.insert(key.into(), value.into());
@@ -517,30 +526,67 @@ impl CollectingObserver {
     }
 
     /// Returns a copy of all collected violations.
+    #[cfg(not(loom))]
     #[must_use]
     pub fn violations(&self) -> Vec<SpecViolation> {
         self.violations.lock().clone()
     }
 
+    /// Returns a copy of all collected violations (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn violations(&self) -> Vec<SpecViolation> {
+        self.violations.lock().unwrap().clone()
+    }
+
     /// Returns the number of collected violations.
+    #[cfg(not(loom))]
     #[must_use]
     pub fn len(&self) -> usize {
         self.violations.lock().len()
     }
 
+    /// Returns the number of collected violations (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.violations.lock().unwrap().len()
+    }
+
     /// Returns true if no violations have been collected.
+    #[cfg(not(loom))]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.violations.lock().is_empty()
     }
 
+    /// Returns true if no violations have been collected (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.violations.lock().unwrap().is_empty()
+    }
+
     /// Checks if any violation of the specified kind has been collected.
+    #[cfg(not(loom))]
     #[must_use]
     pub fn has_violation(&self, kind: ViolationKind) -> bool {
         self.violations.lock().iter().any(|v| v.kind == kind)
     }
 
+    /// Checks if any violation of the specified kind has been collected (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn has_violation(&self, kind: ViolationKind) -> bool {
+        self.violations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v.kind == kind)
+    }
+
     /// Checks if any violation with the specified severity has been collected.
+    #[cfg(not(loom))]
     #[must_use]
     pub fn has_severity(&self, severity: ViolationSeverity) -> bool {
         self.violations
@@ -549,7 +595,19 @@ impl CollectingObserver {
             .any(|v| v.severity == severity)
     }
 
+    /// Checks if any violation with the specified severity has been collected (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn has_severity(&self, severity: ViolationSeverity) -> bool {
+        self.violations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v.severity == severity)
+    }
+
     /// Returns all violations matching the specified kind.
+    #[cfg(not(loom))]
     #[must_use]
     pub fn violations_of_kind(&self, kind: ViolationKind) -> Vec<SpecViolation> {
         self.violations
@@ -560,7 +618,21 @@ impl CollectingObserver {
             .collect()
     }
 
+    /// Returns all violations matching the specified kind (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn violations_of_kind(&self, kind: ViolationKind) -> Vec<SpecViolation> {
+        self.violations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|v| v.kind == kind)
+            .cloned()
+            .collect()
+    }
+
     /// Returns all violations at or above the specified severity.
+    #[cfg(not(loom))]
     #[must_use]
     pub fn violations_at_severity(&self, min_severity: ViolationSeverity) -> Vec<SpecViolation> {
         self.violations
@@ -571,15 +643,43 @@ impl CollectingObserver {
             .collect()
     }
 
+    /// Returns all violations at or above the specified severity (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn violations_at_severity(&self, min_severity: ViolationSeverity) -> Vec<SpecViolation> {
+        self.violations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|v| v.severity >= min_severity)
+            .cloned()
+            .collect()
+    }
+
     /// Clears all collected violations.
+    #[cfg(not(loom))]
     pub fn clear(&self) {
         self.violations.lock().clear();
     }
+
+    /// Clears all collected violations (loom version).
+    #[cfg(loom)]
+    pub fn clear(&self) {
+        self.violations.lock().unwrap().clear();
+    }
 }
 
+#[cfg(not(loom))]
 impl ViolationObserver for CollectingObserver {
     fn on_violation(&self, violation: &SpecViolation) {
         self.violations.lock().push(violation.clone());
+    }
+}
+
+#[cfg(loom)]
+impl ViolationObserver for CollectingObserver {
+    fn on_violation(&self, violation: &SpecViolation) {
+        self.violations.lock().unwrap().push(violation.clone());
     }
 }
 
@@ -868,6 +968,8 @@ macro_rules! assert_violation {
 /// // Report with no observer (uses TracingObserver)
 /// report_to_observer(None::<&Arc<CollectingObserver>>, &violation);
 /// ```
+#[cold]
+#[inline(never)]
 pub fn report_to_observer<O: ViolationObserver + ?Sized>(
     observer: Option<&Arc<O>>,
     violation: &SpecViolation,
@@ -951,6 +1053,8 @@ pub struct InvariantViolation {
 
 impl InvariantViolation {
     /// Creates a new invariant violation.
+    #[cold]
+    #[inline(never)]
     #[must_use]
     pub fn new(type_name: &'static str, invariant: impl Into<String>) -> Self {
         Self {
@@ -961,6 +1065,8 @@ impl InvariantViolation {
     }
 
     /// Adds additional details to the violation.
+    #[cold]
+    #[inline(never)]
     #[must_use]
     pub fn with_details(mut self, details: impl Into<String>) -> Self {
         self.details = Some(details.into());
@@ -1803,7 +1909,7 @@ mod tests {
     #[test]
     fn test_invariant_checker_trait_ok() {
         let checker = TestCheckerOk;
-        assert!(checker.check_invariants().is_ok());
+        checker.check_invariants().unwrap();
     }
 
     #[test]

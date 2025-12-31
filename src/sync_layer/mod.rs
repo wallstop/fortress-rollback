@@ -821,9 +821,8 @@ mod sync_layer_tests {
         assert_eq!(sync_layer.current_frame(), Frame::new(3));
 
         // Load frame 0
-        let result = sync_layer.load_frame(Frame::new(0));
-        assert!(result.is_ok());
-        match result.unwrap() {
+        let request = sync_layer.load_frame(Frame::new(0)).unwrap();
+        match request {
             FortressRequest::LoadGameState { frame, cell } => {
                 assert_eq!(frame, Frame::new(0));
                 assert_eq!(cell.load(), Some(100u8));
@@ -1011,8 +1010,7 @@ mod sync_layer_tests {
         assert_eq!(sync_layer.last_saved_frame(), Frame::new(5));
 
         // Rollback to frame 2
-        let result = sync_layer.load_frame(Frame::new(2));
-        assert!(result.is_ok());
+        sync_layer.load_frame(Frame::new(2)).unwrap();
 
         // INVARIANT CHECK: last_saved_frame must be <= current_frame after rollback
         assert_eq!(sync_layer.current_frame(), Frame::new(2));
@@ -1052,8 +1050,7 @@ mod sync_layer_tests {
         assert_eq!(sync_layer.last_saved_frame(), Frame::new(3));
 
         // Rollback all the way to frame 0
-        let result = sync_layer.load_frame(Frame::new(0));
-        assert!(result.is_ok());
+        sync_layer.load_frame(Frame::new(0)).unwrap();
 
         // Verify invariant
         assert_eq!(sync_layer.current_frame(), Frame::new(0));
@@ -1149,13 +1146,12 @@ mod sync_layer_tests {
 
         // Rollback exactly to the edge of prediction window (frame 0)
         // current_frame (4) - max_prediction (4) = 0
-        let result = sync_layer.load_frame(Frame::new(0));
-        assert!(result.is_ok());
+        sync_layer.load_frame(Frame::new(0)).unwrap();
 
         // Verify invariants
         assert_eq!(sync_layer.current_frame(), Frame::new(0));
         assert!(sync_layer.last_saved_frame() <= sync_layer.current_frame());
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 
     /// Test that last_confirmed_frame invariant is maintained.
@@ -1178,7 +1174,7 @@ mod sync_layer_tests {
 
         // Verify invariant: last_confirmed_frame <= current_frame
         assert!(sync_layer.last_confirmed_frame() <= sync_layer.current_frame());
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 
     /// Test that set_last_confirmed_frame clamps to current_frame.
@@ -1217,7 +1213,7 @@ mod sync_layer_tests {
     fn test_invariant_checker_validates_player_count() {
         // Create sync layer with valid player count
         let sync_layer = SyncLayer::<TestConfig>::new(2, 8);
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
 
         // Note: We can't easily create an invalid state from outside,
         // so this test just verifies the checker runs successfully.
@@ -1401,9 +1397,9 @@ mod sync_layer_tests {
         connect_status[1].disconnected = true;
         connect_status[1].last_frame = Frame::NULL;
 
-        let result = sync_layer.confirmed_inputs(Frame::new(0), &connect_status);
-        assert!(result.is_ok());
-        let inputs = result.unwrap();
+        let inputs = sync_layer
+            .confirmed_inputs(Frame::new(0), &connect_status)
+            .unwrap();
         assert_eq!(inputs.len(), 2);
         assert_eq!(inputs[0].input.inp, 42);
         assert_eq!(inputs[1].frame, Frame::NULL); // Blank input for disconnected
@@ -1572,7 +1568,7 @@ mod sync_layer_tests {
     #[test]
     fn test_invariant_checker_new_sync_layer() {
         let sync_layer = SyncLayer::<TestConfig>::new(2, 8);
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 
     #[test]
@@ -1581,7 +1577,7 @@ mod sync_layer_tests {
 
         for _ in 0..20 {
             sync_layer.advance_frame();
-            assert!(sync_layer.check_invariants().is_ok());
+            sync_layer.check_invariants().unwrap();
         }
     }
 
@@ -1594,7 +1590,7 @@ mod sync_layer_tests {
             if let FortressRequest::SaveGameState { cell, frame } = request {
                 cell.save(frame, Some(i as u8), None);
             }
-            assert!(sync_layer.check_invariants().is_ok());
+            sync_layer.check_invariants().unwrap();
             sync_layer.advance_frame();
         }
     }
@@ -1607,7 +1603,7 @@ mod sync_layer_tests {
             let game_input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
             sync_layer.add_remote_input(PlayerHandle::new(0), game_input);
             sync_layer.add_remote_input(PlayerHandle::new(1), game_input);
-            assert!(sync_layer.check_invariants().is_ok());
+            sync_layer.check_invariants().unwrap();
             sync_layer.advance_frame();
         }
     }
@@ -1624,7 +1620,7 @@ mod sync_layer_tests {
         }
 
         sync_layer.set_last_confirmed_frame(Frame::new(5), SaveMode::EveryFrame);
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 
     #[test]
@@ -1633,14 +1629,14 @@ mod sync_layer_tests {
         sync_layer.set_frame_delay(PlayerHandle::new(0), 2).unwrap();
         sync_layer.set_frame_delay(PlayerHandle::new(1), 3).unwrap();
 
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
 
         for i in 0..10i32 {
             let game_input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
             sync_layer.add_remote_input(PlayerHandle::new(0), game_input);
             sync_layer.add_remote_input(PlayerHandle::new(1), game_input);
             sync_layer.advance_frame();
-            assert!(sync_layer.check_invariants().is_ok());
+            sync_layer.check_invariants().unwrap();
         }
     }
 
@@ -1713,8 +1709,7 @@ mod sync_layer_tests {
         assert_eq!(sync_layer.current_frame(), Frame::new(5));
 
         // Load frame 2 (rollback)
-        let result = sync_layer.load_frame(Frame::new(2));
-        assert!(result.is_ok());
+        sync_layer.load_frame(Frame::new(2)).unwrap();
         assert_eq!(sync_layer.current_frame(), Frame::new(2));
 
         // Now save_current_state should work correctly at frame 2

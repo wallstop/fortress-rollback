@@ -905,9 +905,7 @@ mod input_queue_tests {
             queue.add_input(input);
         }
         // Retrieve confirmed input for frame 2
-        let result = queue.confirmed_input(Frame::new(2));
-        assert!(result.is_ok());
-        let confirmed = result.unwrap();
+        let confirmed = queue.confirmed_input(Frame::new(2)).unwrap();
         assert_eq!(confirmed.frame, Frame::new(2));
         assert_eq!(confirmed.input.inp, 20);
     }
@@ -942,8 +940,7 @@ mod input_queue_tests {
         assert_eq!(queue.length, 5);
 
         // Frame 5 should still be retrievable
-        let result = queue.confirmed_input(Frame::new(5));
-        assert!(result.is_ok());
+        queue.confirmed_input(Frame::new(5)).unwrap();
     }
 
     #[test]
@@ -995,9 +992,8 @@ mod input_queue_tests {
         );
 
         // The most recent input (frame 4) should still be accessible
-        let result = queue.confirmed_input(Frame::new(4));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().input.inp, 4);
+        let confirmed = queue.confirmed_input(Frame::new(4)).unwrap();
+        assert_eq!(confirmed.input.inp, 4);
     }
 
     /// Regression test: discard_confirmed_frames with head at position 0 (wraparound edge case)
@@ -1037,9 +1033,8 @@ mod input_queue_tests {
         );
 
         // The most recent input (frame 127) should be accessible
-        let result = queue.confirmed_input(Frame::new(127));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().input.inp, 127);
+        let confirmed = queue.confirmed_input(Frame::new(127)).unwrap();
+        assert_eq!(confirmed.input.inp, 127);
     }
 
     /// Regression test: multiple consecutive discard_all_but_one operations maintain invariants
@@ -1092,9 +1087,7 @@ mod input_queue_tests {
         assert_eq!(queue.length, 1);
 
         // Verify we kept frame 4 with value 45
-        let result = queue.confirmed_input(Frame::new(4));
-        assert!(result.is_ok());
-        let input = result.unwrap();
+        let input = queue.confirmed_input(Frame::new(4)).unwrap();
         assert_eq!(input.input.inp, 45);
         assert_eq!(input.frame, Frame::new(4));
     }
@@ -1154,8 +1147,7 @@ mod input_queue_tests {
         queue.discard_confirmed_frames(Frame::new(8));
 
         // Frame 3 should still be available
-        let result = queue.confirmed_input(Frame::new(3));
-        assert!(result.is_ok());
+        queue.confirmed_input(Frame::new(3)).unwrap();
     }
 
     #[test]
@@ -1281,9 +1273,8 @@ mod input_queue_tests {
         }
 
         // Verify we can still retrieve the most recent inputs
-        let result = queue.confirmed_input(Frame::new(99));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().input.inp, 99);
+        let confirmed = queue.confirmed_input(Frame::new(99)).unwrap();
+        assert_eq!(confirmed.input.inp, 99);
     }
 
     #[test]
@@ -1381,7 +1372,7 @@ mod input_queue_tests {
     #[test]
     fn test_invariant_checker_new_queue() {
         let queue = test_queue(0);
-        assert!(queue.check_invariants().is_ok());
+        queue.check_invariants().unwrap();
     }
 
     #[test]
@@ -1407,7 +1398,7 @@ mod input_queue_tests {
         }
 
         queue.discard_confirmed_frames(Frame::new(10));
-        assert!(queue.check_invariants().is_ok());
+        queue.check_invariants().unwrap();
     }
 
     #[test]
@@ -1418,7 +1409,7 @@ mod input_queue_tests {
         for i in 0..10i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
             queue.add_input(input);
-            assert!(queue.check_invariants().is_ok());
+            queue.check_invariants().unwrap();
         }
     }
 
@@ -1432,7 +1423,7 @@ mod input_queue_tests {
         let _ = queue.input(Frame::new(10)).expect("input"); // Trigger prediction
 
         queue.reset_prediction();
-        assert!(queue.check_invariants().is_ok());
+        queue.check_invariants().unwrap();
     }
 
     // ========================================================================
@@ -1470,8 +1461,7 @@ mod input_queue_tests {
         let mut queue = test_queue(0);
 
         // Delay at MAX_FRAME_DELAY should succeed
-        let result = queue.set_frame_delay(MAX_FRAME_DELAY);
-        assert!(result.is_ok());
+        queue.set_frame_delay(MAX_FRAME_DELAY).unwrap();
         assert_eq!(queue.frame_delay, MAX_FRAME_DELAY);
     }
 
@@ -1480,8 +1470,7 @@ mod input_queue_tests {
     fn test_set_frame_delay_accepts_zero() {
         let mut queue = test_queue(0);
 
-        let result = queue.set_frame_delay(0);
-        assert!(result.is_ok());
+        queue.set_frame_delay(0).unwrap();
         assert_eq!(queue.frame_delay, 0);
     }
 
@@ -1509,7 +1498,7 @@ mod input_queue_tests {
         // Should be stored at frame 0 + 3 = 3
         assert_eq!(result, Frame::new(3));
         assert_eq!(queue.last_added_frame, Frame::new(3));
-        assert!(queue.check_invariants().is_ok());
+        queue.check_invariants().unwrap();
     }
 
     /// Test: After rejected delay, queue state remains unchanged
@@ -1672,9 +1661,8 @@ mod input_queue_tests {
         queue.discard_confirmed_frames(Frame::new(5));
 
         // Frame 5 (now at tail) should be retrievable
-        let result = queue.confirmed_input(Frame::new(5));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().input.inp, 5);
+        let confirmed = queue.confirmed_input(Frame::new(5)).unwrap();
+        assert_eq!(confirmed.input.inp, 5);
     }
 
     #[test]
@@ -1688,9 +1676,8 @@ mod input_queue_tests {
         }
 
         // Frame 9 (most recent, at head-1) should be retrievable
-        let result = queue.confirmed_input(Frame::new(9));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().input.inp, 9);
+        let confirmed = queue.confirmed_input(Frame::new(9)).unwrap();
+        assert_eq!(confirmed.input.inp, 9);
     }
 
     // ==========================================
@@ -1759,6 +1746,15 @@ mod property_tests {
     use serde::{Deserialize, Serialize};
     use std::net::SocketAddr;
 
+    /// Returns reduced iteration count when running under Miri for faster testing.
+    const fn miri_case_count() -> u32 {
+        if cfg!(miri) {
+            10
+        } else {
+            256
+        }
+    }
+
     #[repr(C)]
     #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize, Debug)]
     struct TestInput {
@@ -1794,6 +1790,10 @@ mod property_tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: miri_case_count(),
+            ..ProptestConfig::default()
+        })]
         /// Property: Sequential inputs are always stored correctly
         #[test]
         fn prop_sequential_inputs_stored(
@@ -1833,9 +1833,8 @@ mod property_tests {
 
             // Verify all inputs can be retrieved
             for i in 0..count as i32 {
-                let result = queue.confirmed_input(Frame::new(i));
-                prop_assert!(result.is_ok());
-                prop_assert_eq!(result.unwrap().input.inp, i as u8);
+                let confirmed = queue.confirmed_input(Frame::new(i)).unwrap();
+                prop_assert_eq!(confirmed.input.inp, i as u8);
             }
         }
 

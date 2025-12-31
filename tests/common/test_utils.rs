@@ -53,6 +53,7 @@ use fortress_rollback::{ChaosConfig, ChaosSocket, UdpNonBlockingSocket};
 /// Helper to create a UDP socket wrapped with ChaosSocket for network resilience testing.
 #[allow(dead_code)]
 #[allow(clippy::expect_used)] // expect is acceptable in test utilities
+#[track_caller]
 pub fn create_chaos_socket(
     port: u16,
     config: ChaosConfig,
@@ -90,6 +91,7 @@ impl Default for SyncConfig {
 /// - `Ok(iterations)` if both sessions synchronized successfully
 /// - `Err(error message)` if synchronization timed out
 #[allow(dead_code)]
+#[track_caller]
 pub fn synchronize_sessions<C: Config>(
     sess1: &mut P2PSession<C>,
     sess2: &mut P2PSession<C>,
@@ -169,6 +171,7 @@ pub fn poll_with_sleep<C: Config>(
 /// This should be called after `synchronize_sessions` to clear any accumulated
 /// sync events before testing other functionality.
 #[allow(dead_code)]
+#[track_caller]
 pub fn drain_sync_events<C: Config + std::fmt::Debug>(
     sess1: &mut P2PSession<C>,
     sess2: &mut P2PSession<C>,

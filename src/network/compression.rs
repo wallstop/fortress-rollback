@@ -241,6 +241,15 @@ mod property_tests {
     use super::*;
     use proptest::prelude::*;
 
+    /// Returns reduced iteration count when running under Miri for faster testing.
+    const fn miri_case_count() -> u32 {
+        if cfg!(miri) {
+            10
+        } else {
+            256
+        }
+    }
+
     // Strategy for generating valid input sizes (1-32 bytes)
     fn input_size() -> impl Strategy<Value = usize> {
         1usize..=32
@@ -257,6 +266,10 @@ mod property_tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: miri_case_count(),
+            ..ProptestConfig::default()
+        })]
         /// Property: encode followed by decode is identity
         #[test]
         fn prop_encode_decode_roundtrip(

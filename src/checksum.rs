@@ -485,7 +485,20 @@ mod property_tests {
     use proptest::prelude::*;
     use serde::Deserialize;
 
+    /// Returns reduced iteration count when running under Miri for faster testing.
+    const fn miri_case_count() -> u32 {
+        if cfg!(miri) {
+            10
+        } else {
+            256
+        }
+    }
+
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: miri_case_count(),
+            ..ProptestConfig::default()
+        })]
         /// Property: compute_checksum is deterministic for any serializable state
         #[test]
         fn prop_checksum_deterministic(

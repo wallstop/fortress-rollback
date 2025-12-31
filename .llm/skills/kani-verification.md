@@ -474,6 +474,64 @@ fn verify_with_minisat() { /* ... */ }
 
 ## CI Integration
 
+### CRITICAL: Adding New Kani Proofs to CI
+
+**When adding new `#[kani::proof]` functions, you MUST also add them to the tier lists in `scripts/verify-kani.sh`.**
+
+This is enforced by CI — the `kani-coverage-check` job will fail if any proofs are missing.
+
+#### Step-by-Step Process
+
+1. **Write your Kani proof** in the appropriate source file:
+
+   ```rust
+   #[cfg(kani)]
+   mod kani_proofs {
+       #[kani::proof]
+       fn proof_my_invariant() {
+           // Your proof here
+       }
+   }
+   ```
+
+2. **Add the proof to the appropriate tier** in `scripts/verify-kani.sh`:
+   - **Tier 1** (`TIER1_PROOFS`): Fast proofs (<30s each) — simple property checks
+   - **Tier 2** (`TIER2_PROOFS`): Medium proofs (30s-2min each) — moderate complexity
+   - **Tier 3** (`TIER3_PROOFS`): Slow proofs (>2min each) — complex state verification
+
+3. **Validate coverage** before committing:
+
+   ```bash
+   ./scripts/check-kani-coverage.sh
+   ```
+
+   This must show "SUCCESS: All N Kani proofs are covered in tier lists."
+
+#### Example: Adding a New Proof
+
+```bash
+# 1. Add proof to source code
+# 2. Add to tier list in verify-kani.sh:
+TIER1_PROOFS=(
+    # ... existing proofs ...
+    "proof_my_invariant"  # Add here
+)
+
+# 3. Validate coverage
+./scripts/check-kani-coverage.sh
+# Output: SUCCESS: All N Kani proofs are covered in tier lists.
+```
+
+#### CI Enforcement
+
+The CI workflow includes a `kani-coverage-check` job that:
+
+1. Scans source code for all `#[kani::proof]` functions
+2. Scans `verify-kani.sh` for all tier list entries
+3. **Fails the build** if any proofs are missing or stale
+
+This ensures no proof is ever silently skipped during verification.
+
 ### GitHub Actions Workflow
 
 ```yaml

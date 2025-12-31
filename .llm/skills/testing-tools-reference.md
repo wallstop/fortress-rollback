@@ -827,4 +827,4 @@ wiremock = "0.6"
 
 ---
 
-*See also: [rust-testing-guide.md](rust-testing-guide.md), [property-testing.md](property-testing.md), [mutation-testing.md](mutation-testing.md)*
+*See also: [rust-testing-guide.md](rust-testing-guide.md), [property-testing.md](property-testing.md), [mutation-testing.md](mutation-testing.md), [rust-fuzzing-guide.md](rust-fuzzing-guide.md)*
