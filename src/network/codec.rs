@@ -108,8 +108,11 @@ impl fmt::Display for CodecOperation {
 ///    strings, which would be fragile and could break with bincode updates.
 ///
 /// For hot-path error handling (like RLE decode errors in compression), we use
-/// structured enums. See [`CompressionError`](crate::network::compression::CompressionError)
-/// and [`RleDecodeReason`](crate::RleDecodeReason) for examples.
+/// structured enums. See [`CompressionError`]
+/// and [`RleDecodeReason`] for examples.
+///
+/// [`CompressionError`]: crate::network::compression::CompressionError
+/// [`RleDecodeReason`]: crate::RleDecodeReason
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CodecError {

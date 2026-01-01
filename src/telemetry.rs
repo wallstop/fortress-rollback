@@ -1099,6 +1099,64 @@ impl InvariantViolation {
         self
     }
 
+    /// Adds input queue index and nested violation details.
+    ///
+    /// This method encapsulates the formatting pattern for input queue invariant
+    /// violations, providing a consistent API across call sites.
+    #[cold]
+    #[inline(never)]
+    #[must_use]
+    pub fn with_input_queue_index(mut self, index: usize, nested_violation: String) -> Self {
+        use std::fmt::Write;
+        let mut details = String::new();
+        // Ignore write error since we're writing to a String
+        let _ = write!(details, "input_queue[{}]: {}", index, nested_violation);
+        self.details = Some(details);
+        self
+    }
+
+    /// Adds a single field name and value as details.
+    ///
+    /// This method encapsulates the common pattern of reporting a single
+    /// field's value when an invariant is violated.
+    #[cold]
+    #[inline(never)]
+    #[must_use]
+    pub fn with_field_value(mut self, field: &str, value: impl std::fmt::Display) -> Self {
+        use std::fmt::Write;
+        let mut details = String::new();
+        // Ignore write error since we're writing to a String
+        let _ = write!(details, "{}={}", field, value);
+        self.details = Some(details);
+        self
+    }
+
+    /// Adds bounds violation details showing the actual value and valid range.
+    ///
+    /// This method encapsulates the common pattern of reporting when a value
+    /// is outside its expected bounds.
+    #[cold]
+    #[inline(never)]
+    #[must_use]
+    pub fn with_bounds_violation(
+        mut self,
+        name: &str,
+        actual: impl std::fmt::Display,
+        min: impl std::fmt::Display,
+        max: impl std::fmt::Display,
+    ) -> Self {
+        use std::fmt::Write;
+        let mut details = String::new();
+        // Ignore write error since we're writing to a String
+        let _ = write!(
+            details,
+            "{}={}, valid_range=[{}, {}]",
+            name, actual, min, max
+        );
+        self.details = Some(details);
+        self
+    }
+
     /// Serializes this violation to a JSON string.
     ///
     /// Returns `None` if serialization fails (which should not happen for

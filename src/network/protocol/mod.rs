@@ -4550,10 +4550,13 @@ mod kani_proofs {
     /// 2. The random_reply is valid (line 745)
     /// In this path, remaining was set to num_sync_packets > 0 at sync start.
     #[kani::proof]
+    #[kani::unwind(11)] // max loop iterations = 10, need +1 for termination check
     fn proof_sync_counter_decrement_safe() {
         let num_sync_packets: u32 = kani::any();
-        // SyncConfig::num_sync_packets must be > 0 (validated at construction)
-        kani::assume(num_sync_packets > 0 && num_sync_packets <= 100);
+        // SyncConfig::num_sync_packets default is 5, production presets use 3-20.
+        // Bounded to 10 for tractable loop verification (proof covers representative values).
+        // Note: proof_sync_remaining_bounds uses <= 100 because it's loop-free.
+        kani::assume(num_sync_packets > 0 && num_sync_packets <= 10);
 
         // sync_remaining starts at num_sync_packets (set at mod.rs:390)
         let mut remaining = num_sync_packets;

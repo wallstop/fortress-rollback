@@ -272,7 +272,7 @@ impl std::fmt::Display for ChecksumAlgorithm {
 ///
 /// # Why String for Error Messages?
 ///
-/// Similar to [`CodecError`](crate::network::codec::CodecError), this error type stores
+/// Similar to [`CodecError`], this error type stores
 /// the underlying error message as a `String` rather than a structured enum. This is
 /// intentional:
 ///
@@ -289,9 +289,10 @@ impl std::fmt::Display for ChecksumAlgorithm {
 ///    "unsupported type").
 ///
 /// For hot-path error handling, we use structured enums. See
-/// [`RleDecodeReason`](crate::RleDecodeReason) for an example.
+/// [`RleDecodeReason`] for an example.
 ///
 /// [`CodecError`]: crate::network::codec::CodecError
+/// [`RleDecodeReason`]: crate::RleDecodeReason
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ChecksumError {
@@ -304,7 +305,7 @@ pub enum ChecksumError {
         algorithm: ChecksumAlgorithm,
         /// The underlying error message from the serializer.
         ///
-        /// This is a `String` because it wraps [`CodecError`](crate::network::codec::CodecError),
+        /// This is a `String` because it wraps [`CodecError`],
         /// which stores bincode errors as strings (since bincode errors are opaque).
         message: String,
     },

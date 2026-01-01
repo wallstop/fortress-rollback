@@ -25,7 +25,7 @@
 //! ### Step 3: Prediction
 //!
 //! When remote inputs haven't arrived for a frame, the sync layer uses the
-//! [`PredictionStrategy`](crate::input_queue::PredictionStrategy) to guess what
+//! [`PredictionStrategy`] to guess what
 //! the remote player will do:
 //!
 //! - **`RepeatLastConfirmed`** (default): Use the last known input - works well
@@ -87,7 +87,7 @@
 //! - **Floating-point**: Use fixed-point or integers for physics/positions
 //! - **HashMap iteration**: Use `BTreeMap` or sort keys before iterating
 //! - **System time**: Use frame counter, not wall clock
-//! - **Random numbers**: Use the provided deterministic [`Rng`](crate::rng::Rng)
+//! - **Random numbers**: Use the provided deterministic [`Rng`]
 //! - **Uninitialized memory**: Always initialize all fields
 //! - **Multithreading**: Run simulation on a single thread
 //! - **External I/O**: Only read inputs from the input queue
@@ -97,6 +97,9 @@
 //! - [`GameStateCell`] and [`GameStateAccessor`] - Types for saving/loading game states
 //! - [`SavedStates`] - Circular buffer holding saved game states
 //! - [`SyncLayer`] - The main synchronization layer managing state and inputs
+//!
+//! [`PredictionStrategy`]: crate::input_queue::PredictionStrategy
+//! [`Rng`]: crate::rng::Rng
 
 mod game_state_cell;
 mod saved_states;
@@ -606,7 +609,7 @@ impl<T: Config> InvariantChecker for SyncLayer<T> {
         if self.current_frame.as_i32() < 0 {
             return Err(
                 InvariantViolation::new("SyncLayer", "current_frame must be non-negative")
-                    .with_details(format!("current_frame={}", self.current_frame)),
+                    .with_field_value("current_frame", self.current_frame),
             );
         }
 
@@ -616,10 +619,12 @@ impl<T: Config> InvariantChecker for SyncLayer<T> {
                 "SyncLayer",
                 "last_confirmed_frame exceeds current_frame",
             )
-            .with_details(format!(
-                "last_confirmed_frame={}, current_frame={}",
-                self.last_confirmed_frame, self.current_frame
-            )));
+            .with_bounds_violation(
+                "last_confirmed_frame",
+                self.last_confirmed_frame,
+                "NULL",
+                self.current_frame,
+            ));
         }
 
         // Invariant 5: last_saved_frame <= current_frame
@@ -628,10 +633,12 @@ impl<T: Config> InvariantChecker for SyncLayer<T> {
                 "SyncLayer",
                 "last_saved_frame exceeds current_frame",
             )
-            .with_details(format!(
-                "last_saved_frame={}, current_frame={}",
-                self.last_saved_frame, self.current_frame
-            )));
+            .with_bounds_violation(
+                "last_saved_frame",
+                self.last_saved_frame,
+                "NULL",
+                self.current_frame,
+            ));
         }
 
         // Invariant 6: input queues count matches num_players
@@ -640,11 +647,12 @@ impl<T: Config> InvariantChecker for SyncLayer<T> {
                 "SyncLayer",
                 "input_queues count does not match num_players",
             )
-            .with_details(format!(
-                "input_queues.len()={}, num_players={}",
+            .with_bounds_violation(
+                "input_queues.len()",
                 self.input_queues.len(),
-                self.num_players
-            )));
+                self.num_players,
+                self.num_players,
+            ));
         }
 
         // Invariant 7: saved states count is max_prediction + 1
@@ -652,22 +660,22 @@ impl<T: Config> InvariantChecker for SyncLayer<T> {
         if self.saved_states.states.len() != expected_states {
             return Err(
                 InvariantViolation::new("SyncLayer", "saved_states count is incorrect")
-                    .with_details(format!(
-                        "saved_states.len()={}, expected={}",
+                    .with_bounds_violation(
+                        "saved_states.len()",
                         self.saved_states.states.len(),
-                        expected_states
-                    )),
+                        expected_states,
+                        expected_states,
+                    ),
             );
         }
 
         // Invariant 8: all input queues pass their invariant checks
         for (i, queue) in self.input_queues.iter().enumerate() {
             if let Err(violation) = queue.check_invariants() {
-                return Err(InvariantViolation::new(
-                    "SyncLayer",
-                    format!("input_queue[{}] invariant violated", i),
-                )
-                .with_details(violation.to_string()));
+                return Err(
+                    InvariantViolation::new("SyncLayer", "input_queue invariant violated")
+                        .with_input_queue_index(i, violation.to_string()),
+                );
             }
         }
 

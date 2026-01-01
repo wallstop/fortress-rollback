@@ -243,25 +243,37 @@ See also: `ci-rust.yml` (Miri UB detection), `ci-security.yml` (cargo-geiger, ca
 /// Longer explanation if needed, explaining the "why" not just "what".
 ///
 /// # Arguments
+///
 /// * `param1` - What this parameter represents
 ///
 /// # Returns
+///
 /// What the function returns and when.
 ///
 /// # Errors
+///
 /// * [`FortressError::Variant`] - When this specific error occurs
 ///
 /// # Examples
+///
 /// ```
 /// # use fortress_rollback::*;
 /// let result = function(arg)?;
 /// assert_eq!(result, expected);
 /// # Ok::<(), FortressError>(())
 /// ```
+///
+/// [`FortressError::Variant`]: crate::error::FortressError::Variant
 pub fn function(param1: Type) -> Result<ReturnType, FortressError> {
     // Implementation
 }
 ```
+
+**Intra-doc link best practices:**
+
+- Use shorthand `[`TypeName`]` when link text matches the final path segment
+- Place link reference definitions at the end of doc blocks
+- Run `cargo doc --no-deps` after documentation changes to verify links
 
 ### Test Writing Best Practices
 
@@ -403,7 +415,14 @@ fn rollback_preserves_confirmed_frames() { }
 ```bash
 # Kani proofs
 cargo kani
-cargo kani --harness verify_specific_function
+cargo kani --harness proof_specific_function
+
+# Kani with tiered execution
+./scripts/verify-kani.sh --tier 1 --quick   # Fast proofs (~15 min)
+./scripts/verify-kani.sh --list             # List all proofs and tiers
+
+# Validate Kani proof coverage (pre-commit runs this)
+./scripts/check-kani-coverage.sh
 
 # TLA+ verification
 ./scripts/verify-tla.sh
@@ -420,6 +439,33 @@ cargo +nightly miri test
 # Mutation testing
 cargo mutants -f src/module.rs --timeout 30 --jobs 4
 ```
+
+### CRITICAL: Kani Proof Changes
+
+**Pre-commit only validates that proofs are registered, NOT that they pass.**
+
+When modifying Kani proofs or code verified by them:
+
+1. **Run the affected proof locally** before committing:
+
+   ```bash
+   cargo kani --harness proof_function_name
+   ```
+
+2. **Ensure new proofs are registered** in `scripts/verify-kani.sh`:
+   - Tier 1: Fast proofs (<30s) — simple property checks
+   - Tier 2: Medium proofs (30s-2min) — moderate complexity
+   - Tier 3: Slow proofs (>2min) — complex state verification
+
+3. **Validate coverage** before pushing:
+
+   ```bash
+   ./scripts/check-kani-coverage.sh
+   ```
+
+**Why?** Kani verification is too slow for pre-commit (15+ minutes), so CI catches failures. Running affected proofs locally prevents CI surprises.
+
+**Remember:** All loops with symbolic bounds require `#[kani::unwind(N)]` where N = max_iterations + 1. This is the #1 cause of Kani CI failures. See [kani-verification.md](skills/kani-verification.md) for details.
 
 ### After Finding a Bug via Verification
 
@@ -746,6 +792,34 @@ actionlint
 Workflow syntax errors are easy to introduce and tedious to debug in CI. Always validate locally first.
 
 **Workflow reliability:** Workflows that call GitHub APIs (releases, artifact uploads, API queries) should include retry logic. Transient API failures are common; handle them gracefully rather than failing the entire workflow.
+
+### Documentation Changes
+
+**Run after modifying any rustdoc comments:**
+
+```bash
+cargo doc --no-deps
+```
+
+The pre-commit hook runs `cargo doc` with strict `RUSTDOCFLAGS=-D warnings`, matching CI. This catches:
+
+- Broken intra-doc links
+- Invalid HTML in documentation
+- Missing documentation for public items (when enabled)
+
+**Intra-doc link syntax:** Prefer shorthand syntax with link reference definitions:
+
+```rust
+// ❌ Avoid: Inline explicit links (verbose, duplicates path)
+/// Returns a [`PlayerHandle`](crate::sessions::PlayerHandle).
+
+// ✅ Prefer: Shorthand with reference definition
+/// Returns a [`PlayerHandle`].
+///
+/// [`PlayerHandle`]: crate::sessions::PlayerHandle
+```
+
+Use shorthand `[`TypeName`]` when the link text matches the final path segment. Place reference definitions at the end of doc blocks for readability.
 
 ### Full Verification (Before Committing)
 

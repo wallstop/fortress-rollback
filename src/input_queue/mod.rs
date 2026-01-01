@@ -676,7 +676,7 @@ impl<T: Config> InvariantChecker for InputQueue<T> {
         if self.length > self.queue_length {
             return Err(
                 InvariantViolation::new("InputQueue", "length exceeds queue_length")
-                    .with_details(format!("length={}, max={}", self.length, self.queue_length)),
+                    .with_bounds_violation("length", self.length, 0, self.queue_length),
             );
         }
 
@@ -684,14 +684,14 @@ impl<T: Config> InvariantChecker for InputQueue<T> {
         if self.head >= self.queue_length {
             return Err(
                 InvariantViolation::new("InputQueue", "head index out of bounds")
-                    .with_details(format!("head={}, max={}", self.head, self.queue_length - 1)),
+                    .with_bounds_violation("head", self.head, 0, self.queue_length - 1),
             );
         }
 
         if self.tail >= self.queue_length {
             return Err(
                 InvariantViolation::new("InputQueue", "tail index out of bounds")
-                    .with_details(format!("tail={}, max={}", self.tail, self.queue_length - 1)),
+                    .with_bounds_violation("tail", self.tail, 0, self.queue_length - 1),
             );
         }
 
@@ -738,11 +738,12 @@ impl<T: Config> InvariantChecker for InputQueue<T> {
         if self.inputs.len() != self.queue_length {
             return Err(
                 InvariantViolation::new("InputQueue", "inputs vector has incorrect size")
-                    .with_details(format!(
-                        "size={}, expected={}",
+                    .with_bounds_violation(
+                        "size",
                         self.inputs.len(),
-                        self.queue_length
-                    )),
+                        self.queue_length,
+                        self.queue_length,
+                    ),
             );
         }
 
@@ -752,17 +753,14 @@ impl<T: Config> InvariantChecker for InputQueue<T> {
                 "InputQueue",
                 "frame_delay exceeds reasonable bounds",
             )
-            .with_details(format!("frame_delay={}", self.frame_delay)));
+            .with_bounds_violation("frame_delay", self.frame_delay, 0, 255));
         }
 
         // Invariant 6: first_incorrect_frame is either NULL or a valid frame
         if !self.first_incorrect_frame.is_null() && self.first_incorrect_frame.as_i32() < 0 {
             return Err(
                 InvariantViolation::new("InputQueue", "first_incorrect_frame is invalid")
-                    .with_details(format!(
-                        "first_incorrect_frame={}",
-                        self.first_incorrect_frame
-                    )),
+                    .with_field_value("first_incorrect_frame", self.first_incorrect_frame),
             );
         }
 
@@ -770,10 +768,7 @@ impl<T: Config> InvariantChecker for InputQueue<T> {
         if !self.last_requested_frame.is_null() && self.last_requested_frame.as_i32() < 0 {
             return Err(
                 InvariantViolation::new("InputQueue", "last_requested_frame is invalid")
-                    .with_details(format!(
-                        "last_requested_frame={}",
-                        self.last_requested_frame
-                    )),
+                    .with_field_value("last_requested_frame", self.last_requested_frame),
             );
         }
 
@@ -781,7 +776,7 @@ impl<T: Config> InvariantChecker for InputQueue<T> {
         if !self.last_added_frame.is_null() && self.last_added_frame.as_i32() < 0 {
             return Err(
                 InvariantViolation::new("InputQueue", "last_added_frame is invalid")
-                    .with_details(format!("last_added_frame={}", self.last_added_frame)),
+                    .with_field_value("last_added_frame", self.last_added_frame),
             );
         }
 
