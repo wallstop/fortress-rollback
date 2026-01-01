@@ -19,7 +19,7 @@ pub use prediction::{BlankPrediction, PredictionStrategy, RepeatLastConfirmed};
 use crate::frame_info::PlayerInput;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
 use crate::{report_violation, safe_frame_add, safe_frame_sub};
-use crate::{Config, FortressError, Frame, InputStatus};
+use crate::{Config, FortressError, Frame, IndexOutOfBounds, InputStatus, InternalErrorKind};
 use std::cmp;
 
 /// The length of the input queue. This describes the number of inputs Fortress Rollback can hold at the same time per player.
@@ -243,11 +243,12 @@ impl<T: Config> InputQueue<T> {
         let input = self
             .inputs
             .get(offset)
-            .ok_or_else(|| FortressError::InternalError {
-                context: format!(
-                    "Invalid offset {} in confirmed_input (queue_length={})",
-                    offset, self.queue_length
-                ),
+            .ok_or(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                    name: "inputs",
+                    index: offset,
+                    length: self.inputs.len(),
+                }),
             })?;
         if input.frame == requested_frame {
             return Ok(*input);
@@ -255,10 +256,7 @@ impl<T: Config> InputQueue<T> {
 
         // the requested confirmed input should not be before a prediction. We should not have asked for a known incorrect frame.
         Err(crate::FortressError::InvalidRequest {
-            info: format!(
-                "No confirmed input for frame {} (tail={}, head={}, length={})",
-                requested_frame, self.tail, self.head, self.length
-            ),
+            info: "No confirmed input for requested frame".into(),
         })
     }
 
@@ -1742,18 +1740,10 @@ mod input_queue_tests {
 )]
 mod property_tests {
     use super::*;
+    use crate::test_config::miri_case_count;
     use proptest::prelude::*;
     use serde::{Deserialize, Serialize};
     use std::net::SocketAddr;
-
-    /// Returns reduced iteration count when running under Miri for faster testing.
-    const fn miri_case_count() -> u32 {
-        if cfg!(miri) {
-            10
-        } else {
-            256
-        }
-    }
 
     #[repr(C)]
     #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize, Debug)]

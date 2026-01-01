@@ -110,7 +110,10 @@ use crate::network::messages::ConnectionStatus;
 use crate::sessions::config::SaveMode;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
 use crate::{report_violation, safe_frame_add, safe_frame_sub};
-use crate::{Config, FortressError, FortressRequest, Frame, InputStatus, InputVec, PlayerHandle};
+use crate::{
+    Config, FortressError, FortressRequest, Frame, IndexOutOfBounds, InputStatus, InputVec,
+    InternalErrorKind, InvalidFrameReason, PlayerHandle,
+};
 
 /// The synchronization layer manages game state, input queues, and rollback operations.
 ///
@@ -297,13 +300,15 @@ impl<T: Config> SyncLayer<T> {
                 max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
             });
         }
+        let len = self.input_queues.len();
         self.input_queues
             .get_mut(player_handle.as_usize())
-            .ok_or_else(|| FortressError::InternalError {
-                context: format!(
-                    "input_queues index {} out of bounds",
-                    player_handle.as_usize()
-                ),
+            .ok_or(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                    name: "input_queues",
+                    index: player_handle.as_usize(),
+                    length: len,
+                }),
             })?
             .set_frame_delay(delay)?;
         Ok(())
@@ -338,30 +343,28 @@ impl<T: Config> SyncLayer<T> {
     ) -> Result<FortressRequest<T>, FortressError> {
         // The state should not be the current state or the state should not be in the future or too far away in the past
         if frame_to_load.is_null() {
-            return Err(FortressError::InvalidFrame {
+            return Err(FortressError::InvalidFrameStructured {
                 frame: frame_to_load,
-                reason: "cannot load NULL_FRAME".to_string(),
+                reason: InvalidFrameReason::NullFrame,
             });
         }
 
         if frame_to_load >= self.current_frame {
-            return Err(FortressError::InvalidFrame {
+            return Err(FortressError::InvalidFrameStructured {
                 frame: frame_to_load,
-                reason: format!(
-                    "must load frame in the past (frame to load is {}, current frame is {})",
-                    frame_to_load, self.current_frame
-                ),
+                reason: InvalidFrameReason::NotInPast {
+                    current_frame: self.current_frame,
+                },
             });
         }
 
         if frame_to_load.as_i32() < self.current_frame.as_i32() - self.max_prediction as i32 {
-            return Err(FortressError::InvalidFrame {
+            return Err(FortressError::InvalidFrameStructured {
                 frame: frame_to_load,
-                reason: format!(
-                    "cannot load frame outside of prediction window \
-                    (frame to load is {}, current frame is {}, max prediction is {})",
-                    frame_to_load, self.current_frame, self.max_prediction
-                ),
+                reason: InvalidFrameReason::OutsidePredictionWindow {
+                    current_frame: self.current_frame,
+                    max_prediction: self.max_prediction,
+                },
             });
         }
 
@@ -371,12 +374,11 @@ impl<T: Config> SyncLayer<T> {
         #[cfg(loom)]
         let cell_frame = cell.0.lock().unwrap().frame;
         if cell_frame != frame_to_load {
-            return Err(FortressError::InvalidFrame {
+            return Err(FortressError::InvalidFrameStructured {
                 frame: frame_to_load,
-                reason: format!(
-                    "saved state has wrong frame (expected {}, got {})",
-                    frame_to_load, cell_frame
-                ),
+                reason: InvalidFrameReason::WrongSavedFrame {
+                    saved_frame: cell_frame,
+                },
             });
         }
         self.current_frame = frame_to_load;
@@ -469,8 +471,12 @@ impl<T: Config> SyncLayer<T> {
                 let queue =
                     self.input_queues
                         .get(i)
-                        .ok_or_else(|| FortressError::InternalError {
-                            context: format!("input_queues index {} out of bounds", i),
+                        .ok_or(FortressError::InternalErrorStructured {
+                            kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                                name: "input_queues",
+                                index: i,
+                                length: self.input_queues.len(),
+                            }),
                         })?;
                 inputs.push(queue.confirmed_input(frame)?);
             }
@@ -840,11 +846,11 @@ mod sync_layer_tests {
         let result = sync_layer.load_frame(Frame::NULL);
         assert!(result.is_err());
         match result {
-            Err(FortressError::InvalidFrame { frame, reason }) => {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
                 assert_eq!(frame, Frame::NULL);
-                assert!(reason.contains("NULL_FRAME"));
+                assert!(matches!(reason, InvalidFrameReason::NullFrame));
             },
-            _ => panic!("Expected InvalidFrame error"),
+            _ => panic!("Expected InvalidFrameStructured error"),
         }
     }
 
@@ -857,11 +863,11 @@ mod sync_layer_tests {
         let result = sync_layer.load_frame(Frame::new(5));
         assert!(result.is_err());
         match result {
-            Err(FortressError::InvalidFrame { frame, reason }) => {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
                 assert_eq!(frame, Frame::new(5));
-                assert!(reason.contains("past"));
+                assert!(matches!(reason, InvalidFrameReason::NotInPast { .. }));
             },
-            _ => panic!("Expected InvalidFrame error"),
+            _ => panic!("Expected InvalidFrameStructured error"),
         }
     }
 
@@ -876,11 +882,11 @@ mod sync_layer_tests {
         let result = sync_layer.load_frame(Frame::new(2));
         assert!(result.is_err());
         match result {
-            Err(FortressError::InvalidFrame { frame, reason }) => {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
                 assert_eq!(frame, Frame::new(2));
-                assert!(reason.contains("past"));
+                assert!(matches!(reason, InvalidFrameReason::NotInPast { .. }));
             },
-            _ => panic!("Expected InvalidFrame error"),
+            _ => panic!("Expected InvalidFrameStructured error"),
         }
     }
 
@@ -898,11 +904,14 @@ mod sync_layer_tests {
         let result = sync_layer.load_frame(Frame::new(0));
         assert!(result.is_err());
         match result {
-            Err(FortressError::InvalidFrame { frame, reason }) => {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
                 assert_eq!(frame, Frame::new(0));
-                assert!(reason.contains("prediction window"));
+                assert!(matches!(
+                    reason,
+                    InvalidFrameReason::OutsidePredictionWindow { .. }
+                ));
             },
-            _ => panic!("Expected InvalidFrame error"),
+            _ => panic!("Expected InvalidFrameStructured error"),
         }
     }
 
@@ -968,11 +977,14 @@ mod sync_layer_tests {
         assert!(result.is_err());
 
         match result {
-            Err(FortressError::InvalidFrame { frame, reason }) => {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
                 assert_eq!(frame, Frame::new(0));
-                assert!(reason.contains("prediction window"));
+                assert!(matches!(
+                    reason,
+                    InvalidFrameReason::OutsidePredictionWindow { .. }
+                ));
             },
-            _ => panic!("Expected InvalidFrame error"),
+            _ => panic!("Expected InvalidFrameStructured error"),
         }
     }
 

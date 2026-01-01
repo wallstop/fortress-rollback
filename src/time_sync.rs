@@ -567,16 +567,8 @@ mod sync_layer_tests {
 )]
 mod property_tests {
     use super::*;
+    use crate::test_config::miri_case_count;
     use proptest::prelude::*;
-
-    /// Returns reduced iteration count when running under Miri for faster testing.
-    const fn miri_case_count() -> u32 {
-        if cfg!(miri) {
-            10
-        } else {
-            256
-        }
-    }
 
     /// Maximum frame value for property tests (keep tractable)
     const MAX_FRAME: i32 = 10_000;

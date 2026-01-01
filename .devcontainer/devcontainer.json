@@ -37,15 +37,16 @@
 			"extensions": [
 				"rust-lang.rust-analyzer",
 				"tamasfe.even-better-toml",
-				"serayuzgur.crates",
+				"fill-labs.dependi",
 				"vadimcn.vscode-lldb",
-				"alygin.vscode-tlaplus",
+				"tlaplus.vscode-ide",
 				"ms-python.python",
 				"ms-python.vscode-pylance",
 				"ryanluker.vscode-coverage-gutters",
 				"streetsidesoftware.code-spell-checker",
 				"GitHub.copilot",
-				"GitHub.copilot-chat"
+				"GitHub.copilot-chat",
+				"anthropic.claude-code"
 			],
 			"settings": {
 				"rust-analyzer.cargo.features": "all",

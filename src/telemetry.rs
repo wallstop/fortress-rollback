@@ -22,7 +22,7 @@
 //! ```
 
 use crate::sync::Mutex;
-use crate::Frame;
+use crate::{Frame, PlayerHandle};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -1073,6 +1073,32 @@ impl InvariantViolation {
         self
     }
 
+    /// Adds checksum mismatch details to the violation.
+    ///
+    /// This is a specialized method for desync detection that encapsulates
+    /// the formatting internally, keeping the call site clean.
+    #[cold]
+    #[inline(never)]
+    #[must_use]
+    pub fn with_checksum_mismatch(
+        mut self,
+        frame: Frame,
+        player_handle: PlayerHandle,
+        local_checksum: u128,
+        remote_checksum: u128,
+    ) -> Self {
+        use std::fmt::Write;
+        let mut details = String::new();
+        // Ignore write error since we're writing to a String
+        let _ = write!(
+            details,
+            "Desync at frame {} with player {}: local={:#x}, remote={:#x}",
+            frame, player_handle, local_checksum, remote_checksum
+        );
+        self.details = Some(details);
+        self
+    }
+
     /// Serializes this violation to a JSON string.
     ///
     /// Returns `None` if serialization fails (which should not happen for
@@ -1885,6 +1911,33 @@ mod tests {
         assert!(display.contains("Buffer"));
         assert!(display.contains("overflow"));
         assert!(display.contains("size=200, max=128"));
+    }
+
+    #[test]
+    fn test_invariant_violation_with_checksum_mismatch() {
+        let violation = InvariantViolation::new("P2PSession", "checksum mismatch")
+            .with_checksum_mismatch(Frame::new(42), PlayerHandle(1), 0xDEAD_BEEF, 0xCAFE_BABE);
+
+        assert_eq!(violation.type_name, "P2PSession");
+        assert_eq!(violation.invariant, "checksum mismatch");
+
+        let details = violation.details.as_ref().expect("details should be set");
+        assert!(details.contains("Desync at frame 42"));
+        assert!(details.contains("player 1"));
+        assert!(details.contains("0xdeadbeef"));
+        assert!(details.contains("0xcafebabe"));
+    }
+
+    #[test]
+    fn test_invariant_violation_with_checksum_mismatch_display() {
+        let violation = InvariantViolation::new("Session", "desync detected")
+            .with_checksum_mismatch(Frame::new(100), PlayerHandle(2), 0x1234, 0x5678);
+
+        let display = violation.to_string();
+        assert!(display.contains("Session"));
+        assert!(display.contains("desync detected"));
+        assert!(display.contains("Desync at frame 100"));
+        assert!(display.contains("player 2"));
     }
 
     // Test implementation of InvariantChecker for testing

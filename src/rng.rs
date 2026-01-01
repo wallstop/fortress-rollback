@@ -816,16 +816,8 @@ mod tests {
 )]
 mod property_tests {
     use super::*;
+    use crate::test_config::miri_case_count;
     use proptest::prelude::*;
-
-    /// Returns reduced iteration count when running under Miri for faster testing.
-    const fn miri_case_count() -> u32 {
-        if cfg!(miri) {
-            10
-        } else {
-            256
-        }
-    }
 
     proptest! {
         #![proptest_config(ProptestConfig {

@@ -4,7 +4,7 @@
 //! [`GameStateCell`]s for rollback functionality.
 
 use crate::sync_layer::GameStateCell;
-use crate::{FortressError, Frame};
+use crate::{FortressError, Frame, IndexOutOfBounds, InternalErrorKind, InvalidFrameReason};
 
 /// Container for saved game states used during rollback.
 ///
@@ -35,17 +35,21 @@ impl<T> SavedStates<T> {
     /// Gets the cell for a given frame.
     pub fn get_cell(&self, frame: Frame) -> Result<GameStateCell<T>, FortressError> {
         if frame.as_i32() < 0 {
-            return Err(FortressError::InvalidFrame {
+            return Err(FortressError::InvalidFrameStructured {
                 frame,
-                reason: "frame must be non-negative".to_string(),
+                reason: InvalidFrameReason::MustBeNonNegative,
             });
         }
         let pos = frame.as_i32() as usize % self.states.len();
         self.states
             .get(pos)
             .cloned()
-            .ok_or_else(|| FortressError::InternalError {
-                context: format!("states index {} out of bounds", pos),
+            .ok_or(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                    name: "states",
+                    index: pos,
+                    length: self.states.len(),
+                }),
             })
     }
 }
@@ -109,11 +113,11 @@ mod tests {
         let result = saved_states.get_cell(Frame::new(-1));
         assert!(result.is_err());
         match result {
-            Err(FortressError::InvalidFrame { frame, reason }) => {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
                 assert_eq!(frame.as_i32(), -1);
-                assert!(reason.contains("non-negative"));
+                assert!(matches!(reason, InvalidFrameReason::MustBeNonNegative));
             },
-            _ => panic!("Expected InvalidFrame error"),
+            _ => panic!("Expected InvalidFrameStructured error"),
         }
     }
 

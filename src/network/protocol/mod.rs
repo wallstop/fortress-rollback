@@ -2646,6 +2646,7 @@ mod tests {
 )]
 mod property_tests {
     use super::*;
+    use crate::test_config::miri_case_count;
     use proptest::prelude::*;
     use serde::{Deserialize, Serialize};
     use std::net::SocketAddr;
@@ -2673,15 +2674,6 @@ mod property_tests {
 
     fn test_addr() -> SocketAddr {
         "127.0.0.1:7000".parse().unwrap()
-    }
-
-    /// Returns reduced iteration count when running under Miri for faster testing.
-    const fn miri_case_count() -> u32 {
-        if cfg!(miri) {
-            10
-        } else {
-            256
-        }
     }
 
     // ========================================================================

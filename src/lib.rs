@@ -19,7 +19,7 @@
 //#![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 use std::{fmt::Debug, hash::Hash};
 
-pub use error::FortressError;
+pub use error::{FortressError, IndexOutOfBounds, InternalErrorKind, InvalidFrameReason};
 
 /// A specialized `Result` type for Fortress Rollback operations.
 ///
@@ -186,6 +186,12 @@ pub mod sync;
 #[doc(hidden)]
 pub mod sync_layer;
 pub mod telemetry;
+/// Shared test configuration for property-based testing.
+///
+/// This module provides centralized configuration for proptest, including
+/// Miri-aware case count reduction for faster testing under the interpreter.
+#[cfg(test)]
+pub(crate) mod test_config;
 #[doc(hidden)]
 pub mod time_sync;
 #[doc(hidden)]

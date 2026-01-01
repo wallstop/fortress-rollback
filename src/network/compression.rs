@@ -86,12 +86,7 @@ pub fn delta_decode(
             data.len(),
             ref_bytes.len()
         );
-        return Err(format!(
-            "delta_decode: data length {} is not a multiple of reference length {}",
-            data.len(),
-            ref_bytes.len()
-        )
-        .into());
+        return Err("delta_decode: data length is not a multiple of reference length".into());
     }
 
     let out_size = data.len() / ref_bytes.len();
@@ -102,12 +97,12 @@ pub fn delta_decode(
         let mut buffer = Vec::with_capacity(ref_bytes.len());
         for byte_index in 0..ref_bytes.len() {
             let data_idx = ref_bytes.len() * output_index + byte_index;
-            let ref_byte = ref_bytes.get(byte_index).ok_or_else(|| {
-                format!("delta_decode: ref_bytes index {} out of bounds", byte_index)
-            })?;
+            let ref_byte = ref_bytes
+                .get(byte_index)
+                .ok_or("delta_decode: ref_bytes index out of bounds")?;
             let data_byte = data
                 .get(data_idx)
-                .ok_or_else(|| format!("delta_decode: data index {} out of bounds", data_idx))?;
+                .ok_or("delta_decode: data index out of bounds")?;
             // Push directly instead of allocating zeros then mutating
             buffer.push(ref_byte ^ data_byte);
         }
@@ -239,16 +234,8 @@ mod compression_tests {
 )]
 mod property_tests {
     use super::*;
+    use crate::test_config::miri_case_count;
     use proptest::prelude::*;
-
-    /// Returns reduced iteration count when running under Miri for faster testing.
-    const fn miri_case_count() -> u32 {
-        if cfg!(miri) {
-            10
-        } else {
-            256
-        }
-    }
 
     // Strategy for generating valid input sizes (1-32 bytes)
     fn input_size() -> impl Strategy<Value = usize> {
