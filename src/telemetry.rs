@@ -1261,11 +1261,65 @@ macro_rules! assert_invariants {
 }
 
 /// No-op version for release builds without `paranoid` feature.
+///
+/// # Note
+///
+/// This macro is a no-op in release builds to avoid the overhead of invariant
+/// checking in production. If you need to check invariants in production without
+/// panicking, use [`try_check_invariants!`] instead, which returns a `Result`.
 #[macro_export]
 #[cfg(not(any(debug_assertions, feature = "paranoid")))]
 macro_rules! assert_invariants {
     ($expr:expr) => {{}};
     ($expr:expr, $context:expr) => {{}};
+}
+
+/// Macro for checking invariants and returning a Result.
+///
+/// Unlike [`assert_invariants!`], this macro does not panic. Instead, it returns
+/// `Ok(())` if invariants hold, or `Err(violation_message)` if they are violated.
+/// This is suitable for production code where you want to handle invariant
+/// violations gracefully without panicking.
+///
+/// Unlike [`debug_check_invariants!`], this macro is not gated behind debug_assertions
+/// and will always execute in both debug and release builds.
+///
+/// # Example
+///
+/// ```ignore
+/// use fortress_rollback::{try_check_invariants, telemetry::InvariantChecker};
+///
+/// fn validate_state<T: InvariantChecker>(item: &T) -> Result<(), String> {
+///     try_check_invariants!(item)?;
+///     Ok(())
+/// }
+///
+/// fn process_with_validation<T: InvariantChecker>(item: &T) -> Result<(), String> {
+///     // Check invariants and handle failure gracefully
+///     if let Err(violation) = try_check_invariants!(item) {
+///         // Log and recover instead of panicking
+///         eprintln!("Warning: invariant violation: {}", violation);
+///         return Err(violation);
+///     }
+///     // Continue processing...
+///     Ok(())
+/// }
+/// ```
+#[macro_export]
+macro_rules! try_check_invariants {
+    ($expr:expr) => {{
+        #[allow(unused_imports)]
+        use $crate::telemetry::InvariantChecker as _;
+        $expr.check_invariants()
+    }};
+
+    ($expr:expr, $context:expr) => {{
+        #[allow(unused_imports)]
+        use $crate::telemetry::InvariantChecker as _;
+        $expr
+            .check_invariants()
+            .map_err(|violation| format!("{} [context: {}]", violation, $context))
+    }};
 }
 
 #[cfg(test)]
@@ -2023,6 +2077,61 @@ mod tests {
             message: "panic test",
         };
         assert_invariants!(checker, "test context");
+    }
+
+    // ==========================================
+    // try_check_invariants! Macro Tests
+    // ==========================================
+
+    #[test]
+    fn test_try_check_invariants_macro_ok() {
+        let checker = TestCheckerOk;
+        let result = try_check_invariants!(checker);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_try_check_invariants_macro_ok_with_context() {
+        let checker = TestCheckerOk;
+        let result = try_check_invariants!(checker, "test context");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_try_check_invariants_macro_fail() {
+        let checker = TestCheckerFail {
+            message: "invariant failed",
+        };
+        let result = try_check_invariants!(checker);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().invariant.contains("invariant failed"));
+    }
+
+    #[test]
+    fn test_try_check_invariants_macro_fail_with_context() {
+        let checker = TestCheckerFail {
+            message: "invariant failed",
+        };
+        let result = try_check_invariants!(checker, "my context");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // With context, the error is formatted as a String
+        assert!(err.contains("invariant failed"));
+        assert!(err.contains("my context"));
+    }
+
+    #[test]
+    fn test_try_check_invariants_can_use_question_mark() {
+        fn check_it<T: InvariantChecker>(item: &T) -> Result<(), InvariantViolation> {
+            try_check_invariants!(item)?;
+            Ok(())
+        }
+
+        let checker_ok = TestCheckerOk;
+        assert!(check_it(&checker_ok).is_ok());
+
+        let checker_fail = TestCheckerFail { message: "failed" };
+        assert!(check_it(&checker_fail).is_err());
     }
 
     // ==========================================

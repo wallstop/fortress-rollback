@@ -598,7 +598,10 @@ mod kani_proofs {
         if frame_val == -1 {
             kani::assert(input_bytes.frame.is_null(), "Frame -1 should be NULL");
         } else {
-            kani::assert!(!input_bytes.frame.is_null());
+            kani::assert(
+                !input_bytes.frame.is_null(),
+                "non -1 frame should not be null",
+            );
         }
     }
 
@@ -884,21 +887,24 @@ mod kani_proofs {
             frame: Frame::new(i32::MAX),
             bytes: Vec::new(),
         };
-        kani::assert!(!max_input.frame.is_null());
-        kani::assert!(max_input.frame == Frame::new(i32::MAX));
+        kani::assert(!max_input.frame.is_null(), "max frame should not be null");
+        kani::assert(
+            max_input.frame == Frame::new(i32::MAX),
+            "max frame should equal i32::MAX",
+        );
 
         // Test min negative frame (not NULL)
         let min_input = InputBytes {
             frame: Frame::new(i32::MIN),
             bytes: Vec::new(),
         };
-        kani::assert!(!min_input.frame.is_null());
+        kani::assert(!min_input.frame.is_null(), "min frame should not be null");
 
         // Test NULL frame
         let null_input = InputBytes {
             frame: Frame::NULL,
             bytes: Vec::new(),
         };
-        kani::assert!(null_input.frame.is_null());
+        kani::assert(null_input.frame.is_null(), "NULL frame should be null");
     }
 }

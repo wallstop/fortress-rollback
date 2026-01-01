@@ -466,6 +466,7 @@ mod kani_proofs {
     #[derive(Clone, Default)]
     struct TestState;
 
+    #[derive(Clone, PartialEq)]
     struct TestConfig;
 
     impl Config for TestConfig {
@@ -475,6 +476,7 @@ mod kani_proofs {
     }
 
     /// Total number of event variants.
+    #[allow(dead_code)]
     const EVENT_VARIANT_COUNT: u8 = 7;
 
     // =========================================================================
@@ -650,12 +652,30 @@ mod kani_proofs {
         let timeout: Event<TestConfig> = Event::SyncTimeout { elapsed_ms: 10000 };
 
         // Verify Synchronizing is distinct from all others
-        kani::assert!(sync_progress != synchronized);
-        kani::assert!(sync_progress != input);
-        kani::assert!(sync_progress != disconnected);
-        kani::assert!(sync_progress != interrupted);
-        kani::assert!(sync_progress != resumed);
-        kani::assert!(sync_progress != timeout);
+        kani::assert(
+            sync_progress != synchronized,
+            "sync_progress should differ from synchronized",
+        );
+        kani::assert(
+            sync_progress != input,
+            "sync_progress should differ from input",
+        );
+        kani::assert(
+            sync_progress != disconnected,
+            "sync_progress should differ from disconnected",
+        );
+        kani::assert(
+            sync_progress != interrupted,
+            "sync_progress should differ from interrupted",
+        );
+        kani::assert(
+            sync_progress != resumed,
+            "sync_progress should differ from resumed",
+        );
+        kani::assert(
+            sync_progress != timeout,
+            "sync_progress should differ from timeout",
+        );
     }
 
     // =========================================================================

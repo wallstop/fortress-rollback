@@ -4327,8 +4327,11 @@ mod kani_proofs {
         let status = ConnectionStatus::default();
 
         // Default should be disconnected with NULL frame
-        kani::assert!(status.disconnected);
-        kani::assert!(status.last_frame.is_null());
+        kani::assert(status.disconnected, "default status should be disconnected");
+        kani::assert(
+            status.last_frame.is_null(),
+            "default last_frame should be null",
+        );
     }
 
     /// Proof: ConnectionStatus with symbolic values preserves frame.
@@ -4351,9 +4354,12 @@ mod kani_proofs {
 
         // NULL detection should work
         if frame_val == -1 {
-            kani::assert!(status.last_frame.is_null());
+            kani::assert(status.last_frame.is_null(), "frame -1 should be null");
         } else {
-            kani::assert!(!status.last_frame.is_null());
+            kani::assert(
+                !status.last_frame.is_null(),
+                "non -1 frame should not be null",
+            );
         }
     }
 
@@ -4522,10 +4528,13 @@ mod kani_proofs {
         );
 
         // Verify gap detection logic
-        let has_gap = start_frame > expected_next;
+        let _has_gap = start_frame > expected_next;
         if last_recv == -1 {
             // First frame - no gap possible
-            kani::assert!(start_frame >= 0);
+            kani::assert(
+                start_frame >= 0,
+                "start_frame should be non-negative for first frame",
+            );
         }
     }
 

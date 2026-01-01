@@ -19,7 +19,10 @@
 //#![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 use std::{fmt::Debug, hash::Hash};
 
-pub use error::{FortressError, IndexOutOfBounds, InternalErrorKind, InvalidFrameReason};
+pub use error::{
+    DeltaDecodeReason, FortressError, IndexOutOfBounds, InternalErrorKind, InvalidFrameReason,
+    RleDecodeReason,
+};
 
 /// A specialized `Result` type for Fortress Rollback operations.
 ///

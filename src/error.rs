@@ -1,3 +1,87 @@
+//! Error types for Fortress Rollback.
+//!
+//! This module provides structured error types for the rollback networking library.
+//! The error types are designed to be:
+//!
+//! - **Zero-allocation on hot paths**: Errors store numeric data directly instead
+//!   of formatting strings, enabling allocation-free error construction.
+//! - **Programmatically inspectable**: Using enums and structured fields instead
+//!   of string messages allows callers to match on specific error cases.
+//! - **Self-documenting**: Each error variant and field is documented.
+//!
+//! # Error Type Design
+//!
+//! ## Dual Variant Pattern
+//!
+//! Some error variants exist in both unstructured (legacy) and structured forms:
+//!
+//! - `InvalidFrame` (unstructured) vs `InvalidFrameStructured` (structured)
+//! - `InternalError` (unstructured) vs `InternalErrorStructured` (structured)
+//!
+//! This pattern exists for backward compatibility. The unstructured variants
+//! accept string messages and are used by legacy code. The structured variants
+//! use zero-allocation enums and provide better error inspection.
+//!
+//! **Migration path:** New code should use structured variants. Unstructured
+//! variants are deprecated but retained for API stability. A future major version
+//! may remove the unstructured variants.
+//!
+//! ## Structured Error Types
+//!
+//! - [`IndexOutOfBounds`]: Index/bounds error with collection name and indices.
+//! - [`InvalidFrameReason`]: Why a frame was invalid (null, negative, out of window).
+//! - [`InternalErrorKind`]: Specific internal error types with structured context.
+//! - [`RleDecodeReason`]: Why RLE decoding failed.
+//!
+//! ## Module-Specific Error Types
+//!
+//! Other modules provide their own structured error types:
+//!
+//! - [`crate::network::compression::CompressionError`]: RLE and delta decode errors.
+//! - [`crate::network::codec::CodecError`]: Serialization/deserialization errors.
+//! - [`crate::checksum::ChecksumError`]: Checksum computation errors.
+//!
+//! # Usage Examples
+//!
+//! ## Creating structured errors (preferred)
+//!
+//! ```
+//! use fortress_rollback::{FortressError, InternalErrorKind, IndexOutOfBounds};
+//!
+//! // Create a structured index out of bounds error
+//! let error = FortressError::InternalErrorStructured {
+//!     kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+//!         name: "inputs",
+//!         index: 10,
+//!         length: 5,
+//!     }),
+//! };
+//! ```
+//!
+//! ## Matching on error variants
+//!
+//! ```
+//! use fortress_rollback::{FortressError, InvalidFrameReason};
+//!
+//! fn handle_error(err: FortressError) {
+//!     match err {
+//!         FortressError::InvalidFrameStructured { frame, reason } => {
+//!             match reason {
+//!                 InvalidFrameReason::NullFrame => {
+//!                     println!("Frame {} is NULL", frame.as_i32());
+//!                 }
+//!                 InvalidFrameReason::OutsidePredictionWindow { max_prediction, .. } => {
+//!                     println!("Frame {} outside {} frame prediction window",
+//!                              frame.as_i32(), max_prediction);
+//!                 }
+//!                 _ => {}
+//!             }
+//!         }
+//!         _ => {}
+//!     }
+//! }
+//! ```
+
 use std::error::Error;
 use std::fmt;
 use std::fmt::Display;
@@ -114,6 +198,111 @@ impl Display for InvalidFrameReason {
     }
 }
 
+/// Represents why an RLE decode operation failed.
+///
+/// Using an enum instead of String allows for zero-allocation error construction
+/// on hot paths while still providing detailed error messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RleDecodeReason {
+    /// The bitfield index was out of bounds during decode.
+    BitfieldIndexOutOfBounds,
+    /// The destination slice was out of bounds during decode.
+    DestinationSliceOutOfBounds,
+    /// The source slice was out of bounds during decode.
+    SourceSliceOutOfBounds,
+    /// The encoded data was truncated (offset exceeded buffer length).
+    TruncatedData {
+        /// The offset that was reached.
+        offset: usize,
+        /// The buffer length.
+        buffer_len: usize,
+    },
+}
+
+impl Display for RleDecodeReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BitfieldIndexOutOfBounds => {
+                write!(f, "bitfield index out of bounds")
+            },
+            Self::DestinationSliceOutOfBounds => {
+                write!(f, "destination slice out of bounds")
+            },
+            Self::SourceSliceOutOfBounds => {
+                write!(f, "source slice out of bounds")
+            },
+            Self::TruncatedData { offset, buffer_len } => {
+                write!(
+                    f,
+                    "truncated data: offset {} exceeds buffer length {}",
+                    offset, buffer_len
+                )
+            },
+        }
+    }
+}
+
+/// Represents why a delta decode operation failed.
+///
+/// Using an enum instead of String allows for zero-allocation error construction
+/// and programmatic error inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DeltaDecodeReason {
+    /// The reference bytes were empty.
+    EmptyReference,
+    /// The data length is not a multiple of the reference length.
+    DataLengthMismatch {
+        /// The length of the data buffer.
+        data_len: usize,
+        /// The length of the reference buffer.
+        reference_len: usize,
+    },
+    /// The reference bytes index was out of bounds.
+    ReferenceIndexOutOfBounds {
+        /// The index that was out of bounds.
+        index: usize,
+        /// The length of the reference buffer.
+        length: usize,
+    },
+    /// The data index was out of bounds.
+    DataIndexOutOfBounds {
+        /// The index that was out of bounds.
+        index: usize,
+        /// The length of the data buffer.
+        length: usize,
+    },
+}
+
+impl Display for DeltaDecodeReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyReference => write!(f, "reference bytes is empty"),
+            Self::DataLengthMismatch {
+                data_len,
+                reference_len,
+            } => {
+                write!(
+                    f,
+                    "data length {} is not a multiple of reference length {}",
+                    data_len, reference_len
+                )
+            },
+            Self::ReferenceIndexOutOfBounds { index, length } => {
+                write!(
+                    f,
+                    "reference bytes index {} out of bounds (length: {})",
+                    index, length
+                )
+            },
+            Self::DataIndexOutOfBounds { index, length } => {
+                write!(f, "data index {} out of bounds (length: {})", index, length)
+            },
+        }
+    }
+}
+
 /// Specific internal error kinds with structured data.
 ///
 /// Using an enum instead of String allows for zero-allocation error construction
@@ -151,6 +340,16 @@ pub enum InternalErrorKind {
     ConnectionStatusIndexOutOfBounds {
         /// The player handle that was out of bounds.
         player_handle: PlayerHandle,
+    },
+    /// RLE decode operation failed.
+    RleDecodeError {
+        /// The specific reason for the RLE decode failure.
+        reason: RleDecodeReason,
+    },
+    /// Delta decode operation failed.
+    DeltaDecodeError {
+        /// The specific reason for the delta decode failure.
+        reason: DeltaDecodeReason,
     },
     /// Custom error (fallback for API compatibility).
     Custom(&'static str),
@@ -192,6 +391,12 @@ impl Display for InternalErrorKind {
                     "connection status index out of bounds for player handle {}",
                     player_handle
                 )
+            },
+            Self::RleDecodeError { reason } => {
+                write!(f, "RLE decode failed: {}", reason)
+            },
+            Self::DeltaDecodeError { reason } => {
+                write!(f, "delta decode failed: {}", reason)
             },
             Self::Custom(s) => write!(f, "{}", s),
         }
@@ -710,5 +915,67 @@ mod tests {
         let kind = InternalErrorKind::EmptyPlayerInputs;
         let kind2 = kind; // Copy
         assert_eq!(kind, kind2);
+    }
+
+    // =========================================================================
+    // RLE Decode Reason Tests
+    // =========================================================================
+
+    #[test]
+    fn test_rle_decode_reason_bitfield_index_out_of_bounds() {
+        let reason = RleDecodeReason::BitfieldIndexOutOfBounds;
+        let display = format!("{}", reason);
+        assert!(display.contains("bitfield index out of bounds"));
+    }
+
+    #[test]
+    fn test_rle_decode_reason_destination_slice_out_of_bounds() {
+        let reason = RleDecodeReason::DestinationSliceOutOfBounds;
+        let display = format!("{}", reason);
+        assert!(display.contains("destination slice out of bounds"));
+    }
+
+    #[test]
+    fn test_rle_decode_reason_source_slice_out_of_bounds() {
+        let reason = RleDecodeReason::SourceSliceOutOfBounds;
+        let display = format!("{}", reason);
+        assert!(display.contains("source slice out of bounds"));
+    }
+
+    #[test]
+    fn test_rle_decode_reason_truncated_data() {
+        let reason = RleDecodeReason::TruncatedData {
+            offset: 100,
+            buffer_len: 50,
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("truncated data"));
+        assert!(display.contains("100"));
+        assert!(display.contains("50"));
+    }
+
+    #[test]
+    fn test_internal_error_kind_rle_decode_error() {
+        let kind = InternalErrorKind::RleDecodeError {
+            reason: RleDecodeReason::BitfieldIndexOutOfBounds,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("RLE decode failed"));
+        assert!(display.contains("bitfield index out of bounds"));
+    }
+
+    #[test]
+    fn test_rle_decode_reason_is_copy() {
+        // Verify RleDecodeReason is Copy (important for hot path)
+        let reason = RleDecodeReason::BitfieldIndexOutOfBounds;
+        let reason2 = reason; // Copy
+        assert_eq!(reason, reason2);
+
+        let reason_with_data = RleDecodeReason::TruncatedData {
+            offset: 10,
+            buffer_len: 5,
+        };
+        let reason_with_data2 = reason_with_data; // Copy
+        assert_eq!(reason_with_data, reason_with_data2);
     }
 }

@@ -37,31 +37,7 @@
 
 use std::error::Error;
 
-use crate::FortressError;
-
-/// Error type for RLE decoding failures.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RleDecodeError {
-    message: String,
-}
-
-impl RleDecodeError {
-    #[cold]
-    #[inline(never)]
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for RleDecodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RLE decode error: {}", self.message)
-    }
-}
-
-impl Error for RleDecodeError {}
+use crate::{FortressError, InternalErrorKind, RleDecodeReason};
 
 /// Result type for RLE operations.
 pub type RleResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -354,11 +330,13 @@ fn decode_with_offset(buf: &[u8], mut offset: usize) -> RleResult<Vec<u8>> {
                 // Fill with 0xFF
                 for i in 0..len {
                     if ptr + i < bitfield.len() {
-                        *bitfield.get_mut(ptr + i).ok_or_else(|| {
-                            FortressError::InternalError {
-                                context: "RLE decode bitfield index out of bounds".into(),
-                            }
-                        })? = 255;
+                        *bitfield.get_mut(ptr + i).ok_or(
+                            FortressError::InternalErrorStructured {
+                                kind: InternalErrorKind::RleDecodeError {
+                                    reason: RleDecodeReason::BitfieldIndexOutOfBounds,
+                                },
+                            },
+                        )? = 255;
                     }
                 }
             }
@@ -370,17 +348,20 @@ fn decode_with_offset(buf: &[u8], mut offset: usize) -> RleResult<Vec<u8>> {
             let dst_end = (ptr + src_len).min(bitfield.len());
             let actual_len = dst_end - ptr;
             if actual_len > 0 && offset + actual_len <= buf.len() {
-                let dst_slice =
-                    bitfield
-                        .get_mut(ptr..dst_end)
-                        .ok_or_else(|| FortressError::InternalError {
-                            context: "RLE decode destination slice out of bounds".into(),
-                        })?;
-                let src_slice = buf.get(offset..offset + actual_len).ok_or_else(|| {
-                    FortressError::InternalError {
-                        context: "RLE decode source slice out of bounds".into(),
-                    }
-                })?;
+                let dst_slice = bitfield.get_mut(ptr..dst_end).ok_or(
+                    FortressError::InternalErrorStructured {
+                        kind: InternalErrorKind::RleDecodeError {
+                            reason: RleDecodeReason::DestinationSliceOutOfBounds,
+                        },
+                    },
+                )?;
+                let src_slice = buf.get(offset..offset + actual_len).ok_or(
+                    FortressError::InternalErrorStructured {
+                        kind: InternalErrorKind::RleDecodeError {
+                            reason: RleDecodeReason::SourceSliceOutOfBounds,
+                        },
+                    },
+                )?;
                 dst_slice.copy_from_slice(src_slice);
             }
             offset += len;
@@ -414,11 +395,14 @@ fn decode_len_with_offset(buf: &[u8], mut offset: usize) -> RleResult<usize> {
     }
 
     if offset > buf.len() {
-        return Err(Box::new(RleDecodeError::new(format!(
-            "Invalid RLE bitfield: offset {} > buffer length {}",
-            offset,
-            buf.len()
-        ))));
+        return Err(Box::new(FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::RleDecodeError {
+                reason: RleDecodeReason::TruncatedData {
+                    offset,
+                    buffer_len: buf.len(),
+                },
+            },
+        }));
     }
 
     Ok(len)
@@ -437,6 +421,37 @@ fn decode_len_with_offset(buf: &[u8], mut offset: usize) -> RleResult<usize> {
 )]
 mod tests {
     use super::*;
+
+    // ================
+    // Test-only types
+    // ================
+
+    /// Test-only error type for RLE decoding failures.
+    ///
+    /// This struct is only used in tests to verify error display formatting.
+    /// Production code uses the structured `RleDecodeReason` variants via
+    /// `FortressError::InternalErrorStructured`.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RleDecodeError {
+        message: String,
+    }
+
+    impl RleDecodeError {
+        /// Creates a new RLE decode error with the given message.
+        fn new(message: impl Into<String>) -> Self {
+            Self {
+                message: message.into(),
+            }
+        }
+    }
+
+    impl std::fmt::Display for RleDecodeError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "RLE decode error: {}", self.message)
+        }
+    }
+
+    impl std::error::Error for RleDecodeError {}
 
     // ================
     // Varint tests

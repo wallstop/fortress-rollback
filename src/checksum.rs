@@ -176,7 +176,9 @@ pub fn compute_checksum<T: Serialize>(state: &T) -> Result<u128, ChecksumError> 
 ///     .expect("should succeed");
 /// ```
 pub fn compute_checksum_fletcher16<T: Serialize>(state: &T) -> Result<u128, ChecksumError> {
-    let bytes = encode(state)?;
+    let bytes = encode(state).map_err(|e| {
+        ChecksumError::serialization_failed(ChecksumAlgorithm::Fletcher16, e.to_string())
+    })?;
     Ok(u128::from(fletcher16(&bytes)))
 }
 
@@ -247,26 +249,96 @@ pub fn fletcher16(data: &[u8]) -> u16 {
     (sum2 << 8) | sum1
 }
 
+/// Represents what checksum algorithm was being computed when an error occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ChecksumAlgorithm {
+    /// FNV-1a hashing (used by [`compute_checksum`]).
+    Fnv1a,
+    /// Fletcher-16 checksum (used by [`compute_checksum_fletcher16`]).
+    Fletcher16,
+}
+
+impl std::fmt::Display for ChecksumAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fnv1a => write!(f, "FNV-1a"),
+            Self::Fletcher16 => write!(f, "Fletcher-16"),
+        }
+    }
+}
+
 /// Errors that can occur during checksum computation.
-#[derive(Debug)]
+///
+/// # Why String for Error Messages?
+///
+/// Similar to [`CodecError`](crate::network::codec::CodecError), this error type stores
+/// the underlying error message as a `String` rather than a structured enum. This is
+/// intentional:
+///
+/// 1. **Wraps CodecError**: Checksum computation uses the codec module for serialization,
+///    and [`CodecError`] already stores bincode errors as strings (since bincode errors
+///    are opaque).
+///
+/// 2. **Not on the hot path**: Checksum errors occur during exceptional conditions
+///    (serialization failures), not during normal game loop execution. The allocation
+///    cost of a String is negligible for error paths.
+///
+/// 3. **Diagnostic preservation**: The serialization error message contains useful
+///    diagnostic information about why serialization failed (e.g., "sequence too long",
+///    "unsupported type").
+///
+/// For hot-path error handling, we use structured enums. See
+/// [`RleDecodeReason`](crate::RleDecodeReason) for an example.
+///
+/// [`CodecError`]: crate::network::codec::CodecError
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ChecksumError {
     /// Serialization of the state failed.
     ///
     /// This typically occurs if the state contains unsupported types or
     /// if there's an issue with the serde implementation.
-    SerializationFailed(String),
+    SerializationFailed {
+        /// The checksum algorithm that was being computed.
+        algorithm: ChecksumAlgorithm,
+        /// The underlying error message from the serializer.
+        ///
+        /// This is a `String` because it wraps [`CodecError`](crate::network::codec::CodecError),
+        /// which stores bincode errors as strings (since bincode errors are opaque).
+        message: String,
+    },
+}
+
+impl ChecksumError {
+    /// Creates a new serialization error for the given algorithm.
+    pub fn serialization_failed(algorithm: ChecksumAlgorithm, message: impl Into<String>) -> Self {
+        Self::SerializationFailed {
+            algorithm,
+            message: message.into(),
+        }
+    }
 }
 
 impl From<CodecError> for ChecksumError {
     fn from(err: CodecError) -> Self {
-        Self::SerializationFailed(err.to_string())
+        // Default to FNV-1a since that's the primary checksum algorithm
+        Self::SerializationFailed {
+            algorithm: ChecksumAlgorithm::Fnv1a,
+            message: err.to_string(),
+        }
     }
 }
 
 impl std::fmt::Display for ChecksumError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SerializationFailed(msg) => write!(f, "checksum failed: {msg}"),
+            Self::SerializationFailed { algorithm, message } => {
+                write!(
+                    f,
+                    "{algorithm} checksum failed: serialization error: {message}"
+                )
+            },
         }
     }
 }
@@ -396,10 +468,48 @@ mod tests {
 
     #[test]
     fn checksum_error_display() {
-        let err = ChecksumError::SerializationFailed("test error".to_string());
+        let err = ChecksumError::SerializationFailed {
+            algorithm: ChecksumAlgorithm::Fnv1a,
+            message: "test error".to_string(),
+        };
         let display = format!("{err}");
         assert!(display.contains("checksum failed"));
         assert!(display.contains("test error"));
+        assert!(display.contains("FNV-1a"));
+    }
+
+    #[test]
+    fn checksum_error_fletcher16_display() {
+        let err =
+            ChecksumError::serialization_failed(ChecksumAlgorithm::Fletcher16, "serialize failed");
+        let display = format!("{err}");
+        assert!(display.contains("Fletcher-16"));
+        assert!(display.contains("serialize failed"));
+    }
+
+    #[test]
+    fn checksum_algorithm_display() {
+        assert_eq!(format!("{}", ChecksumAlgorithm::Fnv1a), "FNV-1a");
+        assert_eq!(format!("{}", ChecksumAlgorithm::Fletcher16), "Fletcher-16");
+    }
+
+    #[test]
+    fn checksum_algorithm_is_copy() {
+        let alg = ChecksumAlgorithm::Fnv1a;
+        let alg2 = alg;
+        assert_eq!(alg, alg2);
+    }
+
+    #[test]
+    fn checksum_error_equality() {
+        let err1 = ChecksumError::serialization_failed(ChecksumAlgorithm::Fnv1a, "test");
+        let err2 = ChecksumError::serialization_failed(ChecksumAlgorithm::Fnv1a, "test");
+        let err3 = ChecksumError::serialization_failed(ChecksumAlgorithm::Fletcher16, "test");
+        let err4 = ChecksumError::serialization_failed(ChecksumAlgorithm::Fnv1a, "different");
+
+        assert_eq!(err1, err2);
+        assert_ne!(err1, err3);
+        assert_ne!(err1, err4);
     }
 
     #[test]
