@@ -5,7 +5,7 @@ members = [".", "tests/network-peer"]
 
 [package]
 name = "fortress-rollback"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["wallstop <wallstop@wallstopstudios.com>"]
 edition = "2021"
 rust-version = "1.86"  # Minimum Supported Rust Version (MSRV) - required by criterion 0.8.1
@@ -26,6 +26,13 @@ exclude = [
     "specs/",
     "proptest-regressions/",
     "actionlint",
+    # Security scanning baseline (development only)
+    ".secrets.baseline",
+    # Mutation testing artifacts (can be very large ~1GB+)
+    "mutants.out/",
+    # TLA+ model checker output
+    "states/",
+    "states.dot",
     # Development config files (not needed by users)
     ".cargo/",
     ".config/",
@@ -40,9 +47,27 @@ exclude = [
     "clippy.toml",
     "deny.toml",
     "rustfmt.toml",
+    # CI/tooling configuration files (only used for development workflows)
+    ".lychee.toml",
+    ".typos.toml",
+    ".vale.ini",
+    ".vale/",
+    "codecov.yml",
+    "Cross.toml",
+    "mkdocs.yml",
+    "requirements-docs.txt",
+    # Python virtual environment and cache (for TLA+ tooling)
+    ".venv/",
+    ".pytest_cache/",
+    # Session progress tracking files
+    "progress/",
+    # GitHub wiki mirror
+    "wiki/",
     # LLM instruction files (for contributing to this project, not for users)
     "AGENTS.md",
     "CLAUDE.md",
+    # Development planning document (not for users)
+    "PLAN.md",
     # Note: .cursorrules is already excluded above with development config files
     # Note: llms.txt is intentionally NOT excluded - it helps AI tools understand
     # the library API for users integrating Fortress Rollback into their projects

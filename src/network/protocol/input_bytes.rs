@@ -578,6 +578,10 @@ mod kani_proofs {
     /// Proof: InputBytes construction preserves frame.
     ///
     /// Verifies that constructing InputBytes with a frame value correctly stores it.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Frame field preservation during construction
+    /// - Related: proof_clone_preserves_frame, proof_null_frame_detection
     #[kani::proof]
     fn proof_input_bytes_frame_preserved() {
         let frame_val: i32 = kani::any();
@@ -608,6 +612,10 @@ mod kani_proofs {
     /// Proof: InputBytes construction with symbolic bytes.
     ///
     /// Verifies that InputBytes correctly stores bytes with various lengths.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Bytes field preservation during construction
+    /// - Related: proof_clone_preserves_bytes, proof_empty_input_bytes_valid
     #[kani::proof]
     #[kani::unwind(10)]
     fn proof_input_bytes_stores_bytes() {
@@ -642,6 +650,10 @@ mod kani_proofs {
     /// Proof: Clone preserves frame value.
     ///
     /// Verifies that cloning InputBytes preserves the frame field.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Clone correctness for frame field
+    /// - Related: proof_input_bytes_frame_preserved, proof_clone_preserves_bytes
     #[kani::proof]
     fn proof_clone_preserves_frame() {
         let frame_val: i32 = kani::any();
@@ -664,6 +676,10 @@ mod kani_proofs {
     /// Proof: Clone preserves bytes.
     ///
     /// Verifies that cloning InputBytes creates a deep copy of bytes.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Clone correctness for bytes field
+    /// - Related: proof_clone_preserves_frame, proof_clone_is_independent
     #[kani::proof]
     #[kani::unwind(10)]
     fn proof_clone_preserves_bytes() {
@@ -698,6 +714,10 @@ mod kani_proofs {
     /// Proof: Clone creates independent copy.
     ///
     /// Verifies that cloned InputBytes is independent (modifying one doesn't affect other).
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Clone independence (deep copy semantics)
+    /// - Related: proof_clone_preserves_bytes
     #[kani::proof]
     #[kani::unwind(5)]
     fn proof_clone_is_independent() {
@@ -725,6 +745,10 @@ mod kani_proofs {
     ///
     /// Verifies that start..end ranges for player slices are always within bounds
     /// when bytes.len() is divisible by num_players.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Slice bounds safety in to_player_inputs
+    /// - Related: proof_divisibility_check
     #[kani::proof]
     fn proof_player_slice_bounds_valid() {
         let total_bytes: usize = kani::any();
@@ -766,6 +790,10 @@ mod kani_proofs {
     /// Proof: Divisibility check correctly identifies valid/invalid byte lengths.
     ///
     /// Verifies that the modulo check in to_player_inputs works correctly.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Modulo divisibility check correctness
+    /// - Related: proof_player_slice_bounds_valid
     #[kani::proof]
     fn proof_divisibility_check() {
         let bytes_len: usize = kani::any();
@@ -802,6 +830,10 @@ mod kani_proofs {
     /// Proof: First non-NULL frame is selected.
     ///
     /// Verifies the frame selection algorithm that picks the first non-NULL frame.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame selection logic in from_inputs
+    /// - Related: proof_null_frame_detection
     #[kani::proof]
     fn proof_first_non_null_frame_selection() {
         let frame_val1: i32 = kani::any();
@@ -836,6 +868,10 @@ mod kani_proofs {
     /// Proof: NULL frame detection is consistent.
     ///
     /// Verifies that Frame::NULL is correctly identified.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Frame::is_null() consistency with value -1
+    /// - Related: proof_input_bytes_frame_preserved, proof_first_non_null_frame_selection
     #[kani::proof]
     fn proof_null_frame_detection() {
         let frame_val: i32 = kani::any();
@@ -865,6 +901,10 @@ mod kani_proofs {
     /// Proof: Empty InputBytes is valid.
     ///
     /// Verifies that InputBytes with empty bytes is a valid state.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Empty bytes edge case handling
+    /// - Related: proof_input_bytes_stores_bytes
     #[kani::proof]
     fn proof_empty_input_bytes_valid() {
         let input_bytes = InputBytes {
@@ -880,6 +920,10 @@ mod kani_proofs {
     /// Proof: InputBytes with max frame value.
     ///
     /// Verifies that extreme frame values are handled correctly.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Extreme frame value handling (i32::MAX, i32::MIN)
+    /// - Related: proof_input_bytes_frame_preserved, proof_null_frame_detection
     #[kani::proof]
     fn proof_extreme_frame_values() {
         // Test max positive frame

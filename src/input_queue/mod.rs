@@ -2100,9 +2100,13 @@ mod kani_input_queue_proofs {
             .expect("test_queue: InputQueue::new should succeed for valid player_index")
     }
 
-    /// Proof: New queue has valid initial state
+    /// Proof: New queue has valid initial state.
     ///
     /// Verifies INV-4 (length = 0) and INV-5 (head = tail = 0) at initialization.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Initial queue state validity (INV-4, INV-5)
+    /// - Related: proof_add_single_input_maintains_invariants
     #[kani::proof]
     #[kani::unwind(10)]
     fn proof_new_queue_valid() {
@@ -2135,12 +2139,16 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: Single add_input maintains invariants
+    /// Proof: Single add_input maintains invariants.
     ///
     /// Verifies that adding a single input maintains INV-4 and INV-5.
     ///
     /// Note: unwind(10) is needed because Vec initialization requires iterating
     /// over INPUT_QUEUE_LENGTH (8 under Kani) elements.
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Single add_input preserves invariants (INV-4, INV-5)
+    /// - Related: proof_new_queue_valid, proof_sequential_inputs_maintain_invariants
     #[kani::proof]
     #[kani::unwind(10)]
     fn proof_add_single_input_maintains_invariants() {
@@ -2177,7 +2185,7 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: Sequential inputs maintain invariants (concrete iteration for tractability)
+    /// Proof: Sequential inputs maintain invariants (concrete iteration for tractability).
     ///
     /// Verifies INV-4 and INV-5 hold after adding multiple sequential inputs.
     ///
@@ -2185,6 +2193,10 @@ mod kani_input_queue_proofs {
     /// tractable. The invariants are verified at each step, proving they are maintained
     /// for sequential additions. Combined with proof_add_single_input_maintains_invariants,
     /// this provides coverage for the general case via induction.
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Sequential add_input preserves invariants (INV-4, INV-5)
+    /// - Related: proof_add_single_input_maintains_invariants
     #[kani::proof]
     #[kani::unwind(10)]
     fn proof_sequential_inputs_maintain_invariants() {
@@ -2233,9 +2245,13 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: Head wraparound is correct
+    /// Proof: Head wraparound is correct.
     ///
     /// Verifies that head index wraps around correctly when reaching INPUT_QUEUE_LENGTH.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Circular buffer head wraparound
+    /// - Related: proof_queue_index_calculation, proof_length_calculation_consistent
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_head_wraparound() {
@@ -2256,9 +2272,13 @@ mod kani_input_queue_proofs {
         }
     }
 
-    /// Proof: Queue index calculation is always valid
+    /// Proof: Queue index calculation is always valid.
     ///
     /// Verifies that frame-to-index calculation (frame % INPUT_QUEUE_LENGTH) is always valid.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame-to-index modulo bounds (INV-5)
+    /// - Related: proof_head_wraparound, proof_frame_modulo_for_queue
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_queue_index_calculation() {
@@ -2273,9 +2293,13 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: Length calculation is consistent with head/tail
+    /// Proof: Length calculation is consistent with head/tail.
     ///
     /// Verifies the circular buffer length formula: length = (head - tail + N) % N
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Circular buffer length formula correctness
+    /// - Related: proof_head_wraparound, proof_queue_index_calculation
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_length_calculation_consistent() {
@@ -2301,11 +2325,15 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: discard_confirmed_frames maintains invariants
+    /// Proof: discard_confirmed_frames maintains invariants.
     ///
     /// Verifies that discarding frames maintains INV-4 and INV-5.
     ///
     /// Note: unwind(15) accounts for Vec initialization (8) + loop iterations (5) + buffer
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Discard operation preserves invariants (INV-4, INV-5)
+    /// - Related: proof_add_single_input_maintains_invariants
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_discard_maintains_invariants() {
@@ -2340,13 +2368,17 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: Frame delay doesn't violate invariants
+    /// Proof: Frame delay doesn't violate invariants.
     ///
     /// Verifies that setting frame delay maintains valid queue state.
     /// Tests with concrete delay values (0 and 2) to ensure both zero and non-zero
     /// delay paths are verified while keeping verification tractable.
     ///
     /// Note: unwind(15) accounts for Vec initialization (8) + frame delay iterations + buffer
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Frame delay preserves invariants (INV-4, INV-5)
+    /// - Related: proof_add_single_input_maintains_invariants
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_frame_delay_maintains_invariants() {
@@ -2384,11 +2416,15 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: Non-sequential inputs are rejected
+    /// Proof: Non-sequential inputs are rejected.
     ///
     /// Verifies that add_input rejects non-sequential frame inputs, preserving invariants.
     ///
     /// Note: unwind(12) accounts for Vec initialization (8) + operations + buffer
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Non-sequential input rejection
+    /// - Related: proof_sequential_inputs_maintain_invariants
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_non_sequential_rejected() {
@@ -2409,9 +2445,13 @@ mod kani_input_queue_proofs {
         kani::assert(queue.length == 1, "Length should not change on rejection");
     }
 
-    /// Proof: reset_prediction maintains structural invariants
+    /// Proof: reset_prediction maintains structural invariants.
     ///
     /// Note: unwind(12) accounts for Vec initialization (8) + loop iterations (3) + buffer
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: reset_prediction preserves structure
+    /// - Related: proof_new_queue_valid
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_reset_maintains_structure() {
@@ -2449,10 +2489,14 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: Confirmed input retrieval is valid for stored frames
+    /// Proof: Confirmed input retrieval is valid for stored frames.
     ///
     /// Note: unwind(15) accounts for Vec initialization (8) + loop iterations (3) + buffer
     /// Uses concrete values to keep verification tractable while still proving index validity.
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: confirmed_input index bounds validity
+    /// - Related: proof_queue_index_calculation
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_confirmed_input_valid_index() {

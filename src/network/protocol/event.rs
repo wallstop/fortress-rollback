@@ -489,6 +489,10 @@ mod kani_proofs {
     ///
     /// Verifies that constructing and matching a Synchronizing event
     /// preserves all field values exactly.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Field value preservation in Synchronizing variant
+    /// - Related: proof_synchronizing_boundary_values, proof_clone_synchronizing
     #[kani::proof]
     fn proof_synchronizing_preserves_fields() {
         let total: u32 = kani::any();
@@ -529,6 +533,10 @@ mod kani_proofs {
     /// - Zero values (start of sync)
     /// - Equal values (sync complete)
     /// - Max values (edge case)
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Boundary value handling in Synchronizing
+    /// - Related: proof_synchronizing_preserves_fields
     #[kani::proof]
     fn proof_synchronizing_boundary_values() {
         let boundary_case: u8 = kani::any();
@@ -571,6 +579,10 @@ mod kani_proofs {
     /// Proof: NetworkInterrupted timeout value is preserved.
     ///
     /// Verifies that the disconnect_timeout value is correctly stored and retrieved.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Timeout field preservation in NetworkInterrupted
+    /// - Related: proof_clone_network_interrupted, proof_network_interrupted_inequality
     #[kani::proof]
     fn proof_network_interrupted_timeout_preserved() {
         let timeout: u128 = kani::any();
@@ -593,6 +605,10 @@ mod kani_proofs {
     /// Proof: SyncTimeout elapsed_ms value is preserved.
     ///
     /// Verifies that the elapsed_ms value is correctly stored and retrieved.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Elapsed time field preservation in SyncTimeout
+    /// - Related: proof_clone_sync_timeout
     #[kani::proof]
     fn proof_sync_timeout_elapsed_preserved() {
         let elapsed: u128 = kani::any();
@@ -616,6 +632,10 @@ mod kani_proofs {
     /// Proof: Unit variants are distinct from each other.
     ///
     /// Verifies that Synchronized, Disconnected, and NetworkResumed are distinct.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Unit variant distinctness
+    /// - Related: proof_all_variants_distinct, proof_clone_unit_variants
     #[kani::proof]
     fn proof_unit_variants_distinct() {
         let synchronized: Event<TestConfig> = Event::Synchronized;
@@ -630,6 +650,10 @@ mod kani_proofs {
     /// Proof: All variants are distinct from each other.
     ///
     /// Verifies that different variant types never compare equal.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: All event variant types are distinct
+    /// - Related: proof_unit_variants_distinct
     #[kani::proof]
     fn proof_all_variants_distinct() {
         // Create one of each variant type
@@ -685,6 +709,10 @@ mod kani_proofs {
     /// Proof: Clone preserves equality for Synchronizing variant.
     ///
     /// Verifies that cloning a Synchronizing event produces an equal value.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Clone correctness for Synchronizing
+    /// - Related: proof_synchronizing_preserves_fields
     #[kani::proof]
     fn proof_clone_synchronizing() {
         let total: u32 = kani::any();
@@ -704,6 +732,10 @@ mod kani_proofs {
     }
 
     /// Proof: Clone preserves equality for NetworkInterrupted variant.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Clone correctness for NetworkInterrupted
+    /// - Related: proof_network_interrupted_timeout_preserved
     #[kani::proof]
     fn proof_clone_network_interrupted() {
         let timeout: u128 = kani::any();
@@ -717,6 +749,10 @@ mod kani_proofs {
     }
 
     /// Proof: Clone preserves equality for SyncTimeout variant.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Clone correctness for SyncTimeout
+    /// - Related: proof_sync_timeout_elapsed_preserved
     #[kani::proof]
     fn proof_clone_sync_timeout() {
         let elapsed: u128 = kani::any();
@@ -730,6 +766,10 @@ mod kani_proofs {
     }
 
     /// Proof: Clone preserves equality for unit variants.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Clone correctness for Synchronized, Disconnected, NetworkResumed
+    /// - Related: proof_unit_variants_distinct
     #[kani::proof]
     fn proof_clone_unit_variants() {
         let variant_index: u8 = kani::any();
@@ -753,6 +793,10 @@ mod kani_proofs {
     ///
     /// Verifies that the Input variant correctly stores and retrieves
     /// PlayerInput and PlayerHandle values.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: PlayerInput and PlayerHandle field preservation
+    /// - Related: proof_input_event_clone
     #[kani::proof]
     fn proof_input_event_preserves_data() {
         let frame_val: i32 = kani::any();
@@ -787,6 +831,10 @@ mod kani_proofs {
     }
 
     /// Proof: Input event clone preserves data.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Clone correctness for Input variant
+    /// - Related: proof_input_event_preserves_data
     #[kani::proof]
     fn proof_input_event_clone() {
         let frame_val: i32 = kani::any();
@@ -812,6 +860,10 @@ mod kani_proofs {
     /// Proof: PartialEq is symmetric.
     ///
     /// Verifies that if a == b then b == a.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Equality symmetry for Event type
+    /// - Related: proof_synchronizing_inequality
     #[kani::proof]
     fn proof_partial_eq_symmetric() {
         let total: u32 = kani::any();
@@ -840,6 +892,10 @@ mod kani_proofs {
     /// Proof: Different Synchronizing values produce unequal events.
     ///
     /// Verifies that Synchronizing events with different field values are not equal.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Inequality for different Synchronizing field values
+    /// - Related: proof_synchronizing_preserves_fields
     #[kani::proof]
     fn proof_synchronizing_inequality() {
         let total: u32 = kani::any();
@@ -868,6 +924,10 @@ mod kani_proofs {
     }
 
     /// Proof: NetworkInterrupted events with different timeouts are unequal.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Inequality for different timeout values
+    /// - Related: proof_network_interrupted_timeout_preserved
     #[kani::proof]
     fn proof_network_interrupted_inequality() {
         let timeout1: u128 = kani::any();

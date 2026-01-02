@@ -344,6 +344,10 @@ mod kani_proofs {
     ///
     /// Verifies alignment with TLA+ specification which defines exactly 5 states.
     /// This proof ensures no variants are accidentally added or removed.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: State enum variant count matches TLA+ spec
+    /// - Related: proof_state_index_bijection, proof_exhaustive_match
     #[kani::proof]
     fn proof_state_count_matches_specification() {
         let index: u8 = kani::any();
@@ -361,6 +365,10 @@ mod kani_proofs {
     /// Proof: State-to-index conversion is bijective (one-to-one and onto).
     ///
     /// Verifies that state_to_index and state_from_index are inverses.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Index round-trip correctness
+    /// - Related: proof_state_count_matches_specification, proof_variants_distinct
     #[kani::proof]
     fn proof_state_index_bijection() {
         let index: u8 = kani::any();
@@ -382,6 +390,10 @@ mod kani_proofs {
     /// Proof: Clone produces equal state.
     ///
     /// Verifies that cloning a ProtocolState produces a value equal to the original.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Clone trait correctness
+    /// - Related: proof_partial_eq_symmetric
     #[kani::proof]
     fn proof_clone_correctness() {
         let index: u8 = kani::any();
@@ -396,6 +408,10 @@ mod kani_proofs {
     /// Proof: PartialEq is symmetric.
     ///
     /// Verifies that if state_a == state_b, then state_b == state_a.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Equality symmetry property
+    /// - Related: proof_clone_correctness, proof_variants_distinct
     #[kani::proof]
     fn proof_partial_eq_symmetric() {
         let index_a: u8 = kani::any();
@@ -415,6 +431,10 @@ mod kani_proofs {
     /// Proof: Different indices produce unequal states.
     ///
     /// Verifies that each state variant is distinct from all others.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Variant distinctness
+    /// - Related: proof_state_index_bijection, proof_partial_eq_symmetric
     #[kani::proof]
     fn proof_variants_distinct() {
         let index_a: u8 = kani::any();
@@ -437,6 +457,10 @@ mod kani_proofs {
     ///
     /// Verifies that every valid state can be matched. This proof implicitly
     /// verifies that no new variants have been added without updating the match.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Match exhaustiveness for all state variants
+    /// - Related: proof_state_count_matches_specification
     #[kani::proof]
     fn proof_exhaustive_match() {
         let index: u8 = kani::any();
@@ -464,6 +488,10 @@ mod kani_proofs {
     /// This documents that Shutdown is the terminal state. In practice,
     /// transitions go through Disconnected first, but protocol can force
     /// shutdown from any state via explicit shutdown call.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Shutdown is terminal state (highest index)
+    /// - Related: proof_initializing_is_initial, proof_transition_matrix_rejects_backwards
     #[kani::proof]
     fn proof_shutdown_is_terminal() {
         // Shutdown is defined as the terminal state - no transitions out
@@ -477,6 +505,10 @@ mod kani_proofs {
     /// Proof: Initializing is the only valid initial state.
     ///
     /// Verifies that protocols start in Initializing state (index 0).
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Initial state has index 0
+    /// - Related: proof_shutdown_is_terminal, proof_transition_matrix_sync_required
     #[kani::proof]
     fn proof_initializing_is_initial() {
         let initializing = ProtocolState::Initializing;
@@ -536,6 +568,10 @@ mod kani_proofs {
     /// Verifies that the transition matrix properly rejects invalid backward
     /// transitions. This is a property the production code relies on.
     /// TLA+ alignment: NetworkProtocol.tla ValidTransition predicate.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: No backward state transitions allowed
+    /// - Related: proof_transition_matrix_sequential, proof_transition_matrix_sync_required
     #[kani::proof]
     fn proof_transition_matrix_rejects_backwards() {
         let from_idx: u8 = kani::any();
@@ -565,6 +601,10 @@ mod kani_proofs {
     ///
     /// Verifies that non-shutdown transitions must be single steps forward.
     /// This ensures synchronization cannot be skipped.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Single-step forward progression only
+    /// - Related: proof_transition_matrix_rejects_backwards, proof_transition_matrix_sync_required
     #[kani::proof]
     fn proof_transition_matrix_sequential() {
         let from_idx: u8 = kani::any();
@@ -591,6 +631,10 @@ mod kani_proofs {
     ///
     /// Verifies synchronize() precondition (mod.rs:381): must be in Initializing
     /// to start sync. Production code: `if self.state != ProtocolState::Initializing`
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Synchronization cannot be skipped
+    /// - Related: proof_initializing_is_initial, proof_transition_matrix_sequential
     #[kani::proof]
     fn proof_transition_matrix_sync_required() {
         // Cannot go directly from Initializing to Running (must sync first)

@@ -4195,6 +4195,10 @@ mod kani_proofs {
     ///
     /// Verifies that the state machine has exactly 5 states matching TLA+ spec.
     /// TLA+ alignment: NetworkProtocol.tla defines States = {Init, Sync, Running, Disconnected, Shutdown}
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: State machine has exactly 5 states
+    /// - Related: proof_running_is_active_state, proof_state_count_matches_specification
     #[kani::proof]
     fn proof_protocol_state_count() {
         let state_idx: u8 = kani::any();
@@ -4221,6 +4225,10 @@ mod kani_proofs {
     ///
     /// Verifies INV-PROTO-1: Only Running state should handle game inputs.
     /// This is a state predicate that the protocol relies on.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Running is the only input-processing state (INV-PROTO-1)
+    /// - Related: proof_protocol_state_count, proof_synchronize_precondition
     #[kani::proof]
     fn proof_running_is_active_state() {
         let state_idx: u8 = kani::any();
@@ -4249,6 +4257,10 @@ mod kani_proofs {
     /// Verifies the guard condition at mod.rs:366: `if self.state == ProtocolState::Shutdown`
     /// ensures calling disconnect() from Shutdown is a no-op.
     /// Production code: disconnect() returns early if already in Shutdown state.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Disconnect idempotence from Shutdown state
+    /// - Related: proof_synchronize_precondition, proof_shutdown_is_terminal
     #[kani::proof]
     fn proof_disconnect_idempotent_from_shutdown() {
         // The disconnect() function at mod.rs:365-373 checks:
@@ -4286,6 +4298,10 @@ mod kani_proofs {
     /// Verifies the condition checked at mod.rs:381:
     /// `if self.state != ProtocolState::Initializing { return Err(...) }`
     /// Production code only allows sync from Initializing state.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Synchronize precondition from Initializing only
+    /// - Related: proof_initializing_is_initial, proof_transition_matrix_sync_required
     #[kani::proof]
     fn proof_synchronize_precondition() {
         let state_idx: u8 = kani::any();
@@ -4322,6 +4338,10 @@ mod kani_proofs {
     /// Proof: ConnectionStatus default values are consistent.
     ///
     /// Verifies that a new ConnectionStatus starts in a valid initial state.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Default ConnectionStatus state validity
+    /// - Related: proof_connection_status_frame_preservation, proof_connection_status_disconnected_flag
     #[kani::proof]
     fn proof_connection_status_default() {
         let status = ConnectionStatus::default();
@@ -4337,6 +4357,10 @@ mod kani_proofs {
     /// Proof: ConnectionStatus with symbolic values preserves frame.
     ///
     /// Verifies that last_frame is correctly stored and retrieved.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Frame field preservation in ConnectionStatus
+    /// - Related: proof_connection_status_default
     #[kani::proof]
     fn proof_connection_status_frame_preservation() {
         let frame_val: i32 = kani::any();
@@ -4364,6 +4388,10 @@ mod kani_proofs {
     }
 
     /// Proof: ConnectionStatus disconnected flag works correctly.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Disconnected flag preservation
+    /// - Related: proof_connection_status_default
     #[kani::proof]
     fn proof_connection_status_disconnected_flag() {
         let is_disconnected: bool = kani::any();
@@ -4388,6 +4416,10 @@ mod kani_proofs {
     /// Proof: Frame::NULL is correctly detected.
     ///
     /// Verifies that Frame::is_null() correctly identifies NULL frames.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Frame::is_null() correctness
+    /// - Related: proof_frame_ordering, proof_frame_addition_safe
     #[kani::proof]
     fn proof_frame_null_detection() {
         let frame_val: i32 = kani::any();
@@ -4407,6 +4439,10 @@ mod kani_proofs {
     ///
     /// Verifies that Frame comparison works correctly for the protocol's
     /// frame ordering logic.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Frame comparison operators consistency
+    /// - Related: proof_frame_null_detection, proof_frame_addition_safe
     #[kani::proof]
     fn proof_frame_ordering() {
         let frame_a_val: i32 = kani::any();
@@ -4430,6 +4466,10 @@ mod kani_proofs {
     /// Proof: Frame arithmetic is safe within bounds.
     ///
     /// Verifies that frame addition doesn't overflow for realistic values.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame addition overflow safety (SAFE-6)
+    /// - Related: proof_frame_ordering, proof_frame_gap_safe
     #[kani::proof]
     fn proof_frame_addition_safe() {
         let frame_val: i32 = kani::any();
@@ -4458,6 +4498,10 @@ mod kani_proofs {
     /// Proof: PlayerHandle preserves index.
     ///
     /// Verifies that PlayerHandle::new and as_usize are inverses.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: PlayerHandle index preservation
+    /// - Related: proof_player_handle_equality, proof_player_handle_validity
     #[kani::proof]
     fn proof_player_handle_preservation() {
         let index: usize = kani::any();
@@ -4472,6 +4516,10 @@ mod kani_proofs {
     /// Proof: PlayerHandle equality works correctly.
     ///
     /// Verifies that handles with same index are equal.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: PlayerHandle equality consistency
+    /// - Related: proof_player_handle_preservation
     #[kani::proof]
     fn proof_player_handle_equality() {
         let idx_a: usize = kani::any();
@@ -4504,6 +4552,10 @@ mod kani_proofs {
     /// Proof: Input frame gap calculation is safe.
     ///
     /// Verifies the frame gap detection used in on_input doesn't overflow.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame gap detection overflow safety
+    /// - Related: proof_frame_addition_safe, proof_frame_null_detection
     #[kani::proof]
     fn proof_frame_gap_safe() {
         let last_recv: i32 = kani::any();
@@ -4549,6 +4601,10 @@ mod kani_proofs {
     /// 1. State is Synchronizing (line 741)
     /// 2. The random_reply is valid (line 745)
     /// In this path, remaining was set to num_sync_packets > 0 at sync start.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Sync counter decrement safety (INV-PROTO-3)
+    /// - Related: proof_sync_remaining_bounds
     #[kani::proof]
     #[kani::unwind(11)] // max loop iterations = 10, need +1 for termination check
     fn proof_sync_counter_decrement_safe() {
@@ -4598,6 +4654,10 @@ mod kani_proofs {
     /// Production code reference:
     /// - mod.rs:390 sets: `self.sync_remaining_roundtrips = self.sync_config.num_sync_packets`
     /// - mod.rs:749 decrements: `self.sync_remaining_roundtrips -= 1` (only when > 0 implicitly)
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Sync counter bounds (INV-PROTO-2, INV-PROTO-3)
+    /// - Related: proof_sync_counter_decrement_safe
     #[kani::proof]
     fn proof_sync_remaining_bounds() {
         let num_sync_packets: u32 = kani::any();
@@ -4653,6 +4713,10 @@ mod kani_proofs {
     ///
     /// The proof verifies that within realistic session bounds, the subtraction
     /// is well-defined and produces a value within the expected range.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame advantage calculation bounds
+    /// - Related: proof_remote_frame_advantage_from_i8, proof_frame_advantage_null_guard
     #[kani::proof]
     fn proof_local_frame_advantage_bounds() {
         let local_frame: i32 = kani::any();
@@ -4682,6 +4746,10 @@ mod kani_proofs {
     /// `self.remote_frame_advantage = body.frame_advantage as i32;`
     ///
     /// The QualityReport.frame_advantage is i8, so casting to i32 is always safe.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: i8 to i32 cast preserves value
+    /// - Related: proof_local_frame_advantage_bounds
     #[kani::proof]
     fn proof_remote_frame_advantage_from_i8() {
         let wire_value: i8 = kani::any();
@@ -4709,6 +4777,10 @@ mod kani_proofs {
     /// `if local_frame == Frame::NULL || self.last_recv_frame() == Frame::NULL { return; }`
     ///
     /// This ensures we don't compute frame advantage with invalid frames.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: NULL frame guard prevents invalid calculations
+    /// - Related: proof_local_frame_advantage_bounds, proof_frame_null_detection
     #[kani::proof]
     fn proof_frame_advantage_null_guard() {
         let local_frame_val: i32 = kani::any();

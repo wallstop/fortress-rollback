@@ -33,19 +33,8 @@
 //!
 //! # Port Allocation
 //!
-//! This test file uses ports **9001-9070** (standard tests) and **9200-9299**
-//! (data-driven tests). When adding new tests that bind to UDP ports, ensure
-//! they don't conflict with other test files:
-//!
-//! | Test File                     | Port Range      |
-//! |-------------------------------|-----------------|
-//! | tests/config.rs               | 9100-9109       |
-//! | tests/sessions/p2p.rs         | 9100-9109, 19001+ |
-//! | tests/network/resilience.rs   | 9001-9070, 9200-9299 |
-//!
-//! **Important**: Even with `#[serial]`, tests in different crates can run
-//! in parallel. Choose non-overlapping port ranges to avoid "Address already
-//! in use" errors in CI.
+//! This test file uses `PortAllocator` for thread-safe port allocation.
+//! All ports are dynamically allocated to avoid conflicts with other tests.
 
 // Allow test-specific patterns that are appropriate for test code
 #![allow(
@@ -60,32 +49,26 @@
 )]
 
 use crate::common::stubs::{GameStub, StubConfig, StubInput};
+use crate::common::test_utils::create_chaos_socket;
+use crate::common::PortAllocator;
 use fortress_rollback::{
-    ChaosConfig, ChaosSocket, FortressError, FortressEvent, PlayerHandle, PlayerType,
-    ProtocolConfig, SaveMode, SessionBuilder, SessionState, SyncConfig, TimeSyncConfig,
-    UdpNonBlockingSocket,
+    ChaosConfig, FortressError, FortressEvent, PlayerHandle, PlayerType, ProtocolConfig, SaveMode,
+    SessionBuilder, SessionState, SyncConfig, TimeSyncConfig, UdpNonBlockingSocket,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-/// Helper to create a UDP socket wrapped with ChaosSocket.
-#[track_caller]
-fn create_chaos_socket(
-    port: u16,
-    config: ChaosConfig,
-) -> ChaosSocket<SocketAddr, UdpNonBlockingSocket> {
-    let inner = UdpNonBlockingSocket::bind_to_port(port).unwrap();
-    ChaosSocket::new(inner, config)
-}
+// Use the shared create_chaos_socket helper from test_utils
 
 /// Test that sessions can synchronize with moderate packet loss.
 /// 10% packet loss should still allow synchronization to complete.
 #[test]
 #[serial]
 fn test_synchronize_with_packet_loss() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9001);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9002);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Use different seeds to avoid correlated packet drops
     let config1 = ChaosConfig::builder()
@@ -98,13 +81,13 @@ fn test_synchronize_with_packet_loss() -> Result<(), FortressError> {
         .seed(43) // Different seed!
         .build();
 
-    let socket1 = create_chaos_socket(9001, config1);
+    let socket1 = create_chaos_socket(port1, config1);
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9002, config2);
+    let socket2 = create_chaos_socket(port2, config2);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -151,21 +134,22 @@ fn test_synchronize_with_packet_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_advance_frames_with_packet_loss() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9003);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9004);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     let chaos_config = ChaosConfig::builder()
         .packet_loss_rate(0.05) // 5% loss
         .seed(123)
         .build();
 
-    let socket1 = create_chaos_socket(9003, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9004, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -226,19 +210,20 @@ fn test_advance_frames_with_packet_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_synchronize_with_latency() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9005);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9006);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // 20ms simulated latency
     let chaos_config = ChaosConfig::builder().latency_ms(20).seed(42).build();
 
-    let socket1 = create_chaos_socket(9005, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9006, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -277,8 +262,9 @@ fn test_synchronize_with_latency() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_synchronize_with_jitter() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9007);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9008);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // 30ms latency with ±15ms jitter
     let chaos_config = ChaosConfig::builder()
@@ -287,13 +273,13 @@ fn test_synchronize_with_jitter() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(9007, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9008, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -330,20 +316,21 @@ fn test_synchronize_with_jitter() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_poor_network_conditions() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9009);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9010);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Use the "poor network" preset with a deterministic seed
     let mut chaos_config = ChaosConfig::poor_network();
     chaos_config.seed = Some(42);
 
-    let socket1 = create_chaos_socket(9009, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9010, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -415,8 +402,9 @@ fn test_poor_network_conditions() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_asymmetric_packet_loss() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9011);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9012);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Player 1 has high send loss (simulates bad upload)
     let config1 = ChaosConfig::builder()
@@ -432,13 +420,13 @@ fn test_asymmetric_packet_loss() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let socket1 = create_chaos_socket(9011, config1);
+    let socket1 = create_chaos_socket(port1, config1);
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9012, config2);
+    let socket2 = create_chaos_socket(port2, config2);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -477,21 +465,22 @@ fn test_asymmetric_packet_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_high_packet_loss() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9013);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9014);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     let chaos_config = ChaosConfig::builder()
         .packet_loss_rate(0.25) // 25% loss - very aggressive
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(9013, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9014, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -530,18 +519,19 @@ fn test_high_packet_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_high_latency_100ms() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9017);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9018);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     let chaos_config = ChaosConfig::builder().latency_ms(100).seed(42).build();
 
-    let socket1 = create_chaos_socket(9017, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9018, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -612,18 +602,19 @@ fn test_high_latency_100ms() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_high_latency_250ms() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9019);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9020);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     let chaos_config = ChaosConfig::builder().latency_ms(250).seed(42).build();
 
-    let socket1 = create_chaos_socket(9019, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9020, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -661,18 +652,19 @@ fn test_high_latency_250ms() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_extreme_latency_500ms() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9021);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9022);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     let chaos_config = ChaosConfig::builder().latency_ms(500).seed(42).build();
 
-    let socket1 = create_chaos_socket(9021, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9022, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -710,8 +702,9 @@ fn test_extreme_latency_500ms() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_out_of_order_delivery() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9023);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9024);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Configure aggressive reordering
     let chaos_config = ChaosConfig::builder()
@@ -720,13 +713,13 @@ fn test_out_of_order_delivery() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(9023, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9024, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -803,8 +796,9 @@ fn test_out_of_order_delivery() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_jitter_with_packet_loss() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9025);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9026);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Moderate jitter with packet loss
     let chaos_config = ChaosConfig::builder()
@@ -814,13 +808,13 @@ fn test_jitter_with_packet_loss() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(9025, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9026, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -893,8 +887,9 @@ fn test_jitter_with_packet_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_packet_duplication() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9015);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9016);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // High duplication rate to test duplicate handling
     let chaos_config = ChaosConfig::builder()
@@ -902,13 +897,13 @@ fn test_packet_duplication() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(9015, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9016, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -978,20 +973,21 @@ fn test_packet_duplication() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_determinism_under_stress() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9027);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9028);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Use "terrible network" conditions for stress testing
     let mut chaos_config = ChaosConfig::terrible_network();
     chaos_config.seed = Some(42);
 
-    let socket1 = create_chaos_socket(9027, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9028, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1071,8 +1067,9 @@ fn test_determinism_under_stress() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_no_panics_under_worst_case() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9029);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9030);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Very aggressive network chaos
     let chaos_config = ChaosConfig::builder()
@@ -1085,13 +1082,13 @@ fn test_no_panics_under_worst_case() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(9029, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9030, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1145,8 +1142,9 @@ fn test_no_panics_under_worst_case() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_asymmetric_latency() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9031);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9032);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Player 1 has higher latency (poor download)
     let config1 = ChaosConfig::builder().latency_ms(150).seed(42).build();
@@ -1154,13 +1152,13 @@ fn test_asymmetric_latency() -> Result<(), FortressError> {
     // Player 2 has lower latency
     let config2 = ChaosConfig::builder().latency_ms(30).seed(43).build();
 
-    let socket1 = create_chaos_socket(9031, config1);
+    let socket1 = create_chaos_socket(port1, config1);
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9032, config2);
+    let socket2 = create_chaos_socket(port2, config2);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1234,8 +1232,9 @@ fn test_asymmetric_latency() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_burst_packet_loss() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9033);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9034);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Use burst loss with latency - this simulates WiFi interference or similar
     // 3% chance of burst, 3 consecutive drops per burst
@@ -1245,13 +1244,13 @@ fn test_burst_packet_loss() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(9033, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9034, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1325,19 +1324,20 @@ fn test_burst_packet_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_temporary_disconnect_reconnect() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9035);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9036);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Start with good connection
     let good_config = ChaosConfig::passthrough();
 
-    let socket1 = create_chaos_socket(9035, good_config.clone());
+    let socket1 = create_chaos_socket(port1, good_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9036, good_config);
+    let socket2 = create_chaos_socket(port2, good_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1433,8 +1433,9 @@ fn test_temporary_disconnect_reconnect() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_eventual_consistency() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9037);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9038);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Use moderate network conditions
     let chaos_config = ChaosConfig::builder()
@@ -1444,13 +1445,13 @@ fn test_eventual_consistency() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(9037, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9038, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1530,8 +1531,9 @@ fn test_eventual_consistency() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_burst_loss_with_jitter() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9039);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9040);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Combine burst loss with jitter
     let chaos_config = ChaosConfig::builder()
@@ -1541,13 +1543,13 @@ fn test_burst_loss_with_jitter() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(9039, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9040, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1625,8 +1627,9 @@ fn test_burst_loss_with_jitter() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_one_way_send_only_loss() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9041);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9042);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Peer 1 has higher receive loss (simulates bad incoming connection)
     let config1 = ChaosConfig::builder()
@@ -1644,13 +1647,13 @@ fn test_one_way_send_only_loss() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let socket1 = create_chaos_socket(9041, config1);
+    let socket1 = create_chaos_socket(port1, config1);
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9042, config2);
+    let socket2 = create_chaos_socket(port2, config2);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1720,8 +1723,9 @@ fn test_one_way_send_only_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_one_way_receive_only_loss() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9043);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9044);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Peer 1 has higher send loss (simulates bad outgoing connection)
     let config1 = ChaosConfig::builder()
@@ -1739,13 +1743,13 @@ fn test_one_way_receive_only_loss() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let socket1 = create_chaos_socket(9043, config1);
+    let socket1 = create_chaos_socket(port1, config1);
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9044, config2);
+    let socket2 = create_chaos_socket(port2, config2);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1812,8 +1816,9 @@ fn test_one_way_receive_only_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_heavy_packet_duplication() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9045);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9046);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // 20% packet duplication rate
     let chaos_config = ChaosConfig::builder()
@@ -1822,13 +1827,13 @@ fn test_heavy_packet_duplication() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(9045, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9046, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1895,8 +1900,9 @@ fn test_heavy_packet_duplication() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_packet_reordering() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9047);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9048);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Buffer 4 packets, 30% chance of reordering within buffer
     let chaos_config = ChaosConfig::builder()
@@ -1906,13 +1912,13 @@ fn test_packet_reordering() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(9047, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9048, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1979,8 +1985,9 @@ fn test_packet_reordering() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_extreme_chaos_combined() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9049);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9050);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Everything enabled but at moderate levels
     let chaos_config = ChaosConfig::builder()
@@ -1994,13 +2001,13 @@ fn test_extreme_chaos_combined() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(9049, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9050, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2067,8 +2074,9 @@ fn test_extreme_chaos_combined() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_large_prediction_window_with_latency() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9051);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9052);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     let chaos_config = ChaosConfig::builder()
         .latency_ms(80)
@@ -2077,14 +2085,14 @@ fn test_large_prediction_window_with_latency() -> Result<(), FortressError> {
         .build();
 
     // Use larger prediction window (16 frames instead of default 8)
-    let socket1 = create_chaos_socket(9051, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_max_prediction_window(16)
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9052, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_max_prediction_window(16)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -2152,8 +2160,9 @@ fn test_large_prediction_window_with_latency() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9053);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9054);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     let chaos_config = ChaosConfig::builder()
         .packet_loss_rate(0.10)
@@ -2162,7 +2171,7 @@ fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
         .build();
 
     // Use input delay of 3 frames
-    let socket1 = create_chaos_socket(9053, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_input_delay(3)
         .unwrap()
@@ -2170,7 +2179,7 @@ fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9054, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_input_delay(3)
         .unwrap()
@@ -2239,8 +2248,9 @@ fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9055);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9056);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Reduced latency and packet loss for more reliable synchronization
     let chaos_config = ChaosConfig::builder()
@@ -2251,14 +2261,14 @@ fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
         .build();
 
     // Enable sparse saving mode
-    let socket1 = create_chaos_socket(9055, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_save_mode(SaveMode::Sparse)
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9056, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_save_mode(SaveMode::Sparse)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -2333,8 +2343,9 @@ fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_network_flapping_simulation() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9057);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9058);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Simulate flapping with burst loss
     // 10% burst probability with 6-packet bursts is aggressive but within
@@ -2355,14 +2366,14 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
         .seed(43) // Different seed to decorrelate burst loss events
         .build();
 
-    let socket1 = create_chaos_socket(9057, chaos_config1);
+    let socket1 = create_chaos_socket(port1, chaos_config1);
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::stress_test()) // 60s timeout for harsh conditions
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9058, chaos_config2);
+    let socket2 = create_chaos_socket(port2, chaos_config2);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::stress_test()) // 60s timeout for harsh conditions
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -2483,8 +2494,9 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_extreme_jitter() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9059);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9060);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Base latency 50ms, jitter ±50ms (0-100ms effective)
     let chaos_config = ChaosConfig::builder()
@@ -2493,13 +2505,13 @@ fn test_extreme_jitter() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(9059, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9060, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2566,19 +2578,20 @@ fn test_extreme_jitter() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_terrible_network_preset() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9061);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9062);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Use the preset
     let chaos_config = ChaosConfig::terrible_network();
 
-    let socket1 = create_chaos_socket(9061, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9062, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2645,8 +2658,9 @@ fn test_terrible_network_preset() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_mobile_network_preset() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9063);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9064);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Use the mobile network preset with deterministic seed
     let chaos_config1 = ChaosConfig::builder()
@@ -2671,7 +2685,7 @@ fn test_mobile_network_preset() -> Result<(), FortressError> {
         .seed(12346)
         .build();
 
-    let socket1 = create_chaos_socket(9063, chaos_config1);
+    let socket1 = create_chaos_socket(port1, chaos_config1);
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::mobile())
         .with_protocol_config(ProtocolConfig::mobile())
@@ -2680,7 +2694,7 @@ fn test_mobile_network_preset() -> Result<(), FortressError> {
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9064, chaos_config2);
+    let socket2 = create_chaos_socket(port2, chaos_config2);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::mobile())
         .with_protocol_config(ProtocolConfig::mobile())
@@ -2750,8 +2764,9 @@ fn test_mobile_network_preset() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_wifi_interference_preset() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9065);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9066);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Use WiFi interference characteristics with deterministic seed
     let chaos_config1 = ChaosConfig::builder()
@@ -2774,13 +2789,13 @@ fn test_wifi_interference_preset() -> Result<(), FortressError> {
         .seed(22223)
         .build();
 
-    let socket1 = create_chaos_socket(9065, chaos_config1);
+    let socket1 = create_chaos_socket(port1, chaos_config1);
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9066, chaos_config2);
+    let socket2 = create_chaos_socket(port2, chaos_config2);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2847,8 +2862,9 @@ fn test_wifi_interference_preset() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_intercontinental_preset() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9067);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9068);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Use intercontinental characteristics with deterministic seed
     let chaos_config1 = ChaosConfig::builder()
@@ -2865,7 +2881,7 @@ fn test_intercontinental_preset() -> Result<(), FortressError> {
         .seed(33334)
         .build();
 
-    let socket1 = create_chaos_socket(9067, chaos_config1);
+    let socket1 = create_chaos_socket(port1, chaos_config1);
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::high_latency())
         .with_protocol_config(ProtocolConfig::high_latency())
@@ -2874,7 +2890,7 @@ fn test_intercontinental_preset() -> Result<(), FortressError> {
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9068, chaos_config2);
+    let socket2 = create_chaos_socket(port2, chaos_config2);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::high_latency())
         .with_protocol_config(ProtocolConfig::high_latency())
@@ -2944,11 +2960,12 @@ fn test_intercontinental_preset() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_competitive_preset_fast_sync() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9069);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9070);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // No chaos - LAN-like conditions for competitive play
-    let socket1 = UdpNonBlockingSocket::bind_to_port(9069).unwrap();
+    let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::competitive())
         .with_protocol_config(ProtocolConfig::competitive())
@@ -2957,7 +2974,7 @@ fn test_competitive_preset_fast_sync() -> Result<(), FortressError> {
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(9070).unwrap();
+    let socket2 = UdpNonBlockingSocket::bind_to_port(port2).unwrap();
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::competitive())
         .with_protocol_config(ProtocolConfig::competitive())
@@ -3063,9 +3080,10 @@ struct ChaosTestCase {
 
 impl ChaosTestCase {
     /// Run the test case and return diagnostic information.
-    fn run(&self, base_port: u16) -> Result<ChaosTestResult, FortressError> {
-        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), base_port);
-        let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), base_port + 1);
+    fn run(&self) -> Result<ChaosTestResult, FortressError> {
+        let (port1, port2) = PortAllocator::next_pair();
+        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+        let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
         // Build chaos configurations with DIFFERENT seeds for each socket.
         // Using the same seed causes correlated packet loss patterns that can
@@ -3089,14 +3107,14 @@ impl ChaosTestCase {
         let chaos_config1 = build_chaos_config(42);
         let chaos_config2 = build_chaos_config(43); // Different seed to avoid correlated loss
 
-        let socket1 = create_chaos_socket(base_port, chaos_config1);
+        let socket1 = create_chaos_socket(port1, chaos_config1);
         let mut sess1 = SessionBuilder::<StubConfig>::new()
             .with_sync_config(self.sync_config.clone())
             .add_player(PlayerType::Local, PlayerHandle::new(0))?
             .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
             .start_p2p_session(socket1)?;
 
-        let socket2 = create_chaos_socket(base_port + 1, chaos_config2);
+        let socket2 = create_chaos_socket(port2, chaos_config2);
         let mut sess2 = SessionBuilder::<StubConfig>::new()
             .with_sync_config(self.sync_config.clone())
             .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -3225,13 +3243,10 @@ fn test_chaos_conditions_data_driven() {
         },
     ];
 
-    // Use 9200+ range to avoid conflicts with tests/sessions/p2p.rs (uses 9100-9109)
-    let mut base_port = 9200u16;
-
     for test_case in &test_cases {
         eprintln!("\n[Data-Driven Test] Running: {}", test_case.name);
 
-        let result = test_case.run(base_port).expect("Test setup failed");
+        let result = test_case.run().expect("Test setup failed");
 
         eprintln!(
             "[Data-Driven Test] {} completed: synchronized={}, elapsed={:.2}s, \
@@ -3266,8 +3281,6 @@ fn test_chaos_conditions_data_driven() {
                 test_case.name
             );
         }
-
-        base_port += 2; // Advance ports for next test
     }
 }
 
@@ -3275,9 +3288,9 @@ fn test_chaos_conditions_data_driven() {
 #[test]
 #[serial]
 fn test_sync_timeout_detection() -> Result<(), FortressError> {
-    // Use 9250+ range to avoid conflicts with tests/sessions/p2p.rs (uses 9100-9109)
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9250);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9251);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Use very short timeout with heavy packet loss to trigger timeout
     let short_timeout_config = SyncConfig {
@@ -3295,14 +3308,14 @@ fn test_sync_timeout_detection() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(9250, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(short_timeout_config.clone())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9251, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(short_timeout_config)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -3367,9 +3380,9 @@ fn test_sync_timeout_detection() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_burst_loss_matches_sync_packets() -> Result<(), FortressError> {
-    // Use 9260+ range to avoid conflicts with tests/sessions/p2p.rs (uses 9100-9109)
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9260);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9261);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Configure burst loss length equal to default sync packets (5)
     // This tests the edge case where a burst could wipe out all initial sync attempts
@@ -3388,14 +3401,14 @@ fn test_burst_loss_matches_sync_packets() -> Result<(), FortressError> {
         keepalive_interval: Duration::from_millis(100),
     };
 
-    let socket1 = create_chaos_socket(9260, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone());
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(resilient_config.clone())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9261, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(resilient_config)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -3443,8 +3456,9 @@ fn test_burst_loss_matches_sync_packets() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_different_seeds_prevent_correlated_loss() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9267);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9268);
+    let (port1, port2) = PortAllocator::next_pair();
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // Use aggressive burst loss with DIFFERENT seeds
     let chaos_config1 = ChaosConfig::builder()
@@ -3459,14 +3473,14 @@ fn test_different_seeds_prevent_correlated_loss() -> Result<(), FortressError> {
         .seed(101) // Different seed!
         .build();
 
-    let socket1 = create_chaos_socket(9267, chaos_config1);
+    let socket1 = create_chaos_socket(port1, chaos_config1);
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::stress_test())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(9268, chaos_config2);
+    let socket2 = create_chaos_socket(port2, chaos_config2);
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::stress_test())
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -3568,18 +3582,19 @@ fn test_different_seeds_prevent_correlated_loss() -> Result<(), FortressError> {
 #[serial]
 fn test_seed_pairs_for_decorrelated_sync() -> Result<(), FortressError> {
     let test_cases = [
-        (1, 2, 9269, 9270),
-        (42, 43, 9271, 9272),
-        (1000, 2000, 9273, 9274),
-        (u64::MAX - 1, u64::MAX, 9275, 9276),
+        (1u64, 2u64),
+        (42, 43),
+        (1000, 2000),
+        (u64::MAX - 1, u64::MAX),
     ];
 
     // Use lossy preset for better handling of decorrelated packet loss
     let sync_config = SyncConfig::lossy();
 
-    for (seed1, seed2, port1, port2) in test_cases {
-        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port1);
-        let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port2);
+    for (seed1, seed2) in test_cases {
+        let (port1, port2) = PortAllocator::next_pair();
+        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+        let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
         // Use 5% loss for reliable CI behavior while still testing
         // decorrelated loss patterns
@@ -3652,7 +3667,7 @@ fn test_seed_pairs_for_decorrelated_sync() -> Result<(), FortressError> {
 // This prevents regression where tests might pass on some platforms but fail
 // on others due to missing timing sleeps or incorrect configuration assumptions.
 //
-// Port allocation: 9300-9399 (non-overlapping with other test ranges)
+// Port allocation: Handled by PortAllocator for dynamic port assignment
 
 /// Parameters for data-driven preset configuration testing.
 #[derive(Clone, Debug)]
@@ -3695,9 +3710,10 @@ struct PresetTestResult {
 
 impl PresetTestCase {
     /// Run the preset test case and return diagnostic results.
-    fn run(&self, base_port: u16) -> Result<PresetTestResult, FortressError> {
-        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), base_port);
-        let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), base_port + 1);
+    fn run(&self) -> Result<PresetTestResult, FortressError> {
+        let (port1, port2) = PortAllocator::next_pair();
+        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+        let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
         // Create sockets - either chaos or plain UDP
         let (socket1, socket2) = if let Some(ref chaos) = self.chaos_config {
@@ -3717,15 +3733,15 @@ impl PresetTestCase {
                 .seed(43)
                 .build();
             (
-                create_chaos_socket(base_port, chaos1),
-                create_chaos_socket(base_port + 1, chaos2),
+                create_chaos_socket(port1, chaos1),
+                create_chaos_socket(port2, chaos2),
             )
         } else {
             // Perfect network - no chaos
             let perfect = ChaosConfig::builder().build();
             (
-                create_chaos_socket(base_port, perfect.clone()),
-                create_chaos_socket(base_port + 1, perfect),
+                create_chaos_socket(port1, perfect.clone()),
+                create_chaos_socket(port2, perfect),
             )
         };
 
@@ -3825,7 +3841,7 @@ impl PresetTestCase {
 }
 
 /// Run a preset test case with comprehensive validation and diagnostics.
-fn run_preset_test(case: &PresetTestCase, base_port: u16) {
+fn run_preset_test(case: &PresetTestCase) {
     eprintln!("\n[Preset Test] Running: {}", case.name);
     eprintln!(
         "  Config: sync={:?}, protocol={:?}, time_sync={:?}",
@@ -3838,7 +3854,7 @@ fn run_preset_test(case: &PresetTestCase, base_port: u16) {
             .map_or("perfect".to_string(), |c| format!("{c:?}"))
     );
 
-    let result = case.run(base_port).expect("Test setup failed");
+    let result = case.run().expect("Test setup failed");
 
     eprintln!(
         "[Preset Test] {} completed:\n  \
@@ -3928,8 +3944,7 @@ fn test_preset_competitive_perfect_network() {
         target_frames: 60,
         min_expected_frames: 55, // Allow small margin for rollbacks
     };
-    // Use port range 9300-9399 for preset tests
-    run_preset_test(&case, 9300);
+    run_preset_test(&case);
 }
 
 /// Test: Default preset under perfect network conditions.
@@ -3954,7 +3969,7 @@ fn test_preset_default_perfect_network() {
         target_frames: 60,
         min_expected_frames: 55,
     };
-    run_preset_test(&case, 9302);
+    run_preset_test(&case);
 }
 
 /// Test: LAN preset under perfect network conditions.
@@ -3976,7 +3991,7 @@ fn test_preset_lan_perfect_network() {
         target_frames: 60,
         min_expected_frames: 55,
     };
-    run_preset_test(&case, 9304);
+    run_preset_test(&case);
 }
 
 /// Test: Mobile preset under simulated mobile conditions.
@@ -4007,7 +4022,7 @@ fn test_preset_mobile_with_mobile_conditions() {
         target_frames: 30,            // Fewer frames due to latency
         min_expected_frames: 15,      // Allow for network variance and rollbacks
     };
-    run_preset_test(&case, 9306);
+    run_preset_test(&case);
 }
 
 /// Test: High latency preset under high latency conditions.
@@ -4031,7 +4046,7 @@ fn test_preset_high_latency_with_latency() {
         target_frames: 25,       // Fewer frames due to high latency
         min_expected_frames: 10, // With 100ms latency, frame advancement is slow
     };
-    run_preset_test(&case, 9308);
+    run_preset_test(&case);
 }
 
 /// Test: Lossy preset under lossy network conditions.
@@ -4055,7 +4070,7 @@ fn test_preset_lossy_with_packet_loss() {
         target_frames: 40,
         min_expected_frames: 25, // Some frames may stall due to lost packets
     };
-    run_preset_test(&case, 9310);
+    run_preset_test(&case);
 }
 
 /// Data-driven test for all presets under perfect network conditions.
@@ -4128,12 +4143,8 @@ fn test_all_presets_perfect_network_data_driven() {
         },
     ];
 
-    // Use ports 9320-9340 for this data-driven test
-    let mut base_port = 9320u16;
-
     for case in &test_cases {
-        run_preset_test(case, base_port);
-        base_port += 2; // Each test uses 2 ports
+        run_preset_test(case);
     }
 }
 
@@ -4223,11 +4234,7 @@ fn test_presets_matched_conditions_data_driven() {
         },
     ];
 
-    // Use ports 9340-9360 for this data-driven test
-    let mut base_port = 9340u16;
-
     for case in &test_cases {
-        run_preset_test(case, base_port);
-        base_port += 2;
+        run_preset_test(case);
     }
 }

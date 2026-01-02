@@ -2038,10 +2038,14 @@ mod tests {
 mod kani_config_proofs {
     use super::*;
 
-    /// Proof: validate() accepts all queue_length >= 2
+    /// Proof: validate() accepts all queue_length >= 2.
     ///
     /// Verifies that InputQueueConfig.validate() returns Ok for any queue_length >= 2
     /// and Err for queue_length < 2.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Queue length validation correctness
+    /// - Related: proof_validate_boundary_at_two, proof_all_presets_valid
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_validate_accepts_valid_queue_lengths() {
@@ -2059,9 +2063,13 @@ mod kani_config_proofs {
         }
     }
 
-    /// Proof: validate() boundary condition at queue_length = 2
+    /// Proof: validate() boundary condition at queue_length = 2.
     ///
     /// Specifically verifies the minimum valid queue_length.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Boundary condition at minimum queue length
+    /// - Related: proof_validate_accepts_valid_queue_lengths
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_validate_boundary_at_two() {
@@ -2080,10 +2088,14 @@ mod kani_config_proofs {
         );
     }
 
-    /// Proof: validate_frame_delay() enforces frame_delay < queue_length
+    /// Proof: validate_frame_delay() enforces frame_delay < queue_length.
     ///
     /// Verifies that validate_frame_delay returns Ok when frame_delay < queue_length
     /// and Err when frame_delay >= queue_length.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame delay validation constraint
+    /// - Related: proof_max_frame_delay_is_valid_delay, proof_max_frame_delay_derivation
     #[kani::proof]
     #[kani::unwind(10)]
     fn proof_validate_frame_delay_constraint() {
@@ -2110,10 +2122,14 @@ mod kani_config_proofs {
         }
     }
 
-    /// Proof: max_frame_delay() returns queue_length - 1 (with saturation)
+    /// Proof: max_frame_delay() returns queue_length - 1 (with saturation).
     ///
     /// Verifies that max_frame_delay() correctly computes queue_length - 1,
     /// using saturating_sub to handle the edge case of queue_length = 0.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Max frame delay derivation correctness
+    /// - Related: proof_max_frame_delay_is_valid_delay, proof_validate_frame_delay_constraint
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_max_frame_delay_derivation() {
@@ -2131,10 +2147,14 @@ mod kani_config_proofs {
         );
     }
 
-    /// Proof: max_frame_delay() is always a valid frame_delay
+    /// Proof: max_frame_delay() is always a valid frame_delay.
     ///
     /// Verifies that validate_frame_delay(max_frame_delay()) always succeeds
     /// for valid configurations (queue_length >= 2).
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Max delay is always valid for valid configs
+    /// - Related: proof_max_frame_delay_derivation, proof_validate_frame_delay_constraint
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_max_frame_delay_is_valid_delay() {
@@ -2151,10 +2171,14 @@ mod kani_config_proofs {
         );
     }
 
-    /// Proof: All presets are valid configurations
+    /// Proof: All presets are valid configurations.
     ///
     /// Verifies that standard(), high_latency(), and minimal() presets
     /// all pass validate().
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: All factory presets pass validation
+    /// - Related: proof_preset_values, proof_validate_accepts_valid_queue_lengths
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_all_presets_valid() {
@@ -2176,12 +2200,16 @@ mod kani_config_proofs {
         );
     }
 
-    /// Proof: Presets have correct queue_length values
+    /// Proof: Presets have correct queue_length values.
     ///
     /// Verifies that preset implementations return their expected values.
     /// Note: `standard()` uses `INPUT_QUEUE_LENGTH` which varies between
     /// Kani (8) and production (128) builds. The other presets use
     /// hardcoded values that don't change.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Preset queue length values match specifications
+    /// - Related: proof_all_presets_valid
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_preset_values() {

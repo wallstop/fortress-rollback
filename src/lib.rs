@@ -2019,7 +2019,11 @@ mod tests {
 mod kani_proofs {
     use super::*;
 
-    /// Proof: Frame::new creates valid frames for non-negative inputs
+    /// Proof: Frame::new creates valid frames for non-negative inputs.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Frame construction preserves value and validity
+    /// - Related: proof_frame_null_consistency, proof_frame_to_option
     #[kani::proof]
     fn proof_frame_new_valid() {
         let value: i32 = kani::any();
@@ -2040,7 +2044,11 @@ mod kani_proofs {
         );
     }
 
-    /// Proof: Frame::NULL is consistently null
+    /// Proof: Frame::NULL is consistently null.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: NULL frame identity and invariants
+    /// - Related: proof_frame_new_valid, proof_frame_to_option
     #[kani::proof]
     fn proof_frame_null_consistency() {
         let null_frame = Frame::NULL;
@@ -2052,10 +2060,14 @@ mod kani_proofs {
         );
     }
 
-    /// Proof: Frame addition with small positive values is safe
+    /// Proof: Frame addition with small positive values is safe.
     ///
     /// This proves that for frames in typical game usage (0 to 10,000,000),
     /// adding small increments (0-1000) does not overflow.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame addition overflow safety (SAFE-6)
+    /// - Related: proof_frame_add_assign_consistent, proof_frame_sub_frames_correct
     #[kani::proof]
     fn proof_frame_add_small_safe() {
         let frame_val: i32 = kani::any();
@@ -2078,7 +2090,11 @@ mod kani_proofs {
         );
     }
 
-    /// Proof: Frame subtraction produces correct differences
+    /// Proof: Frame subtraction produces correct differences.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame subtraction correctness
+    /// - Related: proof_frame_add_small_safe, proof_frame_sub_assign_consistent
     #[kani::proof]
     fn proof_frame_sub_frames_correct() {
         let a: i32 = kani::any();
@@ -2097,7 +2113,11 @@ mod kani_proofs {
         );
     }
 
-    /// Proof: Frame ordering is consistent with i32 ordering
+    /// Proof: Frame ordering is consistent with i32 ordering.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame comparison operators consistency
+    /// - Related: proof_frame_ordering
     #[kani::proof]
     fn proof_frame_ordering_consistent() {
         let a: i32 = kani::any();
@@ -2121,9 +2141,13 @@ mod kani_proofs {
         }
     }
 
-    /// Proof: Frame modulo operation is correct for queue indexing
+    /// Proof: Frame modulo operation is correct for queue indexing.
     ///
     /// This is critical for InputQueue circular buffer indexing (INV-5).
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Queue index bounds via modulo (INV-5)
+    /// - Related: proof_queue_index_calculation, proof_head_wraparound
     #[kani::proof]
     fn proof_frame_modulo_for_queue() {
         let frame_val: i32 = kani::any();
@@ -2141,7 +2165,11 @@ mod kani_proofs {
         kani::assert(index == frame_val % queue_len, "Modulo should be correct");
     }
 
-    /// Proof: Frame::to_option correctly handles null and valid frames
+    /// Proof: Frame::to_option correctly handles null and valid frames.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Frame to Option conversion correctness
+    /// - Related: proof_frame_from_option, proof_frame_null_consistency
     #[kani::proof]
     fn proof_frame_to_option() {
         let frame_val: i32 = kani::any();
@@ -2158,7 +2186,11 @@ mod kani_proofs {
         }
     }
 
-    /// Proof: Frame::from_option correctly handles Some and None
+    /// Proof: Frame::from_option correctly handles Some and None.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Option to Frame conversion correctness
+    /// - Related: proof_frame_to_option, proof_frame_null_consistency
     #[kani::proof]
     fn proof_frame_from_option() {
         let frame_val: i32 = kani::any();
@@ -2178,7 +2210,11 @@ mod kani_proofs {
         );
     }
 
-    /// Proof: Frame AddAssign is consistent with Add
+    /// Proof: Frame AddAssign is consistent with Add.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: AddAssign operator equivalence with Add
+    /// - Related: proof_frame_add_small_safe, proof_frame_sub_assign_consistent
     #[kani::proof]
     fn proof_frame_add_assign_consistent() {
         let frame_val: i32 = kani::any();
@@ -2196,7 +2232,11 @@ mod kani_proofs {
         kani::assert(result1 == frame2, "AddAssign should be consistent with Add");
     }
 
-    /// Proof: Frame SubAssign is consistent with Sub
+    /// Proof: Frame SubAssign is consistent with Sub.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: SubAssign operator equivalence with Sub
+    /// - Related: proof_frame_sub_frames_correct, proof_frame_add_assign_consistent
     #[kani::proof]
     fn proof_frame_sub_assign_consistent() {
         let frame_val: i32 = kani::any();
@@ -2214,7 +2254,11 @@ mod kani_proofs {
         kani::assert(result1 == frame2, "SubAssign should be consistent with Sub");
     }
 
-    /// Proof: PlayerHandle validity check is correct
+    /// Proof: PlayerHandle validity check is correct.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: PlayerHandle player vs spectator classification
+    /// - Related: proof_player_handle_preservation, proof_player_handle_equality
     #[kani::proof]
     fn proof_player_handle_validity() {
         let handle_val: usize = kani::any();

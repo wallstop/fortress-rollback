@@ -1,4 +1,9 @@
 //! Spectator session integration tests.
+//!
+//! # Port Allocation
+//!
+//! This test file uses `PortAllocator` for thread-safe port allocation.
+//! All ports are dynamically allocated to avoid conflicts with other tests.
 
 // Allow test-specific patterns that are appropriate for test code
 #![allow(
@@ -11,114 +16,19 @@
 )]
 
 use crate::common::stubs::{GameStub, StubConfig, StubInput};
+use crate::common::{
+    assert_spectator_synchronized, synchronize_spectator, PortAllocator, MAX_SYNC_ITERATIONS,
+    POLL_INTERVAL, SYNC_TIMEOUT,
+};
 use fortress_rollback::{
-    telemetry::CollectingObserver, FortressError, FortressEvent, InputQueueConfig, P2PSession,
-    PlayerHandle, PlayerType, SessionBuilder, SessionState, SpectatorConfig, SpectatorSession,
-    SyncConfig, UdpNonBlockingSocket,
+    telemetry::CollectingObserver, FortressError, FortressEvent, InputQueueConfig, PlayerHandle,
+    PlayerType, SessionBuilder, SessionState, SpectatorConfig, SyncConfig, UdpNonBlockingSocket,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-
-/// Maximum time to wait for synchronization to complete.
-const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Time to sleep between poll iterations to allow for proper timing.
-/// This prevents tight loops that may not give the network layer enough time
-/// to process messages, especially on systems with different scheduling behavior.
-const POLL_INTERVAL: Duration = Duration::from_millis(1);
-
-/// Maximum number of poll iterations to attempt during synchronization.
-const MAX_SYNC_ITERATIONS: usize = 500;
-
-// Helper to create test addresses
-fn test_addr(port: u16) -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
-}
-
-/// Result of a synchronization attempt.
-#[derive(Debug)]
-struct SyncResult {
-    /// Number of poll iterations it took to synchronize.
-    iterations: usize,
-    /// Time elapsed during synchronization.
-    elapsed: Duration,
-    /// Whether both sessions are now in Running state.
-    success: bool,
-}
-
-/// Polls both sessions until they reach the Running state or timeout.
-///
-/// This function is more robust than a fixed number of iterations because:
-/// 1. It uses actual time-based timeout instead of iteration count
-/// 2. It includes small sleeps between iterations to allow proper message processing
-/// 3. It provides diagnostic information on failure
-///
-/// # Arguments
-/// * `spec_sess` - The spectator session to synchronize
-/// * `host_sess` - The host P2P session to synchronize
-/// * `timeout` - Maximum time to wait for synchronization
-///
-/// # Returns
-/// `SyncResult` with synchronization outcome and diagnostics.
-fn wait_for_sync(
-    spec_sess: &mut SpectatorSession<StubConfig>,
-    host_sess: &mut P2PSession<StubConfig>,
-    timeout: Duration,
-) -> SyncResult {
-    let start = Instant::now();
-    let mut iterations = 0;
-
-    while start.elapsed() < timeout && iterations < MAX_SYNC_ITERATIONS {
-        spec_sess.poll_remote_clients();
-        host_sess.poll_remote_clients();
-        iterations += 1;
-
-        // Check if both sessions are synchronized
-        if spec_sess.current_state() == SessionState::Running
-            && host_sess.current_state() == SessionState::Running
-        {
-            return SyncResult {
-                iterations,
-                elapsed: start.elapsed(),
-                success: true,
-            };
-        }
-
-        // Small sleep to allow network layer to process messages
-        // This is especially important on fast systems where tight loops
-        // may not give the OS enough time to deliver UDP packets
-        thread::sleep(POLL_INTERVAL);
-    }
-
-    SyncResult {
-        iterations,
-        elapsed: start.elapsed(),
-        success: false,
-    }
-}
-
-/// Asserts that synchronization completed successfully, with detailed diagnostics on failure.
-#[track_caller]
-fn assert_synchronized(
-    spec_sess: &SpectatorSession<StubConfig>,
-    host_sess: &P2PSession<StubConfig>,
-    result: &SyncResult,
-) {
-    assert!(
-        result.success,
-        "Synchronization failed after {} iterations ({:?}).\n\
-         Spectator state: {:?}\n\
-         Host state: {:?}\n\
-         This may indicate a timing issue on this platform.",
-        result.iterations,
-        result.elapsed,
-        spec_sess.current_state(),
-        host_sess.current_state()
-    );
-}
 
 // ============================================================================
 // Basic Session Tests
@@ -127,8 +37,9 @@ fn assert_synchronized(
 #[test]
 #[serial]
 fn test_start_session() {
-    let host_addr = test_addr(7777);
-    let socket = UdpNonBlockingSocket::bind_to_port(9999).unwrap();
+    let [host_port, spec_port] = PortAllocator::next_ports::<2>();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let socket = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
@@ -138,10 +49,11 @@ fn test_start_session() {
 #[test]
 #[serial]
 fn test_synchronize_with_host() -> Result<(), FortressError> {
-    let host_addr = test_addr(7777);
-    let spec_addr = test_addr(8888);
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), spec_port);
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7777).unwrap();
+    let socket1 = UdpNonBlockingSocket::bind_to_port(host_port).unwrap();
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(1)
         .unwrap()
@@ -149,7 +61,7 @@ fn test_synchronize_with_host() -> Result<(), FortressError> {
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(8888).unwrap();
+    let socket2 = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .start_spectator_session(host_addr, socket2)
         .expect("spectator session should start");
@@ -158,8 +70,8 @@ fn test_synchronize_with_host() -> Result<(), FortressError> {
     assert_eq!(host_sess.current_state(), SessionState::Synchronizing);
 
     // Use robust synchronization with timeout and diagnostics
-    let result = wait_for_sync(&mut spec_sess, &mut host_sess, SYNC_TIMEOUT);
-    assert_synchronized(&spec_sess, &host_sess, &result);
+    let result = synchronize_spectator(&mut spec_sess, &mut host_sess);
+    assert_spectator_synchronized(&spec_sess, &host_sess, &result);
 
     Ok(())
 }
@@ -176,22 +88,14 @@ struct SyncTestCase {
     num_players: usize,
     /// Number of local players (remaining will be spectators)
     num_local_players: usize,
-    /// Base port number for socket binding
-    base_port: u16,
 }
 
 impl SyncTestCase {
-    const fn new(
-        name: &'static str,
-        num_players: usize,
-        num_local_players: usize,
-        base_port: u16,
-    ) -> Self {
+    const fn new(name: &'static str, num_players: usize, num_local_players: usize) -> Self {
         Self {
             name,
             num_players,
             num_local_players,
-            base_port,
         }
     }
 }
@@ -206,17 +110,18 @@ impl SyncTestCase {
 fn test_synchronization_scenarios_data_driven() -> Result<(), FortressError> {
     // Define test cases for different configurations
     let test_cases = [
-        SyncTestCase::new("single_local_single_spectator", 1, 1, 7300),
-        SyncTestCase::new("two_local_single_spectator", 2, 2, 7310),
-        SyncTestCase::new("four_local_single_spectator", 4, 4, 7320),
+        SyncTestCase::new("single_local_single_spectator", 1, 1),
+        SyncTestCase::new("two_local_single_spectator", 2, 2),
+        SyncTestCase::new("four_local_single_spectator", 4, 4),
     ];
 
     for case in &test_cases {
-        // Create host session with local players and one spectator
-        let host_addr = test_addr(case.base_port);
-        let spec_addr = test_addr(case.base_port + 1);
+        // Allocate ports dynamically for each test case
+        let (host_port, spec_port) = PortAllocator::next_pair();
+        let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+        let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), spec_port);
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(case.base_port)
+        let socket1 = UdpNonBlockingSocket::bind_to_port(host_port)
             .unwrap_or_else(|e| panic!("[{}] Failed to bind host socket: {:?}", case.name, e));
 
         let mut builder = SessionBuilder::<StubConfig>::new()
@@ -238,7 +143,7 @@ fn test_synchronization_scenarios_data_driven() -> Result<(), FortressError> {
             .start_p2p_session(socket1)
             .expect("Failed to start host session");
 
-        let socket2 = UdpNonBlockingSocket::bind_to_port(case.base_port + 1)
+        let socket2 = UdpNonBlockingSocket::bind_to_port(spec_port)
             .unwrap_or_else(|e| panic!("[{}] Failed to bind spectator socket: {:?}", case.name, e));
 
         let mut spec_sess = SessionBuilder::<StubConfig>::new()
@@ -248,7 +153,7 @@ fn test_synchronization_scenarios_data_driven() -> Result<(), FortressError> {
             .expect("Failed to start spectator session");
 
         // Perform synchronization with timeout
-        let result = wait_for_sync(&mut spec_sess, &mut host_sess, SYNC_TIMEOUT);
+        let result = synchronize_spectator(&mut spec_sess, &mut host_sess);
 
         // Assert with detailed failure message for this specific case
         assert!(
@@ -281,32 +186,29 @@ fn test_sync_config_presets_data_driven() -> Result<(), FortressError> {
     struct SyncConfigTestCase {
         name: &'static str,
         config: SyncConfig,
-        base_port: u16,
     }
 
     let test_cases = [
         SyncConfigTestCase {
             name: "default",
             config: SyncConfig::default(),
-            base_port: 7330,
         },
         SyncConfigTestCase {
             name: "lan",
             config: SyncConfig::lan(),
-            base_port: 7340,
         },
         SyncConfigTestCase {
             name: "competitive",
             config: SyncConfig::competitive(),
-            base_port: 7350,
         },
     ];
 
     for case in &test_cases {
-        let host_addr = test_addr(case.base_port);
-        let spec_addr = test_addr(case.base_port + 1);
+        let (host_port, spec_port) = PortAllocator::next_pair();
+        let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+        let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), spec_port);
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(case.base_port)
+        let socket1 = UdpNonBlockingSocket::bind_to_port(host_port)
             .unwrap_or_else(|e| panic!("[{}] Failed to bind host socket: {:?}", case.name, e));
 
         let mut host_sess = SessionBuilder::<StubConfig>::new()
@@ -319,7 +221,7 @@ fn test_sync_config_presets_data_driven() -> Result<(), FortressError> {
             .start_p2p_session(socket1)
             .expect("Failed to start host session");
 
-        let socket2 = UdpNonBlockingSocket::bind_to_port(case.base_port + 1)
+        let socket2 = UdpNonBlockingSocket::bind_to_port(spec_port)
             .unwrap_or_else(|e| panic!("[{}] Failed to bind spectator socket: {:?}", case.name, e));
 
         let mut spec_sess = SessionBuilder::<StubConfig>::new()
@@ -330,7 +232,7 @@ fn test_sync_config_presets_data_driven() -> Result<(), FortressError> {
             .expect("Failed to start spectator session");
 
         // Use robust synchronization with timeout
-        let result = wait_for_sync(&mut spec_sess, &mut host_sess, SYNC_TIMEOUT);
+        let result = synchronize_spectator(&mut spec_sess, &mut host_sess);
 
         assert!(
             result.success,
@@ -360,8 +262,9 @@ fn test_sync_config_presets_data_driven() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_current_frame_starts_at_null() {
-    let host_addr = test_addr(7100);
-    let socket = UdpNonBlockingSocket::bind_to_port(7101).unwrap();
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let socket = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
@@ -373,8 +276,9 @@ fn test_current_frame_starts_at_null() {
 #[test]
 #[serial]
 fn test_frames_behind_host_initially_zero() {
-    let host_addr = test_addr(7110);
-    let socket = UdpNonBlockingSocket::bind_to_port(7111).unwrap();
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let socket = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
@@ -386,8 +290,9 @@ fn test_frames_behind_host_initially_zero() {
 #[test]
 #[serial]
 fn test_num_players_default() {
-    let host_addr = test_addr(7120);
-    let socket = UdpNonBlockingSocket::bind_to_port(7121).unwrap();
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let socket = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
@@ -399,8 +304,9 @@ fn test_num_players_default() {
 #[test]
 #[serial]
 fn test_num_players_custom() {
-    let host_addr = test_addr(7130);
-    let socket = UdpNonBlockingSocket::bind_to_port(7131).unwrap();
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let socket = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
         .unwrap()
@@ -417,8 +323,9 @@ fn test_num_players_custom() {
 #[test]
 #[serial]
 fn test_network_stats_not_synchronized() {
-    let host_addr = test_addr(7140);
-    let socket = UdpNonBlockingSocket::bind_to_port(7141).unwrap();
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let socket = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
@@ -436,8 +343,9 @@ fn test_network_stats_not_synchronized() {
 #[test]
 #[serial]
 fn test_events_empty_initially() {
-    let host_addr = test_addr(7150);
-    let socket = UdpNonBlockingSocket::bind_to_port(7151).unwrap();
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let socket = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
@@ -450,10 +358,11 @@ fn test_events_empty_initially() {
 #[test]
 #[serial]
 fn test_events_generated_during_sync() -> Result<(), FortressError> {
-    let host_addr = test_addr(7160);
-    let spec_addr = test_addr(7161);
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), spec_port);
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7160).unwrap();
+    let socket1 = UdpNonBlockingSocket::bind_to_port(host_port).unwrap();
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -462,7 +371,7 @@ fn test_events_generated_during_sync() -> Result<(), FortressError> {
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(7161).unwrap();
+    let socket2 = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .start_spectator_session(host_addr, socket2)
         .expect("spectator session should start");
@@ -491,8 +400,9 @@ fn test_events_generated_during_sync() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_advance_frame_before_sync_fails() {
-    let host_addr = test_addr(7170);
-    let socket = UdpNonBlockingSocket::bind_to_port(7171).unwrap();
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let socket = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
@@ -506,10 +416,11 @@ fn test_advance_frame_before_sync_fails() {
 #[test]
 #[serial]
 fn test_advance_frame_after_sync() -> Result<(), FortressError> {
-    let host_addr = test_addr(7180);
-    let spec_addr = test_addr(7181);
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), spec_port);
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7180).unwrap();
+    let socket1 = UdpNonBlockingSocket::bind_to_port(host_port).unwrap();
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -518,7 +429,7 @@ fn test_advance_frame_after_sync() -> Result<(), FortressError> {
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(7181).unwrap();
+    let socket2 = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -528,8 +439,8 @@ fn test_advance_frame_after_sync() -> Result<(), FortressError> {
     let mut host_game = GameStub::new();
 
     // Use robust synchronization with timeout and diagnostics
-    let result = wait_for_sync(&mut spec_sess, &mut host_sess, SYNC_TIMEOUT);
-    assert_synchronized(&spec_sess, &host_sess, &result);
+    let result = synchronize_spectator(&mut spec_sess, &mut host_sess);
+    assert_spectator_synchronized(&spec_sess, &host_sess, &result);
 
     // Advance host a few frames and send inputs
     for _ in 0..5 {
@@ -568,8 +479,9 @@ fn test_advance_frame_after_sync() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_violation_observer_attached() {
-    let host_addr = test_addr(7190);
-    let socket = UdpNonBlockingSocket::bind_to_port(7191).unwrap();
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let socket = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let observer = Arc::new(CollectingObserver::new());
 
     let spec_sess = SessionBuilder::<StubConfig>::new()
@@ -584,8 +496,9 @@ fn test_violation_observer_attached() {
 #[test]
 #[serial]
 fn test_no_violation_observer_by_default() {
-    let host_addr = test_addr(7200);
-    let socket = UdpNonBlockingSocket::bind_to_port(7201).unwrap();
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let socket = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
@@ -601,10 +514,11 @@ fn test_no_violation_observer_by_default() {
 #[test]
 #[serial]
 fn test_spectator_config_buffer_size() -> Result<(), FortressError> {
-    let host_addr = test_addr(7210);
-    let spec_addr = test_addr(7211);
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), spec_port);
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7210).unwrap();
+    let socket1 = UdpNonBlockingSocket::bind_to_port(host_port).unwrap();
     let _host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -621,7 +535,7 @@ fn test_spectator_config_buffer_size() -> Result<(), FortressError> {
         ..Default::default()
     };
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(7211).unwrap();
+    let socket2 = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -638,10 +552,11 @@ fn test_spectator_config_buffer_size() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_spectator_with_input_queue_config() -> Result<(), FortressError> {
-    let host_addr = test_addr(7220);
-    let spec_addr = test_addr(7221);
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), spec_port);
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7220).unwrap();
+    let socket1 = UdpNonBlockingSocket::bind_to_port(host_port).unwrap();
     let _host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -651,7 +566,7 @@ fn test_spectator_with_input_queue_config() -> Result<(), FortressError> {
         .start_p2p_session(socket1)?;
 
     // Create spectator with high latency input queue config
-    let socket2 = UdpNonBlockingSocket::bind_to_port(7221).unwrap();
+    let socket2 = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -671,8 +586,9 @@ fn test_spectator_with_input_queue_config() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_poll_remote_clients_no_host() {
-    let host_addr = test_addr(7230);
-    let socket = UdpNonBlockingSocket::bind_to_port(7231).unwrap();
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let socket = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
@@ -693,10 +609,11 @@ fn test_poll_remote_clients_no_host() {
 #[test]
 #[serial]
 fn test_full_spectator_flow() -> Result<(), FortressError> {
-    let host_addr = test_addr(7240);
-    let spec_addr = test_addr(7241);
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), spec_port);
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7240).unwrap();
+    let socket1 = UdpNonBlockingSocket::bind_to_port(host_port).unwrap();
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -705,7 +622,7 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(7241).unwrap();
+    let socket2 = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -715,8 +632,8 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
     let mut host_game = GameStub::new();
 
     // Phase 1: Synchronization - use robust helper with timeout and diagnostics
-    let sync_result = wait_for_sync(&mut spec_sess, &mut host_sess, SYNC_TIMEOUT);
-    assert_synchronized(&spec_sess, &host_sess, &sync_result);
+    let sync_result = synchronize_spectator(&mut spec_sess, &mut host_sess);
+    assert_spectator_synchronized(&spec_sess, &host_sess, &sync_result);
 
     // Phase 2: Host advances frames and spectator follows
     for frame in 0..10 {
@@ -758,10 +675,11 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_synchronized_event_generated() -> Result<(), FortressError> {
-    let host_addr = test_addr(7250);
-    let spec_addr = test_addr(7251);
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), spec_port);
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7250).unwrap();
+    let socket1 = UdpNonBlockingSocket::bind_to_port(host_port).unwrap();
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -770,7 +688,7 @@ fn test_synchronized_event_generated() -> Result<(), FortressError> {
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(7251).unwrap();
+    let socket2 = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -779,8 +697,11 @@ fn test_synchronized_event_generated() -> Result<(), FortressError> {
 
     let mut found_synchronized = false;
 
-    // Synchronize and collect events
-    // Use time-based timeout and sleep between iterations for reliable packet delivery
+    // NOTE: This test intentionally uses an inline sync loop instead of the centralized
+    // `synchronize_spectator()` helper because we need to capture and inspect events
+    // DURING synchronization. The helper only returns success/failure, not the events
+    // generated during the handshake process. This test verifies that `Synchronized`
+    // events are properly emitted.
     let start = Instant::now();
     while start.elapsed() < SYNC_TIMEOUT {
         spec_sess.poll_remote_clients();
@@ -807,10 +728,11 @@ fn test_synchronized_event_generated() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_synchronizing_events_generated() -> Result<(), FortressError> {
-    let host_addr = test_addr(7260);
-    let spec_addr = test_addr(7261);
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), spec_port);
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7260).unwrap();
+    let socket1 = UdpNonBlockingSocket::bind_to_port(host_port).unwrap();
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -819,7 +741,7 @@ fn test_synchronizing_events_generated() -> Result<(), FortressError> {
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(7261).unwrap();
+    let socket2 = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -830,9 +752,14 @@ fn test_synchronizing_events_generated() -> Result<(), FortressError> {
     let mut iterations = 0;
     let start = Instant::now();
 
-    // Run synchronization and collect events with timeout to handle platform timing variations.
-    // On slow or busy CI systems (especially macOS), tight loops may not allow enough time
-    // for UDP packets to be delivered and processed.
+    // NOTE: This test intentionally uses an inline sync loop instead of the centralized
+    // `synchronize_spectator()` helper because we need to capture and inspect events
+    // DURING synchronization. The helper only returns success/failure, not the events
+    // generated during the handshake process. This test verifies that `Synchronizing`
+    // progress events are properly emitted.
+    //
+    // The loop also uses both time-based timeout and iteration limits to handle
+    // platform timing variations (especially macOS CI).
     while start.elapsed() < SYNC_TIMEOUT && iterations < MAX_SYNC_ITERATIONS {
         spec_sess.poll_remote_clients();
         host_sess.poll_remote_clients();
@@ -877,8 +804,9 @@ fn test_synchronizing_events_generated() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_spectator_catchup_speed() -> Result<(), FortressError> {
-    let host_addr = test_addr(7270);
-    let spec_addr = test_addr(7271);
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), spec_port);
 
     // Configure spectator to catch up faster when behind
     let spectator_config = SpectatorConfig {
@@ -888,7 +816,7 @@ fn test_spectator_catchup_speed() -> Result<(), FortressError> {
         ..Default::default()
     };
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7270).unwrap();
+    let socket1 = UdpNonBlockingSocket::bind_to_port(host_port).unwrap();
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -897,7 +825,7 @@ fn test_spectator_catchup_speed() -> Result<(), FortressError> {
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(7271).unwrap();
+    let socket2 = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -908,8 +836,8 @@ fn test_spectator_catchup_speed() -> Result<(), FortressError> {
     let mut host_game = GameStub::new();
 
     // Synchronize first with proper timeout and sleeps for reliable timing
-    let result = wait_for_sync(&mut spec_sess, &mut host_sess, SYNC_TIMEOUT);
-    assert_synchronized(&spec_sess, &host_sess, &result);
+    let result = synchronize_spectator(&mut spec_sess, &mut host_sess);
+    assert_spectator_synchronized(&spec_sess, &host_sess, &result);
 
     // Have host advance many frames ahead
     for frame in 0..20 {
@@ -939,11 +867,12 @@ fn test_spectator_catchup_speed() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_multiple_spectators_same_host() -> Result<(), FortressError> {
-    let host_addr = test_addr(7280);
-    let spec_addr1 = test_addr(7281);
-    let spec_addr2 = test_addr(7282);
+    let [host_port, spec_port1, spec_port2] = PortAllocator::next_ports::<3>();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+    let spec_addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), spec_port1);
+    let spec_addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), spec_port2);
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7280).unwrap();
+    let socket1 = UdpNonBlockingSocket::bind_to_port(host_port).unwrap();
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -953,21 +882,25 @@ fn test_multiple_spectators_same_host() -> Result<(), FortressError> {
         .add_player(PlayerType::Spectator(spec_addr2), PlayerHandle::new(3))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(7281).unwrap();
+    let socket2 = UdpNonBlockingSocket::bind_to_port(spec_port1).unwrap();
     let mut spec_sess1 = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
         .start_spectator_session(host_addr, socket2)
         .expect("spectator session should start");
 
-    let socket3 = UdpNonBlockingSocket::bind_to_port(7282).unwrap();
+    let socket3 = UdpNonBlockingSocket::bind_to_port(spec_port2).unwrap();
     let mut spec_sess2 = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
         .start_spectator_session(host_addr, socket3)
         .expect("spectator session should start");
 
-    // Synchronize all with proper timeout and small sleeps for reliable timing
+    // NOTE: This test intentionally uses an inline sync loop instead of the centralized
+    // `synchronize_spectator()` helper because we need to synchronize THREE sessions
+    // simultaneously (one host and TWO spectators). The helper only supports one
+    // spectator + one host pair. Using two sequential calls would not correctly test
+    // the scenario where both spectators synchronize concurrently with the same host.
     let start = Instant::now();
     let mut all_synced = false;
     while start.elapsed() < SYNC_TIMEOUT && !all_synced {
@@ -1003,10 +936,11 @@ fn test_multiple_spectators_same_host() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_spectator_disconnect_timeout() -> Result<(), FortressError> {
-    let host_addr = test_addr(7290);
+    let (host_port, spec_port) = PortAllocator::next_pair();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
 
     // Create spectator that expects a connection
-    let socket = UdpNonBlockingSocket::bind_to_port(7291).unwrap();
+    let socket = UdpNonBlockingSocket::bind_to_port(spec_port).unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()

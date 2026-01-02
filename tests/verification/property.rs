@@ -1445,36 +1445,8 @@ mod p2p_checksum_tests {
         17700 + base
     }
 
-    /// Helper to advance a session by processing a number of frames with poll cycles.
-    /// Uses time-based waiting to be robust across different platforms.
-    #[track_caller]
-    fn synchronize_sessions<T: Config>(
-        sess1: &mut fortress_rollback::P2PSession<T>,
-        sess2: &mut fortress_rollback::P2PSession<T>,
-        _poll_cycles: usize, // Kept for API compatibility but ignored - we use time-based timeout
-    ) where
-        T::Input: Default,
-    {
-        use std::thread;
-        use std::time::{Duration, Instant};
-
-        const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
-        const POLL_INTERVAL: Duration = Duration::from_millis(1);
-
-        let start = Instant::now();
-        while start.elapsed() < SYNC_TIMEOUT {
-            sess1.poll_remote_clients();
-            sess2.poll_remote_clients();
-            if sess1.current_state() == SessionState::Running
-                && sess2.current_state() == SessionState::Running
-            {
-                return;
-            }
-            thread::sleep(POLL_INTERVAL);
-        }
-        // If we get here, synchronization may have failed - but don't assert,
-        // let the caller handle the failure with their own assertions
-    }
+    // Use synchronize_sessions from test_utils to avoid duplicating constants
+    use crate::common::test_utils::{synchronize_sessions, SyncConfig};
 
     /// Property: sync_health returns Pending when desync detection is off
     #[test]
@@ -1674,8 +1646,9 @@ mod p2p_checksum_tests {
             .start_p2p_session(socket2)
             .unwrap();
 
-        // Synchronize sessions first
-        synchronize_sessions(&mut sess1, &mut sess2, 50);
+        // Synchronize sessions first using the helper from test_utils
+        synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default())
+            .expect("Sessions should synchronize");
 
         assert_eq!(sess1.current_state(), SessionState::Running);
         assert_eq!(sess2.current_state(), SessionState::Running);

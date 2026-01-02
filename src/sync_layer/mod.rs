@@ -1893,10 +1893,14 @@ mod kani_sync_layer_proofs {
         type Address = SocketAddr;
     }
 
-    /// Proof: New SyncLayer has valid initial state
+    /// Proof: New SyncLayer has valid initial state.
     ///
     /// Verifies all invariants hold at initialization.
     /// Note: Bounds are reduced for Kani verification tractability.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Initial SyncLayer state validity (INV-1, INV-7, INV-8)
+    /// - Related: proof_advance_frame_monotonic, proof_saved_states_count
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_new_sync_layer_valid() {
@@ -1941,9 +1945,13 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: advance_frame maintains INV-1 (monotonicity)
+    /// Proof: advance_frame maintains INV-1 (monotonicity).
     ///
     /// Verifies that advance_frame always increases current_frame.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame monotonicity (INV-1)
+    /// - Related: proof_multiple_advances_monotonic, proof_new_sync_layer_valid
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_advance_frame_monotonic() {
@@ -1963,9 +1971,13 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: Multiple advances maintain monotonicity
+    /// Proof: Multiple advances maintain monotonicity.
     ///
     /// Note: unwind(15) accounts for SyncLayer construction + loop iterations
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Repeated advance_frame maintains monotonicity
+    /// - Related: proof_advance_frame_monotonic
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_multiple_advances_monotonic() {
@@ -1991,11 +2003,15 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: save_current_state maintains INV-8
+    /// Proof: save_current_state maintains INV-8.
     ///
     /// Verifies that after saving, last_saved_frame == current_frame.
     ///
     /// Note: unwind(15) accounts for SyncLayer construction + loop iterations
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Save updates last_saved_frame (INV-8)
+    /// - Related: proof_load_frame_validates_bounds, proof_saved_states_count
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_save_maintains_inv8() {
@@ -2021,11 +2037,15 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: load_frame validates bounds correctly
+    /// Proof: load_frame validates bounds correctly.
     ///
     /// Verifies that load_frame rejects invalid frames.
     ///
     /// Note: unwind(20) accounts for SyncLayer construction + loop iterations (5)
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: load_frame rejects invalid frames
+    /// - Related: proof_load_frame_success_maintains_invariants
     #[kani::proof]
     #[kani::unwind(20)]
     fn proof_load_frame_validates_bounds() {
@@ -2061,9 +2081,13 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: load_frame success maintains invariants
+    /// Proof: load_frame success maintains invariants.
     ///
     /// Note: unwind(20) accounts for SyncLayer construction + loop iterations
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Successful load_frame sets current_frame correctly
+    /// - Related: proof_load_frame_validates_bounds
     #[kani::proof]
     #[kani::unwind(20)]
     fn proof_load_frame_success_maintains_invariants() {
@@ -2090,10 +2114,14 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: set_frame_delay validates player handle
+    /// Proof: set_frame_delay validates player handle.
     ///
     /// Note: unwind(15) accounts for SyncLayer construction
     /// Tests that invalid handles are rejected
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Invalid player handle rejection
+    /// - Related: proof_player_handle_validity
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_set_frame_delay_validates_handle() {
@@ -2104,7 +2132,11 @@ mod kani_sync_layer_proofs {
         kani::assert(result_invalid.is_err(), "Invalid handle should fail");
     }
 
-    /// Proof: Saved states count is correct
+    /// Proof: Saved states count is correct.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: SavedStates has max_prediction + 1 slots
+    /// - Related: proof_new_sync_layer_valid, proof_saved_states_circular_index
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_saved_states_count() {
@@ -2120,7 +2152,11 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: SavedStates get_cell validates frame
+    /// Proof: SavedStates get_cell validates frame.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: get_cell rejects negative frames
+    /// - Related: proof_saved_states_circular_index
     #[kani::proof]
     #[kani::unwind(10)]
     fn proof_get_cell_validates_frame() {
@@ -2137,7 +2173,11 @@ mod kani_sync_layer_proofs {
         kani::assert(result_valid.is_ok(), "Valid frame should succeed");
     }
 
-    /// Proof: SavedStates uses circular indexing correctly
+    /// Proof: SavedStates uses circular indexing correctly.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Circular index calculation bounds
+    /// - Related: proof_saved_states_count, proof_get_cell_validates_frame
     #[kani::proof]
     #[kani::unwind(10)]
     fn proof_saved_states_circular_index() {
@@ -2160,9 +2200,13 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: reset_prediction doesn't affect frame state
+    /// Proof: reset_prediction doesn't affect frame state.
     ///
     /// Note: unwind(15) accounts for SyncLayer construction + loop iterations
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: reset_prediction preserves frame invariants
+    /// - Related: proof_new_sync_layer_valid
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_reset_prediction_preserves_frames() {
@@ -2194,10 +2238,14 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: INV-7 holds after set_last_confirmed_frame
+    /// Proof: INV-7 holds after set_last_confirmed_frame.
     ///
     /// Note: unwind(15) accounts for SyncLayer construction
     /// Verifies that set_last_confirmed_frame maintains INV-7 invariant
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Confirmed frame bounded by current frame (INV-7)
+    /// - Related: proof_sparse_saving_respects_saved_frame
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_confirmed_frame_bounded() {
@@ -2218,10 +2266,14 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: Sparse saving respects last_saved_frame
+    /// Proof: Sparse saving respects last_saved_frame.
     ///
     /// Note: unwind(15) accounts for SyncLayer construction
     /// Verifies that sparse save mode clamps confirm frame to last_saved
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Sparse save mode respects last_saved_frame
+    /// - Related: proof_confirmed_frame_bounded, proof_save_maintains_inv8
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_sparse_saving_respects_saved_frame() {

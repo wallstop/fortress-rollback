@@ -1368,6 +1368,10 @@ mod kani_proofs {
     ///
     /// LEB128 encoding uses 7 bits per byte, so for a value with N bits,
     /// we need ceil(N/7) bytes. For value 0, we need 1 byte.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Varint length calculation correctness
+    /// - Related: proof_varint_encoded_len_no_overflow, proof_varint_encode_single_byte
     #[kani::proof]
     fn proof_varint_encoded_len_correct() {
         let value: u64 = kani::any();
@@ -1394,6 +1398,10 @@ mod kani_proofs {
     /// Proof: varint::encode produces correct output for small values.
     ///
     /// For values < 128, the encoding is a single byte equal to the value.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Single-byte varint encoding correctness
+    /// - Related: proof_varint_encoded_len_correct, proof_varint_continuation_handling
     #[kani::proof]
     fn proof_varint_encode_single_byte() {
         let value: u64 = kani::any();
@@ -1414,6 +1422,10 @@ mod kani_proofs {
     ///
     /// This proves that the decode loop always terminates and returns a valid
     /// number of consumed bytes.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Decode loop termination and bounds safety
+    /// - Related: proof_varint_decode_offset_safe, proof_varint_decode_empty_safe
     #[kani::proof]
     #[kani::unwind(5)] // 3 bytes + 2 for loop overhead
     fn proof_varint_decode_terminates() {
@@ -1444,6 +1456,10 @@ mod kani_proofs {
     /// Proof: varint::decode handles offset correctly.
     ///
     /// Decoding at different offsets should not cause buffer overflow.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Offset parameter bounds safety
+    /// - Related: proof_varint_decode_terminates, proof_varint_decode_empty_safe
     #[kani::proof]
     #[kani::unwind(4)]
     fn proof_varint_decode_offset_safe() {
@@ -1466,6 +1482,10 @@ mod kani_proofs {
     /// Proof: varint roundtrip is correct for small values.
     ///
     /// For values that fit in 2 bytes (< 16384), verify encode/decode roundtrip.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Encode/decode roundtrip correctness
+    /// - Related: proof_varint_encode_single_byte, proof_varint_continuation_handling
     #[kani::proof]
     #[kani::unwind(5)]
     fn proof_varint_roundtrip_small() {
@@ -1485,6 +1505,10 @@ mod kani_proofs {
     /// Proof: varint::encoded_len never overflows.
     ///
     /// The calculation `bits.div_ceil(7)` should never overflow for any u64.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: No overflow in length calculation
+    /// - Related: proof_varint_encoded_len_correct
     #[kani::proof]
     fn proof_varint_encoded_len_no_overflow() {
         let value: u64 = kani::any();
@@ -1499,6 +1523,10 @@ mod kani_proofs {
     /// Proof: Empty buffer decode is safe.
     ///
     /// Decoding from an empty buffer should return (0, 0) without panicking.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Empty input handling safety
+    /// - Related: proof_varint_decode_terminates, proof_varint_decode_offset_safe
     #[kani::proof]
     fn proof_varint_decode_empty_safe() {
         let buf: [u8; 0] = [];
@@ -1512,6 +1540,10 @@ mod kani_proofs {
     ///
     /// A varint with all continuation bits set should consume all available bytes
     /// (up to the overflow limit).
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Multi-byte varint decoding correctness
+    /// - Related: proof_varint_encode_single_byte, proof_varint_roundtrip_small
     #[kani::proof]
     #[kani::unwind(4)]
     fn proof_varint_continuation_handling() {
