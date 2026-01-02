@@ -9,6 +9,7 @@ on:
       - '**/Cargo.lock'
       - 'rust-toolchain.toml'
       - '.cargo/**'
+      - 'Cross.toml'
       - 'clippy.toml'
       - 'rustfmt.toml'
       - 'scripts/verify-kani.sh'
@@ -22,6 +23,7 @@ on:
       - '**/Cargo.lock'
       - 'rust-toolchain.toml'
       - '.cargo/**'
+      - 'Cross.toml'
       - 'clippy.toml'
       - 'rustfmt.toml'
       - 'scripts/verify-kani.sh'
@@ -454,49 +456,25 @@ jobs:
 
       - name: Check ARM64 build (no default features)
         run: cross check --target aarch64-unknown-linux-gnu --no-default-features
-        env:
-          # Override .cargo/config.toml linker setting for cross-rs container
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
+        # Cross.toml installs clang+lld in the container to match .cargo/config.toml
 
       - name: Check ARM64 build (default features)
         run: cross check --target aarch64-unknown-linux-gnu
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
 
       - name: Check ARM64 build (with sync-send feature)
         run: cross check --target aarch64-unknown-linux-gnu --features sync-send
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
 
       - name: Check ARM64 build (with paranoid feature)
         run: cross check --target aarch64-unknown-linux-gnu --features paranoid
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
 
       - name: Check ARM64 build (with json feature)
         run: cross check --target aarch64-unknown-linux-gnu --features json
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
 
       - name: Check ARM64 build (with tokio feature)
         run: cross check --target aarch64-unknown-linux-gnu --features tokio
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
 
       - name: Run clippy for ARM64 target
         run: cross clippy --target aarch64-unknown-linux-gnu --no-default-features -- -D warnings
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
 
       - name: Build ARM64 release (verify full compilation)
         run: cross build --target aarch64-unknown-linux-gnu --release
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""

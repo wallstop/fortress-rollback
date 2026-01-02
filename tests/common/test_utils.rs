@@ -224,18 +224,106 @@ pub fn test_addr(port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
 }
 
-use fortress_rollback::{ChaosConfig, ChaosSocket, UdpNonBlockingSocket};
+use fortress_rollback::{ChaosConfig, ChaosSocket, FortressError, UdpNonBlockingSocket};
+
+/// Maximum number of retry attempts for socket binding on Windows.
+///
+/// Windows CI (especially GitHub Actions runners) can experience transient
+/// WSAEACCES (error 10013) errors when binding sockets. This is often caused
+/// by port conflicts or exclusive address use issues that resolve after a
+/// short delay.
+#[cfg(target_os = "windows")]
+const SOCKET_BIND_MAX_RETRIES: u32 = 5;
+
+/// Delay between socket bind retry attempts on Windows.
+#[cfg(target_os = "windows")]
+const SOCKET_BIND_RETRY_DELAY_MS: u64 = 100;
 
 /// Helper to create a UDP socket wrapped with ChaosSocket for network resilience testing.
+///
+/// # Windows Retry Logic
+///
+/// On Windows, this function includes retry logic to handle transient WSAEACCES
+/// (error 10013) errors that occur on GitHub Actions Windows runners. These errors
+/// are caused by port conflicts or exclusive address use issues that typically
+/// resolve after a short delay.
+///
+/// The retry logic:
+/// - Retries up to 5 times on WSAEACCES errors
+/// - Waits 100ms between attempts
+/// - Only retries on error code 10013 (WSAEACCES), not other errors
 #[allow(dead_code)]
-#[allow(clippy::expect_used)] // expect is acceptable in test utilities
 #[track_caller]
 pub fn create_chaos_socket(
     port: u16,
     config: ChaosConfig,
-) -> ChaosSocket<SocketAddr, UdpNonBlockingSocket> {
-    let inner = UdpNonBlockingSocket::bind_to_port(port).expect("Failed to bind chaos socket");
-    ChaosSocket::new(inner, config)
+) -> Result<ChaosSocket<SocketAddr, UdpNonBlockingSocket>, FortressError> {
+    let inner = bind_socket_with_retry(port)?;
+    Ok(ChaosSocket::new(inner, config))
+}
+
+/// Binds a UDP socket with retry logic for Windows CI.
+///
+/// On non-Windows platforms, this is a simple bind without retries.
+/// On Windows, it retries on WSAEACCES (error 10013) errors.
+#[track_caller]
+fn bind_socket_with_retry(port: u16) -> Result<UdpNonBlockingSocket, FortressError> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        return UdpNonBlockingSocket::bind_to_port(port).map_err(|error| {
+            FortressError::SocketError {
+                context: format!("Failed to bind chaos socket on port {port}: {error}"),
+            }
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::io::ErrorKind;
+
+        let mut last_error = None;
+
+        for attempt in 0..SOCKET_BIND_MAX_RETRIES {
+            match UdpNonBlockingSocket::bind_to_port(port) {
+                Ok(socket) => return Ok(socket),
+                Err(error) => {
+                    // WSAEACCES is error code 10013 on Windows
+                    // It manifests as PermissionDenied in Rust's std::io::ErrorKind
+                    let is_wsaeacces = error.kind() == ErrorKind::PermissionDenied
+                        || error.raw_os_error() == Some(10013);
+
+                    if is_wsaeacces && attempt + 1 < SOCKET_BIND_MAX_RETRIES {
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            port,
+                            delay_ms = SOCKET_BIND_RETRY_DELAY_MS,
+                            "Socket bind attempt failed with WSAEACCES, retrying"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            SOCKET_BIND_RETRY_DELAY_MS,
+                        ));
+                        last_error = Some(error);
+                        continue;
+                    }
+                    // Non-retryable error or max retries exceeded
+                    let context = format!(
+                        "Failed to bind chaos socket on port {} after {} attempts: {}",
+                        port,
+                        attempt + 1,
+                        error
+                    );
+                    return Err(FortressError::SocketError { context });
+                },
+            }
+        }
+
+        // This should only be reached if all retries failed with WSAEACCES
+        let context = format!(
+            "Failed to bind chaos socket on port {} after {} attempts: {:?}",
+            port, SOCKET_BIND_MAX_RETRIES, last_error
+        );
+        Err(FortressError::SocketError { context })
+    }
 }
 
 // ============================================================================
@@ -463,7 +551,7 @@ pub fn assert_spectator_synchronized<C: Config>(
 // Generic P2P Session Test Helpers
 // ============================================================================
 
-use fortress_rollback::{FortressError, FortressRequest, PlayerHandle, PlayerType};
+use fortress_rollback::{FortressRequest, PlayerHandle, PlayerType};
 
 /// Trait for game stubs that can handle fortress requests.
 ///

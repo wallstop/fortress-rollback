@@ -7,11 +7,8 @@ linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
 [target.aarch64-unknown-linux-gnu]
-# ARM64 configuration for local development (e.g., Apple Silicon via Rosetta or native ARM)
-# NOTE: This uses clang+lld which works in the devcontainer but NOT in cross-rs containers.
-# For cross-compilation in CI, we set CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER to
-# override this with the container's gcc-based toolchain (aarch64-linux-gnu-gcc).
-# See Cross.toml for the environment variable passthrough configuration.
+# ARM64 configuration using clang+lld for faster linking
+# For cross-compilation in CI, Cross.toml installs clang+lld in the Docker container
 linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 

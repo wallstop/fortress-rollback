@@ -405,7 +405,7 @@ mod kani_proofs {
         }
     }
 
-    /// Proof: PartialEq is symmetric.
+    /// Proof: PartialEq is symmetric for ProtocolState.
     ///
     /// Verifies that if state_a == state_b, then state_b == state_a.
     ///
@@ -413,7 +413,7 @@ mod kani_proofs {
     /// - Verifies: Equality symmetry property
     /// - Related: proof_clone_correctness, proof_variants_distinct
     #[kani::proof]
-    fn proof_partial_eq_symmetric() {
+    fn proof_protocol_state_partial_eq_symmetric() {
         let index_a: u8 = kani::any();
         let index_b: u8 = kani::any();
         kani::assume(index_a < PROTOCOL_STATE_COUNT as u8);

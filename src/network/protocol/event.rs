@@ -857,7 +857,7 @@ mod kani_proofs {
     // PartialEq Verification
     // =========================================================================
 
-    /// Proof: PartialEq is symmetric.
+    /// Proof: PartialEq is symmetric for Event.
     ///
     /// Verifies that if a == b then b == a.
     ///
@@ -865,7 +865,7 @@ mod kani_proofs {
     /// - Verifies: Equality symmetry for Event type
     /// - Related: proof_synchronizing_inequality
     #[kani::proof]
-    fn proof_partial_eq_symmetric() {
+    fn proof_event_partial_eq_symmetric() {
         let total: u32 = kani::any();
         let count: u32 = kani::any();
 

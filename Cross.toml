@@ -1,15 +1,10 @@
 # Cross-rs configuration for cross-compilation
 # See: https://github.com/cross-rs/cross/wiki/Configuration
 
-[build.env]
-# Pass through environment variables that override .cargo/config.toml settings
-# This allows CI to specify the correct linker for cross-compilation containers
-passthrough = [
-    "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER",
-    "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
-]
-
 [target.aarch64-unknown-linux-gnu]
-# The cross-rs Docker container uses aarch64-linux-gnu-gcc, not clang
-# The linker is set via CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER in CI
-# to override .cargo/config.toml which specifies clang (for local dev)
+# Install clang and lld in the cross container to match .cargo/config.toml requirements
+# The .cargo/config.toml specifies clang+lld for faster linking, but the default
+# cross-rs Docker image doesn't include these tools. The pre-build hook installs them.
+pre-build = [
+    "apt-get update && apt-get install -y clang lld"
+]

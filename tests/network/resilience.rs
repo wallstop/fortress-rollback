@@ -27,8 +27,8 @@
 //! **Incorrect pattern (DO NOT USE):**
 //! ```ignore
 //! let config = ChaosConfig::builder().packet_loss_rate(0.10).seed(42).build();
-//! let socket1 = create_chaos_socket(port1, config.clone());
-//! let socket2 = create_chaos_socket(port2, config); // Same seed!
+//! let socket1 = create_chaos_socket(port1, config.clone())?;
+//! let socket2 = create_chaos_socket(port2, config)?; // Same seed!
 //! ```
 //!
 //! # Port Allocation
@@ -81,13 +81,13 @@ fn test_synchronize_with_packet_loss() -> Result<(), FortressError> {
         .seed(43) // Different seed!
         .build();
 
-    let socket1 = create_chaos_socket(port1, config1);
+    let socket1 = create_chaos_socket(port1, config1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, config2);
+    let socket2 = create_chaos_socket(port2, config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -143,13 +143,13 @@ fn test_advance_frames_with_packet_loss() -> Result<(), FortressError> {
         .seed(123)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -217,13 +217,13 @@ fn test_synchronize_with_latency() -> Result<(), FortressError> {
     // 20ms simulated latency
     let chaos_config = ChaosConfig::builder().latency_ms(20).seed(42).build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -273,13 +273,13 @@ fn test_synchronize_with_jitter() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -324,13 +324,13 @@ fn test_poor_network_conditions() -> Result<(), FortressError> {
     let mut chaos_config = ChaosConfig::poor_network();
     chaos_config.seed = Some(42);
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -420,13 +420,13 @@ fn test_asymmetric_packet_loss() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let socket1 = create_chaos_socket(port1, config1);
+    let socket1 = create_chaos_socket(port1, config1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, config2);
+    let socket2 = create_chaos_socket(port2, config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -474,13 +474,13 @@ fn test_high_packet_loss() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -525,13 +525,13 @@ fn test_high_latency_100ms() -> Result<(), FortressError> {
 
     let chaos_config = ChaosConfig::builder().latency_ms(100).seed(42).build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -608,13 +608,13 @@ fn test_high_latency_250ms() -> Result<(), FortressError> {
 
     let chaos_config = ChaosConfig::builder().latency_ms(250).seed(42).build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -658,13 +658,13 @@ fn test_extreme_latency_500ms() -> Result<(), FortressError> {
 
     let chaos_config = ChaosConfig::builder().latency_ms(500).seed(42).build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -713,13 +713,13 @@ fn test_out_of_order_delivery() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -808,13 +808,13 @@ fn test_jitter_with_packet_loss() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -897,13 +897,13 @@ fn test_packet_duplication() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -981,13 +981,13 @@ fn test_determinism_under_stress() -> Result<(), FortressError> {
     let mut chaos_config = ChaosConfig::terrible_network();
     chaos_config.seed = Some(42);
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1082,13 +1082,13 @@ fn test_no_panics_under_worst_case() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1152,13 +1152,13 @@ fn test_asymmetric_latency() -> Result<(), FortressError> {
     // Player 2 has lower latency
     let config2 = ChaosConfig::builder().latency_ms(30).seed(43).build();
 
-    let socket1 = create_chaos_socket(port1, config1);
+    let socket1 = create_chaos_socket(port1, config1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, config2);
+    let socket2 = create_chaos_socket(port2, config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1244,13 +1244,13 @@ fn test_burst_packet_loss() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1331,13 +1331,13 @@ fn test_temporary_disconnect_reconnect() -> Result<(), FortressError> {
     // Start with good connection
     let good_config = ChaosConfig::passthrough();
 
-    let socket1 = create_chaos_socket(port1, good_config.clone());
+    let socket1 = create_chaos_socket(port1, good_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, good_config);
+    let socket2 = create_chaos_socket(port2, good_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1445,13 +1445,13 @@ fn test_eventual_consistency() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1543,13 +1543,13 @@ fn test_burst_loss_with_jitter() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1647,13 +1647,13 @@ fn test_one_way_send_only_loss() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let socket1 = create_chaos_socket(port1, config1);
+    let socket1 = create_chaos_socket(port1, config1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, config2);
+    let socket2 = create_chaos_socket(port2, config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1743,13 +1743,13 @@ fn test_one_way_receive_only_loss() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let socket1 = create_chaos_socket(port1, config1);
+    let socket1 = create_chaos_socket(port1, config1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, config2);
+    let socket2 = create_chaos_socket(port2, config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1827,13 +1827,13 @@ fn test_heavy_packet_duplication() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1912,13 +1912,13 @@ fn test_packet_reordering() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2001,13 +2001,13 @@ fn test_extreme_chaos_combined() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2085,14 +2085,14 @@ fn test_large_prediction_window_with_latency() -> Result<(), FortressError> {
         .build();
 
     // Use larger prediction window (16 frames instead of default 8)
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_max_prediction_window(16)
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_max_prediction_window(16)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -2171,7 +2171,7 @@ fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
         .build();
 
     // Use input delay of 3 frames
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_input_delay(3)
         .unwrap()
@@ -2179,7 +2179,7 @@ fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_input_delay(3)
         .unwrap()
@@ -2261,14 +2261,14 @@ fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
         .build();
 
     // Enable sparse saving mode
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_save_mode(SaveMode::Sparse)
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_save_mode(SaveMode::Sparse)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -2366,14 +2366,14 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
         .seed(43) // Different seed to decorrelate burst loss events
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config1);
+    let socket1 = create_chaos_socket(port1, chaos_config1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::stress_test()) // 60s timeout for harsh conditions
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config2);
+    let socket2 = create_chaos_socket(port2, chaos_config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::stress_test()) // 60s timeout for harsh conditions
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -2505,13 +2505,13 @@ fn test_extreme_jitter() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2585,13 +2585,13 @@ fn test_terrible_network_preset() -> Result<(), FortressError> {
     // Use the preset
     let chaos_config = ChaosConfig::terrible_network();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2685,7 +2685,7 @@ fn test_mobile_network_preset() -> Result<(), FortressError> {
         .seed(12346)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config1);
+    let socket1 = create_chaos_socket(port1, chaos_config1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::mobile())
         .with_protocol_config(ProtocolConfig::mobile())
@@ -2694,7 +2694,7 @@ fn test_mobile_network_preset() -> Result<(), FortressError> {
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config2);
+    let socket2 = create_chaos_socket(port2, chaos_config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::mobile())
         .with_protocol_config(ProtocolConfig::mobile())
@@ -2789,13 +2789,13 @@ fn test_wifi_interference_preset() -> Result<(), FortressError> {
         .seed(22223)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config1);
+    let socket1 = create_chaos_socket(port1, chaos_config1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config2);
+    let socket2 = create_chaos_socket(port2, chaos_config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2881,7 +2881,7 @@ fn test_intercontinental_preset() -> Result<(), FortressError> {
         .seed(33334)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config1);
+    let socket1 = create_chaos_socket(port1, chaos_config1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::high_latency())
         .with_protocol_config(ProtocolConfig::high_latency())
@@ -2890,7 +2890,7 @@ fn test_intercontinental_preset() -> Result<(), FortressError> {
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config2);
+    let socket2 = create_chaos_socket(port2, chaos_config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::high_latency())
         .with_protocol_config(ProtocolConfig::high_latency())
@@ -3107,14 +3107,14 @@ impl ChaosTestCase {
         let chaos_config1 = build_chaos_config(42);
         let chaos_config2 = build_chaos_config(43); // Different seed to avoid correlated loss
 
-        let socket1 = create_chaos_socket(port1, chaos_config1);
+        let socket1 = create_chaos_socket(port1, chaos_config1)?;
         let mut sess1 = SessionBuilder::<StubConfig>::new()
             .with_sync_config(self.sync_config.clone())
             .add_player(PlayerType::Local, PlayerHandle::new(0))?
             .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
             .start_p2p_session(socket1)?;
 
-        let socket2 = create_chaos_socket(port2, chaos_config2);
+        let socket2 = create_chaos_socket(port2, chaos_config2)?;
         let mut sess2 = SessionBuilder::<StubConfig>::new()
             .with_sync_config(self.sync_config.clone())
             .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -3308,14 +3308,14 @@ fn test_sync_timeout_detection() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(short_timeout_config.clone())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(short_timeout_config)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -3401,14 +3401,14 @@ fn test_burst_loss_matches_sync_packets() -> Result<(), FortressError> {
         keepalive_interval: Duration::from_millis(100),
     };
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone());
+    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(resilient_config.clone())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config);
+    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(resilient_config)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -3473,14 +3473,14 @@ fn test_different_seeds_prevent_correlated_loss() -> Result<(), FortressError> {
         .seed(101) // Different seed!
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config1);
+    let socket1 = create_chaos_socket(port1, chaos_config1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::stress_test())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config2);
+    let socket2 = create_chaos_socket(port2, chaos_config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::stress_test())
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -3610,14 +3610,14 @@ fn test_seed_pairs_for_decorrelated_sync() -> Result<(), FortressError> {
             .seed(seed2)
             .build();
 
-        let socket1 = create_chaos_socket(port1, chaos_config1);
+        let socket1 = create_chaos_socket(port1, chaos_config1)?;
         let mut sess1 = SessionBuilder::<StubConfig>::new()
             .with_sync_config(sync_config.clone())
             .add_player(PlayerType::Local, PlayerHandle::new(0))?
             .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
             .start_p2p_session(socket1)?;
 
-        let socket2 = create_chaos_socket(port2, chaos_config2);
+        let socket2 = create_chaos_socket(port2, chaos_config2)?;
         let mut sess2 = SessionBuilder::<StubConfig>::new()
             .with_sync_config(sync_config.clone())
             .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -3733,15 +3733,15 @@ impl PresetTestCase {
                 .seed(43)
                 .build();
             (
-                create_chaos_socket(port1, chaos1),
-                create_chaos_socket(port2, chaos2),
+                create_chaos_socket(port1, chaos1)?,
+                create_chaos_socket(port2, chaos2)?,
             )
         } else {
             // Perfect network - no chaos
             let perfect = ChaosConfig::builder().build();
             (
-                create_chaos_socket(port1, perfect.clone()),
-                create_chaos_socket(port2, perfect),
+                create_chaos_socket(port1, perfect.clone())?,
+                create_chaos_socket(port2, perfect)?,
             )
         };
 
