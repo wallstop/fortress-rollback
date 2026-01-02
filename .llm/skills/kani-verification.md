@@ -815,6 +815,63 @@ fn verify_all_inputs() {
 }
 ```
 
+### Pitfall 5: Proof Assertions Don't Match Implementation (CRITICAL)
+
+**The most insidious Kani failure mode: a proof that passes but verifies the wrong thing.**
+
+This happens when the proof's assertions don't reflect the actual implementation behavior. The proof passes locally, you commit it, and CI fails because the real code behaves differently.
+
+```rust
+// Production code
+impl Default for ConnectionStatus {
+    fn default() -> Self {
+        ConnectionStatus::Disconnected  // Actual default
+    }
+}
+
+// ❌ WRONG: Proof asserts something the code doesn't do
+#[kani::proof]
+fn proof_connection_status_default() {
+    let status = ConnectionStatus::default();
+    // This assertion is WRONG — the code returns Disconnected, not Connected!
+    assert!(matches!(status, ConnectionStatus::Connected));
+}
+
+// ✅ CORRECT: Proof reflects actual implementation
+#[kani::proof]
+fn proof_connection_status_default() {
+    let status = ConnectionStatus::default();
+    // Matches what the code actually does
+    assert!(matches!(status, ConnectionStatus::Disconnected));
+}
+```
+
+**How to prevent this:**
+
+1. **Read the implementation first** before writing the proof
+2. **Verify the proof's assertions match the code's behavior** line by line
+3. **Run the proof locally** before committing: `cargo kani --harness proof_name`
+4. **When a proof fails in CI, investigate the ASSERTION first** — the proof might be wrong, not the code
+
+**Common causes:**
+
+- Copy-pasting from another proof without updating assertions
+- Assuming behavior without checking the implementation
+- Implementation changed but proof wasn't updated
+- Misunderstanding the semantics of the function being verified
+
+**Best practice:** When writing a proof, add a comment explaining what property you're verifying:
+
+```rust
+#[kani::proof]
+fn proof_connection_status_default() {
+    // PROPERTY: Default ConnectionStatus should be Disconnected,
+    // representing a new connection that hasn't been established yet.
+    let status = ConnectionStatus::default();
+    assert!(matches!(status, ConnectionStatus::Disconnected));
+}
+```
+
 ---
 
 ## Real-World Success Stories

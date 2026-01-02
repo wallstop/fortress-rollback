@@ -7,8 +7,9 @@ linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
 [target.aarch64-unknown-linux-gnu]
-# ARM64 configuration using clang+lld for faster linking
-# For cross-compilation in CI, Cross.toml installs clang+lld in the Docker container
+# ARM64 configuration using clang+lld for faster linking (local development)
+# For CI cross-compilation, Cross.toml passes through environment variables that
+# allow the CI workflow to override these settings to use GCC instead
 linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 

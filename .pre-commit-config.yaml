@@ -105,6 +105,14 @@ repos:
         types: [markdown]
         exclude: '^(target/|fuzz/target/|loom-tests/target/|progress/|PLAN\.md)'
 
+      - id: vale
+        name: vale prose linting (advisory)
+        entry: python scripts/hooks/vale.py
+        language: python
+        types: [markdown]
+        files: ^docs/
+        verbose: true
+
       - id: check-links
         name: check links
         entry: python scripts/check-links.py

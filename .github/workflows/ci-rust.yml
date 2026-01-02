@@ -431,6 +431,16 @@ jobs:
     name: ARM64 Cross-Compile
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Override linker settings to use the default GCC cross-compiler instead of clang+lld.
+    # This avoids needing to install extra tools in the cross-rs container.
+    # The .cargo/config.toml specifies clang+lld for faster local builds, but
+    # Cross.toml passes through these env vars so CI can override to GCC.
+    #
+    # RUSTFLAGS must be cleared because .cargo/config.toml sets "-C link-arg=-fuse-ld=lld"
+    # which is incompatible with GCC (GCC doesn't understand the -fuse-ld=lld flag).
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
 
     steps:
       - uses: actions/checkout@v6
@@ -456,7 +466,6 @@ jobs:
 
       - name: Check ARM64 build (no default features)
         run: cross check --target aarch64-unknown-linux-gnu --no-default-features
-        # Cross.toml installs clang+lld in the container to match .cargo/config.toml
 
       - name: Check ARM64 build (default features)
         run: cross check --target aarch64-unknown-linux-gnu

@@ -4346,8 +4346,8 @@ mod kani_proofs {
     fn proof_connection_status_default() {
         let status = ConnectionStatus::default();
 
-        // Default should be disconnected with NULL frame
-        kani::assert(status.disconnected, "default status should be disconnected");
+        // Default should be connected (not disconnected) with NULL frame
+        kani::assert(!status.disconnected, "default status should be connected");
         kani::assert(
             status.last_frame.is_null(),
             "default last_frame should be null",

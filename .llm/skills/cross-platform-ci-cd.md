@@ -166,6 +166,64 @@ jobs:
         run: cross test --target ${{ matrix.target }}
 ```
 
+### CRITICAL: cross-rs Image Tag Stability
+
+**Never use unstable image tags like `:main` or `:edge` in CI.** These tags change without notice and can break builds unexpectedly.
+
+```yaml
+# ❌ DANGEROUS: Unstable image tag — WILL break randomly
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
+
+# ❌ DANGEROUS: Custom image with unstable base
+[target.aarch64-unknown-linux-gnu.dockerfile]
+file = "Dockerfile.cross"
+# Dockerfile: FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main  # BAD!
+```
+
+**Recommended approach: Use environment variable passthrough instead of custom images.**
+
+The default cross-rs images are well-tested and stable. Instead of customizing images for different toolchain settings, use environment variable passthrough to control build behavior:
+
+```toml
+# Cross.toml — Recommended pattern
+[target.aarch64-unknown-linux-gnu]
+# No custom image! Use environment variables to control behavior.
+
+[build.env]
+passthrough = [
+    "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER",
+    "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+]
+```
+
+Then in CI, set environment variables to override settings:
+
+```yaml
+# .github/workflows/ci.yml
+- name: Cross-compile for ARM64
+  env:
+    # Override linker to use GCC instead of clang+lld (more stable in cross-rs)
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+  run: cross build --release --target aarch64-unknown-linux-gnu
+```
+
+**Why this is better:**
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| Custom images with `:main` | Full control | Breaks when upstream changes |
+| Pinned image versions | Stable | Need to track updates manually |
+| **Environment passthrough** | Stable + flexible | Slightly more verbose in CI |
+
+**When you MUST use custom images:**
+
+If you genuinely need packages not in the default image:
+
+1. **Pin to a specific version tag** (e.g., `:0.2.5`), not `:main`
+2. **Document why** the custom image is needed
+3. **Set up Dependabot** or similar to track upstream updates
+
 ### Using cargo-zigbuild for glibc Targeting
 
 ```yaml

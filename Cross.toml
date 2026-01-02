@@ -1,10 +1,29 @@
 # Cross-rs configuration for cross-compilation
 # See: https://github.com/cross-rs/cross/wiki/Configuration
 
-[target.aarch64-unknown-linux-gnu]
-# Install clang and lld in the cross container to match .cargo/config.toml requirements
-# The .cargo/config.toml specifies clang+lld for faster linking, but the default
-# cross-rs Docker image doesn't include these tools. The pre-build hook installs them.
-pre-build = [
-    "apt-get update && apt-get install -y clang lld"
+# Environment variable passthrough allows CI to override linker settings.
+#
+# How this works:
+# - Local development: Uses clang+lld from .cargo/config.toml (fast linking)
+# - CI: Sets these environment variables to override to GCC linker (stable, no extra deps)
+#
+# This approach is more stable than using custom Docker images because:
+# - Default cross-rs images are well-tested and maintained
+# - No dependency on upstream image tag changes (e.g., :main)
+# - CI controls its own toolchain without modifying the container
+#
+# To override locally (if needed):
+#   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+#   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="" \
+#   cross check --target aarch64-unknown-linux-gnu
+[build.env]
+passthrough = [
+    "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER",
+    "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
 ]
+
+[target.aarch64-unknown-linux-gnu]
+# No additional target-specific settings needed.
+# Linker and rustflags are configured via:
+# - .cargo/config.toml (local development with clang+lld)
+# - Environment variables passed through [build.env] (CI with GCC)

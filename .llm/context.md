@@ -285,6 +285,7 @@ pub fn function(param1: Type) -> Result<ReturnType, FortressError> {
 > - [mutation-testing.md](skills/mutation-testing.md) — Mutation testing for test quality verification
 > - [rust-fuzzing-guide.md](skills/rust-fuzzing-guide.md) — Fuzz testing with cargo-fuzz, LibAFL, and structured fuzzing
 > - [cross-platform-ci-cd.md](skills/cross-platform-ci-cd.md) — CI/CD workflows for multi-platform builds
+> - [ci-cd-debugging.md](skills/ci-cd-debugging.md) — Reproducing and debugging CI failures locally
 
 #### Test Organization
 
@@ -465,7 +466,12 @@ When modifying Kani proofs or code verified by them:
 
 **Why?** Kani verification is too slow for pre-commit (15+ minutes), so CI catches failures. Running affected proofs locally prevents CI surprises.
 
-**Remember:** All loops with symbolic bounds require `#[kani::unwind(N)]` where N = max_iterations + 1. This is the #1 cause of Kani CI failures. See [kani-verification.md](skills/kani-verification.md) for details.
+**Remember:**
+
+- All loops with symbolic bounds require `#[kani::unwind(N)]` where N = max_iterations + 1. This is the #1 cause of Kani CI failures.
+- **Verify proof assertions match actual implementation.** The #2 cause of failures is proofs that assert the wrong thing (e.g., asserting `ConnectionStatus::Connected` when the code returns `ConnectionStatus::Disconnected`).
+
+See [kani-verification.md](skills/kani-verification.md) for details.
 
 ### After Finding a Bug via Verification
 
@@ -866,6 +872,37 @@ npx markdownlint '**/*.md' --config .markdownlint.json --fix
 
 **See also:** [markdown-formatting.md](skills/markdown-formatting.md) for complete style rules, common fixes, and CI configuration.
 
+### Vale Prose Linting (docs/ directory)
+
+Vale runs on the `docs/` directory to check prose quality. While currently advisory (non-blocking), it catches common writing issues.
+
+```bash
+# Install Vale (if not using dev container)
+brew install vale    # macOS
+# or download from https://vale.sh/docs/vale-cli/installation/
+
+# Sync Vale packages (one-time, or when .vale.ini changes)
+vale sync
+
+# Run Vale on docs/
+vale docs/
+
+# Check a specific file
+vale docs/user-guide.md
+```
+
+**What Vale checks:**
+
+- Passive voice usage (suggestion)
+- Weasel words like "very", "quite", "really" (suggestion)
+- Wordy phrases that could be simplified (suggestion)
+- Clichés (warning)
+- Word illusions ("the the") (warning)
+
+**Configuration:** `.vale.ini` controls which rules are enabled. Project-specific vocabulary is in `.vale/styles/config/vocabularies/Fortress/`.
+
+**CI behavior:** Vale runs in `ci-docs.yml` with `continue-on-error: true` and `fail_on_error: false`. This makes it advisory only, not blocking.
+
 ### For Agents and Sub-Agents
 
 When spawning sub-agents or using Task tools to make code changes:
@@ -874,7 +911,7 @@ When spawning sub-agents or using Task tools to make code changes:
 2. The sub-agent MUST verify `cargo clippy --all-targets` passes
 3. If the sub-agent cannot run these commands, the parent agent must run them after receiving the changes
 
-**See also:** [GitHub Actions Best Practices](skills/github-actions-best-practices.md) and [Markdown Link Validation](skills/markdown-link-validation.md) for detailed guidance.
+**See also:** [GitHub Actions Best Practices](skills/github-actions-best-practices.md), [Markdown Link Validation](skills/markdown-link-validation.md), and [CI/CD Debugging](skills/ci-cd-debugging.md) for detailed guidance.
 
 ---
 
