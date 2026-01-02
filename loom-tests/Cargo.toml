@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# This is intentionally a standalone crate, not part of the main workspace.
+# Loom requires special RUSTFLAGS="--cfg loom" that would break the main build.
+[workspace]
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
@@ -18,3 +22,11 @@ loom = "0.7"
 [[test]]
 name = "loom_game_state_cell"
 path = "tests/loom_game_state_cell.rs"
+
+[[test]]
+name = "loom_saved_states"
+path = "tests/loom_saved_states.rs"
+
+[[test]]
+name = "loom_telemetry"
+path = "tests/loom_telemetry.rs"

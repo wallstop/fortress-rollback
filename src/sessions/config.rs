@@ -1486,7 +1486,7 @@ mod tests {
     #[test]
     fn test_protocol_config_validate_default_is_valid() {
         let config = ProtocolConfig::default();
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1516,21 +1516,21 @@ mod tests {
             quality_report_interval: Duration::from_millis(1),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (10000ms)
         let config = ProtocolConfig {
             quality_report_interval: Duration::from_millis(10000),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             quality_report_interval: Duration::from_millis(500),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1576,21 +1576,21 @@ mod tests {
             shutdown_delay: Duration::from_millis(1),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (300000ms)
         let config = ProtocolConfig {
             shutdown_delay: Duration::from_millis(300000),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             shutdown_delay: Duration::from_millis(10000),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1636,21 +1636,21 @@ mod tests {
             max_checksum_history: 1,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (1024)
         let config = ProtocolConfig {
             max_checksum_history: 1024,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             max_checksum_history: 64,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1696,21 +1696,21 @@ mod tests {
             pending_output_limit: 1,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (4096)
         let config = ProtocolConfig {
             pending_output_limit: 4096,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             pending_output_limit: 256,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1756,21 +1756,21 @@ mod tests {
             sync_retry_warning_threshold: 1,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (1000)
         let config = ProtocolConfig {
             sync_retry_warning_threshold: 1000,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             sync_retry_warning_threshold: 25,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1816,21 +1816,21 @@ mod tests {
             sync_duration_warning_ms: 1,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (300000)
         let config = ProtocolConfig {
             sync_duration_warning_ms: 300000,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             sync_duration_warning_ms: 5000,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1876,21 +1876,21 @@ mod tests {
             input_history_multiplier: 1,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (16)
         let config = ProtocolConfig {
             input_history_multiplier: 16,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             input_history_multiplier: 4,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1961,7 +1961,7 @@ mod tests {
             input_history_multiplier: 1,
             protocol_rng_seed: None,
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Test a config with all fields at their maximum valid values
         let config = ProtocolConfig {
@@ -1974,7 +1974,7 @@ mod tests {
             input_history_multiplier: 16,
             protocol_rng_seed: None,
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     // ========================================================================
@@ -2018,7 +2018,7 @@ mod tests {
     fn test_protocol_config_seed_validates_ok() {
         // Config with seed should validate successfully
         let config = ProtocolConfig::deterministic(42);
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 }
 
@@ -2038,10 +2038,14 @@ mod tests {
 mod kani_config_proofs {
     use super::*;
 
-    /// Proof: validate() accepts all queue_length >= 2
+    /// Proof: validate() accepts all queue_length >= 2.
     ///
     /// Verifies that InputQueueConfig.validate() returns Ok for any queue_length >= 2
     /// and Err for queue_length < 2.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Queue length validation correctness
+    /// - Related: proof_validate_boundary_at_two, proof_all_presets_valid
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_validate_accepts_valid_queue_lengths() {
@@ -2059,9 +2063,13 @@ mod kani_config_proofs {
         }
     }
 
-    /// Proof: validate() boundary condition at queue_length = 2
+    /// Proof: validate() boundary condition at queue_length = 2.
     ///
     /// Specifically verifies the minimum valid queue_length.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Boundary condition at minimum queue length
+    /// - Related: proof_validate_accepts_valid_queue_lengths
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_validate_boundary_at_two() {
@@ -2080,10 +2088,14 @@ mod kani_config_proofs {
         );
     }
 
-    /// Proof: validate_frame_delay() enforces frame_delay < queue_length
+    /// Proof: validate_frame_delay() enforces frame_delay < queue_length.
     ///
     /// Verifies that validate_frame_delay returns Ok when frame_delay < queue_length
     /// and Err when frame_delay >= queue_length.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame delay validation constraint
+    /// - Related: proof_max_frame_delay_is_valid_delay, proof_max_frame_delay_derivation
     #[kani::proof]
     #[kani::unwind(10)]
     fn proof_validate_frame_delay_constraint() {
@@ -2110,10 +2122,14 @@ mod kani_config_proofs {
         }
     }
 
-    /// Proof: max_frame_delay() returns queue_length - 1 (with saturation)
+    /// Proof: max_frame_delay() returns queue_length - 1 (with saturation).
     ///
     /// Verifies that max_frame_delay() correctly computes queue_length - 1,
     /// using saturating_sub to handle the edge case of queue_length = 0.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Max frame delay derivation correctness
+    /// - Related: proof_max_frame_delay_is_valid_delay, proof_validate_frame_delay_constraint
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_max_frame_delay_derivation() {
@@ -2131,10 +2147,14 @@ mod kani_config_proofs {
         );
     }
 
-    /// Proof: max_frame_delay() is always a valid frame_delay
+    /// Proof: max_frame_delay() is always a valid frame_delay.
     ///
     /// Verifies that validate_frame_delay(max_frame_delay()) always succeeds
     /// for valid configurations (queue_length >= 2).
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Max delay is always valid for valid configs
+    /// - Related: proof_max_frame_delay_derivation, proof_validate_frame_delay_constraint
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_max_frame_delay_is_valid_delay() {
@@ -2151,10 +2171,14 @@ mod kani_config_proofs {
         );
     }
 
-    /// Proof: All presets are valid configurations
+    /// Proof: All presets are valid configurations.
     ///
     /// Verifies that standard(), high_latency(), and minimal() presets
     /// all pass validate().
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: All factory presets pass validation
+    /// - Related: proof_preset_values, proof_validate_accepts_valid_queue_lengths
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_all_presets_valid() {
@@ -2176,12 +2200,16 @@ mod kani_config_proofs {
         );
     }
 
-    /// Proof: Presets have correct queue_length values
+    /// Proof: Presets have correct queue_length values.
     ///
     /// Verifies that preset implementations return their expected values.
     /// Note: `standard()` uses `INPUT_QUEUE_LENGTH` which varies between
     /// Kani (8) and production (128) builds. The other presets use
     /// hardcoded values that don't change.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Preset queue length values match specifications
+    /// - Related: proof_all_presets_valid
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_preset_values() {

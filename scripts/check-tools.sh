@@ -78,6 +78,7 @@ echo "Documentation & Linting:"
 check_tool "pre-commit" "pre-commit --version" "false"
 check_tool "markdownlint" "markdownlint --version" "false"
 check_tool "markdown-link-check" "markdown-link-check --version" "false"
+check_tool "vale" "vale --version" "false"
 echo ""
 
 echo "CI/CD Linting:"

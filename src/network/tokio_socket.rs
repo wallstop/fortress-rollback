@@ -593,6 +593,7 @@ mod tests {
 
     // Helper function to wait for messages with retry logic using the async recv_all method.
     // This is necessary because UDP packet delivery timing can vary across platforms.
+    #[track_caller]
     async fn wait_for_messages(
         socket: &mut TokioUdpSocket,
         expected_count: usize,
@@ -617,6 +618,7 @@ mod tests {
     // When a socket binds to 0.0.0.0:port, its local_addr() returns 0.0.0.0:port,
     // but on Windows (and some other platforms), you cannot send to 0.0.0.0 - you
     // must send to 127.0.0.1 for loopback communication to work correctly.
+    #[track_caller]
     fn to_loopback_addr(socket: &TokioUdpSocket) -> SocketAddr {
         let local = socket.local_addr().unwrap();
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local.port())
@@ -636,14 +638,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_tokio_socket_bind_to_port() {
-        let socket = TokioUdpSocket::bind_to_port(0).await;
-        assert!(socket.is_ok());
-
-        let socket = socket.unwrap();
-        let local_addr = socket.local_addr();
-        assert!(local_addr.is_ok());
+        let socket = TokioUdpSocket::bind_to_port(0).await.unwrap();
+        let local_addr = socket.local_addr().unwrap();
         // OS should have assigned a non-zero port
-        assert_ne!(local_addr.unwrap().port(), 0);
+        assert_ne!(local_addr.port(), 0);
     }
 
     #[tokio::test]

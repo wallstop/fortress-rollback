@@ -10,7 +10,8 @@ use crate::{
     report_violation, safe_frame_add,
     telemetry::{ViolationKind, ViolationObserver, ViolationSeverity},
     Config, FortressError, FortressEvent, FortressRequest, Frame, InputStatus, InputVec,
-    NetworkStats, NonBlockingSocket, PlayerHandle, SessionState,
+    InternalErrorKind, InvalidFrameReason, NetworkStats, NonBlockingSocket, PlayerHandle,
+    SessionState,
 };
 
 /// The number of frames the spectator advances in a single step during normal operation.
@@ -234,27 +235,25 @@ impl<T: Config> SpectatorSession<T> {
                 "inputs_at_frame called with invalid frame {:?}",
                 frame_to_grab
             );
-            return Err(FortressError::InvalidFrame {
+            return Err(FortressError::InvalidFrameStructured {
                 frame: frame_to_grab,
-                reason: "Frame is NULL or negative".to_string(),
+                reason: InvalidFrameReason::NullOrNegative,
             });
         }
 
-        let player_inputs = self
-            .inputs
-            .get(frame_to_grab.as_i32() as usize % self.buffer_size)
-            .ok_or_else(|| FortressError::InternalError {
-                context: format!(
-                    "Buffer index out of bounds: frame {} % buffer_size {}",
-                    frame_to_grab, self.buffer_size
-                ),
-            })?;
+        let buffer_index = frame_to_grab.as_i32() as usize % self.buffer_size;
+        let player_inputs =
+            self.inputs
+                .get(buffer_index)
+                .ok_or(FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::BufferIndexOutOfBounds,
+                })?;
 
         // We haven't received the input from the host yet. Wait.
         let first_input = player_inputs
             .first()
-            .ok_or_else(|| FortressError::InternalError {
-                context: "Player inputs vector is empty".into(),
+            .ok_or(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::EmptyPlayerInputs,
             })?;
         if first_input.frame < frame_to_grab {
             return Err(FortressError::PredictionThreshold);

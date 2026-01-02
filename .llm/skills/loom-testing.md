@@ -738,22 +738,52 @@ fn test_with_shuttle() {
 
 ## Integration with Project CI
 
-### GitHub Actions Example
+### GitHub Actions Example (Cross-Platform)
+
+**Loom tests should run cross-platform** because concurrency bugs can manifest differently across operating systems due to different scheduler behaviors, memory models, and threading implementations.
 
 ```yaml
 loom-tests:
-  runs-on: ubuntu-latest
+  name: Loom Concurrency Tests (${{ matrix.os }})
+  runs-on: ${{ matrix.os }}
+  timeout-minutes: 30
+  strategy:
+    fail-fast: false  # Run all platforms even if one fails
+    matrix:
+      os: [ubuntu-latest, windows-latest, macos-latest]
+
   steps:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@stable
 
+    - name: Cache cargo registry and build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          loom-tests/target
+        key: loom-${{ matrix.os }}-cargo-${{ hashFiles('loom-tests/Cargo.lock') }}
+        restore-keys: |
+          loom-${{ matrix.os }}-cargo-
+
     - name: Run loom tests
-      run: |
-        cd loom-tests
-        RUSTFLAGS="--cfg loom" cargo test --release
+      working-directory: loom-tests
+      run: cargo test --release
       env:
+        RUSTFLAGS: "--cfg loom"
         LOOM_MAX_PREEMPTIONS: 3
 ```
+
+### Why Cross-Platform Loom Testing?
+
+| Platform | Potential Differences |
+|----------|----------------------|
+| **Linux** | Uses futex-based primitives, NPTL threading |
+| **macOS** | GCD integration, different scheduler priorities |
+| **Windows** | SRW locks, different thread scheduling |
+
+A concurrency bug that's rare on Linux might be common on Windows due to different scheduler heuristics.
 
 ---
 

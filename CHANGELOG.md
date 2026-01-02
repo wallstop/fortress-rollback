@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-01-02
+
+### Fixed
+
+- Removed the possibility for an internal panic under debug mode.
+
 ## [0.2.1] - 2025-12-26
 
 ### Added

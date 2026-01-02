@@ -567,6 +567,7 @@ mod sync_layer_tests {
 )]
 mod property_tests {
     use super::*;
+    use crate::test_config::miri_case_count;
     use proptest::prelude::*;
 
     /// Maximum frame value for property tests (keep tractable)
@@ -591,6 +592,10 @@ mod property_tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: miri_case_count(),
+            ..ProptestConfig::default()
+        })]
         /// Property: Window index is always in bounds.
         ///
         /// For any valid frame number and window size, the computed index
@@ -805,6 +810,10 @@ mod kani_proofs {
     ///
     /// For any valid frame number and window size >= 1, the modulo operation
     /// produces an index that is always < window_size.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Modulo index bounds (INV-5 for TimeSync)
+    /// - Related: proof_index_wrapping_consistent, proof_advance_frame_safe
     #[kani::proof]
     fn proof_window_index_in_bounds() {
         let frame_val: i32 = kani::any();
@@ -822,6 +831,10 @@ mod kani_proofs {
     ///
     /// With bounded advantage values, the sum of up to 1000 values
     /// should not overflow i32.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Arithmetic overflow safety in sum calculation
+    /// - Related: proof_division_safe, proof_advance_frame_safe
     #[kani::proof]
     fn proof_sum_no_overflow() {
         // Simulate a small window for tractability
@@ -840,6 +853,10 @@ mod kani_proofs {
     /// Proof: Division in average calculation is safe.
     ///
     /// Division by window.len() is always safe because window_size >= 1.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Division by zero is impossible
+    /// - Related: proof_sum_no_overflow, proof_window_size_minimum
     #[kani::proof]
     fn proof_division_safe() {
         let window_size: usize = kani::any();
@@ -856,6 +873,10 @@ mod kani_proofs {
     /// Proof: advance_frame with valid frame doesn't panic.
     ///
     /// For any valid (non-negative) frame, advance_frame should not panic.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: advance_frame safety with valid inputs
+    /// - Related: proof_negative_frame_safe, proof_window_index_in_bounds
     #[kani::proof]
     fn proof_advance_frame_safe() {
         let frame_val: i32 = kani::any();
@@ -887,6 +908,10 @@ mod kani_proofs {
     /// We bound window_size to realistic values to avoid capacity overflow
     /// during Vec allocation - this is not a production bug but a verification
     /// tractability constraint. Real users won't pass usize::MAX as window_size.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Window size minimum bound enforcement
+    /// - Related: proof_zero_window_size_corrected, proof_division_safe
     #[kani::proof]
     fn proof_window_size_minimum() {
         let window_size: usize = kani::any();
@@ -915,6 +940,10 @@ mod kani_proofs {
     /// Note: We need unwind(32) because the default window size is 30,
     /// and average_frame_advantage() iterates over the window using .iter().sum().
     /// Kani needs to unroll the loop at least window_size+1 times.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Default TimeSync state validity
+    /// - Related: proof_preset_configs_valid, proof_window_size_minimum
     #[kani::proof]
     #[kani::unwind(32)]
     fn proof_default_valid() {
@@ -941,6 +970,10 @@ mod kani_proofs {
     /// - window_size >= 1
     /// - local/remote vec lengths match window_size
     /// - initial average is 0
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: All preset configurations produce valid state
+    /// - Related: proof_default_valid, proof_zero_window_size_corrected
     #[kani::proof]
     fn proof_preset_configs_valid() {
         // Use symbolic choice to test all presets
@@ -975,6 +1008,10 @@ mod kani_proofs {
     /// Proof: Window size 0 is always corrected to 1.
     ///
     /// Explicitly verifies the edge case where window_size = 0.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Zero window size edge case handling
+    /// - Related: proof_window_size_minimum, proof_division_safe
     #[kani::proof]
     fn proof_zero_window_size_corrected() {
         let config = TimeSyncConfig { window_size: 0 };
@@ -996,6 +1033,10 @@ mod kani_proofs {
     /// Note: We bound frame_val to [0, 10000] to keep verification tractable.
     /// The mathematical property (modulo determinism and bounds) holds for all
     /// non-negative integers, so testing a representative range is sufficient.
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Modulo index determinism and bounds
+    /// - Related: proof_window_index_in_bounds, proof_advance_frame_safe
     #[kani::proof]
     fn proof_index_wrapping_consistent() {
         let frame_val: i32 = kani::any();
@@ -1023,6 +1064,10 @@ mod kani_proofs {
     /// Verifies that advance_frame with negative frames doesn't modify state.
     /// Note: We can't directly test this in Kani without state comparison,
     /// so we verify the safety property that it doesn't panic.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Negative frame rejection safety
+    /// - Related: proof_advance_frame_safe, proof_window_index_in_bounds
     #[kani::proof]
     fn proof_negative_frame_safe() {
         let frame_val: i32 = kani::any();

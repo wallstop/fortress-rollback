@@ -34,6 +34,78 @@ fn verify_transfer() {
 
 ---
 
+## CRITICAL: Loop Unwinding Requirements
+
+> **This is the #1 cause of Kani CI failures.** Read this section carefully before writing any proof.
+
+### The Rule
+
+**ALWAYS add `#[kani::unwind(N)]` for ANY loop with symbolic bounds**, where:
+
+- **N = max_iterations + 1** (the +1 accounts for the loop termination check)
+
+```rust
+// ❌ WILL FAIL CI — Missing unwind attribute
+#[kani::proof]
+fn verify_loop_broken() {
+    let n: usize = kani::any();
+    kani::assume(n <= 10);
+    for _ in 0..n { /* ... */ }  // CI hangs or times out!
+}
+
+// ✅ CORRECT — Always specify unwind bound
+#[kani::proof]
+#[kani::unwind(11)]  // 10 max iterations + 1
+fn verify_loop_correct() {
+    let n: usize = kani::any();
+    kani::assume(n <= 10);
+    for _ in 0..n { /* ... */ }
+}
+```
+
+### Why This Matters
+
+- Kani uses bounded model checking — it needs to know how many times to unroll loops
+- Without `#[kani::unwind(N)]`, Kani either hangs forever or times out in CI
+- The CI timeout is typically 10-30 minutes, wasting resources and blocking PRs
+
+### Common Loop Sources (Check All of These)
+
+| Loop Type | Example | Requires Unwind? |
+|-----------|---------|------------------|
+| `for i in 0..n` where n is symbolic | `kani::any()` | **YES** |
+| `while` with symbolic condition | `while count > 0` | **YES** |
+| `.iter()` on symbolic-length collection | `vec.iter()` | **YES** |
+| `loop` with symbolic break | `loop { if done { break; } }` | **YES** |
+| Fixed iteration count | `for i in 0..10` | No (Kani knows bound) |
+| Iterator over fixed array | `[1,2,3].iter()` | No |
+
+### Checklist for New Kani Proofs
+
+Before committing ANY new `#[kani::proof]` function:
+
+- [ ] **Identify ALL loops** — Including nested loops and loops in called functions
+- [ ] **Add `#[kani::unwind(N)]`** — For each loop with symbolic bounds (N = max + 1)
+- [ ] **Run locally first** — `cargo kani --harness your_proof_name`
+- [ ] **Verify it completes** — Should finish in under 5 minutes for most proofs
+- [ ] **Add to tier list** — Update `scripts/verify-kani.sh` (see CI Integration section)
+- [ ] **Run coverage check** — `./scripts/check-kani-coverage.sh`
+
+### Quick Local Verification
+
+```bash
+# Run your specific proof locally BEFORE pushing
+cargo kani --harness verify_my_function
+
+# If it hangs, you're missing an unwind bound
+# Press Ctrl+C and add #[kani::unwind(N)]
+
+# Run all proofs (takes longer)
+cargo kani
+```
+
+---
+
 ## When to Use Kani vs Other Verification Tools
 
 | Tool | Best For | Limitations |
@@ -474,6 +546,75 @@ fn verify_with_minisat() { /* ... */ }
 
 ## CI Integration
 
+### CRITICAL: Adding New Kani Proofs to CI
+
+**When adding new `#[kani::proof]` functions, you MUST also add them to the tier lists in `scripts/verify-kani.sh`.**
+
+This is enforced by CI — the `kani-coverage-check` job will fail if any proofs are missing.
+
+#### Step-by-Step Process
+
+1. **Write your Kani proof** in the appropriate source file:
+
+   ```rust
+   #[cfg(kani)]
+   mod kani_proofs {
+       #[kani::proof]
+       #[kani::unwind(N)]  // REQUIRED for loops with symbolic bounds!
+       fn proof_my_invariant() {
+           // Your proof here
+       }
+   }
+   ```
+
+2. **Run the proof locally BEFORE committing** (this catches most CI failures):
+
+   ```bash
+   # Run your specific proof
+   cargo kani --harness proof_my_invariant
+
+   # If it hangs: you're missing #[kani::unwind(N)]
+   # Press Ctrl+C, add the attribute, try again
+   ```
+
+3. **Add the proof to the appropriate tier** in `scripts/verify-kani.sh`:
+   - **Tier 1** (`TIER1_PROOFS`): Fast proofs (<30s each) — simple property checks
+   - **Tier 2** (`TIER2_PROOFS`): Medium proofs (30s-2min each) — moderate complexity
+   - **Tier 3** (`TIER3_PROOFS`): Slow proofs (>2min each) — complex state verification
+
+4. **Validate coverage** before committing:
+
+   ```bash
+   ./scripts/check-kani-coverage.sh
+   ```
+
+   This must show "SUCCESS: All N Kani proofs are covered in tier lists."
+
+#### Example: Adding a New Proof
+
+```bash
+# 1. Add proof to source code
+# 2. Add to tier list in verify-kani.sh:
+TIER1_PROOFS=(
+    # ... existing proofs ...
+    "proof_my_invariant"  # Add here
+)
+
+# 3. Validate coverage
+./scripts/check-kani-coverage.sh
+# Output: SUCCESS: All N Kani proofs are covered in tier lists.
+```
+
+#### CI Enforcement
+
+The CI workflow includes a `kani-coverage-check` job that:
+
+1. Scans source code for all `#[kani::proof]` functions
+2. Scans `verify-kani.sh` for all tier list entries
+3. **Fails the build** if any proofs are missing or stale
+
+This ensures no proof is ever silently skipped during verification.
+
 ### GitHub Actions Workflow
 
 ```yaml
@@ -584,10 +725,14 @@ Use checked_add() or saturating_add() as appropriate.
 
 ## Common Pitfalls and Solutions
 
-### Pitfall 1: Unbounded Loops
+### Pitfall 1: Unbounded Loops (MOST COMMON CI FAILURE)
+
+> **See [CRITICAL: Loop Unwinding Requirements](#critical-loop-unwinding-requirements) above for the complete guide.**
+
+This is the #1 cause of Kani CI failures. **Always add `#[kani::unwind(N)]` where N = max_iterations + 1.**
 
 ```rust
-// ❌ Will never terminate
+// ❌ Will never terminate — CI WILL FAIL
 #[kani::proof]
 fn verify_unbounded() {
     let n: usize = kani::any();
@@ -596,9 +741,9 @@ fn verify_unbounded() {
     }
 }
 
-// ✅ Add explicit bound
+// ✅ Add explicit bound — ALWAYS DO THIS
 #[kani::proof]
-#[kani::unwind(101)]
+#[kani::unwind(101)]  // 100 + 1 for termination check
 fn verify_bounded() {
     let n: usize = kani::any();
     kani::assume(n <= 100);
@@ -607,6 +752,8 @@ fn verify_bounded() {
     }
 }
 ```
+
+**Remember:** Run `cargo kani --harness your_proof_name` locally before pushing!
 
 ### Pitfall 2: State Explosion
 
@@ -665,6 +812,63 @@ fn verify_all_inputs() {
     let x: u32 = kani::any();  // Symbolic
     let result = process(x);
     assert!(result > 0);  // Proves for ALL u32
+}
+```
+
+### Pitfall 5: Proof Assertions Don't Match Implementation (CRITICAL)
+
+**The most insidious Kani failure mode: a proof that passes but verifies the wrong thing.**
+
+This happens when the proof's assertions don't reflect the actual implementation behavior. The proof passes locally, you commit it, and CI fails because the real code behaves differently.
+
+```rust
+// Production code
+impl Default for ConnectionStatus {
+    fn default() -> Self {
+        ConnectionStatus::Disconnected  // Actual default
+    }
+}
+
+// ❌ WRONG: Proof asserts something the code doesn't do
+#[kani::proof]
+fn proof_connection_status_default() {
+    let status = ConnectionStatus::default();
+    // This assertion is WRONG — the code returns Disconnected, not Connected!
+    assert!(matches!(status, ConnectionStatus::Connected));
+}
+
+// ✅ CORRECT: Proof reflects actual implementation
+#[kani::proof]
+fn proof_connection_status_default() {
+    let status = ConnectionStatus::default();
+    // Matches what the code actually does
+    assert!(matches!(status, ConnectionStatus::Disconnected));
+}
+```
+
+**How to prevent this:**
+
+1. **Read the implementation first** before writing the proof
+2. **Verify the proof's assertions match the code's behavior** line by line
+3. **Run the proof locally** before committing: `cargo kani --harness proof_name`
+4. **When a proof fails in CI, investigate the ASSERTION first** — the proof might be wrong, not the code
+
+**Common causes:**
+
+- Copy-pasting from another proof without updating assertions
+- Assuming behavior without checking the implementation
+- Implementation changed but proof wasn't updated
+- Misunderstanding the semantics of the function being verified
+
+**Best practice:** When writing a proof, add a comment explaining what property you're verifying:
+
+```rust
+#[kani::proof]
+fn proof_connection_status_default() {
+    // PROPERTY: Default ConnectionStatus should be Disconnected,
+    // representing a new connection that hasn't been established yet.
+    let status = ConnectionStatus::default();
+    assert!(matches!(status, ConnectionStatus::Disconnected));
 }
 ```
 
@@ -740,11 +944,12 @@ cargo kani --visualize
 - [ ] Add `#[cfg(kani)]` module for proofs
 - [ ] Derive `kani::Arbitrary` for domain types
 - [ ] Write focused harnesses for critical functions
-- [ ] Set appropriate `#[kani::unwind(N)]` bounds
+- [ ] **CRITICAL: Add `#[kani::unwind(N)]` for ALL loops with symbolic bounds** (N = max + 1)
 - [ ] Stub I/O, networking, and external dependencies
+- [ ] **Run each proof locally** with `cargo kani --harness proof_name` before pushing
 - [ ] Add Kani to CI pipeline
+- [ ] Add proofs to tier lists in `scripts/verify-kani.sh`
 - [ ] Document verification assumptions
-- [ ] Run `cargo kani` locally before pushing
 
 ---
 

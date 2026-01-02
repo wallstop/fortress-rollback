@@ -62,7 +62,30 @@ pub(crate) mod inner {
     pub type MappedMutexGuard<'a, T> = std::marker::PhantomData<&'a T>;
 }
 
-/// In production, use parking_lot for performance
+/// In production, use parking_lot for performance.
+///
+/// # Mutex Safety: No Poisoning
+///
+/// We use `parking_lot::Mutex` instead of `std::sync::Mutex` for several reasons:
+///
+/// 1. **No Poisoning**: `parking_lot::Mutex::lock()` returns `MutexGuard<T>` directly,
+///    not `LockResult<MutexGuard<T>>`. This means:
+///    - No `.unwrap()` or `?` needed when locking
+///    - No need to handle the `PoisonError` case
+///    - No risk of panic from lock poisoning
+///
+/// 2. **Why No Poisoning is Safe Here**: Mutex poisoning in `std::sync::Mutex` occurs
+///    when a thread panics while holding the lock, potentially leaving data in an
+///    inconsistent state. `parking_lot` takes a different approach:
+///    - It assumes that if a panic occurs, the program should abort or the
+///      inconsistent state should be handled at a higher level
+///    - For Fortress Rollback, game state is managed through save/load semantics,
+///      so any inconsistency would be corrected on the next rollback
+///    - All our mutex-protected data (game states, checksums, frames) is either
+///      immutable after creation or replaced atomically via `save()`
+///
+/// 3. **Performance**: `parking_lot::Mutex` is typically faster than `std::sync::Mutex`
+///    due to optimized spinning and smaller size (1 byte vs platform-dependent).
 #[cfg(not(loom))]
 pub(crate) mod inner {
     pub use parking_lot::MappedMutexGuard;

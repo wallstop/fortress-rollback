@@ -129,6 +129,7 @@ impl Config for MetaConfig {
 // ============================================================================
 
 /// Run a synctest session with given inputs and return final state
+#[track_caller]
 fn run_synctest_session(
     num_players: usize,
     num_frames: usize,
@@ -762,6 +763,7 @@ mod termination_tests {
     /// The key metamorphic property is: given the same inputs processed in the same order,
     /// the checksum at any given frame should be identical regardless of when during
     /// the simulation it is computed.
+    #[track_caller]
     fn run_checksum_determinism_test(
         num_players: usize,
         num_frames: usize,
@@ -1001,6 +1003,7 @@ mod termination_property_tests {
     }
 
     /// Helper function used by termination property tests
+    #[track_caller]
     fn run_checksum_determinism_test(
         num_players: usize,
         num_frames: usize,
