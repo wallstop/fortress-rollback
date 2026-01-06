@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1767676056904,
+  "lastUpdate": 1767676169569,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "450135070358537aa546b659b5631fde32186e2c",
-          "message": "CI/CD fixes (#13)",
-          "timestamp": "2025-12-18T20:57:49-08:00",
-          "tree_id": "d1668a276116e3a9cfc0d0e94fcaf58b243eb5fe",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/450135070358537aa546b659b5631fde32186e2c"
-        },
-        "date": 1766120553690,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 108,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 161,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 532,
-            "range": "± 22",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 834,
-            "range": "± 25",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1180,
-            "range": "± 22",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 118248,
-            "range": "± 1757",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 25429,
-            "range": "± 368",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 11425,
-            "range": "± 153",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1554,
-            "range": "± 85",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 868,
             "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5811045b9b1ba4aab8b0cced96b7ebdc8395edbf",
+          "message": "chore(deps): bump serial_test from 3.2.0 to 3.3.1 (#58)\n\nBumps [serial_test](https://github.com/palfrey/serial_test) from 3.2.0\nto 3.3.1.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/palfrey/serial_test/releases\">serial_test's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v3.3.1</h2>\n<p>docs.rs removed a feature we use in <a\nhref=\"https://redirect.github.com/rust-lang/rust/pull/138907\">rust-lang/rust#138907</a>.\n<a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/148\">palfrey/serial_test#148</a>\n(which is the entire content of this release) adds a CI step to check we\ndon't break it in the future, and fixes the issue.</p>\n<p><strong>Full Changelog</strong>: <a\nhref=\"https://github.com/palfrey/serial_test/compare/v3.3.0...v3.3.1\">https://github.com/palfrey/serial_test/compare/v3.3.0...v3.3.1</a></p>\n<h2>v3.3.0</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Explicit testing for tokio multi-thread by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/122\">palfrey/serial_test#122</a></li>\n<li>Remove an unneeded explicit lifetime by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/124\">palfrey/serial_test#124</a></li>\n<li>docs: fixed the link to the shield by <a\nhref=\"https://github.com/operagxoksana\"><code>@​operagxoksana</code></a>\nin <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/125\">palfrey/serial_test#125</a></li>\n<li>Permit non-empty function returns by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/128\">palfrey/serial_test#128</a></li>\n<li>Add support for crate parameter by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/130\">palfrey/serial_test#130</a></li>\n<li>Add use serial_test::serial to Readme.md example by <a\nhref=\"https://github.com/APN-Pucky\"><code>@​APN-Pucky</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/135\">palfrey/serial_test#135</a></li>\n<li>Fix elided lifetime warnings by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/138\">palfrey/serial_test#138</a></li>\n<li>Add docs about &quot;path&quot; for file_serial/parallel by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/137\">palfrey/serial_test#137</a></li>\n<li>Don't depend on the whole futures crate by <a\nhref=\"https://github.com/bilelmoussaoui\"><code>@​bilelmoussaoui</code></a>\nin <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/141\">palfrey/serial_test#141</a></li>\n<li>Add is_locked_file_serially by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/139\">palfrey/serial_test#139</a></li>\n<li>Add relative path and better file_serial testing by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/143\">palfrey/serial_test#143</a></li>\n<li>Add std feature to wasm-bindgen-test to avoid breaking dep updates\nby <a href=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/145\">palfrey/serial_test#145</a></li>\n<li>Add some more logging around relative paths by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/147\">palfrey/serial_test#147</a></li>\n</ul>\n<h2>New Contributors</h2>\n<ul>\n<li><a\nhref=\"https://github.com/operagxoksana\"><code>@​operagxoksana</code></a>\nmade their first contribution in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/125\">palfrey/serial_test#125</a></li>\n<li><a href=\"https://github.com/APN-Pucky\"><code>@​APN-Pucky</code></a>\nmade their first contribution in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/135\">palfrey/serial_test#135</a></li>\n<li><a\nhref=\"https://github.com/bilelmoussaoui\"><code>@​bilelmoussaoui</code></a>\nmade their first contribution in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/141\">palfrey/serial_test#141</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a\nhref=\"https://github.com/palfrey/serial_test/compare/v3.2.0...v3.3.0\">https://github.com/palfrey/serial_test/compare/v3.2.0...v3.3.0</a></p>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/0771eb0e1e1e3fa9147b37536cd339073f0478fe\"><code>0771eb0</code></a>\n3.3.1</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/ace6ebf0eff78d7c3027bce72b9f418a9d352c28\"><code>ace6ebf</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/palfrey/serial_test/issues/148\">#148</a>\nfrom palfrey/docsrs-testing</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/349375d1e2bbbbe4f9eb6426b322f3de8fadd112\"><code>349375d</code></a>\nImprove feature flag docs</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/f9deb97f055ffec1d5aafb4f68c284138a584a63\"><code>f9deb97</code></a>\nRemove doc_auto_cfg</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/d5a4c09043b10dc2c74873686637f8af511475b5\"><code>d5a4c09</code></a>\nReset cargo.lock</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/89253b17d753f9a4b98f2c0b60e5b6f0590b910f\"><code>89253b1</code></a>\nTest docs-rs will work</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/5e84cd48e2078b5a109589f9283647a2f278417e\"><code>5e84cd4</code></a>\n3.3.0</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/abfc053ccb4dc6544c4b47b02ce2545c7183bfab\"><code>abfc053</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/palfrey/serial_test/issues/147\">#147</a>\nfrom palfrey/non-absolute-file-checking</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/38d6b05aa04c490156434fac2c17516cfe51e599\"><code>38d6b05</code></a>\nRefactor feature name for serial_test_test</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/2620c791d76b092fa606d358103426a99e4c5f1c\"><code>2620c79</code></a>\ntest-all-features needs more escaping</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/palfrey/serial_test/compare/v3.2.0...v3.3.1\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=serial_test&package-manager=cargo&previous-version=3.2.0&new-version=3.3.1)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot merge` will merge this PR after your CI passes on it\n- `@dependabot squash and merge` will squash and merge this PR after\nyour CI passes on it\n- `@dependabot cancel merge` will cancel a previously requested merge\nand block automerging\n- `@dependabot reopen` will reopen this PR if it is closed\n- `@dependabot close` will close this PR and stop Dependabot recreating\nit. You can achieve the same result by closing it manually\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-01-05T21:02:54-08:00",
+          "tree_id": "3d1071dd7588f81c3510b40dcf05078e68c234c2",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/5811045b9b1ba4aab8b0cced96b7ebdc8395edbf"
+        },
+        "date": 1767676169075,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 91,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 139,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 618,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 952,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1344,
+            "range": "± 49",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 97425,
+            "range": "± 1622",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 24504,
+            "range": "± 912",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 867,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 868,
+            "range": "± 1",
             "unit": "ns/iter"
           },
           {
