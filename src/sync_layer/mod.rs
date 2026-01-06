@@ -25,7 +25,7 @@
 //! ### Step 3: Prediction
 //!
 //! When remote inputs haven't arrived for a frame, the sync layer uses the
-//! [`PredictionStrategy`](crate::input_queue::PredictionStrategy) to guess what
+//! [`PredictionStrategy`] to guess what
 //! the remote player will do:
 //!
 //! - **`RepeatLastConfirmed`** (default): Use the last known input - works well
@@ -87,7 +87,7 @@
 //! - **Floating-point**: Use fixed-point or integers for physics/positions
 //! - **HashMap iteration**: Use `BTreeMap` or sort keys before iterating
 //! - **System time**: Use frame counter, not wall clock
-//! - **Random numbers**: Use the provided deterministic [`Rng`](crate::rng::Rng)
+//! - **Random numbers**: Use the provided deterministic [`Rng`]
 //! - **Uninitialized memory**: Always initialize all fields
 //! - **Multithreading**: Run simulation on a single thread
 //! - **External I/O**: Only read inputs from the input queue
@@ -97,6 +97,9 @@
 //! - [`GameStateCell`] and [`GameStateAccessor`] - Types for saving/loading game states
 //! - [`SavedStates`] - Circular buffer holding saved game states
 //! - [`SyncLayer`] - The main synchronization layer managing state and inputs
+//!
+//! [`PredictionStrategy`]: crate::input_queue::PredictionStrategy
+//! [`Rng`]: crate::rng::Rng
 
 mod game_state_cell;
 mod saved_states;
@@ -110,7 +113,10 @@ use crate::network::messages::ConnectionStatus;
 use crate::sessions::config::SaveMode;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
 use crate::{report_violation, safe_frame_add, safe_frame_sub};
-use crate::{Config, FortressError, FortressRequest, Frame, InputStatus, InputVec, PlayerHandle};
+use crate::{
+    Config, FortressError, FortressRequest, Frame, IndexOutOfBounds, InputStatus, InputVec,
+    InternalErrorKind, InvalidFrameReason, PlayerHandle,
+};
 
 /// The synchronization layer manages game state, input queues, and rollback operations.
 ///
@@ -297,13 +303,15 @@ impl<T: Config> SyncLayer<T> {
                 max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
             });
         }
+        let len = self.input_queues.len();
         self.input_queues
             .get_mut(player_handle.as_usize())
-            .ok_or_else(|| FortressError::InternalError {
-                context: format!(
-                    "input_queues index {} out of bounds",
-                    player_handle.as_usize()
-                ),
+            .ok_or(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                    name: "input_queues",
+                    index: player_handle.as_usize(),
+                    length: len,
+                }),
             })?
             .set_frame_delay(delay)?;
         Ok(())
@@ -338,30 +346,28 @@ impl<T: Config> SyncLayer<T> {
     ) -> Result<FortressRequest<T>, FortressError> {
         // The state should not be the current state or the state should not be in the future or too far away in the past
         if frame_to_load.is_null() {
-            return Err(FortressError::InvalidFrame {
+            return Err(FortressError::InvalidFrameStructured {
                 frame: frame_to_load,
-                reason: "cannot load NULL_FRAME".to_string(),
+                reason: InvalidFrameReason::NullFrame,
             });
         }
 
         if frame_to_load >= self.current_frame {
-            return Err(FortressError::InvalidFrame {
+            return Err(FortressError::InvalidFrameStructured {
                 frame: frame_to_load,
-                reason: format!(
-                    "must load frame in the past (frame to load is {}, current frame is {})",
-                    frame_to_load, self.current_frame
-                ),
+                reason: InvalidFrameReason::NotInPast {
+                    current_frame: self.current_frame,
+                },
             });
         }
 
         if frame_to_load.as_i32() < self.current_frame.as_i32() - self.max_prediction as i32 {
-            return Err(FortressError::InvalidFrame {
+            return Err(FortressError::InvalidFrameStructured {
                 frame: frame_to_load,
-                reason: format!(
-                    "cannot load frame outside of prediction window \
-                    (frame to load is {}, current frame is {}, max prediction is {})",
-                    frame_to_load, self.current_frame, self.max_prediction
-                ),
+                reason: InvalidFrameReason::OutsidePredictionWindow {
+                    current_frame: self.current_frame,
+                    max_prediction: self.max_prediction,
+                },
             });
         }
 
@@ -371,12 +377,11 @@ impl<T: Config> SyncLayer<T> {
         #[cfg(loom)]
         let cell_frame = cell.0.lock().unwrap().frame;
         if cell_frame != frame_to_load {
-            return Err(FortressError::InvalidFrame {
+            return Err(FortressError::InvalidFrameStructured {
                 frame: frame_to_load,
-                reason: format!(
-                    "saved state has wrong frame (expected {}, got {})",
-                    frame_to_load, cell_frame
-                ),
+                reason: InvalidFrameReason::WrongSavedFrame {
+                    saved_frame: cell_frame,
+                },
             });
         }
         self.current_frame = frame_to_load;
@@ -469,8 +474,12 @@ impl<T: Config> SyncLayer<T> {
                 let queue =
                     self.input_queues
                         .get(i)
-                        .ok_or_else(|| FortressError::InternalError {
-                            context: format!("input_queues index {} out of bounds", i),
+                        .ok_or(FortressError::InternalErrorStructured {
+                            kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                                name: "input_queues",
+                                index: i,
+                                length: self.input_queues.len(),
+                            }),
                         })?;
                 inputs.push(queue.confirmed_input(frame)?);
             }
@@ -600,7 +609,7 @@ impl<T: Config> InvariantChecker for SyncLayer<T> {
         if self.current_frame.as_i32() < 0 {
             return Err(
                 InvariantViolation::new("SyncLayer", "current_frame must be non-negative")
-                    .with_details(format!("current_frame={}", self.current_frame)),
+                    .with_field_value("current_frame", self.current_frame),
             );
         }
 
@@ -610,10 +619,12 @@ impl<T: Config> InvariantChecker for SyncLayer<T> {
                 "SyncLayer",
                 "last_confirmed_frame exceeds current_frame",
             )
-            .with_details(format!(
-                "last_confirmed_frame={}, current_frame={}",
-                self.last_confirmed_frame, self.current_frame
-            )));
+            .with_bounds_violation(
+                "last_confirmed_frame",
+                self.last_confirmed_frame,
+                "NULL",
+                self.current_frame,
+            ));
         }
 
         // Invariant 5: last_saved_frame <= current_frame
@@ -622,10 +633,12 @@ impl<T: Config> InvariantChecker for SyncLayer<T> {
                 "SyncLayer",
                 "last_saved_frame exceeds current_frame",
             )
-            .with_details(format!(
-                "last_saved_frame={}, current_frame={}",
-                self.last_saved_frame, self.current_frame
-            )));
+            .with_bounds_violation(
+                "last_saved_frame",
+                self.last_saved_frame,
+                "NULL",
+                self.current_frame,
+            ));
         }
 
         // Invariant 6: input queues count matches num_players
@@ -634,11 +647,12 @@ impl<T: Config> InvariantChecker for SyncLayer<T> {
                 "SyncLayer",
                 "input_queues count does not match num_players",
             )
-            .with_details(format!(
-                "input_queues.len()={}, num_players={}",
+            .with_bounds_violation(
+                "input_queues.len()",
                 self.input_queues.len(),
-                self.num_players
-            )));
+                self.num_players,
+                self.num_players,
+            ));
         }
 
         // Invariant 7: saved states count is max_prediction + 1
@@ -646,22 +660,22 @@ impl<T: Config> InvariantChecker for SyncLayer<T> {
         if self.saved_states.states.len() != expected_states {
             return Err(
                 InvariantViolation::new("SyncLayer", "saved_states count is incorrect")
-                    .with_details(format!(
-                        "saved_states.len()={}, expected={}",
+                    .with_bounds_violation(
+                        "saved_states.len()",
                         self.saved_states.states.len(),
-                        expected_states
-                    )),
+                        expected_states,
+                        expected_states,
+                    ),
             );
         }
 
         // Invariant 8: all input queues pass their invariant checks
         for (i, queue) in self.input_queues.iter().enumerate() {
             if let Err(violation) = queue.check_invariants() {
-                return Err(InvariantViolation::new(
-                    "SyncLayer",
-                    format!("input_queue[{}] invariant violated", i),
-                )
-                .with_details(violation.to_string()));
+                return Err(
+                    InvariantViolation::new("SyncLayer", "input_queue invariant violated")
+                        .with_input_queue_index(i, violation.to_string()),
+                );
             }
         }
 
@@ -821,9 +835,8 @@ mod sync_layer_tests {
         assert_eq!(sync_layer.current_frame(), Frame::new(3));
 
         // Load frame 0
-        let result = sync_layer.load_frame(Frame::new(0));
-        assert!(result.is_ok());
-        match result.unwrap() {
+        let request = sync_layer.load_frame(Frame::new(0)).unwrap();
+        match request {
             FortressRequest::LoadGameState { frame, cell } => {
                 assert_eq!(frame, Frame::new(0));
                 assert_eq!(cell.load(), Some(100u8));
@@ -841,11 +854,11 @@ mod sync_layer_tests {
         let result = sync_layer.load_frame(Frame::NULL);
         assert!(result.is_err());
         match result {
-            Err(FortressError::InvalidFrame { frame, reason }) => {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
                 assert_eq!(frame, Frame::NULL);
-                assert!(reason.contains("NULL_FRAME"));
+                assert!(matches!(reason, InvalidFrameReason::NullFrame));
             },
-            _ => panic!("Expected InvalidFrame error"),
+            _ => panic!("Expected InvalidFrameStructured error"),
         }
     }
 
@@ -858,11 +871,11 @@ mod sync_layer_tests {
         let result = sync_layer.load_frame(Frame::new(5));
         assert!(result.is_err());
         match result {
-            Err(FortressError::InvalidFrame { frame, reason }) => {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
                 assert_eq!(frame, Frame::new(5));
-                assert!(reason.contains("past"));
+                assert!(matches!(reason, InvalidFrameReason::NotInPast { .. }));
             },
-            _ => panic!("Expected InvalidFrame error"),
+            _ => panic!("Expected InvalidFrameStructured error"),
         }
     }
 
@@ -877,11 +890,11 @@ mod sync_layer_tests {
         let result = sync_layer.load_frame(Frame::new(2));
         assert!(result.is_err());
         match result {
-            Err(FortressError::InvalidFrame { frame, reason }) => {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
                 assert_eq!(frame, Frame::new(2));
-                assert!(reason.contains("past"));
+                assert!(matches!(reason, InvalidFrameReason::NotInPast { .. }));
             },
-            _ => panic!("Expected InvalidFrame error"),
+            _ => panic!("Expected InvalidFrameStructured error"),
         }
     }
 
@@ -899,11 +912,14 @@ mod sync_layer_tests {
         let result = sync_layer.load_frame(Frame::new(0));
         assert!(result.is_err());
         match result {
-            Err(FortressError::InvalidFrame { frame, reason }) => {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
                 assert_eq!(frame, Frame::new(0));
-                assert!(reason.contains("prediction window"));
+                assert!(matches!(
+                    reason,
+                    InvalidFrameReason::OutsidePredictionWindow { .. }
+                ));
             },
-            _ => panic!("Expected InvalidFrame error"),
+            _ => panic!("Expected InvalidFrameStructured error"),
         }
     }
 
@@ -969,11 +985,14 @@ mod sync_layer_tests {
         assert!(result.is_err());
 
         match result {
-            Err(FortressError::InvalidFrame { frame, reason }) => {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
                 assert_eq!(frame, Frame::new(0));
-                assert!(reason.contains("prediction window"));
+                assert!(matches!(
+                    reason,
+                    InvalidFrameReason::OutsidePredictionWindow { .. }
+                ));
             },
-            _ => panic!("Expected InvalidFrame error"),
+            _ => panic!("Expected InvalidFrameStructured error"),
         }
     }
 
@@ -1011,8 +1030,7 @@ mod sync_layer_tests {
         assert_eq!(sync_layer.last_saved_frame(), Frame::new(5));
 
         // Rollback to frame 2
-        let result = sync_layer.load_frame(Frame::new(2));
-        assert!(result.is_ok());
+        sync_layer.load_frame(Frame::new(2)).unwrap();
 
         // INVARIANT CHECK: last_saved_frame must be <= current_frame after rollback
         assert_eq!(sync_layer.current_frame(), Frame::new(2));
@@ -1052,8 +1070,7 @@ mod sync_layer_tests {
         assert_eq!(sync_layer.last_saved_frame(), Frame::new(3));
 
         // Rollback all the way to frame 0
-        let result = sync_layer.load_frame(Frame::new(0));
-        assert!(result.is_ok());
+        sync_layer.load_frame(Frame::new(0)).unwrap();
 
         // Verify invariant
         assert_eq!(sync_layer.current_frame(), Frame::new(0));
@@ -1149,13 +1166,12 @@ mod sync_layer_tests {
 
         // Rollback exactly to the edge of prediction window (frame 0)
         // current_frame (4) - max_prediction (4) = 0
-        let result = sync_layer.load_frame(Frame::new(0));
-        assert!(result.is_ok());
+        sync_layer.load_frame(Frame::new(0)).unwrap();
 
         // Verify invariants
         assert_eq!(sync_layer.current_frame(), Frame::new(0));
         assert!(sync_layer.last_saved_frame() <= sync_layer.current_frame());
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 
     /// Test that last_confirmed_frame invariant is maintained.
@@ -1178,7 +1194,7 @@ mod sync_layer_tests {
 
         // Verify invariant: last_confirmed_frame <= current_frame
         assert!(sync_layer.last_confirmed_frame() <= sync_layer.current_frame());
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 
     /// Test that set_last_confirmed_frame clamps to current_frame.
@@ -1217,7 +1233,7 @@ mod sync_layer_tests {
     fn test_invariant_checker_validates_player_count() {
         // Create sync layer with valid player count
         let sync_layer = SyncLayer::<TestConfig>::new(2, 8);
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
 
         // Note: We can't easily create an invalid state from outside,
         // so this test just verifies the checker runs successfully.
@@ -1401,9 +1417,9 @@ mod sync_layer_tests {
         connect_status[1].disconnected = true;
         connect_status[1].last_frame = Frame::NULL;
 
-        let result = sync_layer.confirmed_inputs(Frame::new(0), &connect_status);
-        assert!(result.is_ok());
-        let inputs = result.unwrap();
+        let inputs = sync_layer
+            .confirmed_inputs(Frame::new(0), &connect_status)
+            .unwrap();
         assert_eq!(inputs.len(), 2);
         assert_eq!(inputs[0].input.inp, 42);
         assert_eq!(inputs[1].frame, Frame::NULL); // Blank input for disconnected
@@ -1572,7 +1588,7 @@ mod sync_layer_tests {
     #[test]
     fn test_invariant_checker_new_sync_layer() {
         let sync_layer = SyncLayer::<TestConfig>::new(2, 8);
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 
     #[test]
@@ -1581,7 +1597,7 @@ mod sync_layer_tests {
 
         for _ in 0..20 {
             sync_layer.advance_frame();
-            assert!(sync_layer.check_invariants().is_ok());
+            sync_layer.check_invariants().unwrap();
         }
     }
 
@@ -1594,7 +1610,7 @@ mod sync_layer_tests {
             if let FortressRequest::SaveGameState { cell, frame } = request {
                 cell.save(frame, Some(i as u8), None);
             }
-            assert!(sync_layer.check_invariants().is_ok());
+            sync_layer.check_invariants().unwrap();
             sync_layer.advance_frame();
         }
     }
@@ -1607,7 +1623,7 @@ mod sync_layer_tests {
             let game_input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
             sync_layer.add_remote_input(PlayerHandle::new(0), game_input);
             sync_layer.add_remote_input(PlayerHandle::new(1), game_input);
-            assert!(sync_layer.check_invariants().is_ok());
+            sync_layer.check_invariants().unwrap();
             sync_layer.advance_frame();
         }
     }
@@ -1624,7 +1640,7 @@ mod sync_layer_tests {
         }
 
         sync_layer.set_last_confirmed_frame(Frame::new(5), SaveMode::EveryFrame);
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 
     #[test]
@@ -1633,14 +1649,14 @@ mod sync_layer_tests {
         sync_layer.set_frame_delay(PlayerHandle::new(0), 2).unwrap();
         sync_layer.set_frame_delay(PlayerHandle::new(1), 3).unwrap();
 
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
 
         for i in 0..10i32 {
             let game_input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
             sync_layer.add_remote_input(PlayerHandle::new(0), game_input);
             sync_layer.add_remote_input(PlayerHandle::new(1), game_input);
             sync_layer.advance_frame();
-            assert!(sync_layer.check_invariants().is_ok());
+            sync_layer.check_invariants().unwrap();
         }
     }
 
@@ -1713,8 +1729,7 @@ mod sync_layer_tests {
         assert_eq!(sync_layer.current_frame(), Frame::new(5));
 
         // Load frame 2 (rollback)
-        let result = sync_layer.load_frame(Frame::new(2));
-        assert!(result.is_ok());
+        sync_layer.load_frame(Frame::new(2)).unwrap();
         assert_eq!(sync_layer.current_frame(), Frame::new(2));
 
         // Now save_current_state should work correctly at frame 2
@@ -1878,10 +1893,14 @@ mod kani_sync_layer_proofs {
         type Address = SocketAddr;
     }
 
-    /// Proof: New SyncLayer has valid initial state
+    /// Proof: New SyncLayer has valid initial state.
     ///
     /// Verifies all invariants hold at initialization.
     /// Note: Bounds are reduced for Kani verification tractability.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Initial SyncLayer state validity (INV-1, INV-7, INV-8)
+    /// - Related: proof_advance_frame_monotonic, proof_saved_states_count
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_new_sync_layer_valid() {
@@ -1926,9 +1945,13 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: advance_frame maintains INV-1 (monotonicity)
+    /// Proof: advance_frame maintains INV-1 (monotonicity).
     ///
     /// Verifies that advance_frame always increases current_frame.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame monotonicity (INV-1)
+    /// - Related: proof_multiple_advances_monotonic, proof_new_sync_layer_valid
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_advance_frame_monotonic() {
@@ -1948,9 +1971,13 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: Multiple advances maintain monotonicity
+    /// Proof: Multiple advances maintain monotonicity.
     ///
     /// Note: unwind(15) accounts for SyncLayer construction + loop iterations
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Repeated advance_frame maintains monotonicity
+    /// - Related: proof_advance_frame_monotonic
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_multiple_advances_monotonic() {
@@ -1976,11 +2003,15 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: save_current_state maintains INV-8
+    /// Proof: save_current_state maintains INV-8.
     ///
     /// Verifies that after saving, last_saved_frame == current_frame.
     ///
     /// Note: unwind(15) accounts for SyncLayer construction + loop iterations
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Save updates last_saved_frame (INV-8)
+    /// - Related: proof_load_frame_validates_bounds, proof_saved_states_count
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_save_maintains_inv8() {
@@ -2006,11 +2037,15 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: load_frame validates bounds correctly
+    /// Proof: load_frame validates bounds correctly.
     ///
     /// Verifies that load_frame rejects invalid frames.
     ///
     /// Note: unwind(20) accounts for SyncLayer construction + loop iterations (5)
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: load_frame rejects invalid frames
+    /// - Related: proof_load_frame_success_maintains_invariants
     #[kani::proof]
     #[kani::unwind(20)]
     fn proof_load_frame_validates_bounds() {
@@ -2046,9 +2081,13 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: load_frame success maintains invariants
+    /// Proof: load_frame success maintains invariants.
     ///
     /// Note: unwind(20) accounts for SyncLayer construction + loop iterations
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Successful load_frame sets current_frame correctly
+    /// - Related: proof_load_frame_validates_bounds
     #[kani::proof]
     #[kani::unwind(20)]
     fn proof_load_frame_success_maintains_invariants() {
@@ -2075,10 +2114,14 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: set_frame_delay validates player handle
+    /// Proof: set_frame_delay validates player handle.
     ///
     /// Note: unwind(15) accounts for SyncLayer construction
     /// Tests that invalid handles are rejected
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Invalid player handle rejection
+    /// - Related: proof_player_handle_validity
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_set_frame_delay_validates_handle() {
@@ -2089,7 +2132,11 @@ mod kani_sync_layer_proofs {
         kani::assert(result_invalid.is_err(), "Invalid handle should fail");
     }
 
-    /// Proof: Saved states count is correct
+    /// Proof: Saved states count is correct.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: SavedStates has max_prediction + 1 slots
+    /// - Related: proof_new_sync_layer_valid, proof_saved_states_circular_index
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_saved_states_count() {
@@ -2105,7 +2152,11 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: SavedStates get_cell validates frame
+    /// Proof: SavedStates get_cell validates frame.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: get_cell rejects negative frames
+    /// - Related: proof_saved_states_circular_index
     #[kani::proof]
     #[kani::unwind(10)]
     fn proof_get_cell_validates_frame() {
@@ -2122,7 +2173,11 @@ mod kani_sync_layer_proofs {
         kani::assert(result_valid.is_ok(), "Valid frame should succeed");
     }
 
-    /// Proof: SavedStates uses circular indexing correctly
+    /// Proof: SavedStates uses circular indexing correctly.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Circular index calculation bounds
+    /// - Related: proof_saved_states_count, proof_get_cell_validates_frame
     #[kani::proof]
     #[kani::unwind(10)]
     fn proof_saved_states_circular_index() {
@@ -2145,9 +2200,13 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: reset_prediction doesn't affect frame state
+    /// Proof: reset_prediction doesn't affect frame state.
     ///
     /// Note: unwind(15) accounts for SyncLayer construction + loop iterations
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: reset_prediction preserves frame invariants
+    /// - Related: proof_new_sync_layer_valid
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_reset_prediction_preserves_frames() {
@@ -2179,10 +2238,14 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: INV-7 holds after set_last_confirmed_frame
+    /// Proof: INV-7 holds after set_last_confirmed_frame.
     ///
     /// Note: unwind(15) accounts for SyncLayer construction
     /// Verifies that set_last_confirmed_frame maintains INV-7 invariant
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Confirmed frame bounded by current frame (INV-7)
+    /// - Related: proof_sparse_saving_respects_saved_frame
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_confirmed_frame_bounded() {
@@ -2203,10 +2266,14 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: Sparse saving respects last_saved_frame
+    /// Proof: Sparse saving respects last_saved_frame.
     ///
     /// Note: unwind(15) accounts for SyncLayer construction
     /// Verifies that sparse save mode clamps confirm frame to last_saved
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Sparse save mode respects last_saved_frame
+    /// - Related: proof_confirmed_frame_bounded, proof_save_maintains_inv8
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_sparse_saving_respects_saved_frame() {

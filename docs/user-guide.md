@@ -1591,6 +1591,17 @@ cargo install trunk
 trunk serve
 ```
 
+#### Binary Size Optimization
+
+For smaller WASM binaries, add to your project's `Cargo.toml`:
+
+```toml
+[profile.release]
+opt-level = "s"  # Size-optimized; try "z" for even smaller binaries
+```
+
+This trades some runtime performance for smaller binaries. Test both `"s"` and `"z"` to find the best tradeoff for your game.
+
 ### Platform-Specific Features
 
 Fortress Rollback automatically adapts to different platforms:

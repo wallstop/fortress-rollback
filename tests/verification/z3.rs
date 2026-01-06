@@ -76,6 +76,26 @@ const MAX_PREDICTION: i64 = 8; // Default max prediction window
 ///
 /// Proves that for any valid frame f in [0, MAX_INT - INPUT_QUEUE_LENGTH),
 /// adding frame_delay (< INPUT_QUEUE_LENGTH) produces a valid non-negative result.
+///
+/// # Model
+/// - `frame`: A frame number in the valid range [0, i64::MAX - INPUT_QUEUE_LENGTH)
+/// - `delay`: The frame delay, in range [0, MAX_FRAME_DELAY]
+///
+/// # Preconditions (Assumptions)
+/// - Frame is non-negative (Frame type invariant)
+/// - Frame is bounded to prevent i64 overflow (practical session limit)
+/// - Delay is within valid bounds (validated by InputQueueConfig)
+///
+/// # Property
+/// frame + delay >= 0 (result is never negative)
+///
+/// # Relationship to Production Code
+/// Models frame arithmetic in `InputQueue::add_input()` and `InputQueue::get_input()`.
+/// The delay bounds are validated by `InputQueueConfig::validate_frame_delay()`.
+///
+/// # Limitations
+/// - Does not model the actual Rust overflow behavior (uses Z3 infinite precision)
+/// - Assumes frame is already bounded by caller (SessionBuilder validates this)
 #[test]
 fn z3_proof_frame_addition_bounded() {
     let cfg = Config::new();
@@ -116,6 +136,30 @@ fn z3_proof_frame_addition_bounded() {
 /// 1. Non-negative (valid frame)
 /// 2. Less than current_frame (in the past)
 /// 3. Within the prediction window
+///
+/// # Model
+/// - `current_frame`: The current simulation frame
+/// - `rollback_distance`: How many frames to roll back (1..=MAX_PREDICTION)
+///
+/// # Preconditions (Assumptions)
+/// - current_frame >= 0 (Frame type invariant)
+/// - rollback_distance > 0 (rollback requires at least 1 frame)
+/// - rollback_distance <= MAX_PREDICTION (prediction window bound)
+/// - rollback_distance <= current_frame (can't rollback before frame 0)
+///
+/// # Property
+/// target_frame >= 0 AND target_frame < current_frame
+///
+/// # Relationship to Production Code
+/// Models the rollback calculation in `P2PSession::adjust_gamestate()`:
+/// ```ignore
+/// let frame_to_load = first_incorrect_frame; // or nearest saved in sparse mode
+/// // ... later calls sync_layer.load_frame(frame_to_load)
+/// ```
+///
+/// # Limitations
+/// - Simplified model; actual code has sparse saving logic
+/// - Assumes MAX_PREDICTION bounds are enforced by session
 #[test]
 fn z3_proof_rollback_frame_valid() {
     let cfg = Config::new();
@@ -194,6 +238,25 @@ fn z3_proof_frame_comparison_transitive() {
 /// Z3 Proof: Modulo operation always produces valid index
 ///
 /// Proves that frame % INPUT_QUEUE_LENGTH is always in [0, INPUT_QUEUE_LENGTH).
+///
+/// # Model
+/// - `frame`: A non-negative frame number
+///
+/// # Preconditions (Assumptions)
+/// - frame >= 0 (Frame type invariant, enforced by Frame::new())
+///
+/// # Property
+/// 0 <= (frame % INPUT_QUEUE_LENGTH) < INPUT_QUEUE_LENGTH
+///
+/// # Relationship to Production Code
+/// Models the index calculation used throughout the codebase:
+/// - `InputQueue`: `frame as usize % self.queue_length`
+/// - `SavedStates`: `frame.as_i32() as usize % self.cells.len()`
+///
+/// # Limitations
+/// - Z3 modulo semantics: This proof requires frame >= 0 because Z3's modulo
+///   with negative numbers may differ from Rust's behavior. Production code
+///   uses Frame type which enforces non-negative values.
 #[test]
 fn z3_proof_circular_buffer_index_valid() {
     let cfg = Config::new();
@@ -355,18 +418,61 @@ fn z3_proof_circular_distance_non_wrapped() {
 // Rollback Frame Selection Proofs
 // =============================================================================
 
-/// Z3 Proof: Rollback target is always in the past when rollback occurs
+/// # Rollback Target Always in Past
 ///
-/// Proves that when we actually execute a rollback (call load_frame), the target
-/// is always < current_frame. This models the production guard in adjust_gamestate():
-///   if frame_to_load >= current_frame { skip_rollback; return Ok(()) }
+/// Proves that when rollback actually executes (load_frame is called), the target
+/// frame is always strictly less than the current frame. This is a critical safety
+/// property ensuring we never attempt to "rollback" to a future or current frame.
 ///
-/// The precondition `first_incorrect_frame < current_frame` is now explicitly
-/// documented as the GUARD for entering the rollback path (not a general constraint).
+/// # Model
 ///
-/// FV-GAP-2: This proof was reviewed as part of the Frame 0 Rollback FV Gap Analysis.
-/// The precondition is correct because production code skips rollback when
-/// first_incorrect >= current_frame. See also: z3_proof_skip_rollback_when_frame_equal.
+/// - `current_frame`: The simulation's current frame number (Frame type in production)
+/// - `first_incorrect_frame`: The earliest frame where a misprediction was detected
+///
+/// # Preconditions
+///
+/// All preconditions asserted in this proof:
+/// - `current_frame >= 0` (Frame type invariant)
+/// - `first_incorrect_frame >= 0` (valid frame)
+/// - `first_incorrect_frame < current_frame` (GUARD: only enter rollback path when target is in past)
+///
+/// # Property Verified
+///
+/// When the rollback guard passes (first_incorrect < current_frame), the target frame
+/// is guaranteed to be strictly less than current_frame, ensuring load_frame receives
+/// a valid past frame.
+///
+/// # Relationship to Production Code
+///
+/// This models behavior in:
+/// - `src/sessions/p2p_session.rs` - `adjust_gamestate()` function
+/// - Verifies the guard: `if frame_to_load >= current_frame { skip... }`
+/// - When we DO call `load_frame`, target < current is guaranteed
+///
+/// Production code structure:
+/// ```ignore
+/// fn adjust_gamestate(&mut self, first_incorrect: Frame, ...) {
+///     let frame_to_load = if self.save_mode == SaveMode::Sparse {
+///         self.sync_layer.last_saved_frame()
+///     } else {
+///         first_incorrect
+///     };
+///     if frame_to_load >= current_frame {
+///         // Skip rollback - this proof shows we won't get here
+///         // when first_incorrect < current_frame in non-sparse mode
+///         return Ok(());
+///     }
+///     requests.push(self.sync_layer.load_frame(frame_to_load)?);
+/// }
+/// ```
+///
+/// # Limitations
+///
+/// - Does not model sparse saving mode (where frame_to_load != first_incorrect)
+/// - Assumes the guard check is correctly implemented in production
+/// - See `z3_proof_skip_rollback_when_frame_equal` for the skip-path complement
+///
+/// FV-GAP-2: Reviewed as part of Frame 0 Rollback FV Gap Analysis.
 #[test]
 fn z3_proof_rollback_target_in_past() {
     let cfg = Config::new();
@@ -399,19 +505,63 @@ fn z3_proof_rollback_target_in_past() {
     });
 }
 
-/// Z3 Proof: Skip rollback path is taken when first_incorrect >= current_frame
+/// # Skip Rollback When Frame Equal or Greater
 ///
-/// Proves that the guard `frame_to_load >= current_frame` correctly identifies
-/// when rollback should be skipped. This models the production code:
-///   if frame_to_load >= current_frame {
-///       debug!("Skipping rollback...");
-///       self.sync_layer.reset_prediction();
-///       return Ok(());
-///   }
+/// Proves that the rollback skip guard (`frame_to_load >= current_frame`) correctly
+/// identifies when rollback should be skipped, and that this condition is mutually
+/// exclusive with the normal rollback path.
 ///
-/// FV-GAP-2: New proof added as part of Frame 0 Rollback FV Gap Analysis.
-/// This explicitly verifies the edge case where first_incorrect == current_frame
-/// (which can happen at frame 0 with misprediction detected immediately).
+/// # Model
+///
+/// - `current_frame`: The simulation's current frame number
+/// - `first_incorrect_frame`: The earliest frame where a misprediction was detected
+/// - `frame_to_load`: The frame we would load (equals first_incorrect in non-sparse mode)
+/// - `should_skip`: Boolean indicating the skip guard would trigger
+///
+/// # Preconditions
+///
+/// All preconditions asserted in this proof:
+/// - `current_frame >= 0` (can be 0, the first frame)
+/// - `first_incorrect_frame >= 0` (valid frame)
+/// - `first_incorrect_frame <= current_frame` (includes equality case)
+/// - `current_frame - first_incorrect_frame <= MAX_PREDICTION` (within prediction window)
+///
+/// # Property Verified
+///
+/// The skip_rollback condition (`frame_to_load >= current_frame`) and the
+/// normal_rollback condition (`first_incorrect < current_frame`) are mutually
+/// exclusive. You cannot have both conditions true simultaneously.
+///
+/// # Relationship to Production Code
+///
+/// This models behavior in:
+/// - `src/sessions/p2p_session.rs` - `adjust_gamestate()` function
+/// - Verifies the edge case handling at frame 0
+///
+/// Production code structure:
+/// ```ignore
+/// fn adjust_gamestate(&mut self, first_incorrect: Frame, ...) {
+///     // ...
+///     if frame_to_load >= current_frame {
+///         debug!(
+///             "Skipping rollback: frame_to_load {} >= current_frame {}",
+///             frame_to_load, current_frame
+///         );
+///         self.sync_layer.reset_prediction();
+///         return Ok(());
+///     }
+///     // Normal rollback path - frame_to_load < current_frame guaranteed here
+/// }
+/// ```
+///
+/// # Limitations
+///
+/// - Simplified model assumes non-sparse saving (frame_to_load = first_incorrect)
+/// - Does not model the actual reset_prediction() side effects
+/// - See `z3_proof_rollback_target_in_past` for the normal rollback path proof
+///
+/// FV-GAP-2: Added as part of Frame 0 Rollback FV Gap Analysis.
+/// Explicitly covers the edge case where first_incorrect == current_frame == 0.
 #[test]
 fn z3_proof_skip_rollback_when_frame_equal() {
     let cfg = Config::new();
@@ -688,13 +838,54 @@ fn z3_proof_input_position_uniqueness_in_window() {
 // Comprehensive Property Tests
 // =============================================================================
 
-/// Z3 Proof: Complete rollback safety
+/// # Complete Rollback Safety
 ///
-/// Combines multiple properties to prove the complete rollback operation is safe:
-/// 1. Target frame is valid
-/// 2. Target is in the past
-/// 3. Target is within prediction window
-/// 4. Saved state is available
+/// Comprehensive proof combining all safety properties required for a valid rollback.
+/// This is the "master" rollback proof that ensures all invariants hold together.
+///
+/// # Model
+///
+/// - `current_frame`: The simulation's current frame number
+/// - `target_frame`: The frame we want to roll back to
+///
+/// # Preconditions
+///
+/// All preconditions asserted in this proof:
+/// - `current_frame >= 0` (valid simulation state)
+/// - `target_frame >= 0` (valid rollback target)
+/// - `target_frame < current_frame` (target is in the past)
+/// - `current_frame - target_frame <= MAX_PREDICTION` (within prediction window)
+///
+/// # Property Verified
+///
+/// Given all the safety preconditions, valid rollback scenarios exist. This is a
+/// satisfiability check (SAT) rather than an UNSAT proof - it confirms that our
+/// constraints are not contradictory and valid rollback states can be found.
+///
+/// The combined properties verified:
+/// 1. **Target validity**: target_frame >= 0 (not negative)
+/// 2. **Temporal correctness**: target_frame < current_frame (rollback to past)
+/// 3. **Bounded rollback**: distance <= MAX_PREDICTION (not too far back)
+/// 4. **State availability**: implied by bounded rollback (SavedStates has enough slots)
+///
+/// # Relationship to Production Code
+///
+/// This models the complete rollback flow in:
+/// - `src/sessions/p2p_session.rs` - `adjust_gamestate()` orchestrates rollback
+/// - `src/sync_layer/mod.rs` - `SyncLayer::load_frame()` loads saved state
+/// - `src/sync_layer/saved_states.rs` - `SavedStates` manages state buffer
+///
+/// The invariants verified here map to formal specification invariants:
+/// - **INV-1**: Frame monotonicity (except during rollback)
+/// - **INV-2**: Rollback bounded by max_prediction
+/// - **INV-6**: State availability for rollback frames
+///
+/// # Limitations
+///
+/// - Does not verify the actual state loading mechanism
+/// - Assumes SavedStates has sufficient capacity (MAX_PREDICTION + 1 slots)
+/// - Does not model concurrent access to saved states
+/// - See individual proofs for more specific property verification
 #[test]
 fn z3_proof_complete_rollback_safety() {
     let cfg = Config::new();
@@ -808,8 +999,28 @@ fn z3_proof_frame_increment_safe() {
 /// Proves that `DesyncDetected` can only be returned when checksums actually differ.
 /// This models the `sync_health()` and `compare_local_checksums_against_peers()` logic.
 ///
-/// Property: If local_checksum == remote_checksum for a frame, then
-/// SyncHealth::DesyncDetected is never returned for that frame.
+/// # Model
+/// - `local_checksum`: The locally computed checksum for a frame
+/// - `remote_checksum`: The checksum received from a peer for the same frame
+///
+/// # Preconditions (Assumptions)
+/// - Both checksums are valid (non-negative in this model)
+/// - Checksums are EQUAL (no actual desync)
+///
+/// # Property
+/// If local_checksum == remote_checksum, then desync_detected is false
+///
+/// # Relationship to Production Code
+/// Models `P2PSession::compare_local_checksums_against_peers()`:
+/// ```ignore
+/// if local_checksum != remote_checksum {
+///     return SyncHealth::DesyncDetected;
+/// }
+/// ```
+///
+/// # Limitations
+/// - Does not model the frame confirmation guard
+/// - Assumes comparison actually happens (not filtered out)
 #[test]
 fn z3_proof_desync_detection_no_false_positives() {
     let cfg = Config::new();
@@ -976,15 +1187,62 @@ fn z3_proof_pending_checksum_becomes_comparable() {
     });
 }
 
-/// Z3 Proof: SyncHealth state transitions are valid
+/// # SyncHealth State Transitions
 ///
-/// Proves that the only valid state transitions for sync health are:
-/// - Pending -> InSync (successful comparison with matching checksums)
-/// - Pending -> DesyncDetected (comparison found mismatch)
-/// - InSync -> InSync (subsequent successful comparisons)
-/// - InSync -> DesyncDetected (later comparison found mismatch)
+/// Proves the correctness of the SyncHealth state machine. Most critically,
+/// it verifies that DesyncDetected is a terminal state - once detected, a
+/// desync cannot be "undone".
 ///
-/// Once DesyncDetected, the state cannot return to InSync (desync is permanent).
+/// # Model
+///
+/// - `current_state`: Integer encoding of SyncHealth (0=Pending, 1=InSync, 2=DesyncDetected)
+/// - `checksums_match`: Boolean (1=match, 0=differ) indicating checksum comparison result
+/// - `comparison_happened`: Boolean (1=yes, 0=no) indicating if comparison was performed
+/// - `next_state`: The computed next state based on transition rules
+///
+/// # Preconditions
+///
+/// All preconditions asserted in this proof:
+/// - `current_state` in {0, 1, 2} (valid state)
+/// - `comparison_happened` in {0, 1} (boolean)
+/// - `checksums_match` in {0, 1} (boolean, only meaningful when comparison happened)
+///
+/// # Property Verified
+///
+/// The state transition from DesyncDetected (state 2) to InSync (state 1) is
+/// impossible. This proves that desync detection is permanent - a critical
+/// safety property for game state consistency.
+///
+/// Valid transitions modeled:
+/// - Pending -> InSync: comparison happened, checksums match
+/// - Pending -> DesyncDetected: comparison happened, checksums differ
+/// - InSync -> InSync: comparison happened, checksums match
+/// - InSync -> DesyncDetected: comparison happened, checksums differ
+/// - DesyncDetected -> DesyncDetected: always (terminal state)
+/// - Any -> Same: no comparison happened (state preserved)
+///
+/// # Relationship to Production Code
+///
+/// This models behavior in:
+/// - `src/sessions/sync_health.rs` - `SyncHealth` enum definition
+/// - `src/sessions/p2p_session.rs` - `sync_health()` method
+/// - `src/sessions/p2p_session.rs` - `compare_local_checksums_against_peers()` method
+///
+/// Production state machine:
+/// ```ignore
+/// pub enum SyncHealth {
+///     Pending,       // No comparison yet
+///     InSync,        // Last comparison matched
+///     DesyncDetected { frame, local_checksum, remote_checksum }, // Permanent
+/// }
+/// ```
+///
+/// # Limitations
+///
+/// - Uses integer encoding instead of actual enum
+/// - Does not model the checksum values themselves
+/// - Does not model timing of when comparisons happen
+/// - See `z3_proof_desync_detection_no_false_positives` for checksum logic
 #[test]
 fn z3_proof_sync_health_state_transitions() {
     let cfg = Config::new();
@@ -1264,16 +1522,17 @@ fn z3_verified_properties_summary() {
 
     println!(
         "Z3 Verification Summary:\n\
-         - 4 Frame arithmetic proofs\n\
+         - 3 Frame arithmetic proofs\n\
          - 5 Circular buffer proofs\n\
-         - 3 Rollback frame selection proofs\n\
+         - 5 Rollback frame selection proofs\n\
          - 2 Frame delay proofs\n\
          - 1 Input consistency proof\n\
-         - 2 Comprehensive safety proofs\n\
+         - 3 Comprehensive safety proofs\n\
          - 8 Internal component invariant proofs\n\
          - 7 FNV-1a hash function proofs\n\
          - 8 Desync detection proofs\n\
-         Total: 40 Z3 proofs"
+         - 8 PCG32 RNG proofs\n\
+         Total: 50 Z3 proofs"
     );
 }
 
@@ -1281,10 +1540,65 @@ fn z3_verified_properties_summary() {
 // Internal Component Invariant Proofs (Using __internal module access)
 // =============================================================================
 
-/// Z3 Proof: InputQueue head/tail indices always valid
+/// # InputQueue Head/Tail Bounds (INV-IQ1)
 ///
-/// Proves that head and tail indices are always in [0, queue_length).
-/// This models the invariants from InputQueue's internal state.
+/// Proves that head and tail indices in the InputQueue circular buffer are always
+/// valid (within bounds). This is essential for memory safety - invalid indices
+/// would cause out-of-bounds array access.
+///
+/// # Model
+///
+/// - `head`: Index pointing to the next slot to write (0 to queue_length-1)
+/// - `tail`: Index pointing to the oldest valid input (0 to queue_length-1)
+/// - `length`: Number of valid inputs in the queue (0 to queue_length)
+/// - `new_head`: Head index after add_input operation
+///
+/// # Preconditions
+///
+/// All preconditions asserted in this proof:
+/// - `head` in [0, INPUT_QUEUE_LENGTH)
+/// - `tail` in [0, INPUT_QUEUE_LENGTH)
+/// - `length` in [0, INPUT_QUEUE_LENGTH]
+///
+/// # Property Verified
+///
+/// After add_input() operation: `new_head = (head + 1) % queue_length` remains
+/// within valid bounds [0, queue_length). The modulo operation guarantees
+/// proper wraparound.
+///
+/// # Relationship to Production Code
+///
+/// This models behavior in:
+/// - `src/input_queue/mod.rs` - `InputQueue` struct and its `head`/`tail` fields
+/// - `src/input_queue/mod.rs` - `add_input()` method
+/// - `src/input_queue/mod.rs` - `get_input()` method
+///
+/// Production code structure:
+/// ```ignore
+/// pub struct InputQueue<T> {
+///     queue: Vec<PlayerInput<T>>,  // Fixed-size circular buffer
+///     head: usize,                  // Next write position
+///     tail: usize,                  // Oldest valid position
+///     length: usize,                // Number of valid entries
+///     // ... other fields
+/// }
+///
+/// fn add_input(&mut self, input: PlayerInput<T>) {
+///     self.queue[self.head] = input;  // Bounds safety requires head < queue_length
+///     self.head = (self.head + 1) % self.queue.len();
+/// }
+/// ```
+///
+/// This maps to formal specification invariants:
+/// - **INV-IQ1** / **INV-4**: `0 <= head < INPUT_QUEUE_LENGTH`
+/// - **INV-IQ2** / **INV-5**: `0 <= tail < INPUT_QUEUE_LENGTH`
+///
+/// # Limitations
+///
+/// - Only verifies head advancement, not tail advancement
+/// - Does not model the actual queue contents
+/// - Does not verify length calculation correctness
+/// - See Kani proofs in input_queue.rs for bounded verification of actual code
 #[test]
 fn z3_proof_input_queue_head_tail_bounds() {
     let cfg = Config::new();
@@ -1357,10 +1671,55 @@ fn z3_proof_input_queue_length_calculation() {
     });
 }
 
-/// Z3 Proof: SyncLayer last_confirmed_frame invariant
+/// # SyncLayer Confirmed Frame Invariant (INV-SL1)
 ///
-/// Proves that last_confirmed_frame is always <= current_frame (when not NULL).
-/// This models INV-SL1 from the formal specification.
+/// Proves that `last_confirmed_frame` is always less than or equal to `current_frame`,
+/// or is NULL (-1). This is a fundamental invariant ensuring we never claim to have
+/// confirmed inputs for frames that haven't happened yet.
+///
+/// # Model
+///
+/// - `current_frame`: The simulation's current frame number
+/// - `last_confirmed_frame`: The last frame where all player inputs are confirmed (-1 if none)
+/// - `invariant`: Boolean encoding of the invariant (1=holds, 0=violated)
+///
+/// # Preconditions
+///
+/// All preconditions asserted in this proof:
+/// - `current_frame >= 0` (valid after construction)
+/// - `last_confirmed_frame >= NULL_FRAME` (either NULL or valid)
+/// - `invariant == 1` (invariant holds initially)
+///
+/// # Property Verified
+///
+/// After `advance_frame()` (which increments current_frame by 1), the invariant
+/// `last_confirmed_frame <= current_frame` continues to hold. This is an
+/// inductive preservation proof.
+///
+/// # Relationship to Production Code
+///
+/// This models behavior in:
+/// - `src/sync_layer/mod.rs` - `SyncLayer` struct and its `last_confirmed_frame` field
+/// - `src/sync_layer/mod.rs` - `advance_frame()` method
+/// - `src/sync_layer/mod.rs` - `set_last_confirmed_frame()` method
+///
+/// Production invariant (from sync_layer documentation):
+/// ```ignore
+/// // INV-7: last_confirmed_frame <= current_frame
+/// // Maintained by:
+/// // - advance_frame(): increments current_frame, doesn't change last_confirmed
+/// // - set_last_confirmed_frame(): only sets to values <= current_frame
+/// ```
+///
+/// This maps to formal specification invariant **INV-SL1** / **INV-7**:
+/// > `last_confirmed_frame <= current_frame` (when not NULL)
+///
+/// # Limitations
+///
+/// - Does not model `set_last_confirmed_frame()` which could potentially violate
+///   the invariant if given a bad value (production code validates this)
+/// - Assumes the invariant holds initially (base case not proven here)
+/// - See Kani proofs in sync_layer.rs for bounded verification of actual code
 #[test]
 fn z3_proof_sync_layer_confirmed_frame_invariant() {
     let cfg = Config::new();
@@ -1412,10 +1771,59 @@ fn z3_proof_sync_layer_confirmed_frame_invariant() {
     });
 }
 
-/// Z3 Proof: SyncLayer last_saved_frame invariant
+/// # SyncLayer Saved Frame Invariant (INV-SL2)
 ///
-/// Proves that last_saved_frame is always <= current_frame (when not NULL).
-/// This models INV-SL2 from the formal specification.
+/// Proves that `last_saved_frame` is always less than or equal to `current_frame`.
+/// This ensures we never claim to have saved state for a frame that hasn't been
+/// simulated yet.
+///
+/// # Model
+///
+/// - `current_frame`: The simulation's current frame number
+/// - `last_saved_frame`: The last frame for which state was saved (-1 if none)
+/// - `new_saved`: The frame number after save_current_state()
+/// - `new_current`: The frame number after advance_frame()
+///
+/// # Preconditions
+///
+/// All preconditions asserted in this proof:
+/// - `current_frame >= 0` (valid simulation state)
+/// - `last_saved_frame >= NULL_FRAME` (NULL or valid)
+/// - `last_saved_frame <= current_frame` (invariant holds initially)
+///
+/// # Property Verified
+///
+/// After the sequence: save_current_state() then advance_frame(), the invariant
+/// `new_saved <= new_current` still holds. This models the typical game loop
+/// where state is saved before advancing to the next frame.
+///
+/// # Relationship to Production Code
+///
+/// This models behavior in:
+/// - `src/sync_layer/mod.rs` - `SyncLayer` struct and its `last_saved_frame` field
+/// - `src/sync_layer/mod.rs` - `save_current_state()` method
+/// - `src/sync_layer/mod.rs` - `advance_frame()` method
+/// - `src/sync_layer/saved_states.rs` - `SavedStates` state buffer
+///
+/// Production code pattern:
+/// ```ignore
+/// // Typical game loop in advance_frame():
+/// // 1. Save current state (if save_mode requires it)
+/// requests.push(self.sync_layer.save_current_state());
+/// // 2. Advance to next frame
+/// self.sync_layer.advance_frame();
+/// // INV-8 maintained: last_saved_frame <= current_frame
+/// ```
+///
+/// This maps to formal specification invariant **INV-SL2** / **INV-8**:
+/// > `last_saved_frame <= current_frame` (when not NULL)
+///
+/// # Limitations
+///
+/// - Assumes save happens before advance (production code ensures this order)
+/// - Does not model SaveMode::Sparse which may skip some saves
+/// - Does not verify the circular buffer doesn't overflow
+/// - See SavedStates for actual storage implementation
 #[test]
 fn z3_proof_sync_layer_saved_frame_invariant() {
     let cfg = Config::new();
@@ -1538,10 +1946,62 @@ fn z3_proof_first_incorrect_frame_bound() {
     });
 }
 
-/// Z3 Proof: Prediction window constraint
+/// # Prediction Window Bounded (INV-2)
 ///
-/// Proves that the prediction window is bounded by max_prediction.
-/// frames_ahead = current_frame - last_confirmed_frame must be <= max_prediction.
+/// Proves that the prediction window (number of unconfirmed frames) is bounded
+/// by max_prediction. This is critical for ensuring rollback operations remain
+/// tractable and SavedStates has sufficient capacity.
+///
+/// # Model
+///
+/// - `current_frame`: The simulation's current frame number
+/// - `last_confirmed_frame`: The last frame where all inputs are confirmed
+/// - `frames_ahead`: Distance from last_confirmed to current (prediction count)
+/// - `first_incorrect`: Frame where misprediction was detected
+/// - `rollback_distance`: How far back we need to roll
+///
+/// # Preconditions
+///
+/// All preconditions asserted in this proof:
+/// - `current_frame >= 0` (valid simulation)
+/// - `last_confirmed_frame >= NULL_FRAME` (NULL or valid)
+/// - `last_confirmed_frame < current_frame` (some unconfirmed frames exist)
+/// - `frames_ahead <= MAX_PREDICTION + 1` (session enforces this limit)
+/// - `first_incorrect >= last_confirmed_frame` (misprediction after confirmation)
+/// - `first_incorrect < current_frame` (misprediction is in the past)
+///
+/// # Property Verified
+///
+/// Given the prediction window constraint, any rollback distance will be within
+/// bounds. This is a satisfiability check confirming valid rollback scenarios
+/// exist under these constraints.
+///
+/// # Relationship to Production Code
+///
+/// This models behavior in:
+/// - `src/sessions/p2p_session.rs` - prediction window enforcement
+/// - `src/sync_layer/mod.rs` - `SyncLayer` state management
+/// - `src/sessions/builder.rs` - max_prediction configuration
+///
+/// Production enforcement:
+/// ```ignore
+/// // In P2PSession::advance_frame():
+/// let prediction_count = current_frame - last_confirmed_frame;
+/// if prediction_count >= self.max_prediction {
+///     // Session rejects new inputs / waits for confirmations
+///     return Err(FortressError::PredictionThreshold { ... });
+/// }
+/// ```
+///
+/// This maps to formal specification invariant **INV-2**:
+/// > `rollback_depth <= max_prediction`
+///
+/// # Limitations
+///
+/// - Does not model the actual rejection mechanism
+/// - Assumes session correctly enforces the prediction limit
+/// - See `z3_proof_complete_rollback_safety` for combined safety proof
+/// - See TLA+ spec in `specs/tla/Rollback.tla` for state machine model
 #[test]
 fn z3_proof_prediction_window_bounded() {
     let cfg = Config::new();
@@ -1640,15 +2100,42 @@ fn z3_proof_frame_discard_safety() {
 // =============================================================================
 
 /// FNV-1a 64-bit offset basis constant (must match src/hash.rs)
+///
+/// Note: 0xcbf2_9ce4_8422_2325 = 14695981039346656037 > i64::MAX
+/// When cast to i64, this becomes a negative number (-3750763034362895579).
+/// The Z3 proofs model the mathematical structure, not the exact bit pattern.
 const FNV_OFFSET_BASIS: i64 = 0xcbf2_9ce4_8422_2325_u64 as i64;
 
 /// FNV-1a 64-bit prime constant (must match src/hash.rs)
+///
+/// This value (1099511628211) fits comfortably in i64.
 const FNV_PRIME: i64 = 0x0100_0000_01b3_u64 as i64;
 
-/// Z3 Proof: FNV-1a single byte hash correctness
+/// Z3 Proof: FNV-1a single byte hash formula structure
 ///
-/// Proves that for any byte b: hash(b) = (offset_basis XOR b) * prime
-/// This verifies the core FNV-1a step is correctly modeled.
+/// Verifies structural properties of the FNV-1a single-byte hash formula.
+/// For any byte b: hash(b) = (offset_basis XOR b) * prime
+///
+/// # Model
+/// - `byte`: A value in [0, 256) representing a single byte
+///
+/// # Preconditions (Assumptions)
+/// - byte is a valid u8 (0 <= byte < 256)
+///
+/// # Property
+/// Different bytes produce different intermediate XOR results (structure check).
+///
+/// # Relationship to Production Code
+/// Models the core loop in `DeterministicHasher::write()`:
+/// ```ignore
+/// self.state ^= u64::from(byte);
+/// self.state = self.state.wrapping_mul(FNV_PRIME);
+/// ```
+///
+/// # Limitations
+/// - Uses simplified addition model instead of XOR (Z3 integers don't have bitwise ops)
+/// - The actual FNV-1a uses XOR which has stronger collision resistance properties
+/// - Wrapping multiplication is not modeled (uses Z3 infinite precision)
 #[test]
 fn z3_proof_fnv1a_single_byte_formula() {
     let cfg = Config::new();
@@ -1848,10 +2335,28 @@ fn z3_proof_fnv1a_prime_properties() {
     });
 }
 
-/// Z3 Proof: FNV-1a different bytes produce different single-byte hashes
+/// Z3 Model Check: FNV-1a collision-free property for single-byte inputs
 ///
-/// Proves that for any two distinct bytes b1 and b2, hash(b1) != hash(b2).
-/// This is the collision-free property for single-byte inputs.
+/// This is a **model satisfiability check**, not a proof of collision-freedom.
+/// The actual collision-free property for single-byte FNV-1a follows from the
+/// mathematical identity: `a XOR b == a XOR c` implies `b == c`.
+///
+/// # What This Test Verifies
+/// - Confirms that distinct byte values can exist (trivial satisfiability)
+/// - Documents the collision-free property reasoning in comments
+///
+/// # Why Z3 Cannot Directly Prove Collision-Freedom
+/// Z3's `Int` type doesn't support bitwise XOR operations. To properly prove
+/// this, we would need to use Z3 bitvectors (`BV` type) which support XOR.
+/// The property `(basis XOR b1) * prime != (basis XOR b2) * prime` when
+/// `b1 != b2` holds due to:
+/// 1. XOR preserves distinctness: `basis XOR b1 != basis XOR b2`
+/// 2. Prime multiplication is injective mod 2^64 (since prime is odd)
+///
+/// # Limitations
+/// - Does NOT prove collision-freedom; that's a mathematical identity
+/// - Uses Int type which lacks XOR support
+/// - See property tests for actual collision testing with concrete values
 #[test]
 fn z3_proof_fnv1a_single_byte_no_collision() {
     let cfg = Config::new();
@@ -1870,43 +2375,13 @@ fn z3_proof_fnv1a_single_byte_no_collision() {
         // They are different
         solver.assert(byte1.ne(&byte2));
 
-        // Compute single-byte hashes using XOR model
-        // hash(b) = (offset_basis XOR b) * prime
-        // For Z3, we model this algebraically
-
-        // The key property: if byte1 != byte2, then
-        // (offset_basis XOR byte1) != (offset_basis XOR byte2)
-        // because XOR with the same value preserves differences
-
-        // And since prime is coprime to 2^64, multiplication preserves distinctness
-        // within reasonable bounds (no wraparound collisions for small inputs)
-
-        // Model: hash difference
-        // If bytes differ by delta, XOR results differ by at most delta
-        // Multiplication by prime spreads this difference
-
-        // We verify the structural property: different inputs -> different XOR intermediates
-        // offset_basis XOR byte1 == offset_basis XOR byte2 implies byte1 == byte2
-        let xor1 = Int::fresh_const("xor1");
-        let xor2 = Int::fresh_const("xor2");
-
-        // XOR results are different when bytes are different (property of XOR)
-        // This is the contrapositive: if xor1 == xor2, then byte1 == byte2
-        solver.assert(xor1.eq(&xor2));
-        // But we said byte1 != byte2, so this should be UNSAT for XOR inputs derived from bytes
-
-        // Actually, we need to model: can same XOR result come from different bytes?
-        // offset_basis XOR b1 == offset_basis XOR b2 iff b1 == b2
-        // This is a basic property of XOR: a XOR b == a XOR c implies b == c
-
+        // Satisfiability check: can two different bytes exist?
+        // This is trivially SAT (e.g., byte1=0, byte2=1)
         let check_result = solver.check();
-        // This is SAT because xor1 and xor2 are unconstrained
-        // The real proof is that different bytes produce different XOR results
-        // which is a mathematical identity (not needing Z3 proof)
         assert_eq!(
             check_result,
             SatResult::Sat,
-            "Z3 satisfiability check for collision-free model"
+            "Z3 should find distinct byte pairs exist (trivial satisfiability)"
         );
     });
 }
@@ -1973,6 +2448,10 @@ fn z3_hash_proofs_summary() {
 // =============================================================================
 
 /// Constants matching the PCG32 implementation in src/rng.rs
+///
+/// These values come directly from the PCG paper and ensure:
+/// - Full 2^64 period (multiplier coprime to 2^64)
+/// - Good statistical properties (specific multiplier was chosen for this)
 const PCG_MULTIPLIER: i64 = 6364136223846793005_i64;
 const PCG_DEFAULT_INCREMENT: i64 = 1442695040888963407_i64;
 
@@ -1982,6 +2461,24 @@ const PCG_DEFAULT_INCREMENT: i64 = 1442695040888963407_i64;
 /// This is critical because PCG32 only achieves its full 2^64 period when
 /// the increment is odd. If the increment were even, the generator would
 /// have a shorter period and potentially poor statistical properties.
+///
+/// # Model
+/// - `stream`: Any 64-bit value representing the stream selector
+///
+/// # Preconditions (Assumptions)
+/// - None; works for any stream value
+///
+/// # Property
+/// inc = (stream << 1) | 1 is always odd (inc % 2 == 1)
+///
+/// # Relationship to Production Code
+/// Models `Pcg32::new()` in `src/rng.rs`:
+/// ```ignore
+/// let inc = (stream << 1) | 1;
+/// ```
+///
+/// # Limitations
+/// - None; this is a complete proof for the increment formula
 #[test]
 fn z3_proof_pcg32_increment_always_odd() {
     let cfg = Config::new();
@@ -2012,11 +2509,58 @@ fn z3_proof_pcg32_increment_always_odd() {
     });
 }
 
-/// Z3 Proof: PCG32 state transition is deterministic
+/// # PCG32 State Transition Determinism
 ///
-/// Proves that given the same state and increment, the next state
-/// is uniquely determined. This is essential for reproducible sequences
-/// in rollback networking.
+/// Proves that the PCG32 random number generator produces deterministic output.
+/// Given identical state and increment values, the next state is always the same.
+/// This is essential for rollback networking where RNG sequences must be
+/// reproducible across rollback/re-simulation.
+///
+/// # Model
+///
+/// - `state`: The 64-bit internal state of the PCG32 generator
+/// - `inc`: The increment value (must be odd for full period)
+/// - `multiplier`: The PCG constant 6364136223846793005
+/// - `new_state1`, `new_state2`: Results of applying the same transition twice
+///
+/// # Preconditions
+///
+/// All preconditions asserted in this proof:
+/// - None explicitly (works for any state and inc values)
+///
+/// # Property Verified
+///
+/// For any state and increment: `state * MULTIPLIER + inc` always produces the
+/// same result. This is a tautology in mathematics but explicitly verified
+/// here to document the determinism requirement.
+///
+/// # Relationship to Production Code
+///
+/// This models behavior in:
+/// - `src/rng.rs` - `Pcg32` struct and its `next()` method
+/// - Used throughout game simulation for deterministic random events
+///
+/// Production code:
+/// ```ignore
+/// impl Pcg32 {
+///     pub fn next(&mut self) -> u32 {
+///         let old_state = self.state;
+///         // State transition - deterministic given state and inc
+///         self.state = old_state
+///             .wrapping_mul(PCG_MULTIPLIER)
+///             .wrapping_add(self.inc);
+///         // Output function (XSH-RR)
+///         // ...
+///     }
+/// }
+/// ```
+///
+/// # Limitations
+///
+/// - Uses Z3 arbitrary precision integers, not wrapping u64 arithmetic
+/// - Does not verify the output function (XSH-RR permutation)
+/// - Does not verify statistical properties of the output
+/// - See property tests for runtime verification of RNG quality
 #[test]
 fn z3_proof_pcg32_state_transition_deterministic() {
     let cfg = Config::new();

@@ -71,25 +71,19 @@ fn test_advance_frame_with_rollbacks() -> Result<(), FortressError> {
     Ok(())
 }
 
+/// Tests frame advancement with input delay using the generic helper.
+///
+/// Uses the generic `run_synctest_with_delayed_input` helper to avoid duplication.
 #[test]
 fn test_advance_frames_with_delayed_input() -> Result<(), FortressError> {
-    let check_distance = 7;
-    let mut stub = GameStub::new();
-    let mut sess = SessionBuilder::new()
-        .with_check_distance(check_distance)
-        .with_input_delay(2)
-        .unwrap()
-        .start_synctest_session()?;
+    use crate::common::run_synctest_with_delayed_input;
 
-    for i in 0..200 {
-        sess.add_local_input(PlayerHandle::new(0), StubInput { inp: i })?;
-        sess.add_local_input(PlayerHandle::new(1), StubInput { inp: i })?;
-        let requests = sess.advance_frame()?;
-        stub.handle_requests(requests);
-        assert_eq!(stub.gs.frame, i as i32 + 1); // frame should have advanced
-    }
-
-    Ok(())
+    run_synctest_with_delayed_input::<StubConfig, GameStub>(
+        7, // check_distance
+        2, // input_delay
+        |i| StubInput { inp: i },
+        200, // num_frames
+    )
 }
 
 #[test]

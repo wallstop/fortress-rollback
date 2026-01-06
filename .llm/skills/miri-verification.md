@@ -313,25 +313,65 @@ let ptr = std::ptr::without_provenance::<u64>(addr);
 
 ## CI Integration
 
-### GitHub Actions Example
+### GitHub Actions Example (Cross-Platform)
+
+**Miri tests should run cross-platform** because undefined behavior detection can catch platform-specific issues like memory layout differences, alignment requirements, pointer sizes, and endianness.
 
 ```yaml
 miri:
-  name: "Miri UB Check"
-  runs-on: ubuntu-latest
+  name: Miri UB Check (${{ matrix.os }})
+  runs-on: ${{ matrix.os }}
+  timeout-minutes: 30
+  strategy:
+    fail-fast: false  # Run all platforms even if one fails
+    matrix:
+      os: [ubuntu-latest, windows-latest, macos-latest]
+
   steps:
     - uses: actions/checkout@v4
 
-    - name: Install Miri
-      run: |
-        rustup toolchain install nightly --component miri
-        rustup override set nightly
-        cargo miri setup
+    - name: Install nightly with Miri
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: nightly
+        components: miri
+
+    - name: Cache cargo registry and build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: miri-${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          miri-${{ matrix.os }}-cargo-
+
+    - name: Setup Miri
+      run: cargo miri setup
 
     - name: Run Miri tests
       run: cargo miri test --lib
       env:
         MIRIFLAGS: "-Zmiri-disable-isolation"
+```
+
+### Why Cross-Platform Miri Testing?
+
+| Platform | Potential Differences |
+|----------|----------------------|
+| **Linux** | Specific pointer sizes, alignment rules |
+| **macOS** | Different allocation patterns, alignment |
+| **Windows** | Different ABI, calling conventions |
+
+Additionally, Miri supports cross-target testing even on a single platform:
+
+```bash
+# Test big-endian behavior (from any host)
+cargo miri test --target s390x-unknown-linux-gnu
+
+# Test 32-bit behavior
+cargo miri test --target i686-unknown-linux-gnu
 ```
 
 ### Advanced CI with Multiple Seeds

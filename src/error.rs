@@ -1,8 +1,411 @@
+//! Error types for Fortress Rollback.
+//!
+//! This module provides structured error types for the rollback networking library.
+//! The error types are designed to be:
+//!
+//! - **Zero-allocation on hot paths**: Errors store numeric data directly instead
+//!   of formatting strings, enabling allocation-free error construction.
+//! - **Programmatically inspectable**: Using enums and structured fields instead
+//!   of string messages allows callers to match on specific error cases.
+//! - **Self-documenting**: Each error variant and field is documented.
+//!
+//! # Error Type Design
+//!
+//! ## Dual Variant Pattern
+//!
+//! Some error variants exist in both unstructured (legacy) and structured forms:
+//!
+//! - `InvalidFrame` (unstructured) vs `InvalidFrameStructured` (structured)
+//! - `InternalError` (unstructured) vs `InternalErrorStructured` (structured)
+//!
+//! This pattern exists for backward compatibility. The unstructured variants
+//! accept string messages and are used by legacy code. The structured variants
+//! use zero-allocation enums and provide better error inspection.
+//!
+//! **Migration path:** New code should use structured variants. Unstructured
+//! variants are deprecated but retained for API stability. A future major version
+//! may remove the unstructured variants.
+//!
+//! ## Structured Error Types
+//!
+//! - [`IndexOutOfBounds`]: Index/bounds error with collection name and indices.
+//! - [`InvalidFrameReason`]: Why a frame was invalid (null, negative, out of window).
+//! - [`InternalErrorKind`]: Specific internal error types with structured context.
+//! - [`RleDecodeReason`]: Why RLE decoding failed.
+//!
+//! ## Module-Specific Error Types
+//!
+//! Other modules provide their own structured error types:
+//!
+//! - [`crate::network::compression::CompressionError`]: RLE and delta decode errors.
+//! - [`crate::network::codec::CodecError`]: Serialization/deserialization errors.
+//! - [`crate::checksum::ChecksumError`]: Checksum computation errors.
+//!
+//! # Usage Examples
+//!
+//! ## Creating structured errors (preferred)
+//!
+//! ```
+//! use fortress_rollback::{FortressError, InternalErrorKind, IndexOutOfBounds};
+//!
+//! // Create a structured index out of bounds error
+//! let error = FortressError::InternalErrorStructured {
+//!     kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+//!         name: "inputs",
+//!         index: 10,
+//!         length: 5,
+//!     }),
+//! };
+//! ```
+//!
+//! ## Matching on error variants
+//!
+//! ```
+//! use fortress_rollback::{FortressError, InvalidFrameReason};
+//!
+//! fn handle_error(err: FortressError) {
+//!     match err {
+//!         FortressError::InvalidFrameStructured { frame, reason } => {
+//!             match reason {
+//!                 InvalidFrameReason::NullFrame => {
+//!                     println!("Frame {} is NULL", frame.as_i32());
+//!                 }
+//!                 InvalidFrameReason::OutsidePredictionWindow { max_prediction, .. } => {
+//!                     println!("Frame {} outside {} frame prediction window",
+//!                              frame.as_i32(), max_prediction);
+//!                 }
+//!                 _ => {}
+//!             }
+//!         }
+//!         _ => {}
+//!     }
+//! }
+//! ```
+
 use std::error::Error;
 use std::fmt;
 use std::fmt::Display;
 
 use crate::{Frame, PlayerHandle};
+
+// =============================================================================
+// Structured Error Types for Hot Path
+// =============================================================================
+// These types store debugging data as fields (cheap - no allocation) and format
+// lazily in Display impl (only when error is displayed - cold path).
+
+/// Represents an index out of bounds error with full context.
+///
+/// This structured type stores all debugging information without allocation,
+/// and formats the message lazily in the `Display` implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IndexOutOfBounds {
+    /// The name of the collection that was accessed.
+    pub name: &'static str,
+    /// The index that was attempted.
+    pub index: usize,
+    /// The length of the collection.
+    pub length: usize,
+}
+
+impl Display for IndexOutOfBounds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} index {} out of bounds (length: {})",
+            self.name, self.index, self.length
+        )
+    }
+}
+
+/// Represents why a frame was invalid.
+///
+/// Using an enum instead of String allows for zero-allocation error construction
+/// on hot paths while still providing detailed error messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum InvalidFrameReason {
+    /// Frame is NULL_FRAME (-1).
+    NullFrame,
+    /// Frame is negative (other than NULL_FRAME).
+    Negative,
+    /// Frame must be non-negative.
+    MustBeNonNegative,
+    /// Frame is not in the past (must load a frame before current).
+    NotInPast {
+        /// The current frame.
+        current_frame: Frame,
+    },
+    /// Frame is outside the prediction window.
+    OutsidePredictionWindow {
+        /// The current frame.
+        current_frame: Frame,
+        /// The maximum prediction depth.
+        max_prediction: usize,
+    },
+    /// The saved state for this frame has the wrong frame number.
+    WrongSavedFrame {
+        /// The frame number in the saved state.
+        saved_frame: Frame,
+    },
+    /// Frame is not confirmed yet.
+    NotConfirmed {
+        /// The highest confirmed frame.
+        confirmed_frame: Frame,
+    },
+    /// Frame is NULL or negative (general validation).
+    NullOrNegative,
+    /// Custom reason (fallback for API compatibility).
+    Custom(&'static str),
+}
+
+impl Display for InvalidFrameReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NullFrame => write!(f, "cannot load NULL_FRAME"),
+            Self::Negative => write!(f, "frame is negative"),
+            Self::MustBeNonNegative => write!(f, "frame must be non-negative"),
+            Self::NotInPast { current_frame } => {
+                write!(
+                    f,
+                    "must load frame in the past (current: {})",
+                    current_frame
+                )
+            },
+            Self::OutsidePredictionWindow {
+                current_frame,
+                max_prediction,
+            } => {
+                write!(
+                    f,
+                    "cannot load frame outside of prediction window (current: {}, max_prediction: {})",
+                    current_frame, max_prediction
+                )
+            },
+            Self::WrongSavedFrame { saved_frame } => {
+                write!(f, "saved state has wrong frame (found: {})", saved_frame)
+            },
+            Self::NotConfirmed { confirmed_frame } => {
+                write!(
+                    f,
+                    "frame is not confirmed yet (confirmed_frame: {})",
+                    confirmed_frame
+                )
+            },
+            Self::NullOrNegative => write!(f, "frame is NULL or negative"),
+            Self::Custom(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+/// Represents why an RLE decode operation failed.
+///
+/// Using an enum instead of String allows for zero-allocation error construction
+/// on hot paths while still providing detailed error messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RleDecodeReason {
+    /// The bitfield index was out of bounds during decode.
+    BitfieldIndexOutOfBounds,
+    /// The destination slice was out of bounds during decode.
+    DestinationSliceOutOfBounds,
+    /// The source slice was out of bounds during decode.
+    SourceSliceOutOfBounds,
+    /// The encoded data was truncated (offset exceeded buffer length).
+    TruncatedData {
+        /// The offset that was reached.
+        offset: usize,
+        /// The buffer length.
+        buffer_len: usize,
+    },
+}
+
+impl Display for RleDecodeReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BitfieldIndexOutOfBounds => {
+                write!(f, "bitfield index out of bounds")
+            },
+            Self::DestinationSliceOutOfBounds => {
+                write!(f, "destination slice out of bounds")
+            },
+            Self::SourceSliceOutOfBounds => {
+                write!(f, "source slice out of bounds")
+            },
+            Self::TruncatedData { offset, buffer_len } => {
+                write!(
+                    f,
+                    "truncated data: offset {} exceeds buffer length {}",
+                    offset, buffer_len
+                )
+            },
+        }
+    }
+}
+
+/// Represents why a delta decode operation failed.
+///
+/// Using an enum instead of String allows for zero-allocation error construction
+/// and programmatic error inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DeltaDecodeReason {
+    /// The reference bytes were empty.
+    EmptyReference,
+    /// The data length is not a multiple of the reference length.
+    DataLengthMismatch {
+        /// The length of the data buffer.
+        data_len: usize,
+        /// The length of the reference buffer.
+        reference_len: usize,
+    },
+    /// The reference bytes index was out of bounds.
+    ReferenceIndexOutOfBounds {
+        /// The index that was out of bounds.
+        index: usize,
+        /// The length of the reference buffer.
+        length: usize,
+    },
+    /// The data index was out of bounds.
+    DataIndexOutOfBounds {
+        /// The index that was out of bounds.
+        index: usize,
+        /// The length of the data buffer.
+        length: usize,
+    },
+}
+
+impl Display for DeltaDecodeReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyReference => write!(f, "reference bytes is empty"),
+            Self::DataLengthMismatch {
+                data_len,
+                reference_len,
+            } => {
+                write!(
+                    f,
+                    "data length {} is not a multiple of reference length {}",
+                    data_len, reference_len
+                )
+            },
+            Self::ReferenceIndexOutOfBounds { index, length } => {
+                write!(
+                    f,
+                    "reference bytes index {} out of bounds (length: {})",
+                    index, length
+                )
+            },
+            Self::DataIndexOutOfBounds { index, length } => {
+                write!(f, "data index {} out of bounds (length: {})", index, length)
+            },
+        }
+    }
+}
+
+/// Specific internal error kinds with structured data.
+///
+/// Using an enum instead of String allows for zero-allocation error construction
+/// on hot paths while preserving full debugging context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum InternalErrorKind {
+    /// An index was out of bounds.
+    IndexOutOfBounds(IndexOutOfBounds),
+    /// Failed to get synchronized inputs.
+    SynchronizedInputsFailed {
+        /// The frame at which inputs were requested.
+        frame: Frame,
+    },
+    /// Player inputs vector is empty.
+    EmptyPlayerInputs,
+    /// Buffer index out of bounds (generic).
+    BufferIndexOutOfBounds,
+    /// Player handle not found when checking disconnect status.
+    DisconnectStatusNotFound {
+        /// The player handle that was not found.
+        player_handle: PlayerHandle,
+    },
+    /// Endpoint not found for a registered remote player.
+    EndpointNotFoundForRemote {
+        /// The player handle for which the endpoint was not found.
+        player_handle: PlayerHandle,
+    },
+    /// Endpoint not found for a registered spectator.
+    EndpointNotFoundForSpectator {
+        /// The player handle for which the endpoint was not found.
+        player_handle: PlayerHandle,
+    },
+    /// Connection status index out of bounds when updating local connection status.
+    ConnectionStatusIndexOutOfBounds {
+        /// The player handle that was out of bounds.
+        player_handle: PlayerHandle,
+    },
+    /// RLE decode operation failed.
+    RleDecodeError {
+        /// The specific reason for the RLE decode failure.
+        reason: RleDecodeReason,
+    },
+    /// Delta decode operation failed.
+    DeltaDecodeError {
+        /// The specific reason for the delta decode failure.
+        reason: DeltaDecodeReason,
+    },
+    /// Custom error (fallback for API compatibility).
+    Custom(&'static str),
+}
+
+impl Display for InternalErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IndexOutOfBounds(iob) => write!(f, "{}", iob),
+            Self::SynchronizedInputsFailed { frame } => {
+                write!(f, "failed to get synchronized inputs for frame {}", frame)
+            },
+            Self::EmptyPlayerInputs => write!(f, "player inputs vector is empty"),
+            Self::BufferIndexOutOfBounds => write!(f, "buffer index out of bounds"),
+            Self::DisconnectStatusNotFound { player_handle } => {
+                write!(
+                    f,
+                    "disconnect status not found for player handle {}",
+                    player_handle
+                )
+            },
+            Self::EndpointNotFoundForRemote { player_handle } => {
+                write!(
+                    f,
+                    "endpoint not found for registered remote player {}",
+                    player_handle
+                )
+            },
+            Self::EndpointNotFoundForSpectator { player_handle } => {
+                write!(
+                    f,
+                    "endpoint not found for registered spectator {}",
+                    player_handle
+                )
+            },
+            Self::ConnectionStatusIndexOutOfBounds { player_handle } => {
+                write!(
+                    f,
+                    "connection status index out of bounds for player handle {}",
+                    player_handle
+                )
+            },
+            Self::RleDecodeError { reason } => {
+                write!(f, "RLE decode failed: {}", reason)
+            },
+            Self::DeltaDecodeError { reason } => {
+                write!(f, "delta decode failed: {}", reason)
+            },
+            Self::Custom(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+// =============================================================================
+// Main Error Enum
+// =============================================================================
 
 /// This enum contains all error messages this library can return. Most API functions will generally return a [`Result<(), FortressError>`].
 ///
@@ -47,8 +450,18 @@ pub enum FortressError {
     InvalidFrame {
         /// The frame that was invalid.
         frame: Frame,
-        /// A description of why the frame was invalid.
+        /// A description of why the frame was invalid (legacy String variant).
         reason: String,
+    },
+    /// An invalid frame number was provided, with structured reason (zero-allocation on hot path).
+    ///
+    /// This variant is preferred over `InvalidFrame` on hot paths as it avoids
+    /// allocating a String for the reason.
+    InvalidFrameStructured {
+        /// The frame that was invalid.
+        frame: Frame,
+        /// The structured reason why the frame was invalid.
+        reason: InvalidFrameReason,
     },
     /// An invalid player handle was provided. Player handles must be less than the number of players.
     InvalidPlayerHandle {
@@ -74,6 +487,14 @@ pub enum FortressError {
     InternalError {
         /// A description of the internal error.
         context: String,
+    },
+    /// An internal error with structured data (zero-allocation on hot path).
+    ///
+    /// This variant is preferred over `InternalError` on hot paths as it avoids
+    /// allocating a String for the context.
+    InternalErrorStructured {
+        /// The structured kind of internal error.
+        kind: InternalErrorKind,
     },
     /// A network socket operation failed.
     SocketError {
@@ -119,6 +540,9 @@ impl Display for FortressError {
             Self::InvalidFrame { frame, reason } => {
                 write!(f, "Invalid frame {}: {}", frame, reason)
             },
+            Self::InvalidFrameStructured { frame, reason } => {
+                write!(f, "Invalid frame {}: {}", frame, reason)
+            },
             Self::InvalidPlayerHandle { handle, max_handle } => {
                 write!(
                     f,
@@ -141,6 +565,9 @@ impl Display for FortressError {
             },
             Self::InternalError { context } => {
                 write!(f, "Internal error (please report as bug): {}", context)
+            },
+            Self::InternalErrorStructured { kind } => {
+                write!(f, "Internal error (please report as bug): {}", kind)
             },
             Self::SocketError { context } => {
                 write!(f, "Socket error: {}", context)
@@ -319,5 +746,236 @@ mod tests {
         let err: Box<dyn Error> = Box::new(FortressError::NotSynchronized);
         // This test verifies that FortressError implements std::error::Error
         assert!(err.source().is_none());
+    }
+
+    // =========================================================================
+    // Structured Error Type Tests
+    // =========================================================================
+
+    #[test]
+    fn test_index_out_of_bounds_display() {
+        let err = IndexOutOfBounds {
+            name: "input_queues",
+            index: 5,
+            length: 3,
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("input_queues"));
+        assert!(display.contains('5'));
+        assert!(display.contains('3'));
+        assert!(display.contains("out of bounds"));
+    }
+
+    #[test]
+    fn test_invalid_frame_reason_null_frame() {
+        let reason = InvalidFrameReason::NullFrame;
+        let display = format!("{}", reason);
+        assert!(display.contains("NULL_FRAME"));
+    }
+
+    #[test]
+    fn test_invalid_frame_reason_not_in_past() {
+        let reason = InvalidFrameReason::NotInPast {
+            current_frame: Frame::new(10),
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("past"));
+        assert!(display.contains("10"));
+    }
+
+    #[test]
+    fn test_invalid_frame_reason_outside_prediction_window() {
+        let reason = InvalidFrameReason::OutsidePredictionWindow {
+            current_frame: Frame::new(100),
+            max_prediction: 8,
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("prediction window"));
+        assert!(display.contains("100"));
+        assert!(display.contains('8'));
+    }
+
+    #[test]
+    fn test_invalid_frame_reason_wrong_saved_frame() {
+        let reason = InvalidFrameReason::WrongSavedFrame {
+            saved_frame: Frame::new(42),
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("wrong frame"));
+        assert!(display.contains("42"));
+    }
+
+    #[test]
+    fn test_invalid_frame_reason_not_confirmed() {
+        let reason = InvalidFrameReason::NotConfirmed {
+            confirmed_frame: Frame::new(50),
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("not confirmed"));
+        assert!(display.contains("50"));
+    }
+
+    #[test]
+    fn test_internal_error_kind_index_out_of_bounds() {
+        let kind = InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+            name: "states",
+            index: 10,
+            length: 5,
+        });
+        let display = format!("{}", kind);
+        assert!(display.contains("states"));
+        assert!(display.contains("10"));
+        assert!(display.contains('5'));
+    }
+
+    #[test]
+    fn test_internal_error_kind_synchronized_inputs_failed() {
+        let kind = InternalErrorKind::SynchronizedInputsFailed {
+            frame: Frame::new(25),
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("synchronized inputs"));
+        assert!(display.contains("25"));
+    }
+
+    #[test]
+    fn test_internal_error_kind_empty_player_inputs() {
+        let kind = InternalErrorKind::EmptyPlayerInputs;
+        let display = format!("{}", kind);
+        assert!(display.contains("empty"));
+    }
+
+    #[test]
+    fn test_invalid_frame_structured_display() {
+        let err = FortressError::InvalidFrameStructured {
+            frame: Frame::new(42),
+            reason: InvalidFrameReason::NullFrame,
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Invalid frame"));
+        assert!(display.contains("42"));
+        assert!(display.contains("NULL_FRAME"));
+    }
+
+    #[test]
+    fn test_internal_error_structured_display() {
+        let err = FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::BufferIndexOutOfBounds,
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Internal error"));
+        assert!(display.contains("buffer index out of bounds"));
+    }
+
+    #[test]
+    fn test_internal_error_kind_disconnect_status_not_found() {
+        let kind = InternalErrorKind::DisconnectStatusNotFound {
+            player_handle: PlayerHandle(3),
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("disconnect status"));
+        assert!(display.contains("player handle 3"));
+    }
+
+    #[test]
+    fn test_internal_error_kind_endpoint_not_found_for_remote() {
+        let kind = InternalErrorKind::EndpointNotFoundForRemote {
+            player_handle: PlayerHandle(5),
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("endpoint not found"));
+        assert!(display.contains("remote player 5"));
+    }
+
+    #[test]
+    fn test_internal_error_kind_endpoint_not_found_for_spectator() {
+        let kind = InternalErrorKind::EndpointNotFoundForSpectator {
+            player_handle: PlayerHandle(7),
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("endpoint not found"));
+        assert!(display.contains("spectator 7"));
+    }
+
+    #[test]
+    fn test_structured_errors_are_copy() {
+        // Verify that structured error types are Copy (important for hot path)
+        let iob = IndexOutOfBounds {
+            name: "test",
+            index: 1,
+            length: 2,
+        };
+        let iob2 = iob; // Copy
+        assert_eq!(iob, iob2);
+
+        let reason = InvalidFrameReason::NullFrame;
+        let reason2 = reason; // Copy
+        assert_eq!(reason, reason2);
+
+        let kind = InternalErrorKind::EmptyPlayerInputs;
+        let kind2 = kind; // Copy
+        assert_eq!(kind, kind2);
+    }
+
+    // =========================================================================
+    // RLE Decode Reason Tests
+    // =========================================================================
+
+    #[test]
+    fn test_rle_decode_reason_bitfield_index_out_of_bounds() {
+        let reason = RleDecodeReason::BitfieldIndexOutOfBounds;
+        let display = format!("{}", reason);
+        assert!(display.contains("bitfield index out of bounds"));
+    }
+
+    #[test]
+    fn test_rle_decode_reason_destination_slice_out_of_bounds() {
+        let reason = RleDecodeReason::DestinationSliceOutOfBounds;
+        let display = format!("{}", reason);
+        assert!(display.contains("destination slice out of bounds"));
+    }
+
+    #[test]
+    fn test_rle_decode_reason_source_slice_out_of_bounds() {
+        let reason = RleDecodeReason::SourceSliceOutOfBounds;
+        let display = format!("{}", reason);
+        assert!(display.contains("source slice out of bounds"));
+    }
+
+    #[test]
+    fn test_rle_decode_reason_truncated_data() {
+        let reason = RleDecodeReason::TruncatedData {
+            offset: 100,
+            buffer_len: 50,
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("truncated data"));
+        assert!(display.contains("100"));
+        assert!(display.contains("50"));
+    }
+
+    #[test]
+    fn test_internal_error_kind_rle_decode_error() {
+        let kind = InternalErrorKind::RleDecodeError {
+            reason: RleDecodeReason::BitfieldIndexOutOfBounds,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("RLE decode failed"));
+        assert!(display.contains("bitfield index out of bounds"));
+    }
+
+    #[test]
+    fn test_rle_decode_reason_is_copy() {
+        // Verify RleDecodeReason is Copy (important for hot path)
+        let reason = RleDecodeReason::BitfieldIndexOutOfBounds;
+        let reason2 = reason; // Copy
+        assert_eq!(reason, reason2);
+
+        let reason_with_data = RleDecodeReason::TruncatedData {
+            offset: 10,
+            buffer_len: 5,
+        };
+        let reason_with_data2 = reason_with_data; // Copy
+        assert_eq!(reason_with_data, reason_with_data2);
     }
 }

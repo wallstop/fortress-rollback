@@ -43,6 +43,8 @@ SPECS=(
     "InputQueue"
     "Concurrency"
     "Rollback"
+    "TimeSync"
+    "SpectatorSession"
 )
 
 # Track results

@@ -145,7 +145,11 @@ fn test_frame_advancement_pattern() {
 
         // Final state should be consistent
         let loaded = cell.load();
-        assert!(loaded.is_some(), "Cell should have data after saves");
+        assert!(
+            loaded == Some(10) || loaded == Some(20),
+            "Cell should contain either 10 or 20, got {:?}",
+            loaded
+        );
     });
 }
 

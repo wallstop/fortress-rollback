@@ -215,6 +215,7 @@ mod tests {
     // Helper function to wait for messages with retry logic
     // This is necessary because UDP packet delivery timing can vary across platforms
     #[cfg(not(miri))]
+    #[track_caller]
     fn wait_for_messages(
         socket: &mut UdpNonBlockingSocket,
         expected_count: usize,
@@ -237,6 +238,7 @@ mod tests {
     // but on Windows (and some other platforms), you cannot send to 0.0.0.0 - you
     // must send to 127.0.0.1 for loopback communication to work correctly.
     #[cfg(not(miri))]
+    #[track_caller]
     fn to_loopback_addr(socket: &UdpNonBlockingSocket) -> SocketAddr {
         let local = socket.socket.local_addr().unwrap();
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local.port())
@@ -246,8 +248,7 @@ mod tests {
     #[cfg(not(miri))] // Miri cannot execute foreign functions like socket()
     fn test_udp_socket_bind_to_port() {
         // Bind to port 0 to let OS assign an available port
-        let socket = UdpNonBlockingSocket::bind_to_port(0);
-        assert!(socket.is_ok());
+        UdpNonBlockingSocket::bind_to_port(0).unwrap();
     }
 
     #[test]
