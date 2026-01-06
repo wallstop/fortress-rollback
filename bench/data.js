@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1767048386268,
+  "lastUpdate": 1767676053105,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "80025388f7e4932a8f6d1fd3971ff13a7f6b74cb",
-          "message": "CI/CD cleanup, add llms.txt, add depndabot (#5)",
-          "timestamp": "2025-12-18T18:41:37-08:00",
-          "tree_id": "4ee6554727615a22708a67d25efa3aaff301a3a4",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/80025388f7e4932a8f6d1fd3971ff13a7f6b74cb"
-        },
-        "date": 1766112388314,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 97,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 144,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 695,
-            "range": "± 20",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 1004,
-            "range": "± 19",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1452,
-            "range": "± 22",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 115,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 23,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 11,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 2,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1554,
             "range": "± 88",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b43925ca0463aee2ee09585186b4d39d6875b2b2",
+          "message": "chore(deps): bump tokio from 1.48.0 to 1.49.0 (#59)\n\nBumps [tokio](https://github.com/tokio-rs/tokio) from 1.48.0 to 1.49.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/tokio-rs/tokio/releases\">tokio's\nreleases</a>.</em></p>\n<blockquote>\n<h2>Tokio v1.49.0</h2>\n<h1>1.49.0 (January 3rd, 2026)</h1>\n<h3>Added</h3>\n<ul>\n<li>net: add support for <code>TCLASS</code> option on IPv6 (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7781\">#7781</a>)</li>\n<li>runtime: stabilize <code>runtime::id::Id</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7125\">#7125</a>)</li>\n<li>task: implement <code>Extend</code> for <code>JoinSet</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7195\">#7195</a>)</li>\n<li>task: stabilize the <code>LocalSet::id()</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7776\">#7776</a>)</li>\n</ul>\n<h3>Changed</h3>\n<ul>\n<li>net: deprecate <code>{TcpStream,TcpSocket}::set_linger</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7752\">#7752</a>)</li>\n</ul>\n<h3>Fixed</h3>\n<ul>\n<li>macros: fix the hygiene issue of <code>join!</code> and\n<code>try_join!</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7766\">#7766</a>)</li>\n<li>runtime: revert &quot;replace manual vtable definitions with\nWake&quot; (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7699\">#7699</a>)</li>\n<li>sync: return <code>TryRecvError::Disconnected</code> from\n<code>Receiver::try_recv</code> after <code>Receiver::close</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7686\">#7686</a>)</li>\n<li>task: remove unnecessary trait bounds on the <code>Debug</code>\nimplementation (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7720\">#7720</a>)</li>\n</ul>\n<h3>Unstable</h3>\n<ul>\n<li>fs: handle <code>EINTR</code> in <code>fs::write</code> for io-uring\n(<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7786\">#7786</a>)</li>\n<li>fs: support io-uring with <code>tokio::fs::read</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7696\">#7696</a>)</li>\n<li>runtime: disable io-uring on <code>EPERM</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7724\">#7724</a>)</li>\n<li>time: add alternative timer for better multicore scalability (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7467\">#7467</a>)</li>\n</ul>\n<h3>Documented</h3>\n<ul>\n<li>docs: fix a typos in <code>bounded.rs</code> and\n<code>park.rs</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7817\">#7817</a>)</li>\n<li>io: add <code>SyncIoBridge</code> cross-references to\n<code>copy</code> and <code>copy_buf</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7798\">#7798</a>)</li>\n<li>io: doc that <code>AsyncWrite</code> does not inherit from\n<code>std::io::Write</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7705\">#7705</a>)</li>\n<li>metrics: clarify that <code>num_alive_tasks</code> is not strongly\nconsistent (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7614\">#7614</a>)</li>\n<li>net: clarify the cancellation safety of the\n<code>TcpStream::peek</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7305\">#7305</a>)</li>\n<li>net: clarify the drop behavior of <code>unix::OwnedWriteHalf</code>\n(<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7742\">#7742</a>)</li>\n<li>net: clarify the platform-dependent backlog in\n<code>TcpSocket</code> docs (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7738\">#7738</a>)</li>\n<li>runtime: mention <code>LocalRuntime</code> in\n<code>new_current_thread</code> docs (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7820\">#7820</a>)</li>\n<li>sync: add missing period to <code>mpsc::Sender::try_send</code> docs\n(<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7721\">#7721</a>)</li>\n<li>sync: clarify the cancellation safety of\n<code>oneshot::Receiver</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7780\">#7780</a>)</li>\n<li>sync: improve the docs for the <code>errors</code> of mpsc (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7722\">#7722</a>)</li>\n<li>task: add example for <code>spawn_local</code> usage on local\nruntime (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7689\">#7689</a>)</li>\n</ul>\n<p><a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7125\">#7125</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7125\">tokio-rs/tokio#7125</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7195\">#7195</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7195\">tokio-rs/tokio#7195</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7305\">#7305</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7305\">tokio-rs/tokio#7305</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7467\">#7467</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7467\">tokio-rs/tokio#7467</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7614\">#7614</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7614\">tokio-rs/tokio#7614</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7686\">#7686</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7686\">tokio-rs/tokio#7686</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7689\">#7689</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7689\">tokio-rs/tokio#7689</a></p>\n<!-- raw HTML omitted -->\n</blockquote>\n<p>... (truncated)</p>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/e3b89bbefa7564e2eba2fb9f849ef7bf87d60fad\"><code>e3b89bb</code></a>\nchore: prepare Tokio v1.49.0 (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7824\">#7824</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/4f577b84e939c8d427d79fdc73919842d8735de2\"><code>4f577b8</code></a>\nMerge 'tokio-1.47.3' into 'master'</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/f320197693ee09e28f1fca0e55418081adcdfc25\"><code>f320197</code></a>\nchore: prepare Tokio v1.47.3 (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7823\">#7823</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/ea6b144cd1042d6841a7830b18f2df77c3db904b\"><code>ea6b144</code></a>\nci: freeze rustc on nightly-2025-01-25 in <code>netlify.toml</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7652\">#7652</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/264e703296bccd6783a438815d91055d4517099b\"><code>264e703</code></a>\nMerge <code>tokio-1.43.4</code> into <code>tokio-1.47.x</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7822\">#7822</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/dfb0f00838ca1986dee04a54a6299d35b0a4072c\"><code>dfb0f00</code></a>\nchore: prepare Tokio v1.43.4 (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7821\">#7821</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/4a91f197b03dc335010fffcf0e0c14e1f4011b42\"><code>4a91f19</code></a>\nci: fix wasm32-wasip1 tests (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7788\">#7788</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/601c383ab6def5a6d2f95a434c95a97b65059628\"><code>601c383</code></a>\nci: upgrade FreeBSD from 14.2 to 14.3 (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7758\">#7758</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/484cb52d8d21cb8156decbeba9569651fcc09d0d\"><code>484cb52</code></a>\nsync: return <code>TryRecvError::Disconnected</code> from\n<code>Receiver::try_recv</code> after `Re...</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/16f20c34ed9bc11eb1e7cdec441ab844b198d2cd\"><code>16f20c3</code></a>\nrt: mention <code>LocalRuntime</code> in <code>new_current_thread</code>\ndocs (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7820\">#7820</a>)</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/tokio-rs/tokio/compare/tokio-1.48.0...tokio-1.49.0\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=tokio&package-manager=cargo&previous-version=1.48.0&new-version=1.49.0)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot merge` will merge this PR after your CI passes on it\n- `@dependabot squash and merge` will squash and merge this PR after\nyour CI passes on it\n- `@dependabot cancel merge` will cancel a previously requested merge\nand block automerging\n- `@dependabot reopen` will reopen this PR if it is closed\n- `@dependabot close` will close this PR and stop Dependabot recreating\nit. You can achieve the same result by closing it manually\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-01-05T21:02:36-08:00",
+          "tree_id": "cd88d8276ec084a9f2c37c18da76034754a5e174",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/b43925ca0463aee2ee09585186b4d39d6875b2b2"
+        },
+        "date": 1767676052630,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 87,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 131,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 628,
+            "range": "± 16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 910,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1356,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 96738,
+            "range": "± 348",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 24302,
+            "range": "± 402",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 867,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 868,
+            "range": "± 1",
             "unit": "ns/iter"
           },
           {
