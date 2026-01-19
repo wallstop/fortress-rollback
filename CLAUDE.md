@@ -18,10 +18,10 @@ Key requirements:
 **ALWAYS run before committing ANY changes:**
 
 ```bash
-# Rust code
-cargo fmt && cargo clippy --all-targets && cargo nextest run
+# Rust code (always capture output so failures are visible)
+cargo fmt && cargo clippy --all-targets && cargo nextest run --no-capture
 
-# Or use the convenient aliases defined in .cargo/config.toml
+# Or use the convenient aliases defined in .cargo/config.toml (includes --no-capture)
 cargo c && cargo t
 
 # Documentation changes (rustdoc comments)
@@ -35,6 +35,8 @@ actionlint
 ```
 
 **Run linters after EVERY change, not just before committing.** This catches errors immediately while context is fresh.
+
+**Always use `--no-capture`** (nextest) or `-- --nocapture` (cargo test) so that test output is visible immediately when failures occur. This avoids having to re-run tests to see what went wrong.
 
 ## Kani Formal Verification
 

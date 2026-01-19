@@ -21,7 +21,7 @@ use std::{fmt::Debug, hash::Hash};
 
 pub use error::{
     DeltaDecodeReason, FortressError, IndexOutOfBounds, InternalErrorKind, InvalidFrameReason,
-    RleDecodeReason,
+    InvalidRequestKind, RleDecodeReason, SerializationErrorKind, SocketErrorKind,
 };
 
 /// A specialized `Result` type for Fortress Rollback operations.

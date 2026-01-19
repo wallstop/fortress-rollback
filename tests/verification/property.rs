@@ -1434,8 +1434,8 @@ proptest! {
 mod p2p_checksum_tests {
     use super::*;
     use fortress_rollback::{
-        DesyncDetection, PlayerHandle, PlayerType, SessionBuilder, SessionState, SyncHealth,
-        UdpNonBlockingSocket,
+        DesyncDetection, FortressError, PlayerHandle, PlayerType, SessionBuilder, SessionState,
+        SyncHealth,
     };
     use serial_test::serial;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -1446,82 +1446,76 @@ mod p2p_checksum_tests {
     }
 
     // Use synchronize_sessions from test_utils to avoid duplicating constants
-    use crate::common::test_utils::{synchronize_sessions, SyncConfig};
+    use crate::common::test_utils::{bind_socket_with_retry, synchronize_sessions, SyncConfig};
 
     /// Property: sync_health returns Pending when desync detection is off
     #[test]
     #[serial]
-    fn test_sync_health_pending_when_detection_off() {
+    fn test_sync_health_pending_when_detection_off() -> Result<(), FortressError> {
         let port1 = get_test_port(0);
         let port2 = get_test_port(1);
         let _addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let socket1 = bind_socket_with_retry(port1)?;
         let sess1 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::Off)
-            .add_player(PlayerType::Local, PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))
-            .unwrap()
-            .start_p2p_session(socket1)
-            .unwrap();
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .start_p2p_session(socket1)?;
 
         // With desync detection off, sync_health should return Pending
         let health = sess1.sync_health(PlayerHandle::new(1));
         assert_eq!(health, Some(SyncHealth::Pending));
+        Ok(())
     }
 
     /// Property: sync_health returns None for local players
     #[test]
     #[serial]
-    fn test_sync_health_none_for_local_player() {
+    fn test_sync_health_none_for_local_player() -> Result<(), FortressError> {
         let port1 = get_test_port(2);
         let port2 = get_test_port(3);
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let socket1 = bind_socket_with_retry(port1)?;
         let sess1 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval: 10 })
-            .add_player(PlayerType::Local, PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))
-            .unwrap()
-            .start_p2p_session(socket1)
-            .unwrap();
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .start_p2p_session(socket1)?;
 
         // sync_health for local player should return None
         let health = sess1.sync_health(PlayerHandle::new(0));
         assert_eq!(health, None);
+        Ok(())
     }
 
     /// Property: sync_health returns None for invalid player handles
     #[test]
     #[serial]
-    fn test_sync_health_none_for_invalid_handle() {
+    fn test_sync_health_none_for_invalid_handle() -> Result<(), FortressError> {
         let port1 = get_test_port(4);
         let port2 = get_test_port(5);
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let socket1 = bind_socket_with_retry(port1)?;
         let sess1 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval: 10 })
-            .add_player(PlayerType::Local, PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))
-            .unwrap()
-            .start_p2p_session(socket1)
-            .unwrap();
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .start_p2p_session(socket1)?;
 
         // sync_health for non-existent player should return None
         let health = sess1.sync_health(PlayerHandle::new(99));
         assert_eq!(health, None);
+        Ok(())
     }
 
     /// Property: is_synchronized returns true when no remote peers exist
     #[test]
     #[serial]
-    fn test_is_synchronized_no_remote_peers() {
+    fn test_is_synchronized_no_remote_peers() -> Result<(), FortressError> {
         // A session with only local players should be synchronized with itself
         // This requires at least 2 players, so we need a remote player
         // Actually, creating a session with only local players isn't a typical use case
@@ -1530,15 +1524,12 @@ mod p2p_checksum_tests {
         let port2 = get_test_port(7);
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let socket1 = bind_socket_with_retry(port1)?;
         let mut sess1 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval: 10 })
-            .add_player(PlayerType::Local, PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))
-            .unwrap()
-            .start_p2p_session(socket1)
-            .unwrap();
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .start_p2p_session(socket1)?;
 
         // Initially, before any checksum exchange, should be pending (not synchronized)
         // The definition of is_synchronized is: all remote peers show InSync
@@ -1546,35 +1537,31 @@ mod p2p_checksum_tests {
         assert!(!sess1.is_synchronized());
 
         // Disconnect the remote player
-        sess1.disconnect_player(PlayerHandle::new(1)).unwrap();
+        sess1.disconnect_player(PlayerHandle::new(1))?;
 
         // With no connected remote peers, should be synchronized
         // (Note: disconnected players may not count as "remote" anymore for sync purposes)
+        Ok(())
     }
 
     /// Property: all_sync_health returns entries for all remote players
     #[test]
     #[serial]
-    fn test_all_sync_health_includes_all_remotes() {
+    fn test_all_sync_health_includes_all_remotes() -> Result<(), FortressError> {
         let port1 = get_test_port(8);
         let port2 = get_test_port(9);
         let port3 = get_test_port(10);
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
         let addr3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port3);
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let socket1 = bind_socket_with_retry(port1)?;
         let sess1 = SessionBuilder::<TestConfig>::new()
-            .with_num_players(3)
-            .unwrap()
+            .with_num_players(3)?
             .with_desync_detection_mode(DesyncDetection::On { interval: 10 })
-            .add_player(PlayerType::Local, PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr3), PlayerHandle::new(2))
-            .unwrap()
-            .start_p2p_session(socket1)
-            .unwrap();
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .add_player(PlayerType::Remote(addr3), PlayerHandle::new(2))?
+            .start_p2p_session(socket1)?;
 
         let all_health = sess1.all_sync_health();
 
@@ -1585,28 +1572,27 @@ mod p2p_checksum_tests {
         let handles: Vec<_> = all_health.iter().map(|(h, _)| *h).collect();
         assert!(handles.contains(&PlayerHandle::new(1)));
         assert!(handles.contains(&PlayerHandle::new(2)));
+        Ok(())
     }
 
     /// Property: last_verified_frame is None before any checksum comparison
     #[test]
     #[serial]
-    fn test_last_verified_frame_initially_none() {
+    fn test_last_verified_frame_initially_none() -> Result<(), FortressError> {
         let port1 = get_test_port(11);
         let port2 = get_test_port(12);
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let socket1 = bind_socket_with_retry(port1)?;
         let sess1 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval: 10 })
-            .add_player(PlayerType::Local, PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))
-            .unwrap()
-            .start_p2p_session(socket1)
-            .unwrap();
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .start_p2p_session(socket1)?;
 
         // Before any frames are processed, last_verified_frame should be None
         assert_eq!(sess1.last_verified_frame(), None);
+        Ok(())
     }
 
     /// Property: Two synchronized sessions reach InSync after exchanging checksums
@@ -1617,7 +1603,7 @@ mod p2p_checksum_tests {
     /// 3. After checksums are compared, sync_health transitions to InSync
     #[test]
     #[serial]
-    fn test_checksum_exchange_reaches_in_sync() {
+    fn test_checksum_exchange_reaches_in_sync() -> Result<(), FortressError> {
         let port1 = get_test_port(13);
         let port2 = get_test_port(14);
         let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
@@ -1626,25 +1612,19 @@ mod p2p_checksum_tests {
         // Use a small interval for faster testing
         let interval = 5;
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let socket1 = bind_socket_with_retry(port1)?;
         let mut sess1 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval })
-            .add_player(PlayerType::Local, PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))
-            .unwrap()
-            .start_p2p_session(socket1)
-            .unwrap();
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .start_p2p_session(socket1)?;
 
-        let socket2 = UdpNonBlockingSocket::bind_to_port(port2).unwrap();
+        let socket2 = bind_socket_with_retry(port2)?;
         let mut sess2 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval })
-            .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Local, PlayerHandle::new(1))
-            .unwrap()
-            .start_p2p_session(socket2)
-            .unwrap();
+            .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+            .add_player(PlayerType::Local, PlayerHandle::new(1))?
+            .start_p2p_session(socket2)?;
 
         // Synchronize sessions first using the helper from test_utils
         synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default())
@@ -1763,5 +1743,6 @@ mod p2p_checksum_tests {
                 panic!("Session 2 generated unexpected DesyncDetected event");
             }
         }
+        Ok(())
     }
 }

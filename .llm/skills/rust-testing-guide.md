@@ -6,24 +6,26 @@
 ## TL;DR — Quick Reference
 
 ```bash
-# Run tests with nextest (12x faster)
-cargo nextest run
+# Run tests with nextest (12x faster) — ALWAYS use --no-capture
+cargo nextest run --no-capture
 
 # Run specific test
-cargo nextest run test_name
+cargo nextest run test_name --no-capture
 
 # Run tests matching pattern
-cargo nextest run -E 'test(parse_) | test(validate_)'
+cargo nextest run -E 'test(parse_) | test(validate_)' --no-capture
 
-# Run with retries for flaky tests
-cargo nextest run --retries 2
+# Run with retries for flaky tests (NOT recommended — fix flakiness instead)
+cargo nextest run --retries 2 --no-capture
 
 # Run doc tests (nextest doesn't support them)
-cargo test --doc
+cargo test --doc -- --nocapture
 
 # Run slow/ignored tests
-cargo test -- --ignored
+cargo test -- --ignored --nocapture
 ```
+
+> **CRITICAL: Always capture test output.** Use `--no-capture` (nextest) or `-- --nocapture` (cargo test) so that failure output is immediately visible without re-running.
 
 **Key Principles:**
 

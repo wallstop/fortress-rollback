@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::error::FortressError;
+use crate::error::{FortressError, InvalidRequestKind};
 use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::report_violation;
@@ -103,9 +103,11 @@ impl<T: Config> SyncTestSession<T> {
         input: T::Input,
     ) -> Result<(), FortressError> {
         if !player_handle.is_valid_player_for(self.num_players) {
-            return Err(FortressError::InvalidRequest {
-                info: "The player handle you provided is not valid.".to_owned(),
-            });
+            return Err(InvalidRequestKind::InvalidLocalPlayerHandle {
+                handle: player_handle,
+                num_players: self.num_players,
+            }
+            .into());
         }
         let player_input = PlayerInput::<T::Input>::new(self.sync_layer.current_frame(), input);
         self.local_inputs.insert(player_handle, player_input);
@@ -151,9 +153,7 @@ impl<T: Config> SyncTestSession<T> {
 
         // we require inputs for all players
         if self.num_players != self.local_inputs.len() {
-            return Err(FortressError::InvalidRequest {
-                info: "Missing local input while calling advance_frame().".to_owned(),
-            });
+            return Err(InvalidRequestKind::MissingLocalInput.into());
         }
         // pass all inputs into the sync layer
         for (&handle, &input) in self.local_inputs.iter() {
@@ -424,12 +424,12 @@ mod tests {
         let result = session.add_local_input(PlayerHandle::new(2), 42);
         assert!(result.is_err());
 
-        match result {
-            Err(FortressError::InvalidRequest { info }) => {
-                assert!(info.contains("not valid"));
-            },
-            _ => panic!("Expected InvalidRequest error"),
-        }
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::InvalidLocalPlayerHandle { .. }
+            })
+        ));
     }
 
     #[test]
@@ -476,12 +476,12 @@ mod tests {
         let result = session.advance_frame();
         assert!(result.is_err());
 
-        match result {
-            Err(FortressError::InvalidRequest { info }) => {
-                assert!(info.contains("Missing local input"));
-            },
-            _ => panic!("Expected InvalidRequest error"),
-        }
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::MissingLocalInput
+            })
+        ));
     }
 
     #[test]
@@ -567,12 +567,12 @@ mod tests {
         let result = session.advance_frame();
         assert!(result.is_err());
 
-        match result {
-            Err(FortressError::InvalidRequest { info }) => {
-                assert!(info.contains("Missing local input"));
-            },
-            _ => panic!("Expected InvalidRequest error"),
-        }
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::MissingLocalInput
+            })
+        ));
     }
 
     // ==========================================

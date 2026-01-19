@@ -438,9 +438,18 @@ jobs:
     #
     # RUSTFLAGS must be cleared because .cargo/config.toml sets "-C link-arg=-fuse-ld=lld"
     # which is incompatible with GCC (GCC doesn't understand the -fuse-ld=lld flag).
+    #
+    # IMPORTANT: We must ALSO override the x86_64 (host) target settings because proc-macro
+    # crates and build scripts compile for the HOST machine, not the cross-compile target.
+    # The .cargo/config.toml specifies `clang` as the linker for x86_64, but clang is NOT
+    # installed in the cross-rs Docker container (where the build runs). Using `cc` works everywhere.
     env:
+      # Target (aarch64) linker settings
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
+      # Host (x86_64) linker settings - required for build scripts and proc-macros
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: cc
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
 
     steps:
       - uses: actions/checkout@v6

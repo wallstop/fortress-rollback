@@ -16,12 +16,12 @@
 
 use crate::common::stubs::{CorruptibleGameStub, GameStub, StubConfig, StubInput};
 use crate::common::{
-    drain_sync_events, poll_with_sleep, synchronize_sessions, PortAllocator, SyncConfig,
-    POLL_INTERVAL,
+    bind_socket_with_retry, drain_sync_events, poll_with_sleep, synchronize_sessions,
+    PortAllocator, SyncConfig, POLL_INTERVAL,
 };
 use fortress_rollback::{
     DesyncDetection, FortressError, FortressEvent, PlayerHandle, PlayerType, SessionBuilder,
-    SessionState, UdpNonBlockingSocket,
+    SessionState,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -32,7 +32,7 @@ use std::time::Instant;
 #[serial]
 fn test_add_more_players() -> Result<(), FortressError> {
     let [port0, port1, port2, port3, port4] = PortAllocator::next_ports::<5>();
-    let socket = UdpNonBlockingSocket::bind_to_port(port0).unwrap();
+    let socket = bind_socket_with_retry(port0)?;
     let remote_addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
     let remote_addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
     let remote_addr3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port3);
@@ -54,7 +54,7 @@ fn test_add_more_players() -> Result<(), FortressError> {
 #[serial]
 fn test_start_session() -> Result<(), FortressError> {
     let [port0, port1, port2] = PortAllocator::next_ports::<3>();
-    let socket = UdpNonBlockingSocket::bind_to_port(port0).unwrap();
+    let socket = bind_socket_with_retry(port0)?;
     let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
     let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
@@ -70,7 +70,7 @@ fn test_start_session() -> Result<(), FortressError> {
 #[serial]
 fn test_disconnect_player() -> Result<(), FortressError> {
     let [port0, port1, port2] = PortAllocator::next_ports::<3>();
-    let socket = UdpNonBlockingSocket::bind_to_port(port0).unwrap();
+    let socket = bind_socket_with_retry(port0)?;
     let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
     let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
@@ -96,13 +96,13 @@ fn test_synchronize_p2p_sessions() -> Result<(), FortressError> {
     let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
     let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+    let socket1 = bind_socket_with_retry(port1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(port2).unwrap();
+    let socket2 = bind_socket_with_retry(port2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -146,14 +146,14 @@ fn test_desyncs_detected() -> Result<(), FortressError> {
     let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
     let desync_mode = DesyncDetection::On { interval: 100 };
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+    let socket1 = bind_socket_with_retry(port1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .with_desync_detection_mode(desync_mode)
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(port2).unwrap();
+    let socket2 = bind_socket_with_retry(port2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -277,7 +277,7 @@ fn test_desyncs_and_input_delay_no_panic() -> Result<(), FortressError> {
     let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
     let desync_mode = DesyncDetection::On { interval: 100 };
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+    let socket1 = bind_socket_with_retry(port1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
@@ -286,7 +286,7 @@ fn test_desyncs_and_input_delay_no_panic() -> Result<(), FortressError> {
         .with_desync_detection_mode(desync_mode)
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(port2).unwrap();
+    let socket2 = bind_socket_with_retry(port2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -339,7 +339,7 @@ fn test_three_player_session() -> Result<(), FortressError> {
     let addr3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port3);
 
     // Player 1: local=0, remote=1,2
-    let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+    let socket1 = bind_socket_with_retry(port1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_num_players(3)
         .unwrap()
@@ -349,7 +349,7 @@ fn test_three_player_session() -> Result<(), FortressError> {
         .start_p2p_session(socket1)?;
 
     // Player 2: local=1, remote=0,2
-    let socket2 = UdpNonBlockingSocket::bind_to_port(port2).unwrap();
+    let socket2 = bind_socket_with_retry(port2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_num_players(3)
         .unwrap()
@@ -359,7 +359,7 @@ fn test_three_player_session() -> Result<(), FortressError> {
         .start_p2p_session(socket2)?;
 
     // Player 3: local=2, remote=0,1
-    let socket3 = UdpNonBlockingSocket::bind_to_port(port3).unwrap();
+    let socket3 = bind_socket_with_retry(port3)?;
     let mut sess3 = SessionBuilder::<StubConfig>::new()
         .with_num_players(3)
         .unwrap()
@@ -442,7 +442,7 @@ fn test_four_player_session() -> Result<(), FortressError> {
     let addr4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port4);
 
     // Player 1
-    let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+    let socket1 = bind_socket_with_retry(port1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
         .unwrap()
@@ -453,7 +453,7 @@ fn test_four_player_session() -> Result<(), FortressError> {
         .start_p2p_session(socket1)?;
 
     // Player 2
-    let socket2 = UdpNonBlockingSocket::bind_to_port(port2).unwrap();
+    let socket2 = bind_socket_with_retry(port2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
         .unwrap()
@@ -464,7 +464,7 @@ fn test_four_player_session() -> Result<(), FortressError> {
         .start_p2p_session(socket2)?;
 
     // Player 3
-    let socket3 = UdpNonBlockingSocket::bind_to_port(port3).unwrap();
+    let socket3 = bind_socket_with_retry(port3)?;
     let mut sess3 = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
         .unwrap()
@@ -475,7 +475,7 @@ fn test_four_player_session() -> Result<(), FortressError> {
         .start_p2p_session(socket3)?;
 
     // Player 4
-    let socket4 = UdpNonBlockingSocket::bind_to_port(port4).unwrap();
+    let socket4 = bind_socket_with_retry(port4)?;
     let mut sess4 = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
         .unwrap()
@@ -579,8 +579,8 @@ fn test_misprediction_at_frame_0_no_crash() -> Result<(), FortressError> {
     let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
     let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
-    let socket2 = UdpNonBlockingSocket::bind_to_port(port2).unwrap();
+    let socket1 = bind_socket_with_retry(port1)?;
+    let socket2 = bind_socket_with_retry(port2)?;
 
     // Create sessions with 0 input delay to maximize prediction window
     let mut sess1 = SessionBuilder::<StubConfig>::new()
@@ -765,7 +765,7 @@ fn run_sync_test_case(
     let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port1);
     let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port2);
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(port1)?;
+    let socket1 = bind_socket_with_retry(port1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
@@ -773,7 +773,7 @@ fn run_sync_test_case(
         .unwrap()
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(port2)?;
+    let socket2 = bind_socket_with_retry(port2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -862,13 +862,13 @@ fn test_sync_helper_both_sessions_must_be_running() -> Result<(), FortressError>
     let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
     let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+    let socket1 = bind_socket_with_retry(port1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(port2).unwrap();
+    let socket2 = bind_socket_with_retry(port2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1036,7 +1036,7 @@ fn test_desync_detection_intervals_data_driven() -> Result<(), FortressError> {
             interval: case.interval,
         };
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let socket1 = bind_socket_with_retry(port1)?;
         let mut sess1 = SessionBuilder::<StubConfig>::new()
             .add_player(PlayerType::Local, PlayerHandle::new(0))?
             .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
@@ -1044,7 +1044,7 @@ fn test_desync_detection_intervals_data_driven() -> Result<(), FortressError> {
             .with_max_prediction_window(case.max_prediction)
             .start_p2p_session(socket1)?;
 
-        let socket2 = UdpNonBlockingSocket::bind_to_port(port2).unwrap();
+        let socket2 = bind_socket_with_retry(port2)?;
         let mut sess2 = SessionBuilder::<StubConfig>::new()
             .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
             .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1293,7 +1293,7 @@ fn run_timing_test_case(
     let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port1);
     let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port2);
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(port1)?;
+    let socket1 = bind_socket_with_retry(port1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
@@ -1301,7 +1301,7 @@ fn run_timing_test_case(
         .unwrap()
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(port2)?;
+    let socket2 = bind_socket_with_retry(port2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?

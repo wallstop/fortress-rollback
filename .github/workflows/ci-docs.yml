@@ -45,6 +45,11 @@ jobs:
   # ============================================================================
   # VALE PROSE LINT - Check documentation prose quality
   # ============================================================================
+  # Note: Uses Vale CLI directly instead of errata-ai/vale-action to avoid
+  # reviewdog's dependency on GitHub's Pull Request diff API, which fails
+  # with HTTP 406 when PRs exceed GitHub's diff line limit (~3,000 lines).
+  # See: https://github.com/reviewdog/reviewdog/issues/1696
+  # ============================================================================
   vale-lint:
     name: Vale Prose Lint
     runs-on: ubuntu-latest
@@ -53,14 +58,98 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Vale prose linter
-        uses: errata-ai/vale-action@v2
+      - name: Cache Vale styles
+        uses: actions/cache@v5
         with:
-          files: docs/
-          reporter: github-check
-          fail_on_error: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          path: .vale/styles
+          key: vale-styles-${{ hashFiles('.vale.ini') }}
+          restore-keys: |
+            vale-styles-
+
+      - name: Install Vale CLI
+        run: |
+          # Pin to specific version for reproducibility
+          VALE_VERSION="3.9.0"
+          curl -sfL "https://github.com/errata-ai/vale/releases/download/v${VALE_VERSION}/vale_${VALE_VERSION}_Linux_64-bit.tar.gz" \
+            | tar xz -C /usr/local/bin vale
+          vale --version
+
+      - name: Sync Vale styles
+        run: vale sync
+
+      - name: Run Vale prose linter
+        id: vale
+        run: |
+          {
+            echo "## Vale Prose Lint Results"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Check if docs/ directory exists
+          if [ ! -d docs/ ]; then
+            echo "⚠️ docs/ directory not found, skipping Vale lint" >> "$GITHUB_STEP_SUMMARY"
+            touch vale-output.txt
+            exit 0
+          fi
+
+          # Run vale with line output format
+          # Note: Vale returns 0 for suggestions/warnings, non-zero for errors/config issues
+          # We check output file content to determine if issues were found
+          set +e
+          vale --output=line docs/ 2>&1 | tee vale-output.txt
+          EXIT_CODE=$?
+          set -e
+
+          # Check for configuration errors (exit code >= 2)
+          if [ $EXIT_CODE -ge 2 ]; then
+            {
+              echo "⚠️ Vale configuration error (exit code: $EXIT_CODE)"
+              echo ""
+              echo "\`\`\`"
+              cat vale-output.txt
+              echo "\`\`\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0  # Don't fail since continue-on-error: true handles this
+          fi
+
+          # Check if any issues were found by examining output file content
+          if [ ! -s vale-output.txt ]; then
+            echo "✅ No prose issues found in docs/" >> "$GITHUB_STEP_SUMMARY"
+          else
+            ISSUE_COUNT=$(wc -l < vale-output.txt | tr -d ' ')
+            {
+              echo "### Issues Found: ${ISSUE_COUNT}"
+              echo ""
+              echo "These are advisory suggestions to improve prose quality."
+              echo ""
+              echo "\`\`\`"
+              head -100 vale-output.txt
+              if [ "$ISSUE_COUNT" -gt 100 ]; then
+                echo "... (truncated, see artifact for full report)"
+              fi
+              echo "\`\`\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            # Emit GitHub annotations from vale output (limit to 50 to avoid noise)
+            # Vale --output=line format: filepath:line:col:rule:message (5 colon-separated fields)
+            # Example: docs/guide.md:15:1:write-good.Weasel:'few' is a weasel word!
+            head -50 vale-output.txt | while IFS=: read -r file line col rule message; do
+              [ -z "$file" ] && continue
+              # All Vale findings in this config are advisory (suggestions/warnings)
+              # Map to GitHub notice level for non-blocking visibility
+              level="notice"
+              # Emit GitHub annotation
+              echo "::${level} file=${file},line=${line},col=${col}::[${rule}] ${message}"
+            done
+          fi
+
+      - name: Upload Vale report
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: vale-report
+          path: vale-output.txt
+          retention-days: 7
 
   # ============================================================================
   # WIKI CONSISTENCY - Validate wiki links and structure

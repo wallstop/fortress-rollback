@@ -403,6 +403,417 @@ impl Display for InternalErrorKind {
     }
 }
 
+/// Represents why a request was invalid.
+///
+/// Using an enum instead of String allows for zero-allocation error construction
+/// and programmatic error inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum InvalidRequestKind {
+    // Player handle errors
+    /// The player handle is already in use.
+    PlayerHandleInUse {
+        /// The handle that is already in use.
+        handle: PlayerHandle,
+    },
+    /// The player handle does not refer to a local player.
+    NotLocalPlayer {
+        /// The handle that is not a local player.
+        handle: PlayerHandle,
+    },
+    /// The player handle does not refer to a remote player or spectator.
+    NotRemotePlayerOrSpectator {
+        /// The handle that is not a remote player or spectator.
+        handle: PlayerHandle,
+    },
+    /// Invalid handle for a local player.
+    InvalidLocalPlayerHandle {
+        /// The invalid player handle.
+        handle: PlayerHandle,
+        /// The number of players in the session.
+        num_players: usize,
+    },
+    /// Invalid handle for a remote player.
+    InvalidRemotePlayerHandle {
+        /// The invalid player handle.
+        handle: PlayerHandle,
+        /// The number of players in the session.
+        num_players: usize,
+    },
+    /// Invalid handle for a spectator.
+    InvalidSpectatorHandle {
+        /// The invalid player handle.
+        handle: PlayerHandle,
+        /// The number of players in the session.
+        num_players: usize,
+    },
+
+    // Input errors
+    /// Missing local input for one or more players.
+    MissingLocalInput,
+    /// No confirmed input available for the requested frame.
+    NoConfirmedInput {
+        /// The frame for which no confirmed input was available.
+        frame: Frame,
+    },
+
+    // Configuration errors
+    /// A configuration value is outside the allowed range.
+    ConfigValueOutOfRange {
+        /// The name of the configuration field.
+        field: &'static str,
+        /// The minimum allowed value.
+        min: u64,
+        /// The maximum allowed value.
+        max: u64,
+        /// The actual value that was provided.
+        actual: u64,
+    },
+    /// A Duration configuration value is outside the allowed range.
+    DurationConfigOutOfRange {
+        /// The name of the configuration field.
+        field: &'static str,
+        /// The minimum allowed value in milliseconds.
+        min_ms: u64,
+        /// The maximum allowed value in milliseconds.
+        max_ms: u64,
+        /// The actual value provided in milliseconds.
+        actual_ms: u64,
+    },
+    /// Frame delay exceeds the maximum allowed for the queue length.
+    FrameDelayTooLarge {
+        /// The requested delay.
+        delay: usize,
+        /// The maximum allowed delay.
+        max_delay: usize,
+    },
+    /// Input delay exceeds the maximum allowed for the given FPS.
+    InputDelayTooLarge {
+        /// The requested input delay in frames.
+        delay_frames: usize,
+        /// The frames per second (for computing actual delay in seconds).
+        fps: usize,
+        /// The maximum allowed seconds (e.g., 10 for "10 seconds").
+        max_seconds_limit: usize,
+    },
+    /// Input queue length is too small (minimum is 2).
+    QueueLengthTooSmall {
+        /// The requested length.
+        length: usize,
+    },
+    /// Event queue size is too small (minimum is 10).
+    EventQueueSizeTooSmall {
+        /// The requested size.
+        size: usize,
+    },
+
+    // Session building errors
+    /// Number of players must be greater than 0.
+    ZeroPlayers,
+    /// FPS must be greater than 0.
+    ZeroFps,
+    /// Not enough players have been registered.
+    NotEnoughPlayers {
+        /// The expected number of players.
+        expected: usize,
+        /// The actual number of players registered.
+        actual: usize,
+    },
+    /// Check distance is too large for the prediction window.
+    CheckDistanceTooLarge {
+        /// The requested check distance.
+        check_dist: usize,
+        /// The maximum prediction window.
+        max_prediction: usize,
+    },
+    /// Max frames behind is invalid.
+    MaxFramesBehindInvalid {
+        /// The requested value.
+        value: usize,
+        /// The buffer size.
+        buffer_size: usize,
+    },
+    /// Catchup speed is invalid.
+    CatchupSpeedInvalid {
+        /// The requested catchup speed.
+        speed: usize,
+        /// The maximum frames behind value.
+        max_frames_behind: usize,
+    },
+
+    // Disconnect errors
+    /// Cannot disconnect: player handle is invalid.
+    DisconnectInvalidHandle {
+        /// The invalid handle.
+        handle: PlayerHandle,
+    },
+    /// Cannot disconnect a local player.
+    DisconnectLocalPlayer {
+        /// The local player handle.
+        handle: PlayerHandle,
+    },
+    /// Player is already disconnected.
+    AlreadyDisconnected {
+        /// The already disconnected handle.
+        handle: PlayerHandle,
+    },
+
+    // Protocol errors
+    /// Operation called in wrong protocol state.
+    WrongProtocolState {
+        /// The current state name.
+        current_state: &'static str,
+        /// The expected state name.
+        expected_state: &'static str,
+    },
+
+    /// Custom error (fallback for API compatibility).
+    Custom(&'static str),
+}
+
+impl Display for InvalidRequestKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PlayerHandleInUse { handle } => {
+                write!(f, "player handle {} is already in use", handle)
+            },
+            Self::NotLocalPlayer { handle } => {
+                write!(
+                    f,
+                    "player handle {} does not refer to a local player",
+                    handle
+                )
+            },
+            Self::NotRemotePlayerOrSpectator { handle } => {
+                write!(
+                    f,
+                    "player handle {} does not refer to a remote player or spectator",
+                    handle
+                )
+            },
+            Self::InvalidLocalPlayerHandle {
+                handle,
+                num_players,
+            } => {
+                write!(
+                    f,
+                    "invalid local player handle {}: num_players is {}",
+                    handle, num_players
+                )
+            },
+            Self::InvalidRemotePlayerHandle {
+                handle,
+                num_players,
+            } => {
+                write!(
+                    f,
+                    "invalid remote player handle {}: num_players is {}",
+                    handle, num_players
+                )
+            },
+            Self::InvalidSpectatorHandle {
+                handle,
+                num_players,
+            } => {
+                write!(
+                    f,
+                    "invalid spectator handle {}: num_players is {}",
+                    handle, num_players
+                )
+            },
+            Self::MissingLocalInput => write!(f, "missing local input for one or more players"),
+            Self::NoConfirmedInput { frame } => {
+                write!(f, "no confirmed input available for frame {}", frame)
+            },
+            Self::ConfigValueOutOfRange {
+                field,
+                min,
+                max,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "configuration value '{}' is out of range: {} not in [{}, {}]",
+                    field, actual, min, max
+                )
+            },
+            Self::DurationConfigOutOfRange {
+                field,
+                min_ms,
+                max_ms,
+                actual_ms,
+            } => {
+                write!(
+                    f,
+                    "duration configuration '{}' is out of range: {}ms not in [{}ms, {}ms]",
+                    field, actual_ms, min_ms, max_ms
+                )
+            },
+            Self::FrameDelayTooLarge { delay, max_delay } => {
+                write!(
+                    f,
+                    "frame delay {} exceeds maximum allowed delay {}",
+                    delay, max_delay
+                )
+            },
+            Self::InputDelayTooLarge {
+                delay_frames,
+                fps,
+                max_seconds_limit,
+            } => {
+                // Compute actual delay in seconds: delay_frames / fps
+                // fps is guaranteed non-zero when this error is created
+                let actual_seconds = if *fps > 0 {
+                    *delay_frames as f64 / *fps as f64
+                } else {
+                    f64::INFINITY
+                };
+                write!(
+                    f,
+                    "input delay {} frames ({:.2}s) exceeds maximum allowed {}s",
+                    delay_frames, actual_seconds, max_seconds_limit
+                )
+            },
+            Self::QueueLengthTooSmall { length } => {
+                write!(
+                    f,
+                    "input queue length {} is too small (minimum is 2)",
+                    length
+                )
+            },
+            Self::EventQueueSizeTooSmall { size } => {
+                write!(f, "event queue size {} is too small (minimum is 10)", size)
+            },
+            Self::ZeroPlayers => write!(f, "number of players must be greater than 0"),
+            Self::ZeroFps => write!(f, "FPS must be greater than 0"),
+            Self::NotEnoughPlayers { expected, actual } => {
+                write!(
+                    f,
+                    "not enough players registered: expected {}, got {}",
+                    expected, actual
+                )
+            },
+            Self::CheckDistanceTooLarge {
+                check_dist,
+                max_prediction,
+            } => {
+                write!(
+                    f,
+                    "check distance {} is too large for prediction window {}",
+                    check_dist, max_prediction
+                )
+            },
+            Self::MaxFramesBehindInvalid { value, buffer_size } => {
+                write!(
+                    f,
+                    "max frames behind {} is invalid for buffer size {}",
+                    value, buffer_size
+                )
+            },
+            Self::CatchupSpeedInvalid {
+                speed,
+                max_frames_behind,
+            } => {
+                write!(
+                    f,
+                    "catchup speed {} is invalid for max frames behind {}",
+                    speed, max_frames_behind
+                )
+            },
+            Self::DisconnectInvalidHandle { handle } => {
+                write!(f, "cannot disconnect: player handle {} is invalid", handle)
+            },
+            Self::DisconnectLocalPlayer { handle } => {
+                write!(f, "cannot disconnect local player {}", handle)
+            },
+            Self::AlreadyDisconnected { handle } => {
+                write!(f, "player {} is already disconnected", handle)
+            },
+            Self::WrongProtocolState {
+                current_state,
+                expected_state,
+            } => {
+                write!(
+                    f,
+                    "operation called in wrong protocol state: current '{}', expected '{}'",
+                    current_state, expected_state
+                )
+            },
+            Self::Custom(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+/// Represents why serialization failed.
+///
+/// Using an enum instead of String allows for zero-allocation error construction
+/// and programmatic error inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SerializationErrorKind {
+    /// Failed to create a protocol endpoint for remote players.
+    EndpointCreationFailed,
+    /// Failed to create a protocol endpoint for spectators.
+    SpectatorEndpointCreationFailed,
+    /// Custom error (fallback for API compatibility).
+    Custom(&'static str),
+}
+
+impl Display for SerializationErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EndpointCreationFailed => {
+                write!(f, "failed to create protocol endpoint for remote players")
+            },
+            Self::SpectatorEndpointCreationFailed => {
+                write!(f, "failed to create protocol endpoint for spectators")
+            },
+            Self::Custom(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+/// Represents why a socket operation failed.
+///
+/// Using an enum instead of String allows for zero-allocation error construction
+/// and programmatic error inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SocketErrorKind {
+    /// Failed to bind socket to the specified port.
+    BindFailed {
+        /// The port that failed to bind.
+        port: u16,
+    },
+    /// Failed to bind after multiple retry attempts.
+    BindFailedAfterRetries {
+        /// The port that failed to bind.
+        port: u16,
+        /// The number of attempts made.
+        attempts: u8,
+    },
+    /// Custom error (fallback for API compatibility).
+    Custom(&'static str),
+}
+
+impl Display for SocketErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BindFailed { port } => {
+                write!(f, "failed to bind socket to port {}", port)
+            },
+            Self::BindFailedAfterRetries { port, attempts } => {
+                write!(
+                    f,
+                    "failed to bind socket to port {} after {} attempts",
+                    port, attempts
+                )
+            },
+            Self::Custom(s) => write!(f, "{}", s),
+        }
+    }
+}
+
 // =============================================================================
 // Main Error Enum
 // =============================================================================
@@ -429,6 +840,9 @@ pub enum FortressError {
     /// When the prediction threshold has been reached, we cannot accept more inputs from the local player.
     PredictionThreshold,
     /// You made an invalid request, usually by using wrong parameters for function calls.
+    ///
+    /// **Note**: For new code, prefer using [`FortressError::InvalidRequestStructured`] which
+    /// provides zero-allocation error construction and programmatic error inspection.
     InvalidRequest {
         /// Further specifies why the request was invalid.
         info: String,
@@ -478,6 +892,9 @@ pub enum FortressError {
         frame: Frame,
     },
     /// Serialization or deserialization of data failed.
+    ///
+    /// **Note**: For new code, prefer using [`FortressError::SerializationErrorStructured`] which
+    /// provides zero-allocation error construction and programmatic error inspection.
     SerializationError {
         /// A description of what failed to serialize/deserialize.
         context: String,
@@ -497,9 +914,36 @@ pub enum FortressError {
         kind: InternalErrorKind,
     },
     /// A network socket operation failed.
+    ///
+    /// **Note**: For new code, prefer using [`FortressError::SocketErrorStructured`] which
+    /// provides zero-allocation error construction and programmatic error inspection.
     SocketError {
         /// A description of the socket error.
         context: String,
+    },
+    /// An invalid request with structured reason (zero-allocation on hot path).
+    ///
+    /// This variant is preferred over `InvalidRequest` as it avoids
+    /// allocating a String for the info.
+    InvalidRequestStructured {
+        /// The structured kind of invalid request.
+        kind: InvalidRequestKind,
+    },
+    /// Serialization error with structured reason (zero-allocation on hot path).
+    ///
+    /// This variant is preferred over `SerializationError` as it avoids
+    /// allocating a String for the context.
+    SerializationErrorStructured {
+        /// The structured kind of serialization error.
+        kind: SerializationErrorKind,
+    },
+    /// Socket error with structured reason (zero-allocation on hot path).
+    ///
+    /// This variant is preferred over `SocketError` as it avoids
+    /// allocating a String for the context.
+    SocketErrorStructured {
+        /// The structured kind of socket error.
+        kind: SocketErrorKind,
     },
 }
 
@@ -572,6 +1016,15 @@ impl Display for FortressError {
             Self::SocketError { context } => {
                 write!(f, "Socket error: {}", context)
             },
+            Self::InvalidRequestStructured { kind } => {
+                write!(f, "Invalid Request: {}", kind)
+            },
+            Self::SerializationErrorStructured { kind } => {
+                write!(f, "Serialization error: {}", kind)
+            },
+            Self::SocketErrorStructured { kind } => {
+                write!(f, "Socket error: {}", kind)
+            },
         }
     }
 }
@@ -591,6 +1044,24 @@ impl Error for FortressError {
         // Error context is stored as strings, not wrapped errors.
         // This is intentional - see documentation above.
         None
+    }
+}
+
+impl From<InvalidRequestKind> for FortressError {
+    fn from(kind: InvalidRequestKind) -> Self {
+        Self::InvalidRequestStructured { kind }
+    }
+}
+
+impl From<SerializationErrorKind> for FortressError {
+    fn from(kind: SerializationErrorKind) -> Self {
+        Self::SerializationErrorStructured { kind }
+    }
+}
+
+impl From<SocketErrorKind> for FortressError {
+    fn from(kind: SocketErrorKind) -> Self {
+        Self::SocketErrorStructured { kind }
     }
 }
 
@@ -977,5 +1448,480 @@ mod tests {
         };
         let reason_with_data2 = reason_with_data; // Copy
         assert_eq!(reason_with_data, reason_with_data2);
+    }
+
+    // =========================================================================
+    // InvalidRequestKind Tests
+    // =========================================================================
+
+    #[test]
+    fn test_invalid_request_kind_player_handle_in_use() {
+        let kind = InvalidRequestKind::PlayerHandleInUse {
+            handle: PlayerHandle(3),
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("player handle 3"));
+        assert!(display.contains("already in use"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_not_local_player() {
+        let kind = InvalidRequestKind::NotLocalPlayer {
+            handle: PlayerHandle(2),
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("player handle 2"));
+        assert!(display.contains("local player"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_not_remote_player_or_spectator() {
+        let kind = InvalidRequestKind::NotRemotePlayerOrSpectator {
+            handle: PlayerHandle(1),
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("player handle 1"));
+        assert!(display.contains("remote player or spectator"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_missing_local_input() {
+        let kind = InvalidRequestKind::MissingLocalInput;
+        let display = format!("{}", kind);
+        assert!(display.contains("missing local input"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_no_confirmed_input() {
+        let kind = InvalidRequestKind::NoConfirmedInput {
+            frame: Frame::new(42),
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("no confirmed input"));
+        assert!(display.contains("42"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_config_value_out_of_range() {
+        let kind = InvalidRequestKind::ConfigValueOutOfRange {
+            field: "fps",
+            min: 1,
+            max: 120,
+            actual: 0,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("fps"));
+        assert!(display.contains("out of range"));
+        assert!(display.contains('0'));
+        assert!(display.contains('1'));
+        assert!(display.contains("120"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_frame_delay_too_large() {
+        let kind = InvalidRequestKind::FrameDelayTooLarge {
+            delay: 10,
+            max_delay: 5,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("frame delay"));
+        assert!(display.contains("10"));
+        assert!(display.contains('5'));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_queue_length_too_small() {
+        let kind = InvalidRequestKind::QueueLengthTooSmall { length: 1 };
+        let display = format!("{}", kind);
+        assert!(display.contains("queue length"));
+        assert!(display.contains('1'));
+        assert!(display.contains("minimum is 2"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_event_queue_size_too_small() {
+        let kind = InvalidRequestKind::EventQueueSizeTooSmall { size: 5 };
+        let display = format!("{}", kind);
+        assert!(display.contains("event queue size"));
+        assert!(display.contains('5'));
+        assert!(display.contains("minimum is 10"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_zero_players() {
+        let kind = InvalidRequestKind::ZeroPlayers;
+        let display = format!("{}", kind);
+        assert!(display.contains("players"));
+        assert!(display.contains("greater than 0"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_zero_fps() {
+        let kind = InvalidRequestKind::ZeroFps;
+        let display = format!("{}", kind);
+        assert!(display.contains("FPS"));
+        assert!(display.contains("greater than 0"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_not_enough_players() {
+        let kind = InvalidRequestKind::NotEnoughPlayers {
+            expected: 4,
+            actual: 2,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("not enough players"));
+        assert!(display.contains('4'));
+        assert!(display.contains('2'));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_check_distance_too_large() {
+        let kind = InvalidRequestKind::CheckDistanceTooLarge {
+            check_dist: 20,
+            max_prediction: 10,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("check distance"));
+        assert!(display.contains("20"));
+        assert!(display.contains("10"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_max_frames_behind_invalid() {
+        let kind = InvalidRequestKind::MaxFramesBehindInvalid {
+            value: 100,
+            buffer_size: 50,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("max frames behind"));
+        assert!(display.contains("100"));
+        assert!(display.contains("50"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_catchup_speed_invalid() {
+        let kind = InvalidRequestKind::CatchupSpeedInvalid {
+            speed: 5,
+            max_frames_behind: 2,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("catchup speed"));
+        assert!(display.contains('5'));
+        assert!(display.contains('2'));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_disconnect_invalid_handle() {
+        let kind = InvalidRequestKind::DisconnectInvalidHandle {
+            handle: PlayerHandle(99),
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("disconnect"));
+        assert!(display.contains("99"));
+        assert!(display.contains("invalid"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_disconnect_local_player() {
+        let kind = InvalidRequestKind::DisconnectLocalPlayer {
+            handle: PlayerHandle(0),
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("disconnect"));
+        assert!(display.contains("local player"));
+        assert!(display.contains('0'));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_already_disconnected() {
+        let kind = InvalidRequestKind::AlreadyDisconnected {
+            handle: PlayerHandle(2),
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("already disconnected"));
+        assert!(display.contains('2'));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_wrong_protocol_state() {
+        let kind = InvalidRequestKind::WrongProtocolState {
+            current_state: "Running",
+            expected_state: "Synchronizing",
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("wrong protocol state"));
+        assert!(display.contains("Running"));
+        assert!(display.contains("Synchronizing"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_custom() {
+        let kind = InvalidRequestKind::Custom("custom error message");
+        let display = format!("{}", kind);
+        assert!(display.contains("custom error message"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_is_copy() {
+        // Verify InvalidRequestKind is Copy (important for hot path)
+        let kind = InvalidRequestKind::ZeroPlayers;
+        let kind2 = kind; // Copy
+        assert_eq!(kind, kind2);
+
+        let kind_with_data = InvalidRequestKind::PlayerHandleInUse {
+            handle: PlayerHandle(1),
+        };
+        let kind_with_data2 = kind_with_data; // Copy
+        assert_eq!(kind_with_data, kind_with_data2);
+    }
+
+    // =========================================================================
+    // SerializationErrorKind Tests
+    // =========================================================================
+
+    #[test]
+    fn test_serialization_error_kind_endpoint_creation_failed() {
+        let kind = SerializationErrorKind::EndpointCreationFailed;
+        let display = format!("{}", kind);
+        assert!(display.contains("failed to create"));
+        assert!(display.contains("endpoint"));
+        assert!(display.contains("remote players"));
+    }
+
+    #[test]
+    fn test_serialization_error_kind_spectator_endpoint_creation_failed() {
+        let kind = SerializationErrorKind::SpectatorEndpointCreationFailed;
+        let display = format!("{}", kind);
+        assert!(display.contains("failed to create"));
+        assert!(display.contains("endpoint"));
+        assert!(display.contains("spectators"));
+    }
+
+    #[test]
+    fn test_serialization_error_kind_custom() {
+        let kind = SerializationErrorKind::Custom("custom serialization error");
+        let display = format!("{}", kind);
+        assert!(display.contains("custom serialization error"));
+    }
+
+    #[test]
+    fn test_serialization_error_kind_is_copy() {
+        // Verify SerializationErrorKind is Copy (important for hot path)
+        let kind = SerializationErrorKind::EndpointCreationFailed;
+        let kind2 = kind; // Copy
+        assert_eq!(kind, kind2);
+    }
+
+    // =========================================================================
+    // SocketErrorKind Tests
+    // =========================================================================
+
+    #[test]
+    fn test_socket_error_kind_bind_failed() {
+        let kind = SocketErrorKind::BindFailed { port: 8080 };
+        let display = format!("{}", kind);
+        assert!(display.contains("failed to bind"));
+        assert!(display.contains("8080"));
+    }
+
+    #[test]
+    fn test_socket_error_kind_bind_failed_after_retries() {
+        let kind = SocketErrorKind::BindFailedAfterRetries {
+            port: 9000,
+            attempts: 5,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("failed to bind"));
+        assert!(display.contains("9000"));
+        assert!(display.contains('5'));
+        assert!(display.contains("attempts"));
+    }
+
+    #[test]
+    fn test_socket_error_kind_custom() {
+        let kind = SocketErrorKind::Custom("custom socket error");
+        let display = format!("{}", kind);
+        assert!(display.contains("custom socket error"));
+    }
+
+    #[test]
+    fn test_socket_error_kind_is_copy() {
+        // Verify SocketErrorKind is Copy (important for hot path)
+        let kind = SocketErrorKind::BindFailed { port: 8080 };
+        let kind2 = kind; // Copy
+        assert_eq!(kind, kind2);
+    }
+
+    // =========================================================================
+    // FortressError Structured Variant Tests
+    // =========================================================================
+
+    #[test]
+    fn test_invalid_request_structured_display() {
+        let err = FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::ZeroPlayers,
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Invalid Request"));
+        assert!(display.contains("players"));
+    }
+
+    #[test]
+    fn test_serialization_error_structured_display() {
+        let err = FortressError::SerializationErrorStructured {
+            kind: SerializationErrorKind::EndpointCreationFailed,
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Serialization error"));
+        assert!(display.contains("endpoint"));
+    }
+
+    #[test]
+    fn test_socket_error_structured_display() {
+        let err = FortressError::SocketErrorStructured {
+            kind: SocketErrorKind::BindFailed { port: 8080 },
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Socket error"));
+        assert!(display.contains("8080"));
+    }
+
+    // =========================================================================
+    // From Implementations Tests
+    // =========================================================================
+
+    #[test]
+    fn test_from_invalid_request_kind() {
+        let kind = InvalidRequestKind::ZeroPlayers;
+        let err: FortressError = kind.into();
+        assert_eq!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ZeroPlayers
+            }
+        );
+    }
+
+    #[test]
+    fn test_from_serialization_error_kind() {
+        let kind = SerializationErrorKind::EndpointCreationFailed;
+        let err: FortressError = kind.into();
+        assert_eq!(
+            err,
+            FortressError::SerializationErrorStructured {
+                kind: SerializationErrorKind::EndpointCreationFailed
+            }
+        );
+    }
+
+    #[test]
+    fn test_from_socket_error_kind() {
+        let kind = SocketErrorKind::BindFailed { port: 8080 };
+        let err: FortressError = kind.into();
+        assert_eq!(
+            err,
+            FortressError::SocketErrorStructured {
+                kind: SocketErrorKind::BindFailed { port: 8080 }
+            }
+        );
+    }
+
+    // =========================================================================
+    // New Variant Tests (Review Feedback)
+    // =========================================================================
+
+    #[test]
+    fn test_invalid_request_kind_duration_config_out_of_range() {
+        let kind = InvalidRequestKind::DurationConfigOutOfRange {
+            field: "disconnect_timeout",
+            min_ms: 100,
+            max_ms: 60000,
+            actual_ms: 50,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("duration configuration"));
+        assert!(display.contains("disconnect_timeout"));
+        assert!(display.contains("50ms"));
+        assert!(display.contains("100ms"));
+        assert!(display.contains("60000ms"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_invalid_local_player_handle() {
+        let kind = InvalidRequestKind::InvalidLocalPlayerHandle {
+            handle: PlayerHandle(5),
+            num_players: 4,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("invalid local player handle"));
+        assert!(display.contains('5'));
+        assert!(display.contains("num_players is 4"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_invalid_remote_player_handle() {
+        let kind = InvalidRequestKind::InvalidRemotePlayerHandle {
+            handle: PlayerHandle(10),
+            num_players: 2,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("invalid remote player handle"));
+        assert!(display.contains("10"));
+        assert!(display.contains("num_players is 2"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_invalid_spectator_handle() {
+        let kind = InvalidRequestKind::InvalidSpectatorHandle {
+            handle: PlayerHandle(3),
+            num_players: 2,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("invalid spectator handle"));
+        assert!(display.contains('3'));
+        assert!(display.contains("num_players is 2"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_input_delay_too_large() {
+        let kind = InvalidRequestKind::InputDelayTooLarge {
+            delay_frames: 660,
+            fps: 60,
+            max_seconds_limit: 10,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("input delay"));
+        assert!(display.contains("660"));
+        assert!(display.contains("11.00s")); // 660 / 60 = 11.00
+        assert!(display.contains("10s")); // max_seconds_limit
+    }
+
+    #[test]
+    fn test_new_variants_are_copy() {
+        // Verify new variants remain Copy (important for hot path)
+        let kind1 = InvalidRequestKind::DurationConfigOutOfRange {
+            field: "test",
+            min_ms: 0,
+            max_ms: 100,
+            actual_ms: 50,
+        };
+        let kind1_copy = kind1; // Copy
+        assert_eq!(kind1, kind1_copy);
+
+        let kind2 = InvalidRequestKind::InvalidLocalPlayerHandle {
+            handle: PlayerHandle(1),
+            num_players: 2,
+        };
+        let kind2_copy = kind2; // Copy
+        assert_eq!(kind2, kind2_copy);
+
+        let kind3 = InvalidRequestKind::InputDelayTooLarge {
+            delay_frames: 10,
+            fps: 60,
+            max_seconds_limit: 1,
+        };
+        let kind3_copy = kind3; // Copy
+        assert_eq!(kind3, kind3_copy);
     }
 }

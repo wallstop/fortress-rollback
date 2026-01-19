@@ -18,15 +18,17 @@
 
 ```bash
 # Run after every change
-cargo fmt && cargo clippy --all-targets && cargo nextest run
+cargo fmt && cargo clippy --all-targets && cargo nextest run --no-capture
 
 # Aliases from .cargo/config.toml
 cargo c && cargo t
 
 # Additional checks
 typos                                    # Spell check (CI enforced)
-cargo test --features z3-verification   # Z3 proofs (slow)
+cargo test --features z3-verification -- --nocapture  # Z3 proofs (slow)
 ```
+
+**Always use `--no-capture`** (nextest) or `-- --nocapture` (cargo test) so that test output is visible immediately when failures occur. This avoids having to re-run tests to see what went wrong.
 
 ---
 
@@ -832,14 +834,14 @@ Use shorthand `[`TypeName`]` when the link text matches the final path segment. 
 **Run the complete check before any commit:**
 
 ```bash
-# Format + lint + test
-cargo fmt && cargo clippy --all-targets && cargo nextest run
+# Format + lint + test (with output capture for debugging)
+cargo fmt && cargo clippy --all-targets && cargo nextest run --no-capture
 ```
 
 **Or use the aliases:**
 
 ```bash
-cargo c && cargo t  # Defined in .cargo/config.toml
+cargo c && cargo t  # Defined in .cargo/config.toml (includes --no-capture)
 ```
 
 ### Additional Checks

@@ -12,14 +12,26 @@
 # - No dependency on upstream image tag changes (e.g., :main)
 # - CI controls its own toolchain without modifying the container
 #
+# Why we need BOTH target AND host variables:
+# - Target (aarch64) variables: Configure linker for the final cross-compiled binaries
+# - Host (x86_64) variables: Configure linker for build scripts and proc-macros that
+#   compile and run on the host machine during the build process
+#
+# Without host variables, proc-macros would fail to link inside the cross container
+# because they need to be compiled for x86_64, not aarch64.
+#
 # To override locally (if needed):
 #   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
 #   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="" \
 #   cross check --target aarch64-unknown-linux-gnu
 [build.env]
 passthrough = [
+    # Target (aarch64) variables - for cross-compiled binaries
     "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER",
     "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+    # Host (x86_64) variables - for build scripts and proc-macros
+    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
 ]
 
 [target.aarch64-unknown-linux-gnu]

@@ -35,12 +35,10 @@
 //! These functions are re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
 //! They are not part of the stable public API.
 
-use std::error::Error;
-
 use crate::{FortressError, InternalErrorKind, RleDecodeReason};
 
 /// Result type for RLE operations.
-pub type RleResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+pub type RleResult<T> = Result<T, FortressError>;
 
 /// Varint encoding/decoding utilities.
 ///
@@ -395,14 +393,14 @@ fn decode_len_with_offset(buf: &[u8], mut offset: usize) -> RleResult<usize> {
     }
 
     if offset > buf.len() {
-        return Err(Box::new(FortressError::InternalErrorStructured {
+        return Err(FortressError::InternalErrorStructured {
             kind: InternalErrorKind::RleDecodeError {
                 reason: RleDecodeReason::TruncatedData {
                     offset,
                     buffer_len: buf.len(),
                 },
             },
-        }));
+        });
     }
 
     Ok(len)

@@ -19,7 +19,10 @@ pub use prediction::{BlankPrediction, PredictionStrategy, RepeatLastConfirmed};
 use crate::frame_info::PlayerInput;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
 use crate::{report_violation, safe_frame_add, safe_frame_sub};
-use crate::{Config, FortressError, Frame, IndexOutOfBounds, InputStatus, InternalErrorKind};
+use crate::{
+    Config, FortressError, Frame, IndexOutOfBounds, InputStatus, InternalErrorKind,
+    InvalidRequestKind,
+};
 use std::cmp;
 
 /// The length of the input queue. This describes the number of inputs Fortress Rollback can hold at the same time per player.
@@ -211,15 +214,7 @@ impl<T: Config> InputQueue<T> {
     pub fn set_frame_delay(&mut self, delay: usize) -> Result<(), FortressError> {
         let max_delay = self.max_frame_delay();
         if delay > max_delay {
-            return Err(FortressError::InvalidRequest {
-                info: format!(
-                    "Frame delay {} exceeds maximum allowed value of {} (queue_length - 1). \
-                     At 60fps, this would be {:.1}+ seconds of delay, which is impractical for gameplay.",
-                    delay,
-                    max_delay,
-                    delay as f64 / 60.0
-                ),
-            });
+            return Err(InvalidRequestKind::FrameDelayTooLarge { delay, max_delay }.into());
         }
         self.frame_delay = delay;
         Ok(())
@@ -255,9 +250,10 @@ impl<T: Config> InputQueue<T> {
         }
 
         // the requested confirmed input should not be before a prediction. We should not have asked for a known incorrect frame.
-        Err(crate::FortressError::InvalidRequest {
-            info: "No confirmed input for requested frame".into(),
-        })
+        Err(InvalidRequestKind::NoConfirmedInput {
+            frame: requested_frame,
+        }
+        .into())
     }
 
     /// Discards confirmed frames **before** the given `frame` from the queue.
@@ -1434,13 +1430,17 @@ mod input_queue_tests {
         // Delay exactly at the limit should fail
         let result = queue.set_frame_delay(INPUT_QUEUE_LENGTH);
         assert!(result.is_err());
-        if let Err(FortressError::InvalidRequest { info }) = result {
-            assert!(
-                info.contains("exceeds maximum"),
-                "Error should explain the issue"
-            );
+        if let Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::FrameDelayTooLarge { delay, max_delay },
+        }) = result
+        {
+            assert_eq!(delay, INPUT_QUEUE_LENGTH);
+            assert_eq!(max_delay, INPUT_QUEUE_LENGTH - 1);
         } else {
-            panic!("Expected InvalidRequest error");
+            panic!(
+                "Expected InvalidRequestStructured with FrameDelayTooLarge, got {:?}",
+                result
+            );
         }
 
         // Delay well above limit should also fail

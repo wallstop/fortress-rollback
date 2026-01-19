@@ -22,7 +22,10 @@ use crate::sessions::config::{ProtocolConfig, SyncConfig};
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::time_sync::TimeSync;
 use crate::{report_violation, safe_frame_add, safe_frame_sub};
-use crate::{Config, DesyncDetection, FortressError, Frame, NonBlockingSocket, PlayerHandle};
+use crate::{
+    Config, DesyncDetection, FortressError, Frame, InvalidRequestKind, NonBlockingSocket,
+    PlayerHandle,
+};
 use tracing::trace;
 
 use std::collections::vec_deque::Drain;
@@ -379,12 +382,11 @@ impl<T: Config> UdpProtocol<T> {
     /// - `Err(FortressError::InvalidRequest)` if the protocol was not in `Initializing` state
     pub(crate) fn synchronize(&mut self) -> Result<(), FortressError> {
         if self.state != ProtocolState::Initializing {
-            return Err(FortressError::InvalidRequest {
-                info: format!(
-                    "synchronize() called in {:?} state, expected Initializing",
-                    self.state
-                ),
-            });
+            return Err(InvalidRequestKind::WrongProtocolState {
+                current_state: self.state.as_str(),
+                expected_state: "Initializing",
+            }
+            .into());
         }
         self.state = ProtocolState::Synchronizing;
         self.sync_remaining_roundtrips = self.sync_config.num_sync_packets;
@@ -2827,7 +2829,12 @@ mod property_tests {
             let result = protocol.synchronize();
             prop_assert!(result.is_err());
             // Use matches! in a separate assertion to avoid format string issues
-            let is_invalid_request = matches!(result, Err(FortressError::InvalidRequest { .. }));
+            let is_invalid_request = matches!(
+                result,
+                Err(FortressError::InvalidRequestStructured {
+                    kind: InvalidRequestKind::WrongProtocolState { .. }
+                })
+            );
             prop_assert!(is_invalid_request);
         }
 

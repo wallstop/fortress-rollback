@@ -143,6 +143,22 @@ pub enum ProtocolState {
     Shutdown,
 }
 
+impl ProtocolState {
+    /// Returns the state name as a static string slice.
+    ///
+    /// This is useful for error messages and logging.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Initializing => "Initializing",
+            Self::Synchronizing => "Synchronizing",
+            Self::Running => "Running",
+            Self::Disconnected => "Disconnected",
+            Self::Shutdown => "Shutdown",
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::panic,

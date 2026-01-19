@@ -28,6 +28,28 @@ use std::time::{Duration, Instant};
 // ============================================================================
 // Port Allocation System
 // ============================================================================
+//
+// ## Windows-Specific Considerations
+//
+// Windows CI environments (especially GitHub Actions runners) frequently encounter
+// transient WSAEACCES (error code 10013) errors when binding UDP sockets. This error
+// indicates "Permission denied" and occurs due to:
+//
+// 1. **Port conflicts**: Another process (possibly from a parallel test) briefly held
+//    the port in an exclusive state.
+//
+// 2. **TIME_WAIT states**: Recently closed sockets may still hold the port for up to
+//    2 minutes (MSL timeout) to prevent packet confusion.
+//
+// 3. **Exclusive address use**: Windows networking stack sometimes marks ports as
+//    exclusively used even when they appear free.
+//
+// These issues are transient and typically resolve after a short delay (100ms).
+// The `bind_socket_with_retry` function handles this by retrying up to 5 times
+// on Windows when WSAEACCES is encountered.
+//
+// On Linux and macOS, these issues are much rarer due to different socket
+// implementation semantics, so no retry logic is needed.
 
 /// Starting port for the atomic port allocator.
 ///
@@ -266,15 +288,48 @@ pub fn create_chaos_socket(
 ///
 /// On non-Windows platforms, this is a simple bind without retries.
 /// On Windows, it retries on WSAEACCES (error 10013) errors.
+///
+/// # Windows Retry Logic
+///
+/// Windows CI environments (especially GitHub Actions runners) can experience
+/// transient WSAEACCES (error 10013) errors when binding UDP sockets. These
+/// errors are caused by:
+/// - Port conflicts with other processes or tests
+/// - Exclusive address use issues in Windows networking stack
+/// - TIME_WAIT states from recently closed sockets
+///
+/// These issues typically resolve after a short delay, so this function:
+/// - Retries up to 5 times on WSAEACCES errors
+/// - Waits 100ms between retry attempts
+/// - Logs retry attempts via tracing for debugging
+/// - Only retries on error code 10013 (WSAEACCES), not other errors
+///
+/// # Example
+///
+/// ```ignore
+/// use common::test_utils::bind_socket_with_retry;
+///
+/// // Returns Result instead of panicking
+/// let socket = bind_socket_with_retry(9000)?;
+/// ```
+///
+/// # Errors
+///
+/// Returns `FortressError::SocketError` if:
+/// - The socket cannot be bound after all retry attempts (Windows)
+/// - The socket cannot be bound on the first attempt (non-Windows)
+#[allow(dead_code)]
 #[track_caller]
-fn bind_socket_with_retry(port: u16) -> Result<UdpNonBlockingSocket, FortressError> {
+pub fn bind_socket_with_retry(port: u16) -> Result<UdpNonBlockingSocket, FortressError> {
     #[cfg(not(target_os = "windows"))]
     {
-        return UdpNonBlockingSocket::bind_to_port(port).map_err(|error| {
+        let socket = UdpNonBlockingSocket::bind_to_port(port).map_err(|error| {
             FortressError::SocketError {
-                context: format!("Failed to bind chaos socket on port {port}: {error}"),
+                context: format!("Failed to bind socket on port {port}: {error}"),
             }
-        });
+        })?;
+        tracing::debug!(port, "Successfully bound socket");
+        return Ok(socket);
     }
 
     #[cfg(target_os = "windows")]
@@ -285,7 +340,18 @@ fn bind_socket_with_retry(port: u16) -> Result<UdpNonBlockingSocket, FortressErr
 
         for attempt in 0..SOCKET_BIND_MAX_RETRIES {
             match UdpNonBlockingSocket::bind_to_port(port) {
-                Ok(socket) => return Ok(socket),
+                Ok(socket) => {
+                    if attempt > 0 {
+                        tracing::debug!(
+                            port,
+                            attempts = attempt + 1,
+                            "Successfully bound socket after retries"
+                        );
+                    } else {
+                        tracing::debug!(port, "Successfully bound socket");
+                    }
+                    return Ok(socket);
+                },
                 Err(error) => {
                     // WSAEACCES is error code 10013 on Windows
                     // It manifests as PermissionDenied in Rust's std::io::ErrorKind
@@ -307,7 +373,7 @@ fn bind_socket_with_retry(port: u16) -> Result<UdpNonBlockingSocket, FortressErr
                     }
                     // Non-retryable error or max retries exceeded
                     let context = format!(
-                        "Failed to bind chaos socket on port {} after {} attempts: {}",
+                        "Failed to bind socket on port {} after {} attempts: {}",
                         port,
                         attempt + 1,
                         error
@@ -319,7 +385,7 @@ fn bind_socket_with_retry(port: u16) -> Result<UdpNonBlockingSocket, FortressErr
 
         // This should only be reached if all retries failed with WSAEACCES
         let context = format!(
-            "Failed to bind chaos socket on port {} after {} attempts: {:?}",
+            "Failed to bind socket on port {} after {} attempts: {:?}",
             port, SOCKET_BIND_MAX_RETRIES, last_error
         );
         Err(FortressError::SocketError { context })
@@ -587,7 +653,7 @@ pub trait GameStubHandler<C: Config> {
 /// * `port1`, `port2` - Ports for the two sessions
 /// * `input_gen` - Function that generates input for a given frame number
 /// * `num_frames` - Number of frames to advance
-#[allow(dead_code, clippy::expect_used)]
+#[allow(dead_code)]
 #[track_caller]
 pub fn run_p2p_frame_advancement_test<C, S>(
     port1: u16,
@@ -599,19 +665,19 @@ where
     C: Config<Address = SocketAddr>,
     S: GameStubHandler<C>,
 {
-    use fortress_rollback::{SessionBuilder, UdpNonBlockingSocket};
+    use fortress_rollback::SessionBuilder;
     use std::net::{IpAddr, Ipv4Addr};
 
     let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
     let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(port1).expect("Failed to bind socket 1");
+    let socket1 = bind_socket_with_retry(port1)?;
     let mut sess1 = SessionBuilder::<C>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(port2).expect("Failed to bind socket 2");
+    let socket2 = bind_socket_with_retry(port2)?;
     let mut sess2 = SessionBuilder::<C>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -621,8 +687,11 @@ where
     assert!(sess2.current_state() == SessionState::Synchronizing);
 
     // Use robust synchronization with time-based timeout
-    synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default())
-        .expect("Sessions should synchronize");
+    synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default()).map_err(|e| {
+        FortressError::InvalidRequest {
+            info: format!("Sessions should synchronize: {e}"),
+        }
+    })?;
 
     assert!(sess1.current_state() == SessionState::Running);
     assert!(sess2.current_state() == SessionState::Running);
@@ -705,4 +774,244 @@ where
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Tests for Socket Binding Utilities
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Allow test-specific patterns
+    #[allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )]
+    mod socket_binding_tests {
+        use super::*;
+
+        /// Tests that `bind_socket_with_retry` successfully binds to port 0.
+        ///
+        /// Port 0 tells the OS to assign any available ephemeral port.
+        /// This test verifies the happy path works correctly.
+        #[test]
+        #[cfg(not(miri))] // Miri cannot execute socket operations
+        fn bind_socket_with_retry_succeeds_on_port_zero() {
+            let result = bind_socket_with_retry(0);
+            assert!(
+                result.is_ok(),
+                "bind_socket_with_retry should succeed on port 0"
+            );
+        }
+
+        /// Tests that binding to a privileged port (1) returns an error on most systems.
+        ///
+        /// On Unix systems, ports below 1024 require root privileges.
+        /// On Windows, this may also fail with WSAEACCES.
+        /// This verifies the error handling path works correctly.
+        #[test]
+        #[cfg(not(miri))] // Miri cannot execute socket operations
+        fn bind_socket_with_retry_fails_on_privileged_port() {
+            // Port 1 is privileged and should fail to bind without root/admin
+            let result = bind_socket_with_retry(1);
+
+            // We expect this to fail on most systems
+            // (unless running as root/admin, which is unlikely in CI)
+            if result.is_err() {
+                match result {
+                    Err(FortressError::SocketError { context }) => {
+                        assert!(
+                            context.contains("Failed to bind socket"),
+                            "Error should mention bind failure: {}",
+                            context
+                        );
+                        assert!(
+                            context.contains('1'),
+                            "Error should mention port 1: {}",
+                            context
+                        );
+                    },
+                    Err(other) => {
+                        panic!("Expected SocketError, got: {:?}", other);
+                    },
+                    Ok(_) => unreachable!(),
+                }
+            }
+            // If it succeeds (running as root), that's also acceptable
+        }
+
+        /// Tests that multiple sequential binds to port 0 all succeed.
+        ///
+        /// This exercises the port allocation under repeated use, similar to
+        /// how parallel tests might allocate ports.
+        #[test]
+        #[cfg(not(miri))] // Miri cannot execute socket operations
+        fn bind_socket_with_retry_handles_multiple_sequential_binds() {
+            // Just verify that multiple binds succeed; we can't easily
+            // verify unique ports without accessing private socket fields
+            for i in 0..5 {
+                let result = bind_socket_with_retry(0);
+                assert!(result.is_ok(), "Sequential bind {} should succeed", i + 1);
+            }
+        }
+
+        /// Tests that `create_chaos_socket` successfully creates a socket.
+        #[test]
+        #[cfg(not(miri))] // Miri cannot execute socket operations
+        fn create_chaos_socket_succeeds() {
+            let config = ChaosConfig::default();
+            let result = create_chaos_socket(0, config);
+            assert!(
+                result.is_ok(),
+                "create_chaos_socket should succeed on port 0"
+            );
+        }
+
+        /// Tests that the error context includes the port number.
+        ///
+        /// This verifies diagnostic information is useful for debugging.
+        #[test]
+        #[cfg(not(miri))] // Miri cannot execute socket operations
+        fn bind_error_includes_port_in_context() {
+            // Use a privileged port that should fail
+            let result = bind_socket_with_retry(1);
+
+            if let Err(FortressError::SocketError { context }) = result {
+                assert!(
+                    context.contains('1'),
+                    "Error context should include port number: {}",
+                    context
+                );
+            }
+            // If binding succeeded (running as root), test passes trivially
+        }
+
+        /// Tests data-driven scenarios for socket binding.
+        ///
+        /// This uses the data-driven pattern from spectator.rs to test
+        /// multiple port scenarios efficiently.
+        #[test]
+        #[cfg(not(miri))] // Miri cannot execute socket operations
+        fn bind_socket_data_driven_scenarios() {
+            /// Test case for socket binding scenarios
+            struct BindTestCase {
+                name: &'static str,
+                port: u16,
+                should_succeed: bool,
+            }
+
+            let test_cases = [
+                BindTestCase {
+                    name: "port_0_os_assigned",
+                    port: 0,
+                    should_succeed: true,
+                },
+                // Privileged ports typically require elevated permissions
+                BindTestCase {
+                    name: "port_1_privileged",
+                    port: 1,
+                    should_succeed: false, // May succeed if running as root
+                },
+                BindTestCase {
+                    name: "port_80_privileged_http",
+                    port: 80,
+                    should_succeed: false, // May succeed if running as root
+                },
+            ];
+
+            for case in &test_cases {
+                let result = bind_socket_with_retry(case.port);
+
+                if case.should_succeed {
+                    assert!(
+                        result.is_ok(),
+                        "[{}] Expected success for port {}",
+                        case.name,
+                        case.port
+                    );
+                } else {
+                    // For privileged ports, we expect failure unless running as root
+                    // So we just verify the error type if it fails
+                    if let Err(FortressError::SocketError { context }) = &result {
+                        assert!(
+                            context.contains("Failed to bind"),
+                            "[{}] Error should mention bind failure: {}",
+                            case.name,
+                            context
+                        );
+                    }
+                    // If it succeeded, the test runner has elevated privileges
+                }
+            }
+        }
+    }
+
+    mod port_allocator_tests {
+        use super::*;
+
+        /// Tests that PortAllocator provides unique ports.
+        #[test]
+        fn port_allocator_provides_unique_ports() {
+            // Reset to ensure clean state
+            PortAllocator::reset();
+
+            let port1 = PortAllocator::next_port();
+            let port2 = PortAllocator::next_port();
+            let port3 = PortAllocator::next_port();
+
+            assert_ne!(port1, port2, "Ports should be unique");
+            assert_ne!(port2, port3, "Ports should be unique");
+            assert_ne!(port1, port3, "Ports should be unique");
+        }
+
+        /// Tests that next_ports returns the correct number of ports.
+        #[test]
+        fn port_allocator_next_ports_returns_correct_count() {
+            PortAllocator::reset();
+
+            let ports = PortAllocator::next_ports::<4>();
+            assert_eq!(ports.len(), 4, "Should return 4 ports");
+
+            // All should be unique
+            for i in 0..ports.len() {
+                for j in (i + 1)..ports.len() {
+                    assert_ne!(
+                        ports[i], ports[j],
+                        "Ports at indices {} and {} should be unique",
+                        i, j
+                    );
+                }
+            }
+        }
+
+        /// Tests that next_pair returns two unique ports.
+        #[test]
+        fn port_allocator_next_pair_returns_unique_ports() {
+            PortAllocator::reset();
+
+            let (port1, port2) = PortAllocator::next_pair();
+            assert_ne!(port1, port2, "Pair ports should be unique");
+        }
+
+        /// Tests that ports are within the expected range.
+        #[test]
+        fn port_allocator_ports_in_valid_range() {
+            PortAllocator::reset();
+
+            for _ in 0..10 {
+                let port = PortAllocator::next_port();
+                assert!(
+                    port >= PORT_ALLOCATOR_START,
+                    "Port {} should be >= {}",
+                    port,
+                    PORT_ALLOCATOR_START
+                );
+                assert!(port < 60000, "Port {} should be < 60000", port);
+            }
+        }
+    }
 }

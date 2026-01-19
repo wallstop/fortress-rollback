@@ -1,4 +1,4 @@
-use crate::error::{FortressError, InternalErrorKind};
+use crate::error::{FortressError, InternalErrorKind, InvalidRequestKind};
 use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::network::network_stats::NetworkStats;
@@ -213,10 +213,10 @@ impl<T: Config> P2PSession<T> {
             .local_player_handles()
             .contains(&player_handle)
         {
-            return Err(FortressError::InvalidRequest {
-                info: "The player handle you provided is not referring to a local player."
-                    .to_owned(),
-            });
+            return Err(InvalidRequestKind::NotLocalPlayer {
+                handle: player_handle,
+            }
+            .into());
         }
         let player_input = PlayerInput::<T::Input>::new(self.sync_layer.current_frame(), input);
         self.local_inputs.insert(player_handle, player_input);
@@ -248,9 +248,7 @@ impl<T: Config> P2PSession<T> {
         // check if input for all local players is queued
         for handle in self.player_reg.local_player_handles() {
             if !self.local_inputs.contains_key(&handle) {
-                return Err(FortressError::InvalidRequest {
-                    info: "Missing local input for player while calling advance_frame()".into(),
-                });
+                return Err(InvalidRequestKind::MissingLocalInput.into());
             }
         }
 
@@ -489,12 +487,14 @@ impl<T: Config> P2PSession<T> {
     pub fn disconnect_player(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError> {
         match self.player_reg.handles.get(&player_handle) {
             // the local player cannot be disconnected
-            None => Err(FortressError::InvalidRequest {
-                info: "Invalid Player Handle.".to_owned(),
-            }),
-            Some(PlayerType::Local) => Err(FortressError::InvalidRequest {
-                info: "Local Player cannot be disconnected.".to_owned(),
-            }),
+            None => Err(InvalidRequestKind::DisconnectInvalidHandle {
+                handle: player_handle,
+            }
+            .into()),
+            Some(PlayerType::Local) => Err(InvalidRequestKind::DisconnectLocalPlayer {
+                handle: player_handle,
+            }
+            .into()),
             // a remote player can only be disconnected if not already disconnected, since there is some additional logic attached
             Some(PlayerType::Remote(_)) => {
                 let status = self
@@ -508,9 +508,10 @@ impl<T: Config> P2PSession<T> {
                     self.disconnect_player_at_frame(player_handle, last_frame);
                     return Ok(());
                 }
-                Err(FortressError::InvalidRequest {
-                    info: "Player already disconnected.".to_owned(),
-                })
+                Err(InvalidRequestKind::AlreadyDisconnected {
+                    handle: player_handle,
+                }
+                .into())
             },
             // disconnecting spectators is simpler
             Some(PlayerType::Spectator(_)) => {
@@ -561,10 +562,10 @@ impl<T: Config> P2PSession<T> {
                 },
             },
             _ => {
-                return Err(FortressError::InvalidRequest {
-                    info: "Given player handle not referring to a remote player or spectator"
-                        .to_owned(),
-                });
+                return Err(InvalidRequestKind::NotRemotePlayerOrSpectator {
+                    handle: player_handle,
+                }
+                .into());
             },
         };
 
@@ -1861,12 +1862,12 @@ mod tests {
         // Handle 1 is remote
         let result = session.add_local_input(PlayerHandle::new(1), 42u8);
         assert!(result.is_err());
-        match result {
-            Err(FortressError::InvalidRequest { info }) => {
-                assert!(info.contains("local player"));
-            },
-            _ => panic!("Expected InvalidRequest error"),
-        }
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::NotLocalPlayer { .. }
+            })
+        ));
     }
 
     #[test]
@@ -1898,12 +1899,12 @@ mod tests {
         let mut session = create_local_only_session();
         let result = session.advance_frame();
         assert!(result.is_err());
-        match result {
-            Err(FortressError::InvalidRequest { info }) => {
-                assert!(info.contains("Missing local input"));
-            },
-            _ => panic!("Expected InvalidRequest error"),
-        }
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::MissingLocalInput
+            })
+        ));
     }
 
     #[test]
@@ -1965,12 +1966,12 @@ mod tests {
             .expect("Input failed");
         let result = session.advance_frame();
         assert!(result.is_err());
-        match result {
-            Err(FortressError::InvalidRequest { info }) => {
-                assert!(info.contains("Missing local input"));
-            },
-            _ => panic!("Expected InvalidRequest error"),
-        }
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::MissingLocalInput
+            })
+        ));
     }
 
     #[test]
@@ -2015,12 +2016,12 @@ mod tests {
         let mut session = create_local_only_session();
         let result = session.disconnect_player(PlayerHandle::new(0));
         assert!(result.is_err());
-        match result {
-            Err(FortressError::InvalidRequest { info }) => {
-                assert!(info.contains("Local Player cannot be disconnected"));
-            },
-            _ => panic!("Expected InvalidRequest error"),
-        }
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::DisconnectLocalPlayer { .. }
+            })
+        ));
     }
 
     #[test]
@@ -2028,12 +2029,12 @@ mod tests {
         let mut session = create_local_only_session();
         let result = session.disconnect_player(PlayerHandle::new(99));
         assert!(result.is_err());
-        match result {
-            Err(FortressError::InvalidRequest { info }) => {
-                assert!(info.contains("Invalid Player Handle"));
-            },
-            _ => panic!("Expected InvalidRequest error"),
-        }
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::DisconnectInvalidHandle { .. }
+            })
+        ));
     }
 
     #[test]
@@ -2051,12 +2052,12 @@ mod tests {
             .expect("First disconnect failed");
         let result = session.disconnect_player(PlayerHandle::new(1));
         assert!(result.is_err());
-        match result {
-            Err(FortressError::InvalidRequest { info }) => {
-                assert!(info.contains("already disconnected"));
-            },
-            _ => panic!("Expected InvalidRequest error"),
-        }
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::AlreadyDisconnected { .. }
+            })
+        ));
     }
 
     // ==========================================
@@ -2068,12 +2069,12 @@ mod tests {
         let session = create_local_only_session();
         let result = session.network_stats(PlayerHandle::new(0));
         assert!(result.is_err());
-        match result {
-            Err(FortressError::InvalidRequest { info }) => {
-                assert!(info.contains("not referring to a remote player"));
-            },
-            _ => panic!("Expected InvalidRequest error"),
-        }
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::NotRemotePlayerOrSpectator { .. }
+            })
+        ));
     }
 
     #[test]
@@ -2207,7 +2208,7 @@ mod tests {
         // The key point is that it handles the edge case gracefully
         if result.is_err() {
             match result {
-                Err(FortressError::InvalidRequest { .. }) => {
+                Err(FortressError::InvalidRequestStructured { .. }) => {
                     // Expected - frame was discarded
                 },
                 Err(FortressError::InvalidFrame { .. })

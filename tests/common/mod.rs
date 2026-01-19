@@ -24,8 +24,9 @@ pub mod test_utils;
 // These are public utilities for integration tests - allow unused until tests adopt them.
 #[allow(unused_imports)]
 pub use test_utils::{
-    assert_spectator_synchronized, calculate_hash, create_chaos_socket, drain_sync_events,
-    poll_with_sleep, run_p2p_frame_advancement_test, run_synctest_with_delayed_input,
-    synchronize_sessions, synchronize_spectator, test_addr, GameStubHandler, PortAllocator,
-    SyncConfig, SyncResult, MAX_SYNC_ITERATIONS, POLL_INTERVAL, SYNC_TIMEOUT,
+    assert_spectator_synchronized, bind_socket_with_retry, calculate_hash, create_chaos_socket,
+    drain_sync_events, poll_with_sleep, run_p2p_frame_advancement_test,
+    run_synctest_with_delayed_input, synchronize_sessions, synchronize_spectator, test_addr,
+    GameStubHandler, PortAllocator, SyncConfig, SyncResult, MAX_SYNC_ITERATIONS, POLL_INTERVAL,
+    SYNC_TIMEOUT,
 };

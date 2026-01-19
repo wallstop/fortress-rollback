@@ -31,8 +31,9 @@ split-debuginfo = "unpacked"
 
 [alias]
 # Convenient aliases for common operations
-t = "nextest run"
-qt = "nextest run --no-fail-fast"
-ci = "nextest run --profile ci"
+# All test aliases use --no-capture so output is visible on failures
+t = "nextest run --no-capture"
+qt = "nextest run --no-fail-fast --no-capture"
+ci = "nextest run --profile ci --no-capture"
 c = "clippy --all-targets"
 b = "build --all-targets"

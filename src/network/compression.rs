@@ -123,13 +123,12 @@ pub fn delta_encode<'a>(
 pub fn decode(reference: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, CompressionError> {
     // decode the RLE encoding first
     let buf = rle::decode(data).map_err(|e| {
-        // Try to extract the structured RleDecodeReason from the error.
-        // The RLE module wraps FortressError::InternalErrorStructured with RleDecodeError.
-        if let Some(FortressError::InternalErrorStructured {
+        // Extract the structured RleDecodeReason from the FortressError.
+        if let FortressError::InternalErrorStructured {
             kind: InternalErrorKind::RleDecodeError { reason },
-        }) = e.downcast_ref::<FortressError>()
+        } = e
         {
-            return CompressionError::RleDecode { reason: *reason };
+            return CompressionError::RleDecode { reason };
         }
         // Fallback: use a generic reason if we can't extract the specific one
         CompressionError::RleDecode {

@@ -34,24 +34,26 @@ cargo install cargo-nextest --locked
 ### Basic Usage
 
 ```bash
-# Run all tests
-cargo nextest run
+# Run all tests — ALWAYS use --no-capture to see output on failures
+cargo nextest run --no-capture
 
 # Run specific test by name
-cargo nextest run test_parse_empty
+cargo nextest run test_parse_empty --no-capture
 
 # Run tests matching pattern
-cargo nextest run parse_
+cargo nextest run parse_ --no-capture
 
 # Use filter expressions
-cargo nextest run -E 'test(parse_) | test(validate_)'
+cargo nextest run -E 'test(parse_) | test(validate_)' --no-capture
 
-# Run with retries for flaky tests
-cargo nextest run --retries 2
+# Run with retries for flaky tests (NOT recommended — fix flakiness)
+cargo nextest run --retries 2 --no-capture
 
 # Show slow tests
-cargo nextest run --slow-timeout 1s
+cargo nextest run --slow-timeout 1s --no-capture
 ```
+
+> **Why `--no-capture`?** By default, Rust test runners hide stdout/stderr from passing tests and only show output for failures AFTER the test completes. With `--no-capture`, output streams in real-time, making it immediately visible without re-running. Configure this globally in `.config/nextest.toml` with `failure-output = "immediate-final"`.
 
 ### Configuration
 

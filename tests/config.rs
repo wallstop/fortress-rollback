@@ -26,10 +26,10 @@
 mod common;
 
 use common::stubs::StubConfig;
-use common::PortAllocator;
+use common::{bind_socket_with_retry, PortAllocator};
 use fortress_rollback::{
     FortressError, PlayerHandle, PlayerType, ProtocolConfig, SessionBuilder, SpectatorConfig,
-    SyncConfig, TimeSyncConfig, UdpNonBlockingSocket,
+    SyncConfig, TimeSyncConfig,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -368,7 +368,7 @@ fn test_time_sync_config_copy_clone() {
 fn test_session_with_default_configs() -> Result<(), FortressError> {
     // A session built with no explicit config should work with defaults
     let (port1, port2) = PortAllocator::next_pair();
-    let socket = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+    let socket = bind_socket_with_retry(port1)?;
     let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     let _sess = SessionBuilder::<StubConfig>::new()
@@ -386,7 +386,7 @@ fn test_session_with_default_configs() -> Result<(), FortressError> {
 fn test_session_with_all_custom_configs() -> Result<(), FortressError> {
     // A session built with explicit configs for everything should also work
     let (port1, port2) = PortAllocator::next_pair();
-    let socket = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+    let socket = bind_socket_with_retry(port1)?;
     let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     let _sess = SessionBuilder::<StubConfig>::new()
@@ -408,7 +408,7 @@ fn test_session_with_all_custom_configs() -> Result<(), FortressError> {
 fn test_session_with_mixed_configs() -> Result<(), FortressError> {
     // A session built with some explicit and some default configs
     let (port1, port2) = PortAllocator::next_pair();
-    let socket = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+    let socket = bind_socket_with_retry(port1)?;
     let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     let _sess = SessionBuilder::<StubConfig>::new()
@@ -428,7 +428,7 @@ fn test_session_with_mixed_configs() -> Result<(), FortressError> {
 fn test_session_with_custom_protocol_config() -> Result<(), FortressError> {
     // Test custom field values (not using a preset)
     let (port1, port2) = PortAllocator::next_pair();
-    let socket = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+    let socket = bind_socket_with_retry(port1)?;
     let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     let custom_protocol_config = ProtocolConfig {
@@ -456,7 +456,7 @@ fn test_session_with_custom_protocol_config() -> Result<(), FortressError> {
 fn test_session_with_custom_sync_config() -> Result<(), FortressError> {
     // Test custom field values (not using a preset)
     let (port1, port2) = PortAllocator::next_pair();
-    let socket = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+    let socket = bind_socket_with_retry(port1)?;
     let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     let custom_sync_config = SyncConfig {

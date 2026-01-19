@@ -17,7 +17,7 @@ Key requirements:
 
 ```bash
 # Rust code
-cargo fmt && cargo clippy --all-targets && cargo nextest run
+cargo fmt && cargo clippy --all-targets && cargo nextest run --no-capture
 
 # Or use the convenient aliases defined in .cargo/config.toml
 cargo c && cargo t
@@ -25,3 +25,5 @@ cargo c && cargo t
 # Markdown files (if modified)
 npx markdownlint '**/*.md' --config .markdownlint.json --fix
 ```
+
+**Always use `--no-capture`** (nextest) or `-- --nocapture` (cargo test) so that test output is visible immediately when failures occur. The aliases include this by default.

@@ -49,11 +49,11 @@
 )]
 
 use crate::common::stubs::{GameStub, StubConfig, StubInput};
-use crate::common::test_utils::create_chaos_socket;
+use crate::common::test_utils::{bind_socket_with_retry, create_chaos_socket};
 use crate::common::PortAllocator;
 use fortress_rollback::{
     ChaosConfig, FortressError, FortressEvent, PlayerHandle, PlayerType, ProtocolConfig, SaveMode,
-    SessionBuilder, SessionState, SyncConfig, TimeSyncConfig, UdpNonBlockingSocket,
+    SessionBuilder, SessionState, SyncConfig, TimeSyncConfig,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -2965,7 +2965,7 @@ fn test_competitive_preset_fast_sync() -> Result<(), FortressError> {
     let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     // No chaos - LAN-like conditions for competitive play
-    let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+    let socket1 = bind_socket_with_retry(port1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::competitive())
         .with_protocol_config(ProtocolConfig::competitive())
@@ -2974,7 +2974,7 @@ fn test_competitive_preset_fast_sync() -> Result<(), FortressError> {
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(port2).unwrap();
+    let socket2 = bind_socket_with_retry(port2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::competitive())
         .with_protocol_config(ProtocolConfig::competitive())
