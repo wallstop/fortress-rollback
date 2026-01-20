@@ -379,7 +379,8 @@ impl<T: Config> UdpProtocol<T> {
     ///
     /// # Returns
     /// - `Ok(())` if the protocol was in `Initializing` state and successfully transitioned
-    /// - `Err(FortressError::InvalidRequest)` if the protocol was not in `Initializing` state
+    /// - `Err(FortressError::InvalidRequestStructured)` with [`InvalidRequestKind::WrongProtocolState`]
+    ///   if the protocol was not in `Initializing` state
     pub(crate) fn synchronize(&mut self) -> Result<(), FortressError> {
         if self.state != ProtocolState::Initializing {
             return Err(InvalidRequestKind::WrongProtocolState {

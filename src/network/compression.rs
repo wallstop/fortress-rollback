@@ -130,11 +130,19 @@ pub fn decode(reference: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, Compression
         {
             return CompressionError::RleDecode { reason };
         }
-        // Fallback: use a generic reason if we can't extract the specific one
+        // Fallback: use neutral placeholder values to indicate unknown failure location.
+        // We use (0, 0) rather than fabricating specific values that might mislead debugging.
+        // Log this unexpected error type for debugging - this path should rarely be hit.
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::NetworkProtocol,
+            "decode: unexpected RLE error type in fallback path: {:?}",
+            e
+        );
         CompressionError::RleDecode {
             reason: RleDecodeReason::TruncatedData {
                 offset: 0,
-                buffer_len: data.len(),
+                buffer_len: 0,
             },
         }
     })?;
@@ -520,7 +528,8 @@ mod compression_tests {
             Box::new(std::io::Error::other("test error"));
 
         // Simulate the fallback logic from decode()
-        let data = &[1, 2, 3, 4, 5];
+        // Note: The fallback uses neutral placeholder values (0, 0) to indicate
+        // unknown failure location, rather than fabricating misleading values.
         let result = non_fortress_error
             .downcast_ref::<FortressError>()
             .and_then(|fe| match fe {
@@ -531,14 +540,14 @@ mod compression_tests {
             })
             .unwrap_or(RleDecodeReason::TruncatedData {
                 offset: 0,
-                buffer_len: data.len(),
+                buffer_len: 0,
             });
 
-        // Verify the fallback produces the expected result
+        // Verify the fallback produces neutral placeholder values
         match result {
             RleDecodeReason::TruncatedData { offset, buffer_len } => {
                 assert_eq!(offset, 0);
-                assert_eq!(buffer_len, 5);
+                assert_eq!(buffer_len, 0);
             },
             _ => panic!("Expected TruncatedData fallback, got {:?}", result),
         }
@@ -584,9 +593,8 @@ mod compression_tests {
                 kind: InternalErrorKind::BufferIndexOutOfBounds,
             });
 
-        let data = &[1, 2, 3];
-
         // Simulate the extraction logic from decode()
+        // Note: The fallback uses neutral placeholder values (0, 0)
         let result = fortress_error
             .downcast_ref::<FortressError>()
             .and_then(|fe| match fe {
@@ -597,14 +605,14 @@ mod compression_tests {
             })
             .unwrap_or(RleDecodeReason::TruncatedData {
                 offset: 0,
-                buffer_len: data.len(),
+                buffer_len: 0,
             });
 
-        // Verify the fallback is used since this isn't an RleDecodeError
+        // Verify the fallback uses neutral placeholder values
         match result {
             RleDecodeReason::TruncatedData { offset, buffer_len } => {
                 assert_eq!(offset, 0);
-                assert_eq!(buffer_len, 3);
+                assert_eq!(buffer_len, 0);
             },
             _ => panic!("Expected TruncatedData fallback, got {:?}", result),
         }
@@ -619,9 +627,8 @@ mod compression_tests {
             "bad data",
         ));
 
-        let data = &[10, 20, 30];
-
         // Simulate the full map_err logic from decode()
+        // Note: The fallback uses neutral placeholder values (0, 0)
         let compression_error: CompressionError = (|| {
             if let Some(FortressError::InternalErrorStructured {
                 kind: InternalErrorKind::RleDecodeError { reason },
@@ -632,18 +639,18 @@ mod compression_tests {
             CompressionError::RleDecode {
                 reason: RleDecodeReason::TruncatedData {
                     offset: 0,
-                    buffer_len: data.len(),
+                    buffer_len: 0,
                 },
             }
         })();
 
-        // Verify the error structure
+        // Verify the error structure uses neutral placeholder values
         match compression_error {
             CompressionError::RleDecode {
                 reason: RleDecodeReason::TruncatedData { offset, buffer_len },
             } => {
                 assert_eq!(offset, 0);
-                assert_eq!(buffer_len, 3);
+                assert_eq!(buffer_len, 0);
             },
             _ => panic!(
                 "Expected RleDecode with TruncatedData, got {:?}",
