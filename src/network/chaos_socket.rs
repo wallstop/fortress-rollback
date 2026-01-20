@@ -1433,36 +1433,39 @@ mod tests {
             ("intercontinental", ChaosConfig::intercontinental()),
         ];
 
-        for (_name, config) in presets {
+        for (name, config) in presets {
             // Loss rates should be in valid range
             assert!(
                 (0.0..=1.0).contains(&config.send_loss_rate),
-                "send_loss_rate out of range"
+                "{name}: send_loss_rate out of range"
             );
             assert!(
                 (0.0..=1.0).contains(&config.receive_loss_rate),
-                "receive_loss_rate out of range"
+                "{name}: receive_loss_rate out of range"
             );
             assert!(
                 (0.0..=1.0).contains(&config.duplication_rate),
-                "duplication_rate out of range"
+                "{name}: duplication_rate out of range"
             );
             assert!(
                 (0.0..=1.0).contains(&config.reorder_rate),
-                "reorder_rate out of range"
+                "{name}: reorder_rate out of range"
             );
             assert!(
                 (0.0..=1.0).contains(&config.burst_loss_probability),
-                "burst_loss_probability out of range"
+                "{name}: burst_loss_probability out of range"
             );
 
             // Latency should not be absurdly high (< 1 second)
-            assert!(config.latency < Duration::from_secs(1), "latency too high");
+            assert!(
+                config.latency < Duration::from_secs(1),
+                "{name}: latency too high"
+            );
 
             // Jitter should not exceed latency by too much
             assert!(
                 config.jitter <= config.latency + Duration::from_millis(100),
-                "jitter unreasonably high compared to latency"
+                "{name}: jitter unreasonably high compared to latency"
             );
         }
     }

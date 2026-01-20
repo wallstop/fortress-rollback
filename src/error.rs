@@ -661,8 +661,7 @@ impl Display for InvalidRequestKind {
                 fps,
                 max_seconds_limit,
             } => {
-                // Compute actual delay in seconds: delay_frames / fps
-                // fps is guaranteed non-zero when this error is created
+                // Defensive: if fps is zero, report infinite delay rather than panic
                 let actual_seconds = if *fps > 0 {
                     *delay_frames as f64 / *fps as f64
                 } else {
@@ -1895,6 +1894,23 @@ mod tests {
         assert!(display.contains("660"));
         assert!(display.contains("11.00s")); // 660 / 60 = 11.00
         assert!(display.contains("10s")); // max_seconds_limit
+    }
+
+    #[test]
+    fn test_invalid_request_kind_input_delay_too_large_with_zero_fps() {
+        // Test the defensive branch that handles fps=0 without panicking
+        let kind = InvalidRequestKind::InputDelayTooLarge {
+            delay_frames: 100,
+            fps: 0,
+            max_seconds_limit: 10,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("input delay"));
+        assert!(display.contains("100"));
+        assert!(
+            display.contains("inf"),
+            "Should display infinity for zero fps: {display}"
+        );
     }
 
     #[test]
