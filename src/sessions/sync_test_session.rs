@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::error::{FortressError, InvalidRequestKind};
+use crate::error::{FortressError, InternalErrorKind, InvalidRequestKind};
 use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::report_violation;
@@ -182,8 +182,10 @@ impl<T: Config> SyncTestSession<T> {
                     "Failed to get synchronized inputs for frame {}",
                     self.sync_layer.current_frame()
                 );
-                return Err(FortressError::InternalError {
-                    context: "Failed to get synchronized inputs".to_owned(),
+                return Err(FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::SynchronizedInputsFailed {
+                        frame: self.sync_layer.current_frame(),
+                    },
                 });
             },
         };
@@ -298,8 +300,10 @@ impl<T: Config> SyncTestSession<T> {
                         "Failed to get synchronized inputs during resimulation at frame {}",
                         self.sync_layer.current_frame()
                     );
-                    return Err(FortressError::InternalError {
-                        context: "Failed to get synchronized inputs during resimulation".to_owned(),
+                    return Err(FortressError::InternalErrorStructured {
+                        kind: InternalErrorKind::SynchronizedInputsFailed {
+                            frame: self.sync_layer.current_frame(),
+                        },
                     });
                 },
             };

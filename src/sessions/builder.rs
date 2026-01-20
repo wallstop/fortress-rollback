@@ -4,10 +4,13 @@ use std::sync::Arc;
 use web_time::Duration;
 
 use crate::{
-    error::InvalidRequestKind, network::protocol::UdpProtocol,
-    sessions::player_registry::PlayerRegistry, telemetry::ViolationObserver,
-    time_sync::TimeSyncConfig, Config, DesyncDetection, FortressError, NonBlockingSocket,
-    P2PSession, PlayerHandle, PlayerType, SpectatorSession, SyncTestSession,
+    error::{InvalidRequestKind, SerializationErrorKind},
+    network::protocol::UdpProtocol,
+    sessions::player_registry::PlayerRegistry,
+    telemetry::ViolationObserver,
+    time_sync::TimeSyncConfig,
+    Config, DesyncDetection, FortressError, NonBlockingSocket, P2PSession, PlayerHandle,
+    PlayerType, SpectatorSession, SyncTestSession,
 };
 
 // Re-export config types for backwards compatibility with code that imports from builder
@@ -735,21 +738,13 @@ impl<T: Config> SessionBuilder<T> {
                 PlayerType::Remote(peer_addr) => {
                     let endpoint = self
                         .create_endpoint(handles, peer_addr.clone(), self.local_players)
-                        .ok_or_else(|| FortressError::SerializationError {
-                            context:
-                                "Failed to create protocol endpoint - input serialization error"
-                                    .to_owned(),
-                        })?;
+                        .ok_or(SerializationErrorKind::EndpointCreationFailed)?;
                     self.player_reg.remotes.insert(peer_addr, endpoint);
                 },
                 PlayerType::Spectator(peer_addr) => {
                     let endpoint = self
                         .create_endpoint(handles, peer_addr.clone(), self.num_players) // the host of the spectator sends inputs for all players
-                        .ok_or_else(|| FortressError::SerializationError {
-                            context:
-                                "Failed to create spectator endpoint - input serialization error"
-                                    .to_owned(),
-                        })?;
+                        .ok_or(SerializationErrorKind::SpectatorEndpointCreationFailed)?;
                     self.player_reg.spectators.insert(peer_addr, endpoint);
                 },
                 PlayerType::Local => (),

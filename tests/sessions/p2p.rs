@@ -783,8 +783,7 @@ fn run_sync_test_case(
 
     // Synchronize using helper
     let sync_config = SyncConfig::default();
-    let _iterations = synchronize_sessions(&mut sess1, &mut sess2, &sync_config)
-        .map_err(|e| format!("[{}] {}", case.name, e))?;
+    synchronize_sessions(&mut sess1, &mut sess2, &sync_config)?;
 
     // Drain sync events
     drain_sync_events(&mut sess1, &mut sess2);
@@ -1311,8 +1310,7 @@ fn run_timing_test_case(
 
     // Synchronize using helper
     let sync_config = SyncConfig::default();
-    synchronize_sessions(&mut sess1, &mut sess2, &sync_config)
-        .map_err(|e| format!("[{}] {}", case.name, e))?;
+    synchronize_sessions(&mut sess1, &mut sess2, &sync_config)?;
 
     // Drain sync events
     drain_sync_events(&mut sess1, &mut sess2);

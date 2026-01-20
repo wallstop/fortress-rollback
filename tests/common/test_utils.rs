@@ -44,9 +44,10 @@ use std::time::{Duration, Instant};
 // 3. **Exclusive address use**: Windows networking stack sometimes marks ports as
 //    exclusively used even when they appear free.
 //
-// These issues are transient and typically resolve after a short delay (100ms).
-// The `bind_socket_with_retry` function handles this by retrying up to 5 times
-// on Windows when WSAEACCES is encountered.
+// These issues are transient and typically resolve after a short delay.
+// The `bind_socket_with_retry` function handles this by retrying up to 10 times
+// on Windows with exponential backoff (50ms, 100ms, 200ms... up to 1000ms) when
+// WSAEACCES (10013) or WSAEADDRINUSE (10048) errors are encountered.
 //
 // On Linux and macOS, these issues are much rarer due to different socket
 // implementation semantics, so no retry logic is needed.
@@ -246,34 +247,42 @@ pub fn test_addr(port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
 }
 
-use fortress_rollback::{ChaosConfig, ChaosSocket, FortressError, UdpNonBlockingSocket};
+use fortress_rollback::{
+    ChaosConfig, ChaosSocket, FortressError, SocketErrorKind, UdpNonBlockingSocket,
+};
 
 /// Maximum number of retry attempts for socket binding on Windows.
 ///
 /// Windows CI (especially GitHub Actions runners) can experience transient
-/// WSAEACCES (error 10013) errors when binding sockets. This is often caused
-/// by port conflicts or exclusive address use issues that resolve after a
-/// short delay.
+/// socket binding errors that resolve after a short delay:
+/// - WSAEACCES (error 10013): Permission denied, often due to exclusive address use
+/// - WSAEADDRINUSE (error 10048): Address already in use, often due to TIME_WAIT state
+///
+/// We use 10 retries with exponential backoff, providing up to ~7 seconds total wait.
 #[cfg(target_os = "windows")]
-const SOCKET_BIND_MAX_RETRIES: u32 = 5;
+const SOCKET_BIND_MAX_RETRIES: u32 = 10;
 
-/// Delay between socket bind retry attempts on Windows.
+/// Initial delay for socket bind retries on Windows (exponential backoff starts here).
 #[cfg(target_os = "windows")]
-const SOCKET_BIND_RETRY_DELAY_MS: u64 = 100;
+const SOCKET_BIND_INITIAL_DELAY_MS: u64 = 50;
+
+/// Maximum delay between socket bind retry attempts on Windows.
+#[cfg(target_os = "windows")]
+const SOCKET_BIND_MAX_DELAY_MS: u64 = 1000;
 
 /// Helper to create a UDP socket wrapped with ChaosSocket for network resilience testing.
 ///
 /// # Windows Retry Logic
 ///
-/// On Windows, this function includes retry logic to handle transient WSAEACCES
-/// (error 10013) errors that occur on GitHub Actions Windows runners. These errors
-/// are caused by port conflicts or exclusive address use issues that typically
-/// resolve after a short delay.
+/// On Windows, this function includes retry logic to handle transient socket binding
+/// errors that occur on GitHub Actions Windows runners:
+/// - WSAEACCES (error 10013): Permission denied
+/// - WSAEADDRINUSE (error 10048): Address already in use (TIME_WAIT state)
 ///
 /// The retry logic:
-/// - Retries up to 5 times on WSAEACCES errors
-/// - Waits 100ms between attempts
-/// - Only retries on error code 10013 (WSAEACCES), not other errors
+/// - Retries up to 10 times with exponential backoff
+/// - Starts at 50ms, doubles each attempt, caps at 1000ms
+/// - Retries on both error codes 10013 (WSAEACCES) and 10048 (WSAEADDRINUSE)
 #[allow(dead_code)]
 #[track_caller]
 pub fn create_chaos_socket(
@@ -287,22 +296,19 @@ pub fn create_chaos_socket(
 /// Binds a UDP socket with retry logic for Windows CI.
 ///
 /// On non-Windows platforms, this is a simple bind without retries.
-/// On Windows, it retries on WSAEACCES (error 10013) errors.
+/// On Windows, it retries on transient socket binding errors.
 ///
 /// # Windows Retry Logic
 ///
 /// Windows CI environments (especially GitHub Actions runners) can experience
-/// transient WSAEACCES (error 10013) errors when binding UDP sockets. These
-/// errors are caused by:
-/// - Port conflicts with other processes or tests
-/// - Exclusive address use issues in Windows networking stack
-/// - TIME_WAIT states from recently closed sockets
+/// transient errors when binding UDP sockets:
+/// - WSAEACCES (error 10013): Permission denied - caused by exclusive address use
+/// - WSAEADDRINUSE (error 10048): Address in use - caused by TIME_WAIT state
 ///
 /// These issues typically resolve after a short delay, so this function:
-/// - Retries up to 5 times on WSAEACCES errors
-/// - Waits 100ms between retry attempts
+/// - Retries up to 10 times with exponential backoff (50ms, 100ms, 200ms, ... 1000ms)
 /// - Logs retry attempts via tracing for debugging
-/// - Only retries on error code 10013 (WSAEACCES), not other errors
+/// - Retries on error codes 10013 (WSAEACCES) and 10048 (WSAEADDRINUSE)
 ///
 /// # Example
 ///
@@ -315,7 +321,7 @@ pub fn create_chaos_socket(
 ///
 /// # Errors
 ///
-/// Returns `FortressError::SocketError` if:
+/// Returns `FortressError::SocketErrorStructured` if:
 /// - The socket cannot be bound after all retry attempts (Windows)
 /// - The socket cannot be bound on the first attempt (non-Windows)
 #[allow(dead_code)]
@@ -323,9 +329,9 @@ pub fn create_chaos_socket(
 pub fn bind_socket_with_retry(port: u16) -> Result<UdpNonBlockingSocket, FortressError> {
     #[cfg(not(target_os = "windows"))]
     {
-        let socket = UdpNonBlockingSocket::bind_to_port(port).map_err(|error| {
-            FortressError::SocketError {
-                context: format!("Failed to bind socket on port {port}: {error}"),
+        let socket = UdpNonBlockingSocket::bind_to_port(port).map_err(|_io_err| {
+            FortressError::SocketErrorStructured {
+                kind: SocketErrorKind::BindFailed { port },
             }
         })?;
         tracing::debug!(port, "Successfully bound socket");
@@ -335,8 +341,6 @@ pub fn bind_socket_with_retry(port: u16) -> Result<UdpNonBlockingSocket, Fortres
     #[cfg(target_os = "windows")]
     {
         use std::io::ErrorKind;
-
-        let mut last_error = None;
 
         for attempt in 0..SOCKET_BIND_MAX_RETRIES {
             match UdpNonBlockingSocket::bind_to_port(port) {
@@ -353,42 +357,51 @@ pub fn bind_socket_with_retry(port: u16) -> Result<UdpNonBlockingSocket, Fortres
                     return Ok(socket);
                 },
                 Err(error) => {
-                    // WSAEACCES is error code 10013 on Windows
-                    // It manifests as PermissionDenied in Rust's std::io::ErrorKind
-                    let is_wsaeacces = error.kind() == ErrorKind::PermissionDenied
-                        || error.raw_os_error() == Some(10013);
+                    // Check for retryable Windows socket errors:
+                    // - WSAEACCES (10013): Permission denied, often due to exclusive address use
+                    // - WSAEADDRINUSE (10048): Address in use, often due to TIME_WAIT state
+                    let os_error = error.raw_os_error();
+                    let is_retryable = matches!(
+                        error.kind(),
+                        ErrorKind::PermissionDenied | ErrorKind::AddrInUse
+                    ) || matches!(os_error, Some(10013) | Some(10048));
 
-                    if is_wsaeacces && attempt + 1 < SOCKET_BIND_MAX_RETRIES {
+                    if is_retryable && attempt + 1 < SOCKET_BIND_MAX_RETRIES {
+                        // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms, 1000ms (capped)
+                        let delay_ms = SOCKET_BIND_INITIAL_DELAY_MS
+                            .saturating_mul(1u64 << attempt)
+                            .min(SOCKET_BIND_MAX_DELAY_MS);
+                        let error_name = match os_error {
+                            Some(10013) => "WSAEACCES",
+                            Some(10048) => "WSAEADDRINUSE",
+                            _ => "unknown",
+                        };
                         tracing::warn!(
                             attempt = attempt + 1,
                             port,
-                            delay_ms = SOCKET_BIND_RETRY_DELAY_MS,
-                            "Socket bind attempt failed with WSAEACCES, retrying"
+                            delay_ms,
+                            error = error_name,
+                            "Socket bind attempt failed, retrying with exponential backoff"
                         );
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            SOCKET_BIND_RETRY_DELAY_MS,
-                        ));
-                        last_error = Some(error);
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                         continue;
                     }
                     // Non-retryable error or max retries exceeded
-                    let context = format!(
-                        "Failed to bind socket on port {} after {} attempts: {}",
-                        port,
-                        attempt + 1,
-                        error
-                    );
-                    return Err(FortressError::SocketError { context });
+                    // Use saturating conversion since attempt is u32 and attempts is u8
+                    let attempts = u8::try_from(attempt + 1).unwrap_or(u8::MAX);
+                    return Err(FortressError::SocketErrorStructured {
+                        kind: SocketErrorKind::BindFailedAfterRetries { port, attempts },
+                    });
                 },
             }
         }
 
-        // This should only be reached if all retries failed with WSAEACCES
-        let context = format!(
-            "Failed to bind socket on port {} after {} attempts: {:?}",
-            port, SOCKET_BIND_MAX_RETRIES, last_error
-        );
-        Err(FortressError::SocketError { context })
+        // This should only be reached if all retries failed with retryable errors
+        // Use saturating conversion since SOCKET_BIND_MAX_RETRIES is u32 and attempts is u8
+        let attempts = u8::try_from(SOCKET_BIND_MAX_RETRIES).unwrap_or(u8::MAX);
+        Err(FortressError::SocketErrorStructured {
+            kind: SocketErrorKind::BindFailedAfterRetries { port, attempts },
+        })
     }
 }
 
@@ -419,14 +432,14 @@ impl Default for SyncConfig {
 ///
 /// # Returns
 /// - `Ok(iterations)` if both sessions synchronized successfully
-/// - `Err(error message)` if synchronization timed out
+/// - `Err(FortressError)` if synchronization timed out
 #[allow(dead_code)]
 #[track_caller]
 pub fn synchronize_sessions<C: Config>(
     sess1: &mut P2PSession<C>,
     sess2: &mut P2PSession<C>,
     config: &SyncConfig,
-) -> Result<usize, String> {
+) -> Result<usize, FortressError> {
     let mut iterations = 0;
     let start = Instant::now();
 
@@ -438,14 +451,19 @@ pub fn synchronize_sessions<C: Config>(
         // Check both iteration count AND time-based timeout for robustness.
         // Time-based timeout is more reliable across different platforms (especially macOS CI).
         if iterations >= config.max_iterations || start.elapsed() > SYNC_TIMEOUT {
-            return Err(format!(
-                "Synchronization timed out after {} iterations ({:?}). \
-                 sess1 state: {:?}, sess2 state: {:?}",
-                iterations,
-                start.elapsed(),
-                sess1.current_state(),
-                sess2.current_state()
-            ));
+            // Use legacy InternalError for test code - it provides detailed debugging
+            // info that's useful when tests fail. Structured errors are preferred in
+            // production code, but test helpers benefit from rich context.
+            return Err(FortressError::InternalError {
+                context: format!(
+                    "Synchronization timed out after {} iterations ({:?}). \
+                     sess1 state: {:?}, sess2 state: {:?}",
+                    iterations,
+                    start.elapsed(),
+                    sess1.current_state(),
+                    sess2.current_state()
+                ),
+            });
         }
 
         sess1.poll_remote_clients();
@@ -687,11 +705,7 @@ where
     assert!(sess2.current_state() == SessionState::Synchronizing);
 
     // Use robust synchronization with time-based timeout
-    synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default()).map_err(|e| {
-        FortressError::InvalidRequest {
-            info: format!("Sessions should synchronize: {e}"),
-        }
-    })?;
+    synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default())?;
 
     assert!(sess1.current_state() == SessionState::Running);
     assert!(sess2.current_state() == SessionState::Running);
@@ -823,20 +837,25 @@ mod tests {
             // (unless running as root/admin, which is unlikely in CI)
             if result.is_err() {
                 match result {
-                    Err(FortressError::SocketError { context }) => {
-                        assert!(
-                            context.contains("Failed to bind socket"),
-                            "Error should mention bind failure: {}",
-                            context
-                        );
-                        assert!(
-                            context.contains('1'),
-                            "Error should mention port 1: {}",
-                            context
-                        );
+                    Err(FortressError::SocketErrorStructured { kind }) => {
+                        // Verify the error kind contains the expected port
+                        match kind {
+                            SocketErrorKind::BindFailed { port } => {
+                                assert_eq!(port, 1, "Error should mention port 1");
+                            },
+                            SocketErrorKind::BindFailedAfterRetries { port, .. } => {
+                                assert_eq!(port, 1, "Error should mention port 1");
+                            },
+                            SocketErrorKind::Custom(_) => {
+                                // Custom errors are acceptable as fallback
+                            },
+                            _ => {
+                                // Handle future variants (non_exhaustive enum)
+                            },
+                        }
                     },
                     Err(other) => {
-                        panic!("Expected SocketError, got: {:?}", other);
+                        panic!("Expected SocketErrorStructured, got: {:?}", other);
                     },
                     Ok(_) => unreachable!(),
                 }
@@ -871,7 +890,7 @@ mod tests {
             );
         }
 
-        /// Tests that the error context includes the port number.
+        /// Tests that the error kind includes the port number.
         ///
         /// This verifies diagnostic information is useful for debugging.
         #[test]
@@ -880,12 +899,22 @@ mod tests {
             // Use a privileged port that should fail
             let result = bind_socket_with_retry(1);
 
-            if let Err(FortressError::SocketError { context }) = result {
-                assert!(
-                    context.contains('1'),
-                    "Error context should include port number: {}",
-                    context
-                );
+            if let Err(FortressError::SocketErrorStructured { kind }) = result {
+                // Verify the port is accessible from the error kind
+                match kind {
+                    SocketErrorKind::BindFailed { port } => {
+                        assert_eq!(port, 1, "Error should include port number");
+                    },
+                    SocketErrorKind::BindFailedAfterRetries { port, .. } => {
+                        assert_eq!(port, 1, "Error should include port number");
+                    },
+                    SocketErrorKind::Custom(_) => {
+                        // Custom errors may not include port in struct form
+                    },
+                    _ => {
+                        // Handle future variants (non_exhaustive enum)
+                    },
+                }
             }
             // If binding succeeded (running as root), test passes trivially
         }
@@ -936,13 +965,30 @@ mod tests {
                 } else {
                     // For privileged ports, we expect failure unless running as root
                     // So we just verify the error type if it fails
-                    if let Err(FortressError::SocketError { context }) = &result {
-                        assert!(
-                            context.contains("Failed to bind"),
-                            "[{}] Error should mention bind failure: {}",
-                            case.name,
-                            context
-                        );
+                    if let Err(FortressError::SocketErrorStructured { kind }) = &result {
+                        // Verify the error kind matches expected port
+                        match kind {
+                            SocketErrorKind::BindFailed { port } => {
+                                assert_eq!(
+                                    *port, case.port,
+                                    "[{}] Error should have correct port",
+                                    case.name
+                                );
+                            },
+                            SocketErrorKind::BindFailedAfterRetries { port, .. } => {
+                                assert_eq!(
+                                    *port, case.port,
+                                    "[{}] Error should have correct port",
+                                    case.name
+                                );
+                            },
+                            SocketErrorKind::Custom(_) => {
+                                // Custom errors are acceptable as fallback
+                            },
+                            _ => {
+                                // Handle future variants (non_exhaustive enum)
+                            },
+                        }
                     }
                     // If it succeeded, the test runner has elevated privileges
                 }

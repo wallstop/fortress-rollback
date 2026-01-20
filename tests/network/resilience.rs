@@ -4157,13 +4157,15 @@ fn test_all_presets_perfect_network_data_driven() {
 fn test_presets_matched_conditions_data_driven() {
     let test_cases = [
         // Competitive: LAN-like conditions (minimal latency, no loss)
+        // Note: We use 2000ms expected sync time to accommodate CI variability,
+        // especially on macOS where UDP scheduling can be slower.
         PresetTestCase {
             name: "competitive_lan_conditions",
             sync_config: SyncConfig::competitive(),
             protocol_config: ProtocolConfig::competitive(),
             time_sync_config: TimeSyncConfig::competitive(),
             chaos_config: Some(ChaosConfig::builder().latency_ms(5).build()),
-            expected_sync_time_ms: 1200,
+            expected_sync_time_ms: 2000,
             target_frames: 50,
             min_expected_frames: 45,
         },

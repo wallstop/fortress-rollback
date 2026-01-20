@@ -8,7 +8,15 @@ unmaintained = "workspace"
 # Warn about yanked crate versions
 yanked = "warn"
 # Ignore specific advisories (add RUSTSEC IDs here if needed)
-ignore = []
+ignore = [
+    # bincode is deliberately kept despite being unmaintained because:
+    # 1. It's stable and the maintainers consider v1.3.3 complete
+    # 2. The codebase is well-tested and production-ready
+    # 3. Migration to alternatives (wincode, postcard, bitcode) would require
+    #    significant refactoring with no functional benefit
+    # See: https://rustsec.org/advisories/RUSTSEC-2025-0141
+    "RUSTSEC-2025-0141",
+]
 
 [licenses]
 # All licenses are denied by default unless explicitly allowed
