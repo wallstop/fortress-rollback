@@ -1026,6 +1026,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Miri doesn't advance Instant::now() through thread::sleep() reliably
     fn test_latency_delays_delivery() {
         let mut inner = TestSocket::default();
         let addr = test_addr();
@@ -1123,6 +1124,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Miri doesn't advance Instant::now() through thread::sleep() reliably
     fn test_in_flight_count() {
         let mut inner = TestSocket::default();
         let addr = test_addr();
@@ -1550,6 +1552,7 @@ mod tests {
 
     /// Data-driven test: packets should always be delivered after maximum delivery time
     #[test]
+    #[cfg_attr(miri, ignore)] // Miri doesn't advance Instant::now() through thread::sleep() reliably
     fn test_latency_maximum_delivery_time_data_driven() {
         const TEST_CASES: &[LatencyTestCase] = &[
             LatencyTestCase::new("small_latency", 100, 0, 1),
@@ -1608,6 +1611,7 @@ mod tests {
 
     /// Test that multiple packets with same latency maintain FIFO order (no jitter)
     #[test]
+    #[cfg_attr(miri, ignore)] // Miri doesn't advance Instant::now() through thread::sleep() reliably
     fn test_latency_fifo_ordering_without_jitter() {
         let mut inner = TestSocket::default();
         let addr = test_addr();
@@ -1712,6 +1716,7 @@ mod tests {
 
     /// Test that in_flight tracking is accurate across multiple receive cycles
     #[test]
+    #[cfg_attr(miri, ignore)] // Miri doesn't advance Instant::now() through thread::sleep() reliably
     fn test_in_flight_accuracy_multiple_cycles() {
         let inner = TestSocket::default();
         let addr = test_addr();

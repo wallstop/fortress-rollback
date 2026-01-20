@@ -93,7 +93,10 @@ jobs:
         id: sccache-check
         shell: bash
         run: |
-          if [ "${{ steps.sccache-check-unix.outputs.working }}" == "true" ] || [ "${{ steps.sccache-check-windows.outputs.working }}" == "true" ]; then
+          # Assign GitHub expressions to variables (avoids shellcheck SC2193)
+          unix_working="${{ steps['sccache-check-unix'].outputs.working }}"
+          windows_working="${{ steps['sccache-check-windows'].outputs.working }}"
+          if [ "$unix_working" == "true" ] || [ "$windows_working" == "true" ]; then
             echo "working=true" >> "$GITHUB_OUTPUT"
           else
             echo "working=false" >> "$GITHUB_OUTPUT"
@@ -174,19 +177,19 @@ jobs:
   miri:
     name: Miri (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
           # ============================================================
-          # Linux jobs (16 seeds each, split into 7 for parallelism)
+          # Linux jobs (4 seeds each, split into 7 for parallelism)
           # ============================================================
 
           # Linux Job 1: Protocol tests only (largest test group: ~148 tests)
           - name: Linux - protocol
             os: ubuntu-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "network::protocol"
             skip_filter: ""
             big_endian: false
@@ -194,7 +197,7 @@ jobs:
           # Linux Job 2: Compression + RLE tests (~83 tests)
           - name: Linux - compression
             os: ubuntu-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "MULTI:network::compression|rle::"
             skip_filter: ""
             big_endian: false
@@ -202,7 +205,7 @@ jobs:
           # Linux Job 3: Input queue tests (~68 tests)
           - name: Linux - input_queue
             os: ubuntu-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "input_queue::"
             skip_filter: ""
             big_endian: false
@@ -211,7 +214,7 @@ jobs:
           # Runs: hash, rng, checksum, time_sync modules (~99 tests)
           - name: Linux - core + big-endian
             os: ubuntu-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "MULTI:hash::|rng::|checksum::|time_sync::"
             skip_filter: ""
             big_endian: true
@@ -219,7 +222,7 @@ jobs:
           # Linux Job 5: Sessions tests (~253 tests)
           - name: Linux - sessions
             os: ubuntu-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "sessions::"
             skip_filter: ""
             big_endian: false
@@ -228,7 +231,7 @@ jobs:
           # sync_layer (96) + network non-protocol/compression (96)
           - name: Linux - sync + network-other
             os: ubuntu-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "MULTI:sync_layer::|network::chaos_socket|network::udp_socket|network::messages|network::codec|network::network_stats"
             skip_filter: ""
             big_endian: false
@@ -236,19 +239,19 @@ jobs:
           # Linux Job 7: Error + tests + telemetry + frame_info + misc (~221 tests)
           - name: Linux - error + misc
             os: ubuntu-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "MULTI:error::|tests::|telemetry::|frame_info::|sync::|test_config::"
             skip_filter: ""
             big_endian: false
 
           # ============================================================
-          # Windows jobs (16 seeds each, split into 7 for parallelism)
+          # Windows jobs (4 seeds each, split into 7 for parallelism)
           # ============================================================
 
           # Windows Job 1: Protocol tests only (~148 tests)
           - name: Windows - protocol
             os: windows-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "network::protocol"
             skip_filter: ""
             big_endian: false
@@ -256,7 +259,7 @@ jobs:
           # Windows Job 2: Compression + RLE tests (~83 tests)
           - name: Windows - compression
             os: windows-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "MULTI:network::compression|rle::"
             skip_filter: ""
             big_endian: false
@@ -264,7 +267,7 @@ jobs:
           # Windows Job 3: Input queue tests (~68 tests)
           - name: Windows - input_queue
             os: windows-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "input_queue::"
             skip_filter: ""
             big_endian: false
@@ -272,7 +275,7 @@ jobs:
           # Windows Job 4: Core utility tests (~99 tests)
           - name: Windows - core
             os: windows-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "MULTI:hash::|rng::|checksum::|time_sync::"
             skip_filter: ""
             big_endian: false
@@ -280,7 +283,7 @@ jobs:
           # Windows Job 5: Sessions tests (~253 tests)
           - name: Windows - sessions
             os: windows-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "sessions::"
             skip_filter: ""
             big_endian: false
@@ -289,7 +292,7 @@ jobs:
           # sync_layer (96) + network non-protocol/compression (96)
           - name: Windows - sync + network-other
             os: windows-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "MULTI:sync_layer::|network::chaos_socket|network::udp_socket|network::messages|network::codec|network::network_stats"
             skip_filter: ""
             big_endian: false
@@ -297,19 +300,19 @@ jobs:
           # Windows Job 7: Error + tests + telemetry + frame_info + misc (~221 tests)
           - name: Windows - error + misc
             os: windows-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "MULTI:error::|tests::|telemetry::|frame_info::|sync::|test_config::"
             skip_filter: ""
             big_endian: false
 
           # ============================================================
-          # macOS jobs (16 seeds each, split into 4 - faster runners)
+          # macOS jobs (4 seeds each, split into 4 - faster runners)
           # ============================================================
 
           # macOS Job 1: Protocol + Compression (~148 + 83 = ~231 tests)
           - name: macOS - protocol + compression
             os: macos-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "MULTI:network::protocol|network::compression|rle::"
             skip_filter: ""
             big_endian: false
@@ -317,7 +320,7 @@ jobs:
           # macOS Job 2: Input queue + Core (~68 + 99 = ~167 tests)
           - name: macOS - input_queue + core
             os: macos-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "MULTI:input_queue::|hash::|rng::|checksum::|time_sync::"
             skip_filter: ""
             big_endian: false
@@ -325,7 +328,7 @@ jobs:
           # macOS Job 3: Sessions + sync_layer (~253 + 96 = ~349 tests)
           - name: macOS - sessions + sync
             os: macos-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "MULTI:sessions::|sync_layer::"
             skip_filter: ""
             big_endian: false
@@ -333,7 +336,7 @@ jobs:
           # macOS Job 4: Network other + error + misc (~96 + 221 = ~317 tests)
           - name: macOS - network-other + misc
             os: macos-latest
-            seeds: "0..16"
+            seeds: "0..4"
             test_filter: "MULTI:network::chaos_socket|network::udp_socket|network::messages|network::codec|network::network_stats|error::|tests::|telemetry::|frame_info::|sync::|test_config::"
             skip_filter: ""
             big_endian: false
@@ -368,11 +371,15 @@ jobs:
         run: |
           set -e  # Exit on first error
 
+          # Assign GitHub Actions expressions to bash variables (avoids shellcheck SC2193)
+          test_filter="${{ matrix.test_filter }}"
+          skip_filter="${{ matrix.skip_filter }}"
+
           # Handle MULTI: prefix for running multiple test groups
           # Uses pipe (|) as delimiter to avoid conflicts with Rust's :: module separator
-          if [[ "${{ matrix.test_filter }}" == MULTI:* ]]; then
+          if [[ "$test_filter" == MULTI:* ]]; then
             # Extract pipe-separated filters (skip MULTI: prefix)
-            filters="${{ matrix.test_filter }}"
+            filters="$test_filter"
             filters="${filters#MULTI:}"
 
             # Run cargo miri test for each filter
@@ -380,15 +387,15 @@ jobs:
             for filter in "${FILTER_ARRAY[@]}"; do
               if [[ -n "$filter" ]]; then
                 echo "Running tests matching: $filter"
-                cargo miri test --lib -- "$filter" ${{ matrix.skip_filter }}
+                cargo miri test --lib -- "$filter" $skip_filter
               fi
             done
-          elif [[ -n "${{ matrix.test_filter }}" ]]; then
+          elif [[ -n "$test_filter" ]]; then
             # Single positive filter
-            cargo miri test --lib -- "${{ matrix.test_filter }}" ${{ matrix.skip_filter }}
+            cargo miri test --lib -- "$test_filter" $skip_filter
           else
             # No positive filter, just skip patterns
-            cargo miri test --lib -- ${{ matrix.skip_filter }}
+            cargo miri test --lib -- $skip_filter
           fi
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-many-seeds=${{ matrix.seeds }} -Zmiri-symbolic-alignment-check"

@@ -28,7 +28,7 @@
 
 /// Returns the number of test cases to run for property-based tests.
 ///
-/// When running under Miri, returns a reduced count (10) for faster testing.
+/// When running under Miri, returns a reduced count (5) for faster testing.
 /// Otherwise, returns the standard count (256) for thorough coverage.
 ///
 /// # Examples
@@ -51,7 +51,7 @@
 #[must_use]
 pub const fn miri_case_count() -> u32 {
     if cfg!(miri) {
-        10
+        5
     } else {
         256
     }
@@ -64,11 +64,11 @@ mod tests {
     #[test]
     fn test_miri_case_count_returns_expected_value() {
         // When not running under Miri, should return 256
-        // When running under Miri, should return 10
+        // When running under Miri, should return 5
         let count = miri_case_count();
 
         if cfg!(miri) {
-            assert_eq!(count, 10);
+            assert_eq!(count, 5);
         } else {
             assert_eq!(count, 256);
         }

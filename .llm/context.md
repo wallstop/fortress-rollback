@@ -237,6 +237,12 @@ The project runs comprehensive safety checks beyond standard linting:
 
 See also: `ci-rust.yml` (Miri UB detection), `ci-security.yml` (cargo-geiger, cargo-deny)
 
+> **See also:** CI/CD guides in `.llm/skills/`:
+>
+> - [github-actions-best-practices.md](skills/github-actions-best-practices.md) — Workflow linting, shellcheck, Miri CI, timeout values, cross-platform scripts
+> - [cross-platform-ci-cd.md](skills/cross-platform-ci-cd.md) — Multi-platform build strategies and release workflows
+> - [ci-cd-debugging.md](skills/ci-cd-debugging.md) — Reproducing and debugging CI failures locally
+
 ### Documentation Template
 
 ```rust

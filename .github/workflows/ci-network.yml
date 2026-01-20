@@ -70,7 +70,10 @@ jobs:
         id: sccache-check
         shell: bash
         run: |
-          if [ "${{ steps.sccache-check-unix.outputs.working }}" == "true" ] || [ "${{ steps.sccache-check-windows.outputs.working }}" == "true" ]; then
+          # Assign GitHub expressions to variables (avoids shellcheck SC2193)
+          unix_working="${{ steps['sccache-check-unix'].outputs.working }}"
+          windows_working="${{ steps['sccache-check-windows'].outputs.working }}"
+          if [ "$unix_working" == "true" ] || [ "$windows_working" == "true" ]; then
             echo "working=true" >> "$GITHUB_OUTPUT"
           else
             echo "working=false" >> "$GITHUB_OUTPUT"
