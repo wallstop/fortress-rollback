@@ -92,6 +92,10 @@ maintenance = { status = "actively-developed" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(loom)'] }
+# Allow unknown lints during lint rename transitions (e.g., unchecked_duration_subtraction -> unchecked_time_subtraction in Rust 1.92)
+unknown_lints = "allow"
+# Allow renamed lints during Rust version transitions
+renamed_and_removed_lints = "allow"
 
 # Defensive programming clippy lints
 # Reference: https://corrode.dev/blog/defensive-programming/
@@ -184,9 +188,11 @@ semicolon_if_nothing_returned = "allow"
 struct_excessive_bools = "allow"
 # Allow trivially copy pass by ref (API consistency)
 trivially_copy_pass_by_ref = "allow"
-# Allow unchecked duration/time subtraction (validated)
-# Note: renamed to unchecked_time_subtraction in rust 1.92+
+# Allow unchecked time subtraction (validated by our logic)
+# Note: unchecked_duration_subtraction was renamed to unchecked_time_subtraction in Rust 1.92
+# We allow both names for compatibility across Rust versions
 unchecked_duration_subtraction = "allow"
+unchecked_time_subtraction = "allow"
 
 # Note: wildcard_enum_match_arm is NOT enabled because public enums use #[non_exhaustive],
 # which already forces external users to handle wildcards. Internal test code uses wildcards

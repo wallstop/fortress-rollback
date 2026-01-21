@@ -5,8 +5,8 @@
 //!
 //! # Port Allocation
 //!
-//! This test file uses `PortAllocator` for thread-safe port allocation.
-//! All ports are dynamically allocated to avoid conflicts with other tests.
+//! This test file uses `bind_socket_ephemeral()` for OS-assigned ephemeral ports
+//! to avoid TIME_WAIT conflicts on Windows CI.
 
 // Allow test-specific patterns that are appropriate for test code
 #![allow(
@@ -19,7 +19,6 @@
 
 use crate::common::run_p2p_frame_advancement_test;
 use crate::common::stubs_enum::{EnumInput, GameStubEnum, StubEnumConfig};
-use crate::common::PortAllocator;
 use fortress_rollback::FortressError;
 use serial_test::serial;
 
@@ -30,10 +29,7 @@ use serial_test::serial;
 #[test]
 #[serial]
 fn test_advance_frame_p2p_sessions_enum() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
     run_p2p_frame_advancement_test::<StubEnumConfig, GameStubEnum>(
-        port1,
-        port2,
         |i| {
             if i % 2 == 0 {
                 EnumInput::Val1

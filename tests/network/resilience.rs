@@ -49,11 +49,10 @@
 )]
 
 use crate::common::stubs::{GameStub, StubConfig, StubInput};
-use crate::common::test_utils::{bind_socket_with_retry, create_chaos_socket};
-use crate::common::PortAllocator;
+use crate::common::test_utils::{bind_socket_with_retry, create_chaos_socket_ephemeral};
 use fortress_rollback::{
     ChaosConfig, FortressError, FortressEvent, PlayerHandle, PlayerType, ProtocolConfig, SaveMode,
-    SessionBuilder, SessionState, SyncConfig, TimeSyncConfig,
+    SessionBuilder, SessionState, SocketErrorKind, SyncConfig, TimeSyncConfig,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -66,10 +65,7 @@ use std::time::Duration;
 #[test]
 #[serial]
 fn test_synchronize_with_packet_loss() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Use different seeds to avoid correlated packet drops
     let config1 = ChaosConfig::builder()
         .packet_loss_rate(0.10) // 10% loss
@@ -81,13 +77,13 @@ fn test_synchronize_with_packet_loss() -> Result<(), FortressError> {
         .seed(43) // Different seed!
         .build();
 
-    let socket1 = create_chaos_socket(port1, config1)?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -134,29 +130,32 @@ fn test_synchronize_with_packet_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_advance_frames_with_packet_loss() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
-    let chaos_config = ChaosConfig::builder()
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let chaos_config1 = ChaosConfig::builder()
         .packet_loss_rate(0.05) // 5% loss
         .seed(123)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let chaos_config2 = ChaosConfig::builder()
+        .packet_loss_rate(0.05) // 5% loss
+        .seed(124)
+        .build();
+
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
     // Synchronize first - need sleep for protocol retry timers (200ms interval)
-    for _ in 0..100 {
+    // With packet loss, synchronization may take longer, so we increase iterations
+    for _ in 0..200 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
 
@@ -165,11 +164,19 @@ fn test_advance_frames_with_packet_loss() -> Result<(), FortressError> {
         {
             break;
         }
-        std::thread::sleep(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(40));
     }
 
-    assert_eq!(sess1.current_state(), SessionState::Running);
-    assert_eq!(sess2.current_state(), SessionState::Running);
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Running,
+        "Session 1 failed to synchronize within timeout"
+    );
+    assert_eq!(
+        sess2.current_state(),
+        SessionState::Running,
+        "Session 2 failed to synchronize within timeout"
+    );
 
     // Now advance frames with packet loss
     let mut stub1 = GameStub::new();
@@ -210,20 +217,18 @@ fn test_advance_frames_with_packet_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_synchronize_with_latency() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // 20ms simulated latency
-    let chaos_config = ChaosConfig::builder().latency_ms(20).seed(42).build();
+    let chaos_config1 = ChaosConfig::builder().latency_ms(20).seed(42).build();
+    let chaos_config2 = ChaosConfig::builder().latency_ms(20).seed(43).build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -262,24 +267,27 @@ fn test_synchronize_with_latency() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_synchronize_with_jitter() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // 30ms latency with ±15ms jitter
-    let chaos_config = ChaosConfig::builder()
+    let chaos_config1 = ChaosConfig::builder()
         .latency_ms(30)
         .jitter_ms(15)
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let chaos_config2 = ChaosConfig::builder()
+        .latency_ms(30)
+        .jitter_ms(15)
+        .seed(43)
+        .build();
+
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -316,21 +324,21 @@ fn test_synchronize_with_jitter() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_poor_network_conditions() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    // Use the "poor network" preset with deterministic seeds
+    let mut chaos_config1 = ChaosConfig::poor_network();
+    chaos_config1.seed = Some(42);
 
-    // Use the "poor network" preset with a deterministic seed
-    let mut chaos_config = ChaosConfig::poor_network();
-    chaos_config.seed = Some(42);
+    let mut chaos_config2 = ChaosConfig::poor_network();
+    chaos_config2.seed = Some(43);
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -402,10 +410,7 @@ fn test_poor_network_conditions() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_asymmetric_packet_loss() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Player 1 has high send loss (simulates bad upload)
     let config1 = ChaosConfig::builder()
         .send_loss_rate(0.15)
@@ -420,13 +425,13 @@ fn test_asymmetric_packet_loss() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let socket1 = create_chaos_socket(port1, config1)?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -465,22 +470,25 @@ fn test_asymmetric_packet_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_high_packet_loss() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
-    let chaos_config = ChaosConfig::builder()
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let chaos_config1 = ChaosConfig::builder()
         .packet_loss_rate(0.25) // 25% loss - very aggressive
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let chaos_config2 = ChaosConfig::builder()
+        .packet_loss_rate(0.25)
+        .seed(43)
+        .build();
+
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -519,19 +527,17 @@ fn test_high_packet_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_high_latency_100ms() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let chaos_config1 = ChaosConfig::builder().latency_ms(100).seed(42).build();
+    let chaos_config2 = ChaosConfig::builder().latency_ms(100).seed(43).build();
 
-    let chaos_config = ChaosConfig::builder().latency_ms(100).seed(42).build();
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -602,19 +608,17 @@ fn test_high_latency_100ms() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_high_latency_250ms() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let chaos_config1 = ChaosConfig::builder().latency_ms(250).seed(42).build();
+    let chaos_config2 = ChaosConfig::builder().latency_ms(250).seed(43).build();
 
-    let chaos_config = ChaosConfig::builder().latency_ms(250).seed(42).build();
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -652,19 +656,17 @@ fn test_high_latency_250ms() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_extreme_latency_500ms() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let chaos_config1 = ChaosConfig::builder().latency_ms(500).seed(42).build();
+    let chaos_config2 = ChaosConfig::builder().latency_ms(500).seed(43).build();
 
-    let chaos_config = ChaosConfig::builder().latency_ms(500).seed(42).build();
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -702,24 +704,27 @@ fn test_extreme_latency_500ms() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_out_of_order_delivery() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Configure aggressive reordering
-    let chaos_config = ChaosConfig::builder()
+    let chaos_config1 = ChaosConfig::builder()
         .reorder_buffer_size(5)
         .reorder_rate(0.5) // 50% chance of reordering within buffer
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let chaos_config2 = ChaosConfig::builder()
+        .reorder_buffer_size(5)
+        .reorder_rate(0.5) // 50% chance of reordering within buffer
+        .seed(43)
+        .build();
+
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -796,25 +801,30 @@ fn test_out_of_order_delivery() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_jitter_with_packet_loss() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Moderate jitter with packet loss
-    let chaos_config = ChaosConfig::builder()
+    let chaos_config1 = ChaosConfig::builder()
         .latency_ms(40)
         .jitter_ms(30)
         .packet_loss_rate(0.08)
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let chaos_config2 = ChaosConfig::builder()
+        .latency_ms(40)
+        .jitter_ms(30)
+        .packet_loss_rate(0.08)
+        .seed(43)
+        .build();
+
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -887,23 +897,25 @@ fn test_jitter_with_packet_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_packet_duplication() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // High duplication rate to test duplicate handling
-    let chaos_config = ChaosConfig::builder()
+    let chaos_config1 = ChaosConfig::builder()
         .duplication_rate(0.30) // 30% of packets duplicated
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let chaos_config2 = ChaosConfig::builder()
+        .duplication_rate(0.30) // 30% of packets duplicated
+        .seed(43)
+        .build();
+
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -973,21 +985,21 @@ fn test_packet_duplication() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_determinism_under_stress() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Use "terrible network" conditions for stress testing
-    let mut chaos_config = ChaosConfig::terrible_network();
-    chaos_config.seed = Some(42);
+    let mut chaos_config1 = ChaosConfig::terrible_network();
+    chaos_config1.seed = Some(42);
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let mut chaos_config2 = ChaosConfig::terrible_network();
+    chaos_config2.seed = Some(43);
+
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1067,12 +1079,9 @@ fn test_determinism_under_stress() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_no_panics_under_worst_case() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Very aggressive network chaos
-    let chaos_config = ChaosConfig::builder()
+    let chaos_config1 = ChaosConfig::builder()
         .latency_ms(200)
         .jitter_ms(150)
         .packet_loss_rate(0.30) // 30% loss
@@ -1082,13 +1091,24 @@ fn test_no_panics_under_worst_case() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let chaos_config2 = ChaosConfig::builder()
+        .latency_ms(200)
+        .jitter_ms(150)
+        .packet_loss_rate(0.30)
+        .duplication_rate(0.20)
+        .reorder_buffer_size(8)
+        .reorder_rate(0.5)
+        .seed(43)
+        .build();
+
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1142,23 +1162,20 @@ fn test_no_panics_under_worst_case() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_asymmetric_latency() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Player 1 has higher latency (poor download)
     let config1 = ChaosConfig::builder().latency_ms(150).seed(42).build();
 
     // Player 2 has lower latency
     let config2 = ChaosConfig::builder().latency_ms(30).seed(43).build();
 
-    let socket1 = create_chaos_socket(port1, config1)?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1232,25 +1249,28 @@ fn test_asymmetric_latency() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_burst_packet_loss() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Use burst loss with latency - this simulates WiFi interference or similar
     // 3% chance of burst, 3 consecutive drops per burst
-    let chaos_config = ChaosConfig::builder()
+    let chaos_config1 = ChaosConfig::builder()
         .burst_loss(0.03, 3)
         .latency_ms(20)
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let chaos_config2 = ChaosConfig::builder()
+        .burst_loss(0.03, 3)
+        .latency_ms(20)
+        .seed(43)
+        .build();
+
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1324,20 +1344,18 @@ fn test_burst_packet_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_temporary_disconnect_reconnect() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Start with good connection
-    let good_config = ChaosConfig::passthrough();
+    let good_config1 = ChaosConfig::passthrough();
+    let good_config2 = ChaosConfig::passthrough();
 
-    let socket1 = create_chaos_socket(port1, good_config.clone())?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(good_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(good_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, good_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1433,25 +1451,29 @@ fn test_temporary_disconnect_reconnect() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_eventual_consistency() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Use moderate network conditions
-    let chaos_config = ChaosConfig::builder()
+    let chaos_config1 = ChaosConfig::builder()
         .latency_ms(30)
         .jitter_ms(10)
         .packet_loss_rate(0.03)
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let chaos_config2 = ChaosConfig::builder()
+        .latency_ms(30)
+        .jitter_ms(10)
+        .packet_loss_rate(0.03)
+        .seed(43)
+        .build();
+
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1531,25 +1553,29 @@ fn test_eventual_consistency() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_burst_loss_with_jitter() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Combine burst loss with jitter
-    let chaos_config = ChaosConfig::builder()
+    let chaos_config1 = ChaosConfig::builder()
         .latency_ms(40)
         .jitter_ms(25)
         .burst_loss(0.08, 4) // 8% chance of 4-packet burst
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let chaos_config2 = ChaosConfig::builder()
+        .latency_ms(40)
+        .jitter_ms(25)
+        .burst_loss(0.08, 4) // 8% chance of 4-packet burst
+        .seed(43)
+        .build();
+
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1627,10 +1653,7 @@ fn test_burst_loss_with_jitter() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_one_way_send_only_loss() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Peer 1 has higher receive loss (simulates bad incoming connection)
     let config1 = ChaosConfig::builder()
         .send_loss_rate(0.02)
@@ -1647,13 +1670,13 @@ fn test_one_way_send_only_loss() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let socket1 = create_chaos_socket(port1, config1)?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1723,10 +1746,7 @@ fn test_one_way_send_only_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_one_way_receive_only_loss() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Peer 1 has higher send loss (simulates bad outgoing connection)
     let config1 = ChaosConfig::builder()
         .send_loss_rate(0.15) // 15% send loss
@@ -1743,13 +1763,13 @@ fn test_one_way_receive_only_loss() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let socket1 = create_chaos_socket(port1, config1)?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1816,24 +1836,27 @@ fn test_one_way_receive_only_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_heavy_packet_duplication() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // 20% packet duplication rate
-    let chaos_config = ChaosConfig::builder()
+    let chaos_config1 = ChaosConfig::builder()
         .duplication_rate(0.20)
         .latency_ms(20)
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let chaos_config2 = ChaosConfig::builder()
+        .duplication_rate(0.20)
+        .latency_ms(20)
+        .seed(43)
+        .build();
+
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1900,25 +1923,29 @@ fn test_heavy_packet_duplication() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_packet_reordering() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Buffer 4 packets, 30% chance of reordering within buffer
-    let chaos_config = ChaosConfig::builder()
+    let chaos_config1 = ChaosConfig::builder()
         .reorder_buffer_size(4)
         .reorder_rate(0.30)
         .latency_ms(30)
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let chaos_config2 = ChaosConfig::builder()
+        .reorder_buffer_size(4)
+        .reorder_rate(0.30)
+        .latency_ms(30)
+        .seed(43)
+        .build();
+
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1985,12 +2012,9 @@ fn test_packet_reordering() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_extreme_chaos_combined() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Everything enabled but at moderate levels
-    let chaos_config = ChaosConfig::builder()
+    let chaos_config1 = ChaosConfig::builder()
         .latency_ms(60)
         .jitter_ms(30)
         .packet_loss_rate(0.08)
@@ -2001,13 +2025,24 @@ fn test_extreme_chaos_combined() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let chaos_config2 = ChaosConfig::builder()
+        .latency_ms(60)
+        .jitter_ms(30)
+        .packet_loss_rate(0.08)
+        .duplication_rate(0.05)
+        .reorder_buffer_size(3)
+        .reorder_rate(0.15)
+        .burst_loss(0.02, 2)
+        .seed(43)
+        .build();
+
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2074,25 +2109,28 @@ fn test_extreme_chaos_combined() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_large_prediction_window_with_latency() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
-    let chaos_config = ChaosConfig::builder()
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let chaos_config1 = ChaosConfig::builder()
         .latency_ms(80)
         .jitter_ms(20)
         .seed(42)
         .build();
 
+    let chaos_config2 = ChaosConfig::builder()
+        .latency_ms(80)
+        .jitter_ms(20)
+        .seed(43)
+        .build();
+
     // Use larger prediction window (16 frames instead of default 8)
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_max_prediction_window(16)
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_max_prediction_window(16)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -2160,26 +2198,29 @@ fn test_large_prediction_window_with_latency() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
-    let chaos_config = ChaosConfig::builder()
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let chaos_config1 = ChaosConfig::builder()
         .packet_loss_rate(0.10)
         .latency_ms(30)
         .seed(42)
         .build();
 
+    let chaos_config2 = ChaosConfig::builder()
+        .packet_loss_rate(0.10)
+        .latency_ms(30)
+        .seed(43)
+        .build();
+
     // Use input delay of 3 frames
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_input_delay(3)
         .unwrap()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_input_delay(3)
         .unwrap()
@@ -2248,27 +2289,31 @@ fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Reduced latency and packet loss for more reliable synchronization
-    let chaos_config = ChaosConfig::builder()
+    let chaos_config1 = ChaosConfig::builder()
         .latency_ms(20)
         .jitter_ms(10)
         .packet_loss_rate(0.03)
         .seed(42)
         .build();
 
+    let chaos_config2 = ChaosConfig::builder()
+        .latency_ms(20)
+        .jitter_ms(10)
+        .packet_loss_rate(0.03)
+        .seed(43)
+        .build();
+
     // Enable sparse saving mode
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_save_mode(SaveMode::Sparse)
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_save_mode(SaveMode::Sparse)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -2343,10 +2388,7 @@ fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_network_flapping_simulation() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Simulate flapping with burst loss
     // 10% burst probability with 6-packet bursts is aggressive but within
     // stress_test() documented capabilities ("10%+ probability with 8+ packet bursts")
@@ -2366,14 +2408,15 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
         .seed(43) // Different seed to decorrelate burst loss events
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config1)?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::stress_test()) // 60s timeout for harsh conditions
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::stress_test()) // 60s timeout for harsh conditions
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -2494,10 +2537,9 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_extreme_jitter() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI.
+    // The OS assigns available ports, eliminating the flaky port allocation issues.
+    //
     // Base latency 50ms, jitter ±50ms (0-100ms effective)
     let chaos_config = ChaosConfig::builder()
         .latency_ms(50)
@@ -2505,13 +2547,16 @@ fn test_extreme_jitter() -> Result<(), FortressError> {
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    // Create sockets with ephemeral ports
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config.clone())?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config)?;
+
+    // Now create sessions pointing at each other's addresses
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2578,20 +2623,36 @@ fn test_extreme_jitter() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_terrible_network_preset() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    // Recreate terrible_network preset with different seeds for each socket
+    let chaos_config1 = ChaosConfig::builder()
+        .latency(Duration::from_millis(250))
+        .jitter(Duration::from_millis(100))
+        .packet_loss_rate(0.15)
+        .duplication_rate(0.02)
+        .reorder_buffer_size(5)
+        .reorder_rate(0.1)
+        .seed(42)
+        .build();
 
-    // Use the preset
-    let chaos_config = ChaosConfig::terrible_network();
+    let chaos_config2 = ChaosConfig::builder()
+        .latency(Duration::from_millis(250))
+        .jitter(Duration::from_millis(100))
+        .packet_loss_rate(0.15)
+        .duplication_rate(0.02)
+        .reorder_buffer_size(5)
+        .reorder_rate(0.1)
+        .seed(43)
+        .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2658,10 +2719,7 @@ fn test_terrible_network_preset() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_mobile_network_preset() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Use the mobile network preset with deterministic seed
     let chaos_config1 = ChaosConfig::builder()
         .latency(Duration::from_millis(60))
@@ -2685,7 +2743,9 @@ fn test_mobile_network_preset() -> Result<(), FortressError> {
         .seed(12346)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config1)?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::mobile())
         .with_protocol_config(ProtocolConfig::mobile())
@@ -2693,8 +2753,6 @@ fn test_mobile_network_preset() -> Result<(), FortressError> {
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::mobile())
         .with_protocol_config(ProtocolConfig::mobile())
@@ -2764,10 +2822,7 @@ fn test_mobile_network_preset() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_wifi_interference_preset() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Use WiFi interference characteristics with deterministic seed
     let chaos_config1 = ChaosConfig::builder()
         .latency(Duration::from_millis(15))
@@ -2789,13 +2844,13 @@ fn test_wifi_interference_preset() -> Result<(), FortressError> {
         .seed(22223)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config1)?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2862,10 +2917,7 @@ fn test_wifi_interference_preset() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_intercontinental_preset() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Use intercontinental characteristics with deterministic seed
     let chaos_config1 = ChaosConfig::builder()
         .latency(Duration::from_millis(120))
@@ -2881,7 +2933,9 @@ fn test_intercontinental_preset() -> Result<(), FortressError> {
         .seed(33334)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config1)?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::high_latency())
         .with_protocol_config(ProtocolConfig::high_latency())
@@ -2890,7 +2944,6 @@ fn test_intercontinental_preset() -> Result<(), FortressError> {
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = create_chaos_socket(port2, chaos_config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::high_latency())
         .with_protocol_config(ProtocolConfig::high_latency())
@@ -2960,12 +3013,26 @@ fn test_intercontinental_preset() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_competitive_preset_fast_sync() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // No chaos - LAN-like conditions for competitive play
-    let socket1 = bind_socket_with_retry(port1)?;
+    let socket1 = bind_socket_with_retry(0)?;
+    let bound_addr1 =
+        socket1
+            .local_addr()
+            .map_err(|_io_err| FortressError::SocketErrorStructured {
+                kind: SocketErrorKind::BindFailed { port: 0 },
+            })?;
+    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound_addr1.port());
+
+    let socket2 = bind_socket_with_retry(0)?;
+    let bound_addr2 =
+        socket2
+            .local_addr()
+            .map_err(|_io_err| FortressError::SocketErrorStructured {
+                kind: SocketErrorKind::BindFailed { port: 0 },
+            })?;
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound_addr2.port());
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::competitive())
         .with_protocol_config(ProtocolConfig::competitive())
@@ -2973,8 +3040,6 @@ fn test_competitive_preset_fast_sync() -> Result<(), FortressError> {
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = bind_socket_with_retry(port2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::competitive())
         .with_protocol_config(ProtocolConfig::competitive())
@@ -3081,10 +3146,6 @@ struct ChaosTestCase {
 impl ChaosTestCase {
     /// Run the test case and return diagnostic information.
     fn run(&self) -> Result<ChaosTestResult, FortressError> {
-        let (port1, port2) = PortAllocator::next_pair();
-        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-        let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
         // Build chaos configurations with DIFFERENT seeds for each socket.
         // Using the same seed causes correlated packet loss patterns that can
         // systematically block synchronization (see module documentation).
@@ -3107,14 +3168,16 @@ impl ChaosTestCase {
         let chaos_config1 = build_chaos_config(42);
         let chaos_config2 = build_chaos_config(43); // Different seed to avoid correlated loss
 
-        let socket1 = create_chaos_socket(port1, chaos_config1)?;
+        // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+        let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+        let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
         let mut sess1 = SessionBuilder::<StubConfig>::new()
             .with_sync_config(self.sync_config.clone())
             .add_player(PlayerType::Local, PlayerHandle::new(0))?
             .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
             .start_p2p_session(socket1)?;
 
-        let socket2 = create_chaos_socket(port2, chaos_config2)?;
         let mut sess2 = SessionBuilder::<StubConfig>::new()
             .with_sync_config(self.sync_config.clone())
             .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -3288,10 +3351,7 @@ fn test_chaos_conditions_data_driven() {
 #[test]
 #[serial]
 fn test_sync_timeout_detection() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Use very short timeout with heavy packet loss to trigger timeout
     let short_timeout_config = SyncConfig {
         num_sync_packets: 10,
@@ -3302,20 +3362,26 @@ fn test_sync_timeout_detection() -> Result<(), FortressError> {
     };
 
     // 50% packet loss should make sync impossible in 2 seconds with 10 roundtrips
-    let chaos_config = ChaosConfig::builder()
+    let chaos_config1 = ChaosConfig::builder()
         .latency_ms(20)
         .packet_loss_rate(0.50) // Very high loss
         .seed(42)
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let chaos_config2 = ChaosConfig::builder()
+        .latency_ms(20)
+        .packet_loss_rate(0.50) // Very high loss
+        .seed(43)
+        .build();
+
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(short_timeout_config.clone())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(short_timeout_config)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -3380,16 +3446,19 @@ fn test_sync_timeout_detection() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_burst_loss_matches_sync_packets() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Configure burst loss length equal to default sync packets (5)
     // This tests the edge case where a burst could wipe out all initial sync attempts
-    let chaos_config = ChaosConfig::builder()
+    let chaos_config1 = ChaosConfig::builder()
         .latency_ms(20)
         .burst_loss(0.05, 5) // Burst wipes exactly 5 packets
         .seed(42)
+        .build();
+
+    let chaos_config2 = ChaosConfig::builder()
+        .latency_ms(20)
+        .burst_loss(0.05, 5) // Burst wipes exactly 5 packets
+        .seed(43)
         .build();
 
     // Use a config with more sync packets to handle burst wiping out initial 5
@@ -3401,14 +3470,14 @@ fn test_burst_loss_matches_sync_packets() -> Result<(), FortressError> {
         keepalive_interval: Duration::from_millis(100),
     };
 
-    let socket1 = create_chaos_socket(port1, chaos_config.clone())?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(resilient_config.clone())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(resilient_config)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -3456,10 +3525,7 @@ fn test_burst_loss_matches_sync_packets() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_different_seeds_prevent_correlated_loss() -> Result<(), FortressError> {
-    let (port1, port2) = PortAllocator::next_pair();
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
     // Use aggressive burst loss with DIFFERENT seeds
     let chaos_config1 = ChaosConfig::builder()
         .latency_ms(20)
@@ -3473,14 +3539,14 @@ fn test_different_seeds_prevent_correlated_loss() -> Result<(), FortressError> {
         .seed(101) // Different seed!
         .build();
 
-    let socket1 = create_chaos_socket(port1, chaos_config1)?;
+    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::stress_test())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
-
-    let socket2 = create_chaos_socket(port2, chaos_config2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::stress_test())
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -3592,10 +3658,6 @@ fn test_seed_pairs_for_decorrelated_sync() -> Result<(), FortressError> {
     let sync_config = SyncConfig::lossy();
 
     for (seed1, seed2) in test_cases {
-        let (port1, port2) = PortAllocator::next_pair();
-        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-        let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
         // Use 5% loss for reliable CI behavior while still testing
         // decorrelated loss patterns
         let chaos_config1 = ChaosConfig::builder()
@@ -3610,14 +3672,14 @@ fn test_seed_pairs_for_decorrelated_sync() -> Result<(), FortressError> {
             .seed(seed2)
             .build();
 
-        let socket1 = create_chaos_socket(port1, chaos_config1)?;
+        let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
+        let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+
         let mut sess1 = SessionBuilder::<StubConfig>::new()
             .with_sync_config(sync_config.clone())
             .add_player(PlayerType::Local, PlayerHandle::new(0))?
             .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
             .start_p2p_session(socket1)?;
-
-        let socket2 = create_chaos_socket(port2, chaos_config2)?;
         let mut sess2 = SessionBuilder::<StubConfig>::new()
             .with_sync_config(sync_config.clone())
             .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -3711,12 +3773,9 @@ struct PresetTestResult {
 impl PresetTestCase {
     /// Run the preset test case and return diagnostic results.
     fn run(&self) -> Result<PresetTestResult, FortressError> {
-        let (port1, port2) = PortAllocator::next_pair();
-        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-        let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
-
+        // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
         // Create sockets - either chaos or plain UDP
-        let (socket1, socket2) = if let Some(ref chaos) = self.chaos_config {
+        let (socket1, addr1, socket2, addr2) = if let Some(ref chaos) = self.chaos_config {
             // Use different seeds for each socket to avoid correlated packet loss
             // Access public fields directly from ChaosConfig
             let latency_ms = chaos.latency.as_millis() as u64;
@@ -3732,17 +3791,15 @@ impl PresetTestCase {
                 .packet_loss_rate(loss_rate)
                 .seed(43)
                 .build();
-            (
-                create_chaos_socket(port1, chaos1)?,
-                create_chaos_socket(port2, chaos2)?,
-            )
+            let (s1, a1) = create_chaos_socket_ephemeral(chaos1)?;
+            let (s2, a2) = create_chaos_socket_ephemeral(chaos2)?;
+            (s1, a1, s2, a2)
         } else {
             // Perfect network - no chaos
             let perfect = ChaosConfig::builder().build();
-            (
-                create_chaos_socket(port1, perfect.clone())?,
-                create_chaos_socket(port2, perfect)?,
-            )
+            let (s1, a1) = create_chaos_socket_ephemeral(perfect.clone())?;
+            let (s2, a2) = create_chaos_socket_ephemeral(perfect)?;
+            (s1, a1, s2, a2)
         };
 
         // Build sessions with the preset configurations

@@ -3,20 +3,49 @@
 //! This module provides common constants, helper functions, and utilities
 //! that are used across multiple test files to avoid duplication.
 //!
-//! # Port Allocation
+//! # Port Allocation Strategy
 //!
-//! This module provides a thread-safe port allocation system to prevent port
-//! conflicts in parallel tests. Use `PortAllocator` to get unique ports:
+//! This module provides two approaches for socket binding in tests:
+//!
+//! ## Recommended: Ephemeral Ports (for actual socket binding)
+//!
+//! Use [`bind_socket_ephemeral`] or [`create_chaos_socket_ephemeral`] when you need
+//! to bind actual sockets. This approach uses port 0, letting the OS assign an
+//! available ephemeral port, eliminating TIME_WAIT conflicts on Windows CI:
+//!
+//! ```ignore
+//! use common::test_utils::{bind_socket_ephemeral, create_chaos_socket_ephemeral};
+//!
+//! // For regular UDP sockets
+//! let (socket1, addr1) = bind_socket_ephemeral()?;
+//! let (socket2, addr2) = bind_socket_ephemeral()?;
+//!
+//! // For chaos sockets with network simulation
+//! let config = ChaosConfig::builder().seed(42).build();
+//! let (chaos_socket, addr) = create_chaos_socket_ephemeral(config)?;
+//! ```
+//!
+//! ## Legacy: Port Allocator (for unbound addresses only)
+//!
+//! Use [`PortAllocator`] only for generating remote addresses that will NOT be
+//! bound to actual sockets (e.g., mock remote peers). The allocator uses atomic
+//! operations for thread-safety but can still encounter TIME_WAIT conflicts:
 //!
 //! ```ignore
 //! use common::test_utils::PortAllocator;
 //!
-//! let port1 = PortAllocator::next_port();
-//! let port2 = PortAllocator::next_port();
+//! // Only for addresses NOT bound to actual sockets
+//! let mock_remote_port = PortAllocator::next_port();
 //! ```
 //!
-//! The allocator uses atomic operations to ensure thread-safety across parallel
-//! test execution.
+//! # Migration Note (January 2026)
+//!
+//! All network tests have been migrated to use ephemeral ports for actual socket
+//! binding. This resolved persistent Windows CI failures caused by WSAEACCES (10013)
+//! and WSAEADDRINUSE (10048) errors from TIME_WAIT socket states.
+//!
+//! If adding new network tests, always prefer `bind_socket_ephemeral()` or
+//! `create_chaos_socket_ephemeral()` over `PortAllocator` for bound sockets.
 
 use fortress_rollback::{Config, FortressEvent, P2PSession, SessionState};
 use std::hash::Hash;
@@ -180,13 +209,40 @@ impl PortAllocator {
 
     /// Allocates a pair of ports (convenience method for 2-player sessions).
     ///
-    /// # Example
+    /// # Deprecation Warning
+    ///
+    /// **For actual socket binding, use [`bind_socket_ephemeral`] instead.**
+    ///
+    /// This method should only be used for generating addresses that will NOT
+    /// be bound to actual sockets (e.g., mock remote peer addresses). Using
+    /// pre-allocated ports for actual socket binding can cause TIME_WAIT
+    /// conflicts, especially on Windows CI.
     ///
     /// ```ignore
+    /// // ❌ Deprecated pattern for bound sockets:
     /// let (port1, port2) = PortAllocator::next_pair();
+    /// let socket1 = UdpSocket::bind(format!("127.0.0.1:{}", port1))?; // May fail!
+    ///
+    /// // ✅ Preferred pattern for bound sockets:
+    /// let (socket1, addr1) = bind_socket_ephemeral()?;
+    /// let (socket2, addr2) = bind_socket_ephemeral()?;
     /// ```
+    ///
+    /// # Example (for unbound addresses only)
+    ///
+    /// ```ignore
+    /// // Use for mock remote addresses that won't be bound
+    /// let (mock_port1, mock_port2) = PortAllocator::next_pair();
+    /// let mock_remote = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), mock_port1);
+    /// ```
+    ///
+    /// [`bind_socket_ephemeral`]: crate::common::test_utils::bind_socket_ephemeral
     #[allow(dead_code)]
     #[must_use]
+    #[deprecated(
+        since = "0.11.0",
+        note = "Use bind_socket_ephemeral() for actual socket binding to avoid TIME_WAIT conflicts on Windows CI. This method should only be used for mock addresses that won't be bound."
+    )]
     pub fn next_pair() -> (u16, u16) {
         (Self::next_port(), Self::next_port())
     }
@@ -300,6 +356,53 @@ pub fn create_chaos_socket(
     Ok(ChaosSocket::new(inner, config))
 }
 
+/// Creates a chaos socket bound to an OS-assigned ephemeral port.
+///
+/// This is the preferred approach for tests on Windows CI where pre-allocated
+/// ports may still be in TIME_WAIT state from previous test runs. By using
+/// port 0, the OS assigns an available port, eliminating port conflicts.
+///
+/// # Returns
+///
+/// Returns a tuple of (socket, address) where address is the localhost address
+/// (`127.0.0.1`) with the actual bound port. The socket itself is bound to
+/// `0.0.0.0` (all interfaces), but we return the localhost address since that's
+/// what tests need for peer-to-peer communication.
+///
+/// # Example
+///
+/// ```ignore
+/// use common::test_utils::create_chaos_socket_ephemeral;
+///
+/// let config = ChaosConfig::builder().seed(42).build();
+/// let (socket1, addr1) = create_chaos_socket_ephemeral(config.clone())?;
+/// let (socket2, addr2) = create_chaos_socket_ephemeral(config)?;
+/// // addr1 and addr2 are now 127.0.0.1:ephemeral_port addresses
+/// ```
+///
+/// # Errors
+///
+/// Returns `FortressError::SocketErrorStructured` if socket binding fails.
+#[allow(dead_code)]
+#[track_caller]
+pub fn create_chaos_socket_ephemeral(
+    config: ChaosConfig,
+) -> Result<(ChaosSocket<SocketAddr, UdpNonBlockingSocket>, SocketAddr), FortressError> {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let inner = bind_socket_with_retry(0)?; // Port 0 = OS-assigned ephemeral port
+    let bound_addr =
+        inner
+            .local_addr()
+            .map_err(|_io_err| FortressError::SocketErrorStructured {
+                kind: SocketErrorKind::BindFailed { port: 0 },
+            })?;
+    // The socket is bound to 0.0.0.0:port, but for peer communication we need
+    // to return 127.0.0.1:port (localhost) since 0.0.0.0 is not routable.
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound_addr.port());
+    Ok((ChaosSocket::new(inner, config), addr))
+}
+
 /// Binds a UDP socket with retry logic for Windows CI.
 ///
 /// On non-Windows platforms, this is a simple bind without retries.
@@ -410,6 +513,48 @@ pub fn bind_socket_with_retry(port: u16) -> Result<UdpNonBlockingSocket, Fortres
             kind: SocketErrorKind::BindFailedAfterRetries { port, attempts },
         })
     }
+}
+
+/// Binds a UDP socket to an OS-assigned ephemeral port and returns both the socket and its address.
+///
+/// This is the preferred approach for tests on Windows CI where pre-allocated
+/// ports may still be in TIME_WAIT state from previous test runs. By using
+/// port 0, the OS assigns an available port, eliminating port conflicts.
+///
+/// # Returns
+///
+/// Returns a tuple of (socket, address) where address is the localhost address
+/// (`127.0.0.1`) with the actual bound port.
+///
+/// # Example
+///
+/// ```ignore
+/// use common::test_utils::bind_socket_ephemeral;
+///
+/// let (socket1, addr1) = bind_socket_ephemeral()?;
+/// let (socket2, addr2) = bind_socket_ephemeral()?;
+/// // Now addr1 and addr2 can be used for peer-to-peer setup
+/// ```
+///
+/// # Errors
+///
+/// Returns `FortressError::SocketErrorStructured` if socket binding fails.
+#[allow(dead_code)]
+#[track_caller]
+pub fn bind_socket_ephemeral() -> Result<(UdpNonBlockingSocket, SocketAddr), FortressError> {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let socket = bind_socket_with_retry(0)?; // Port 0 = OS-assigned ephemeral port
+    let bound_addr =
+        socket
+            .local_addr()
+            .map_err(|_io_err| FortressError::SocketErrorStructured {
+                kind: SocketErrorKind::BindFailed { port: 0 },
+            })?;
+    // The socket is bound to 0.0.0.0:port, but for peer communication we need
+    // to return 127.0.0.1:port (localhost) since 0.0.0.0 is not routable.
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound_addr.port());
+    Ok((socket, addr))
 }
 
 // ============================================================================
@@ -681,8 +826,6 @@ pub trait GameStubHandler<C: Config> {
 #[allow(dead_code)]
 #[track_caller]
 pub fn run_p2p_frame_advancement_test<C, S>(
-    port1: u16,
-    port2: u16,
     input_gen: impl Fn(u32) -> C::Input,
     num_frames: u32,
 ) -> Result<(), FortressError>
@@ -691,18 +834,16 @@ where
     S: GameStubHandler<C>,
 {
     use fortress_rollback::SessionBuilder;
-    use std::net::{IpAddr, Ipv4Addr};
 
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let (socket1, addr1) = bind_socket_ephemeral()?;
+    let (socket2, addr2) = bind_socket_ephemeral()?;
 
-    let socket1 = bind_socket_with_retry(port1)?;
     let mut sess1 = SessionBuilder::<C>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = bind_socket_with_retry(port2)?;
     let mut sess2 = SessionBuilder::<C>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1042,7 +1183,9 @@ mod tests {
         }
 
         /// Tests that next_pair returns two unique ports.
+        /// Note: This tests the deprecated function to ensure it still works correctly.
         #[test]
+        #[allow(deprecated)]
         fn port_allocator_next_pair_returns_unique_ports() {
             PortAllocator::reset();
 
@@ -1064,6 +1207,292 @@ mod tests {
                     PORT_ALLOCATOR_START
                 );
                 assert!(port < 60000, "Port {} should be < 60000", port);
+            }
+        }
+    }
+
+    /// Tests for ephemeral port binding.
+    ///
+    /// These tests verify that the ephemeral port binding functions work correctly
+    /// and return unique, usable addresses. This is critical for Windows CI stability.
+    #[allow(clippy::panic)] // Tests are allowed to panic
+    mod ephemeral_port_tests {
+        use super::*;
+        use std::collections::HashSet;
+
+        /// Verifies that `bind_socket_ephemeral` returns unique addresses.
+        ///
+        /// This is the core guarantee that prevents TIME_WAIT conflicts:
+        /// each call should return a different, OS-assigned ephemeral port.
+        #[test]
+        fn ephemeral_binding_returns_unique_addresses() {
+            let mut addresses = HashSet::new();
+            // Keep sockets alive to prevent port reuse during the test
+            #[allow(clippy::collection_is_never_read)]
+            let mut sockets = Vec::new();
+
+            // Bind multiple sockets and verify all addresses are unique
+            for i in 0..10 {
+                let (socket, addr) = bind_socket_ephemeral()
+                    .unwrap_or_else(|e| panic!("Should bind socket {}: {:?}", i, e));
+
+                // Address should be localhost with a non-zero port
+                assert_eq!(
+                    addr.ip(),
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    "Address should be localhost"
+                );
+                assert_ne!(addr.port(), 0, "Port should be non-zero (OS-assigned)");
+
+                // Address should be unique
+                assert!(
+                    addresses.insert(addr),
+                    "Address {} should be unique (duplicate found at index {})",
+                    addr,
+                    i
+                );
+
+                // Keep socket alive to prevent port reuse during the test
+                sockets.push(socket);
+            }
+
+            assert_eq!(
+                addresses.len(),
+                10,
+                "All 10 bindings should have unique addresses"
+            );
+        }
+
+        /// Verifies parallel socket creation doesn't cause conflicts.
+        ///
+        /// This test simulates the parallel test execution environment where
+        /// multiple threads may bind sockets simultaneously.
+        #[test]
+        fn parallel_ephemeral_binding_no_conflicts() {
+            use std::sync::Arc;
+            use std::thread;
+
+            let addresses = Arc::new(std::sync::Mutex::new(HashSet::new()));
+            let errors = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+            // Spawn multiple threads to bind sockets concurrently
+            let handles: Vec<_> = (0..8)
+                .map(|thread_id| {
+                    let addresses = Arc::clone(&addresses);
+                    let errors = Arc::clone(&errors);
+
+                    thread::spawn(move || {
+                        // Each thread binds multiple sockets
+                        let mut local_sockets = Vec::new();
+
+                        for i in 0..5 {
+                            match bind_socket_ephemeral() {
+                                Ok((socket, addr)) => {
+                                    // Verify localhost
+                                    assert_eq!(
+                                        addr.ip(),
+                                        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+                                    );
+
+                                    // Record address (check for duplicates)
+                                    let mut addrs = addresses.lock().unwrap();
+                                    if !addrs.insert(addr) {
+                                        let mut errs = errors.lock().unwrap();
+                                        errs.push(format!(
+                                            "Thread {} iteration {}: duplicate address {}",
+                                            thread_id, i, addr
+                                        ));
+                                    }
+
+                                    // Keep socket alive
+                                    local_sockets.push(socket);
+                                },
+                                Err(e) => {
+                                    let mut errs = errors.lock().unwrap();
+                                    errs.push(format!(
+                                        "Thread {} iteration {}: bind failed: {:?}",
+                                        thread_id, i, e
+                                    ));
+                                },
+                            }
+                        }
+
+                        // Hold sockets until all threads complete
+                        thread::sleep(std::time::Duration::from_millis(10));
+                        drop(local_sockets);
+                    })
+                })
+                .collect();
+
+            // Wait for all threads
+            for handle in handles {
+                handle.join().expect("Thread should complete");
+            }
+
+            // Check for errors
+            let errs = errors.lock().unwrap();
+            assert!(
+                errs.is_empty(),
+                "No errors should occur during parallel binding: {:?}",
+                *errs
+            );
+
+            // Verify we got the expected number of unique addresses
+            let addrs = addresses.lock().unwrap();
+            assert_eq!(
+                addrs.len(),
+                40, // 8 threads × 5 sockets
+                "All parallel bindings should produce unique addresses"
+            );
+        }
+
+        /// Verifies that `create_chaos_socket_ephemeral` works correctly.
+        #[test]
+        fn chaos_socket_ephemeral_returns_unique_addresses() {
+            let mut addresses = HashSet::new();
+            // Keep sockets alive to prevent port reuse during the test
+            #[allow(clippy::collection_is_never_read)]
+            let mut sockets = Vec::new();
+
+            for i in 0..5 {
+                let config = ChaosConfig::builder().seed(i as u64).build();
+                let (socket, addr) = create_chaos_socket_ephemeral(config)
+                    .unwrap_or_else(|e| panic!("Should create chaos socket {}: {:?}", i, e));
+
+                assert_eq!(
+                    addr.ip(),
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    "Chaos socket address should be localhost"
+                );
+                assert_ne!(addr.port(), 0, "Chaos socket port should be non-zero");
+
+                assert!(
+                    addresses.insert(addr),
+                    "Chaos socket address {} should be unique",
+                    addr
+                );
+
+                sockets.push(socket);
+            }
+
+            assert_eq!(
+                addresses.len(),
+                5,
+                "All chaos sockets should have unique addresses"
+            );
+        }
+
+        /// Edge case: Verify the bound address matches what we can use for communication.
+        ///
+        /// This ensures the address returned is actually usable for peer setup.
+        #[test]
+        fn ephemeral_address_is_usable_for_peer_setup() {
+            let (socket1, addr1) = bind_socket_ephemeral().expect("Should bind socket 1");
+            let (socket2, addr2) = bind_socket_ephemeral().expect("Should bind socket 2");
+
+            // Addresses should be distinct
+            assert_ne!(addr1, addr2, "Two sockets should have different addresses");
+
+            // Ports should be in the ephemeral range (typically 49152-65535, but OS-dependent)
+            // Just verify they're above well-known ports
+            assert!(
+                addr1.port() > 1024,
+                "Port {} should be above well-known range",
+                addr1.port()
+            );
+            assert!(
+                addr2.port() > 1024,
+                "Port {} should be above well-known range",
+                addr2.port()
+            );
+
+            // The sockets should be usable (not in error state)
+            // Verify by checking local_addr() matches what we expect
+            let local1 = socket1
+                .local_addr()
+                .expect("Socket 1 should have local addr");
+            let local2 = socket2
+                .local_addr()
+                .expect("Socket 2 should have local addr");
+
+            assert_eq!(
+                local1.port(),
+                addr1.port(),
+                "Returned address port should match socket's local port"
+            );
+            assert_eq!(
+                local2.port(),
+                addr2.port(),
+                "Returned address port should match socket's local port"
+            );
+        }
+
+        /// Data-driven test for various socket binding scenarios.
+        #[test]
+        fn ephemeral_binding_data_driven_scenarios() {
+            struct TestCase {
+                name: &'static str,
+                socket_count: usize,
+                expect_all_unique: bool,
+            }
+
+            let cases = [
+                TestCase {
+                    name: "single_socket",
+                    socket_count: 1,
+                    expect_all_unique: true,
+                },
+                TestCase {
+                    name: "pair_sockets",
+                    socket_count: 2,
+                    expect_all_unique: true,
+                },
+                TestCase {
+                    name: "quad_sockets",
+                    socket_count: 4,
+                    expect_all_unique: true,
+                },
+                TestCase {
+                    name: "many_sockets",
+                    socket_count: 20,
+                    expect_all_unique: true,
+                },
+            ];
+
+            for case in &cases {
+                let mut addresses = HashSet::new();
+                // Keep sockets alive to prevent port reuse during the test
+                #[allow(clippy::collection_is_never_read)]
+                let mut sockets = Vec::new();
+
+                for i in 0..case.socket_count {
+                    let result = bind_socket_ephemeral();
+                    assert!(
+                        result.is_ok(),
+                        "[{}] Socket {} should bind successfully",
+                        case.name,
+                        i
+                    );
+
+                    let (socket, addr) = result.unwrap();
+                    if case.expect_all_unique {
+                        assert!(
+                            addresses.insert(addr),
+                            "[{}] Address {} should be unique",
+                            case.name,
+                            addr
+                        );
+                    }
+                    sockets.push(socket);
+                }
+
+                assert_eq!(
+                    addresses.len(),
+                    case.socket_count,
+                    "[{}] Should have {} unique addresses",
+                    case.name,
+                    case.socket_count
+                );
             }
         }
     }
