@@ -25,8 +25,8 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use common::bind_socket_with_retry;
 use common::stubs::StubConfig;
-use common::{bind_socket_with_retry, PortAllocator};
 use fortress_rollback::{
     FortressError, PlayerHandle, PlayerType, ProtocolConfig, SessionBuilder, SpectatorConfig,
     SyncConfig, TimeSyncConfig,
@@ -34,6 +34,74 @@ use fortress_rollback::{
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use web_time::Duration;
+
+// ============================================================================
+// Data-Driven Test Macros
+// ============================================================================
+
+/// Generates tests to verify that a config type's `new()` equals `Default::default()`.
+///
+/// This macro reduces duplication for the common pattern of testing that
+/// `ConfigType::new() == ConfigType::default()`.
+macro_rules! test_new_equals_default {
+    ($($config_type:ty),+ $(,)?) => {
+        $(
+            paste::paste! {
+                #[test]
+                fn [<test_ $config_type:snake _new_equals_default>]() {
+                    assert_eq!(
+                        <$config_type>::new(),
+                        <$config_type>::default(),
+                        concat!(stringify!($config_type), "::new() should equal Default::default()")
+                    );
+                }
+            }
+        )+
+    };
+}
+
+/// Generates tests to verify that a config type implements Copy and Clone correctly.
+///
+/// This macro tests that:
+/// 1. Copying a config produces an equal value (Copy trait)
+/// 2. Cloning a config produces an equal value (Clone trait)
+macro_rules! test_copy_clone {
+    ($($config_type:ty => $preset:expr),+ $(,)?) => {
+        $(
+            paste::paste! {
+                #[test]
+                fn [<test_ $config_type:snake _copy_clone>]() {
+                    let config1: $config_type = $preset;
+
+                    // Test Copy: assignment should copy, not move
+                    let config2 = config1;
+                    assert_eq!(
+                        config1, config2,
+                        concat!(stringify!($config_type), " should implement Copy correctly")
+                    );
+
+                    // Test Clone: clone should produce equal value
+                    let config3 = config1.clone();
+                    assert_eq!(
+                        config1, config3,
+                        concat!(stringify!($config_type), " should implement Clone correctly")
+                    );
+                }
+            }
+        )+
+    };
+}
+
+// Generate new_equals_default tests for all config types
+test_new_equals_default!(SyncConfig, ProtocolConfig, SpectatorConfig, TimeSyncConfig);
+
+// Generate copy_clone tests for all config types
+test_copy_clone!(
+    SyncConfig => SyncConfig::high_latency(),
+    ProtocolConfig => ProtocolConfig::competitive(),
+    SpectatorConfig => SpectatorConfig::fast_paced(),
+    TimeSyncConfig => TimeSyncConfig::responsive(),
+);
 
 // ============================================================================
 // SyncConfig Tests
@@ -48,11 +116,6 @@ fn test_sync_config_default() {
     assert_eq!(config.sync_timeout, None);
     assert_eq!(config.running_retry_interval, Duration::from_millis(200));
     assert_eq!(config.keepalive_interval, Duration::from_millis(200));
-}
-
-#[test]
-fn test_sync_config_new_equals_default() {
-    assert_eq!(SyncConfig::new(), SyncConfig::default());
 }
 
 #[test]
@@ -115,19 +178,6 @@ fn test_sync_config_competitive_exact_values() {
     assert_eq!(competitive.keepalive_interval, Duration::from_millis(100));
 }
 
-#[test]
-fn test_sync_config_copy_clone() {
-    let config1 = SyncConfig::high_latency();
-
-    // Test Copy
-    let config2 = config1;
-    assert_eq!(config1, config2);
-
-    // Test Clone
-    let config3 = config1;
-    assert_eq!(config1, config3);
-}
-
 // ============================================================================
 // ProtocolConfig Tests
 // ============================================================================
@@ -142,11 +192,6 @@ fn test_protocol_config_default() {
     assert_eq!(config.pending_output_limit, 128);
     assert_eq!(config.sync_retry_warning_threshold, 10);
     assert_eq!(config.sync_duration_warning_ms, 3000);
-}
-
-#[test]
-fn test_protocol_config_new_equals_default() {
-    assert_eq!(ProtocolConfig::new(), ProtocolConfig::default());
 }
 
 #[test]
@@ -187,19 +232,6 @@ fn test_protocol_config_mobile_exact_values() {
     assert_eq!(mobile.sync_duration_warning_ms, 12000);
 }
 
-#[test]
-fn test_protocol_config_copy_clone() {
-    let config1 = ProtocolConfig::competitive();
-
-    // Test Copy
-    let config2 = config1;
-    assert_eq!(config1, config2);
-
-    // Test Clone
-    let config3 = config1;
-    assert_eq!(config1, config3);
-}
-
 // ============================================================================
 // SpectatorConfig Tests
 // ============================================================================
@@ -211,11 +243,6 @@ fn test_spectator_config_default() {
     assert_eq!(config.buffer_size, 60);
     assert_eq!(config.catchup_speed, 1);
     assert_eq!(config.max_frames_behind, 10);
-}
-
-#[test]
-fn test_spectator_config_new_equals_default() {
-    assert_eq!(SpectatorConfig::new(), SpectatorConfig::default());
 }
 
 #[test]
@@ -274,19 +301,6 @@ fn test_spectator_config_mobile_exact_values() {
     assert_eq!(mobile.max_frames_behind, 25);
 }
 
-#[test]
-fn test_spectator_config_copy_clone() {
-    let config1 = SpectatorConfig::fast_paced();
-
-    // Test Copy
-    let config2 = config1;
-    assert_eq!(config1, config2);
-
-    // Test Clone
-    let config3 = config1;
-    assert_eq!(config1, config3);
-}
-
 // ============================================================================
 // TimeSyncConfig Tests
 // ============================================================================
@@ -296,11 +310,6 @@ fn test_time_sync_config_default() {
     let config = TimeSyncConfig::default();
 
     assert_eq!(config.window_size, 30);
-}
-
-#[test]
-fn test_time_sync_config_new_equals_default() {
-    assert_eq!(TimeSyncConfig::new(), TimeSyncConfig::default());
 }
 
 #[test]
@@ -346,19 +355,6 @@ fn test_time_sync_config_competitive_exact_values() {
     assert_eq!(competitive.window_size, 20);
 }
 
-#[test]
-fn test_time_sync_config_copy_clone() {
-    let config1 = TimeSyncConfig::responsive();
-
-    // Test Copy
-    let config2 = config1;
-    assert_eq!(config1, config2);
-
-    // Test Clone
-    let config3 = config1;
-    assert_eq!(config1, config3);
-}
-
 // ============================================================================
 // SessionBuilder Config Integration Tests
 // ============================================================================
@@ -367,9 +363,13 @@ fn test_time_sync_config_copy_clone() {
 #[serial]
 fn test_session_with_default_configs() -> Result<(), FortressError> {
     // A session built with no explicit config should work with defaults
-    let (port1, port2) = PortAllocator::next_pair();
-    let socket = bind_socket_with_retry(port1)?;
-    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
+    // Use port 0 (ephemeral) to let the OS assign an available port.
+    // This avoids port conflicts on Windows CI where parallel test processes
+    // may have overlapping PID-based port ranges.
+    let socket = bind_socket_with_retry(0)?;
+    // The remote address doesn't need to be a real bound port - we're only
+    // testing session creation, not actual network communication.
+    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 65432);
 
     let _sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
@@ -385,9 +385,10 @@ fn test_session_with_default_configs() -> Result<(), FortressError> {
 #[serial]
 fn test_session_with_all_custom_configs() -> Result<(), FortressError> {
     // A session built with explicit configs for everything should also work
-    let (port1, port2) = PortAllocator::next_pair();
-    let socket = bind_socket_with_retry(port1)?;
-    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
+    // Use port 0 (ephemeral) to avoid port conflicts on Windows CI.
+    let socket = bind_socket_with_retry(0)?;
+    // Remote address is a dummy - no actual network communication in this test.
+    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 65432);
 
     let _sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
@@ -407,9 +408,10 @@ fn test_session_with_all_custom_configs() -> Result<(), FortressError> {
 #[serial]
 fn test_session_with_mixed_configs() -> Result<(), FortressError> {
     // A session built with some explicit and some default configs
-    let (port1, port2) = PortAllocator::next_pair();
-    let socket = bind_socket_with_retry(port1)?;
-    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
+    // Use port 0 (ephemeral) to avoid port conflicts on Windows CI.
+    let socket = bind_socket_with_retry(0)?;
+    // Remote address is a dummy - no actual network communication in this test.
+    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 65432);
 
     let _sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2).unwrap()
@@ -427,9 +429,10 @@ fn test_session_with_mixed_configs() -> Result<(), FortressError> {
 #[serial]
 fn test_session_with_custom_protocol_config() -> Result<(), FortressError> {
     // Test custom field values (not using a preset)
-    let (port1, port2) = PortAllocator::next_pair();
-    let socket = bind_socket_with_retry(port1)?;
-    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
+    // Use port 0 (ephemeral) to avoid port conflicts on Windows CI.
+    let socket = bind_socket_with_retry(0)?;
+    // Remote address is a dummy - no actual network communication in this test.
+    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 65432);
 
     let custom_protocol_config = ProtocolConfig {
         quality_report_interval: Duration::from_millis(150),
@@ -455,9 +458,10 @@ fn test_session_with_custom_protocol_config() -> Result<(), FortressError> {
 #[serial]
 fn test_session_with_custom_sync_config() -> Result<(), FortressError> {
     // Test custom field values (not using a preset)
-    let (port1, port2) = PortAllocator::next_pair();
-    let socket = bind_socket_with_retry(port1)?;
-    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
+    // Use port 0 (ephemeral) to avoid port conflicts on Windows CI.
+    let socket = bind_socket_with_retry(0)?;
+    // Remote address is a dummy - no actual network communication in this test.
+    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 65432);
 
     let custom_sync_config = SyncConfig {
         num_sync_packets: 7,

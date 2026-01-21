@@ -320,6 +320,13 @@ jobs:
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-many-seeds=${{ matrix.seeds }} -Zmiri-symbolic-alignment-check"
 
+      # Install s390x cross-compiler for big-endian tests.
+      # Miri needs a C compiler for the target when criterion (via alloca crate)
+      # is a transitive dependency that requires native code compilation.
+      - name: Install s390x cross-compiler
+        if: matrix.big_endian
+        run: sudo apt-get update && sudo apt-get install -y gcc-s390x-linux-gnu
+
       - name: Run Miri tests (big-endian s390x)
         if: matrix.big_endian
         shell: bash
