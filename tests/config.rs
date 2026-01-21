@@ -46,7 +46,7 @@ use web_time::Duration;
 macro_rules! test_new_equals_default {
     ($($config_type:ty),+ $(,)?) => {
         $(
-            paste::paste! {
+            pastey::paste! {
                 #[test]
                 fn [<test_ $config_type:snake _new_equals_default>]() {
                     assert_eq!(
@@ -68,7 +68,7 @@ macro_rules! test_new_equals_default {
 macro_rules! test_copy_clone {
     ($($config_type:ty => $preset:expr),+ $(,)?) => {
         $(
-            paste::paste! {
+            pastey::paste! {
                 #[test]
                 fn [<test_ $config_type:snake _copy_clone>]() {
                     let config1: $config_type = $preset;
