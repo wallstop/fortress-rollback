@@ -815,7 +815,8 @@ mod tests {
     clippy::indexing_slicing
 )]
 mod property_tests {
-    use super::*;
+    // Use explicit imports to avoid ambiguity with proptest::prelude::Rng (which is rand::Rng)
+    use super::{Pcg32, Rng, SeedableRng};
     use crate::test_config::miri_case_count;
     use proptest::prelude::*;
 

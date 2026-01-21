@@ -258,13 +258,20 @@ use fortress_rollback::{
 /// - WSAEACCES (error 10013): Permission denied, often due to exclusive address use
 /// - WSAEADDRINUSE (error 10048): Address already in use, often due to TIME_WAIT state
 ///
-/// We use 10 retries with exponential backoff, providing up to ~7 seconds total wait.
+/// We use 15 retries with exponential backoff, providing up to ~12 seconds total wait.
+/// Windows requires more aggressive retries than Linux/macOS due to:
+/// - Slower TIME_WAIT socket cleanup on Windows networking stack
+/// - More aggressive exclusive port locking in Windows socket implementation
+/// - Higher contention on shared GitHub Actions Windows runners
 #[cfg(target_os = "windows")]
-const SOCKET_BIND_MAX_RETRIES: u32 = 10;
+const SOCKET_BIND_MAX_RETRIES: u32 = 15;
 
 /// Initial delay for socket bind retries on Windows (exponential backoff starts here).
+///
+/// Starting at 100ms gives Windows more time to release ports between attempts,
+/// reducing spurious failures on busy CI runners.
 #[cfg(target_os = "windows")]
-const SOCKET_BIND_INITIAL_DELAY_MS: u64 = 50;
+const SOCKET_BIND_INITIAL_DELAY_MS: u64 = 100;
 
 /// Maximum delay between socket bind retry attempts on Windows.
 #[cfg(target_os = "windows")]
@@ -280,8 +287,8 @@ const SOCKET_BIND_MAX_DELAY_MS: u64 = 1000;
 /// - WSAEADDRINUSE (error 10048): Address already in use (TIME_WAIT state)
 ///
 /// The retry logic:
-/// - Retries up to 10 times with exponential backoff
-/// - Starts at 50ms, doubles each attempt, caps at 1000ms
+/// - Retries up to 15 times with exponential backoff
+/// - Starts at 100ms, doubles each attempt, caps at 1000ms
 /// - Retries on both error codes 10013 (WSAEACCES) and 10048 (WSAEADDRINUSE)
 #[allow(dead_code)]
 #[track_caller]
@@ -306,7 +313,7 @@ pub fn create_chaos_socket(
 /// - WSAEADDRINUSE (error 10048): Address in use - caused by TIME_WAIT state
 ///
 /// These issues typically resolve after a short delay, so this function:
-/// - Retries up to 10 times with exponential backoff (50ms, 100ms, 200ms, ... 1000ms)
+/// - Retries up to 15 times with exponential backoff (100ms, 200ms, 400ms, ... 1000ms)
 /// - Logs retry attempts via tracing for debugging
 /// - Retries on error codes 10013 (WSAEACCES) and 10048 (WSAEADDRINUSE)
 ///
@@ -367,7 +374,7 @@ pub fn bind_socket_with_retry(port: u16) -> Result<UdpNonBlockingSocket, Fortres
                     ) || matches!(os_error, Some(10013) | Some(10048));
 
                     if is_retryable && attempt + 1 < SOCKET_BIND_MAX_RETRIES {
-                        // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms, 1000ms (capped)
+                        // Exponential backoff: 100ms, 200ms, 400ms, 800ms, 1000ms (capped)
                         let delay_ms = SOCKET_BIND_INITIAL_DELAY_MS
                             .saturating_mul(1u64 << attempt)
                             .min(SOCKET_BIND_MAX_DELAY_MS);
