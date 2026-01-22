@@ -399,6 +399,13 @@ mod compression_tests {
     }
 
     #[test]
+    fn test_delta_decode_reason_unknown() {
+        let reason = DeltaDecodeReason::Unknown;
+        let display = format!("{}", reason);
+        assert!(display.contains("unknown delta decode error"));
+    }
+
+    #[test]
     fn test_delta_decode_reason_is_copy() {
         let reason = DeltaDecodeReason::EmptyReference;
         let reason2 = reason;

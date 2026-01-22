@@ -609,21 +609,10 @@ mod property_tests {
             prop_assert_eq!(checksum1, checksum2);
         }
 
-        /// Property: different byte sequences produce different hashes (usually)
-        #[test]
-        fn prop_hash_bytes_different_inputs(
-            data1 in any::<Vec<u8>>(),
-            data2 in any::<Vec<u8>>(),
-        ) {
-            prop_assume!(data1 != data2);
-
-            let hash1 = hash_bytes_fnv1a(&data1);
-            let hash2 = hash_bytes_fnv1a(&data2);
-
-            // Different inputs should produce different hashes (with high probability)
-            // Note: Hash collisions are theoretically possible but extremely rare for FNV-1a
-            prop_assert_ne!(hash1, hash2, "Different data should produce different hashes");
-        }
+        // Note: We do NOT test that different inputs produce different hashes because
+        // FNV-1a is a hash function and collisions ARE possible by design. Testing for
+        // collision-resistance would make the test flaky. The important property for
+        // a hash function used in checksumming is determinism, not collision-resistance.
 
         /// Property: different primitive values produce different checksums
         ///

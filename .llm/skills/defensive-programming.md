@@ -511,6 +511,68 @@ return Err(FortressError::InvalidPlayerIndex {
 });
 ```
 
+### Unknown/Fallback Variants in Error Reason Enums
+
+When creating "reason" enums for structured errors, include an `Unknown` or fallback variant
+for cases where error mapping might not have complete information.
+
+```rust
+// ❌ Avoid: No fallback for unexpected cases
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeltaDecodeReason {
+    EmptyReference,
+    DataLengthMismatch { data_len: usize, reference_len: usize },
+    ReferenceIndexOutOfBounds { index: usize, length: usize },
+    DataIndexOutOfBounds { index: usize, length: usize },
+    // What happens if we need to map an unexpected error type?
+}
+
+// ✅ Prefer: Explicit Unknown variant for fallback cases
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RleDecodeReason {
+    BitfieldIndexOutOfBounds,
+    DestinationSliceOutOfBounds,
+    SourceSliceOutOfBounds,
+    TruncatedData { offset: usize, buffer_len: usize },
+    /// An unknown or unexpected error occurred.
+    ///
+    /// This variant is used as a fallback when the underlying error cannot be
+    /// mapped to a more specific reason (e.g., when downcasting fails).
+    Unknown,
+}
+```
+
+**Why `Unknown` is important:**
+
+1. **Error mapping functions** need a fallback when source errors don't match expected patterns
+2. **Non-exhaustive enums** may have new variants added; code mapping them needs safety valves
+3. **Defensive error handling** shouldn't panic when encountering unexpected error types
+
+```rust
+// ✅ Usage: Error mapping with Unknown fallback
+fn map_rle_error_to_reason(error: &FortressError) -> RleDecodeReason {
+    match error {
+        FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::RleDecodeError { reason },
+        } => *reason,
+        _ => RleDecodeReason::Unknown,  // Safe fallback for unexpected types
+    }
+}
+```
+
+**When to add Unknown:**
+
+- Error reason enums used in error mapping/conversion functions
+- Enums that might receive values from external sources (deserialization, FFI)
+- Enums marked `#[non_exhaustive]` where exhaustive matching isn't possible
+
+**When Unknown may not be needed:**
+
+- Internal enums where all variants are explicitly constructed in known code paths
+- Enums where an existing `Custom(&'static str)` variant serves as the fallback
+
 ---
 
 ## Advanced Defensive Patterns

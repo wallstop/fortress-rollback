@@ -256,7 +256,7 @@ fn test_has_severity_concurrent() {
 
         // Writer adds a Warning severity violation
         let write_handle = thread::spawn(move || {
-            observer.on_violation(&make_violation(1, ViolationKind::FrameSync));
+            writer.on_violation(&make_violation(1, ViolationKind::FrameSync));
         });
 
         // Checker looks for Critical (which won't exist)
@@ -272,7 +272,7 @@ fn test_has_severity_concurrent() {
         assert!(!has_critical);
 
         // Warning should exist after write
-        assert!(writer.has_severity(ViolationSeverity::Warning));
+        assert!(observer.has_severity(ViolationSeverity::Warning));
     });
 }
 

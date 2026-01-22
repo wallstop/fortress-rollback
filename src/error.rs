@@ -218,6 +218,11 @@ pub enum RleDecodeReason {
         /// The buffer length.
         buffer_len: usize,
     },
+    /// An unknown or unexpected error occurred during RLE decoding.
+    ///
+    /// This variant is used as a fallback when the underlying error cannot be
+    /// mapped to a more specific reason (e.g., when downcasting fails).
+    Unknown,
 }
 
 impl Display for RleDecodeReason {
@@ -238,6 +243,9 @@ impl Display for RleDecodeReason {
                     "truncated data: offset {} exceeds buffer length {}",
                     offset, buffer_len
                 )
+            },
+            Self::Unknown => {
+                write!(f, "unknown RLE decode error")
             },
         }
     }
@@ -273,6 +281,11 @@ pub enum DeltaDecodeReason {
         /// The length of the data buffer.
         length: usize,
     },
+    /// An unknown or unexpected error occurred during delta decoding.
+    ///
+    /// This variant is used as a fallback when the underlying error cannot be
+    /// mapped to a more specific reason (e.g., when downcasting fails).
+    Unknown,
 }
 
 impl Display for DeltaDecodeReason {
@@ -298,6 +311,9 @@ impl Display for DeltaDecodeReason {
             },
             Self::DataIndexOutOfBounds { index, length } => {
                 write!(f, "data index {} out of bounds (length: {})", index, length)
+            },
+            Self::Unknown => {
+                write!(f, "unknown delta decode error")
             },
         }
     }
@@ -1425,6 +1441,13 @@ mod tests {
     }
 
     #[test]
+    fn test_rle_decode_reason_unknown() {
+        let reason = RleDecodeReason::Unknown;
+        let display = format!("{}", reason);
+        assert!(display.contains("unknown RLE decode error"));
+    }
+
+    #[test]
     fn test_internal_error_kind_rle_decode_error() {
         let kind = InternalErrorKind::RleDecodeError {
             reason: RleDecodeReason::BitfieldIndexOutOfBounds,
@@ -1447,6 +1470,10 @@ mod tests {
         };
         let reason_with_data2 = reason_with_data; // Copy
         assert_eq!(reason_with_data, reason_with_data2);
+
+        let reason_unknown = RleDecodeReason::Unknown;
+        let reason_unknown2 = reason_unknown; // Copy
+        assert_eq!(reason_unknown, reason_unknown2);
     }
 
     // =========================================================================
