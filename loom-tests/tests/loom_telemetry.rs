@@ -17,10 +17,7 @@ use fortress_rollback::telemetry::{
 use loom::sync::Arc;
 use loom::thread;
 
-/// Creates a minimal test violation for testing purposes.
-///
-/// Uses static string slices to minimize allocation overhead during loom's
-/// exhaustive interleaving exploration.
+/// Creates a test violation with a unique ID.
 fn make_violation(id: u32, kind: ViolationKind) -> SpecViolation {
     SpecViolation::new(
         ViolationSeverity::Warning,

@@ -196,6 +196,78 @@ fn proof_clone_is_independent() {
 
 ---
 
+## Doc Comments and Implementation Details
+
+### The Problem
+
+Doc comments that describe *how* code works (implementation details) become stale when the
+implementation changes:
+
+```rust
+/// Creates a violation with a unique ID.
+/// Uses static string slices for zero-allocation performance.  // <-- LIE!
+fn make_violation(id: u32) -> Violation {
+    Violation::new(
+        format!("test violation {}", id),  // Actually allocates!
+    )
+}
+```
+
+The doc comment claims "static string slices" but the code uses `format!()` which allocates.
+This mismatch misleads readers and erodes trust in documentation.
+
+### The Root Cause
+
+Doc comments describing implementation details are inherently fragile because:
+
+1. **Code changes, comments don't** — Refactoring updates code but forgets comments
+2. **Performance claims age poorly** — Optimizations may be added or removed
+3. **Allocation patterns shift** — Moving from `&'static str` to `String` is common
+4. **Reviewers focus on code** — Comments are often skimmed, not verified against code
+
+### The Solution
+
+**Doc comments should describe WHAT, not HOW** — unless the HOW is part of the API contract.
+
+```rust
+// ❌ Describes implementation (fragile)
+/// Creates a violation with a unique ID.
+/// Uses static string slices for zero-allocation performance.
+
+// ✅ Describes behavior (stable)
+/// Creates a violation with a unique ID.
+
+// ✅ OK if allocation IS the contract
+/// Creates a violation with a unique ID.
+///
+/// # Performance
+///
+/// This function is allocation-free and suitable for hot paths.
+/// (Note: This creates an API contract — changing it is breaking!)
+```
+
+### When Implementation Details ARE Appropriate
+
+Include HOW only when it's part of the API contract:
+
+- **Performance guarantees** — "O(1) lookup", "allocation-free"
+- **Thread safety** — "Lock-free", "Uses interior mutability"
+- **Determinism** — "Uses seeded RNG for reproducibility"
+- **Resource management** — "Caches results", "Lazily initialized"
+
+But remember: documenting these creates an implicit contract. Changing them becomes a
+breaking change, even if the function signature doesn't change.
+
+### Best Practices
+
+1. **Focus on WHAT, not HOW** — Describe behavior and purpose
+2. **Omit performance claims** — Unless they're API guarantees
+3. **Review comments when refactoring** — Update or remove stale implementation details
+4. **Use `# Performance` sections** — Makes performance contracts explicit and findable
+5. **Avoid redundant phrases** — "for testing purposes" in test code is obvious
+
+---
+
 ## GitHub Actions Permissions
 
 ### The Problem
@@ -246,6 +318,7 @@ Before submitting code:
 - [ ] Type aliases — Use distinctive names that can't shadow stdlib types
 - [ ] Tests match production — No simulating patterns not in real code
 - [ ] Kani proofs — Actually verify what their names/docs claim
+- [ ] Doc comments — Describe WHAT, not HOW (unless HOW is API contract)
 - [ ] CI permissions — Use sudo for system directories
 
 ---
