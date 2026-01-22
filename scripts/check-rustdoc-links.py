@@ -30,8 +30,15 @@ def main() -> int:
     try:
         # Set up environment with RUSTDOCFLAGS matching CI
         env = os.environ.copy()
-        env["RUSTDOCFLAGS"] = RUSTDOCFLAGS
+        existing_rustdocflags = env.get("RUSTDOCFLAGS", "").strip()
 
+        # In CI, enforce exact CI RUSTDOCFLAGS; locally, append to any existing flags
+        if env.get("CI"):
+            env["RUSTDOCFLAGS"] = RUSTDOCFLAGS
+        elif existing_rustdocflags:
+            env["RUSTDOCFLAGS"] = f"{existing_rustdocflags} {RUSTDOCFLAGS}"
+        else:
+            env["RUSTDOCFLAGS"] = RUSTDOCFLAGS
         # Run cargo doc and capture output
         result = subprocess.run(
             ["cargo", "doc", "--no-deps"],
