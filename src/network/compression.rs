@@ -130,9 +130,9 @@ pub fn decode(reference: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, Compression
         {
             return CompressionError::RleDecode { reason };
         }
-        // Fallback: use neutral placeholder values to indicate unknown failure location.
-        // We use (0, 0) rather than fabricating specific values that might mislead debugging.
-        // Log this unexpected error type for debugging - this path should rarely be hit.
+        // Fallback: use RleDecodeReason::Unknown when the error cannot be mapped
+        // to a specific reason (e.g., when downcasting fails). This path should
+        // rarely be hit in practice. Log for debugging.
         report_violation!(
             ViolationSeverity::Warning,
             ViolationKind::NetworkProtocol,
@@ -140,10 +140,7 @@ pub fn decode(reference: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, Compression
             e
         );
         CompressionError::RleDecode {
-            reason: RleDecodeReason::TruncatedData {
-                offset: 0,
-                buffer_len: 0,
-            },
+            reason: RleDecodeReason::Unknown,
         }
     })?;
 
@@ -522,7 +519,7 @@ mod compression_tests {
     /// when the RLE decode error is NOT a FortressError.
     ///
     /// This test exercises the fallback path in decode() where downcast_ref fails
-    /// and we return a generic TruncatedData error instead.
+    /// and we return `RleDecodeReason::Unknown` instead.
     #[test]
     fn test_decode_fallback_error_path_for_non_fortress_error() {
         // To test the fallback path, we need to verify the behavior of the
@@ -535,8 +532,8 @@ mod compression_tests {
             Box::new(std::io::Error::other("test error"));
 
         // Simulate the fallback logic from decode()
-        // Note: The fallback uses neutral placeholder values (0, 0) to indicate
-        // unknown failure location, rather than fabricating misleading values.
+        // Note: The fallback uses RleDecodeReason::Unknown to indicate
+        // that the error type could not be mapped to a specific reason.
         let result = non_fortress_error
             .downcast_ref::<FortressError>()
             .and_then(|fe| match fe {
@@ -545,19 +542,10 @@ mod compression_tests {
                 } => Some(*reason),
                 _ => None,
             })
-            .unwrap_or(RleDecodeReason::TruncatedData {
-                offset: 0,
-                buffer_len: 0,
-            });
+            .unwrap_or(RleDecodeReason::Unknown);
 
-        // Verify the fallback produces neutral placeholder values
-        match result {
-            RleDecodeReason::TruncatedData { offset, buffer_len } => {
-                assert_eq!(offset, 0);
-                assert_eq!(buffer_len, 0);
-            },
-            _ => panic!("Expected TruncatedData fallback, got {:?}", result),
-        }
+        // Verify the fallback produces Unknown
+        assert_eq!(result, RleDecodeReason::Unknown);
     }
 
     /// Tests that the decode function's error path correctly extracts
@@ -581,10 +569,7 @@ mod compression_tests {
                 } => Some(*reason),
                 _ => None,
             })
-            .unwrap_or(RleDecodeReason::TruncatedData {
-                offset: 0,
-                buffer_len: 0,
-            });
+            .unwrap_or(RleDecodeReason::Unknown);
 
         // Verify the correct reason is extracted
         assert_eq!(result, RleDecodeReason::BitfieldIndexOutOfBounds);
@@ -601,7 +586,7 @@ mod compression_tests {
             });
 
         // Simulate the extraction logic from decode()
-        // Note: The fallback uses neutral placeholder values (0, 0)
+        // Note: The fallback uses RleDecodeReason::Unknown
         let result = fortress_error
             .downcast_ref::<FortressError>()
             .and_then(|fe| match fe {
@@ -610,19 +595,10 @@ mod compression_tests {
                 } => Some(*reason),
                 _ => None,
             })
-            .unwrap_or(RleDecodeReason::TruncatedData {
-                offset: 0,
-                buffer_len: 0,
-            });
+            .unwrap_or(RleDecodeReason::Unknown);
 
-        // Verify the fallback uses neutral placeholder values
-        match result {
-            RleDecodeReason::TruncatedData { offset, buffer_len } => {
-                assert_eq!(offset, 0);
-                assert_eq!(buffer_len, 0);
-            },
-            _ => panic!("Expected TruncatedData fallback, got {:?}", result),
-        }
+        // Verify the fallback uses Unknown
+        assert_eq!(result, RleDecodeReason::Unknown);
     }
 
     /// Tests the full decode path produces correct CompressionError on fallback.
@@ -635,7 +611,7 @@ mod compression_tests {
         ));
 
         // Simulate the full map_err logic from decode()
-        // Note: The fallback uses neutral placeholder values (0, 0)
+        // Note: The fallback uses RleDecodeReason::Unknown
         let compression_error: CompressionError = (|| {
             if let Some(FortressError::InternalErrorStructured {
                 kind: InternalErrorKind::RleDecodeError { reason },
@@ -644,26 +620,17 @@ mod compression_tests {
                 return CompressionError::RleDecode { reason: *reason };
             }
             CompressionError::RleDecode {
-                reason: RleDecodeReason::TruncatedData {
-                    offset: 0,
-                    buffer_len: 0,
-                },
+                reason: RleDecodeReason::Unknown,
             }
         })();
 
-        // Verify the error structure uses neutral placeholder values
-        match compression_error {
+        // Verify the error structure uses Unknown
+        assert_eq!(
+            compression_error,
             CompressionError::RleDecode {
-                reason: RleDecodeReason::TruncatedData { offset, buffer_len },
-            } => {
-                assert_eq!(offset, 0);
-                assert_eq!(buffer_len, 0);
-            },
-            _ => panic!(
-                "Expected RleDecode with TruncatedData, got {:?}",
-                compression_error
-            ),
-        }
+                reason: RleDecodeReason::Unknown
+            }
+        );
     }
 }
 
