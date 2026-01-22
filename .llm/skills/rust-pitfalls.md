@@ -359,6 +359,77 @@ assert_eq!(data.lock().unwrap().len(), 2);
 
 ---
 
+## Pattern Matching and Ownership Pitfalls
+
+### Use-After-Move in `if let` Fallthrough
+
+The `if let` pattern moves ownership, making the original variable unusable in fallback paths:
+
+```rust
+// ❌ USE-AFTER-MOVE BUG - Compiles with older Rust, fails in 2024 edition
+fn map_error(e: MyError) -> OtherError {
+    if let MyError::SpecificVariant { field } = e {
+        return OtherError::Mapped { field };
+    }
+    // BUG: `e` was moved by the `if let` pattern match above!
+    log::warn!("unexpected error: {:?}", e);  // ERROR: use of moved value
+    OtherError::Unknown
+}
+
+// ✅ CORRECT - Single match expression handles all cases
+fn map_error(e: MyError) -> OtherError {
+    match e {
+        MyError::SpecificVariant { field } => OtherError::Mapped { field },
+        other => {
+            log::warn!("unexpected error: {:?}", other);
+            OtherError::Unknown
+        }
+    }
+}
+```
+
+**Why this happens:**
+
+- `if let Pattern = value` moves `value` into the pattern
+- Even if the pattern doesn't match, ownership has been consumed
+- The fallthrough path cannot use `value` because it's been moved
+
+**The fix:**
+
+- Use `match` with explicit arms instead of `if let` + fallthrough
+- Or borrow: `if let Pattern = &value` (when you don't need ownership)
+
+**This pattern is especially common in error mapping functions** where you want to:
+
+1. Extract structured data from a specific variant
+2. Fall back with a warning/log for unexpected variants
+
+```rust
+// ❌ Anti-pattern: if let with fallthrough
+fn map_rle_error(e: FortressError) -> CompressionError {
+    if let FortressError::RleError { reason } = e {
+        return CompressionError::Rle { reason };
+    }
+    // Want to log `e` here but it's moved!
+    CompressionError::Unknown
+}
+
+// ✅ Correct: match with named fallback binding
+fn map_rle_error(e: FortressError) -> CompressionError {
+    match e {
+        FortressError::RleError { reason } => CompressionError::Rle { reason },
+        other => {
+            log::warn!("unexpected: {:?}", other);
+            CompressionError::Unknown
+        }
+    }
+}
+```
+
+**Clippy lint:** Enable `clippy::if_let_some_else` (nightly) for early detection.
+
+---
+
 ## Error Handling Pitfalls
 
 ### Silent Error Conversion

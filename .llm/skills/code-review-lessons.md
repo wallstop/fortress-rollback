@@ -310,6 +310,64 @@ run: |
 
 ---
 
+## Pattern Matching in Error Mappers
+
+### The Problem
+
+Using `if let` with a fallthrough path causes use-after-move bugs:
+
+```rust
+// ❌ BUG: `e` moved in if-let, unusable in fallback
+fn map_error(e: MyError) -> OtherError {
+    if let MyError::Specific { data } = e {
+        return OtherError::Mapped { data };
+    }
+    log::warn!("unexpected: {:?}", e);  // ERROR: use of moved value!
+    OtherError::Unknown
+}
+```
+
+### The Solution
+
+**Always use `match` for error mapping functions** that need to:
+
+1. Handle a specific variant
+2. Log/warn about unexpected variants
+
+```rust
+// ✅ CORRECT: Single match expression
+fn map_error(e: MyError) -> OtherError {
+    match e {
+        MyError::Specific { data } => OtherError::Mapped { data },
+        other => {
+            log::warn!("unexpected: {:?}", other);
+            OtherError::Unknown
+        }
+    }
+}
+```
+
+### Why This Pattern Exists
+
+Error mapping functions commonly need to:
+
+- Extract fields from a specific error variant for the happy path
+- Handle unexpected variants gracefully with logging/metrics
+- Include the original error in the fallback for debugging
+
+The `if let` + fallthrough pattern seems natural but moves ownership before the fallback.
+
+### Best Practices
+
+1. **Prefer `match` over `if let` + fallthrough** when you need the value in both paths
+2. **Use `other` binding in catch-all arm** — gives access to the unmatched value
+3. **Consider borrowing** — `if let Pattern = &value` if you don't need ownership
+4. **Add `Unknown` variants to reason enums** — provides a fallback for error mapping
+
+See also: [rust-pitfalls.md](rust-pitfalls.md#use-after-move-in-if-let-fallthrough)
+
+---
+
 ## Summary Checklist
 
 Before submitting code:
@@ -320,6 +378,7 @@ Before submitting code:
 - [ ] Kani proofs — Actually verify what their names/docs claim
 - [ ] Doc comments — Describe WHAT, not HOW (unless HOW is API contract)
 - [ ] CI permissions — Use sudo for system directories
+- [ ] Pattern matching — Use `match` not `if let` when fallback needs the value
 
 ---
 

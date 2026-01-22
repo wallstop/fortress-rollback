@@ -118,21 +118,22 @@ pub fn delta_encode<'a>(
 /// Extracts the [`RleDecodeReason`] from a [`FortressError`] if it's an RLE decode error,
 /// otherwise returns a fallback with [`RleDecodeReason::Unknown`].
 fn map_rle_error(e: FortressError) -> CompressionError {
-    if let FortressError::InternalErrorStructured {
-        kind: InternalErrorKind::RleDecodeError { reason },
-    } = e
-    {
-        return CompressionError::RleDecode { reason };
-    }
-    // Fallback for non-RLE FortressError variants
-    report_violation!(
-        ViolationSeverity::Warning,
-        ViolationKind::NetworkProtocol,
-        "map_rle_error: unexpected FortressError variant in RLE decode path: {:?}",
-        e
-    );
-    CompressionError::RleDecode {
-        reason: RleDecodeReason::Unknown,
+    match e {
+        FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::RleDecodeError { reason },
+        } => CompressionError::RleDecode { reason },
+        other => {
+            // Fallback for non-RLE FortressError variants
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "map_rle_error: unexpected FortressError variant in RLE decode path: {:?}",
+                other
+            );
+            CompressionError::RleDecode {
+                reason: RleDecodeReason::Unknown,
+            }
+        },
     }
 }
 
