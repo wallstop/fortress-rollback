@@ -725,13 +725,31 @@ mod kani_proofs {
         let bytes = vec![1u8, 2, 3];
 
         let input_bytes = InputBytes { frame, bytes };
-        let cloned = input_bytes.clone();
+        let mut cloned = input_bytes.clone();
 
-        // After cloning, both should have same values
-        kani::assert(cloned.frame == input_bytes.frame, "Frames should match");
+        // Record original values before modification
+        let original_frame = input_bytes.frame;
+        let original_len = input_bytes.bytes.len();
+
+        // Modify the clone
+        cloned.frame = Frame::new(999);
+        cloned.bytes.push(42);
+
+        // Original should be unchanged (independence verified)
         kani::assert(
-            cloned.bytes.len() == input_bytes.bytes.len(),
-            "Lengths should match",
+            input_bytes.frame == original_frame,
+            "Original frame unchanged after modifying clone",
+        );
+        kani::assert(
+            input_bytes.bytes.len() == original_len,
+            "Original bytes unchanged after modifying clone",
+        );
+
+        // Clone should have the modifications
+        kani::assert(cloned.frame == Frame::new(999), "Clone has modified frame");
+        kani::assert(
+            cloned.bytes.len() == original_len + 1,
+            "Clone has modified bytes",
         );
     }
 

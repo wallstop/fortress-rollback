@@ -30,14 +30,22 @@ pub use error::{
 /// that return [`FortressError`] as the error type. It supports an optional
 /// second type parameter to override the error type if needed.
 ///
+/// # Naming
+///
+/// This type is named `FortressResult` rather than `Result` to avoid
+/// shadowing `std::result::Result` when using glob imports like
+/// `use fortress_rollback::*;` or `use fortress_rollback::prelude::*;`.
+/// This prevents subtle semver hazards where downstream code might
+/// unexpectedly use this alias instead of the standard library's `Result`.
+///
 /// # Examples
 ///
 /// Using the default error type:
 ///
 /// ```
-/// use fortress_rollback::{Result, FortressError};
+/// use fortress_rollback::{FortressResult, FortressError};
 ///
-/// fn process_frame() -> Result<()> {
+/// fn process_frame() -> FortressResult<()> {
 ///     // Returns Result<(), FortressError>
 ///     Ok(())
 /// }
@@ -46,24 +54,24 @@ pub use error::{
 /// Overriding the error type:
 ///
 /// ```
-/// use fortress_rollback::Result;
+/// use fortress_rollback::FortressResult;
 ///
-/// fn custom_operation() -> Result<String, std::io::Error> {
+/// fn custom_operation() -> FortressResult<String, std::io::Error> {
 ///     // Returns Result<String, std::io::Error>
 ///     Ok("success".to_string())
 /// }
 /// ```
 ///
-/// # Note
-///
-/// This type alias does not conflict with `std::result::Result` because
-/// it has the same name but different defaults. If you need both, you can
-/// use the fully qualified path `std::result::Result` or alias this type:
+/// You can also alias it locally if you prefer a shorter name:
 ///
 /// ```
-/// use fortress_rollback::Result as FortressResult;
+/// use fortress_rollback::FortressResult as Result;
+///
+/// fn my_function() -> Result<()> {
+///     Ok(())
+/// }
 /// ```
-pub type Result<T, E = FortressError> = std::result::Result<T, E>;
+pub type FortressResult<T, E = FortressError> = std::result::Result<T, E>;
 
 pub use network::chaos_socket::{ChaosConfig, ChaosConfigBuilder, ChaosSocket, ChaosStats};
 pub use network::messages::Message;

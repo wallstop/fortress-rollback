@@ -76,6 +76,25 @@ match request {
 }
 ```
 
+## Result Type Alias Rename
+
+The `Result` type alias has been renamed to `FortressResult` to avoid shadowing
+the standard library's `Result` when using glob imports:
+
+```rust
+// Before
+use fortress_rollback::Result;
+fn my_function() -> Result<()> { ... }
+
+// After (option 1: use the new name directly)
+use fortress_rollback::FortressResult;
+fn my_function() -> FortressResult<()> { ... }
+
+// After (option 2: local alias if you prefer short names)
+use fortress_rollback::FortressResult as Result;
+fn my_function() -> Result<()> { ... }
+```
+
 ## Input Vector Type Change (Breaking Change)
 
 The `inputs` field in `FortressRequest::AdvanceFrame` now uses `InputVec<T::Input>` (a `SmallVec`)

@@ -113,6 +113,29 @@ pub fn delta_encode<'a>(
     bytes
 }
 
+/// Maps an RLE error to a `CompressionError`.
+///
+/// Extracts the [`RleDecodeReason`] from a [`FortressError`] if it's an RLE decode error,
+/// otherwise returns a fallback with [`RleDecodeReason::Unknown`].
+fn map_rle_error(e: FortressError) -> CompressionError {
+    if let FortressError::InternalErrorStructured {
+        kind: InternalErrorKind::RleDecodeError { reason },
+    } = e
+    {
+        return CompressionError::RleDecode { reason };
+    }
+    // Fallback for non-RLE FortressError variants
+    report_violation!(
+        ViolationSeverity::Warning,
+        ViolationKind::NetworkProtocol,
+        "map_rle_error: unexpected FortressError variant in RLE decode path: {:?}",
+        e
+    );
+    CompressionError::RleDecode {
+        reason: RleDecodeReason::Unknown,
+    }
+}
+
 /// Decodes RLE-compressed XOR delta-encoded data.
 ///
 /// # Errors
@@ -122,27 +145,7 @@ pub fn delta_encode<'a>(
 /// - Delta decoding fails (e.g., empty reference, length mismatch)
 pub fn decode(reference: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, CompressionError> {
     // decode the RLE encoding first
-    let buf = rle::decode(data).map_err(|e| {
-        // Extract the structured RleDecodeReason from the FortressError.
-        if let FortressError::InternalErrorStructured {
-            kind: InternalErrorKind::RleDecodeError { reason },
-        } = e
-        {
-            return CompressionError::RleDecode { reason };
-        }
-        // Fallback: use RleDecodeReason::Unknown when the error cannot be mapped
-        // to a specific reason (e.g., when downcasting fails). This path should
-        // rarely be hit in practice. Log for debugging.
-        report_violation!(
-            ViolationSeverity::Warning,
-            ViolationKind::NetworkProtocol,
-            "decode: unexpected RLE error type in fallback path: {:?}",
-            e
-        );
-        CompressionError::RleDecode {
-            reason: RleDecodeReason::Unknown,
-        }
-    })?;
+    let buf = rle::decode(data).map_err(map_rle_error)?;
 
     // decode the delta-encoding
     delta_decode(reference, &buf)
@@ -518,125 +521,99 @@ mod compression_tests {
     }
 
     // =========================================================================
-    // Fallback Error Path Tests
+    // map_rle_error Helper Tests
     // =========================================================================
 
-    /// Tests that the decode function's fallback error path works correctly
-    /// when the RLE decode error is NOT a FortressError.
-    ///
-    /// This test exercises the fallback path in decode() where downcast_ref fails
-    /// and we return `RleDecodeReason::Unknown` instead.
+    /// Tests that `map_rle_error` correctly extracts a known `RleDecodeReason`
+    /// from a `FortressError::InternalErrorStructured` with `RleDecodeError`.
     #[test]
-    fn test_decode_fallback_error_path_for_non_fortress_error() {
-        // To test the fallback path, we need to verify the behavior of the
-        // error conversion logic. Since rle::decode returns Box<dyn Error>,
-        // and the decode function tries to downcast to FortressError,
-        // we can test this by creating a helper that simulates the conversion.
+    fn test_map_rle_error_extracts_known_reason() {
+        let error = FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::RleDecodeError {
+                reason: RleDecodeReason::BitfieldIndexOutOfBounds,
+            },
+        };
 
-        // Create a non-FortressError error
-        let non_fortress_error: Box<dyn Error + Send + Sync> =
-            Box::new(std::io::Error::other("test error"));
+        let result = map_rle_error(error);
 
-        // Simulate the fallback logic from decode()
-        // Note: The fallback uses RleDecodeReason::Unknown to indicate
-        // that the error type could not be mapped to a specific reason.
-        let result = non_fortress_error
-            .downcast_ref::<FortressError>()
-            .and_then(|fe| match fe {
-                FortressError::InternalErrorStructured {
-                    kind: InternalErrorKind::RleDecodeError { reason },
-                } => Some(*reason),
-                _ => None,
-            })
-            .unwrap_or(RleDecodeReason::Unknown);
-
-        // Verify the fallback produces Unknown
-        assert_eq!(result, RleDecodeReason::Unknown);
-    }
-
-    /// Tests that the decode function's error path correctly extracts
-    /// FortressError when it IS present.
-    #[test]
-    fn test_decode_error_path_extracts_fortress_error() {
-        // Create a FortressError with RleDecodeError
-        let fortress_error: Box<dyn Error + Send + Sync> =
-            Box::new(FortressError::InternalErrorStructured {
-                kind: InternalErrorKind::RleDecodeError {
-                    reason: RleDecodeReason::BitfieldIndexOutOfBounds,
-                },
-            });
-
-        // Simulate the extraction logic from decode()
-        let result = fortress_error
-            .downcast_ref::<FortressError>()
-            .and_then(|fe| match fe {
-                FortressError::InternalErrorStructured {
-                    kind: InternalErrorKind::RleDecodeError { reason },
-                } => Some(*reason),
-                _ => None,
-            })
-            .unwrap_or(RleDecodeReason::Unknown);
-
-        // Verify the correct reason is extracted
-        assert_eq!(result, RleDecodeReason::BitfieldIndexOutOfBounds);
-    }
-
-    /// Tests that the decode function's error path falls back correctly
-    /// when FortressError is present but is NOT an RleDecodeError.
-    #[test]
-    fn test_decode_error_path_fallback_for_non_rle_fortress_error() {
-        // Create a FortressError that is NOT an RleDecodeError
-        let fortress_error: Box<dyn Error + Send + Sync> =
-            Box::new(FortressError::InternalErrorStructured {
-                kind: InternalErrorKind::BufferIndexOutOfBounds,
-            });
-
-        // Simulate the extraction logic from decode()
-        // Note: The fallback uses RleDecodeReason::Unknown
-        let result = fortress_error
-            .downcast_ref::<FortressError>()
-            .and_then(|fe| match fe {
-                FortressError::InternalErrorStructured {
-                    kind: InternalErrorKind::RleDecodeError { reason },
-                } => Some(*reason),
-                _ => None,
-            })
-            .unwrap_or(RleDecodeReason::Unknown);
-
-        // Verify the fallback uses Unknown
-        assert_eq!(result, RleDecodeReason::Unknown);
-    }
-
-    /// Tests the full decode path produces correct CompressionError on fallback.
-    #[test]
-    fn test_decode_produces_compression_error_on_fallback() {
-        // Create a non-FortressError
-        let non_fortress_error: Box<dyn Error + Send + Sync> = Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "bad data",
-        ));
-
-        // Simulate the full map_err logic from decode()
-        // Note: The fallback uses RleDecodeReason::Unknown
-        let compression_error: CompressionError = (|| {
-            if let Some(FortressError::InternalErrorStructured {
-                kind: InternalErrorKind::RleDecodeError { reason },
-            }) = non_fortress_error.downcast_ref::<FortressError>()
-            {
-                return CompressionError::RleDecode { reason: *reason };
-            }
-            CompressionError::RleDecode {
-                reason: RleDecodeReason::Unknown,
-            }
-        })();
-
-        // Verify the error structure uses Unknown
         assert_eq!(
-            compression_error,
+            result,
+            CompressionError::RleDecode {
+                reason: RleDecodeReason::BitfieldIndexOutOfBounds
+            }
+        );
+    }
+
+    /// Tests that `map_rle_error` falls back to `RleDecodeReason::Unknown`
+    /// when the `FortressError` is not an RLE decode error.
+    #[test]
+    fn test_map_rle_error_fallback_for_non_rle_error() {
+        // Use a FortressError variant that is NOT an RleDecodeError
+        let error = FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::BufferIndexOutOfBounds,
+        };
+
+        let result = map_rle_error(error);
+
+        assert_eq!(
+            result,
             CompressionError::RleDecode {
                 reason: RleDecodeReason::Unknown
             }
         );
+    }
+
+    #[test]
+    fn test_map_rle_error_preserves_all_rle_reasons() {
+        let reasons = [
+            RleDecodeReason::BitfieldIndexOutOfBounds,
+            RleDecodeReason::DestinationSliceOutOfBounds,
+            RleDecodeReason::SourceSliceOutOfBounds,
+            RleDecodeReason::TruncatedData {
+                offset: 5,
+                buffer_len: 3,
+            },
+            RleDecodeReason::Unknown,
+        ];
+
+        for reason in reasons {
+            let error = FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError { reason },
+            };
+            let result = map_rle_error(error);
+            assert_eq!(result, CompressionError::RleDecode { reason });
+        }
+    }
+
+    /// Integration test: verifies that `decode()` returns the expected error
+    /// when given malformed RLE data.
+    #[test]
+    fn test_decode_with_malformed_rle_data_returns_rle_error() {
+        // Create malformed RLE data that triggers a TruncatedData error.
+        // RLE varint format: bit0=repeat flag, remaining bits=length
+        // 0x04 means: repeat=0 (bit0=0), len=2 (0x04 >> 1 = 2)
+        // This says "copy 2 literal bytes" but provides none, causing truncation.
+        let malformed_rle_data: &[u8] = &[0x04];
+        let reference = &[0x01, 0x02, 0x03, 0x04];
+
+        let result = decode(reference, malformed_rle_data);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            CompressionError::RleDecode { reason } => {
+                // The RLE decoder should detect the truncation and return a
+                // TruncatedData error with the offset that exceeded the buffer.
+                assert!(
+                    matches!(reason, RleDecodeReason::TruncatedData { .. }),
+                    "Expected TruncatedData error, got: {:?}",
+                    reason
+                );
+            },
+            CompressionError::DeltaDecode { .. } => {
+                panic!("Expected RleDecode error, got DeltaDecode");
+            },
+        }
     }
 }
 

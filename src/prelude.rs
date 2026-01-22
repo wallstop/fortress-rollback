@@ -19,7 +19,7 @@
 //! - **Fundamental types**: [`Frame`], [`PlayerHandle`], [`PlayerType`], [`NULL_FRAME`]
 //! - **Session state**: [`SessionState`], [`InputStatus`], [`DesyncDetection`]
 //! - **Request/Event handling**: [`FortressRequest`], [`FortressEvent`], [`handle_requests`]
-//! - **Error handling**: [`FortressError`], [`Result`]
+//! - **Error handling**: [`FortressError`], [`FortressResult`]
 //! - **Game state**: [`GameStateCell`], [`GameStateAccessor`], [`InputVec`]
 //! - **Network monitoring**: [`NetworkStats`]
 //! - **Configuration**: [`SyncConfig`]
@@ -76,7 +76,7 @@ pub use crate::{DesyncDetection, InputStatus, SessionState};
 pub use crate::{handle_requests, FortressEvent, FortressRequest};
 
 // Error handling
-pub use crate::{FortressError, Result};
+pub use crate::{FortressError, FortressResult};
 
 // Game state management
 pub use crate::sync_layer::{GameStateAccessor, GameStateCell};
