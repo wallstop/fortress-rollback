@@ -14,11 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.2] - 2026-01-02
+## [0.2.2] - 2026-01-022
 
 ### Fixed
 
 - Removed the possibility for an internal panic under debug mode.
+
+### Changed
+
+- **Breaking:** Renamed `Result` type alias to `FortressResult` to avoid shadowing `std::result::Result` when using glob imports (`use fortress_rollback::*`)
 
 ## [0.2.1] - 2025-12-26
 
@@ -34,7 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Breaking:** `SessionBuilder::with_input_delay()` and `with_num_players()` now return `Result<Self, FortressError>` instead of silently clamping invalid values
-- **Breaking:** Renamed `Result` type alias to `FortressResult` to avoid shadowing `std::result::Result` when using glob imports (`use fortress_rollback::*`)
 - Replaced floating-point arithmetic with integer-only calculation in `TimeSync::average_frame_advantage()` to eliminate potential non-determinism
 - Replaced `DefaultHasher` with `DeterministicHasher` (FNV-1a) in `timing_entropy_seed()` for cross-platform consistency
 - Reduced cloning overhead in `poll_remote_clients()` by using `Arc<[PlayerHandle]>` instead of `Vec<PlayerHandle>`
