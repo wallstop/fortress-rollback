@@ -981,7 +981,33 @@ proptest! {
         prop_assert_ne!(hash_ab, hash_ba);
     }
 }
+
+// ✅ OK: Testing adjacent values produce different hashes
+// Adjacent integers serialize to different byte patterns, guaranteed distinct
+proptest! {
+    #[test]
+    fn prop_adjacent_values_differ(
+        base in any::<u64>().prop_filter("non-max", |v| *v < u64::MAX),
+    ) {
+        let hash1 = fnv1a_hash(&base);
+        let hash2 = fnv1a_hash(&(base + 1));
+        // This tests the avalanche property, not collision resistance
+        prop_assert_ne!(hash1, hash2);
+    }
+}
 ```
+
+**When "different inputs → different outputs" tests ARE acceptable:**
+
+1. **Structural properties** — Testing order sensitivity, adjacency, or bit patterns where the algorithm mathematically guarantees distinctness
+2. **Different serialization formats** — When inputs serialize to different byte lengths (e.g., u32 vs tuple), collisions are impossible
+3. **PRNG sequence distinctness** — For quality PRNGs like PCG32, different seeds producing identical first-N outputs is astronomically unlikely
+
+**When these tests are DANGEROUS:**
+
+1. **Arbitrary random inputs** — Testing `hash(random_a) != hash(random_b)` will eventually hit a collision
+2. **Large input spaces with small output spaces** — Fletcher16 (16-bit) will collide much faster than FNV-1a (64-bit)
+3. **High iteration counts** — Even rare collisions become likely over thousands of property test runs
 
 ### ❌ Re-implementing Production Logic in Tests
 

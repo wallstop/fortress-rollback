@@ -189,25 +189,31 @@ pub fn delta_decode(ref_bytes: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, Compr
     let mut output = Vec::with_capacity(out_size);
 
     for output_index in 0..out_size {
-        // Pre-allocate buffer without zero-initialization to reduce allocations in hot path
+        // Pre-allocate buffer capacity to reduce reallocations in hot path
         let mut buffer = Vec::with_capacity(ref_bytes.len());
         for byte_index in 0..ref_bytes.len() {
             let data_idx = ref_bytes.len() * output_index + byte_index;
-            let ref_byte = ref_bytes
-                .get(byte_index)
+            // Use .copied() to convert Option<&u8> to Option<u8> for clearer XOR semantics
+            let ref_byte =
+                ref_bytes
+                    .get(byte_index)
+                    .copied()
+                    .ok_or(CompressionError::DeltaDecode {
+                        reason: DeltaDecodeReason::ReferenceIndexOutOfBounds {
+                            index: byte_index,
+                            length: ref_bytes.len(),
+                        },
+                    })?;
+            let data_byte = data
+                .get(data_idx)
+                .copied()
                 .ok_or(CompressionError::DeltaDecode {
-                    reason: DeltaDecodeReason::ReferenceIndexOutOfBounds {
-                        index: byte_index,
-                        length: ref_bytes.len(),
+                    reason: DeltaDecodeReason::DataIndexOutOfBounds {
+                        index: data_idx,
+                        length: data.len(),
                     },
                 })?;
-            let data_byte = data.get(data_idx).ok_or(CompressionError::DeltaDecode {
-                reason: DeltaDecodeReason::DataIndexOutOfBounds {
-                    index: data_idx,
-                    length: data.len(),
-                },
-            })?;
-            // Push directly instead of allocating zeros then mutating
+            // XOR values directly (both are now u8, not &u8)
             buffer.push(ref_byte ^ data_byte);
         }
         output.push(buffer);

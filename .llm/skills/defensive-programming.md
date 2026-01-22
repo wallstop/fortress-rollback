@@ -550,6 +550,30 @@ pub enum RleDecodeReason {
 2. **Non-exhaustive enums** may have new variants added; code mapping them needs safety valves
 3. **Defensive error handling** shouldn't panic when encountering unexpected error types
 
+**Anti-pattern: Misleading fallback values**
+
+Never use an existing variant with nonsensical placeholder values as a fallback — it misleads
+debugging and masks the true cause:
+
+```rust
+// ❌ FORBIDDEN: Misleading placeholder values
+fn map_error(error: &FortressError) -> RleDecodeReason {
+    match error {
+        // ... specific mappings ...
+        _ => RleDecodeReason::TruncatedData { offset: 0, buffer_len: 0 },  // MISLEADING!
+        // This looks like a real truncation error but contains no useful info
+    }
+}
+
+// ✅ REQUIRED: Explicit Unknown variant
+fn map_error(error: &FortressError) -> RleDecodeReason {
+    match error {
+        // ... specific mappings ...
+        _ => RleDecodeReason::Unknown,  // Honest about not knowing the cause
+    }
+}
+```
+
 ```rust
 // ✅ Usage: Error mapping with Unknown fallback
 fn map_rle_error_to_reason(error: &FortressError) -> RleDecodeReason {

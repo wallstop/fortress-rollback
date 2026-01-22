@@ -560,30 +560,20 @@ mod property_tests {
             prop_assert_eq!(checksum1, checksum2);
         }
 
-        /// Property: fletcher16 produces values across the u16 space
+        /// Property: fletcher16 components are bounded by mod-255 arithmetic
         ///
-        /// This verifies that the algorithm meaningfully uses its output range,
-        /// not just low bits. We check that over many random inputs, we see
-        /// both high and low bits set in results.
+        /// The Fletcher-16 algorithm computes two sums (sum1 and sum2) where each
+        /// is reduced modulo 255. This test verifies that the output components
+        /// respect those bounds: each byte of the checksum must be in [0, 254].
         #[test]
-        fn prop_fletcher16_uses_full_range(data in any::<Vec<u8>>()) {
+        fn prop_fletcher16_modular_bounds(data in any::<Vec<u8>>()) {
             let checksum = fletcher16(&data);
-            // Track the OR of all checksums - over many runs, we expect to see
-            // bits set across the full u16 range. This is verified by running
-            // the test multiple times via proptest.
-            //
-            // For non-empty data, the high byte (sum2) should generally be non-zero
-            // because sum2 accumulates the running sum1 values.
-            if data.len() > 1 {
-                // For data with more than one byte, we expect the algorithm to
-                // produce checksums with both high and low bytes populated
-                let high_byte = checksum >> 8;
-                let low_byte = checksum & 0xFF;
-                // At least verify the structure is correct: both components should
-                // be bounded by 255 (the modulo value in the algorithm)
-                prop_assert!(high_byte <= 254, "sum2 should be mod 255");
-                prop_assert!(low_byte <= 254, "sum1 should be mod 255");
-            }
+            // Extract the two components: high byte is sum2, low byte is sum1
+            let high_byte = checksum >> 8;
+            let low_byte = checksum & 0xFF;
+            // Both components are computed mod 255, so must be <= 254
+            prop_assert!(high_byte <= 254, "sum2 should be in range [0, 254] due to mod 255");
+            prop_assert!(low_byte <= 254, "sum1 should be in range [0, 254] due to mod 255");
         }
 
         /// Property: hash_bytes_fnv1a is deterministic
@@ -609,10 +599,18 @@ mod property_tests {
             prop_assert_eq!(checksum1, checksum2);
         }
 
-        // Note: We do NOT test that different inputs produce different hashes because
-        // FNV-1a is a hash function and collisions ARE possible by design. Testing for
-        // collision-resistance would make the test flaky. The important property for
-        // a hash function used in checksumming is determinism, not collision-resistance.
+        // Note on "different inputs → different outputs" tests:
+        //
+        // We AVOID testing arbitrary byte sequences (Vec<u8>) because collisions are
+        // unpredictable and would make tests flaky.
+        //
+        // We DO test primitives like u64 because:
+        // 1. Different u64 values serialize to different byte patterns (bijective)
+        // 2. With 64-bit hash space, collision probability is ~1/2^64 (negligible)
+        // 3. This validates the hash algorithm distinguishes different serializations
+        //
+        // The key insight: determinism is the critical property, but differentiation
+        // testing is acceptable when the input space guarantees distinct serializations.
 
         /// Property: different primitive values produce different checksums
         ///

@@ -319,6 +319,44 @@ let guard = arc.lock().unwrap();
 let cloned = guard.clone();  // Clones the Vec, not the Arc!
 ```
 
+### Arc Must Be Cloned BEFORE thread::spawn
+
+When moving an `Arc` into a spawned thread, clone it BEFORE the `spawn` call:
+
+```rust
+// ❌ BAD: Arc moved into thread, original cannot be used after
+let cell = Arc::new(GameStateCell::new());
+let handle = thread::spawn(move || {
+    cell.save(Frame::new(1), Some(42), None);  // cell moved here
+});
+handle.join().unwrap();
+assert_eq!(cell.load(), Some(42));  // ERROR: cell was moved!
+
+// ✅ GOOD: Clone Arc before spawning, keep original for later use
+let cell = Arc::new(GameStateCell::new());
+let cell_for_thread = cell.clone();  // Clone BEFORE spawn
+
+let handle = thread::spawn(move || {
+    cell_for_thread.save(Frame::new(1), Some(42), None);
+});
+handle.join().unwrap();
+assert_eq!(cell.load(), Some(42));  // Original still available
+
+// ✅ GOOD: Multiple threads, each gets its own clone
+let data = Arc::new(Mutex::new(vec![]));
+let data1 = data.clone();
+let data2 = data.clone();
+
+let t1 = thread::spawn(move || data1.lock().unwrap().push(1));
+let t2 = thread::spawn(move || data2.lock().unwrap().push(2));
+
+t1.join().unwrap();
+t2.join().unwrap();
+
+// Original Arc still accessible for verification
+assert_eq!(data.lock().unwrap().len(), 2);
+```
+
 ---
 
 ## Error Handling Pitfalls
