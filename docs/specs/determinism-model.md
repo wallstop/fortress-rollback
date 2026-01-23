@@ -165,7 +165,7 @@ pub trait Config: 'static {
 
 **User Responsibility:**
 
-```rust,ignore
+```rust
 // Be explicit about overflow handling
 let new_value = old_value.wrapping_add(delta); // Explicit wrapping
 let new_value = old_value.saturating_add(delta); // Saturating
@@ -243,7 +243,7 @@ fn advance_game(state: &mut GameState, inputs: &[(Input, InputStatus)]) {
 
 When saving state, ALL mutable game data must be included:
 
-```rust,ignore
+```rust
 fn save_state(cell: GameStateCell<State>, frame: Frame, state: &GameState) {
     // Must save EVERYTHING that affects future frames
     cell.save(frame, Some(state.clone()), Some(compute_checksum(state)));
@@ -254,7 +254,7 @@ fn save_state(cell: GameStateCell<State>, frame: Frame, state: &GameState) {
 
 Checksums must be computed deterministically:
 
-```rust,ignore
+```rust
 use fortress_rollback::network::codec::encode;
 
 fn compute_checksum(state: &GameState) -> Option<u128> {
@@ -269,7 +269,7 @@ fn compute_checksum(state: &GameState) -> Option<u128> {
 
 ### R4: Avoid Platform-Specific Behavior
 
-```rust,ignore
+```rust
 // AVOID: Platform-specific floating point
 let result = (x as f64).sin(); // May vary slightly
 
@@ -283,7 +283,7 @@ let result = fixed_sin(x);
 
 ### Pitfall 1: HashMap Iteration
 
-```rust,ignore
+```rust
 // WRONG - HashMap iteration order is random
 for (key, value) in hash_map.iter() {
     process(key, value); // Order affects result
@@ -297,7 +297,7 @@ for (key, value) in btree_map.iter() {
 
 ### Pitfall 2: Floating Point Inconsistency
 
-```rust,ignore
+```rust
 // PROBLEMATIC - May vary across platforms
 let x = 0.1 + 0.2; // Floating point representation
 
@@ -307,7 +307,7 @@ let x = (a * 1000 + b * 1000) / 1000; // Integer math
 
 ### Pitfall 3: Thread-Local State
 
-```rust,ignore
+```rust
 // WRONG - Thread-local state not synchronized
 thread_local! {
     static COUNTER: Cell<u32> = Cell::new(0);
@@ -321,7 +321,7 @@ struct GameState {
 
 ### Pitfall 4: System Calls
 
-```rust,ignore
+```rust
 // WRONG - Depends on file system state
 let config = std::fs::read_to_string("config.txt")?;
 
@@ -333,7 +333,7 @@ struct GameState {
 
 ### Pitfall 5: Pointer Addresses
 
-```rust,ignore
+```rust
 // WRONG - Pointer addresses vary between runs
 let id = &object as *const _ as usize;
 
@@ -345,7 +345,7 @@ struct Object {
 
 ### Pitfall 6: Allocation Order
 
-```rust,ignore
+```rust
 // PROBLEMATIC - Vec reallocation can affect addresses
 let mut objects: Vec<Object> = vec![];
 for _ in 0..100 {
@@ -364,7 +364,7 @@ let mut objects: Vec<Object> = Vec::with_capacity(100);
 
 Use `SyncTestSession` to detect non-determinism locally:
 
-```rust,ignore
+```rust
 let mut session = SessionBuilder::<Config>::new()
     .with_num_players(1)
     .with_check_distance(4) // Compare last 4 frames
@@ -379,7 +379,7 @@ let mut session = SessionBuilder::<Config>::new()
 
 Enable desync detection in P2P sessions:
 
-```rust,ignore
+```rust
 let session = SessionBuilder::<Config>::new()
     .with_desync_detection_mode(DesyncDetection::On { interval: 100 })
     // ...
@@ -387,7 +387,7 @@ let session = SessionBuilder::<Config>::new()
 
 Monitor for `FortressEvent::DesyncDetected`:
 
-```rust,ignore
+```rust
 for event in session.events() {
     if let FortressEvent::DesyncDetected { frame, local, remote, .. } = event {
         panic!("Desync at frame {}: local={}, remote={}", frame, local, remote);
@@ -399,7 +399,7 @@ for event in session.events() {
 
 Record inputs and replay on different machines:
 
-```rust,ignore
+```rust
 // Record
 let recorded_inputs: Vec<(Frame, Vec<Input>)> = record_session();
 
@@ -414,7 +414,7 @@ assert_eq!(machine_a_state, machine_b_state);
 
 Use proptest to generate random input sequences:
 
-```rust,ignore
+```rust
 proptest! {
     #[test]
     fn determinism_holds(inputs in any_input_sequence()) {

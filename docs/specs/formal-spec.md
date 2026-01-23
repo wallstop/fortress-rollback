@@ -194,7 +194,7 @@ less than the current frame. When `first_incorrect_frame >= current_frame`,
 
 This invariant captures the guard in `adjust_gamestate()`:
 
-```rust,ignore
+```rust
 if frame_to_load >= current_frame {
     // skip_rollback path
     return Ok(());

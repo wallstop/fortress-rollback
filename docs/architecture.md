@@ -723,7 +723,7 @@ Rollback is triggered when:
 
 ### Rollback Process
 
-```rust,ignore
+```rust
 // Simplified rollback flow in adjust_gamestate()
 
 let frame_to_load = if sparse_saving {
@@ -804,7 +804,7 @@ Frame:  [9] [1] [2] [3] [4] [5] [6] [7] [8]
 
 Each player has a `ConnectionStatus`:
 
-```rust,ignore
+```rust
 pub struct ConnectionStatus {
     pub disconnected: bool,  // Is the player disconnected?
     pub last_frame: Frame,   // Last frame we received input for
@@ -893,7 +893,7 @@ Run-Length Encoding compresses sequences of identical bytes:
 
 **Compression Pipeline:**
 
-```rust,ignore
+```rust
 // Internal usage (not public API)
 use fortress_rollback::__internal::{encode, decode, delta_encode, delta_decode};
 
@@ -1010,7 +1010,7 @@ if observer.has_violation(ViolationKind::FrameSync) {
 
 Prevents mixing frame numbers with arbitrary integers:
 
-```rust,ignore
+```rust
 let frame = Frame::new(5);
 let next = frame + 1;        // OK: Frame + i32 -> Frame
 let diff = next - frame;     // OK: Frame - Frame -> i32
@@ -1021,7 +1021,7 @@ let diff = next - frame;     // OK: Frame - Frame -> i32
 
 Prevents invalid handle usage:
 
-```rust,ignore
+```rust
 let handle = PlayerHandle::new(0);
 if handle.is_valid_player_for(num_players) {
     // Safe to use as player index
@@ -1032,7 +1032,7 @@ if handle.is_valid_player_for(num_players) {
 
 Compile-time parameterization bundles all type requirements:
 
-```rust,ignore
+```rust
 pub trait Config: 'static {
     type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned;
     type State: Clone;
