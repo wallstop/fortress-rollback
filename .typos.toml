@@ -32,6 +32,9 @@ bitcode = "bitcode"   # serialization crate
 proptest = "proptest"
 nextest = "nextest"
 
+# Intentional typos in documentation examples (demonstrating bad practices)
+conected = "conected"  # Used in .llm/skills/type-driven-design.md to show string-state issues
+
 [files]
 extend-exclude = [
     "target/",

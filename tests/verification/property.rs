@@ -29,7 +29,9 @@
     clippy::indexing_slicing
 )]
 
-use fortress_rollback::__internal::{InputQueue, PlayerInput, SavedStates, SyncLayer};
+use fortress_rollback::__internal::{
+    GameStateCell, InputQueue, PlayerInput, SavedStates, SyncLayer,
+};
 use fortress_rollback::telemetry::InvariantChecker;
 use fortress_rollback::{Config, FortressRequest, Frame, InputStatus};
 use proptest::prelude::*;
@@ -491,7 +493,8 @@ proptest! {
 // ============================================================================
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
+    // Standardized to 200 cases across all sync layer property tests for consistent coverage
+    #![proptest_config(ProptestConfig::with_cases(200))]
 
     /// INV-SL5: Rollback/advance cycles preserve invariants
     ///
@@ -744,6 +747,600 @@ proptest! {
     }
 }
 
+// === SYNC LAYER PROPERTY TESTS ===
+// ============================================================================
+// Tier 1 (CRITICAL) Property Tests
+// ============================================================================
+
+proptest! {
+    // Standardized to 200 cases across all sync layer property tests for consistent coverage
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// Tier 1: prop_frame_advancement_monotonic
+    ///
+    /// After each advance_frame(), current_frame increases by exactly 1.
+    /// This tests INV-SL1: Frame monotonicity.
+    #[test]
+    fn prop_frame_advancement_monotonic(
+        max_prediction in max_prediction_strategy(),
+        num_advances in 1usize..100,
+    ) {
+        let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(
+            2,
+            max_prediction,
+            64,
+        );
+
+        let initial_frame = sync_layer.current_frame();
+        prop_assert_eq!(initial_frame, Frame::new(0), "Initial frame should be 0");
+
+        for i in 0..num_advances {
+            let before = sync_layer.current_frame();
+            sync_layer.advance_frame();
+            let after = sync_layer.current_frame();
+
+            // Frame should increase by exactly 1
+            prop_assert_eq!(
+                after.as_i32(),
+                before.as_i32() + 1,
+                "Frame {} should increase by exactly 1: before={}, after={}",
+                i,
+                before,
+                after
+            );
+
+            // Verify monotonicity
+            prop_assert!(
+                after > before,
+                "Frame should be strictly monotonic: after={} should be > before={}",
+                after,
+                before
+            );
+        }
+
+        // Final frame should equal initial + num_advances
+        prop_assert_eq!(
+            sync_layer.current_frame(),
+            Frame::new(num_advances as i32),
+            "Final frame should equal num_advances"
+        );
+    }
+
+    /// Tier 1: prop_rollback_advance_cycle_valid
+    ///
+    /// Save states, then rollback via load_frame(), then re-advance maintains valid invariants.
+    /// This tests INV-SL5: Rollback/advance cycles preserve invariants.
+    #[test]
+    fn prop_rollback_advance_cycle_valid(
+        max_prediction in 4usize..12,
+        num_frames in 5usize..20,
+        rollback_offset in 1usize..5,
+    ) {
+        let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(
+            2,
+            max_prediction,
+            64,
+        );
+
+        // Phase 1: Advance and save states for num_frames
+        for i in 0..num_frames {
+            let request = sync_layer.save_current_state();
+            if let FortressRequest::SaveGameState { cell, frame } = request {
+                let state = TestState {
+                    value: i as u64,
+                    frame: frame.as_i32(),
+                };
+                cell.save(frame, Some(state), Some(i as u128));
+            }
+            sync_layer.advance_frame();
+
+            // Verify invariants after each operation
+            let result = sync_layer.check_invariants();
+            prop_assert!(
+                result.is_ok(),
+                "Invariants failed during initial advance at frame {}: {:?}",
+                i,
+                result.err()
+            );
+        }
+
+        let original_frame = sync_layer.current_frame();
+
+        // Phase 2: Calculate valid rollback target
+        let rollback_depth = rollback_offset.min(num_frames.saturating_sub(1));
+        let target_frame_value = (original_frame.as_i32() - rollback_depth as i32).max(0);
+        let target_frame = Frame::new(target_frame_value);
+
+        // Only proceed if target is within prediction window
+        let max_rollback_depth = max_prediction as i32;
+        if original_frame.as_i32() - target_frame.as_i32() <= max_rollback_depth
+            && target_frame < original_frame
+        {
+            // Perform rollback
+            let result = sync_layer.load_frame(target_frame);
+            prop_assert!(
+                result.is_ok(),
+                "Rollback to frame {} should succeed: {:?}",
+                target_frame,
+                result.err()
+            );
+
+            // Verify invariants after rollback
+            let inv_result = sync_layer.check_invariants();
+            prop_assert!(
+                inv_result.is_ok(),
+                "Invariants failed after rollback: {:?}",
+                inv_result.err()
+            );
+
+            // Verify frame was rolled back
+            prop_assert_eq!(
+                sync_layer.current_frame(),
+                target_frame,
+                "Current frame should match rollback target"
+            );
+
+            // Verify last_saved_frame invariant
+            prop_assert!(
+                sync_layer.last_saved_frame() <= sync_layer.current_frame(),
+                "last_saved_frame ({}) should be <= current_frame ({}) after rollback",
+                sync_layer.last_saved_frame(),
+                sync_layer.current_frame()
+            );
+
+            // Phase 3: Re-advance to original frame
+            while sync_layer.current_frame() < original_frame {
+                let request = sync_layer.save_current_state();
+                if let FortressRequest::SaveGameState { cell, frame } = request {
+                    let state = TestState {
+                        value: frame.as_i32() as u64 * 100,
+                        frame: frame.as_i32(),
+                    };
+                    cell.save(frame, Some(state), Some(frame.as_i32() as u128 * 100));
+                }
+                sync_layer.advance_frame();
+
+                // Verify invariants after each re-advance
+                let result = sync_layer.check_invariants();
+                prop_assert!(
+                    result.is_ok(),
+                    "Invariants failed during re-advance at frame {}: {:?}",
+                    sync_layer.current_frame(),
+                    result.err()
+                );
+            }
+
+            // Final verification
+            prop_assert_eq!(
+                sync_layer.current_frame(),
+                original_frame,
+                "Should return to original frame after re-advance"
+            );
+        }
+    }
+
+    /// Tier 1: prop_invariants_preserved_after_operations
+    ///
+    /// check_invariants() passes after any sequence of operations.
+    /// This is a comprehensive test that performs random operation sequences
+    /// including set_frame_delay operations on all available players.
+    ///
+    /// Note: Input queue operations (add_local_input, add_remote_input, synchronized_inputs)
+    /// are pub(crate) and tested via InputQueue property tests instead.
+    #[test]
+    fn prop_invariants_preserved_after_operations(
+        max_prediction in 4usize..10,
+        num_operations in 5usize..30,
+        operation_seed in any::<u64>(),
+    ) {
+        let num_players = 2;
+        let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(
+            num_players,
+            max_prediction,
+            64,
+        );
+
+        // Use the seed to deterministically generate operations
+        let mut rng_state = operation_seed;
+
+        for op_idx in 0..num_operations {
+            // Simple LCG for deterministic operation selection
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            // We have 5 operation types (0-4)
+            let op_type = (rng_state >> 60) % 5;
+
+            match op_type {
+                0 => {
+                    // Advance frame
+                    sync_layer.advance_frame();
+                },
+                1 => {
+                    // Save state
+                    let request = sync_layer.save_current_state();
+                    if let FortressRequest::SaveGameState { cell, frame } = request {
+                        let state = TestState {
+                            value: op_idx as u64,
+                            frame: frame.as_i32(),
+                        };
+                        cell.save(frame, Some(state), Some(op_idx as u128));
+                    }
+                },
+                2 => {
+                    // Try rollback if we have saved states and are beyond frame 0
+                    let current = sync_layer.current_frame().as_i32();
+                    if current > 1 {
+                        // Calculate a valid rollback target
+                        let max_back = (current - 1).min(max_prediction as i32);
+                        let target = current - 1 - ((rng_state >> 32) as i32 % max_back.max(1));
+                        let target = target.max(0);
+
+                        if target < current {
+                            // Try rollback - it may fail if state doesn't exist, which is fine
+                            let _ = sync_layer.load_frame(Frame::new(target));
+                        }
+                    }
+                },
+                3 => {
+                    // Reset prediction
+                    sync_layer.reset_prediction();
+                },
+                4 => {
+                    // Set frame delay for a random player
+                    let player_idx = ((rng_state >> 40) as usize) % num_players;
+                    let delay = ((rng_state >> 48) as usize) % 8; // MAX_FRAME_DELAY is 8
+                    let _ = sync_layer.set_frame_delay(
+                        fortress_rollback::PlayerHandle::new(player_idx),
+                        delay
+                    );
+                },
+                _ => unreachable!(),
+            }
+
+            // Verify invariants after each operation
+            let result = sync_layer.check_invariants();
+            prop_assert!(
+                result.is_ok(),
+                "Invariants failed after operation {} (type {}): {:?}",
+                op_idx,
+                op_type,
+                result.err()
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Multi-Player Parameterized Property Tests
+// ============================================================================
+
+proptest! {
+    // Standardized to 200 cases across all sync layer property tests for consistent coverage
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// Multi-player invariant preservation test
+    ///
+    /// Tests that invariants hold across varying player counts (1-4 players).
+    /// This uses player_count_strategy() to parameterize the number of players
+    /// rather than hardcoding 2 players.
+    ///
+    /// Tests all publicly accessible SyncLayer operations through __internal:
+    /// - advance_frame(), save_current_state(), load_frame()
+    /// - reset_prediction(), set_frame_delay()
+    #[test]
+    fn prop_multi_player_invariant_preservation(
+        num_players in player_count_strategy(),
+        max_prediction in max_prediction_strategy(),
+        num_operations in 5usize..25,
+        operation_seed in any::<u64>(),
+    ) {
+        let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(
+            num_players,
+            max_prediction,
+            64,
+        );
+
+        // Use the seed to deterministically generate operations
+        let mut rng_state = operation_seed;
+
+        // Initial invariant check
+        let result = sync_layer.check_invariants();
+        prop_assert!(
+            result.is_ok(),
+            "Initial invariants failed for {} players: {:?}",
+            num_players,
+            result.err()
+        );
+
+        for op_idx in 0..num_operations {
+            // Simple LCG for deterministic operation selection
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let op_type = (rng_state >> 60) % 5;
+
+            match op_type {
+                0 => {
+                    // Advance frame
+                    sync_layer.advance_frame();
+                },
+                1 => {
+                    // Save state
+                    let request = sync_layer.save_current_state();
+                    if let FortressRequest::SaveGameState { cell, frame } = request {
+                        let state = TestState {
+                            value: op_idx as u64,
+                            frame: frame.as_i32(),
+                        };
+                        cell.save(frame, Some(state), Some(op_idx as u128));
+                    }
+                },
+                2 => {
+                    // Try rollback if we have saved states and are beyond frame 0
+                    let current = sync_layer.current_frame().as_i32();
+                    if current > 1 {
+                        let max_back = (current - 1).min(max_prediction as i32);
+                        let target = current - 1 - ((rng_state >> 32) as i32 % max_back.max(1));
+                        let target = target.max(0);
+
+                        if target < current {
+                            let _ = sync_layer.load_frame(Frame::new(target));
+                        }
+                    }
+                },
+                3 => {
+                    // Reset prediction
+                    sync_layer.reset_prediction();
+                },
+                4 => {
+                    // Set frame delay for a random player
+                    let player_idx = ((rng_state >> 40) as usize) % num_players;
+                    let delay = ((rng_state >> 48) as usize) % 8; // MAX_FRAME_DELAY is 8
+                    let _ = sync_layer.set_frame_delay(
+                        fortress_rollback::PlayerHandle::new(player_idx),
+                        delay
+                    );
+                },
+                _ => unreachable!(),
+            }
+
+            // Verify invariants after each operation
+            let result = sync_layer.check_invariants();
+            prop_assert!(
+                result.is_ok(),
+                "Invariants failed for {} players after operation {} (type {}): {:?}",
+                num_players,
+                op_idx,
+                op_type,
+                result.err()
+            );
+        }
+
+        // Final comprehensive invariant checks
+        prop_assert!(
+            sync_layer.current_frame().as_i32() >= 0,
+            "current_frame should be non-negative"
+        );
+
+        // Verify the number of input queues matches num_players
+        // This is checked internally by check_invariants, but let's be explicit
+        let final_result = sync_layer.check_invariants();
+        prop_assert!(
+            final_result.is_ok(),
+            "Final invariants failed for {} players: {:?}",
+            num_players,
+            final_result.err()
+        );
+    }
+}
+
+// ============================================================================
+// Tier 2 (HIGH) Property Tests
+// ============================================================================
+
+proptest! {
+    // Standardized to 200 cases across all sync layer property tests for consistent coverage
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// Tier 2: prop_load_frame_respects_prediction_window
+    ///
+    /// load_frame() rejects frames outside the valid prediction window.
+    /// Tests boundary conditions of the rollback window.
+    #[test]
+    fn prop_load_frame_respects_prediction_window(
+        max_prediction in 3usize..10,
+        num_advances in 5usize..20,
+    ) {
+        let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(
+            2,
+            max_prediction,
+            64,
+        );
+
+        // Advance and save states
+        for i in 0..num_advances {
+            let request = sync_layer.save_current_state();
+            if let FortressRequest::SaveGameState { cell, frame } = request {
+                let state = TestState {
+                    value: i as u64,
+                    frame: frame.as_i32(),
+                };
+                cell.save(frame, Some(state), None);
+            }
+            sync_layer.advance_frame();
+        }
+
+        let current = sync_layer.current_frame().as_i32();
+
+        // Test: NULL_FRAME should always be rejected
+        let null_result = sync_layer.load_frame(Frame::NULL);
+        prop_assert!(
+            null_result.is_err(),
+            "NULL_FRAME should be rejected"
+        );
+
+        // Test: Current frame should be rejected (not in past)
+        let current_result = sync_layer.load_frame(Frame::new(current));
+        prop_assert!(
+            current_result.is_err(),
+            "Current frame should be rejected"
+        );
+
+        // Test: Future frame should be rejected
+        let future_result = sync_layer.load_frame(Frame::new(current + 10));
+        prop_assert!(
+            future_result.is_err(),
+            "Future frame should be rejected"
+        );
+
+        // Test: Frame outside prediction window should be rejected
+        let outside_window = current - max_prediction as i32 - 2;
+        if outside_window >= 0 {
+            let outside_result = sync_layer.load_frame(Frame::new(outside_window));
+            prop_assert!(
+                outside_result.is_err(),
+                "Frame {} outside prediction window should be rejected (current={}, max_pred={})",
+                outside_window,
+                current,
+                max_prediction
+            );
+        }
+
+        // Test: Frame at edge of prediction window should succeed (if saved state exists)
+        // We saved states for frames 0..num_advances, so within that range we should have states
+        let edge_frame = (current - max_prediction as i32).max(0);
+        if edge_frame < current && edge_frame >= 0 && edge_frame < num_advances as i32 {
+            // We saved a state at this frame, so it should be loadable
+            let edge_result = sync_layer.load_frame(Frame::new(edge_frame));
+            prop_assert!(
+                edge_result.is_ok(),
+                "Frame {} at edge of prediction window should succeed (current={}, max_pred={})",
+                edge_frame,
+                current,
+                max_prediction
+            );
+        }
+    }
+
+    /// Tier 2: prop_game_state_cell_roundtrip
+    ///
+    /// save() then load() returns the same data.
+    /// Tests the fundamental save/load contract of GameStateCell.
+    #[test]
+    fn prop_game_state_cell_roundtrip(
+        value in any::<u64>(),
+        frame_num in 0i32..1000,
+        checksum in any::<u128>(),
+    ) {
+        let cell = GameStateCell::<TestState>::default();
+        let frame = Frame::new(frame_num);
+
+        let original_state = TestState {
+            value,
+            frame: frame_num,
+        };
+
+        // Save the state
+        let save_result = cell.save(frame, Some(original_state.clone()), Some(checksum));
+        prop_assert!(save_result, "Save should succeed for valid frame");
+
+        // Load and verify
+        let loaded = cell.load();
+        prop_assert!(loaded.is_some(), "Load should return Some after save");
+
+        let loaded_state = loaded.unwrap();
+        prop_assert_eq!(
+            loaded_state.value,
+            original_state.value,
+            "Loaded value should match saved value"
+        );
+        prop_assert_eq!(
+            loaded_state.frame,
+            original_state.frame,
+            "Loaded frame should match saved frame"
+        );
+
+        // Verify frame accessor
+        prop_assert_eq!(
+            cell.frame(),
+            frame,
+            "Cell frame() should match saved frame"
+        );
+
+        // Verify checksum
+        prop_assert_eq!(
+            cell.checksum(),
+            Some(checksum),
+            "Cell checksum should match saved checksum"
+        );
+    }
+
+    /// Tier 2: prop_saved_states_circular_wrapping_correctness
+    ///
+    /// Frames that differ by (max_prediction+1) map to the same cell.
+    /// Tests the circular buffer behavior of SavedStates.
+    #[test]
+    fn prop_saved_states_circular_wrapping_correctness(
+        max_prediction in 2usize..15,
+        base_frame in 0i32..100,
+        multiplier in 1usize..5,
+    ) {
+        let states = SavedStates::<u64>::new(max_prediction);
+        let num_cells = max_prediction + 1;
+
+        let frame1 = Frame::new(base_frame);
+        let frame2 = Frame::new(base_frame + (num_cells * multiplier) as i32);
+
+        // Both frames should map to the same cell index
+        let expected_index = (base_frame as usize) % num_cells;
+        let frame2_index = (frame2.as_i32() as usize) % num_cells;
+
+        prop_assert_eq!(
+            expected_index,
+            frame2_index,
+            "Frames {} and {} should map to same cell index",
+            base_frame,
+            frame2.as_i32()
+        );
+
+        // Save to frame1
+        let cell1 = states.get_cell(frame1).unwrap();
+        let unique_value = (base_frame as u64) * 1000 + (multiplier as u64);
+        cell1.save(frame1, Some(unique_value), Some(unique_value as u128));
+
+        // Verify cell1 has the data
+        prop_assert_eq!(cell1.load(), Some(unique_value));
+        prop_assert_eq!(cell1.frame(), frame1);
+
+        // Get cell for frame2 (same slot)
+        let cell2 = states.get_cell(frame2).unwrap();
+
+        // Before overwriting, cell2 should see the same data (same underlying cell)
+        prop_assert_eq!(
+            cell2.load(),
+            Some(unique_value),
+            "Cell2 should see cell1's data before overwrite"
+        );
+
+        // Now save to frame2 (overwrites cell1's data)
+        let new_value = unique_value + 999;
+        cell2.save(frame2, Some(new_value), Some(new_value as u128));
+
+        // Both cells should now see frame2's data
+        prop_assert_eq!(cell2.frame(), frame2);
+        prop_assert_eq!(cell2.load(), Some(new_value));
+
+        // cell1 should also see the new data (same underlying Arc)
+        prop_assert_eq!(
+            cell1.frame(),
+            frame2,
+            "Cell1 should now show frame2 after overwrite"
+        );
+        prop_assert_eq!(
+            cell1.load(),
+            Some(new_value),
+            "Cell1 should show new value after overwrite"
+        );
+    }
+}
+
 // ============================================================================
 // SavedStates Advanced Property Tests
 // ============================================================================
@@ -837,8 +1434,8 @@ proptest! {
 mod p2p_checksum_tests {
     use super::*;
     use fortress_rollback::{
-        DesyncDetection, PlayerHandle, PlayerType, SessionBuilder, SessionState, SyncHealth,
-        UdpNonBlockingSocket,
+        DesyncDetection, FortressError, PlayerHandle, PlayerType, SessionBuilder, SessionState,
+        SyncHealth,
     };
     use serial_test::serial;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -848,110 +1445,77 @@ mod p2p_checksum_tests {
         17700 + base
     }
 
-    /// Helper to advance a session by processing a number of frames with poll cycles.
-    /// Uses time-based waiting to be robust across different platforms.
-    fn synchronize_sessions<T: Config>(
-        sess1: &mut fortress_rollback::P2PSession<T>,
-        sess2: &mut fortress_rollback::P2PSession<T>,
-        _poll_cycles: usize, // Kept for API compatibility but ignored - we use time-based timeout
-    ) where
-        T::Input: Default,
-    {
-        use std::thread;
-        use std::time::{Duration, Instant};
-
-        const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
-        const POLL_INTERVAL: Duration = Duration::from_millis(1);
-
-        let start = Instant::now();
-        while start.elapsed() < SYNC_TIMEOUT {
-            sess1.poll_remote_clients();
-            sess2.poll_remote_clients();
-            if sess1.current_state() == SessionState::Running
-                && sess2.current_state() == SessionState::Running
-            {
-                return;
-            }
-            thread::sleep(POLL_INTERVAL);
-        }
-        // If we get here, synchronization may have failed - but don't assert,
-        // let the caller handle the failure with their own assertions
-    }
+    // Use synchronize_sessions from test_utils to avoid duplicating constants
+    use crate::common::test_utils::{bind_socket_with_retry, synchronize_sessions, SyncConfig};
 
     /// Property: sync_health returns Pending when desync detection is off
     #[test]
     #[serial]
-    fn test_sync_health_pending_when_detection_off() {
+    fn test_sync_health_pending_when_detection_off() -> Result<(), FortressError> {
         let port1 = get_test_port(0);
         let port2 = get_test_port(1);
         let _addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let socket1 = bind_socket_with_retry(port1)?;
         let sess1 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::Off)
-            .add_player(PlayerType::Local, PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))
-            .unwrap()
-            .start_p2p_session(socket1)
-            .unwrap();
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .start_p2p_session(socket1)?;
 
         // With desync detection off, sync_health should return Pending
         let health = sess1.sync_health(PlayerHandle::new(1));
         assert_eq!(health, Some(SyncHealth::Pending));
+        Ok(())
     }
 
     /// Property: sync_health returns None for local players
     #[test]
     #[serial]
-    fn test_sync_health_none_for_local_player() {
+    fn test_sync_health_none_for_local_player() -> Result<(), FortressError> {
         let port1 = get_test_port(2);
         let port2 = get_test_port(3);
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let socket1 = bind_socket_with_retry(port1)?;
         let sess1 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval: 10 })
-            .add_player(PlayerType::Local, PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))
-            .unwrap()
-            .start_p2p_session(socket1)
-            .unwrap();
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .start_p2p_session(socket1)?;
 
         // sync_health for local player should return None
         let health = sess1.sync_health(PlayerHandle::new(0));
         assert_eq!(health, None);
+        Ok(())
     }
 
     /// Property: sync_health returns None for invalid player handles
     #[test]
     #[serial]
-    fn test_sync_health_none_for_invalid_handle() {
+    fn test_sync_health_none_for_invalid_handle() -> Result<(), FortressError> {
         let port1 = get_test_port(4);
         let port2 = get_test_port(5);
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let socket1 = bind_socket_with_retry(port1)?;
         let sess1 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval: 10 })
-            .add_player(PlayerType::Local, PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))
-            .unwrap()
-            .start_p2p_session(socket1)
-            .unwrap();
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .start_p2p_session(socket1)?;
 
         // sync_health for non-existent player should return None
         let health = sess1.sync_health(PlayerHandle::new(99));
         assert_eq!(health, None);
+        Ok(())
     }
 
     /// Property: is_synchronized returns true when no remote peers exist
     #[test]
     #[serial]
-    fn test_is_synchronized_no_remote_peers() {
+    fn test_is_synchronized_no_remote_peers() -> Result<(), FortressError> {
         // A session with only local players should be synchronized with itself
         // This requires at least 2 players, so we need a remote player
         // Actually, creating a session with only local players isn't a typical use case
@@ -960,15 +1524,12 @@ mod p2p_checksum_tests {
         let port2 = get_test_port(7);
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let socket1 = bind_socket_with_retry(port1)?;
         let mut sess1 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval: 10 })
-            .add_player(PlayerType::Local, PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))
-            .unwrap()
-            .start_p2p_session(socket1)
-            .unwrap();
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .start_p2p_session(socket1)?;
 
         // Initially, before any checksum exchange, should be pending (not synchronized)
         // The definition of is_synchronized is: all remote peers show InSync
@@ -976,35 +1537,31 @@ mod p2p_checksum_tests {
         assert!(!sess1.is_synchronized());
 
         // Disconnect the remote player
-        sess1.disconnect_player(PlayerHandle::new(1)).unwrap();
+        sess1.disconnect_player(PlayerHandle::new(1))?;
 
         // With no connected remote peers, should be synchronized
         // (Note: disconnected players may not count as "remote" anymore for sync purposes)
+        Ok(())
     }
 
     /// Property: all_sync_health returns entries for all remote players
     #[test]
     #[serial]
-    fn test_all_sync_health_includes_all_remotes() {
+    fn test_all_sync_health_includes_all_remotes() -> Result<(), FortressError> {
         let port1 = get_test_port(8);
         let port2 = get_test_port(9);
         let port3 = get_test_port(10);
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
         let addr3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port3);
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let socket1 = bind_socket_with_retry(port1)?;
         let sess1 = SessionBuilder::<TestConfig>::new()
-            .with_num_players(3)
-            .unwrap()
+            .with_num_players(3)?
             .with_desync_detection_mode(DesyncDetection::On { interval: 10 })
-            .add_player(PlayerType::Local, PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr3), PlayerHandle::new(2))
-            .unwrap()
-            .start_p2p_session(socket1)
-            .unwrap();
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .add_player(PlayerType::Remote(addr3), PlayerHandle::new(2))?
+            .start_p2p_session(socket1)?;
 
         let all_health = sess1.all_sync_health();
 
@@ -1015,28 +1572,27 @@ mod p2p_checksum_tests {
         let handles: Vec<_> = all_health.iter().map(|(h, _)| *h).collect();
         assert!(handles.contains(&PlayerHandle::new(1)));
         assert!(handles.contains(&PlayerHandle::new(2)));
+        Ok(())
     }
 
     /// Property: last_verified_frame is None before any checksum comparison
     #[test]
     #[serial]
-    fn test_last_verified_frame_initially_none() {
+    fn test_last_verified_frame_initially_none() -> Result<(), FortressError> {
         let port1 = get_test_port(11);
         let port2 = get_test_port(12);
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let socket1 = bind_socket_with_retry(port1)?;
         let sess1 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval: 10 })
-            .add_player(PlayerType::Local, PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))
-            .unwrap()
-            .start_p2p_session(socket1)
-            .unwrap();
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .start_p2p_session(socket1)?;
 
         // Before any frames are processed, last_verified_frame should be None
         assert_eq!(sess1.last_verified_frame(), None);
+        Ok(())
     }
 
     /// Property: Two synchronized sessions reach InSync after exchanging checksums
@@ -1047,7 +1603,7 @@ mod p2p_checksum_tests {
     /// 3. After checksums are compared, sync_health transitions to InSync
     #[test]
     #[serial]
-    fn test_checksum_exchange_reaches_in_sync() {
+    fn test_checksum_exchange_reaches_in_sync() -> Result<(), FortressError> {
         let port1 = get_test_port(13);
         let port2 = get_test_port(14);
         let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
@@ -1056,28 +1612,23 @@ mod p2p_checksum_tests {
         // Use a small interval for faster testing
         let interval = 5;
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
+        let socket1 = bind_socket_with_retry(port1)?;
         let mut sess1 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval })
-            .add_player(PlayerType::Local, PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))
-            .unwrap()
-            .start_p2p_session(socket1)
-            .unwrap();
+            .add_player(PlayerType::Local, PlayerHandle::new(0))?
+            .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+            .start_p2p_session(socket1)?;
 
-        let socket2 = UdpNonBlockingSocket::bind_to_port(port2).unwrap();
+        let socket2 = bind_socket_with_retry(port2)?;
         let mut sess2 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval })
-            .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))
-            .unwrap()
-            .add_player(PlayerType::Local, PlayerHandle::new(1))
-            .unwrap()
-            .start_p2p_session(socket2)
-            .unwrap();
+            .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+            .add_player(PlayerType::Local, PlayerHandle::new(1))?
+            .start_p2p_session(socket2)?;
 
-        // Synchronize sessions first
-        synchronize_sessions(&mut sess1, &mut sess2, 50);
+        // Synchronize sessions first using the helper from test_utils
+        synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default())
+            .expect("Sessions should synchronize");
 
         assert_eq!(sess1.current_state(), SessionState::Running);
         assert_eq!(sess2.current_state(), SessionState::Running);
@@ -1192,5 +1743,6 @@ mod p2p_checksum_tests {
                 panic!("Session 2 generated unexpected DesyncDetected event");
             }
         }
+        Ok(())
     }
 }

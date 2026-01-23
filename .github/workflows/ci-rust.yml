@@ -9,8 +9,11 @@ on:
       - '**/Cargo.lock'
       - 'rust-toolchain.toml'
       - '.cargo/**'
+      - 'Cross.toml'
       - 'clippy.toml'
       - 'rustfmt.toml'
+      - 'scripts/verify-kani.sh'
+      - 'scripts/check-kani-coverage.sh'
       - '.github/workflows/ci-rust.yml'
   pull_request:
     branches: [main]
@@ -20,8 +23,11 @@ on:
       - '**/Cargo.lock'
       - 'rust-toolchain.toml'
       - '.cargo/**'
+      - 'Cross.toml'
       - 'clippy.toml'
       - 'rustfmt.toml'
+      - 'scripts/verify-kani.sh'
+      - 'scripts/check-kani-coverage.sh'
       - '.github/workflows/ci-rust.yml'
   workflow_dispatch:
 
@@ -29,6 +35,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Quick validation that all Kani proofs are in tier lists
+  kani-coverage:
+    name: Kani Proof Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate Kani proof coverage
+        run: ./scripts/check-kani-coverage.sh
+        # Ensures all #[kani::proof] functions are in tier lists in verify-kani.sh
+
   # Primary build and test job (cross-platform matrix)
   build:
     name: Build & Test (${{ matrix.os }})
@@ -74,7 +93,10 @@ jobs:
         id: sccache-check
         shell: bash
         run: |
-          if [ "${{ steps.sccache-check-unix.outputs.working }}" == "true" ] || [ "${{ steps.sccache-check-windows.outputs.working }}" == "true" ]; then
+          # Assign GitHub expressions to variables (avoids shellcheck SC2193)
+          unix_working="${{ steps['sccache-check-unix'].outputs.working }}"
+          windows_working="${{ steps['sccache-check-windows'].outputs.working }}"
+          if [ "$unix_working" == "true" ] || [ "$windows_working" == "true" ]; then
             echo "working=true" >> "$GITHUB_OUTPUT"
           else
             echo "working=false" >> "$GITHUB_OUTPUT"
@@ -134,10 +156,128 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
-  # Miri undefined behavior check
+  # Miri undefined behavior check (cross-platform, optimized)
+  #
+  # OPTIMIZATION STRATEGY (January 2026):
+  # Property tests are excluded from Miri runs because:
+  # 1. They're ~50-300x slower than unit tests under Miri (10+ min each)
+  # 2. Miri detects UB, not algorithmic correctness (property tests' purpose)
+  # 3. The same code paths are exercised by faster unit tests
+  #
+  # Concurrent tests (thread::spawn) are also skipped because:
+  # 1. Multi-threaded tests are extremely slow under Miri (~3 min each)
+  # 2. Loom provides better concurrency verification for these tests
+  # 3. Only 3 tests affected: test_collecting_observer_concurrent_*
+  #
+  # Test distribution (from analysis, ~951 unit tests after excluding slow tests):
+  # - sessions:: ~253 tests (27%)
+  # - network:: ~225 tests (24%)
+  # - sync_layer:: ~96 tests (10%)
+  # - input_queue:: ~58 tests (6%)
+  # - rle:: ~44 tests (5%)
+  # - misc (error, telemetry, frame_info, tests, sync, test_config, hash, rng, checksum, time_sync): ~275 tests (29%)
+  #
+  # Note: The "misc" job runs 319 tests because it includes rle:: (275 + 44 = 319)
+  # Windows/macOS "misc" runs 377 tests (includes input_queue:: too)
+  #
+  # Platform strategy:
+  # - Linux: 4 jobs with 2 seeds for race detection, full coverage
+  #   (input_queue + sync_layer split into separate job for balanced load)
+  # - Windows: 2 jobs with 1 seed, platform-specific UB detection
+  #   (input_queue grouped with misc for fewer total jobs)
+  # - macOS: 2 jobs with 1 seed, platform-specific UB detection
+  # - Big-endian (s390x): Separate step on Linux misc job (tests misc only)
+  #
+  # Performance notes:
+  # - Property tests are 50-300x slower under Miri (skipped, use proptest directly)
+  # - Concurrent tests are extremely slow under Miri (skipped, use loom instead)
+  # - Total: 8 jobs, all complete in <20 minutes
   miri:
-    name: Miri UB Check
-    runs-on: ubuntu-latest
+    name: Miri (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ============================================================
+          # Linux jobs (2 seeds each, 4 jobs total)
+          # Skip: property_tests (slow), concurrent (use loom instead)
+          # ============================================================
+
+          # Linux Job 1: Sessions module (~253 tests)
+          - name: Linux - sessions
+            os: ubuntu-latest
+            seeds: "0..2"
+            test_filter: "sessions::"
+            skip_filter: "--skip property_tests --skip concurrent"
+            big_endian: false
+
+          # Linux Job 2: Network module (~225 tests)
+          - name: Linux - network
+            os: ubuntu-latest
+            seeds: "0..2"
+            test_filter: "network::"
+            skip_filter: "--skip property_tests --skip concurrent"
+            big_endian: false
+
+          # Linux Job 3: Input queue + sync_layer (~154 tests)
+          - name: Linux - queues
+            os: ubuntu-latest
+            seeds: "0..2"
+            test_filter: "input_queue:: sync_layer::"
+            skip_filter: "--skip property_tests --skip concurrent"
+            big_endian: false
+
+          # Linux Job 4: Everything else (~319 tests) + separate big-endian step
+          # Covers: error::, hash::, rng::, checksum::, time_sync::,
+          #         telemetry::, frame_info::, sync::, rle::, tests::
+          - name: Linux - misc + big-endian
+            os: ubuntu-latest
+            seeds: "0..2"
+            test_filter: ""
+            skip_filter: "--skip property_tests --skip concurrent --skip sessions:: --skip network:: --skip input_queue:: --skip sync_layer::"
+            big_endian: true
+
+          # ============================================================
+          # Windows jobs (1 seed each, 2 jobs total)
+          # ============================================================
+
+          # Windows Job 1: Core modules (~574 tests)
+          - name: Windows - core
+            os: windows-latest
+            seeds: "0..1"
+            test_filter: "sessions:: network:: sync_layer::"
+            skip_filter: "--skip property_tests --skip concurrent"
+            big_endian: false
+
+          # Windows Job 2: Everything else (~377 tests)
+          - name: Windows - misc
+            os: windows-latest
+            seeds: "0..1"
+            test_filter: ""
+            skip_filter: "--skip property_tests --skip concurrent --skip sessions:: --skip network:: --skip sync_layer::"
+            big_endian: false
+
+          # ============================================================
+          # macOS jobs (1 seed each, 2 jobs total)
+          # ============================================================
+
+          # macOS Job 1: Core modules (~574 tests)
+          - name: macOS - core
+            os: macos-latest
+            seeds: "0..1"
+            test_filter: "sessions:: network:: sync_layer::"
+            skip_filter: "--skip property_tests --skip concurrent"
+            big_endian: false
+
+          # macOS Job 2: Everything else (~377 tests)
+          - name: macOS - misc
+            os: macos-latest
+            seeds: "0..1"
+            test_filter: ""
+            skip_filter: "--skip property_tests --skip concurrent --skip sessions:: --skip network:: --skip sync_layer::"
+            big_endian: false
 
     steps:
       - uses: actions/checkout@v6
@@ -155,17 +295,48 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: miri-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          # Include matrix.name in cache key for job-specific caching
+          key: miri-${{ matrix.os }}-${{ matrix.name }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            miri-${{ runner.os }}-cargo-
+            miri-${{ matrix.os }}-${{ matrix.name }}-cargo-
+            miri-${{ matrix.os }}-cargo-
 
       - name: Setup Miri
         run: cargo miri setup
 
-      - name: Run Miri tests (library)
-        run: cargo miri test --lib -- --skip property_tests
+      - name: Run Miri tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test_filter="${{ matrix.test_filter }}"
+          skip_filter="${{ matrix.skip_filter }}"
+
+          # Run Miri with the configured filters
+          # test_filter: space-separated positive filters (libtest arguments)
+          # skip_filter: --skip patterns for excluding slow tests
+          # shellcheck disable=SC2086
+          cargo miri test --lib -- $test_filter $skip_filter
         env:
-          MIRIFLAGS: "-Zmiri-disable-isolation"
+          MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-many-seeds=${{ matrix.seeds }} -Zmiri-symbolic-alignment-check"
+
+      # Install s390x cross-compiler for big-endian tests.
+      # Miri needs a C compiler for the target when criterion (via alloca crate)
+      # is a transitive dependency that requires native code compilation.
+      - name: Install s390x cross-compiler
+        if: matrix.big_endian
+        run: sudo apt-get update && sudo apt-get install -y gcc-s390x-linux-gnu
+
+      - name: Run Miri tests (big-endian s390x)
+        if: matrix.big_endian
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo miri test --lib --target s390x-unknown-linux-gnu -- \
+            --skip property_tests --skip concurrent \
+            --skip sessions:: --skip network:: --skip input_queue:: --skip sync_layer::
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-symbolic-alignment-check"
 
   # MSRV (Minimum Supported Rust Version) verification
   msrv-check:
@@ -307,3 +478,162 @@ jobs:
       - name: Check semver compatibility
         uses: obi1kenobi/cargo-semver-checks-action@v2
         continue-on-error: true  # Warn but don't fail - breaking changes are acceptable if documented
+
+  # WASM build verification
+  wasm-check:
+    name: WASM Build Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain with WASM target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Configure sccache
+        id: sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        continue-on-error: true
+
+      - name: Verify sccache is working
+        id: sccache-check
+        if: steps.sccache.outcome == 'success'
+        run: ./scripts/verify-sccache.sh
+        continue-on-error: true
+
+      - name: Clear sccache env on failure
+        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
+        run: |
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: wasm-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            wasm-${{ runner.os }}-cargo-
+
+      - name: Check WASM build (no default features)
+        run: cargo check --target wasm32-unknown-unknown --no-default-features
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Check WASM build (with sync-send feature)
+        run: cargo check --target wasm32-unknown-unknown --features sync-send
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Check WASM build (with paranoid feature)
+        run: cargo check --target wasm32-unknown-unknown --features paranoid
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Check WASM build (with json feature)
+        run: cargo check --target wasm32-unknown-unknown --features json
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Run clippy for WASM target
+        run: cargo clippy --target wasm32-unknown-unknown --no-default-features -- -D warnings
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+  # ARM64 (aarch64) cross-compilation verification
+  arm64-cross:
+    name: ARM64 Cross-Compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Override linker settings to use the default GCC cross-compiler instead of clang+lld.
+    # This avoids needing to install extra tools in the cross-rs container.
+    # The .cargo/config.toml specifies clang+lld for faster local builds, but
+    # Cross.toml passes through these env vars so CI can override to GCC.
+    #
+    # RUSTFLAGS must be cleared because .cargo/config.toml sets "-C link-arg=-fuse-ld=lld"
+    # which is incompatible with GCC (GCC doesn't understand the -fuse-ld=lld flag).
+    #
+    # IMPORTANT: We must ALSO override the x86_64 (host) target settings because proc-macro
+    # crates and build scripts compile for the HOST machine, not the cross-compile target.
+    # The .cargo/config.toml specifies `clang` as the linker for x86_64, but clang is NOT
+    # installed in the cross-rs Docker container (where the build runs). Using `cc` works everywhere.
+    env:
+      # Target (aarch64) linker settings
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
+      # Host (x86_64) linker settings - required for build scripts and proc-macros
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: cc
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: arm64-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            arm64-${{ runner.os }}-cargo-
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cross
+
+      - name: Check ARM64 build (no default features)
+        run: cross check --target aarch64-unknown-linux-gnu --no-default-features
+
+      - name: Check ARM64 build (default features)
+        run: cross check --target aarch64-unknown-linux-gnu
+
+      - name: Check ARM64 build (with sync-send feature)
+        run: cross check --target aarch64-unknown-linux-gnu --features sync-send
+
+      - name: Check ARM64 build (with paranoid feature)
+        run: cross check --target aarch64-unknown-linux-gnu --features paranoid
+
+      - name: Check ARM64 build (with json feature)
+        run: cross check --target aarch64-unknown-linux-gnu --features json
+
+      - name: Check ARM64 build (with tokio feature)
+        run: cross check --target aarch64-unknown-linux-gnu --features tokio
+
+      - name: Run clippy for ARM64 target
+        run: cross clippy --target aarch64-unknown-linux-gnu --no-default-features -- -D warnings
+
+      - name: Build ARM64 release (verify full compilation)
+        run: cross build --target aarch64-unknown-linux-gnu --release

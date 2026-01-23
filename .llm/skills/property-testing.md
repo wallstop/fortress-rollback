@@ -899,6 +899,225 @@ fn test_rle_encode_decode_example() {
 
 ---
 
+## Anti-Patterns to Avoid
+
+### ❌ Testing Uniqueness/Collision-Resistance of Hash Functions
+
+**Problem:** Hash functions can have collisions by design. Testing that different inputs produce different hashes is probabilistically flaky.
+
+```rust
+// ❌ BAD: Flaky test - hash collisions are mathematically possible
+proptest! {
+    #[test]
+    fn prop_different_inputs_different_hashes(
+        a in any::<u64>(),
+        b in any::<u64>(),
+    ) {
+        prop_assume!(a != b);
+        let hash_a = fnv1a_hash(&a);
+        let hash_b = fnv1a_hash(&b);
+        // This WILL eventually fail due to the pigeonhole principle
+        prop_assert_ne!(hash_a, hash_b, "Different inputs should hash differently");
+    }
+}
+```
+
+**Why it's wrong:**
+
+- Hash functions map infinite inputs to finite outputs — collisions are guaranteed
+- FNV-1a maps to `u64` (2^64 values), so with ~5 billion inputs, collision probability exceeds 50%
+- Property tests run thousands of cases; rare collisions become likely failures over time
+
+**Correct approach:** Test determinism and structural properties instead:
+
+```rust
+// ✅ GOOD: Test determinism (same input → same hash)
+proptest! {
+    #[test]
+    fn prop_hash_deterministic(data in any::<Vec<u8>>()) {
+        let hash1 = fnv1a_hash(&data);
+        let hash2 = fnv1a_hash(&data);
+        prop_assert_eq!(hash1, hash2, "Hash must be deterministic");
+    }
+}
+
+// ✅ GOOD: Test known vectors (specific inputs with known correct outputs)
+#[test]
+fn test_fnv1a_known_vectors() {
+    assert_eq!(fnv1a_hash(b""), 0xcbf2_9ce4_8422_2325);
+    assert_eq!(fnv1a_hash(b"a"), 0xaf63_dc4c_8601_ec8c);
+}
+
+// ✅ GOOD: Test incremental vs batch hashing equivalence
+proptest! {
+    #[test]
+    fn prop_incremental_equals_batch(chunks in any::<Vec<Vec<u8>>>()) {
+        let batch: Vec<u8> = chunks.iter().flatten().copied().collect();
+        let batch_hash = fnv1a_hash(&batch);
+
+        let mut incremental = DeterministicHasher::new();
+        for chunk in &chunks {
+            incremental.write(chunk);
+        }
+        let incremental_hash = incremental.finish();
+
+        prop_assert_eq!(batch_hash, incremental_hash);
+    }
+}
+```
+
+**Valid deterministic uniqueness tests:** If the mathematical property guarantees uniqueness for specific classes of inputs, testing is acceptable:
+
+```rust
+// ✅ OK: Testing order sensitivity (ab ≠ ba for most a,b pairs)
+// This is a structural property of the algorithm, not collision resistance
+proptest! {
+    #[test]
+    fn prop_order_sensitive(a in 1u8..254, b in 1u8..254) {
+        prop_assume!(a != b);  // Different bytes
+        let hash_ab = hash_bytes(&[a, b]);
+        let hash_ba = hash_bytes(&[b, a]);
+        // For FNV-1a, this is mathematically guaranteed for distinct bytes
+        prop_assert_ne!(hash_ab, hash_ba);
+    }
+}
+
+// ✅ OK: Testing adjacent values produce different hashes
+// Adjacent integers serialize to different byte patterns, guaranteed distinct
+proptest! {
+    #[test]
+    fn prop_adjacent_values_differ(
+        base in any::<u64>().prop_filter("non-max", |v| *v < u64::MAX),
+    ) {
+        let hash1 = fnv1a_hash(&base);
+        let hash2 = fnv1a_hash(&(base + 1));
+        // This tests the avalanche property, not collision resistance
+        prop_assert_ne!(hash1, hash2);
+    }
+}
+```
+
+**When "different inputs → different outputs" tests ARE acceptable:**
+
+1. **Structural properties** — Testing order sensitivity, adjacency, or bit patterns where the algorithm mathematically guarantees distinctness
+2. **Different serialization formats** — When inputs serialize to different byte lengths (e.g., u32 vs tuple), collisions are impossible
+3. **PRNG sequence distinctness** — For quality PRNGs like PCG32, different seeds producing identical first-N outputs is astronomically unlikely
+
+**When these tests are DANGEROUS:**
+
+1. **Arbitrary random inputs** — Testing `hash(random_a) != hash(random_b)` will eventually hit a collision
+2. **Large input spaces with small output spaces** — Fletcher16 (16-bit) will collide much faster than FNV-1a (64-bit)
+3. **High iteration counts** — Even rare collisions become likely over thousands of property test runs
+
+### ❌ Re-implementing Production Logic in Tests
+
+**Problem:** Tests that duplicate production code match arms or decision logic can silently drift from the actual implementation.
+
+```rust
+// ❌ BAD: Test re-implements the match logic from production
+#[test]
+fn test_error_reason_mapping() {
+    let error = create_rle_error();
+
+    // This duplicates production's map_rle_error_to_reason() logic!
+    let reason = match &error {
+        FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::RleDecodeError { reason },
+        } => *reason,
+        _ => RleDecodeReason::Unknown,  // Copy-pasted from production
+    };
+
+    assert_eq!(reason, RleDecodeReason::TruncatedData { offset: 5, buffer_len: 10 });
+}
+```
+
+**Correct approach:** Call the production function directly:
+
+```rust
+// ✅ GOOD: Test calls production code path
+#[test]
+fn test_map_rle_error_to_reason_extracts_reason() {
+    let error = FortressError::InternalErrorStructured {
+        kind: InternalErrorKind::RleDecodeError {
+            reason: RleDecodeReason::TruncatedData { offset: 5, buffer_len: 10 },
+        },
+    };
+
+    // Call the actual production helper function
+    let result = map_rle_error_to_reason(&error);
+
+    assert_eq!(result, RleDecodeReason::TruncatedData { offset: 5, buffer_len: 10 });
+}
+
+// ✅ GOOD: Test fallback behavior by exercising production code
+#[test]
+fn test_map_rle_error_to_reason_returns_unknown_for_non_rle() {
+    let non_rle_error = FortressError::InvalidRequest {
+        message: "unrelated error".to_string(),
+    };
+
+    let result = map_rle_error_to_reason(&non_rle_error);
+
+    assert_eq!(result, RleDecodeReason::Unknown);
+}
+```
+
+### ❌ Thread Ownership Issues in Concurrent Tests
+
+**Problem:** Moving a value into a spawned thread when it's needed later causes compilation errors or logic bugs.
+
+```rust
+// ❌ BAD: `cell` moved into thread, can't use after
+#[test]
+fn test_concurrent_access() {
+    let cell = GameStateCell::new();
+
+    let handle = thread::spawn(move || {
+        cell.save(Frame::new(1), Some(42), None);  // cell moved here
+    });
+
+    handle.join().unwrap();
+    assert_eq!(cell.load(), Some(42));  // ERROR: cell was moved!
+}
+```
+
+**Correct approach:** Clone `Arc`-wrapped values before spawning:
+
+```rust
+// ✅ GOOD: Clone Arc before moving into thread
+#[test]
+fn test_concurrent_access() {
+    let cell = Arc::new(GameStateCell::new());
+    let cell_for_thread = cell.clone();  // Clone BEFORE spawn
+
+    let handle = thread::spawn(move || {
+        cell_for_thread.save(Frame::new(1), Some(42), None);
+    });
+
+    handle.join().unwrap();
+    assert_eq!(cell.load(), Some(42));  // Original Arc still available
+}
+
+// ✅ GOOD: Multiple threads with separate clones
+#[test]
+fn test_concurrent_writes() {
+    let cell = Arc::new(GameStateCell::new());
+    let cell1 = cell.clone();
+    let cell2 = cell.clone();
+
+    let t1 = thread::spawn(move || cell1.save(Frame::new(1), Some(100), None));
+    let t2 = thread::spawn(move || cell2.save(Frame::new(2), Some(200), None));
+
+    t1.join().unwrap();
+    t2.join().unwrap();
+
+    // Original Arc is still available for assertions
+    assert!(cell.load() == Some(100) || cell.load() == Some(200));
+}
+```
+
+---
+
 ## Integration with Fortress Rollback
 
 ### Testing Frame Arithmetic

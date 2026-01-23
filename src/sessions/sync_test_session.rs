@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::error::FortressError;
+use crate::error::{FortressError, InternalErrorKind, InvalidRequestKind};
 use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::report_violation;
@@ -103,9 +103,11 @@ impl<T: Config> SyncTestSession<T> {
         input: T::Input,
     ) -> Result<(), FortressError> {
         if !player_handle.is_valid_player_for(self.num_players) {
-            return Err(FortressError::InvalidRequest {
-                info: "The player handle you provided is not valid.".to_owned(),
-            });
+            return Err(InvalidRequestKind::InvalidLocalPlayerHandle {
+                handle: player_handle,
+                num_players: self.num_players,
+            }
+            .into());
         }
         let player_input = PlayerInput::<T::Input>::new(self.sync_layer.current_frame(), input);
         self.local_inputs.insert(player_handle, player_input);
@@ -151,9 +153,7 @@ impl<T: Config> SyncTestSession<T> {
 
         // we require inputs for all players
         if self.num_players != self.local_inputs.len() {
-            return Err(FortressError::InvalidRequest {
-                info: "Missing local input while calling advance_frame().".to_owned(),
-            });
+            return Err(InvalidRequestKind::MissingLocalInput.into());
         }
         // pass all inputs into the sync layer
         for (&handle, &input) in self.local_inputs.iter() {
@@ -182,8 +182,10 @@ impl<T: Config> SyncTestSession<T> {
                     "Failed to get synchronized inputs for frame {}",
                     self.sync_layer.current_frame()
                 );
-                return Err(FortressError::InternalError {
-                    context: "Failed to get synchronized inputs".to_owned(),
+                return Err(FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::SynchronizedInputsFailed {
+                        frame: self.sync_layer.current_frame(),
+                    },
                 });
             },
         };
@@ -298,8 +300,10 @@ impl<T: Config> SyncTestSession<T> {
                         "Failed to get synchronized inputs during resimulation at frame {}",
                         self.sync_layer.current_frame()
                     );
-                    return Err(FortressError::InternalError {
-                        context: "Failed to get synchronized inputs during resimulation".to_owned(),
+                    return Err(FortressError::InternalErrorStructured {
+                        kind: InternalErrorKind::SynchronizedInputsFailed {
+                            frame: self.sync_layer.current_frame(),
+                        },
                     });
                 },
             };
@@ -413,11 +417,8 @@ mod tests {
     fn add_local_input_valid_handle_succeeds() {
         let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 0, 0, None);
 
-        let result = session.add_local_input(PlayerHandle::new(0), 42);
-        assert!(result.is_ok());
-
-        let result = session.add_local_input(PlayerHandle::new(1), 100);
-        assert!(result.is_ok());
+        session.add_local_input(PlayerHandle::new(0), 42).unwrap();
+        session.add_local_input(PlayerHandle::new(1), 100).unwrap();
     }
 
     #[test]
@@ -427,12 +428,12 @@ mod tests {
         let result = session.add_local_input(PlayerHandle::new(2), 42);
         assert!(result.is_err());
 
-        match result {
-            Err(FortressError::InvalidRequest { info }) => {
-                assert!(info.contains("not valid"));
-            },
-            _ => panic!("Expected InvalidRequest error"),
-        }
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::InvalidLocalPlayerHandle { .. }
+            })
+        ));
     }
 
     #[test]
@@ -479,12 +480,12 @@ mod tests {
         let result = session.advance_frame();
         assert!(result.is_err());
 
-        match result {
-            Err(FortressError::InvalidRequest { info }) => {
-                assert!(info.contains("Missing local input"));
-            },
-            _ => panic!("Expected InvalidRequest error"),
-        }
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::MissingLocalInput
+            })
+        ));
     }
 
     #[test]
@@ -498,10 +499,7 @@ mod tests {
             .add_local_input(PlayerHandle::new(1), 100)
             .expect("should succeed");
 
-        let requests = session.advance_frame();
-        assert!(requests.is_ok());
-
-        let requests = requests.unwrap();
+        let requests = session.advance_frame().unwrap();
         // With check_distance 0, we should only get AdvanceFrame
         assert!(requests
             .iter()
@@ -573,12 +571,12 @@ mod tests {
         let result = session.advance_frame();
         assert!(result.is_err());
 
-        match result {
-            Err(FortressError::InvalidRequest { info }) => {
-                assert!(info.contains("Missing local input"));
-            },
-            _ => panic!("Expected InvalidRequest error"),
-        }
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::MissingLocalInput
+            })
+        ));
     }
 
     // ==========================================

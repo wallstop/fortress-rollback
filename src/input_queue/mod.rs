@@ -19,7 +19,10 @@ pub use prediction::{BlankPrediction, PredictionStrategy, RepeatLastConfirmed};
 use crate::frame_info::PlayerInput;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
 use crate::{report_violation, safe_frame_add, safe_frame_sub};
-use crate::{Config, FortressError, Frame, InputStatus};
+use crate::{
+    Config, FortressError, Frame, IndexOutOfBounds, InputStatus, InternalErrorKind,
+    InvalidRequestKind,
+};
 use std::cmp;
 
 /// The length of the input queue. This describes the number of inputs Fortress Rollback can hold at the same time per player.
@@ -211,15 +214,7 @@ impl<T: Config> InputQueue<T> {
     pub fn set_frame_delay(&mut self, delay: usize) -> Result<(), FortressError> {
         let max_delay = self.max_frame_delay();
         if delay > max_delay {
-            return Err(FortressError::InvalidRequest {
-                info: format!(
-                    "Frame delay {} exceeds maximum allowed value of {} (queue_length - 1). \
-                     At 60fps, this would be {:.1}+ seconds of delay, which is impractical for gameplay.",
-                    delay,
-                    max_delay,
-                    delay as f64 / 60.0
-                ),
-            });
+            return Err(InvalidRequestKind::FrameDelayTooLarge { delay, max_delay }.into());
         }
         self.frame_delay = delay;
         Ok(())
@@ -243,23 +238,22 @@ impl<T: Config> InputQueue<T> {
         let input = self
             .inputs
             .get(offset)
-            .ok_or_else(|| FortressError::InternalError {
-                context: format!(
-                    "Invalid offset {} in confirmed_input (queue_length={})",
-                    offset, self.queue_length
-                ),
+            .ok_or(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                    name: "inputs",
+                    index: offset,
+                    length: self.inputs.len(),
+                }),
             })?;
         if input.frame == requested_frame {
             return Ok(*input);
         }
 
         // the requested confirmed input should not be before a prediction. We should not have asked for a known incorrect frame.
-        Err(crate::FortressError::InvalidRequest {
-            info: format!(
-                "No confirmed input for frame {} (tail={}, head={}, length={})",
-                requested_frame, self.tail, self.head, self.length
-            ),
-        })
+        Err(InvalidRequestKind::NoConfirmedInput {
+            frame: requested_frame,
+        }
+        .into())
     }
 
     /// Discards confirmed frames **before** the given `frame` from the queue.
@@ -678,7 +672,7 @@ impl<T: Config> InvariantChecker for InputQueue<T> {
         if self.length > self.queue_length {
             return Err(
                 InvariantViolation::new("InputQueue", "length exceeds queue_length")
-                    .with_details(format!("length={}, max={}", self.length, self.queue_length)),
+                    .with_bounds_violation("length", self.length, 0, self.queue_length),
             );
         }
 
@@ -686,14 +680,14 @@ impl<T: Config> InvariantChecker for InputQueue<T> {
         if self.head >= self.queue_length {
             return Err(
                 InvariantViolation::new("InputQueue", "head index out of bounds")
-                    .with_details(format!("head={}, max={}", self.head, self.queue_length - 1)),
+                    .with_bounds_violation("head", self.head, 0, self.queue_length - 1),
             );
         }
 
         if self.tail >= self.queue_length {
             return Err(
                 InvariantViolation::new("InputQueue", "tail index out of bounds")
-                    .with_details(format!("tail={}, max={}", self.tail, self.queue_length - 1)),
+                    .with_bounds_violation("tail", self.tail, 0, self.queue_length - 1),
             );
         }
 
@@ -740,11 +734,12 @@ impl<T: Config> InvariantChecker for InputQueue<T> {
         if self.inputs.len() != self.queue_length {
             return Err(
                 InvariantViolation::new("InputQueue", "inputs vector has incorrect size")
-                    .with_details(format!(
-                        "size={}, expected={}",
+                    .with_bounds_violation(
+                        "size",
                         self.inputs.len(),
-                        self.queue_length
-                    )),
+                        self.queue_length,
+                        self.queue_length,
+                    ),
             );
         }
 
@@ -754,17 +749,14 @@ impl<T: Config> InvariantChecker for InputQueue<T> {
                 "InputQueue",
                 "frame_delay exceeds reasonable bounds",
             )
-            .with_details(format!("frame_delay={}", self.frame_delay)));
+            .with_bounds_violation("frame_delay", self.frame_delay, 0, 255));
         }
 
         // Invariant 6: first_incorrect_frame is either NULL or a valid frame
         if !self.first_incorrect_frame.is_null() && self.first_incorrect_frame.as_i32() < 0 {
             return Err(
                 InvariantViolation::new("InputQueue", "first_incorrect_frame is invalid")
-                    .with_details(format!(
-                        "first_incorrect_frame={}",
-                        self.first_incorrect_frame
-                    )),
+                    .with_field_value("first_incorrect_frame", self.first_incorrect_frame),
             );
         }
 
@@ -772,10 +764,7 @@ impl<T: Config> InvariantChecker for InputQueue<T> {
         if !self.last_requested_frame.is_null() && self.last_requested_frame.as_i32() < 0 {
             return Err(
                 InvariantViolation::new("InputQueue", "last_requested_frame is invalid")
-                    .with_details(format!(
-                        "last_requested_frame={}",
-                        self.last_requested_frame
-                    )),
+                    .with_field_value("last_requested_frame", self.last_requested_frame),
             );
         }
 
@@ -783,7 +772,7 @@ impl<T: Config> InvariantChecker for InputQueue<T> {
         if !self.last_added_frame.is_null() && self.last_added_frame.as_i32() < 0 {
             return Err(
                 InvariantViolation::new("InputQueue", "last_added_frame is invalid")
-                    .with_details(format!("last_added_frame={}", self.last_added_frame)),
+                    .with_field_value("last_added_frame", self.last_added_frame),
             );
         }
 
@@ -905,9 +894,7 @@ mod input_queue_tests {
             queue.add_input(input);
         }
         // Retrieve confirmed input for frame 2
-        let result = queue.confirmed_input(Frame::new(2));
-        assert!(result.is_ok());
-        let confirmed = result.unwrap();
+        let confirmed = queue.confirmed_input(Frame::new(2)).unwrap();
         assert_eq!(confirmed.frame, Frame::new(2));
         assert_eq!(confirmed.input.inp, 20);
     }
@@ -942,8 +929,7 @@ mod input_queue_tests {
         assert_eq!(queue.length, 5);
 
         // Frame 5 should still be retrievable
-        let result = queue.confirmed_input(Frame::new(5));
-        assert!(result.is_ok());
+        queue.confirmed_input(Frame::new(5)).unwrap();
     }
 
     #[test]
@@ -995,9 +981,8 @@ mod input_queue_tests {
         );
 
         // The most recent input (frame 4) should still be accessible
-        let result = queue.confirmed_input(Frame::new(4));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().input.inp, 4);
+        let confirmed = queue.confirmed_input(Frame::new(4)).unwrap();
+        assert_eq!(confirmed.input.inp, 4);
     }
 
     /// Regression test: discard_confirmed_frames with head at position 0 (wraparound edge case)
@@ -1037,9 +1022,8 @@ mod input_queue_tests {
         );
 
         // The most recent input (frame 127) should be accessible
-        let result = queue.confirmed_input(Frame::new(127));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().input.inp, 127);
+        let confirmed = queue.confirmed_input(Frame::new(127)).unwrap();
+        assert_eq!(confirmed.input.inp, 127);
     }
 
     /// Regression test: multiple consecutive discard_all_but_one operations maintain invariants
@@ -1092,9 +1076,7 @@ mod input_queue_tests {
         assert_eq!(queue.length, 1);
 
         // Verify we kept frame 4 with value 45
-        let result = queue.confirmed_input(Frame::new(4));
-        assert!(result.is_ok());
-        let input = result.unwrap();
+        let input = queue.confirmed_input(Frame::new(4)).unwrap();
         assert_eq!(input.input.inp, 45);
         assert_eq!(input.frame, Frame::new(4));
     }
@@ -1154,8 +1136,7 @@ mod input_queue_tests {
         queue.discard_confirmed_frames(Frame::new(8));
 
         // Frame 3 should still be available
-        let result = queue.confirmed_input(Frame::new(3));
-        assert!(result.is_ok());
+        queue.confirmed_input(Frame::new(3)).unwrap();
     }
 
     #[test]
@@ -1281,9 +1262,8 @@ mod input_queue_tests {
         }
 
         // Verify we can still retrieve the most recent inputs
-        let result = queue.confirmed_input(Frame::new(99));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().input.inp, 99);
+        let confirmed = queue.confirmed_input(Frame::new(99)).unwrap();
+        assert_eq!(confirmed.input.inp, 99);
     }
 
     #[test]
@@ -1381,7 +1361,7 @@ mod input_queue_tests {
     #[test]
     fn test_invariant_checker_new_queue() {
         let queue = test_queue(0);
-        assert!(queue.check_invariants().is_ok());
+        queue.check_invariants().unwrap();
     }
 
     #[test]
@@ -1407,7 +1387,7 @@ mod input_queue_tests {
         }
 
         queue.discard_confirmed_frames(Frame::new(10));
-        assert!(queue.check_invariants().is_ok());
+        queue.check_invariants().unwrap();
     }
 
     #[test]
@@ -1418,7 +1398,7 @@ mod input_queue_tests {
         for i in 0..10i32 {
             let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
             queue.add_input(input);
-            assert!(queue.check_invariants().is_ok());
+            queue.check_invariants().unwrap();
         }
     }
 
@@ -1432,7 +1412,7 @@ mod input_queue_tests {
         let _ = queue.input(Frame::new(10)).expect("input"); // Trigger prediction
 
         queue.reset_prediction();
-        assert!(queue.check_invariants().is_ok());
+        queue.check_invariants().unwrap();
     }
 
     // ========================================================================
@@ -1450,13 +1430,17 @@ mod input_queue_tests {
         // Delay exactly at the limit should fail
         let result = queue.set_frame_delay(INPUT_QUEUE_LENGTH);
         assert!(result.is_err());
-        if let Err(FortressError::InvalidRequest { info }) = result {
-            assert!(
-                info.contains("exceeds maximum"),
-                "Error should explain the issue"
-            );
+        if let Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::FrameDelayTooLarge { delay, max_delay },
+        }) = result
+        {
+            assert_eq!(delay, INPUT_QUEUE_LENGTH);
+            assert_eq!(max_delay, INPUT_QUEUE_LENGTH - 1);
         } else {
-            panic!("Expected InvalidRequest error");
+            panic!(
+                "Expected InvalidRequestStructured with FrameDelayTooLarge, got {:?}",
+                result
+            );
         }
 
         // Delay well above limit should also fail
@@ -1470,8 +1454,7 @@ mod input_queue_tests {
         let mut queue = test_queue(0);
 
         // Delay at MAX_FRAME_DELAY should succeed
-        let result = queue.set_frame_delay(MAX_FRAME_DELAY);
-        assert!(result.is_ok());
+        queue.set_frame_delay(MAX_FRAME_DELAY).unwrap();
         assert_eq!(queue.frame_delay, MAX_FRAME_DELAY);
     }
 
@@ -1480,8 +1463,7 @@ mod input_queue_tests {
     fn test_set_frame_delay_accepts_zero() {
         let mut queue = test_queue(0);
 
-        let result = queue.set_frame_delay(0);
-        assert!(result.is_ok());
+        queue.set_frame_delay(0).unwrap();
         assert_eq!(queue.frame_delay, 0);
     }
 
@@ -1509,7 +1491,7 @@ mod input_queue_tests {
         // Should be stored at frame 0 + 3 = 3
         assert_eq!(result, Frame::new(3));
         assert_eq!(queue.last_added_frame, Frame::new(3));
-        assert!(queue.check_invariants().is_ok());
+        queue.check_invariants().unwrap();
     }
 
     /// Test: After rejected delay, queue state remains unchanged
@@ -1672,9 +1654,8 @@ mod input_queue_tests {
         queue.discard_confirmed_frames(Frame::new(5));
 
         // Frame 5 (now at tail) should be retrievable
-        let result = queue.confirmed_input(Frame::new(5));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().input.inp, 5);
+        let confirmed = queue.confirmed_input(Frame::new(5)).unwrap();
+        assert_eq!(confirmed.input.inp, 5);
     }
 
     #[test]
@@ -1688,9 +1669,8 @@ mod input_queue_tests {
         }
 
         // Frame 9 (most recent, at head-1) should be retrievable
-        let result = queue.confirmed_input(Frame::new(9));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().input.inp, 9);
+        let confirmed = queue.confirmed_input(Frame::new(9)).unwrap();
+        assert_eq!(confirmed.input.inp, 9);
     }
 
     // ==========================================
@@ -1755,6 +1735,7 @@ mod input_queue_tests {
 )]
 mod property_tests {
     use super::*;
+    use crate::test_config::miri_case_count;
     use proptest::prelude::*;
     use serde::{Deserialize, Serialize};
     use std::net::SocketAddr;
@@ -1794,6 +1775,10 @@ mod property_tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: miri_case_count(),
+            ..ProptestConfig::default()
+        })]
         /// Property: Sequential inputs are always stored correctly
         #[test]
         fn prop_sequential_inputs_stored(
@@ -1833,9 +1818,8 @@ mod property_tests {
 
             // Verify all inputs can be retrieved
             for i in 0..count as i32 {
-                let result = queue.confirmed_input(Frame::new(i));
-                prop_assert!(result.is_ok());
-                prop_assert_eq!(result.unwrap().input.inp, i as u8);
+                let confirmed = queue.confirmed_input(Frame::new(i)).unwrap();
+                prop_assert_eq!(confirmed.input.inp, i as u8);
             }
         }
 
@@ -2116,9 +2100,13 @@ mod kani_input_queue_proofs {
             .expect("test_queue: InputQueue::new should succeed for valid player_index")
     }
 
-    /// Proof: New queue has valid initial state
+    /// Proof: New queue has valid initial state.
     ///
     /// Verifies INV-4 (length = 0) and INV-5 (head = tail = 0) at initialization.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Initial queue state validity (INV-4, INV-5)
+    /// - Related: proof_add_single_input_maintains_invariants
     #[kani::proof]
     #[kani::unwind(10)]
     fn proof_new_queue_valid() {
@@ -2151,12 +2139,16 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: Single add_input maintains invariants
+    /// Proof: Single add_input maintains invariants.
     ///
     /// Verifies that adding a single input maintains INV-4 and INV-5.
     ///
     /// Note: unwind(10) is needed because Vec initialization requires iterating
     /// over INPUT_QUEUE_LENGTH (8 under Kani) elements.
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Single add_input preserves invariants (INV-4, INV-5)
+    /// - Related: proof_new_queue_valid, proof_sequential_inputs_maintain_invariants
     #[kani::proof]
     #[kani::unwind(10)]
     fn proof_add_single_input_maintains_invariants() {
@@ -2193,7 +2185,7 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: Sequential inputs maintain invariants (concrete iteration for tractability)
+    /// Proof: Sequential inputs maintain invariants (concrete iteration for tractability).
     ///
     /// Verifies INV-4 and INV-5 hold after adding multiple sequential inputs.
     ///
@@ -2201,6 +2193,10 @@ mod kani_input_queue_proofs {
     /// tractable. The invariants are verified at each step, proving they are maintained
     /// for sequential additions. Combined with proof_add_single_input_maintains_invariants,
     /// this provides coverage for the general case via induction.
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Sequential add_input preserves invariants (INV-4, INV-5)
+    /// - Related: proof_add_single_input_maintains_invariants
     #[kani::proof]
     #[kani::unwind(10)]
     fn proof_sequential_inputs_maintain_invariants() {
@@ -2249,9 +2245,13 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: Head wraparound is correct
+    /// Proof: Head wraparound is correct.
     ///
     /// Verifies that head index wraps around correctly when reaching INPUT_QUEUE_LENGTH.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Circular buffer head wraparound
+    /// - Related: proof_queue_index_calculation, proof_length_calculation_consistent
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_head_wraparound() {
@@ -2272,9 +2272,13 @@ mod kani_input_queue_proofs {
         }
     }
 
-    /// Proof: Queue index calculation is always valid
+    /// Proof: Queue index calculation is always valid.
     ///
     /// Verifies that frame-to-index calculation (frame % INPUT_QUEUE_LENGTH) is always valid.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame-to-index modulo bounds (INV-5)
+    /// - Related: proof_head_wraparound, proof_frame_modulo_for_queue
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_queue_index_calculation() {
@@ -2289,9 +2293,13 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: Length calculation is consistent with head/tail
+    /// Proof: Length calculation is consistent with head/tail.
     ///
     /// Verifies the circular buffer length formula: length = (head - tail + N) % N
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Circular buffer length formula correctness
+    /// - Related: proof_head_wraparound, proof_queue_index_calculation
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_length_calculation_consistent() {
@@ -2317,11 +2325,15 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: discard_confirmed_frames maintains invariants
+    /// Proof: discard_confirmed_frames maintains invariants.
     ///
     /// Verifies that discarding frames maintains INV-4 and INV-5.
     ///
     /// Note: unwind(15) accounts for Vec initialization (8) + loop iterations (5) + buffer
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Discard operation preserves invariants (INV-4, INV-5)
+    /// - Related: proof_add_single_input_maintains_invariants
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_discard_maintains_invariants() {
@@ -2356,13 +2368,17 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: Frame delay doesn't violate invariants
+    /// Proof: Frame delay doesn't violate invariants.
     ///
     /// Verifies that setting frame delay maintains valid queue state.
     /// Tests with concrete delay values (0 and 2) to ensure both zero and non-zero
     /// delay paths are verified while keeping verification tractable.
     ///
     /// Note: unwind(15) accounts for Vec initialization (8) + frame delay iterations + buffer
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Frame delay preserves invariants (INV-4, INV-5)
+    /// - Related: proof_add_single_input_maintains_invariants
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_frame_delay_maintains_invariants() {
@@ -2400,11 +2416,15 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: Non-sequential inputs are rejected
+    /// Proof: Non-sequential inputs are rejected.
     ///
     /// Verifies that add_input rejects non-sequential frame inputs, preserving invariants.
     ///
     /// Note: unwind(12) accounts for Vec initialization (8) + operations + buffer
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Non-sequential input rejection
+    /// - Related: proof_sequential_inputs_maintain_invariants
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_non_sequential_rejected() {
@@ -2425,9 +2445,13 @@ mod kani_input_queue_proofs {
         kani::assert(queue.length == 1, "Length should not change on rejection");
     }
 
-    /// Proof: reset_prediction maintains structural invariants
+    /// Proof: reset_prediction maintains structural invariants.
     ///
     /// Note: unwind(12) accounts for Vec initialization (8) + loop iterations (3) + buffer
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: reset_prediction preserves structure
+    /// - Related: proof_new_queue_valid
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_reset_maintains_structure() {
@@ -2465,10 +2489,14 @@ mod kani_input_queue_proofs {
         );
     }
 
-    /// Proof: Confirmed input retrieval is valid for stored frames
+    /// Proof: Confirmed input retrieval is valid for stored frames.
     ///
     /// Note: unwind(15) accounts for Vec initialization (8) + loop iterations (3) + buffer
     /// Uses concrete values to keep verification tractable while still proving index validity.
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: confirmed_input index bounds validity
+    /// - Related: proof_queue_index_calculation
     #[kani::proof]
     #[kani::unwind(15)]
     fn proof_confirmed_input_valid_index() {

@@ -34,7 +34,7 @@
 use web_time::Duration;
 
 use crate::input_queue::INPUT_QUEUE_LENGTH;
-use crate::FortressError;
+use crate::{FortressError, InvalidRequestKind};
 
 /// Configuration for the synchronization protocol.
 ///
@@ -588,74 +588,81 @@ impl ProtocolConfig {
         if self.quality_report_interval < Duration::from_millis(1)
             || self.quality_report_interval > Duration::from_millis(10000)
         {
-            return Err(FortressError::InvalidRequest {
-                info: format!(
-                    "quality_report_interval {:?} is out of range. Must be between 1ms and 10000ms.",
-                    self.quality_report_interval
-                ),
-            });
+            return Err(InvalidRequestKind::DurationConfigOutOfRange {
+                field: "quality_report_interval",
+                min_ms: 1,
+                max_ms: 10000,
+                actual_ms: self.quality_report_interval.as_millis() as u64,
+            }
+            .into());
         }
 
         // Validate shutdown_delay: 1ms to 300000ms (5 minutes)
         if self.shutdown_delay < Duration::from_millis(1)
             || self.shutdown_delay > Duration::from_millis(300000)
         {
-            return Err(FortressError::InvalidRequest {
-                info: format!(
-                    "shutdown_delay {:?} is out of range. Must be between 1ms and 300000ms.",
-                    self.shutdown_delay
-                ),
-            });
+            return Err(InvalidRequestKind::DurationConfigOutOfRange {
+                field: "shutdown_delay",
+                min_ms: 1,
+                max_ms: 300000,
+                actual_ms: self.shutdown_delay.as_millis() as u64,
+            }
+            .into());
         }
 
         // Validate max_checksum_history: 1 to 1024
         if self.max_checksum_history < 1 || self.max_checksum_history > 1024 {
-            return Err(FortressError::InvalidRequest {
-                info: format!(
-                    "max_checksum_history {} is out of range. Must be between 1 and 1024.",
-                    self.max_checksum_history
-                ),
-            });
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "max_checksum_history",
+                min: 1,
+                max: 1024,
+                actual: self.max_checksum_history as u64,
+            }
+            .into());
         }
 
         // Validate pending_output_limit: 1 to 4096
         if self.pending_output_limit < 1 || self.pending_output_limit > 4096 {
-            return Err(FortressError::InvalidRequest {
-                info: format!(
-                    "pending_output_limit {} is out of range. Must be between 1 and 4096.",
-                    self.pending_output_limit
-                ),
-            });
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "pending_output_limit",
+                min: 1,
+                max: 4096,
+                actual: self.pending_output_limit as u64,
+            }
+            .into());
         }
 
         // Validate sync_retry_warning_threshold: 1 to 1000
         if self.sync_retry_warning_threshold < 1 || self.sync_retry_warning_threshold > 1000 {
-            return Err(FortressError::InvalidRequest {
-                info: format!(
-                    "sync_retry_warning_threshold {} is out of range. Must be between 1 and 1000.",
-                    self.sync_retry_warning_threshold
-                ),
-            });
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "sync_retry_warning_threshold",
+                min: 1,
+                max: 1000,
+                actual: self.sync_retry_warning_threshold as u64,
+            }
+            .into());
         }
 
         // Validate sync_duration_warning_ms: 1 to 300000 (5 minutes)
         if self.sync_duration_warning_ms < 1 || self.sync_duration_warning_ms > 300000 {
-            return Err(FortressError::InvalidRequest {
-                info: format!(
-                    "sync_duration_warning_ms {} is out of range. Must be between 1 and 300000.",
-                    self.sync_duration_warning_ms
-                ),
-            });
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "sync_duration_warning_ms",
+                min: 1,
+                max: 300000,
+                actual: self.sync_duration_warning_ms as u64,
+            }
+            .into());
         }
 
         // Validate input_history_multiplier: 1 to 16
         if self.input_history_multiplier < 1 || self.input_history_multiplier > 16 {
-            return Err(FortressError::InvalidRequest {
-                info: format!(
-                    "input_history_multiplier {} is out of range. Must be between 1 and 16.",
-                    self.input_history_multiplier
-                ),
-            });
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "input_history_multiplier",
+                min: 1,
+                max: 16,
+                actual: self.input_history_multiplier as u64,
+            }
+            .into());
         }
 
         Ok(())
@@ -925,14 +932,11 @@ impl InputQueueConfig {
     /// Returns `FortressError::InvalidRequest` if `frame_delay >= queue_length`.
     pub fn validate_frame_delay(&self, frame_delay: usize) -> Result<(), FortressError> {
         if frame_delay >= self.queue_length {
-            return Err(FortressError::InvalidRequest {
-                info: format!(
-                    "Frame delay {} is too large for queue length {}. Maximum allowed: {}",
-                    frame_delay,
-                    self.queue_length,
-                    self.max_frame_delay()
-                ),
-            });
+            return Err(InvalidRequestKind::FrameDelayTooLarge {
+                delay: frame_delay,
+                max_delay: self.max_frame_delay(),
+            }
+            .into());
         }
         Ok(())
     }
@@ -944,12 +948,10 @@ impl InputQueueConfig {
     /// Returns `FortressError::InvalidRequest` if `queue_length < 2`.
     pub fn validate(&self) -> Result<(), FortressError> {
         if self.queue_length < 2 {
-            return Err(FortressError::InvalidRequest {
-                info: format!(
-                    "Input queue length {} is too small. Minimum is 2.",
-                    self.queue_length
-                ),
-            });
+            return Err(InvalidRequestKind::QueueLengthTooSmall {
+                length: self.queue_length,
+            }
+            .into());
         }
         Ok(())
     }
@@ -1486,7 +1488,7 @@ mod tests {
     #[test]
     fn test_protocol_config_validate_default_is_valid() {
         let config = ProtocolConfig::default();
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1516,21 +1518,21 @@ mod tests {
             quality_report_interval: Duration::from_millis(1),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (10000ms)
         let config = ProtocolConfig {
             quality_report_interval: Duration::from_millis(10000),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             quality_report_interval: Duration::from_millis(500),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1543,12 +1545,17 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, FortressError::InvalidRequest { .. }));
-        if let FortressError::InvalidRequest { info } = err {
-            assert!(info.contains("quality_report_interval"));
-            assert!(info.contains("1ms"));
-            assert!(info.contains("10000ms"));
-        }
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::DurationConfigOutOfRange {
+                    field: "quality_report_interval",
+                    min_ms: 1,
+                    max_ms: 10000,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1561,12 +1568,17 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, FortressError::InvalidRequest { .. }));
-        if let FortressError::InvalidRequest { info } = err {
-            assert!(info.contains("quality_report_interval"));
-            assert!(info.contains("1ms"));
-            assert!(info.contains("10000ms"));
-        }
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::DurationConfigOutOfRange {
+                    field: "quality_report_interval",
+                    min_ms: 1,
+                    max_ms: 10000,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1576,21 +1588,21 @@ mod tests {
             shutdown_delay: Duration::from_millis(1),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (300000ms)
         let config = ProtocolConfig {
             shutdown_delay: Duration::from_millis(300000),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             shutdown_delay: Duration::from_millis(10000),
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1603,12 +1615,17 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, FortressError::InvalidRequest { .. }));
-        if let FortressError::InvalidRequest { info } = err {
-            assert!(info.contains("shutdown_delay"));
-            assert!(info.contains("1ms"));
-            assert!(info.contains("300000ms"));
-        }
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::DurationConfigOutOfRange {
+                    field: "shutdown_delay",
+                    min_ms: 1,
+                    max_ms: 300000,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1621,12 +1638,17 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, FortressError::InvalidRequest { .. }));
-        if let FortressError::InvalidRequest { info } = err {
-            assert!(info.contains("shutdown_delay"));
-            assert!(info.contains("1ms"));
-            assert!(info.contains("300000ms"));
-        }
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::DurationConfigOutOfRange {
+                    field: "shutdown_delay",
+                    min_ms: 1,
+                    max_ms: 300000,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1636,21 +1658,21 @@ mod tests {
             max_checksum_history: 1,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (1024)
         let config = ProtocolConfig {
             max_checksum_history: 1024,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             max_checksum_history: 64,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1663,12 +1685,17 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, FortressError::InvalidRequest { .. }));
-        if let FortressError::InvalidRequest { info } = err {
-            assert!(info.contains("max_checksum_history"));
-            assert!(info.contains("between 1"));
-            assert!(info.contains("1024"));
-        }
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "max_checksum_history",
+                    min: 1,
+                    max: 1024,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1681,12 +1708,17 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, FortressError::InvalidRequest { .. }));
-        if let FortressError::InvalidRequest { info } = err {
-            assert!(info.contains("max_checksum_history"));
-            assert!(info.contains("between 1"));
-            assert!(info.contains("1024"));
-        }
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "max_checksum_history",
+                    min: 1,
+                    max: 1024,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1696,21 +1728,21 @@ mod tests {
             pending_output_limit: 1,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (4096)
         let config = ProtocolConfig {
             pending_output_limit: 4096,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             pending_output_limit: 256,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1723,12 +1755,17 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, FortressError::InvalidRequest { .. }));
-        if let FortressError::InvalidRequest { info } = err {
-            assert!(info.contains("pending_output_limit"));
-            assert!(info.contains("between 1"));
-            assert!(info.contains("4096"));
-        }
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "pending_output_limit",
+                    min: 1,
+                    max: 4096,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1741,12 +1778,17 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, FortressError::InvalidRequest { .. }));
-        if let FortressError::InvalidRequest { info } = err {
-            assert!(info.contains("pending_output_limit"));
-            assert!(info.contains("between 1"));
-            assert!(info.contains("4096"));
-        }
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "pending_output_limit",
+                    min: 1,
+                    max: 4096,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1756,21 +1798,21 @@ mod tests {
             sync_retry_warning_threshold: 1,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (1000)
         let config = ProtocolConfig {
             sync_retry_warning_threshold: 1000,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             sync_retry_warning_threshold: 25,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1783,12 +1825,17 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, FortressError::InvalidRequest { .. }));
-        if let FortressError::InvalidRequest { info } = err {
-            assert!(info.contains("sync_retry_warning_threshold"));
-            assert!(info.contains("between 1"));
-            assert!(info.contains("1000"));
-        }
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "sync_retry_warning_threshold",
+                    min: 1,
+                    max: 1000,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1801,12 +1848,17 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, FortressError::InvalidRequest { .. }));
-        if let FortressError::InvalidRequest { info } = err {
-            assert!(info.contains("sync_retry_warning_threshold"));
-            assert!(info.contains("between 1"));
-            assert!(info.contains("1000"));
-        }
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "sync_retry_warning_threshold",
+                    min: 1,
+                    max: 1000,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1816,21 +1868,21 @@ mod tests {
             sync_duration_warning_ms: 1,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (300000)
         let config = ProtocolConfig {
             sync_duration_warning_ms: 300000,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             sync_duration_warning_ms: 5000,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1843,12 +1895,17 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, FortressError::InvalidRequest { .. }));
-        if let FortressError::InvalidRequest { info } = err {
-            assert!(info.contains("sync_duration_warning_ms"));
-            assert!(info.contains("between 1"));
-            assert!(info.contains("300000"));
-        }
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "sync_duration_warning_ms",
+                    min: 1,
+                    max: 300000,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1861,12 +1918,17 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, FortressError::InvalidRequest { .. }));
-        if let FortressError::InvalidRequest { info } = err {
-            assert!(info.contains("sync_duration_warning_ms"));
-            assert!(info.contains("between 1"));
-            assert!(info.contains("300000"));
-        }
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "sync_duration_warning_ms",
+                    min: 1,
+                    max: 300000,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1876,21 +1938,21 @@ mod tests {
             input_history_multiplier: 1,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: maximum boundary (16)
         let config = ProtocolConfig {
             input_history_multiplier: 16,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
             input_history_multiplier: 4,
             ..ProtocolConfig::default()
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1903,12 +1965,17 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, FortressError::InvalidRequest { .. }));
-        if let FortressError::InvalidRequest { info } = err {
-            assert!(info.contains("input_history_multiplier"));
-            assert!(info.contains("between 1"));
-            assert!(info.contains("16"));
-        }
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "input_history_multiplier",
+                    min: 1,
+                    max: 16,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1921,12 +1988,17 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, FortressError::InvalidRequest { .. }));
-        if let FortressError::InvalidRequest { info } = err {
-            assert!(info.contains("input_history_multiplier"));
-            assert!(info.contains("between 1"));
-            assert!(info.contains("16"));
-        }
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "input_history_multiplier",
+                    min: 1,
+                    max: 16,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1942,10 +2014,16 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        if let FortressError::InvalidRequest { info } = err {
-            // Should report the first field that failed
-            assert!(info.contains("quality_report_interval"));
-        }
+        // Should report the first field that failed (quality_report_interval)
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::DurationConfigOutOfRange {
+                    field: "quality_report_interval",
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1961,7 +2039,7 @@ mod tests {
             input_history_multiplier: 1,
             protocol_rng_seed: None,
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
 
         // Test a config with all fields at their maximum valid values
         let config = ProtocolConfig {
@@ -1974,7 +2052,7 @@ mod tests {
             input_history_multiplier: 16,
             protocol_rng_seed: None,
         };
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 
     // ========================================================================
@@ -2018,7 +2096,7 @@ mod tests {
     fn test_protocol_config_seed_validates_ok() {
         // Config with seed should validate successfully
         let config = ProtocolConfig::deterministic(42);
-        assert!(config.validate().is_ok());
+        config.validate().unwrap();
     }
 }
 
@@ -2038,10 +2116,14 @@ mod tests {
 mod kani_config_proofs {
     use super::*;
 
-    /// Proof: validate() accepts all queue_length >= 2
+    /// Proof: validate() accepts all queue_length >= 2.
     ///
     /// Verifies that InputQueueConfig.validate() returns Ok for any queue_length >= 2
     /// and Err for queue_length < 2.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Queue length validation correctness
+    /// - Related: proof_validate_boundary_at_two, proof_all_presets_valid
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_validate_accepts_valid_queue_lengths() {
@@ -2059,9 +2141,13 @@ mod kani_config_proofs {
         }
     }
 
-    /// Proof: validate() boundary condition at queue_length = 2
+    /// Proof: validate() boundary condition at queue_length = 2.
     ///
     /// Specifically verifies the minimum valid queue_length.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Boundary condition at minimum queue length
+    /// - Related: proof_validate_accepts_valid_queue_lengths
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_validate_boundary_at_two() {
@@ -2080,10 +2166,14 @@ mod kani_config_proofs {
         );
     }
 
-    /// Proof: validate_frame_delay() enforces frame_delay < queue_length
+    /// Proof: validate_frame_delay() enforces frame_delay < queue_length.
     ///
     /// Verifies that validate_frame_delay returns Ok when frame_delay < queue_length
     /// and Err when frame_delay >= queue_length.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame delay validation constraint
+    /// - Related: proof_max_frame_delay_is_valid_delay, proof_max_frame_delay_derivation
     #[kani::proof]
     #[kani::unwind(10)]
     fn proof_validate_frame_delay_constraint() {
@@ -2110,10 +2200,14 @@ mod kani_config_proofs {
         }
     }
 
-    /// Proof: max_frame_delay() returns queue_length - 1 (with saturation)
+    /// Proof: max_frame_delay() returns queue_length - 1 (with saturation).
     ///
     /// Verifies that max_frame_delay() correctly computes queue_length - 1,
     /// using saturating_sub to handle the edge case of queue_length = 0.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Max frame delay derivation correctness
+    /// - Related: proof_max_frame_delay_is_valid_delay, proof_validate_frame_delay_constraint
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_max_frame_delay_derivation() {
@@ -2131,10 +2225,14 @@ mod kani_config_proofs {
         );
     }
 
-    /// Proof: max_frame_delay() is always a valid frame_delay
+    /// Proof: max_frame_delay() is always a valid frame_delay.
     ///
     /// Verifies that validate_frame_delay(max_frame_delay()) always succeeds
     /// for valid configurations (queue_length >= 2).
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Max delay is always valid for valid configs
+    /// - Related: proof_max_frame_delay_derivation, proof_validate_frame_delay_constraint
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_max_frame_delay_is_valid_delay() {
@@ -2151,10 +2249,14 @@ mod kani_config_proofs {
         );
     }
 
-    /// Proof: All presets are valid configurations
+    /// Proof: All presets are valid configurations.
     ///
     /// Verifies that standard(), high_latency(), and minimal() presets
     /// all pass validate().
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: All factory presets pass validation
+    /// - Related: proof_preset_values, proof_validate_accepts_valid_queue_lengths
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_all_presets_valid() {
@@ -2176,12 +2278,16 @@ mod kani_config_proofs {
         );
     }
 
-    /// Proof: Presets have correct queue_length values
+    /// Proof: Presets have correct queue_length values.
     ///
     /// Verifies that preset implementations return their expected values.
     /// Note: `standard()` uses `INPUT_QUEUE_LENGTH` which varies between
     /// Kani (8) and production (128) builds. The other presets use
     /// hardcoded values that don't change.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Preset queue length values match specifications
+    /// - Related: proof_all_presets_valid
     #[kani::proof]
     #[kani::unwind(2)]
     fn proof_preset_values() {

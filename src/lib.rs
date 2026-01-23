@@ -19,7 +19,60 @@
 //#![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 use std::{fmt::Debug, hash::Hash};
 
-pub use error::FortressError;
+pub use error::{
+    DeltaDecodeReason, FortressError, IndexOutOfBounds, InternalErrorKind, InvalidFrameReason,
+    InvalidRequestKind, RleDecodeReason, SerializationErrorKind, SocketErrorKind,
+};
+
+/// A specialized `Result` type for Fortress Rollback operations.
+///
+/// This type alias provides a convenient way to write function signatures
+/// that return [`FortressError`] as the error type. It supports an optional
+/// second type parameter to override the error type if needed.
+///
+/// # Naming
+///
+/// This type is named `FortressResult` rather than `Result` to avoid
+/// shadowing `std::result::Result` when using glob imports like
+/// `use fortress_rollback::*;` or `use fortress_rollback::prelude::*;`.
+/// This prevents subtle semver hazards where downstream code might
+/// unexpectedly use this alias instead of the standard library's `Result`.
+///
+/// # Examples
+///
+/// Using the default error type:
+///
+/// ```
+/// use fortress_rollback::{FortressResult, FortressError};
+///
+/// fn process_frame() -> FortressResult<()> {
+///     // Returns Result<(), FortressError>
+///     Ok(())
+/// }
+/// ```
+///
+/// Overriding the error type:
+///
+/// ```
+/// use fortress_rollback::FortressResult;
+///
+/// fn custom_operation() -> FortressResult<String, std::io::Error> {
+///     // Returns Result<String, std::io::Error>
+///     Ok("success".to_string())
+/// }
+/// ```
+///
+/// You can also alias it locally if you prefer a shorter name:
+///
+/// ```
+/// use fortress_rollback::FortressResult as Result;
+///
+/// fn my_function() -> Result<()> {
+///     Ok(())
+/// }
+/// ```
+pub type FortressResult<T, E = FortressError> = std::result::Result<T, E>;
+
 pub use network::chaos_socket::{ChaosConfig, ChaosConfigBuilder, ChaosSocket, ChaosStats};
 pub use network::messages::Message;
 pub use network::network_stats::NetworkStats;
@@ -112,6 +165,15 @@ pub mod tokio_socket {
 /// See module documentation for detailed usage and performance considerations.
 pub mod checksum;
 
+/// Convenient re-exports for common usage.
+///
+/// This module provides a "prelude" that re-exports the most commonly used types
+/// from Fortress Rollback, allowing you to import them all at once with
+/// `use fortress_rollback::prelude::*;`
+///
+/// See the [`prelude`] module documentation for the full list of included types.
+pub mod prelude;
+
 // Internal modules - made pub for re-export in __internal, but doc(hidden) for API cleanliness
 #[doc(hidden)]
 pub mod error;
@@ -135,6 +197,12 @@ pub mod sync;
 #[doc(hidden)]
 pub mod sync_layer;
 pub mod telemetry;
+/// Shared test configuration for property-based testing.
+///
+/// This module provides centralized configuration for proptest, including
+/// Miri-aware case count reduction for faster testing under the interpreter.
+#[cfg(test)]
+pub(crate) mod test_config;
 #[doc(hidden)]
 pub mod time_sync;
 #[doc(hidden)]
@@ -1959,7 +2027,11 @@ mod tests {
 mod kani_proofs {
     use super::*;
 
-    /// Proof: Frame::new creates valid frames for non-negative inputs
+    /// Proof: Frame::new creates valid frames for non-negative inputs.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Frame construction preserves value and validity
+    /// - Related: proof_frame_null_consistency, proof_frame_to_option
     #[kani::proof]
     fn proof_frame_new_valid() {
         let value: i32 = kani::any();
@@ -1980,7 +2052,11 @@ mod kani_proofs {
         );
     }
 
-    /// Proof: Frame::NULL is consistently null
+    /// Proof: Frame::NULL is consistently null.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: NULL frame identity and invariants
+    /// - Related: proof_frame_new_valid, proof_frame_to_option
     #[kani::proof]
     fn proof_frame_null_consistency() {
         let null_frame = Frame::NULL;
@@ -1992,10 +2068,14 @@ mod kani_proofs {
         );
     }
 
-    /// Proof: Frame addition with small positive values is safe
+    /// Proof: Frame addition with small positive values is safe.
     ///
     /// This proves that for frames in typical game usage (0 to 10,000,000),
     /// adding small increments (0-1000) does not overflow.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame addition overflow safety (SAFE-6)
+    /// - Related: proof_frame_add_assign_consistent, proof_frame_sub_frames_correct
     #[kani::proof]
     fn proof_frame_add_small_safe() {
         let frame_val: i32 = kani::any();
@@ -2018,7 +2098,11 @@ mod kani_proofs {
         );
     }
 
-    /// Proof: Frame subtraction produces correct differences
+    /// Proof: Frame subtraction produces correct differences.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame subtraction correctness
+    /// - Related: proof_frame_add_small_safe, proof_frame_sub_assign_consistent
     #[kani::proof]
     fn proof_frame_sub_frames_correct() {
         let a: i32 = kani::any();
@@ -2037,7 +2121,11 @@ mod kani_proofs {
         );
     }
 
-    /// Proof: Frame ordering is consistent with i32 ordering
+    /// Proof: Frame ordering is consistent with i32 ordering.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Frame comparison operators consistency
+    /// - Related: proof_frame_ordering
     #[kani::proof]
     fn proof_frame_ordering_consistent() {
         let a: i32 = kani::any();
@@ -2061,9 +2149,13 @@ mod kani_proofs {
         }
     }
 
-    /// Proof: Frame modulo operation is correct for queue indexing
+    /// Proof: Frame modulo operation is correct for queue indexing.
     ///
     /// This is critical for InputQueue circular buffer indexing (INV-5).
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Queue index bounds via modulo (INV-5)
+    /// - Related: proof_queue_index_calculation, proof_head_wraparound
     #[kani::proof]
     fn proof_frame_modulo_for_queue() {
         let frame_val: i32 = kani::any();
@@ -2081,7 +2173,11 @@ mod kani_proofs {
         kani::assert(index == frame_val % queue_len, "Modulo should be correct");
     }
 
-    /// Proof: Frame::to_option correctly handles null and valid frames
+    /// Proof: Frame::to_option correctly handles null and valid frames.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Frame to Option conversion correctness
+    /// - Related: proof_frame_from_option, proof_frame_null_consistency
     #[kani::proof]
     fn proof_frame_to_option() {
         let frame_val: i32 = kani::any();
@@ -2098,7 +2194,11 @@ mod kani_proofs {
         }
     }
 
-    /// Proof: Frame::from_option correctly handles Some and None
+    /// Proof: Frame::from_option correctly handles Some and None.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Option to Frame conversion correctness
+    /// - Related: proof_frame_to_option, proof_frame_null_consistency
     #[kani::proof]
     fn proof_frame_from_option() {
         let frame_val: i32 = kani::any();
@@ -2118,7 +2218,11 @@ mod kani_proofs {
         );
     }
 
-    /// Proof: Frame AddAssign is consistent with Add
+    /// Proof: Frame AddAssign is consistent with Add.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: AddAssign operator equivalence with Add
+    /// - Related: proof_frame_add_small_safe, proof_frame_sub_assign_consistent
     #[kani::proof]
     fn proof_frame_add_assign_consistent() {
         let frame_val: i32 = kani::any();
@@ -2136,7 +2240,11 @@ mod kani_proofs {
         kani::assert(result1 == frame2, "AddAssign should be consistent with Add");
     }
 
-    /// Proof: Frame SubAssign is consistent with Sub
+    /// Proof: Frame SubAssign is consistent with Sub.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: SubAssign operator equivalence with Sub
+    /// - Related: proof_frame_sub_frames_correct, proof_frame_add_assign_consistent
     #[kani::proof]
     fn proof_frame_sub_assign_consistent() {
         let frame_val: i32 = kani::any();
@@ -2154,7 +2262,11 @@ mod kani_proofs {
         kani::assert(result1 == frame2, "SubAssign should be consistent with Sub");
     }
 
-    /// Proof: PlayerHandle validity check is correct
+    /// Proof: PlayerHandle validity check is correct.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: PlayerHandle player vs spectator classification
+    /// - Related: proof_player_handle_preservation, proof_player_handle_equality
     #[kani::proof]
     fn proof_player_handle_validity() {
         let handle_val: usize = kani::any();

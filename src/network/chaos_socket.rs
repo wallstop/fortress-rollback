@@ -1026,6 +1026,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Miri doesn't advance Instant::now() through thread::sleep() reliably
     fn test_latency_delays_delivery() {
         let mut inner = TestSocket::default();
         let addr = test_addr();
@@ -1123,6 +1124,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Miri doesn't advance Instant::now() through thread::sleep() reliably
     fn test_in_flight_count() {
         let mut inner = TestSocket::default();
         let addr = test_addr();
@@ -1141,7 +1143,7 @@ mod tests {
         let mut socket = ChaosSocket::new(inner, config);
         let start = Instant::now();
 
-        // Receive puts them in flight
+        // Queues packets in flight; return value discarded, testing in_flight count
         let _ = socket.receive_all_messages();
         assert_eq!(
             socket.packets_in_flight(),
@@ -1526,7 +1528,7 @@ mod tests {
             let mut socket = ChaosSocket::new(inner, config);
             let start = Instant::now();
 
-            // First receive - packets go into in-flight queue
+            // First receive - packets go into in-flight queue; return value discarded, testing timing
             let _ = socket.receive_all_messages();
 
             // Calculate minimum time before any packet could be delivered:
@@ -1535,7 +1537,7 @@ mod tests {
 
             // If there's a meaningful delay, check packets aren't delivered too early
             if min_delivery_ms > 20 {
-                // Check immediately - no packets should be ready yet
+                // Check immediately - no packets should be ready yet (return value is checked below)
                 let received = socket.receive_all_messages();
                 assert_eq!(
                     received.len(),
@@ -1553,6 +1555,7 @@ mod tests {
 
     /// Data-driven test: packets should always be delivered after maximum delivery time
     #[test]
+    #[cfg_attr(miri, ignore)] // Miri doesn't advance Instant::now() through thread::sleep() reliably
     fn test_latency_maximum_delivery_time_data_driven() {
         const TEST_CASES: &[LatencyTestCase] = &[
             LatencyTestCase::new("small_latency", 100, 0, 1),
@@ -1577,7 +1580,7 @@ mod tests {
             let mut socket = ChaosSocket::new(inner, config);
             let start = Instant::now();
 
-            // First receive - packets go into in-flight queue
+            // First receive - packets go into in-flight queue; return value discarded, testing timing
             let _ = socket.receive_all_messages();
             let in_flight_initial = socket.packets_in_flight();
 
@@ -1611,6 +1614,7 @@ mod tests {
 
     /// Test that multiple packets with same latency maintain FIFO order (no jitter)
     #[test]
+    #[cfg_attr(miri, ignore)] // Miri doesn't advance Instant::now() through thread::sleep() reliably
     fn test_latency_fifo_ordering_without_jitter() {
         let mut inner = TestSocket::default();
         let addr = test_addr();
@@ -1638,7 +1642,7 @@ mod tests {
             .build();
         let mut socket = ChaosSocket::new(inner, config);
 
-        // First receive
+        // First receive; return value discarded, verifying FIFO order after sleep
         let _ = socket.receive_all_messages();
 
         // Wait for delivery
@@ -1706,6 +1710,7 @@ mod tests {
         inner.to_receive.push((test_addr(), test_message()));
 
         let mut socket = ChaosSocket::new(inner, config);
+        // Queues packet in flight; return value discarded, testing in_flight tracking
         let _ = socket.receive_all_messages();
 
         // Packet should be in flight, not delivered
@@ -1714,6 +1719,7 @@ mod tests {
 
     /// Test that in_flight tracking is accurate across multiple receive cycles
     #[test]
+    #[cfg_attr(miri, ignore)] // Miri doesn't advance Instant::now() through thread::sleep() reliably
     fn test_in_flight_accuracy_multiple_cycles() {
         let inner = TestSocket::default();
         let addr = test_addr();
@@ -1734,6 +1740,7 @@ mod tests {
         socket.inner_mut().to_receive.push((addr, msg.clone()));
         socket.inner_mut().to_receive.push((addr, msg.clone()));
 
+        // Queues packets in flight; return value discarded, testing in_flight count
         let _ = socket.receive_all_messages();
         assert_eq!(
             socket.packets_in_flight(),
@@ -1755,6 +1762,7 @@ mod tests {
         socket.inner_mut().to_receive.push((addr, msg.clone()));
         socket.inner_mut().to_receive.push((addr, msg));
 
+        // Queues packets in flight; return value discarded, testing in_flight count
         let _ = socket.receive_all_messages();
         assert_eq!(
             socket.packets_in_flight(),
@@ -2027,6 +2035,7 @@ mod tests {
             .build();
         let mut socket = ChaosSocket::new(inner, config);
 
+        // Triggers reordering; return value discarded, testing stats accuracy
         let _ = socket.receive_all_messages();
 
         // With 100% reorder rate and 10 packets, expect most swaps to succeed

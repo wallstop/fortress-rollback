@@ -286,10 +286,15 @@ mod tests {
 )]
 mod property_tests {
     use super::*;
+    use crate::test_config::miri_case_count;
     use proptest::prelude::*;
     use std::hash::BuildHasher;
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: miri_case_count(),
+            ..ProptestConfig::default()
+        })]
         /// Property: Determinism - Same input always produces same hash
         ///
         /// This is critical for rollback networking where peers must agree on checksums.

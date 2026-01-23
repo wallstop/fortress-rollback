@@ -19,7 +19,7 @@
 		}
 	],
 	// Post-create setup (ensure everything is ready)
-	"postCreateCommand": "bash -c '\n    set -e\n    echo \"=== Setting up Fortress Rollback Development Environment ===\"\n    \n    # Ensure TLA+ tools are in place\n    mkdir -p .tla-tools\n    if [ -f /opt/tla/tla2tools.jar ]; then\n        cp /opt/tla/tla2tools.jar .tla-tools/\n    elif [ ! -f .tla-tools/tla2tools.jar ]; then\n        echo \"Downloading TLA+ tools...\"\n        curl -L https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o .tla-tools/tla2tools.jar\n    fi\n    \n    # Install Rust nightly if missing\n    if ! rustup run nightly rustc --version > /dev/null 2>&1; then\n        echo \"Installing Rust nightly...\"\n        rustup install nightly\n        rustup component add rust-src --toolchain nightly\n        rustup component add llvm-tools-preview --toolchain nightly\n    fi\n    \n    # Install Miri if missing\n    if ! rustup +nightly which miri > /dev/null 2>&1; then\n        echo \"Installing Miri...\"\n        rustup +nightly component add miri || true\n    fi\n    \n    # Install Kani if missing (this can take a while)\n    if ! command -v cargo-kani > /dev/null 2>&1; then\n        echo \"Installing Kani verifier (this may take a few minutes)...\"\n        cargo install --locked kani-verifier || echo \"Kani install failed, install manually with: cargo install --locked kani-verifier && cargo kani setup\"\n        cargo kani setup || echo \"Run cargo kani setup to complete Kani installation\"\n    fi\n    \n    # Install cargo tools if missing\n    command -v cargo-nextest > /dev/null 2>&1 || cargo install cargo-nextest || true\n    command -v cargo-audit > /dev/null 2>&1 || cargo install cargo-audit || true\n    command -v cargo-deny > /dev/null 2>&1 || cargo install cargo-deny || true\n    command -v cargo-llvm-cov > /dev/null 2>&1 || cargo install cargo-llvm-cov || true\n    command -v cargo-mutants > /dev/null 2>&1 || cargo install cargo-mutants || true\n    \n    # Install Z3 if missing\n    if ! python3 -c \"import z3\" 2>/dev/null; then\n        echo \"Installing Z3...\"\n        pip3 install --break-system-packages z3-solver || pip3 install z3-solver || true\n    fi\n    \n    # Build project to cache dependencies\n    cargo build 2>/dev/null || true\n    \n    echo \"=== Development environment ready! ===\"\n    echo \"Run ./scripts/check-tools.sh to verify all tools are installed.\"\n'",
+	"postCreateCommand": "bash -c '\n    set -e\n    echo \"=== Setting up Fortress Rollback Development Environment ===\"\n    \n    # Ensure TLA+ tools are in place\n    mkdir -p .tla-tools\n    if [ -f /opt/tla/tla2tools.jar ]; then\n        cp /opt/tla/tla2tools.jar .tla-tools/\n    elif [ ! -f .tla-tools/tla2tools.jar ]; then\n        echo \"Downloading TLA+ tools...\"\n        curl -L https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o .tla-tools/tla2tools.jar\n    fi\n    \n    # Sync Vale styles (prose linter)\n    if command -v vale > /dev/null 2>&1 && [ -f .vale.ini ]; then\n        echo \"Syncing Vale packages...\"\n        vale sync || echo \"Vale sync failed, run vale sync manually\"\n    fi\n    \n    # Install Rust nightly if missing\n    if ! rustup run nightly rustc --version > /dev/null 2>&1; then\n        echo \"Installing Rust nightly...\"\n        rustup install nightly\n        rustup component add rust-src --toolchain nightly\n        rustup component add llvm-tools-preview --toolchain nightly\n    fi\n    \n    # Install Miri if missing\n    if ! rustup +nightly which miri > /dev/null 2>&1; then\n        echo \"Installing Miri...\"\n        rustup +nightly component add miri || true\n    fi\n    \n    # Install Kani if missing (this can take a while)\n    if ! command -v cargo-kani > /dev/null 2>&1; then\n        echo \"Installing Kani verifier (this may take a few minutes)...\"\n        cargo install --locked kani-verifier || echo \"Kani install failed, install manually with: cargo install --locked kani-verifier && cargo kani setup\"\n        cargo kani setup || echo \"Run cargo kani setup to complete Kani installation\"\n    fi\n    \n    # Install cargo tools if missing\n    command -v cargo-nextest > /dev/null 2>&1 || cargo install cargo-nextest || true\n    command -v cargo-audit > /dev/null 2>&1 || cargo install cargo-audit || true\n    command -v cargo-deny > /dev/null 2>&1 || cargo install cargo-deny || true\n    command -v cargo-llvm-cov > /dev/null 2>&1 || cargo install cargo-llvm-cov || true\n    command -v cargo-mutants > /dev/null 2>&1 || cargo install cargo-mutants || true\n    \n    # Install Z3 if missing\n    if ! python3 -c \"import z3\" 2>/dev/null; then\n        echo \"Installing Z3...\"\n        pip3 install --break-system-packages z3-solver || pip3 install z3-solver || true\n    fi\n    \n    # Build project to cache dependencies\n    cargo build 2>/dev/null || true\n    \n    echo \"=== Development environment ready! ===\"\n    echo \"Run ./scripts/check-tools.sh to verify all tools are installed.\"\n'",
 	// Environment variables for tools
 	"containerEnv": {
 		"TLA_TOOLS_JAR": "${containerWorkspaceFolder}/.tla-tools/tla2tools.jar",
@@ -37,15 +37,16 @@
 			"extensions": [
 				"rust-lang.rust-analyzer",
 				"tamasfe.even-better-toml",
-				"serayuzgur.crates",
+				"fill-labs.dependi",
 				"vadimcn.vscode-lldb",
-				"alygin.vscode-tlaplus",
+				"tlaplus.vscode-ide",
 				"ms-python.python",
 				"ms-python.vscode-pylance",
 				"ryanluker.vscode-coverage-gutters",
 				"streetsidesoftware.code-spell-checker",
 				"GitHub.copilot",
-				"GitHub.copilot-chat"
+				"GitHub.copilot-chat",
+				"anthropic.claude-code"
 			],
 			"settings": {
 				"rust-analyzer.cargo.features": "all",

@@ -2,19 +2,9 @@
 //!
 //! # Port Allocation
 //!
-//! This test file uses ports **9100-9109** (test_desync_detection_intervals_data_driven)
-//! and **19001+** (test_multiple_sessions_isolated). When adding new tests that bind
-//! to UDP ports, ensure they don't conflict with other test files:
-//!
-//! | Test File                     | Port Range      |
-//! |-------------------------------|-----------------|
-//! | tests/config.rs               | 9100-9109       |
-//! | tests/sessions/p2p.rs         | 9100-9109, 19001+ |
-//! | tests/network/resilience.rs   | 9001-9070, 9200-9299 |
-//!
-//! **Important**: Even with `#[serial]`, tests in different crates can run
-//! in parallel. Choose non-overlapping port ranges to avoid "Address already
-//! in use" errors in CI.
+//! This test file uses `bind_socket_ephemeral()` for OS-assigned ephemeral ports
+//! to avoid TIME_WAIT conflicts on Windows CI. For remote addresses that aren't
+//! bound to actual sockets, `PortAllocator` is still used.
 
 // Allow test-specific patterns that are appropriate for test code
 #![allow(
@@ -27,11 +17,12 @@
 
 use crate::common::stubs::{CorruptibleGameStub, GameStub, StubConfig, StubInput};
 use crate::common::{
-    drain_sync_events, poll_with_sleep, synchronize_sessions, SyncConfig, POLL_INTERVAL,
+    bind_socket_ephemeral, drain_sync_events, poll_with_sleep, synchronize_sessions, PortAllocator,
+    SyncConfig, POLL_INTERVAL,
 };
 use fortress_rollback::{
     DesyncDetection, FortressError, FortressEvent, PlayerHandle, PlayerType, SessionBuilder,
-    SessionState, UdpNonBlockingSocket,
+    SessionState,
 };
 use serial_test::serial;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -41,11 +32,13 @@ use std::time::Instant;
 #[test]
 #[serial]
 fn test_add_more_players() -> Result<(), FortressError> {
-    let socket = UdpNonBlockingSocket::bind_to_port(7777).unwrap();
-    let remote_addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
-    let remote_addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8081);
-    let remote_addr3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8082);
-    let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8090);
+    // Use ephemeral port for local socket, PortAllocator for unbound remote addresses
+    let (socket, _addr0) = bind_socket_ephemeral()?;
+    let [port1, port2, port3, port4] = PortAllocator::next_ports::<4>();
+    let remote_addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let remote_addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
+    let remote_addr3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port3);
+    let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port4);
 
     let _sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
@@ -62,9 +55,11 @@ fn test_add_more_players() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_start_session() -> Result<(), FortressError> {
-    let socket = UdpNonBlockingSocket::bind_to_port(7777).unwrap();
-    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
-    let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8090);
+    // Use ephemeral port for local socket, PortAllocator for unbound remote addresses
+    let (socket, _addr0) = bind_socket_ephemeral()?;
+    let [port1, port2] = PortAllocator::next_ports::<2>();
+    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     let _sess = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
@@ -77,9 +72,11 @@ fn test_start_session() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_disconnect_player() -> Result<(), FortressError> {
-    let socket = UdpNonBlockingSocket::bind_to_port(7777).unwrap();
-    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
-    let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8090);
+    // Use ephemeral port for local socket, PortAllocator for unbound remote addresses
+    let (socket, _addr0) = bind_socket_ephemeral()?;
+    let [port1, port2] = PortAllocator::next_ports::<2>();
+    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let spec_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
 
     let mut sess = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
@@ -99,16 +96,15 @@ fn test_disconnect_player() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_synchronize_p2p_sessions() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7777);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8888);
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let (socket1, addr1) = bind_socket_ephemeral()?;
+    let (socket2, addr2) = bind_socket_ephemeral()?;
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7777).unwrap();
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(8888).unwrap();
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -127,75 +123,31 @@ fn test_synchronize_p2p_sessions() -> Result<(), FortressError> {
     Ok(())
 }
 
+/// Tests P2P frame advancement between two synchronized sessions.
+///
+/// Uses the generic `run_p2p_frame_advancement_test` helper to avoid duplication.
 #[test]
 #[serial]
 fn test_advance_frame_p2p_sessions() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7777);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8888);
+    use crate::common::run_p2p_frame_advancement_test;
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7777).unwrap();
-    let mut sess1 = SessionBuilder::<StubConfig>::new()
-        .add_player(PlayerType::Local, PlayerHandle::new(0))?
-        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
-        .start_p2p_session(socket1)?;
-
-    let socket2 = UdpNonBlockingSocket::bind_to_port(8888).unwrap();
-    let mut sess2 = SessionBuilder::<StubConfig>::new()
-        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
-        .add_player(PlayerType::Local, PlayerHandle::new(1))?
-        .start_p2p_session(socket2)?;
-
-    assert!(sess1.current_state() == SessionState::Synchronizing);
-    assert!(sess2.current_state() == SessionState::Synchronizing);
-
-    // Use robust synchronization with time-based timeout
-    synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default())
-        .expect("Sessions should synchronize");
-
-    assert!(sess1.current_state() == SessionState::Running);
-    assert!(sess2.current_state() == SessionState::Running);
-
-    let mut stub1 = GameStub::new();
-    let mut stub2 = GameStub::new();
-    let reps = 10;
-    for i in 0..reps {
-        // Use poll_with_sleep to ensure packets are delivered reliably.
-        poll_with_sleep(&mut sess1, &mut sess2, 3);
-
-        sess1
-            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
-            .unwrap();
-        let requests1 = sess1.advance_frame().unwrap();
-        stub1.handle_requests(requests1);
-        sess2
-            .add_local_input(PlayerHandle::new(1), StubInput { inp: i })
-            .unwrap();
-        let requests2 = sess2.advance_frame().unwrap();
-        stub2.handle_requests(requests2);
-
-        // gamestate evolves
-        assert_eq!(stub1.gs.frame, i as i32 + 1);
-        assert_eq!(stub2.gs.frame, i as i32 + 1);
-    }
-
-    Ok(())
+    run_p2p_frame_advancement_test::<StubConfig, GameStub>(|i| StubInput { inp: i }, 10)
 }
 
 #[test]
 #[serial]
 fn test_desyncs_detected() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7777);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8888);
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let (socket1, addr1) = bind_socket_ephemeral()?;
+    let (socket2, addr2) = bind_socket_ephemeral()?;
     let desync_mode = DesyncDetection::On { interval: 100 };
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7777).unwrap();
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .with_desync_detection_mode(desync_mode)
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(8888).unwrap();
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -314,11 +266,11 @@ fn test_desyncs_detected() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_desyncs_and_input_delay_no_panic() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7777);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8888);
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let (socket1, addr1) = bind_socket_ephemeral()?;
+    let (socket2, addr2) = bind_socket_ephemeral()?;
     let desync_mode = DesyncDetection::On { interval: 100 };
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7777).unwrap();
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
@@ -327,7 +279,6 @@ fn test_desyncs_and_input_delay_no_panic() -> Result<(), FortressError> {
         .with_desync_detection_mode(desync_mode)
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(8888).unwrap();
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -374,12 +325,12 @@ fn test_desyncs_and_input_delay_no_panic() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_three_player_session() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
-    let addr3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7003);
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let (socket1, addr1) = bind_socket_ephemeral()?;
+    let (socket2, addr2) = bind_socket_ephemeral()?;
+    let (socket3, addr3) = bind_socket_ephemeral()?;
 
     // Player 1: local=0, remote=1,2
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7001).unwrap();
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_num_players(3)
         .unwrap()
@@ -389,7 +340,6 @@ fn test_three_player_session() -> Result<(), FortressError> {
         .start_p2p_session(socket1)?;
 
     // Player 2: local=1, remote=0,2
-    let socket2 = UdpNonBlockingSocket::bind_to_port(7002).unwrap();
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_num_players(3)
         .unwrap()
@@ -399,7 +349,6 @@ fn test_three_player_session() -> Result<(), FortressError> {
         .start_p2p_session(socket2)?;
 
     // Player 3: local=2, remote=0,1
-    let socket3 = UdpNonBlockingSocket::bind_to_port(7003).unwrap();
     let mut sess3 = SessionBuilder::<StubConfig>::new()
         .with_num_players(3)
         .unwrap()
@@ -475,13 +424,13 @@ fn test_three_player_session() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_four_player_session() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7011);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7012);
-    let addr3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7013);
-    let addr4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7014);
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let (socket1, addr1) = bind_socket_ephemeral()?;
+    let (socket2, addr2) = bind_socket_ephemeral()?;
+    let (socket3, addr3) = bind_socket_ephemeral()?;
+    let (socket4, addr4) = bind_socket_ephemeral()?;
 
     // Player 1
-    let socket1 = UdpNonBlockingSocket::bind_to_port(7011).unwrap();
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
         .unwrap()
@@ -492,7 +441,6 @@ fn test_four_player_session() -> Result<(), FortressError> {
         .start_p2p_session(socket1)?;
 
     // Player 2
-    let socket2 = UdpNonBlockingSocket::bind_to_port(7012).unwrap();
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
         .unwrap()
@@ -503,7 +451,6 @@ fn test_four_player_session() -> Result<(), FortressError> {
         .start_p2p_session(socket2)?;
 
     // Player 3
-    let socket3 = UdpNonBlockingSocket::bind_to_port(7013).unwrap();
     let mut sess3 = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
         .unwrap()
@@ -514,7 +461,6 @@ fn test_four_player_session() -> Result<(), FortressError> {
         .start_p2p_session(socket3)?;
 
     // Player 4
-    let socket4 = UdpNonBlockingSocket::bind_to_port(7014).unwrap();
     let mut sess4 = SessionBuilder::<StubConfig>::new()
         .with_num_players(4)
         .unwrap()
@@ -614,11 +560,9 @@ fn test_four_player_session() -> Result<(), FortressError> {
 #[test]
 #[serial]
 fn test_misprediction_at_frame_0_no_crash() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9910);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9911);
-
-    let socket1 = UdpNonBlockingSocket::bind_to_port(9910).unwrap();
-    let socket2 = UdpNonBlockingSocket::bind_to_port(9911).unwrap();
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let (socket1, addr1) = bind_socket_ephemeral()?;
+    let (socket2, addr2) = bind_socket_ephemeral()?;
 
     // Create sessions with 0 input delay to maximize prediction window
     let mut sess1 = SessionBuilder::<StubConfig>::new()
@@ -770,12 +714,8 @@ fn test_synchronization_data_driven() {
         },
     ];
 
-    for (i, case) in test_cases.iter().enumerate() {
-        // Use unique ports per test case to avoid conflicts
-        let port1 = 8001 + (i * 2) as u16;
-        let port2 = 8002 + (i * 2) as u16;
-
-        let result = run_sync_test_case(case, port1, port2);
+    for case in test_cases.iter() {
+        let result = run_sync_test_case(case);
 
         if case.expect_success {
             assert!(
@@ -795,15 +735,12 @@ fn test_synchronization_data_driven() {
 }
 
 /// Runs a single synchronization test case.
-fn run_sync_test_case(
-    case: &SyncTestCase,
-    port1: u16,
-    port2: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port2);
+#[track_caller]
+fn run_sync_test_case(case: &SyncTestCase) -> Result<(), Box<dyn std::error::Error>> {
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let (socket1, addr1) = bind_socket_ephemeral()?;
+    let (socket2, addr2) = bind_socket_ephemeral()?;
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(port1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
@@ -811,7 +748,6 @@ fn run_sync_test_case(
         .unwrap()
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(port2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -821,8 +757,7 @@ fn run_sync_test_case(
 
     // Synchronize using helper
     let sync_config = SyncConfig::default();
-    let _iterations = synchronize_sessions(&mut sess1, &mut sess2, &sync_config)
-        .map_err(|e| format!("[{}] {}", case.name, e))?;
+    synchronize_sessions(&mut sess1, &mut sess2, &sync_config)?;
 
     // Drain sync events
     drain_sync_events(&mut sess1, &mut sess2);
@@ -896,16 +831,15 @@ fn run_sync_test_case(
 #[test]
 #[serial]
 fn test_sync_helper_both_sessions_must_be_running() -> Result<(), FortressError> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9501);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9502);
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let (socket1, addr1) = bind_socket_ephemeral()?;
+    let (socket2, addr2) = bind_socket_ephemeral()?;
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(9501).unwrap();
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(9502).unwrap();
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1064,17 +998,14 @@ fn test_desync_detection_intervals_data_driven() -> Result<(), FortressError> {
         },
     ];
 
-    for (i, case) in test_cases.iter().enumerate() {
-        let port1 = 9100 + (i * 2) as u16;
-        let port2 = 9101 + (i * 2) as u16;
-
-        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port1);
-        let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port2);
+    for case in test_cases.iter() {
+        // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+        let (socket1, addr1) = bind_socket_ephemeral()?;
+        let (socket2, addr2) = bind_socket_ephemeral()?;
         let desync_mode = DesyncDetection::On {
             interval: case.interval,
         };
 
-        let socket1 = UdpNonBlockingSocket::bind_to_port(port1).unwrap();
         let mut sess1 = SessionBuilder::<StubConfig>::new()
             .add_player(PlayerType::Local, PlayerHandle::new(0))?
             .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
@@ -1082,7 +1013,6 @@ fn test_desync_detection_intervals_data_driven() -> Result<(), FortressError> {
             .with_max_prediction_window(case.max_prediction)
             .start_p2p_session(socket1)?;
 
-        let socket2 = UdpNonBlockingSocket::bind_to_port(port2).unwrap();
         let mut sess2 = SessionBuilder::<StubConfig>::new()
             .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
             .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1094,8 +1024,8 @@ fn test_desync_detection_intervals_data_driven() -> Result<(), FortressError> {
         let sync_config = SyncConfig::default();
         synchronize_sessions(&mut sess1, &mut sess2, &sync_config).unwrap_or_else(|e| {
             panic!(
-                "[{}] sync failed: {} (ports {}:{})",
-                case.name, e, port1, port2
+                "[{}] sync failed: {} (addr1: {}, addr2: {})",
+                case.name, e, addr1, addr2
             )
         });
         drain_sync_events(&mut sess1, &mut sess2);
@@ -1306,12 +1236,8 @@ fn test_polling_robustness_data_driven() {
         },
     ];
 
-    for (i, case) in test_cases.iter().enumerate() {
-        // Use unique ports per test case to avoid conflicts (19xxx range is reserved for this test)
-        let port1 = 19001 + (i * 2) as u16;
-        let port2 = 19002 + (i * 2) as u16;
-
-        let result = run_timing_test_case(case, port1, port2);
+    for case in test_cases.iter() {
+        let result = run_timing_test_case(case);
 
         assert!(
             result.is_ok(),
@@ -1323,15 +1249,12 @@ fn test_polling_robustness_data_driven() {
 }
 
 /// Runs a single timing robustness test case.
-fn run_timing_test_case(
-    case: &TimingTestCase,
-    port1: u16,
-    port2: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port1);
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port2);
+#[track_caller]
+fn run_timing_test_case(case: &TimingTestCase) -> Result<(), Box<dyn std::error::Error>> {
+    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let (socket1, addr1) = bind_socket_ephemeral()?;
+    let (socket2, addr2) = bind_socket_ephemeral()?;
 
-    let socket1 = UdpNonBlockingSocket::bind_to_port(port1)?;
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
@@ -1339,7 +1262,6 @@ fn run_timing_test_case(
         .unwrap()
         .start_p2p_session(socket1)?;
 
-    let socket2 = UdpNonBlockingSocket::bind_to_port(port2)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -1349,8 +1271,7 @@ fn run_timing_test_case(
 
     // Synchronize using helper
     let sync_config = SyncConfig::default();
-    synchronize_sessions(&mut sess1, &mut sess2, &sync_config)
-        .map_err(|e| format!("[{}] {}", case.name, e))?;
+    synchronize_sessions(&mut sess1, &mut sess2, &sync_config)?;
 
     // Drain sync events
     drain_sync_events(&mut sess1, &mut sess2);

@@ -7,6 +7,10 @@
 //! - Metamorphic tests - metamorphic testing relationships
 //! - Z3 verification - SMT solver verification (requires z3-verification feature)
 
+// Shared test infrastructure
+#[path = "common/mod.rs"]
+mod common;
+
 // Verification test modules
 mod verification {
     pub mod determinism;

@@ -26,7 +26,7 @@ The pre-commit hook catches workflow issues before they reach CI, saving time an
 
 ### actionlint (MUST Run After EVERY Change)
 
-**⚠️ CRITICAL: Run `actionlint` after EVERY modification to ANY workflow file — no exceptions.**
+**CRITICAL: Run `actionlint` after EVERY modification to ANY workflow file — no exceptions.**
 
 Workflow linting catches errors that are impossible to detect without running CI. A single missing quote or syntax error can break the entire workflow. **Always lint before committing.**
 
@@ -59,16 +59,93 @@ go install github.com/rhysd/actionlint/cmd/actionlint@latest
 
 # Via Homebrew (macOS)
 brew install actionlint
-
-# Via npm (alternative)
-npm install -g actionlint
 ```
 
 ---
 
 ## Shellcheck Best Practices for GitHub Actions
 
-GitHub Actions `run:` blocks are shell scripts and must follow shellcheck rules. Common issues:
+GitHub Actions `run:` blocks are shell scripts and must follow shellcheck rules. When `actionlint` runs, it invokes shellcheck on your `run:` blocks, which can produce confusing errors because shellcheck doesn't understand GitHub's `${{ }}` template syntax.
+
+### SC2193: Template Expressions in Conditionals
+
+**Problem:** When you use `${{ }}` expressions directly in bash conditionals with glob/pattern matching, shellcheck sees them as literal strings and warns that the comparison can never match.
+
+```yaml
+# ❌ WRONG: SC2193 - Arguments can never be equal (glob pattern matching)
+- name: Check test filter
+  run: |
+    if [[ "${{ matrix.test_filter }}" == MULTI:* ]]; then
+      echo "Multi-test mode"
+    fi
+```
+
+**Why this fails:** Shellcheck analyzes the bash code before GitHub Actions substitutes the `${{ }}` expressions. It sees `"${{ matrix.test_filter }}"` as a literal string (not a variable), and since a literal string can only equal itself, glob patterns like `== MULTI:*` appear to never match.
+
+**When SC2193 triggers:**
+
+| Comparison Type | Triggers SC2193? | Example |
+|-----------------|------------------|---------|
+| Glob/pattern matching | **Yes** | `== MULTI:*`, `== prefix*`, `!= *suffix` |
+| Simple equality | Sometimes | `== "exact-string"` may or may not trigger |
+| Numeric comparison | Rarely | `-eq`, `-gt`, etc. |
+
+> **Note:** The warning behavior can vary depending on the shellcheck version and the exact expression. Simple equality comparisons like `== "ubuntu-latest"` may not always trigger SC2193, but the variable pattern is still recommended as a defensive practice.
+
+**Solution:** Assign `${{ }}` expressions to bash variables first, then use those variables in conditionals:
+
+```yaml
+# ✅ CORRECT: Assign to variable, then use in conditional
+- name: Check test filter
+  run: |
+    test_filter="${{ matrix.test_filter }}"
+    if [[ "$test_filter" == MULTI:* ]]; then
+      echo "Multi-test mode"
+    fi
+```
+
+**When this pattern is required vs recommended:**
+
+| Scenario | Required or Recommended? |
+|----------|-------------------------|
+| Glob/pattern matching (`== pattern*`, `!= *suffix`) | **Required** — SC2193 will trigger |
+| Equality with `==` or `!=` against exact strings | **Recommended** — defensive practice, may not always trigger SC2193 |
+| Multiple comparisons in the same block | **Recommended** — cleaner code, easier to maintain |
+
+**Example with exact string comparisons:**
+
+```yaml
+# ⚠️ May work, but variable pattern is preferred for consistency
+- run: |
+    if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+      apt-get update
+    elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+      brew update
+    fi
+
+# ✅ RECOMMENDED: Assign first, then compare (consistent and defensive)
+- run: |
+    os="${{ matrix.os }}"
+    if [[ "$os" == "ubuntu-latest" ]]; then
+      apt-get update
+    elif [[ "$os" == "macos-latest" ]]; then
+      brew update
+    fi
+```
+
+**Common contexts where this pattern applies:**
+
+| Context | Incorrect | Correct |
+|---------|-----------|---------|
+| Matrix values | `if [[ "${{ matrix.x }}" == ... ]]` | `x="${{ matrix.x }}"; if [[ "$x" == ... ]]` |
+| Inputs | `if [[ "${{ inputs.mode }}" == ... ]]` | `mode="${{ inputs.mode }}"; if [[ "$mode" == ... ]]` |
+| Environment | `if [[ "${{ env.VAR }}" == ... ]]` | `var="${{ env.VAR }}"; if [[ "$var" == ... ]]` |
+| GitHub context | `if [[ "${{ github.event_name }}" == ... ]]` | `event="${{ github.event_name }}"; if [[ "$event" == ... ]]` |
+| Step outputs | `if [[ "${{ steps.x.outputs.y }}" == ... ]]` | `val="${{ steps.x.outputs.y }}"; if [[ "$val" == ... ]]` |
+| Job results | `if [[ "${{ needs.x.result }}" == ... ]]` | `result="${{ needs.x.result }}"; if [[ "$result" == ... ]]` |
+| Job outputs | `if [[ "${{ needs.x.outputs.y }}" == ... ]]` | `val="${{ needs.x.outputs.y }}"; if [[ "$val" == ... ]]` |
+
+**Why the fix works:** Once assigned to a bash variable, shellcheck recognizes it as a proper variable and can analyze the conditional correctly. The value substitution still happens at GitHub Actions runtime, but shellcheck can now validate the bash syntax.
 
 ### SC2129: Use Grouped Redirects
 
@@ -359,6 +436,7 @@ Before deploying workflows with GitHub API calls:
 | SC2086 | Unquoted variables | Quote: `"$VAR"` |
 | SC2129 | Multiple individual redirects | Use `{ cmd1; cmd2; } >> file` |
 | SC2155 | `export x=$(cmd)` | Separate: `x=$(cmd); export x` |
+| SC2193 | `${{ }}` in conditionals | Assign to variable first: `var="${{ x }}"; if [[ "$var" == ... ]]` |
 | Invalid expression | `${{ }}` syntax error | Check contexts, use `toJSON()` for debugging |
 | Unknown runner | Invalid `runs-on` | Use `ubuntu-latest`, `macos-latest`, `windows-latest` |
 | Missing permissions | GITHUB_TOKEN scope | Add `permissions:` block |
@@ -755,9 +833,541 @@ Before adding `git clone` to any workflow:
 
 ---
 
+## CI Job Timeout Guidelines
+
+Appropriate timeout values prevent runaway jobs while avoiding false failures. Set timeouts based on job type and expected duration.
+
+### Recommended Timeout Values
+
+| Job Type | Timeout | Rationale |
+|----------|---------|-----------|
+| **Build & Test** | 30 min | Standard compile + test; includes sccache startup |
+| **Miri (parallelized)** | 20 min | Miri is ~1000-7000x slower; parallelization helps |
+| **Miri (single job)** | 60 min | Non-parallelized Miri needs more headroom |
+| **Kani verification** | 60-120 min | SMT solving can be slow; depends on proof complexity |
+| **Network tests** | 10-20 min | Real network operations have inherent delays |
+| **Docker builds** | 15-30 min | Image building can be slow without cache |
+| **Quick checks** (fmt, clippy) | 5-10 min | Should be fast; timeout catches hangs |
+| **Documentation** | 10-15 min | Doc generation is I/O bound |
+| **WASM builds** | 15 min | Cross-compilation adds overhead |
+| **ARM64 cross-compile** | 30 min | Cross-rs containers need startup time |
+
+### Setting Timeouts
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # Job-level timeout
+
+    steps:
+      - name: Run tests
+        run: cargo test
+        timeout-minutes: 15  # Step-level timeout (optional)
+```
+
+### Timeout Best Practices
+
+1. **Always set job-level timeouts** — Prevents runaway jobs from consuming minutes
+2. **Use step-level timeouts sparingly** — For steps that might hang (network, external services)
+3. **Add buffer for cold caches** — First runs without cache take longer
+4. **Monitor actual durations** — Adjust timeouts based on real-world data
+5. **Consider platform differences** — Windows and macOS runners may be slower
+
+---
+
+## Miri Testing in CI
+
+Miri undefined behavior detection requires special considerations for CI due to its performance characteristics and symbolic execution nature.
+
+> **See also:** [Miri Verification](miri-verification.md) for the complete Miri guide, including installation, configuration, and advanced usage patterns.
+
+### Miri Performance Characteristics
+
+| Factor | Impact | Mitigation |
+|--------|--------|------------|
+| **~1000-7000x slower** | Long test times | Parallelize across jobs |
+| **Symbolic execution** | Memory intensive | Reduce iteration counts |
+| **Multiple seeds** | Multiplies runtime | Balance seeds vs. parallelism |
+| **Big-endian targets** | Additional overhead | Run selectively |
+
+### Parallelizing Miri Tests
+
+Split tests across multiple jobs for reasonable CI times:
+
+```yaml
+miri:
+  name: Miri (${{ matrix.name }})
+  runs-on: ${{ matrix.os }}
+  timeout-minutes: 20
+  strategy:
+    fail-fast: false
+    matrix:
+      include:
+        # Split by module for balanced load
+        - name: Linux - protocol
+          os: ubuntu-latest
+          seeds: "0..4"
+          test_filter: "network::protocol"
+
+        - name: Linux - sessions
+          os: ubuntu-latest
+          seeds: "0..4"
+          test_filter: "sessions::"
+
+        # Combine smaller modules
+        - name: Linux - core + misc
+          os: ubuntu-latest
+          seeds: "0..4"
+          test_filter: "MULTI:hash::|rng::|checksum::"
+```
+
+### Miri Seed Configuration
+
+Using `-Zmiri-many-seeds` tests multiple random interleavings:
+
+```yaml
+env:
+  MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-many-seeds=0..4"
+```
+
+| Seed Count | CI Time | Coverage |
+|------------|---------|----------|
+| 0..4 | Fast | **Recommended for CI** |
+| 0..8 | Moderate | Basic race detection |
+| 0..16 | Slow | Thorough, use for critical code |
+| 0..32 | Very slow | Use only for targeted investigation |
+
+### Miri-Incompatible Test Patterns
+
+Some test patterns don't work with Miri's symbolic execution:
+
+#### Skip Tests Using Real Time
+
+```rust
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_with_timing() {
+    let start = Instant::now();
+    do_something();
+    assert!(start.elapsed() < Duration::from_secs(1));
+}
+```
+
+#### Skip Tests Using Sleep
+
+```rust
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_with_sleep() {
+    std::thread::sleep(Duration::from_millis(100));
+    // Miri doesn't simulate real time passage
+}
+```
+
+#### Skip FFI Tests
+
+```rust
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_with_ffi() {
+    // Miri cannot interpret C code
+    unsafe { external_c_function(); }
+}
+```
+
+#### Skip Heavy Property Tests
+
+```rust
+proptest! {
+    // Reduce iterations under Miri
+    #![proptest_config(ProptestConfig::with_cases(
+        if cfg!(miri) { 5 } else { 256 }
+    ))]
+
+    #[test]
+    fn prop_roundtrip(data in any::<Vec<u8>>()) {
+        // Property test body
+    }
+}
+```
+
+### Running Multiple Test Groups
+
+For complex test filtering, use a custom parsing approach:
+
+```yaml
+- name: Run Miri tests
+  shell: bash
+  run: |
+    test_filter="${{ matrix.test_filter }}"
+
+    # Handle MULTI: prefix for multiple test groups
+    if [[ "$test_filter" == MULTI:* ]]; then
+      filters="${test_filter#MULTI:}"
+      IFS='|' read -ra FILTER_ARRAY <<< "$filters"
+      for filter in "${FILTER_ARRAY[@]}"; do
+        echo "Running tests matching: $filter"
+        cargo miri test --lib -- "$filter"
+      done
+    else
+      cargo miri test --lib -- "$test_filter"
+    fi
+```
+
+### Cross-Platform Miri
+
+Run Miri on all platforms to catch platform-specific UB:
+
+```yaml
+matrix:
+  include:
+    - os: ubuntu-latest
+    - os: windows-latest
+    - os: macos-latest
+```
+
+### Big-Endian Testing
+
+Test endianness issues with s390x target:
+
+```yaml
+- name: Run Miri (big-endian)
+  if: matrix.big_endian
+  run: cargo miri test --lib --target s390x-unknown-linux-gnu -- --skip property_tests
+  env:
+    MIRIFLAGS: "-Zmiri-disable-isolation"
+```
+
+---
+
+## Property-Based Tests in CI (Proptest)
+
+Property-based tests generate random inputs, requiring special CI considerations.
+
+### Timing Considerations
+
+| Setting | Development | CI |
+|---------|-------------|-----|
+| Cases | 256 (default) | 256 or fewer |
+| Timeout | None | Set step timeout |
+| Seeds | Random | Consider deterministic |
+
+### Reducing Test Cases for CI
+
+```rust
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: if std::env::var("CI").is_ok() { 100 } else { 256 },
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn prop_expensive_test(data in complex_strategy()) {
+        // Property test body
+    }
+}
+```
+
+### Deterministic Seeds for Reproducibility
+
+```rust
+proptest! {
+    #![proptest_config(ProptestConfig {
+        source_file: Some("tests/property_tests.rs"),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn prop_reproducible(x in any::<i32>()) {
+        // Same seed from file path = same test sequence
+    }
+}
+```
+
+### Proptest with Miri
+
+Property tests under Miri need dramatically reduced iterations:
+
+```rust
+fn miri_case_count() -> u32 {
+    if cfg!(miri) { 5 } else { 256 }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(miri_case_count()))]
+
+    #[test]
+    fn prop_roundtrip(data in proptest::collection::vec(any::<u8>(), 0..100)) {
+        // Reduced input sizes for Miri
+    }
+}
+```
+
+### Regression File Management
+
+```yaml
+# Ensure proptest regressions are committed
+- name: Check for uncommitted regression files
+  run: |
+    if [ -n "$(git status --porcelain proptest-regressions/)" ]; then
+      echo "ERROR: Uncommitted proptest regression files found"
+      git status proptest-regressions/
+      exit 1
+    fi
+```
+
+---
+
+## Cross-Platform Shell Script Compatibility
+
+Shell scripts in workflows must work across Linux, macOS, and Windows runners.
+
+### Temporary Directories
+
+| Platform | Temp Path | Environment Variable |
+|----------|-----------|---------------------|
+| Linux | `/tmp` | `$TMPDIR` or `/tmp` |
+| macOS | `/var/folders/...` | `$TMPDIR` |
+| Windows | `C:\Users\...\Temp` | `$TEMP` or `$TMP` |
+
+**Always use `$RUNNER_TEMP`** for cross-platform compatibility:
+
+```yaml
+# ✅ CORRECT: Cross-platform
+- run: |
+    WORK_DIR="$RUNNER_TEMP/my-work"
+    mkdir -p "$WORK_DIR"
+
+# ❌ WRONG: Linux-only
+- run: |
+    WORK_DIR="/tmp/my-work"
+    mkdir -p "$WORK_DIR"
+```
+
+### Timeout Commands
+
+The `timeout` command differs across platforms:
+
+```yaml
+# ✅ CORRECT: Use step-level timeout
+- name: Run potentially slow command
+  run: cargo test
+  timeout-minutes: 10
+
+# ❌ WRONG: timeout command doesn't exist on Windows/macOS
+- run: timeout 600 cargo test
+```
+
+For inline timeouts, use a cross-platform approach:
+
+```yaml
+- name: Run with timeout (cross-platform)
+  shell: bash
+  run: |
+    if command -v timeout &> /dev/null; then
+      timeout 600 cargo test
+    elif command -v gtimeout &> /dev/null; then
+      gtimeout 600 cargo test  # macOS with coreutils
+    else
+      cargo test  # Rely on step timeout
+    fi
+  timeout-minutes: 12
+```
+
+### Path Handling
+
+```yaml
+# ✅ CORRECT: Forward slashes work everywhere in bash
+- shell: bash
+  run: |
+    CONFIG_PATH="${GITHUB_WORKSPACE}/config/settings.toml"
+    cat "$CONFIG_PATH"
+
+# ❌ PROBLEMATIC: Backslashes can cause issues
+- shell: bash
+  run: |
+    CONFIG_PATH="${GITHUB_WORKSPACE}\\config\\settings.toml"
+```
+
+### Line Endings
+
+```yaml
+# Ensure consistent line endings for scripts
+- name: Configure git for consistent line endings
+  run: git config --global core.autocrlf false
+```
+
+### Shell Selection
+
+```yaml
+# Explicitly set bash for consistent behavior
+- name: Cross-platform script
+  shell: bash
+  run: |
+    # This runs in bash on all platforms
+    echo "Running on $OSTYPE"
+```
+
+---
+
+## CI Job Monitoring and Debugging
+
+### Identifying Empty Log Files
+
+Empty logs often indicate the job was cancelled before producing output.
+
+**Common causes:**
+
+1. **Job timeout reached** — Increase `timeout-minutes`
+2. **Workflow cancelled** — Check for concurrent workflow runs
+3. **Runner crashed** — Retry the job
+4. **OOM killed** — Reduce memory usage or use larger runner
+
+### Debugging Silent Failures
+
+```yaml
+- name: Run with verbose output
+  run: |
+    set -x  # Echo commands
+    cargo test --verbose 2>&1 | tee test-output.log
+  continue-on-error: true
+
+- name: Upload logs on failure
+  if: failure()
+  uses: actions/upload-artifact@v4
+  with:
+    name: debug-logs
+    path: test-output.log
+```
+
+### Capturing Output for Analysis
+
+```yaml
+- name: Run tests with output capture
+  id: tests
+  run: |
+    set +e  # Don't exit on error
+    OUTPUT=$(cargo test 2>&1)
+    EXIT_CODE=$?
+    echo "$OUTPUT"
+    echo "output<<EOF" >> "$GITHUB_OUTPUT"
+    echo "$OUTPUT" >> "$GITHUB_OUTPUT"
+    echo "EOF" >> "$GITHUB_OUTPUT"
+    exit $EXIT_CODE
+```
+
+### Job Failure Notifications
+
+```yaml
+- name: Notify on failure
+  if: failure()
+  uses: actions/github-script@v7
+  with:
+    retries: 3
+    script: |
+      await github.rest.issues.createComment({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        issue_number: context.issue.number,
+        body: `CI failed: ${context.workflow} / ${context.job}`
+      });
+```
+
+### Debugging Specific Job Types
+
+#### Miri Debugging
+
+```yaml
+env:
+  MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-backtrace=full"
+  RUST_BACKTRACE: 1
+```
+
+#### Kani Debugging
+
+```yaml
+- name: Run Kani with verbose output
+  run: cargo kani --harness proof_name --verbose
+```
+
+#### Network Test Debugging
+
+```yaml
+- name: Debug network tests
+  run: |
+    # Show network configuration
+    ip addr show || ifconfig
+    netstat -tuln || ss -tuln
+
+    # Run tests with debug output
+    RUST_LOG=debug cargo test network
+```
+
+---
+
+## Preventing Common CI Failures
+
+### Pre-Flight Checks
+
+Run these locally before pushing:
+
+```bash
+# Format + lint + test
+cargo fmt && cargo clippy --all-targets && cargo nextest run --no-capture
+
+# Workflow validation
+actionlint
+
+# Markdown linting
+npx markdownlint '**/*.md' --config .markdownlint.json --fix
+```
+
+### CI-Specific Environment Variables
+
+```yaml
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Prevent cargo from downloading same crate multiple times
+  CARGO_NET_RETRY: 10
+  CARGO_NET_TIMEOUT: 120
+```
+
+### Handling Flaky Tests
+
+```yaml
+# Retry flaky tests
+- name: Run tests with retry
+  uses: nick-fields/retry@v3
+  with:
+    timeout_minutes: 15
+    max_attempts: 3
+    command: cargo test
+```
+
+### Cache Warming for Cold Starts
+
+```yaml
+# Pre-warm cache in a dedicated job
+warm-cache:
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v4
+    - uses: Swatinem/rust-cache@v2
+    - run: cargo fetch
+    - run: cargo build --all-targets
+```
+
+---
+
 ## Related Documentation
 
 - [Cross-Platform CI/CD](cross-platform-ci-cd.md) — Multi-platform build strategies
+- [CI/CD Debugging](ci-cd-debugging.md) — Reproducing and debugging CI failures locally
+- [Miri Verification](miri-verification.md) — Miri UB detection guide
+- [Miri Adaptation Guide](miri-adaptation-guide.md) — Adapting code for Miri
+- [Property Testing](property-testing.md) — Proptest patterns and best practices
 - [Defensive Programming](defensive-programming.md) — Error handling principles
 - [Testing Guide](rust-testing-guide.md) — CI test organization
 

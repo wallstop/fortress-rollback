@@ -48,32 +48,139 @@ fn config() -> impl bincode::config::Config {
     bincode::config::standard().with_fixed_int_encoding()
 }
 
+/// Represents what operation was being performed when a codec error occurred.
+///
+/// This helps with debugging by indicating what we were trying to encode or decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CodecOperation {
+    /// Encoding a network message.
+    EncodeMessage,
+    /// Decoding a network message.
+    DecodeMessage,
+    /// Encoding into a buffer.
+    EncodeIntoBuffer,
+    /// Appending to a buffer.
+    AppendToBuffer,
+    /// A generic encoding operation.
+    Encode,
+    /// A generic decoding operation.
+    Decode,
+}
+
+impl fmt::Display for CodecOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EncodeMessage => write!(f, "encoding network message"),
+            Self::DecodeMessage => write!(f, "decoding network message"),
+            Self::EncodeIntoBuffer => write!(f, "encoding into buffer"),
+            Self::AppendToBuffer => write!(f, "appending to buffer"),
+            Self::Encode => write!(f, "encoding"),
+            Self::Decode => write!(f, "decoding"),
+        }
+    }
+}
+
 /// Errors that can occur during encoding or decoding.
-#[derive(Debug)]
+///
+/// # Why String for Error Messages?
+///
+/// Unlike other error types in this crate that use structured enums for zero-allocation
+/// error construction, `CodecError` stores error messages as `String`. This design choice
+/// is intentional:
+///
+/// 1. **Bincode errors are opaque**: The underlying `bincode::error::EncodeError` and
+///    `bincode::error::DecodeError` types don't expose structured information about
+///    failure reasons. They only provide a `Display` implementation for human-readable
+///    messages.
+///
+/// 2. **Error source preservation**: Converting bincode errors to strings preserves
+///    the diagnostic information that would otherwise be lost. The bincode library
+///    may report issues like "unexpected end of input", "invalid enum variant", or
+///    "sequence too long" - all as formatted strings.
+///
+/// 3. **Not on the hot path**: Codec errors occur during message deserialization
+///    failures, which are exceptional conditions (corrupted data, protocol mismatch).
+///    These are not hot-path operations where zero-allocation matters.
+///
+/// 4. **Simpler API**: Since bincode doesn't provide a structured error API, creating
+///    our own structured error types would require pattern-matching on error message
+///    strings, which would be fragile and could break with bincode updates.
+///
+/// For hot-path error handling (like RLE decode errors in compression), we use
+/// structured enums. See [`CompressionError`]
+/// and [`RleDecodeReason`] for examples.
+///
+/// [`CompressionError`]: crate::network::compression::CompressionError
+/// [`RleDecodeReason`]: crate::RleDecodeReason
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CodecError {
     /// The encoding operation failed.
-    EncodeError(String),
+    EncodeError {
+        /// The underlying bincode error message.
+        ///
+        /// This is a `String` because bincode errors are opaque - they don't expose
+        /// structured failure reasons, only human-readable messages via `Display`.
+        message: String,
+        /// The operation that was being performed.
+        operation: CodecOperation,
+    },
     /// The decoding operation failed.
-    DecodeError(String),
+    DecodeError {
+        /// The underlying bincode error message.
+        ///
+        /// This is a `String` because bincode errors are opaque - they don't expose
+        /// structured failure reasons, only human-readable messages via `Display`.
+        message: String,
+        /// The operation that was being performed.
+        operation: CodecOperation,
+    },
     /// The provided buffer was too small for encoding.
     BufferTooSmall {
-        /// The required buffer size.
+        /// The required buffer size (0 if unknown).
         required: usize,
         /// The actual buffer size provided.
         provided: usize,
     },
 }
 
+impl CodecError {
+    /// Creates a new encode error with the given message and operation.
+    pub fn encode(message: impl Into<String>, operation: CodecOperation) -> Self {
+        Self::EncodeError {
+            message: message.into(),
+            operation,
+        }
+    }
+
+    /// Creates a new decode error with the given message and operation.
+    pub fn decode(message: impl Into<String>, operation: CodecOperation) -> Self {
+        Self::DecodeError {
+            message: message.into(),
+            operation,
+        }
+    }
+}
+
 impl fmt::Display for CodecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::EncodeError(msg) => write!(f, "encoding failed: {msg}"),
-            Self::DecodeError(msg) => write!(f, "decoding failed: {msg}"),
+            Self::EncodeError { message, operation } => {
+                write!(f, "encoding failed while {operation}: {message}")
+            },
+            Self::DecodeError { message, operation } => {
+                write!(f, "decoding failed while {operation}: {message}")
+            },
             Self::BufferTooSmall { required, provided } => {
-                write!(
-                    f,
-                    "buffer too small: needed {required} bytes, but only {provided} provided"
-                )
+                if *required > 0 {
+                    write!(
+                        f,
+                        "buffer too small: needed {required} bytes, but only {provided} provided"
+                    )
+                } else {
+                    write!(f, "buffer too small: only {provided} bytes provided")
+                }
             },
         }
     }
@@ -100,7 +207,7 @@ pub type CodecResult<T> = Result<T, CodecError>;
 /// ```
 pub fn encode<T: Serialize>(value: &T) -> CodecResult<Vec<u8>> {
     bincode::serde::encode_to_vec(value, config())
-        .map_err(|e| CodecError::EncodeError(e.to_string()))
+        .map_err(|e| CodecError::encode(e.to_string(), CodecOperation::Encode))
 }
 
 /// Encodes a value into an existing byte slice.
@@ -133,7 +240,7 @@ pub fn encode_into<T: Serialize>(value: &T, buffer: &mut [u8]) -> CodecResult<us
                 provided: buffer.len(),
             }
         } else {
-            CodecError::EncodeError(msg)
+            CodecError::encode(msg, CodecOperation::EncodeIntoBuffer)
         }
     })
 }
@@ -157,7 +264,7 @@ pub fn encode_append<T: Serialize>(value: &T, buffer: &mut Vec<u8>) -> CodecResu
     let start_len = buffer.len();
     bincode::serde::encode_into_std_write(value, buffer, config())
         .map(|_| buffer.len() - start_len)
-        .map_err(|e| CodecError::EncodeError(e.to_string()))
+        .map_err(|e| CodecError::encode(e.to_string(), CodecOperation::AppendToBuffer))
 }
 
 /// Decodes a value from a byte slice.
@@ -177,7 +284,7 @@ pub fn encode_append<T: Serialize>(value: &T, buffer: &mut Vec<u8>) -> CodecResu
 /// ```
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<(T, usize)> {
     bincode::serde::decode_from_slice(bytes, config())
-        .map_err(|e| CodecError::DecodeError(e.to_string()))
+        .map_err(|e| CodecError::decode(e.to_string(), CodecOperation::Decode))
 }
 
 /// Decodes a value from a byte slice, ignoring the bytes consumed.
@@ -251,7 +358,7 @@ mod tests {
         let result = encode_into(&value, &mut buffer);
         assert!(matches!(
             result,
-            Err(CodecError::BufferTooSmall { .. }) | Err(CodecError::EncodeError(_))
+            Err(CodecError::BufferTooSmall { .. }) | Err(CodecError::EncodeError { .. })
         ));
     }
 
@@ -280,11 +387,19 @@ mod tests {
 
     #[test]
     fn test_codec_error_display() {
-        let err = CodecError::EncodeError("test error".to_string());
+        let err = CodecError::EncodeError {
+            message: "test error".to_string(),
+            operation: CodecOperation::Encode,
+        };
         assert!(err.to_string().contains("encoding failed"));
+        assert!(err.to_string().contains("encoding"));
 
-        let err = CodecError::DecodeError("test error".to_string());
+        let err = CodecError::DecodeError {
+            message: "test error".to_string(),
+            operation: CodecOperation::Decode,
+        };
         assert!(err.to_string().contains("decoding failed"));
+        assert!(err.to_string().contains("decoding"));
 
         let err = CodecError::BufferTooSmall {
             required: 100,
@@ -294,6 +409,44 @@ mod tests {
         assert!(msg.contains("buffer too small"));
         assert!(msg.contains("100"));
         assert!(msg.contains("10"));
+    }
+
+    #[test]
+    fn test_codec_operation_display() {
+        assert!(format!("{}", CodecOperation::Encode).contains("encoding"));
+        assert!(format!("{}", CodecOperation::Decode).contains("decoding"));
+        assert!(format!("{}", CodecOperation::EncodeMessage).contains("network message"));
+        assert!(format!("{}", CodecOperation::DecodeMessage).contains("network message"));
+        assert!(format!("{}", CodecOperation::EncodeIntoBuffer).contains("buffer"));
+        assert!(format!("{}", CodecOperation::AppendToBuffer).contains("buffer"));
+    }
+
+    #[test]
+    fn test_codec_error_helper_methods() {
+        let encode_err = CodecError::encode("test", CodecOperation::Encode);
+        assert!(matches!(encode_err, CodecError::EncodeError { .. }));
+
+        let decode_err = CodecError::decode("test", CodecOperation::Decode);
+        assert!(matches!(decode_err, CodecError::DecodeError { .. }));
+    }
+
+    #[test]
+    fn test_codec_error_equality() {
+        let err1 = CodecError::encode("test", CodecOperation::Encode);
+        let err2 = CodecError::encode("test", CodecOperation::Encode);
+        let err3 = CodecError::encode("different", CodecOperation::Encode);
+        let err4 = CodecError::encode("test", CodecOperation::EncodeMessage);
+
+        assert_eq!(err1, err2);
+        assert_ne!(err1, err3);
+        assert_ne!(err1, err4);
+    }
+
+    #[test]
+    fn test_codec_operation_is_copy() {
+        let op = CodecOperation::Encode;
+        let op2 = op;
+        assert_eq!(op, op2);
     }
 
     #[test]

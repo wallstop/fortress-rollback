@@ -5,7 +5,7 @@ members = [".", "tests/network-peer"]
 
 [package]
 name = "fortress-rollback"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["wallstop <wallstop@wallstopstudios.com>"]
 edition = "2021"
 rust-version = "1.86"  # Minimum Supported Rust Version (MSRV) - required by criterion 0.8.1
@@ -15,6 +15,7 @@ readme = "README.md"
 repository = "https://github.com/wallstop/fortress-rollback"
 keywords = ["gamedev", "networking", "ggpo", "rollback"]
 categories = ["network-programming", "game-development"]
+documentation = "https://docs.rs/fortress-rollback"
 exclude = [
     # Build/CI artifacts
     ".tla-tools/",
@@ -25,6 +26,13 @@ exclude = [
     "specs/",
     "proptest-regressions/",
     "actionlint",
+    # Security scanning baseline (development only)
+    ".secrets.baseline",
+    # Mutation testing artifacts (can be very large ~1GB+)
+    "mutants.out/",
+    # TLA+ model checker output
+    "states/",
+    "states.dot",
     # Development config files (not needed by users)
     ".cargo/",
     ".config/",
@@ -39,9 +47,27 @@ exclude = [
     "clippy.toml",
     "deny.toml",
     "rustfmt.toml",
+    # CI/tooling configuration files (only used for development workflows)
+    ".lychee.toml",
+    ".typos.toml",
+    ".vale.ini",
+    ".vale/",
+    "codecov.yml",
+    "Cross.toml",
+    "mkdocs.yml",
+    "requirements-docs.txt",
+    # Python virtual environment and cache (for TLA+ tooling)
+    ".venv/",
+    ".pytest_cache/",
+    # Session progress tracking files
+    "progress/",
+    # GitHub wiki mirror
+    "wiki/",
     # LLM instruction files (for contributing to this project, not for users)
     "AGENTS.md",
     "CLAUDE.md",
+    # Development planning document (not for users)
+    "PLAN.md",
     # Note: .cursorrules is already excluded above with development config files
     # Note: llms.txt is intentionally NOT excluded - it helps AI tools understand
     # the library API for users integrating Fortress Rollback into their projects
@@ -61,8 +87,15 @@ exclude = [
     "Cargo.lock",
 ]
 
+[badges]
+maintenance = { status = "actively-developed" }
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(loom)'] }
+# Allow unknown lints during lint rename transitions (e.g., unchecked_duration_subtraction -> unchecked_time_subtraction in Rust 1.92)
+unknown_lints = "allow"
+# Allow renamed lints during Rust version transitions
+renamed_and_removed_lints = "allow"
 
 # Defensive programming clippy lints
 # Reference: https://corrode.dev/blog/defensive-programming/
@@ -155,9 +188,11 @@ semicolon_if_nothing_returned = "allow"
 struct_excessive_bools = "allow"
 # Allow trivially copy pass by ref (API consistency)
 trivially_copy_pass_by_ref = "allow"
-# Allow unchecked duration/time subtraction (validated)
-# Note: renamed to unchecked_time_subtraction in rust 1.92+
+# Allow unchecked time subtraction (validated by our logic)
+# Note: unchecked_duration_subtraction was renamed to unchecked_time_subtraction in Rust 1.92
+# We allow both names for compatibility across Rust versions
 unchecked_duration_subtraction = "allow"
+unchecked_time_subtraction = "allow"
 
 # Note: wildcard_enum_match_arm is NOT enabled because public enums use #[non_exhaustive],
 # which already forces external users to handle wildcards. Internal test code uses wildcards
@@ -346,6 +381,8 @@ serde_json = "1.0"
 criterion = { version = "0.8", features = ["html_reports"] }
 # Additional testing utilities
 arbitrary = { version = "1.3", features = ["derive"] }
+# Macro utilities for data-driven tests
+pastey = "0.2"
 
 # Examples
 [[example]]
@@ -399,6 +436,12 @@ overflow-checks = true
 lto = "thin"
 # Single codegen unit for maximum optimization (slightly slower builds)
 codegen-units = 1
+# Strip symbols from release binaries for 50-80% size reduction
+# Safe for production since we have comprehensive error handling
+strip = true
+# Use abort on panic for 10-20% size reduction (removes unwinding machinery)
+# Safe because this crate follows a zero-panic policy - all errors return Result
+panic = "abort"
 
 # CI-specific profile with both overflow checks and debug assertions
 # Used by ci-safety.yml for maximum runtime checking

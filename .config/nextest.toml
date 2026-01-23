@@ -28,6 +28,11 @@ slow-timeout = { period = "30s", terminate-after = 2 }
 # Status output during test runs
 status-level = "pass"
 
+# CRITICAL: Always capture and display test output for debugging
+# This ensures failure output is visible without re-running tests
+failure-output = "immediate-final" # Show failure output immediately AND at end
+success-output = "never"           # Hide output for passing tests (reduce noise)
+
 # Serialize tests that use port 7777 (and 8888)
 [[profile.default.overrides]]
 filter = 'test(sessions::p2p::) | test(sessions::p2p_enum::)'
@@ -45,7 +50,7 @@ test-group = 'port-7777'
 # Tests using stress_test preset need up to 180s (60s sync timeout + overhead)
 [[profile.default.overrides]]
 filter = 'test(network::multi_process::)'
-slow-timeout = { period = "60s", terminate-after = 4 }  # Max 240s for extreme scenarios
+slow-timeout = { period = "60s", terminate-after = 4 } # Max 240s for extreme scenarios
 
 [profile.default.junit]
 # Generate JUnit XML reports for CI integration
@@ -54,5 +59,5 @@ path = "target/nextest/default/junit.xml"
 # CI profile - same zero-tolerance policy
 [profile.ci]
 retries = 0
-fail-fast = false  # Run all tests to see full failure picture
+fail-fast = false                                      # Run all tests to see full failure picture
 slow-timeout = { period = "60s", terminate-after = 3 }

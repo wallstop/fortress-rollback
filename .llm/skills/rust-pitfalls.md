@@ -319,6 +319,115 @@ let guard = arc.lock().unwrap();
 let cloned = guard.clone();  // Clones the Vec, not the Arc!
 ```
 
+### Arc Must Be Cloned BEFORE thread::spawn
+
+When moving an `Arc` into a spawned thread, clone it BEFORE the `spawn` call:
+
+```rust
+// ❌ BAD: Arc moved into thread, original cannot be used after
+let cell = Arc::new(GameStateCell::new());
+let handle = thread::spawn(move || {
+    cell.save(Frame::new(1), Some(42), None);  // cell moved here
+});
+handle.join().unwrap();
+assert_eq!(cell.load(), Some(42));  // ERROR: cell was moved!
+
+// ✅ GOOD: Clone Arc before spawning, keep original for later use
+let cell = Arc::new(GameStateCell::new());
+let cell_for_thread = cell.clone();  // Clone BEFORE spawn
+
+let handle = thread::spawn(move || {
+    cell_for_thread.save(Frame::new(1), Some(42), None);
+});
+handle.join().unwrap();
+assert_eq!(cell.load(), Some(42));  // Original still available
+
+// ✅ GOOD: Multiple threads, each gets its own clone
+let data = Arc::new(Mutex::new(vec![]));
+let data1 = data.clone();
+let data2 = data.clone();
+
+let t1 = thread::spawn(move || data1.lock().unwrap().push(1));
+let t2 = thread::spawn(move || data2.lock().unwrap().push(2));
+
+t1.join().unwrap();
+t2.join().unwrap();
+
+// Original Arc still accessible for verification
+assert_eq!(data.lock().unwrap().len(), 2);
+```
+
+---
+
+## Pattern Matching and Ownership Pitfalls
+
+### Use-After-Move in `if let` Fallthrough
+
+The `if let` pattern moves ownership, making the original variable unusable in fallback paths:
+
+```rust
+// ❌ USE-AFTER-MOVE BUG - Compiles with older Rust, fails in 2024 edition
+fn map_error(e: MyError) -> OtherError {
+    if let MyError::SpecificVariant { field } = e {
+        return OtherError::Mapped { field };
+    }
+    // BUG: `e` was moved by the `if let` pattern match above!
+    log::warn!("unexpected error: {:?}", e);  // ERROR: use of moved value
+    OtherError::Unknown
+}
+
+// ✅ CORRECT - Single match expression handles all cases
+fn map_error(e: MyError) -> OtherError {
+    match e {
+        MyError::SpecificVariant { field } => OtherError::Mapped { field },
+        other => {
+            log::warn!("unexpected error: {:?}", other);
+            OtherError::Unknown
+        }
+    }
+}
+```
+
+**Why this happens:**
+
+- `if let Pattern = value` moves `value` into the pattern
+- Even if the pattern doesn't match, ownership has been consumed
+- The fallthrough path cannot use `value` because it's been moved
+
+**The fix:**
+
+- Use `match` with explicit arms instead of `if let` + fallthrough
+- Or borrow: `if let Pattern = &value` (when you don't need ownership)
+
+**This pattern is especially common in error mapping functions** where you want to:
+
+1. Extract structured data from a specific variant
+2. Fall back with a warning/log for unexpected variants
+
+```rust
+// ❌ Anti-pattern: if let with fallthrough
+fn map_rle_error(e: FortressError) -> CompressionError {
+    if let FortressError::RleError { reason } = e {
+        return CompressionError::Rle { reason };
+    }
+    // Want to log `e` here but it's moved!
+    CompressionError::Unknown
+}
+
+// ✅ Correct: match with named fallback binding
+fn map_rle_error(e: FortressError) -> CompressionError {
+    match e {
+        FortressError::RleError { reason } => CompressionError::Rle { reason },
+        other => {
+            log::warn!("unexpected: {:?}", other);
+            CompressionError::Unknown
+        }
+    }
+}
+```
+
+**Clippy lint:** Enable `clippy::if_let_some_else` (nightly) for early detection.
+
 ---
 
 ## Error Handling Pitfalls

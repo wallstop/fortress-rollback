@@ -15,7 +15,14 @@
 set -euo pipefail
 
 # Configuration
-TEMP_DIR="${TMPDIR:-/tmp}"
+# Use platform-appropriate temp directory
+if [[ "${OSTYPE:-}" == msys* ]] || [[ "${OSTYPE:-}" == cygwin* ]] || [[ -n "${WINDIR:-}" ]]; then
+    # Windows: use TEMP or USERPROFILE
+    TEMP_DIR="${TEMP:-${USERPROFILE:-/tmp}/AppData/Local/Temp}"
+else
+    # Unix: use TMPDIR or /tmp
+    TEMP_DIR="${TMPDIR:-/tmp}"
+fi
 TEST_FILE="$TEMP_DIR/sccache_test_$$.rs"
 TEST_OUTPUT="$TEMP_DIR/sccache_test_$$"
 ERROR_LOG="$TEMP_DIR/sccache_test_$$.log"
@@ -24,6 +31,26 @@ MAX_RETRIES=3
 RETRY_DELAY_SECONDS=2
 # Timeout for each sccache operation (seconds)
 SCCACHE_TIMEOUT=30
+
+# Cross-platform timeout function
+# On Unix, uses the 'timeout' command if available
+# On Windows (Git Bash), runs without timeout since Windows timeout.exe is interactive
+run_with_timeout() {
+    local timeout_seconds="$1"
+    shift
+
+    # Check if we're on Windows (Git Bash/MSYS)
+    if [[ "${OSTYPE:-}" == msys* ]] || [[ "${OSTYPE:-}" == cygwin* ]] || [[ -n "${WINDIR:-}" ]]; then
+        # On Windows, just run without timeout (Windows timeout.exe is interactive)
+        "$@"
+    elif command -v timeout &>/dev/null; then
+        # Unix with GNU timeout
+        timeout "$timeout_seconds" "$@"
+    else
+        # Fallback: run without timeout
+        "$@"
+    fi
+}
 
 cleanup() {
     rm -f "$TEST_FILE" "$TEST_OUTPUT" "$ERROR_LOG" "$VERSION_LOG"
@@ -55,7 +82,7 @@ verify_version_query() {
     local attempt=$1
     echo "Attempt $attempt: Testing sccache version query (rustc -vV)..."
 
-    if timeout "$SCCACHE_TIMEOUT" env RUSTC_WRAPPER=sccache rustc -vV 2>"$VERSION_LOG"; then
+    if run_with_timeout "$SCCACHE_TIMEOUT" env RUSTC_WRAPPER=sccache rustc -vV 2>"$VERSION_LOG"; then
         echo "  Version query: OK"
         return 0
     else
@@ -77,7 +104,7 @@ verify_compilation() {
     # Create a minimal Rust program
     echo 'fn main() {}' > "$TEST_FILE"
 
-    if timeout "$SCCACHE_TIMEOUT" env RUSTC_WRAPPER=sccache rustc "$TEST_FILE" -o "$TEST_OUTPUT" 2>"$ERROR_LOG"; then
+    if run_with_timeout "$SCCACHE_TIMEOUT" env RUSTC_WRAPPER=sccache rustc "$TEST_FILE" -o "$TEST_OUTPUT" 2>"$ERROR_LOG"; then
         echo "  Compilation: OK"
         return 0
     else

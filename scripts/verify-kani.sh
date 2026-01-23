@@ -45,19 +45,24 @@ TOTAL=0
 # Tier definitions - proofs grouped by approximate runtime
 # Tier 1: Fast proofs (<30s each) - simple property checks
 TIER1_PROOFS=(
+    # Core frame/handle proofs (src/lib.rs)
     "proof_frame_new_valid"
     "proof_frame_null_consistency"
     "proof_frame_to_option"
     "proof_frame_from_option"
+    "proof_frame_ordering"
+    # Varint proofs (src/rle.rs)
     "proof_varint_encoded_len_correct"
     "proof_varint_encode_single_byte"
     "proof_varint_encoded_len_no_overflow"
     "proof_varint_decode_empty_safe"
+    # TimeSync proofs (src/time_sync.rs)
     "proof_window_index_in_bounds"
     "proof_sum_no_overflow"
     "proof_division_safe"
     "proof_window_size_minimum"
     "proof_default_valid"
+    # Config proofs (src/sessions/config.rs)
     "proof_validate_accepts_valid_queue_lengths"
     "proof_validate_boundary_at_two"
     "proof_max_frame_delay_derivation"
@@ -66,10 +71,55 @@ TIER1_PROOFS=(
     "proof_preset_configs_valid"
     "proof_zero_window_size_corrected"
     "proof_negative_frame_safe"
+    # Protocol state proofs (src/network/protocol/state.rs)
+    "proof_state_count_matches_specification"
+    "proof_state_index_bijection"
+    "proof_clone_correctness"
+    "proof_protocol_state_partial_eq_symmetric"
+    "proof_variants_distinct"
+    "proof_exhaustive_match"
+    "proof_shutdown_is_terminal"
+    "proof_initializing_is_initial"
+    # Protocol event proofs (src/network/protocol/event.rs)
+    "proof_event_partial_eq_symmetric"
+    "proof_synchronizing_preserves_fields"
+    "proof_synchronizing_boundary_values"
+    "proof_network_interrupted_timeout_preserved"
+    "proof_sync_timeout_elapsed_preserved"
+    "proof_unit_variants_distinct"
+    "proof_clone_synchronizing"
+    "proof_clone_network_interrupted"
+    "proof_clone_sync_timeout"
+    "proof_clone_unit_variants"
+    "proof_input_event_preserves_data"
+    "proof_input_event_clone"
+    "proof_synchronizing_inequality"
+    "proof_network_interrupted_inequality"
+    "proof_all_variants_distinct"
+    # Protocol input_bytes proofs (src/network/protocol/input_bytes.rs)
+    "proof_input_bytes_frame_preserved"
+    "proof_input_bytes_stores_bytes"
+    "proof_clone_preserves_frame"
+    "proof_clone_preserves_bytes"
+    "proof_clone_is_independent"
+    "proof_null_frame_detection"
+    "proof_divisibility_check"
+    "proof_empty_input_bytes_valid"
+    "proof_extreme_frame_values"
+    # Protocol mod.rs proofs (src/network/protocol/mod.rs)
+    "proof_protocol_state_count"
+    "proof_running_is_active_state"
+    "proof_connection_status_default"
+    "proof_connection_status_frame_preservation"
+    "proof_connection_status_disconnected_flag"
+    "proof_frame_null_detection"
+    "proof_player_handle_preservation"
+    "proof_player_handle_equality"
 )
 
 # Tier 2: Medium proofs (30s-2min each) - moderate complexity
 TIER2_PROOFS=(
+    # Core frame proofs (src/lib.rs)
     "proof_frame_add_small_safe"
     "proof_frame_sub_frames_correct"
     "proof_frame_ordering_consistent"
@@ -77,22 +127,44 @@ TIER2_PROOFS=(
     "proof_frame_add_assign_consistent"
     "proof_frame_sub_assign_consistent"
     "proof_player_handle_validity"
+    # Varint proofs (src/rle.rs)
     "proof_varint_decode_terminates"
     "proof_varint_decode_offset_safe"
     "proof_varint_roundtrip_small"
     "proof_varint_continuation_handling"
+    # TimeSync proofs (src/time_sync.rs)
     "proof_advance_frame_safe"
+    # Config proofs (src/sessions/config.rs)
     "proof_validate_frame_delay_constraint"
     "proof_max_frame_delay_is_valid_delay"
+    # InputQueue proofs (src/input_queue/mod.rs)
     "proof_new_queue_valid"
     "proof_head_wraparound"
     "proof_queue_index_calculation"
     "proof_length_calculation_consistent"
+    # SyncLayer proofs (src/sync_layer/mod.rs)
     "proof_new_sync_layer_valid"
     "proof_advance_frame_monotonic"
     "proof_saved_states_count"
     "proof_get_cell_validates_frame"
     "proof_saved_states_circular_index"
+    # Protocol state transition proofs (src/network/protocol/state.rs)
+    "proof_transition_matrix_rejects_backwards"
+    "proof_transition_matrix_sequential"
+    "proof_transition_matrix_sync_required"
+    # Protocol input_bytes proofs (src/network/protocol/input_bytes.rs)
+    "proof_player_slice_bounds_valid"
+    "proof_first_non_null_frame_selection"
+    # Protocol mod.rs proofs (src/network/protocol/mod.rs)
+    "proof_frame_addition_safe"
+    "proof_frame_gap_safe"
+    "proof_synchronize_precondition"
+    "proof_disconnect_idempotent_from_shutdown"
+    "proof_sync_counter_decrement_safe"
+    "proof_sync_remaining_bounds"
+    "proof_local_frame_advantage_bounds"
+    "proof_remote_frame_advantage_from_i8"
+    "proof_frame_advantage_null_guard"
 )
 
 # Tier 3: Slow proofs (>2min each) - complex state verification

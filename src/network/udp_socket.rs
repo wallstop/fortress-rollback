@@ -47,6 +47,26 @@ impl UdpNonBlockingSocket {
             send_buffer: [0; SEND_BUFFER_SIZE],
         })
     }
+
+    /// Returns the local address this socket is bound to.
+    ///
+    /// This is useful when binding to port 0 (ephemeral port) to discover
+    /// the actual port assigned by the operating system.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let socket = UdpNonBlockingSocket::bind_to_port(0)?;
+    /// let local_addr = socket.local_addr()?;
+    /// println!("Bound to port: {}", local_addr.port());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the socket's local address cannot be retrieved.
+    pub fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        self.socket.local_addr()
+    }
 }
 
 impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
@@ -215,6 +235,7 @@ mod tests {
     // Helper function to wait for messages with retry logic
     // This is necessary because UDP packet delivery timing can vary across platforms
     #[cfg(not(miri))]
+    #[track_caller]
     fn wait_for_messages(
         socket: &mut UdpNonBlockingSocket,
         expected_count: usize,
@@ -237,6 +258,7 @@ mod tests {
     // but on Windows (and some other platforms), you cannot send to 0.0.0.0 - you
     // must send to 127.0.0.1 for loopback communication to work correctly.
     #[cfg(not(miri))]
+    #[track_caller]
     fn to_loopback_addr(socket: &UdpNonBlockingSocket) -> SocketAddr {
         let local = socket.socket.local_addr().unwrap();
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local.port())
@@ -246,8 +268,12 @@ mod tests {
     #[cfg(not(miri))] // Miri cannot execute foreign functions like socket()
     fn test_udp_socket_bind_to_port() {
         // Bind to port 0 to let OS assign an available port
-        let socket = UdpNonBlockingSocket::bind_to_port(0);
-        assert!(socket.is_ok());
+        let result = UdpNonBlockingSocket::bind_to_port(0);
+        assert!(
+            result.is_ok(),
+            "Failed to bind to ephemeral port 0: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -408,6 +434,37 @@ mod tests {
         let local_addr = socket.socket.local_addr().unwrap();
         // Port should be non-zero (OS assigned)
         assert_ne!(local_addr.port(), 0);
+    }
+
+    /// Tests that `local_addr()` returns a valid address when binding to an ephemeral port.
+    ///
+    /// This documents the expected behavior: when binding to port 0, the OS assigns
+    /// an available ephemeral port, and `local_addr()` should return a non-zero port.
+    #[test]
+    #[cfg(not(miri))]
+    fn test_local_addr_returns_ephemeral_port() {
+        // Bind to port 0 to request an ephemeral port from the OS
+        let socket = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+
+        // Use the public local_addr() method (not socket.socket.local_addr())
+        let local_addr = socket
+            .local_addr()
+            .expect("local_addr() should succeed after successful bind");
+
+        // OS should assign a non-zero ephemeral port (typically in range 49152-65535)
+        assert_ne!(
+            local_addr.port(),
+            0,
+            "local_addr() should return a non-zero port when binding to ephemeral port 0, got: {}",
+            local_addr
+        );
+
+        // Address should be 0.0.0.0 (UNSPECIFIED) since we bound to that
+        assert!(
+            local_addr.ip().is_unspecified(),
+            "local_addr() IP should be 0.0.0.0 (UNSPECIFIED), got: {}",
+            local_addr.ip()
+        );
     }
 
     #[test]

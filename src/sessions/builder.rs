@@ -4,10 +4,13 @@ use std::sync::Arc;
 use web_time::Duration;
 
 use crate::{
-    network::protocol::UdpProtocol, sessions::player_registry::PlayerRegistry,
-    telemetry::ViolationObserver, time_sync::TimeSyncConfig, Config, DesyncDetection,
-    FortressError, NonBlockingSocket, P2PSession, PlayerHandle, PlayerType, SpectatorSession,
-    SyncTestSession,
+    error::{InvalidRequestKind, SerializationErrorKind},
+    network::protocol::UdpProtocol,
+    sessions::player_registry::PlayerRegistry,
+    telemetry::ViolationObserver,
+    time_sync::TimeSyncConfig,
+    Config, DesyncDetection, FortressError, NonBlockingSocket, P2PSession, PlayerHandle,
+    PlayerType, SpectatorSession, SyncTestSession,
 };
 
 // Re-export config types for backwards compatibility with code that imports from builder
@@ -202,32 +205,39 @@ impl<T: Config> SessionBuilder<T> {
     ) -> Result<Self, FortressError> {
         // check if the player handle is already in use
         if self.player_reg.handles.contains_key(&player_handle) {
-            return Err(FortressError::InvalidRequest {
-                info: "Player handle already in use.".to_owned(),
-            });
+            return Err(InvalidRequestKind::PlayerHandleInUse {
+                handle: player_handle,
+            }
+            .into());
         }
         // check if the player handle is valid for the given player type
         match player_type {
             PlayerType::Local => {
                 self.local_players += 1;
                 if !player_handle.is_valid_player_for(self.num_players) {
-                    return Err(FortressError::InvalidRequest {
-                        info: "The player handle you provided is invalid. For a local player, the handle should be between 0 and num_players".to_owned(),
-                    });
+                    return Err(InvalidRequestKind::InvalidLocalPlayerHandle {
+                        handle: player_handle,
+                        num_players: self.num_players,
+                    }
+                    .into());
                 }
             },
             PlayerType::Remote(_) => {
                 if !player_handle.is_valid_player_for(self.num_players) {
-                    return Err(FortressError::InvalidRequest {
-                        info: "The player handle you provided is invalid. For a remote player, the handle should be between 0 and num_players".to_owned(),
-                    });
+                    return Err(InvalidRequestKind::InvalidRemotePlayerHandle {
+                        handle: player_handle,
+                        num_players: self.num_players,
+                    }
+                    .into());
                 }
             },
             PlayerType::Spectator(_) => {
                 if !player_handle.is_spectator_for(self.num_players) {
-                    return Err(FortressError::InvalidRequest {
-                        info: "The player handle you provided is invalid. For a spectator, the handle should be num_players or higher".to_owned(),
-                    });
+                    return Err(InvalidRequestKind::InvalidSpectatorHandle {
+                        handle: player_handle,
+                        num_players: self.num_players,
+                    }
+                    .into());
                 }
             },
         }
@@ -298,15 +308,7 @@ impl<T: Config> SessionBuilder<T> {
     pub fn with_input_delay(mut self, delay: usize) -> Result<Self, FortressError> {
         let max_delay = self.input_queue_config.max_frame_delay();
         if delay > max_delay {
-            return Err(FortressError::InvalidRequest {
-                info: format!(
-                    "Input delay {} exceeds maximum allowed value of {} (queue_length - 1). \
-                     At 60fps, this would be {:.1}+ seconds of delay.",
-                    delay,
-                    max_delay,
-                    delay as f64 / 60.0
-                ),
-            });
+            return Err(InvalidRequestKind::FrameDelayTooLarge { delay, max_delay }.into());
         }
         self.input_delay = delay;
         Ok(self)
@@ -319,9 +321,7 @@ impl<T: Config> SessionBuilder<T> {
     /// Returns [`FortressError::InvalidRequest`] if `num_players` is 0.
     pub fn with_num_players(mut self, num_players: usize) -> Result<Self, FortressError> {
         if num_players == 0 {
-            return Err(FortressError::InvalidRequest {
-                info: "Number of players must be greater than 0".to_owned(),
-            });
+            return Err(InvalidRequestKind::ZeroPlayers.into());
         }
         self.num_players = num_players;
         Ok(self)
@@ -605,12 +605,7 @@ impl<T: Config> SessionBuilder<T> {
     /// ```
     pub fn with_event_queue_size(mut self, size: usize) -> Result<Self, FortressError> {
         if size < 10 {
-            return Err(FortressError::InvalidRequest {
-                info: format!(
-                    "Event queue size {} is too small. Must be at least 10.",
-                    size
-                ),
-            });
+            return Err(InvalidRequestKind::EventQueueSizeTooSmall { size }.into());
         }
         self.event_queue_size = size;
         Ok(self)
@@ -623,9 +618,7 @@ impl<T: Config> SessionBuilder<T> {
     /// [`InvalidRequest`]: FortressError::InvalidRequest
     pub fn with_fps(mut self, fps: usize) -> Result<Self, FortressError> {
         if fps == 0 {
-            return Err(FortressError::InvalidRequest {
-                info: "FPS should be higher than 0.".to_owned(),
-            });
+            return Err(InvalidRequestKind::ZeroFps.into());
         }
         self.fps = fps;
         Ok(self)
@@ -645,19 +638,12 @@ impl<T: Config> SessionBuilder<T> {
         mut self,
         max_frames_behind: usize,
     ) -> Result<Self, FortressError> {
-        if max_frames_behind < 1 {
-            return Err(FortressError::InvalidRequest {
-                info: "Max frames behind cannot be smaller than 1.".to_owned(),
-            });
-        }
-
-        if max_frames_behind >= self.spectator_config.buffer_size {
-            return Err(FortressError::InvalidRequest {
-                info: format!(
-                    "Max frames behind cannot be larger or equal than the Spectator buffer size ({})",
-                    self.spectator_config.buffer_size
-                ),
-            });
+        if max_frames_behind < 1 || max_frames_behind >= self.spectator_config.buffer_size {
+            return Err(InvalidRequestKind::MaxFramesBehindInvalid {
+                value: max_frames_behind,
+                buffer_size: self.spectator_config.buffer_size,
+            }
+            .into());
         }
         self.max_frames_behind = max_frames_behind;
         self.spectator_config.max_frames_behind = max_frames_behind;
@@ -669,17 +655,12 @@ impl<T: Config> SessionBuilder<T> {
     ///
     /// Note: Prefer using [`Self::with_spectator_config`] for configuring spectator behavior.
     pub fn with_catchup_speed(mut self, catchup_speed: usize) -> Result<Self, FortressError> {
-        if catchup_speed < 1 {
-            return Err(FortressError::InvalidRequest {
-                info: "Catchup speed cannot be smaller than 1.".to_owned(),
-            });
-        }
-
-        if catchup_speed >= self.spectator_config.max_frames_behind {
-            return Err(FortressError::InvalidRequest {
-                info: "Catchup speed cannot be larger or equal than the allowed maximum frames behind host"
-                    .to_owned(),
-            });
+        if catchup_speed < 1 || catchup_speed >= self.spectator_config.max_frames_behind {
+            return Err(InvalidRequestKind::CatchupSpeedInvalid {
+                speed: catchup_speed,
+                max_frames_behind: self.spectator_config.max_frames_behind,
+            }
+            .into());
         }
         self.catchup_speed = catchup_speed;
         self.spectator_config.catchup_speed = catchup_speed;
@@ -728,13 +709,15 @@ impl<T: Config> SessionBuilder<T> {
         socket: impl NonBlockingSocket<T::Address> + 'static,
     ) -> Result<P2PSession<T>, FortressError> {
         // check if all players are added
-        for player_handle in 0..self.num_players {
-            let handle = PlayerHandle::new(player_handle);
-            if !self.player_reg.handles.contains_key(&handle) {
-                return Err(FortressError::InvalidRequest{
-                    info: "Not enough players have been added. Keep registering players up to the defined player number.".to_owned(),
-                });
+        let registered_count = (0..self.num_players)
+            .filter(|&i| self.player_reg.handles.contains_key(&PlayerHandle::new(i)))
+            .count();
+        if registered_count < self.num_players {
+            return Err(InvalidRequestKind::NotEnoughPlayers {
+                expected: self.num_players,
+                actual: registered_count,
             }
+            .into());
         }
 
         // count the number of players per address
@@ -755,21 +738,13 @@ impl<T: Config> SessionBuilder<T> {
                 PlayerType::Remote(peer_addr) => {
                     let endpoint = self
                         .create_endpoint(handles, peer_addr.clone(), self.local_players)
-                        .ok_or_else(|| FortressError::SerializationError {
-                            context:
-                                "Failed to create protocol endpoint - input serialization error"
-                                    .to_owned(),
-                        })?;
+                        .ok_or(SerializationErrorKind::EndpointCreationFailed)?;
                     self.player_reg.remotes.insert(peer_addr, endpoint);
                 },
                 PlayerType::Spectator(peer_addr) => {
                     let endpoint = self
                         .create_endpoint(handles, peer_addr.clone(), self.num_players) // the host of the spectator sends inputs for all players
-                        .ok_or_else(|| FortressError::SerializationError {
-                            context:
-                                "Failed to create spectator endpoint - input serialization error"
-                                    .to_owned(),
-                        })?;
+                        .ok_or(SerializationErrorKind::SpectatorEndpointCreationFailed)?;
                     self.player_reg.spectators.insert(peer_addr, endpoint);
                 },
                 PlayerType::Local => (),
@@ -826,7 +801,7 @@ impl<T: Config> SessionBuilder<T> {
             self.sync_config,
             self.protocol_config,
         )?;
-        host.synchronize();
+        host.synchronize().ok()?;
         Some(SpectatorSession::new(
             self.num_players,
             Box::new(socket),
@@ -847,9 +822,11 @@ impl<T: Config> SessionBuilder<T> {
     /// After creating the session, add a local player, set input delay for them and then start the session.
     pub fn start_synctest_session(self) -> Result<SyncTestSession<T>, FortressError> {
         if self.check_dist >= self.max_prediction {
-            return Err(FortressError::InvalidRequest {
-                info: "Check distance too big.".to_owned(),
-            });
+            return Err(InvalidRequestKind::CheckDistanceTooLarge {
+                check_dist: self.check_dist,
+                max_prediction: self.max_prediction,
+            }
+            .into());
         }
 
         // Validate the input queue configuration
@@ -888,7 +865,7 @@ impl<T: Config> SessionBuilder<T> {
             self.protocol_config,
         )?;
         // start the synchronization
-        endpoint.synchronize();
+        endpoint.synchronize().ok()?;
         Some(endpoint)
     }
 }

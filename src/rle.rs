@@ -35,34 +35,10 @@
 //! These functions are re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
 //! They are not part of the stable public API.
 
-use std::error::Error;
-
-use crate::FortressError;
-
-/// Error type for RLE decoding failures.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RleDecodeError {
-    message: String,
-}
-
-impl RleDecodeError {
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for RleDecodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RLE decode error: {}", self.message)
-    }
-}
-
-impl Error for RleDecodeError {}
+use crate::{FortressError, InternalErrorKind, RleDecodeReason};
 
 /// Result type for RLE operations.
-pub type RleResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+pub type RleResult<T> = Result<T, FortressError>;
 
 /// Varint encoding/decoding utilities.
 ///
@@ -352,11 +328,13 @@ fn decode_with_offset(buf: &[u8], mut offset: usize) -> RleResult<Vec<u8>> {
                 // Fill with 0xFF
                 for i in 0..len {
                     if ptr + i < bitfield.len() {
-                        *bitfield.get_mut(ptr + i).ok_or_else(|| {
-                            FortressError::InternalError {
-                                context: "RLE decode bitfield index out of bounds".into(),
-                            }
-                        })? = 255;
+                        *bitfield.get_mut(ptr + i).ok_or(
+                            FortressError::InternalErrorStructured {
+                                kind: InternalErrorKind::RleDecodeError {
+                                    reason: RleDecodeReason::BitfieldIndexOutOfBounds,
+                                },
+                            },
+                        )? = 255;
                     }
                 }
             }
@@ -368,17 +346,20 @@ fn decode_with_offset(buf: &[u8], mut offset: usize) -> RleResult<Vec<u8>> {
             let dst_end = (ptr + src_len).min(bitfield.len());
             let actual_len = dst_end - ptr;
             if actual_len > 0 && offset + actual_len <= buf.len() {
-                let dst_slice =
-                    bitfield
-                        .get_mut(ptr..dst_end)
-                        .ok_or_else(|| FortressError::InternalError {
-                            context: "RLE decode destination slice out of bounds".into(),
-                        })?;
-                let src_slice = buf.get(offset..offset + actual_len).ok_or_else(|| {
-                    FortressError::InternalError {
-                        context: "RLE decode source slice out of bounds".into(),
-                    }
-                })?;
+                let dst_slice = bitfield.get_mut(ptr..dst_end).ok_or(
+                    FortressError::InternalErrorStructured {
+                        kind: InternalErrorKind::RleDecodeError {
+                            reason: RleDecodeReason::DestinationSliceOutOfBounds,
+                        },
+                    },
+                )?;
+                let src_slice = buf.get(offset..offset + actual_len).ok_or(
+                    FortressError::InternalErrorStructured {
+                        kind: InternalErrorKind::RleDecodeError {
+                            reason: RleDecodeReason::SourceSliceOutOfBounds,
+                        },
+                    },
+                )?;
                 dst_slice.copy_from_slice(src_slice);
             }
             offset += len;
@@ -412,11 +393,14 @@ fn decode_len_with_offset(buf: &[u8], mut offset: usize) -> RleResult<usize> {
     }
 
     if offset > buf.len() {
-        return Err(Box::new(RleDecodeError::new(format!(
-            "Invalid RLE bitfield: offset {} > buffer length {}",
-            offset,
-            buf.len()
-        ))));
+        return Err(FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::RleDecodeError {
+                reason: RleDecodeReason::TruncatedData {
+                    offset,
+                    buffer_len: buf.len(),
+                },
+            },
+        });
     }
 
     Ok(len)
@@ -435,6 +419,37 @@ fn decode_len_with_offset(buf: &[u8], mut offset: usize) -> RleResult<usize> {
 )]
 mod tests {
     use super::*;
+
+    // ================
+    // Test-only types
+    // ================
+
+    /// Test-only error type for RLE decoding failures.
+    ///
+    /// This struct is only used in tests to verify error display formatting.
+    /// Production code uses the structured `RleDecodeReason` variants via
+    /// `FortressError::InternalErrorStructured`.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RleDecodeError {
+        message: String,
+    }
+
+    impl RleDecodeError {
+        /// Creates a new RLE decode error with the given message.
+        fn new(message: impl Into<String>) -> Self {
+            Self {
+                message: message.into(),
+            }
+        }
+    }
+
+    impl std::fmt::Display for RleDecodeError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "RLE decode error: {}", self.message)
+        }
+    }
+
+    impl std::error::Error for RleDecodeError {}
 
     // ================
     // Varint tests
@@ -1111,6 +1126,7 @@ mod tests {
 )]
 mod property_tests {
     use super::*;
+    use crate::test_config::miri_case_count;
     use proptest::prelude::*;
 
     /// Maximum size for property tests to keep execution time reasonable
@@ -1143,6 +1159,10 @@ mod property_tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: miri_case_count(),
+            ..ProptestConfig::default()
+        })]
         /// Property: Roundtrip invariant - decode(encode(data)) == data for ALL inputs.
         ///
         /// This is THE fundamental property of any lossless compression algorithm.
@@ -1346,6 +1366,10 @@ mod kani_proofs {
     ///
     /// LEB128 encoding uses 7 bits per byte, so for a value with N bits,
     /// we need ceil(N/7) bytes. For value 0, we need 1 byte.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Varint length calculation correctness
+    /// - Related: proof_varint_encoded_len_no_overflow, proof_varint_encode_single_byte
     #[kani::proof]
     fn proof_varint_encoded_len_correct() {
         let value: u64 = kani::any();
@@ -1372,6 +1396,10 @@ mod kani_proofs {
     /// Proof: varint::encode produces correct output for small values.
     ///
     /// For values < 128, the encoding is a single byte equal to the value.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Single-byte varint encoding correctness
+    /// - Related: proof_varint_encoded_len_correct, proof_varint_continuation_handling
     #[kani::proof]
     fn proof_varint_encode_single_byte() {
         let value: u64 = kani::any();
@@ -1392,6 +1420,10 @@ mod kani_proofs {
     ///
     /// This proves that the decode loop always terminates and returns a valid
     /// number of consumed bytes.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Decode loop termination and bounds safety
+    /// - Related: proof_varint_decode_offset_safe, proof_varint_decode_empty_safe
     #[kani::proof]
     #[kani::unwind(5)] // 3 bytes + 2 for loop overhead
     fn proof_varint_decode_terminates() {
@@ -1422,6 +1454,10 @@ mod kani_proofs {
     /// Proof: varint::decode handles offset correctly.
     ///
     /// Decoding at different offsets should not cause buffer overflow.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Offset parameter bounds safety
+    /// - Related: proof_varint_decode_terminates, proof_varint_decode_empty_safe
     #[kani::proof]
     #[kani::unwind(4)]
     fn proof_varint_decode_offset_safe() {
@@ -1444,6 +1480,10 @@ mod kani_proofs {
     /// Proof: varint roundtrip is correct for small values.
     ///
     /// For values that fit in 2 bytes (< 16384), verify encode/decode roundtrip.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Encode/decode roundtrip correctness
+    /// - Related: proof_varint_encode_single_byte, proof_varint_continuation_handling
     #[kani::proof]
     #[kani::unwind(5)]
     fn proof_varint_roundtrip_small() {
@@ -1463,6 +1503,10 @@ mod kani_proofs {
     /// Proof: varint::encoded_len never overflows.
     ///
     /// The calculation `bits.div_ceil(7)` should never overflow for any u64.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: No overflow in length calculation
+    /// - Related: proof_varint_encoded_len_correct
     #[kani::proof]
     fn proof_varint_encoded_len_no_overflow() {
         let value: u64 = kani::any();
@@ -1477,6 +1521,10 @@ mod kani_proofs {
     /// Proof: Empty buffer decode is safe.
     ///
     /// Decoding from an empty buffer should return (0, 0) without panicking.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Empty input handling safety
+    /// - Related: proof_varint_decode_terminates, proof_varint_decode_offset_safe
     #[kani::proof]
     fn proof_varint_decode_empty_safe() {
         let buf: [u8; 0] = [];
@@ -1490,6 +1538,10 @@ mod kani_proofs {
     ///
     /// A varint with all continuation bits set should consume all available bytes
     /// (up to the overflow limit).
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Multi-byte varint decoding correctness
+    /// - Related: proof_varint_encode_single_byte, proof_varint_roundtrip_small
     #[kani::proof]
     #[kani::unwind(4)]
     fn proof_varint_continuation_handling() {

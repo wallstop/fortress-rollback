@@ -176,7 +176,9 @@ pub fn compute_checksum<T: Serialize>(state: &T) -> Result<u128, ChecksumError> 
 ///     .expect("should succeed");
 /// ```
 pub fn compute_checksum_fletcher16<T: Serialize>(state: &T) -> Result<u128, ChecksumError> {
-    let bytes = encode(state)?;
+    let bytes = encode(state).map_err(|e| {
+        ChecksumError::serialization_failed(ChecksumAlgorithm::Fletcher16, e.to_string())
+    })?;
     Ok(u128::from(fletcher16(&bytes)))
 }
 
@@ -247,26 +249,97 @@ pub fn fletcher16(data: &[u8]) -> u16 {
     (sum2 << 8) | sum1
 }
 
+/// Represents what checksum algorithm was being computed when an error occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ChecksumAlgorithm {
+    /// FNV-1a hashing (used by [`compute_checksum`]).
+    Fnv1a,
+    /// Fletcher-16 checksum (used by [`compute_checksum_fletcher16`]).
+    Fletcher16,
+}
+
+impl std::fmt::Display for ChecksumAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fnv1a => write!(f, "FNV-1a"),
+            Self::Fletcher16 => write!(f, "Fletcher-16"),
+        }
+    }
+}
+
 /// Errors that can occur during checksum computation.
-#[derive(Debug)]
+///
+/// # Why String for Error Messages?
+///
+/// Similar to [`CodecError`], this error type stores
+/// the underlying error message as a `String` rather than a structured enum. This is
+/// intentional:
+///
+/// 1. **Wraps CodecError**: Checksum computation uses the codec module for serialization,
+///    and [`CodecError`] already stores bincode errors as strings (since bincode errors
+///    are opaque).
+///
+/// 2. **Not on the hot path**: Checksum errors occur during exceptional conditions
+///    (serialization failures), not during normal game loop execution. The allocation
+///    cost of a String is negligible for error paths.
+///
+/// 3. **Diagnostic preservation**: The serialization error message contains useful
+///    diagnostic information about why serialization failed (e.g., "sequence too long",
+///    "unsupported type").
+///
+/// For hot-path error handling, we use structured enums. See
+/// [`RleDecodeReason`] for an example.
+///
+/// [`CodecError`]: crate::network::codec::CodecError
+/// [`RleDecodeReason`]: crate::RleDecodeReason
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ChecksumError {
     /// Serialization of the state failed.
     ///
     /// This typically occurs if the state contains unsupported types or
     /// if there's an issue with the serde implementation.
-    SerializationFailed(String),
+    SerializationFailed {
+        /// The checksum algorithm that was being computed.
+        algorithm: ChecksumAlgorithm,
+        /// The underlying error message from the serializer.
+        ///
+        /// This is a `String` because it wraps [`CodecError`],
+        /// which stores bincode errors as strings (since bincode errors are opaque).
+        message: String,
+    },
+}
+
+impl ChecksumError {
+    /// Creates a new serialization error for the given algorithm.
+    pub fn serialization_failed(algorithm: ChecksumAlgorithm, message: impl Into<String>) -> Self {
+        Self::SerializationFailed {
+            algorithm,
+            message: message.into(),
+        }
+    }
 }
 
 impl From<CodecError> for ChecksumError {
     fn from(err: CodecError) -> Self {
-        Self::SerializationFailed(err.to_string())
+        // Default to FNV-1a since that's the primary checksum algorithm
+        Self::SerializationFailed {
+            algorithm: ChecksumAlgorithm::Fnv1a,
+            message: err.to_string(),
+        }
     }
 }
 
 impl std::fmt::Display for ChecksumError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SerializationFailed(msg) => write!(f, "checksum failed: {msg}"),
+            Self::SerializationFailed { algorithm, message } => {
+                write!(
+                    f,
+                    "{algorithm} checksum failed: serialization error: {message}"
+                )
+            },
         }
     }
 }
@@ -276,6 +349,14 @@ impl std::error::Error for ChecksumError {}
 // =============================================================================
 // Unit Tests
 // =============================================================================
+//
+// Note: Many determinism and consistency tests have been consolidated into
+// property tests in the `property_tests` module below. The remaining unit tests
+// cover:
+// - Edge cases with specific known values (empty data, single byte)
+// - Error type Display/Debug implementations
+// - Trait implementations (Copy, Eq)
+// - Serialization field order semantics
 
 #[cfg(test)]
 #[allow(
@@ -286,51 +367,10 @@ impl std::error::Error for ChecksumError {}
 )]
 mod tests {
     use super::*;
-    use serde::Deserialize;
 
-    #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-    struct TestState {
-        frame: u32,
-        position: (f32, f32),
-        health: i16,
-        name: String,
-    }
-
-    fn sample_state() -> TestState {
-        TestState {
-            frame: 100,
-            position: (1.5, 2.5),
-            health: 100,
-            name: "Player1".to_string(),
-        }
-    }
-
-    #[test]
-    fn compute_checksum_deterministic() {
-        let state = sample_state();
-        let checksum1 = compute_checksum(&state).unwrap();
-        let checksum2 = compute_checksum(&state).unwrap();
-        assert_eq!(checksum1, checksum2);
-    }
-
-    #[test]
-    fn compute_checksum_different_states() {
-        let state1 = sample_state();
-        let mut state2 = sample_state();
-        state2.frame = 101;
-
-        let checksum1 = compute_checksum(&state1).unwrap();
-        let checksum2 = compute_checksum(&state2).unwrap();
-        assert_ne!(checksum1, checksum2);
-    }
-
-    #[test]
-    fn compute_checksum_fletcher16_deterministic() {
-        let state = sample_state();
-        let checksum1 = compute_checksum_fletcher16(&state).unwrap();
-        let checksum2 = compute_checksum_fletcher16(&state).unwrap();
-        assert_eq!(checksum1, checksum2);
-    }
+    // -------------------------------------------------------------------------
+    // Edge case tests for specific known values
+    // -------------------------------------------------------------------------
 
     #[test]
     fn fletcher16_empty() {
@@ -346,33 +386,6 @@ mod tests {
     }
 
     #[test]
-    fn fletcher16_known_values() {
-        // Test with a known value
-        // "abcde" -> sum1=195, sum2=236 -> (236 << 8) | 195 = 60611
-        // Note: The actual calculation depends on modulo operations
-        let checksum = fletcher16(b"abcde");
-        // Verify it's consistent
-        assert_eq!(checksum, fletcher16(b"abcde"));
-    }
-
-    #[test]
-    fn fletcher16_overflow_handling() {
-        // Test that mod 255 prevents overflow
-        let data: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
-        let checksum = fletcher16(&data);
-        // Should complete without panic and be deterministic
-        assert_eq!(checksum, fletcher16(&data));
-    }
-
-    #[test]
-    fn hash_bytes_fnv1a_deterministic() {
-        let bytes = b"test data for hashing";
-        let hash1 = hash_bytes_fnv1a(bytes);
-        let hash2 = hash_bytes_fnv1a(bytes);
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
     fn hash_bytes_fnv1a_empty() {
         // Empty input should produce the FNV offset basis
         let hash = hash_bytes_fnv1a(&[]);
@@ -380,46 +393,73 @@ mod tests {
     }
 
     #[test]
-    fn hash_bytes_fnv1a_different_inputs() {
-        let hash1 = hash_bytes_fnv1a(b"hello");
-        let hash2 = hash_bytes_fnv1a(b"world");
-        assert_ne!(hash1, hash2);
+    fn hash_bytes_fnv1a_single_byte() {
+        // FNV-1a of [1]: offset_basis XOR 1, then multiply by prime
+        // offset_basis = 0xcbf29ce484222325
+        // prime = 0x100000001b3
+        // 0xcbf29ce484222325 ^ 1 = 0xcbf29ce484222324
+        // 0xcbf29ce484222324 * 0x100000001b3 = 0xaf63bc4c8601b62c
+        let hash = hash_bytes_fnv1a(&[1]);
+        assert_eq!(hash, u128::from(0xaf63_bc4c_8601_b62c_u64));
     }
 
-    #[test]
-    fn checksum_returns_u128_for_save_compatibility() {
-        let state = sample_state();
-        let checksum: u128 = compute_checksum(&state).unwrap();
-        // Verify it's a u128 (compile-time check via type annotation)
-        assert!(checksum > 0);
-    }
+    // -------------------------------------------------------------------------
+    // Error type and Display tests
+    // -------------------------------------------------------------------------
 
     #[test]
     fn checksum_error_display() {
-        let err = ChecksumError::SerializationFailed("test error".to_string());
+        let err = ChecksumError::SerializationFailed {
+            algorithm: ChecksumAlgorithm::Fnv1a,
+            message: "test error".to_string(),
+        };
         let display = format!("{err}");
         assert!(display.contains("checksum failed"));
         assert!(display.contains("test error"));
+        assert!(display.contains("FNV-1a"));
     }
 
     #[test]
-    fn compute_checksum_with_various_types() {
-        // Test with primitive
-        let checksum_u32 = compute_checksum(&42u32).unwrap();
-        assert!(checksum_u32 > 0);
-
-        // Test with tuple
-        let checksum_tuple = compute_checksum(&(1, 2, 3)).unwrap();
-        assert!(checksum_tuple > 0);
-
-        // Test with Vec
-        let checksum_vec = compute_checksum(&vec![1, 2, 3, 4, 5]).unwrap();
-        assert!(checksum_vec > 0);
-
-        // All should be different
-        assert_ne!(checksum_u32, checksum_tuple);
-        assert_ne!(checksum_tuple, checksum_vec);
+    fn checksum_error_fletcher16_display() {
+        let err =
+            ChecksumError::serialization_failed(ChecksumAlgorithm::Fletcher16, "serialize failed");
+        let display = format!("{err}");
+        assert!(display.contains("Fletcher-16"));
+        assert!(display.contains("serialize failed"));
     }
+
+    #[test]
+    fn checksum_algorithm_display() {
+        assert_eq!(format!("{}", ChecksumAlgorithm::Fnv1a), "FNV-1a");
+        assert_eq!(format!("{}", ChecksumAlgorithm::Fletcher16), "Fletcher-16");
+    }
+
+    // -------------------------------------------------------------------------
+    // Trait implementation tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn checksum_algorithm_is_copy() {
+        let alg = ChecksumAlgorithm::Fnv1a;
+        let alg2 = alg;
+        assert_eq!(alg, alg2);
+    }
+
+    #[test]
+    fn checksum_error_equality() {
+        let err1 = ChecksumError::serialization_failed(ChecksumAlgorithm::Fnv1a, "test");
+        let err2 = ChecksumError::serialization_failed(ChecksumAlgorithm::Fnv1a, "test");
+        let err3 = ChecksumError::serialization_failed(ChecksumAlgorithm::Fletcher16, "test");
+        let err4 = ChecksumError::serialization_failed(ChecksumAlgorithm::Fnv1a, "different");
+
+        assert_eq!(err1, err2);
+        assert_ne!(err1, err3);
+        assert_ne!(err1, err4);
+    }
+
+    // -------------------------------------------------------------------------
+    // Serialization semantics tests (field order matters)
+    // -------------------------------------------------------------------------
 
     #[test]
     fn compute_checksum_struct_field_order_matters() {
@@ -444,29 +484,6 @@ mod tests {
         // Field order affects serialization, so checksums differ
         assert_ne!(checksum1, checksum2);
     }
-
-    #[test]
-    fn compute_checksum_nested_structs() {
-        #[derive(Serialize)]
-        struct Inner {
-            value: i32,
-        }
-
-        #[derive(Serialize)]
-        struct Outer {
-            inner: Inner,
-            count: u64,
-        }
-
-        let state = Outer {
-            inner: Inner { value: 42 },
-            count: 100,
-        };
-
-        let checksum1 = compute_checksum(&state).unwrap();
-        let checksum2 = compute_checksum(&state).unwrap();
-        assert_eq!(checksum1, checksum2);
-    }
 }
 
 // =============================================================================
@@ -482,10 +499,15 @@ mod tests {
 )]
 mod property_tests {
     use super::*;
+    use crate::test_config::miri_case_count;
     use proptest::prelude::*;
     use serde::Deserialize;
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: miri_case_count(),
+            ..ProptestConfig::default()
+        })]
         /// Property: compute_checksum is deterministic for any serializable state
         #[test]
         fn prop_checksum_deterministic(
@@ -503,7 +525,17 @@ mod property_tests {
             prop_assert_eq!(checksum1, checksum2, "Same state must produce same checksum");
         }
 
-        /// Property: different states produce different checksums (usually)
+        /// Property: different struct states produce different checksums
+        ///
+        /// This test verifies checksum differentiation for **struct-wrapped values**,
+        /// which is the common case in game state serialization. The struct wrapper
+        /// affects serialization format (field ordering, struct markers in some formats).
+        ///
+        /// See also: `prop_checksum_different_primitives` which tests raw primitives.
+        /// Both are kept separate because:
+        /// 1. Struct serialization may differ from primitive serialization
+        /// 2. This test uses u32 (common frame counter type) vs u64 in the primitive test
+        /// 3. Having both provides confidence that checksums differentiate at multiple levels
         #[test]
         fn prop_different_frames_different_checksums(
             frame1 in any::<u32>(),
@@ -528,13 +560,20 @@ mod property_tests {
             prop_assert_eq!(checksum1, checksum2);
         }
 
-        /// Property: fletcher16 result is always <= 16 bits (0xFFFF)
+        /// Property: fletcher16 components are bounded by mod-255 arithmetic
+        ///
+        /// The Fletcher-16 algorithm computes two sums (sum1 and sum2) where each
+        /// is reduced modulo 255. This test verifies that the output components
+        /// respect those bounds: each byte of the checksum must be in [0, 254].
         #[test]
-        fn prop_fletcher16_bounded(data in any::<Vec<u8>>()) {
+        fn prop_fletcher16_modular_bounds(data in any::<Vec<u8>>()) {
             let checksum = fletcher16(&data);
-            // Fletcher-16 returns u16, so it's always bounded by definition
-            // This test verifies the return type is correct
-            let _: u16 = checksum;
+            // Extract the two components: high byte is sum2, low byte is sum1
+            let high_byte = checksum >> 8;
+            let low_byte = checksum & 0xFF;
+            // Both components are computed mod 255, so must be <= 254
+            prop_assert!(high_byte <= 254, "sum2 should be in range [0, 254] due to mod 255");
+            prop_assert!(low_byte <= 254, "sum1 should be in range [0, 254] due to mod 255");
         }
 
         /// Property: hash_bytes_fnv1a is deterministic
@@ -552,20 +591,108 @@ mod property_tests {
             prop_assert!(hash <= u128::from(u64::MAX), "FNV-1a produces 64-bit result");
         }
 
-        /// Property: empty data has known FNV-1a hash (offset basis)
-        #[test]
-        fn prop_empty_hash_is_offset_basis(_seed in any::<u8>()) {
-            let hash = hash_bytes_fnv1a(&[]);
-            let expected = u128::from(0xcbf2_9ce4_8422_2325_u64);
-            prop_assert_eq!(hash, expected);
-        }
-
         /// Property: compute_checksum_fletcher16 is deterministic
         #[test]
         fn prop_fletcher16_checksum_deterministic(value in any::<u64>()) {
             let checksum1 = compute_checksum_fletcher16(&value).expect("should serialize");
             let checksum2 = compute_checksum_fletcher16(&value).expect("should serialize");
             prop_assert_eq!(checksum1, checksum2);
+        }
+
+        // Note on "different inputs → different outputs" tests:
+        //
+        // We AVOID testing arbitrary byte sequences (Vec<u8>) because collisions are
+        // unpredictable and would make tests flaky.
+        //
+        // We DO test primitives like u64 because:
+        // 1. Different u64 values serialize to different byte patterns (bijective)
+        // 2. With 64-bit hash space, collision probability is ~1/2^64 (negligible)
+        // 3. This validates the hash algorithm distinguishes different serializations
+        //
+        // The key insight: determinism is the critical property, but differentiation
+        // testing is acceptable when the input space guarantees distinct serializations.
+
+        /// Property: different primitive values produce different checksums
+        ///
+        /// This test verifies checksum differentiation for **raw primitive values**,
+        /// testing the hash algorithm's ability to distinguish between different byte
+        /// patterns without struct wrapper overhead.
+        ///
+        /// See also: `prop_different_frames_different_checksums` which tests struct-wrapped
+        /// values. Both are kept separate because:
+        /// 1. Primitive serialization is simpler (just the bytes) vs struct serialization
+        /// 2. This test uses u64 (larger value space) vs u32 in the struct test
+        /// 3. Having both provides confidence at the serialization and hashing layers
+        #[test]
+        fn prop_checksum_different_primitives(
+            val1 in any::<u64>(),
+            val2 in any::<u64>(),
+        ) {
+            prop_assume!(val1 != val2);
+
+            let checksum1 = compute_checksum(&val1).expect("should serialize");
+            let checksum2 = compute_checksum(&val2).expect("should serialize");
+
+            prop_assert_ne!(checksum1, checksum2, "Different values should produce different checksums");
+        }
+
+        /// Property: nested structures produce deterministic checksums
+        #[test]
+        fn prop_checksum_nested_deterministic(
+            inner_val in any::<i32>(),
+            outer_count in any::<u64>(),
+        ) {
+            #[derive(Serialize, Deserialize)]
+            struct Inner { value: i32 }
+
+            #[derive(Serialize, Deserialize)]
+            struct Outer { inner: Inner, count: u64 }
+
+            let state = Outer {
+                inner: Inner { value: inner_val },
+                count: outer_count,
+            };
+
+            let checksum1 = compute_checksum(&state).expect("should serialize");
+            let checksum2 = compute_checksum(&state).expect("should serialize");
+
+            prop_assert_eq!(checksum1, checksum2, "Nested structs must produce deterministic checksums");
+        }
+
+        /// Property: tuples produce deterministic checksums
+        #[test]
+        fn prop_checksum_tuples_deterministic(
+            a in any::<i32>(),
+            b in any::<i32>(),
+            c in any::<i32>(),
+        ) {
+            let tuple = (a, b, c);
+            let checksum1 = compute_checksum(&tuple).expect("should serialize");
+            let checksum2 = compute_checksum(&tuple).expect("should serialize");
+
+            prop_assert_eq!(checksum1, checksum2, "Tuples must produce deterministic checksums");
+        }
+
+        /// Property: vectors produce deterministic checksums
+        #[test]
+        fn prop_checksum_vecs_deterministic(data in any::<Vec<i32>>()) {
+            let checksum1 = compute_checksum(&data).expect("should serialize");
+            let checksum2 = compute_checksum(&data).expect("should serialize");
+
+            prop_assert_eq!(checksum1, checksum2, "Vectors must produce deterministic checksums");
+        }
+
+        /// Property: different container types produce different checksums
+        #[test]
+        fn prop_checksum_different_containers(
+            val_u32 in any::<u32>(),
+            val_tuple in (any::<i32>(), any::<i32>(), any::<i32>()),
+        ) {
+            let checksum_u32 = compute_checksum(&val_u32).expect("should serialize");
+            let checksum_tuple = compute_checksum(&val_tuple).expect("should serialize");
+
+            // Different types should produce different checksums
+            prop_assert_ne!(checksum_u32, checksum_tuple, "Different types should produce different checksums");
         }
     }
 }

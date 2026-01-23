@@ -90,6 +90,14 @@ RUN curl -sL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/dow
     rm /tmp/download-actionlint.bash && \
     chmod +x /usr/local/bin/actionlint
 
+# Install Vale (prose linter)
+# Vale is used to check documentation for prose quality
+RUN VALE_VERSION="3.9.3" && \
+    curl -sL "https://github.com/errata-ai/vale/releases/download/v${VALE_VERSION}/vale_${VALE_VERSION}_Linux_64-bit.tar.gz" -o /tmp/vale.tar.gz && \
+    tar -xzf /tmp/vale.tar.gz -C /usr/local/bin vale && \
+    rm /tmp/vale.tar.gz && \
+    chmod +x /usr/local/bin/vale
+
 # Switch to vscode user for remaining installations
 USER vscode
 

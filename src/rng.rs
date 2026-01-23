@@ -815,10 +815,16 @@ mod tests {
     clippy::indexing_slicing
 )]
 mod property_tests {
-    use super::*;
+    // Use explicit imports to avoid ambiguity with proptest::prelude::Rng (which is rand::Rng)
+    use super::{Pcg32, Rng, SeedableRng};
+    use crate::test_config::miri_case_count;
     use proptest::prelude::*;
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: miri_case_count(),
+            ..ProptestConfig::default()
+        })]
         /// Property: Same seed always produces identical sequence.
         ///
         /// This is critical for rollback networking - game state must be

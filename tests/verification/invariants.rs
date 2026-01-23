@@ -234,8 +234,7 @@ mod input_queue_invariants {
     fn test_invariant_violation_detection() {
         // Create a valid queue and verify it passes
         let queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
-        let result = queue.check_invariants();
-        assert!(result.is_ok());
+        queue.check_invariants().unwrap();
 
         // We can't easily create invalid states without unsafe code,
         // but we can verify the check_invariants method returns correctly
@@ -411,13 +410,11 @@ mod invariant_violation_details {
     fn test_valid_states_pass() {
         // InputQueue
         let queue = InputQueue::<TestConfig>::new(0).expect("queue");
-        let queue_result = queue.check_invariants();
-        assert!(queue_result.is_ok());
+        queue.check_invariants().unwrap();
 
         // SyncLayer
         let sync_layer = SyncLayer::<TestConfig>::new(2, 8);
-        let sync_result = sync_layer.check_invariants();
-        assert!(sync_result.is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 }
 
@@ -546,18 +543,17 @@ mod input_queue_production_behavior {
 
         // Discard in various patterns
         queue.discard_confirmed_frames(Frame::new(10));
-        assert!(queue.check_invariants().is_ok());
+        queue.check_invariants().unwrap();
 
         queue.discard_confirmed_frames(Frame::new(25));
-        assert!(queue.check_invariants().is_ok());
+        queue.check_invariants().unwrap();
 
         queue.discard_confirmed_frames(Frame::new(40));
-        assert!(queue.check_invariants().is_ok());
+        queue.check_invariants().unwrap();
 
         // Should still be able to get recent frames
-        let result = queue.confirmed_input(Frame::new(45));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().input.value, 45);
+        let confirmed = queue.confirmed_input(Frame::new(45)).unwrap();
+        assert_eq!(confirmed.input.value, 45);
     }
 
     /// Verify that first_incorrect_frame is properly tracked.
@@ -622,7 +618,7 @@ mod input_queue_production_behavior {
         );
 
         // Invariants should still hold
-        assert!(queue.check_invariants().is_ok());
+        queue.check_invariants().unwrap();
     }
 
     /// Verify queue handles maximum frame delay correctly.
@@ -710,10 +706,9 @@ mod sync_layer_production_behavior {
         }
 
         // Now at frame 10, load frame 5
-        let result = sync_layer.load_frame(Frame::new(5));
-        assert!(result.is_ok());
+        let request = sync_layer.load_frame(Frame::new(5)).unwrap();
 
-        if let Ok(fortress_rollback::FortressRequest::LoadGameState { frame, cell }) = result {
+        if let fortress_rollback::FortressRequest::LoadGameState { frame, cell } = request {
             assert_eq!(frame, Frame::new(5));
             let state = cell.load();
             assert!(state.is_some());
@@ -726,7 +721,7 @@ mod sync_layer_production_behavior {
         assert_eq!(sync_layer.current_frame(), Frame::new(5));
 
         // Invariants should hold
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 
     /// Verify rollback at prediction window boundary.
@@ -802,7 +797,7 @@ mod sync_layer_production_behavior {
         }
 
         // Invariants should hold throughout
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 
     /// Verify state overwriting in circular buffer.
@@ -837,7 +832,7 @@ mod sync_layer_production_behavior {
         // the correct frame data. The circular buffer overwrites old states.
 
         // Verify invariants hold
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 
     /// Verify multi-player frame delay configuration.
@@ -860,7 +855,7 @@ mod sync_layer_production_behavior {
             .unwrap();
 
         // Verify invariants hold with different delays
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
 
         // Invalid player handle should error
         let result = sync_layer.set_frame_delay(fortress_rollback::PlayerHandle::new(10), 0);
@@ -880,7 +875,7 @@ mod sync_layer_production_behavior {
         // Reset prediction - should not break invariants
         sync_layer.reset_prediction();
 
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 
     /// Verify save_current_state returns correct cell and frame.
@@ -1227,7 +1222,7 @@ mod stress_tests {
             sync_layer.advance_frame();
         }
 
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 }
 
@@ -1306,7 +1301,7 @@ mod edge_cases {
             }
         }
 
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 
     /// Test maximum reasonable player count.
@@ -1315,7 +1310,7 @@ mod edge_cases {
         let num_players = 16;
         let sync_layer = SyncLayer::<TestConfig>::new(num_players, 8);
 
-        assert!(sync_layer.check_invariants().is_ok());
+        sync_layer.check_invariants().unwrap();
     }
 
     /// Test frame 0 edge cases.
@@ -1338,8 +1333,7 @@ mod edge_cases {
         sync_layer.advance_frame();
 
         // Now we can load frame 0
-        let result = sync_layer.load_frame(Frame::new(0));
-        assert!(result.is_ok());
+        sync_layer.load_frame(Frame::new(0)).unwrap();
     }
 
     /// Test NULL frame handling.
@@ -1387,6 +1381,6 @@ mod edge_cases {
             assert_eq!(added_frame, Frame::new((i + moderate_delay) as i32));
         }
 
-        assert!(queue.check_invariants().is_ok());
+        queue.check_invariants().unwrap();
     }
 }

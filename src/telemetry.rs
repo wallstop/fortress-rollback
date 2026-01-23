@@ -21,8 +21,8 @@
 //! assert!(observer.violations().is_empty(), "unexpected violations");
 //! ```
 
-use crate::Frame;
-use parking_lot::Mutex;
+use crate::sync::Mutex;
+use crate::{Frame, PlayerHandle};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -242,6 +242,11 @@ pub struct SpecViolation {
 
 impl SpecViolation {
     /// Creates a new specification violation.
+    ///
+    /// Marked `#[cold]` because violations should be rare in normal operation.
+    /// `#[inline(never)]` prevents error-path code from polluting caller instruction cache.
+    #[cold]
+    #[inline(never)]
     #[must_use]
     pub fn new(
         severity: ViolationSeverity,
@@ -260,6 +265,8 @@ impl SpecViolation {
     }
 
     /// Sets the frame at which this violation occurred.
+    #[cold]
+    #[inline(never)]
     #[must_use]
     pub fn with_frame(mut self, frame: Frame) -> Self {
         self.frame = Some(frame);
@@ -267,6 +274,8 @@ impl SpecViolation {
     }
 
     /// Adds a context key-value pair.
+    #[cold]
+    #[inline(never)]
     #[must_use]
     pub fn with_context(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.context.insert(key.into(), value.into());
@@ -517,30 +526,67 @@ impl CollectingObserver {
     }
 
     /// Returns a copy of all collected violations.
+    #[cfg(not(loom))]
     #[must_use]
     pub fn violations(&self) -> Vec<SpecViolation> {
         self.violations.lock().clone()
     }
 
+    /// Returns a copy of all collected violations (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn violations(&self) -> Vec<SpecViolation> {
+        self.violations.lock().unwrap().clone()
+    }
+
     /// Returns the number of collected violations.
+    #[cfg(not(loom))]
     #[must_use]
     pub fn len(&self) -> usize {
         self.violations.lock().len()
     }
 
+    /// Returns the number of collected violations (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.violations.lock().unwrap().len()
+    }
+
     /// Returns true if no violations have been collected.
+    #[cfg(not(loom))]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.violations.lock().is_empty()
     }
 
+    /// Returns true if no violations have been collected (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.violations.lock().unwrap().is_empty()
+    }
+
     /// Checks if any violation of the specified kind has been collected.
+    #[cfg(not(loom))]
     #[must_use]
     pub fn has_violation(&self, kind: ViolationKind) -> bool {
         self.violations.lock().iter().any(|v| v.kind == kind)
     }
 
+    /// Checks if any violation of the specified kind has been collected (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn has_violation(&self, kind: ViolationKind) -> bool {
+        self.violations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v.kind == kind)
+    }
+
     /// Checks if any violation with the specified severity has been collected.
+    #[cfg(not(loom))]
     #[must_use]
     pub fn has_severity(&self, severity: ViolationSeverity) -> bool {
         self.violations
@@ -549,7 +595,19 @@ impl CollectingObserver {
             .any(|v| v.severity == severity)
     }
 
+    /// Checks if any violation with the specified severity has been collected (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn has_severity(&self, severity: ViolationSeverity) -> bool {
+        self.violations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v.severity == severity)
+    }
+
     /// Returns all violations matching the specified kind.
+    #[cfg(not(loom))]
     #[must_use]
     pub fn violations_of_kind(&self, kind: ViolationKind) -> Vec<SpecViolation> {
         self.violations
@@ -560,7 +618,21 @@ impl CollectingObserver {
             .collect()
     }
 
+    /// Returns all violations matching the specified kind (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn violations_of_kind(&self, kind: ViolationKind) -> Vec<SpecViolation> {
+        self.violations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|v| v.kind == kind)
+            .cloned()
+            .collect()
+    }
+
     /// Returns all violations at or above the specified severity.
+    #[cfg(not(loom))]
     #[must_use]
     pub fn violations_at_severity(&self, min_severity: ViolationSeverity) -> Vec<SpecViolation> {
         self.violations
@@ -571,15 +643,43 @@ impl CollectingObserver {
             .collect()
     }
 
+    /// Returns all violations at or above the specified severity (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn violations_at_severity(&self, min_severity: ViolationSeverity) -> Vec<SpecViolation> {
+        self.violations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|v| v.severity >= min_severity)
+            .cloned()
+            .collect()
+    }
+
     /// Clears all collected violations.
+    #[cfg(not(loom))]
     pub fn clear(&self) {
         self.violations.lock().clear();
     }
+
+    /// Clears all collected violations (loom version).
+    #[cfg(loom)]
+    pub fn clear(&self) {
+        self.violations.lock().unwrap().clear();
+    }
 }
 
+#[cfg(not(loom))]
 impl ViolationObserver for CollectingObserver {
     fn on_violation(&self, violation: &SpecViolation) {
         self.violations.lock().push(violation.clone());
+    }
+}
+
+#[cfg(loom)]
+impl ViolationObserver for CollectingObserver {
+    fn on_violation(&self, violation: &SpecViolation) {
+        self.violations.lock().unwrap().push(violation.clone());
     }
 }
 
@@ -868,6 +968,8 @@ macro_rules! assert_violation {
 /// // Report with no observer (uses TracingObserver)
 /// report_to_observer(None::<&Arc<CollectingObserver>>, &violation);
 /// ```
+#[cold]
+#[inline(never)]
 pub fn report_to_observer<O: ViolationObserver + ?Sized>(
     observer: Option<&Arc<O>>,
     violation: &SpecViolation,
@@ -951,6 +1053,8 @@ pub struct InvariantViolation {
 
 impl InvariantViolation {
     /// Creates a new invariant violation.
+    #[cold]
+    #[inline(never)]
     #[must_use]
     pub fn new(type_name: &'static str, invariant: impl Into<String>) -> Self {
         Self {
@@ -961,9 +1065,95 @@ impl InvariantViolation {
     }
 
     /// Adds additional details to the violation.
+    #[cold]
+    #[inline(never)]
     #[must_use]
     pub fn with_details(mut self, details: impl Into<String>) -> Self {
         self.details = Some(details.into());
+        self
+    }
+
+    /// Adds checksum mismatch details to the violation.
+    ///
+    /// This is a specialized method for desync detection that encapsulates
+    /// the formatting internally, keeping the call site clean.
+    #[cold]
+    #[inline(never)]
+    #[must_use]
+    pub fn with_checksum_mismatch(
+        mut self,
+        frame: Frame,
+        player_handle: PlayerHandle,
+        local_checksum: u128,
+        remote_checksum: u128,
+    ) -> Self {
+        use std::fmt::Write;
+        let mut details = String::new();
+        // Ignore write error since we're writing to a String
+        let _ = write!(
+            details,
+            "Desync at frame {} with player {}: local={:#x}, remote={:#x}",
+            frame, player_handle, local_checksum, remote_checksum
+        );
+        self.details = Some(details);
+        self
+    }
+
+    /// Adds input queue index and nested violation details.
+    ///
+    /// This method encapsulates the formatting pattern for input queue invariant
+    /// violations, providing a consistent API across call sites.
+    #[cold]
+    #[inline(never)]
+    #[must_use]
+    pub fn with_input_queue_index(mut self, index: usize, nested_violation: String) -> Self {
+        use std::fmt::Write;
+        let mut details = String::new();
+        // Ignore write error since we're writing to a String
+        let _ = write!(details, "input_queue[{}]: {}", index, nested_violation);
+        self.details = Some(details);
+        self
+    }
+
+    /// Adds a single field name and value as details.
+    ///
+    /// This method encapsulates the common pattern of reporting a single
+    /// field's value when an invariant is violated.
+    #[cold]
+    #[inline(never)]
+    #[must_use]
+    pub fn with_field_value(mut self, field: &str, value: impl std::fmt::Display) -> Self {
+        use std::fmt::Write;
+        let mut details = String::new();
+        // Ignore write error since we're writing to a String
+        let _ = write!(details, "{}={}", field, value);
+        self.details = Some(details);
+        self
+    }
+
+    /// Adds bounds violation details showing the actual value and valid range.
+    ///
+    /// This method encapsulates the common pattern of reporting when a value
+    /// is outside its expected bounds.
+    #[cold]
+    #[inline(never)]
+    #[must_use]
+    pub fn with_bounds_violation(
+        mut self,
+        name: &str,
+        actual: impl std::fmt::Display,
+        min: impl std::fmt::Display,
+        max: impl std::fmt::Display,
+    ) -> Self {
+        use std::fmt::Write;
+        let mut details = String::new();
+        // Ignore write error since we're writing to a String
+        let _ = write!(
+            details,
+            "{}={}, valid_range=[{}, {}]",
+            name, actual, min, max
+        );
+        self.details = Some(details);
         self
     }
 
@@ -1129,11 +1319,65 @@ macro_rules! assert_invariants {
 }
 
 /// No-op version for release builds without `paranoid` feature.
+///
+/// # Note
+///
+/// This macro is a no-op in release builds to avoid the overhead of invariant
+/// checking in production. If you need to check invariants in production without
+/// panicking, use [`try_check_invariants!`] instead, which returns a `Result`.
 #[macro_export]
 #[cfg(not(any(debug_assertions, feature = "paranoid")))]
 macro_rules! assert_invariants {
     ($expr:expr) => {{}};
     ($expr:expr, $context:expr) => {{}};
+}
+
+/// Macro for checking invariants and returning a Result.
+///
+/// Unlike [`assert_invariants!`], this macro does not panic. Instead, it returns
+/// `Ok(())` if invariants hold, or `Err(violation_message)` if they are violated.
+/// This is suitable for production code where you want to handle invariant
+/// violations gracefully without panicking.
+///
+/// Unlike [`debug_check_invariants!`], this macro is not gated behind debug_assertions
+/// and will always execute in both debug and release builds.
+///
+/// # Example
+///
+/// ```ignore
+/// use fortress_rollback::{try_check_invariants, telemetry::InvariantChecker};
+///
+/// fn validate_state<T: InvariantChecker>(item: &T) -> Result<(), String> {
+///     try_check_invariants!(item)?;
+///     Ok(())
+/// }
+///
+/// fn process_with_validation<T: InvariantChecker>(item: &T) -> Result<(), String> {
+///     // Check invariants and handle failure gracefully
+///     if let Err(violation) = try_check_invariants!(item) {
+///         // Log and recover instead of panicking
+///         eprintln!("Warning: invariant violation: {}", violation);
+///         return Err(violation);
+///     }
+///     // Continue processing...
+///     Ok(())
+/// }
+/// ```
+#[macro_export]
+macro_rules! try_check_invariants {
+    ($expr:expr) => {{
+        #[allow(unused_imports)]
+        use $crate::telemetry::InvariantChecker as _;
+        $expr.check_invariants()
+    }};
+
+    ($expr:expr, $context:expr) => {{
+        #[allow(unused_imports)]
+        use $crate::telemetry::InvariantChecker as _;
+        $expr
+            .check_invariants()
+            .map_err(|violation| format!("{} [context: {}]", violation, $context))
+    }};
 }
 
 #[cfg(test)]
@@ -1781,6 +2025,33 @@ mod tests {
         assert!(display.contains("size=200, max=128"));
     }
 
+    #[test]
+    fn test_invariant_violation_with_checksum_mismatch() {
+        let violation = InvariantViolation::new("P2PSession", "checksum mismatch")
+            .with_checksum_mismatch(Frame::new(42), PlayerHandle(1), 0xDEAD_BEEF, 0xCAFE_BABE);
+
+        assert_eq!(violation.type_name, "P2PSession");
+        assert_eq!(violation.invariant, "checksum mismatch");
+
+        let details = violation.details.as_ref().expect("details should be set");
+        assert!(details.contains("Desync at frame 42"));
+        assert!(details.contains("player 1"));
+        assert!(details.contains("0xdeadbeef"));
+        assert!(details.contains("0xcafebabe"));
+    }
+
+    #[test]
+    fn test_invariant_violation_with_checksum_mismatch_display() {
+        let violation = InvariantViolation::new("Session", "desync detected")
+            .with_checksum_mismatch(Frame::new(100), PlayerHandle(2), 0x1234, 0x5678);
+
+        let display = violation.to_string();
+        assert!(display.contains("Session"));
+        assert!(display.contains("desync detected"));
+        assert!(display.contains("Desync at frame 100"));
+        assert!(display.contains("player 2"));
+    }
+
     // Test implementation of InvariantChecker for testing
     struct TestCheckerOk;
 
@@ -1803,7 +2074,7 @@ mod tests {
     #[test]
     fn test_invariant_checker_trait_ok() {
         let checker = TestCheckerOk;
-        assert!(checker.check_invariants().is_ok());
+        checker.check_invariants().unwrap();
     }
 
     #[test]
@@ -1864,6 +2135,61 @@ mod tests {
             message: "panic test",
         };
         assert_invariants!(checker, "test context");
+    }
+
+    // ==========================================
+    // try_check_invariants! Macro Tests
+    // ==========================================
+
+    #[test]
+    fn test_try_check_invariants_macro_ok() {
+        let checker = TestCheckerOk;
+        let result = try_check_invariants!(checker);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_try_check_invariants_macro_ok_with_context() {
+        let checker = TestCheckerOk;
+        let result = try_check_invariants!(checker, "test context");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_try_check_invariants_macro_fail() {
+        let checker = TestCheckerFail {
+            message: "invariant failed",
+        };
+        let result = try_check_invariants!(checker);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().invariant.contains("invariant failed"));
+    }
+
+    #[test]
+    fn test_try_check_invariants_macro_fail_with_context() {
+        let checker = TestCheckerFail {
+            message: "invariant failed",
+        };
+        let result = try_check_invariants!(checker, "my context");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // With context, the error is formatted as a String
+        assert!(err.contains("invariant failed"));
+        assert!(err.contains("my context"));
+    }
+
+    #[test]
+    fn test_try_check_invariants_can_use_question_mark() {
+        fn check_it<T: InvariantChecker>(item: &T) -> Result<(), InvariantViolation> {
+            try_check_invariants!(item)?;
+            Ok(())
+        }
+
+        let checker_ok = TestCheckerOk;
+        assert!(check_it(&checker_ok).is_ok());
+
+        let checker_fail = TestCheckerFail { message: "failed" };
+        assert!(check_it(&checker_fail).is_err());
     }
 
     // ==========================================

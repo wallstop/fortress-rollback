@@ -6,24 +6,26 @@
 ## TL;DR — Quick Reference
 
 ```bash
-# Run tests with nextest (12x faster)
-cargo nextest run
+# Run tests with nextest (12x faster) — ALWAYS use --no-capture
+cargo nextest run --no-capture
 
 # Run specific test
-cargo nextest run test_name
+cargo nextest run test_name --no-capture
 
 # Run tests matching pattern
-cargo nextest run -E 'test(parse_) | test(validate_)'
+cargo nextest run -E 'test(parse_) | test(validate_)' --no-capture
 
-# Run with retries for flaky tests
-cargo nextest run --retries 2
+# Run with retries for flaky tests (NOT recommended — fix flakiness instead)
+cargo nextest run --retries 2 --no-capture
 
 # Run doc tests (nextest doesn't support them)
-cargo test --doc
+cargo test --doc -- --nocapture
 
 # Run slow/ignored tests
-cargo test -- --ignored
+cargo test -- --ignored --nocapture
 ```
+
+> **CRITICAL: Always capture test output.** Use `--no-capture` (nextest) or `-- --nocapture` (cargo test) so that failure output is immediately visible without re-running.
 
 **Key Principles:**
 
@@ -431,6 +433,90 @@ cargo nextest run
 ---
 
 ## Common Anti-Patterns
+
+### ❌ Testing Probabilistic Properties
+
+```rust
+// ❌ BAD: Hash collisions are mathematically possible
+#[test]
+fn different_inputs_produce_different_hashes() {
+    let hash1 = fnv1a_hash(&42u32);
+    let hash2 = fnv1a_hash(&43u32);
+    assert_ne!(hash1, hash2);  // Could fail due to collision!
+}
+
+// ✅ GOOD: Test determinism instead
+#[test]
+fn same_input_produces_same_hash() {
+    let hash1 = fnv1a_hash(&42u32);
+    let hash2 = fnv1a_hash(&42u32);
+    assert_eq!(hash1, hash2);
+}
+
+// ✅ GOOD: Test known vectors
+#[test]
+fn fnv1a_matches_known_vectors() {
+    assert_eq!(fnv1a_hash(b""), 0xcbf2_9ce4_8422_2325);
+    assert_eq!(fnv1a_hash(b"a"), 0xaf63_dc4c_8601_ec8c);
+}
+```
+
+See [property-testing.md](property-testing.md) for more on avoiding flaky property tests.
+
+### ❌ Re-implementing Production Logic in Tests
+
+```rust
+// ❌ BAD: Test duplicates production match logic
+#[test]
+fn test_error_reason_mapping() {
+    let error = create_error();
+
+    // This duplicates production's map_error_to_reason()!
+    let reason = match &error {
+        Error::Specific { reason } => *reason,
+        _ => Reason::Unknown,
+    };
+
+    assert_eq!(reason, Reason::Expected);
+}
+
+// ✅ GOOD: Call production code directly
+#[test]
+fn test_error_reason_mapping() {
+    let error = create_error();
+    let reason = map_error_to_reason(&error);  // Production function
+    assert_eq!(reason, Reason::Expected);
+}
+```
+
+### ❌ Thread Ownership Issues in Concurrent Tests
+
+```rust
+// ❌ BAD: Value moved into thread, can't use after
+#[test]
+fn test_concurrent_access() {
+    let cell = GameStateCell::new();
+    let handle = thread::spawn(move || {
+        cell.save(Frame::new(1), Some(42), None);  // cell moved
+    });
+    handle.join().unwrap();
+    assert_eq!(cell.load(), Some(42));  // ERROR: cell was moved!
+}
+
+// ✅ GOOD: Clone Arc before spawning threads
+#[test]
+fn test_concurrent_access() {
+    let cell = Arc::new(GameStateCell::new());
+    let cell_for_thread = cell.clone();  // Clone BEFORE spawn
+
+    let handle = thread::spawn(move || {
+        cell_for_thread.save(Frame::new(1), Some(42), None);
+    });
+
+    handle.join().unwrap();
+    assert_eq!(cell.load(), Some(42));  // Original Arc still available
+}
+```
 
 ### ❌ Testing Implementation, Not Behavior
 

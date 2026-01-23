@@ -18,15 +18,17 @@
 
 ```bash
 # Run after every change
-cargo fmt && cargo clippy --all-targets && cargo nextest run
+cargo fmt && cargo clippy --all-targets && cargo nextest run --no-capture
 
 # Aliases from .cargo/config.toml
 cargo c && cargo t
 
 # Additional checks
 typos                                    # Spell check (CI enforced)
-cargo test --features z3-verification   # Z3 proofs (slow)
+cargo test --features z3-verification -- --nocapture  # Z3 proofs (slow)
 ```
+
+**Always use `--no-capture`** (nextest) or `-- --nocapture` (cargo test) so that test output is visible immediately when failures occur. This avoids having to re-run tests to see what went wrong.
 
 ---
 
@@ -205,12 +207,20 @@ impl FrameRange {
 > **See also:** Performance and code quality guides in `.llm/skills/`:
 >
 > - [high-performance-rust.md](skills/high-performance-rust.md) — Performance optimization patterns and build configuration
+> - [rust-binary-size-optimization.md](skills/rust-binary-size-optimization.md) — Minimizing binary size for WASM, embedded, and containers
 > - [rust-refactoring-guide.md](skills/rust-refactoring-guide.md) — Safe code transformation patterns with verification
 > - [rust-idioms-patterns.md](skills/rust-idioms-patterns.md) — Idiomatic Rust patterns and best practices
 > - [clippy-configuration.md](skills/clippy-configuration.md) — Clippy lint configuration and enforcement
 > - [zero-copy-memory-patterns.md](skills/zero-copy-memory-patterns.md) — Zero-copy and memory efficiency patterns
 > - [async-rust-best-practices.md](skills/async-rust-best-practices.md) — Async Rust patterns for concurrent code
 > - [rust-compile-time-optimization.md](skills/rust-compile-time-optimization.md) — Build and compile time optimization
+>
+> **Crate publishing and organization guides:**
+>
+> - [crate-publishing-guide.md](skills/crate-publishing-guide.md) — Publishing crates to crates.io with best practices
+> - [workspace-organization.md](skills/workspace-organization.md) — Workspace structure, module organization, when to split crates
+> - [public-api-design.md](skills/public-api-design.md) — Designing stable, ergonomic public APIs
+> - [dependency-management.md](skills/dependency-management.md) — Evaluating, managing, and securing dependencies
 
 ### Safety-Focused CI Checks (ci-safety.yml)
 
@@ -227,6 +237,12 @@ The project runs comprehensive safety checks beyond standard linting:
 
 See also: `ci-rust.yml` (Miri UB detection), `ci-security.yml` (cargo-geiger, cargo-deny)
 
+> **See also:** CI/CD guides in `.llm/skills/`:
+>
+> - [github-actions-best-practices.md](skills/github-actions-best-practices.md) — Workflow linting, shellcheck, Miri CI, timeout values, cross-platform scripts
+> - [cross-platform-ci-cd.md](skills/cross-platform-ci-cd.md) — Multi-platform build strategies and release workflows
+> - [ci-cd-debugging.md](skills/ci-cd-debugging.md) — Reproducing and debugging CI failures locally
+
 ### Documentation Template
 
 ```rust
@@ -235,25 +251,37 @@ See also: `ci-rust.yml` (Miri UB detection), `ci-security.yml` (cargo-geiger, ca
 /// Longer explanation if needed, explaining the "why" not just "what".
 ///
 /// # Arguments
+///
 /// * `param1` - What this parameter represents
 ///
 /// # Returns
+///
 /// What the function returns and when.
 ///
 /// # Errors
+///
 /// * [`FortressError::Variant`] - When this specific error occurs
 ///
 /// # Examples
+///
 /// ```
 /// # use fortress_rollback::*;
 /// let result = function(arg)?;
 /// assert_eq!(result, expected);
 /// # Ok::<(), FortressError>(())
 /// ```
+///
+/// [`FortressError::Variant`]: crate::error::FortressError::Variant
 pub fn function(param1: Type) -> Result<ReturnType, FortressError> {
     // Implementation
 }
 ```
+
+**Intra-doc link best practices:**
+
+- Use shorthand `[`TypeName`]` when link text matches the final path segment
+- Place link reference definitions at the end of doc blocks
+- Run `cargo doc --no-deps` after documentation changes to verify links
 
 ### Test Writing Best Practices
 
@@ -263,7 +291,9 @@ pub fn function(param1: Type) -> Result<ReturnType, FortressError> {
 > - [testing-tools-reference.md](skills/testing-tools-reference.md) — Tool ecosystem reference (nextest, proptest, mockall, etc.)
 > - [property-testing.md](skills/property-testing.md) — Property-based testing to find edge cases automatically
 > - [mutation-testing.md](skills/mutation-testing.md) — Mutation testing for test quality verification
+> - [rust-fuzzing-guide.md](skills/rust-fuzzing-guide.md) — Fuzz testing with cargo-fuzz, LibAFL, and structured fuzzing
 > - [cross-platform-ci-cd.md](skills/cross-platform-ci-cd.md) — CI/CD workflows for multi-platform builds
+> - [ci-cd-debugging.md](skills/ci-cd-debugging.md) — Reproducing and debugging CI failures locally
 
 #### Test Organization
 
@@ -394,7 +424,14 @@ fn rollback_preserves_confirmed_frames() { }
 ```bash
 # Kani proofs
 cargo kani
-cargo kani --harness verify_specific_function
+cargo kani --harness proof_specific_function
+
+# Kani with tiered execution
+./scripts/verify-kani.sh --tier 1 --quick   # Fast proofs (~15 min)
+./scripts/verify-kani.sh --list             # List all proofs and tiers
+
+# Validate Kani proof coverage (pre-commit runs this)
+./scripts/check-kani-coverage.sh
 
 # TLA+ verification
 ./scripts/verify-tla.sh
@@ -411,6 +448,38 @@ cargo +nightly miri test
 # Mutation testing
 cargo mutants -f src/module.rs --timeout 30 --jobs 4
 ```
+
+### CRITICAL: Kani Proof Changes
+
+**Pre-commit only validates that proofs are registered, NOT that they pass.**
+
+When modifying Kani proofs or code verified by them:
+
+1. **Run the affected proof locally** before committing:
+
+   ```bash
+   cargo kani --harness proof_function_name
+   ```
+
+2. **Ensure new proofs are registered** in `scripts/verify-kani.sh`:
+   - Tier 1: Fast proofs (<30s) — simple property checks
+   - Tier 2: Medium proofs (30s-2min) — moderate complexity
+   - Tier 3: Slow proofs (>2min) — complex state verification
+
+3. **Validate coverage** before pushing:
+
+   ```bash
+   ./scripts/check-kani-coverage.sh
+   ```
+
+**Why?** Kani verification is too slow for pre-commit (15+ minutes), so CI catches failures. Running affected proofs locally prevents CI surprises.
+
+**Remember:**
+
+- All loops with symbolic bounds require `#[kani::unwind(N)]` where N = max_iterations + 1. This is the #1 cause of Kani CI failures.
+- **Verify proof assertions match actual implementation.** The #2 cause of failures is proofs that assert the wrong thing (e.g., asserting `ConnectionStatus::Connected` when the code returns `ConnectionStatus::Disconnected`).
+
+See [kani-verification.md](skills/kani-verification.md) for details.
 
 ### After Finding a Bug via Verification
 
@@ -432,6 +501,8 @@ cargo mutants -f src/module.rs --timeout 30 --jobs 4
 > - [deterministic-simulation-testing.md](skills/deterministic-simulation-testing.md) — DST frameworks (madsim, turmoil), failure injection, controlled concurrency
 > - [cross-platform-games.md](skills/cross-platform-games.md) — Cross-platform game development (WASM, mobile, desktop)
 > - [cross-platform-rust.md](skills/cross-platform-rust.md) — Multi-platform project architecture and tooling
+> - [rust-binary-size-optimization.md](skills/rust-binary-size-optimization.md) — Minimizing binary size for WASM, embedded, and containers
+> - [rust-ffi-best-practices.md](skills/rust-ffi-best-practices.md) — Hybrid Rust/C/C++ applications and FFI patterns
 > - [wasm-rust-guide.md](skills/wasm-rust-guide.md) — Rust to WebAssembly compilation and toolchain
 > - [no-std-guide.md](skills/no-std-guide.md) — `no_std` patterns for WASM and embedded
 > - [wasm-threading.md](skills/wasm-threading.md) — Threading and concurrency in WebAssembly
@@ -496,6 +567,12 @@ if !valid { return Err(FortressError::InvalidState); }  // Explicit error
 ---
 
 ## Project Architecture
+
+> **See also:** Organization and publishing guides in `.llm/skills/`:
+>
+> - [workspace-organization.md](skills/workspace-organization.md) — When to split crates, module patterns, test organization
+> - [public-api-design.md](skills/public-api-design.md) — Designing stable, ergonomic public APIs
+> - [crate-publishing-guide.md](skills/crate-publishing-guide.md) — Publishing crates to crates.io
 
 ### Repository Structure
 
@@ -730,19 +807,47 @@ Workflow syntax errors are easy to introduce and tedious to debug in CI. Always 
 
 **Workflow reliability:** Workflows that call GitHub APIs (releases, artifact uploads, API queries) should include retry logic. Transient API failures are common; handle them gracefully rather than failing the entire workflow.
 
+### Documentation Changes
+
+**Run after modifying any rustdoc comments:**
+
+```bash
+cargo doc --no-deps
+```
+
+The pre-commit hook runs `cargo doc` with strict `RUSTDOCFLAGS=-D warnings`, matching CI. This catches:
+
+- Broken intra-doc links
+- Invalid HTML in documentation
+- Missing documentation for public items (when enabled)
+
+**Intra-doc link syntax:** Prefer shorthand syntax with link reference definitions:
+
+```rust
+// ❌ Avoid: Inline explicit links (verbose, duplicates path)
+/// Returns a [`PlayerHandle`](crate::sessions::PlayerHandle).
+
+// ✅ Prefer: Shorthand with reference definition
+/// Returns a [`PlayerHandle`].
+///
+/// [`PlayerHandle`]: crate::sessions::PlayerHandle
+```
+
+Use shorthand `[`TypeName`]` when the link text matches the final path segment. Place reference definitions at the end of doc blocks for readability.
+
 ### Full Verification (Before Committing)
 
 **Run the complete check before any commit:**
 
 ```bash
-# Format + lint + test
-cargo fmt && cargo clippy --all-targets && cargo nextest run
+# Format + lint + test (with output capture for debugging)
+cargo fmt && cargo clippy --all-targets && cargo nextest run --no-capture
 ```
 
 **Or use the aliases:**
 
 ```bash
-cargo c && cargo t  # Defined in .cargo/config.toml
+cargo c && cargo t  # Defined in .cargo/config.toml (includes --no-capture)
 ```
 
 ### Additional Checks
@@ -775,6 +880,37 @@ npx markdownlint '**/*.md' --config .markdownlint.json --fix
 
 **See also:** [markdown-formatting.md](skills/markdown-formatting.md) for complete style rules, common fixes, and CI configuration.
 
+### Vale Prose Linting (docs/ directory)
+
+Vale runs on the `docs/` directory to check prose quality. While currently advisory (non-blocking), it catches common writing issues.
+
+```bash
+# Install Vale (if not using dev container)
+brew install vale    # macOS
+# or download from https://vale.sh/docs/vale-cli/installation/
+
+# Sync Vale packages (one-time, or when .vale.ini changes)
+vale sync
+
+# Run Vale on docs/
+vale docs/
+
+# Check a specific file
+vale docs/user-guide.md
+```
+
+**What Vale checks:**
+
+- Passive voice usage (suggestion)
+- Weasel words like "very", "quite", "really" (suggestion)
+- Wordy phrases that could be simplified (suggestion)
+- Clichés (warning)
+- Word illusions ("the the") (warning)
+
+**Configuration:** `.vale.ini` controls which rules are enabled. Project-specific vocabulary is in `.vale/styles/config/vocabularies/Fortress/`.
+
+**CI behavior:** Vale runs in `ci-docs.yml` with `continue-on-error: true` and `fail_on_error: false`. This makes it advisory only, not blocking.
+
 ### For Agents and Sub-Agents
 
 When spawning sub-agents or using Task tools to make code changes:
@@ -783,7 +919,7 @@ When spawning sub-agents or using Task tools to make code changes:
 2. The sub-agent MUST verify `cargo clippy --all-targets` passes
 3. If the sub-agent cannot run these commands, the parent agent must run them after receiving the changes
 
-**See also:** [GitHub Actions Best Practices](skills/github-actions-best-practices.md) and [Markdown Link Validation](skills/markdown-link-validation.md) for detailed guidance.
+**See also:** [GitHub Actions Best Practices](skills/github-actions-best-practices.md), [Markdown Link Validation](skills/markdown-link-validation.md), and [CI/CD Debugging](skills/ci-cd-debugging.md) for detailed guidance.
 
 ---
 

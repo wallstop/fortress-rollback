@@ -9,9 +9,71 @@
 //! These functions are re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
 //! They are not part of the stable public API.
 
+use std::error::Error;
+use std::fmt;
+
 use crate::report_violation;
 use crate::rle;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
+use crate::{DeltaDecodeReason, FortressError, InternalErrorKind, RleDecodeReason};
+
+// =============================================================================
+// Compression Error Types
+// =============================================================================
+
+/// Error type for compression and decompression operations.
+///
+/// This error type distinguishes between RLE encoding/decoding errors and
+/// delta encoding/decoding errors, allowing callers to handle each type
+/// appropriately.
+///
+/// # Structured Error Data
+///
+/// Both variants use structured reason types ([`RleDecodeReason`] and
+/// [`DeltaDecodeReason`]) instead of strings, enabling zero-allocation error
+/// construction on hot paths and programmatic error inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CompressionError {
+    /// An error occurred during RLE decoding.
+    RleDecode {
+        /// The structured reason for the RLE decode failure.
+        reason: RleDecodeReason,
+    },
+    /// An error occurred during delta decoding.
+    DeltaDecode {
+        /// The structured reason for the delta decode failure.
+        reason: DeltaDecodeReason,
+    },
+}
+
+impl fmt::Display for CompressionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RleDecode { reason } => {
+                write!(f, "RLE decode error: {}", reason)
+            },
+            Self::DeltaDecode { reason } => {
+                write!(f, "delta decode error: {}", reason)
+            },
+        }
+    }
+}
+
+impl Error for CompressionError {}
+
+impl From<CompressionError> for FortressError {
+    fn from(err: CompressionError) -> Self {
+        match err {
+            CompressionError::RleDecode { reason } => Self::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError { reason },
+            },
+            CompressionError::DeltaDecode { reason } => Self::InternalErrorStructured {
+                kind: InternalErrorKind::DeltaDecodeError { reason },
+            },
+        }
+    }
+}
 
 /// Encodes input bytes using XOR delta encoding followed by RLE compression.
 pub fn encode<'a>(reference: &[u8], pending_input: impl Iterator<Item = &'a Vec<u8>>) -> Vec<u8> {
@@ -51,23 +113,54 @@ pub fn delta_encode<'a>(
     bytes
 }
 
+/// Maps an RLE error to a `CompressionError`.
+///
+/// Extracts the [`RleDecodeReason`] from a [`FortressError`] if it's an RLE decode error,
+/// otherwise returns a fallback with [`RleDecodeReason::Unknown`].
+fn map_rle_error(e: FortressError) -> CompressionError {
+    match e {
+        FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::RleDecodeError { reason },
+        } => CompressionError::RleDecode { reason },
+        other => {
+            // Fallback for non-RLE FortressError variants
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "map_rle_error: unexpected FortressError variant in RLE decode path: {:?}",
+                other
+            );
+            CompressionError::RleDecode {
+                reason: RleDecodeReason::Unknown,
+            }
+        },
+    }
+}
+
 /// Decodes RLE-compressed XOR delta-encoded data.
-pub fn decode(
-    reference: &[u8],
-    data: &[u8],
-) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
+///
+/// # Errors
+///
+/// Returns a `CompressionError` if:
+/// - RLE decoding fails (e.g., truncated or malformed data)
+/// - Delta decoding fails (e.g., empty reference, length mismatch)
+pub fn decode(reference: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, CompressionError> {
     // decode the RLE encoding first
-    let buf = rle::decode(data)?;
+    let buf = rle::decode(data).map_err(map_rle_error)?;
 
     // decode the delta-encoding
     delta_decode(reference, &buf)
 }
 
 /// Decodes XOR delta-encoded data against a reference.
-pub fn delta_decode(
-    ref_bytes: &[u8],
-    data: &[u8],
-) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
+///
+/// # Errors
+///
+/// Returns a `CompressionError::DeltaDecode` if:
+/// - The reference bytes are empty
+/// - The data length is not a multiple of the reference length
+/// - An index is out of bounds during decoding
+pub fn delta_decode(ref_bytes: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, CompressionError> {
     // Validate preconditions - return error instead of panicking
     if ref_bytes.is_empty() {
         report_violation!(
@@ -75,7 +168,9 @@ pub fn delta_decode(
             ViolationKind::NetworkProtocol,
             "delta_decode: reference bytes is empty"
         );
-        return Err("delta_decode: reference bytes is empty".into());
+        return Err(CompressionError::DeltaDecode {
+            reason: DeltaDecodeReason::EmptyReference,
+        });
     }
 
     if data.len() % ref_bytes.len() != 0 {
@@ -86,29 +181,43 @@ pub fn delta_decode(
             data.len(),
             ref_bytes.len()
         );
-        return Err(format!(
-            "delta_decode: data length {} is not a multiple of reference length {}",
-            data.len(),
-            ref_bytes.len()
-        )
-        .into());
+        return Err(CompressionError::DeltaDecode {
+            reason: DeltaDecodeReason::DataLengthMismatch {
+                data_len: data.len(),
+                reference_len: ref_bytes.len(),
+            },
+        });
     }
 
     let out_size = data.len() / ref_bytes.len();
     let mut output = Vec::with_capacity(out_size);
 
     for output_index in 0..out_size {
-        // Pre-allocate buffer without zero-initialization to reduce allocations in hot path
+        // Pre-allocate buffer capacity to reduce reallocations in hot path
         let mut buffer = Vec::with_capacity(ref_bytes.len());
         for byte_index in 0..ref_bytes.len() {
             let data_idx = ref_bytes.len() * output_index + byte_index;
-            let ref_byte = ref_bytes.get(byte_index).ok_or_else(|| {
-                format!("delta_decode: ref_bytes index {} out of bounds", byte_index)
-            })?;
+            // Use .copied() to convert Option<&u8> to Option<u8> for clearer XOR semantics
+            let ref_byte =
+                ref_bytes
+                    .get(byte_index)
+                    .copied()
+                    .ok_or(CompressionError::DeltaDecode {
+                        reason: DeltaDecodeReason::ReferenceIndexOutOfBounds {
+                            index: byte_index,
+                            length: ref_bytes.len(),
+                        },
+                    })?;
             let data_byte = data
                 .get(data_idx)
-                .ok_or_else(|| format!("delta_decode: data index {} out of bounds", data_idx))?;
-            // Push directly instead of allocating zeros then mutating
+                .copied()
+                .ok_or(CompressionError::DeltaDecode {
+                    reason: DeltaDecodeReason::DataIndexOutOfBounds {
+                        index: data_idx,
+                        length: data.len(),
+                    },
+                })?;
+            // XOR values directly (both are now u8, not &u8)
             buffer.push(ref_byte ^ data_byte);
         }
         output.push(buffer);
@@ -228,6 +337,285 @@ mod compression_tests {
         // Each good input XORs with ref to produce 4 bytes
         assert_eq!(encoded.len(), 8);
     }
+
+    // =========================================================================
+    // CompressionError Tests
+    // =========================================================================
+
+    #[test]
+    fn test_compression_error_rle_decode_display() {
+        let err = CompressionError::RleDecode {
+            reason: RleDecodeReason::TruncatedData {
+                offset: 10,
+                buffer_len: 5,
+            },
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("RLE decode error"));
+        assert!(display.contains("truncated data"));
+    }
+
+    #[test]
+    fn test_compression_error_delta_decode_display() {
+        let err = CompressionError::DeltaDecode {
+            reason: DeltaDecodeReason::EmptyReference,
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("delta decode error"));
+        assert!(display.contains("reference bytes is empty"));
+    }
+
+    #[test]
+    fn test_delta_decode_reason_empty_reference() {
+        let reason = DeltaDecodeReason::EmptyReference;
+        let display = format!("{}", reason);
+        assert!(display.contains("reference bytes is empty"));
+    }
+
+    #[test]
+    fn test_delta_decode_reason_data_length_mismatch() {
+        let reason = DeltaDecodeReason::DataLengthMismatch {
+            data_len: 7,
+            reference_len: 4,
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("data length 7"));
+        assert!(display.contains("reference length 4"));
+    }
+
+    #[test]
+    fn test_delta_decode_reason_reference_index_out_of_bounds() {
+        let reason = DeltaDecodeReason::ReferenceIndexOutOfBounds {
+            index: 5,
+            length: 4,
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("reference bytes index 5"));
+        assert!(display.contains("length: 4"));
+    }
+
+    #[test]
+    fn test_delta_decode_reason_data_index_out_of_bounds() {
+        let reason = DeltaDecodeReason::DataIndexOutOfBounds {
+            index: 10,
+            length: 8,
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("data index 10"));
+        assert!(display.contains("length: 8"));
+    }
+
+    #[test]
+    fn test_delta_decode_reason_unknown() {
+        let reason = DeltaDecodeReason::Unknown;
+        let display = format!("{}", reason);
+        assert!(display.contains("unknown delta decode error"));
+    }
+
+    #[test]
+    fn test_delta_decode_reason_is_copy() {
+        let reason = DeltaDecodeReason::EmptyReference;
+        let reason2 = reason;
+        assert_eq!(reason, reason2);
+
+        let reason_with_data = DeltaDecodeReason::DataLengthMismatch {
+            data_len: 10,
+            reference_len: 4,
+        };
+        let reason_with_data2 = reason_with_data;
+        assert_eq!(reason_with_data, reason_with_data2);
+    }
+
+    #[test]
+    fn test_compression_error_equality() {
+        let err1 = CompressionError::DeltaDecode {
+            reason: DeltaDecodeReason::EmptyReference,
+        };
+        let err2 = CompressionError::DeltaDecode {
+            reason: DeltaDecodeReason::EmptyReference,
+        };
+        let err3 = CompressionError::RleDecode {
+            reason: RleDecodeReason::BitfieldIndexOutOfBounds,
+        };
+
+        assert_eq!(err1, err2);
+        assert_ne!(err1, err3);
+    }
+
+    #[test]
+    fn test_compression_error_is_copy() {
+        let err = CompressionError::DeltaDecode {
+            reason: DeltaDecodeReason::EmptyReference,
+        };
+        let err2 = err; // Copy
+        assert_eq!(err, err2);
+
+        let rle_err = CompressionError::RleDecode {
+            reason: RleDecodeReason::BitfieldIndexOutOfBounds,
+        };
+        let rle_err2 = rle_err; // Copy
+        assert_eq!(rle_err, rle_err2);
+    }
+
+    #[test]
+    fn test_compression_error_to_fortress_error() {
+        // Test DeltaDecode conversion
+        let delta_err = CompressionError::DeltaDecode {
+            reason: DeltaDecodeReason::EmptyReference,
+        };
+        let fortress_err: FortressError = delta_err.into();
+        match fortress_err {
+            FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::DeltaDecodeError { reason },
+            } => {
+                assert_eq!(reason, DeltaDecodeReason::EmptyReference);
+            },
+            _ => panic!("Expected InternalErrorStructured with DeltaDecodeError"),
+        }
+
+        // Test RleDecode conversion
+        let rle_err = CompressionError::RleDecode {
+            reason: RleDecodeReason::BitfieldIndexOutOfBounds,
+        };
+        let fortress_err: FortressError = rle_err.into();
+        match fortress_err {
+            FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError { reason },
+            } => {
+                assert_eq!(reason, RleDecodeReason::BitfieldIndexOutOfBounds);
+            },
+            _ => panic!("Expected InternalErrorStructured with RleDecodeError"),
+        }
+    }
+
+    #[test]
+    fn test_delta_decode_returns_structured_error_for_empty_ref() {
+        let result = delta_decode(&[], &[1, 2, 3, 4]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            CompressionError::DeltaDecode {
+                reason: DeltaDecodeReason::EmptyReference
+            }
+        ));
+    }
+
+    #[test]
+    fn test_delta_decode_returns_structured_error_for_length_mismatch() {
+        let result = delta_decode(&[1, 2, 3, 4], &[1, 2, 3]); // 3 is not multiple of 4
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            CompressionError::DeltaDecode {
+                reason:
+                    DeltaDecodeReason::DataLengthMismatch {
+                        data_len,
+                        reference_len,
+                    },
+            } => {
+                assert_eq!(data_len, 3);
+                assert_eq!(reference_len, 4);
+            },
+            _ => panic!("Expected DataLengthMismatch error"),
+        }
+    }
+
+    // =========================================================================
+    // map_rle_error Helper Tests
+    // =========================================================================
+
+    /// Tests that `map_rle_error` correctly extracts a known `RleDecodeReason`
+    /// from a `FortressError::InternalErrorStructured` with `RleDecodeError`.
+    #[test]
+    fn test_map_rle_error_extracts_known_reason() {
+        let error = FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::RleDecodeError {
+                reason: RleDecodeReason::BitfieldIndexOutOfBounds,
+            },
+        };
+
+        let result = map_rle_error(error);
+
+        assert_eq!(
+            result,
+            CompressionError::RleDecode {
+                reason: RleDecodeReason::BitfieldIndexOutOfBounds
+            }
+        );
+    }
+
+    /// Tests that `map_rle_error` falls back to `RleDecodeReason::Unknown`
+    /// when the `FortressError` is not an RLE decode error.
+    #[test]
+    fn test_map_rle_error_fallback_for_non_rle_error() {
+        // Use a FortressError variant that is NOT an RleDecodeError
+        let error = FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::BufferIndexOutOfBounds,
+        };
+
+        let result = map_rle_error(error);
+
+        assert_eq!(
+            result,
+            CompressionError::RleDecode {
+                reason: RleDecodeReason::Unknown
+            }
+        );
+    }
+
+    #[test]
+    fn test_map_rle_error_preserves_all_rle_reasons() {
+        let reasons = [
+            RleDecodeReason::BitfieldIndexOutOfBounds,
+            RleDecodeReason::DestinationSliceOutOfBounds,
+            RleDecodeReason::SourceSliceOutOfBounds,
+            RleDecodeReason::TruncatedData {
+                offset: 5,
+                buffer_len: 3,
+            },
+            RleDecodeReason::Unknown,
+        ];
+
+        for reason in reasons {
+            let error = FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError { reason },
+            };
+            let result = map_rle_error(error);
+            assert_eq!(result, CompressionError::RleDecode { reason });
+        }
+    }
+
+    /// Integration test: verifies that `decode()` returns the expected error
+    /// when given malformed RLE data.
+    #[test]
+    fn test_decode_with_malformed_rle_data_returns_rle_error() {
+        // Create malformed RLE data that triggers a TruncatedData error.
+        // RLE varint format: bit0=repeat flag, remaining bits=length
+        // 0x04 means: repeat=0 (bit0=0), len=2 (0x04 >> 1 = 2)
+        // This says "copy 2 literal bytes" but provides none, causing truncation.
+        let malformed_rle_data: &[u8] = &[0x04];
+        let reference = &[0x01, 0x02, 0x03, 0x04];
+
+        let result = decode(reference, malformed_rle_data);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            CompressionError::RleDecode { reason } => {
+                // The RLE decoder should detect the truncation and return a
+                // TruncatedData error with the offset that exceeded the buffer.
+                assert!(
+                    matches!(reason, RleDecodeReason::TruncatedData { .. }),
+                    "Expected TruncatedData error, got: {:?}",
+                    reason
+                );
+            },
+            CompressionError::DeltaDecode { .. } => {
+                panic!("Expected RleDecode error, got DeltaDecode");
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -239,6 +627,7 @@ mod compression_tests {
 )]
 mod property_tests {
     use super::*;
+    use crate::test_config::miri_case_count;
     use proptest::prelude::*;
 
     // Strategy for generating valid input sizes (1-32 bytes)
@@ -257,6 +646,10 @@ mod property_tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: miri_case_count(),
+            ..ProptestConfig::default()
+        })]
         /// Property: encode followed by decode is identity
         #[test]
         fn prop_encode_decode_roundtrip(

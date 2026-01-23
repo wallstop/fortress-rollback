@@ -69,6 +69,13 @@ impl GameStub {
         }
     }
 
+    /// Returns the current frame number.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn current_frame(&self) -> i32 {
+        self.gs.frame
+    }
+
     fn save_game_state(&mut self, cell: GameStateCell<StateStub>, frame: Frame) {
         assert_eq!(self.gs.frame, frame.as_i32());
         let checksum = calculate_hash(&self.gs);
@@ -237,6 +244,29 @@ impl StateStub {
         self.frame += 1;
     }
 }
+
+// ============================================================================
+// GameStubHandler trait implementation
+// ============================================================================
+
+use super::test_utils::GameStubHandler;
+
+impl GameStubHandler<StubConfig> for GameStub {
+    type State = StateStub;
+
+    fn new() -> Self {
+        GameStub::new()
+    }
+
+    fn handle_requests(&mut self, requests: Vec<FortressRequest<StubConfig>>) {
+        GameStub::handle_requests(self, requests);
+    }
+
+    fn current_frame(&self) -> i32 {
+        self.gs.frame
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
