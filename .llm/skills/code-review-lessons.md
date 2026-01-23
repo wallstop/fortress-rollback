@@ -424,6 +424,105 @@ grep -n 'pattern1\|pattern2\+' file.txt
 
 ---
 
+## Shell Script Grep Count Error Handling
+
+### The Problem
+
+When using `grep -c` (count matches) with `|| true` or `|| echo "0"` under `set -euo pipefail`,
+the variable can become empty or contain unexpected values, causing numeric comparisons to fail.
+
+**Understanding grep exit codes:**
+
+| Exit Code | Meaning | `grep -c` Output |
+|-----------|---------|------------------|
+| 0         | Matches found | Count (e.g., "5") |
+| 1         | No matches found | "0" |
+| 2         | Error (file not found, permission denied) | Nothing |
+
+**The broken pattern:**
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+# ❌ BROKEN: Produces "0\n0" when no matches found
+COUNT=$(grep -Ec "pattern" "$file" 2>/dev/null || echo "0")
+if [[ "$COUNT" -gt 0 ]]; then  # Fails: "0\n0" is not a valid integer
+    echo "Found $COUNT matches"
+fi
+```
+
+When `grep -c` finds **no matches** in an existing file:
+
+1. It outputs "0" to stdout
+2. It exits with code 1 (failure)
+3. The `|| echo "0"` fires because of exit code 1
+4. Result: `COUNT` contains `"0\n0"` — **two zeros separated by a newline**
+
+This causes `[[ "$COUNT" -gt 0 ]]` to fail with:
+
+```
+bash: [[: 0
+0: syntax error in expression (error token is "0")
+```
+
+**Another broken pattern:**
+
+```bash
+# ❌ BROKEN: COUNT may be empty if grep exits with code 2 (file error)
+COUNT=$(grep -Ec "pattern" "$file" 2>/dev/null || true)
+if [[ "$COUNT" -gt 0 ]]; then  # Fails if COUNT is empty
+    echo "Found matches"
+fi
+```
+
+### The Solution
+
+**Use `|| true` to suppress the exit code, then default to 0 if empty:**
+
+```bash
+# ✅ CORRECT: Handles all cases safely
+COUNT=$(grep -Ec "pattern" "$file" 2>/dev/null || true)
+COUNT=${COUNT:-0}  # Default to 0 if empty
+
+if [[ "$COUNT" -gt 0 ]]; then
+    echo "Found $COUNT matches"
+fi
+```
+
+**Why this works:**
+
+| Scenario | `grep -c` Output | Exit Code | After `\|\| true` | After `${COUNT:-0}` |
+|----------|------------------|-----------|-------------------|---------------------|
+| Matches found | "5" | 0 | "5" | "5" ✓ |
+| No matches | "0" | 1 | "0" | "0" ✓ |
+| File error | "" (empty) | 2 | "" | "0" ✓ |
+
+### Best Practices
+
+1. **Always use `|| true` + `${VAR:-0}`** — Never use `|| echo "0"` for grep counts
+2. **Add a comment explaining the pattern** — Future maintainers may not know the pitfall
+3. **Validate before arithmetic** — Use `[[ "$VAR" =~ ^[0-9]+$ ]]` if paranoid
+4. **Prefer `wc -l` for line counting** — `wc -l` exits 0 even for zero lines
+
+```bash
+# Alternative: wc -l always exits 0
+COUNT=$(grep -E "pattern" "$file" 2>/dev/null | wc -l)
+# No fallback needed — wc -l outputs "0" and exits 0 for empty input
+```
+
+### Related Scripts in This Repository
+
+The correct pattern is used in:
+
+- `scripts/check-code-fence-syntax.sh`
+- `scripts/check-kani-coverage.sh`
+- `scripts/sync-version.sh`
+- `scripts/verify-markdown-code.sh`
+- `.github/workflows/ci-quality.yml`
+
+---
+
 ## Cross-Platform Documentation Accuracy
 
 ### The Problem

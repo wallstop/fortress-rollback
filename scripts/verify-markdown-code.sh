@@ -330,9 +330,9 @@ is_incomplete_snippet() {
     # Short snippets (< 5 non-comment lines) that appear to be inline examples
     # These often reference undefined variables
     local non_comment_lines
-    non_comment_lines=$(echo "$code" | grep -cvE '^[[:space:]]*(//|$)' 2>/dev/null || echo "0")
-    non_comment_lines="${non_comment_lines%%$'\n'*}"  # Strip trailing newlines
-    non_comment_lines="${non_comment_lines:-0}"  # Default to 0 if empty
+    # Use || true to handle grep exit code 1 (no matches), then default to 0 if empty
+    non_comment_lines=$(echo "$code" | grep -cvE '^[[:space:]]*(//|$)' 2>/dev/null || true)
+    non_comment_lines="${non_comment_lines:-0}"
     if [[ "$non_comment_lines" =~ ^[0-9]+$ ]] && [[ "$non_comment_lines" -lt 5 ]]; then
         # Check if it uses undefined variables (variables without let binding)
         if echo "$code" | grep -qE '_frames|_ms|_rtt|estimated_|network_|local_|remote_'; then

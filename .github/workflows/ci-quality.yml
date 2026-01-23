@@ -146,7 +146,9 @@ jobs:
           if cargo spellcheck check 2>&1 | tee spellcheck-output.txt; then
             echo "✅ No spelling issues found in documentation" >> "$GITHUB_STEP_SUMMARY"
           else
-            ISSUE_COUNT=$(grep -c "error\|warning" spellcheck-output.txt || echo "0")
+            # Use || true + default to handle grep exit code 1 (no matches)
+            ISSUE_COUNT=$(grep -c "error\|warning" spellcheck-output.txt || true)
+            ISSUE_COUNT=${ISSUE_COUNT:-0}
             {
               echo "⚠️ Found potential spelling issues ($ISSUE_COUNT):"
               echo ""
