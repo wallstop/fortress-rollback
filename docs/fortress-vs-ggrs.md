@@ -136,16 +136,17 @@ impl PlayerHandle {
     }
 }
 
-// Build-time validation (returns Result, not panic)
+// Pseudo-code: Simplified for illustration (actual API uses SessionBuilder::add_player)
 pub fn add_spectator(
     &mut self,
     handle: PlayerHandle,
     address: A,
 ) -> Result<(), FortressError> {
-    if handle.0 < self.num_players {
-        return Err(FortressError::InvalidRequest {
-            info: "spectator handle must be >= num_players".into(),
-        });
+    if !handle.is_spectator_for(self.num_players) {
+        return Err(InvalidRequestKind::InvalidSpectatorHandle {
+            handle,
+            num_players: self.num_players,
+        }.into());
     }
     // ...
 }

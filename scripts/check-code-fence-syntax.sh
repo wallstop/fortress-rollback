@@ -79,7 +79,7 @@ while IFS= read -r -d '' file; do
         echo -e "  ${YELLOW}${file}${NC} (${COUNT} occurrence(s))"
 
         # Show the specific lines with context
-        grep -n "$PATTERN" "$file" | while IFS= read -r line; do
+        grep -nE "$PATTERN" "$file" | while IFS= read -r line; do
             echo "    $line"
         done
     fi

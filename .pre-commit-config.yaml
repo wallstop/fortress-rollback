@@ -5,9 +5,10 @@
 # See https://pre-commit.com for more information
 #
 # Cross-platform notes:
-# - Works on Linux, macOS, and Windows (including native PowerShell)
-# - All hooks use local Python scripts - no external repos that need bash
-# - On Windows: no Git Bash or WSL required
+# - Works on Linux, macOS, and Windows (with bash for some hooks)
+# - Most hooks use local Python scripts for maximum Windows compatibility
+# - Exception: check-code-fence-syntax requires bash (available via Git Bash or WSL)
+# - On Windows: Git Bash or WSL recommended for full hook support
 
 default_language_version:
   python: python3

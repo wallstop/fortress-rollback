@@ -78,7 +78,7 @@ Alpha / experimental only.
 
 - **100% Deterministic**: All collections use `BTreeMap`/`BTreeSet` for guaranteed iteration order; new `hash` module provides FNV-1a deterministic hashing
 - **Panic-Free API**: All public APIs return `Result` types instead of panicking — no unexpected crashes
-- **Correctness-First**: Formally verified with TLA+ and Z3 proofs; 1100+ tests (~92% coverage) including multi-process network and resilience scenarios
+- **Correctness-First**: Formally verified with TLA+ and Z3 proofs; ~1500 tests (~92% coverage) including multi-process network and resilience scenarios
 - **Enhanced Desync Detection**: Built-in checksum validation with `P2PSession::confirmed_inputs_for_frame()` for debugging state divergence
 
 📋 **[Complete comparison with GGRS →](./docs/fortress-vs-ggrs.md)** — See all differences, bug fixes, and migration steps
