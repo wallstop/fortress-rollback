@@ -310,9 +310,9 @@ ChaosConfig::intercontinental() // High-latency stable connection
 
 ### Formal Verification
 
-- **4 TLA+ specifications** covering core protocols
-- **56 Kani proofs** for bounded model checking
-- **45 Z3 SMT proofs** for algorithmic correctness
+- **7 TLA+ specifications** covering core protocols
+- **115 Kani proofs** for bounded model checking
+- **54 Z3 SMT proofs** for algorithmic correctness
 
 ### Testing
 

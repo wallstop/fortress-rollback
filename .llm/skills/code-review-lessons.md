@@ -712,7 +712,10 @@ Generate metrics from CI:
 - name: Update metrics
   run: |
     TEST_COUNT=$(cargo test --no-run 2>&1 | grep -oP '\d+ tests')
-    sed -i "s/TEST_COUNT_PLACEHOLDER/$TEST_COUNT/" docs/metrics.md
+    # Use sed -i '' on macOS, sed -i on GNU/Linux
+    # This pattern works on both by creating a backup then removing it
+    sed -i.bak "s/TEST_COUNT_PLACEHOLDER/$TEST_COUNT/" docs/metrics.md
+    rm -f docs/metrics.md.bak
 ```
 
 ### Metrics That Should Be Centralized

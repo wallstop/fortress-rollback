@@ -93,11 +93,13 @@ if [[ "$FOUND_ISSUES" -eq 1 ]]; then
     echo -e "${RED}Found ${TOTAL_OCCURRENCES} rustdoc-style code fence attribute(s)${NC}"
     echo ""
     echo "To fix, replace patterns like:"
-    echo "  \`\`\`rust,ignore  →  \`\`\`rust"
-    echo "  \`\`\`rust,no_run  →  \`\`\`rust"
+    echo '  ```rust,ignore  -->  ```rust'
+    echo '  ```rust,no_run  -->  ```rust'
     echo ""
-    echo "Quick fix command:"
-    echo "  sed -i 's/\`\`\`rust,[a-zA-Z0-9_]*/\`\`\`rust/g' <file>"
+    echo "Quick fix (GNU/Linux):"
+    echo '  sed -i '"'"'s/```rust,[a-zA-Z0-9_]*/```rust/g'"'"' <file>'
+    echo "Quick fix (macOS/BSD):"
+    echo '  sed -i '"''"' '"'"'s/```rust,[a-zA-Z0-9_]*/```rust/g'"'"' <file>'
     exit 1
 else
     echo -e "${GREEN}✓ No rustdoc-style code fence attributes found${NC}"

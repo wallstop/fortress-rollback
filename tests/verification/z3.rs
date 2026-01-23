@@ -1532,7 +1532,7 @@ fn z3_verified_properties_summary() {
          - 7 FNV-1a hash function proofs\n\
          - 8 Desync detection proofs\n\
          - 8 PCG32 RNG proofs\n\
-         Total: 50 Z3 proofs"
+         Total: 54 Z3 proofs"
     );
 }
 
