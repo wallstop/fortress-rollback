@@ -19,6 +19,7 @@ on:
       - '.vale/**'
       - 'scripts/check-links.sh'
       - 'scripts/verify-markdown-code.sh'
+      - 'scripts/check-code-fence-syntax.sh'
       - '.github/workflows/ci-docs.yml'
   pull_request:
     branches: [main]
@@ -38,6 +39,7 @@ on:
       - '.vale/**'
       - 'scripts/check-links.sh'
       - 'scripts/verify-markdown-code.sh'
+      - 'scripts/check-code-fence-syntax.sh'
       - '.github/workflows/ci-docs.yml'
   workflow_dispatch:
 
@@ -216,6 +218,49 @@ jobs:
 
       - name: Run markdownlint
         run: markdownlint '**/*.md' --config .markdownlint.json --ignore 'target/**' --ignore 'fuzz/target/**' --ignore 'loom-tests/target/**' --ignore 'progress/**' --ignore 'PLAN.md'
+
+  # ============================================================================
+  # CODE FENCE SYNTAX - Detect rustdoc-style attributes in markdown
+  # ============================================================================
+  code-fence-syntax:
+    name: Code Fence Syntax
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check for rustdoc-style code fence attributes
+        run: |
+          {
+            echo "## Code Fence Syntax Check"
+            echo ""
+            echo "Checking for rustdoc-style code fence attributes (e.g., \`\`\`rust,ignore)..."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if ./scripts/check-code-fence-syntax.sh docs/ 2>&1 | tee code-fence-output.txt; then
+            echo "✅ No rustdoc-style code fence attributes found" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "❌ Found rustdoc-style code fence attributes:"
+              echo ""
+              echo "These attributes are only valid in Rust doc comments, not markdown files."
+              echo "Use plain \`\`\`rust instead."
+              echo ""
+              echo "\`\`\`"
+              cat code-fence-output.txt
+              echo "\`\`\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Upload code fence report
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: code-fence-report
+          path: code-fence-output.txt
+          retention-days: 7
 
   link-check:
     name: Link Check

@@ -118,11 +118,15 @@ main() {
     # Get proof lists
     echo -e "${BLUE}Scanning source code for #[kani::proof] functions...${NC}"
     SOURCE_PROOFS=$(get_source_proofs)
-    SOURCE_COUNT=$(echo "$SOURCE_PROOFS" | grep -c '^proof_' || echo "0")
+    # Use || true to handle grep exit code 1 (no matches), then default to 0 if empty
+    SOURCE_COUNT=$(echo "$SOURCE_PROOFS" | grep -c '^proof_' || true)
+    SOURCE_COUNT=${SOURCE_COUNT:-0}
 
     echo -e "${BLUE}Scanning verify-kani.sh for tiered proofs...${NC}"
     TIERED_PROOFS=$(get_tiered_proofs)
-    TIERED_COUNT=$(echo "$TIERED_PROOFS" | grep -c '^proof_' || echo "0")
+    # Use || true to handle grep exit code 1 (no matches), then default to 0 if empty
+    TIERED_COUNT=$(echo "$TIERED_PROOFS" | grep -c '^proof_' || true)
+    TIERED_COUNT=${TIERED_COUNT:-0}
 
     echo ""
     echo "Found $SOURCE_COUNT proofs in source code"
@@ -132,7 +136,9 @@ main() {
     # Find proofs in source but not in tiers (missing from CI)
     MISSING_PROOFS=$(comm -23 <(echo "$SOURCE_PROOFS") <(echo "$TIERED_PROOFS") || true)
     if [[ -n "$MISSING_PROOFS" ]]; then
-        MISSING_COUNT=$(echo "$MISSING_PROOFS" | grep -c '^proof_' 2>/dev/null || echo "0")
+        # Use || true to handle grep exit code 1 (no matches), then default to 0 if empty
+        MISSING_COUNT=$(echo "$MISSING_PROOFS" | grep -c '^proof_' 2>/dev/null || true)
+        MISSING_COUNT=${MISSING_COUNT:-0}
     else
         MISSING_COUNT=0
     fi
@@ -140,7 +146,9 @@ main() {
     # Find proofs in tiers but not in source (stale entries)
     EXTRA_PROOFS=$(comm -13 <(echo "$SOURCE_PROOFS") <(echo "$TIERED_PROOFS") || true)
     if [[ -n "$EXTRA_PROOFS" ]]; then
-        EXTRA_COUNT=$(echo "$EXTRA_PROOFS" | grep -c '^proof_' 2>/dev/null || echo "0")
+        # Use || true to handle grep exit code 1 (no matches), then default to 0 if empty
+        EXTRA_COUNT=$(echo "$EXTRA_PROOFS" | grep -c '^proof_' 2>/dev/null || true)
+        EXTRA_COUNT=${EXTRA_COUNT:-0}
     else
         EXTRA_COUNT=0
     fi

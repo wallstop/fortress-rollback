@@ -1,6 +1,6 @@
 # Fortress Rollback
 
-> Fortress Rollback is a correctness-first fork of GGRS (Good Game Rollback System), providing peer-to-peer rollback networking for deterministic multiplayer games in 100% safe Rust. It features deterministic hashing, panic-free APIs, formal verification (TLA+, Z3), and 1100+ tests with ~92% coverage.
+> Fortress Rollback is a correctness-first fork of GGRS (Good Game Rollback System), providing peer-to-peer rollback networking for deterministic multiplayer games in 100% safe Rust. It features deterministic hashing, panic-free APIs, formal verification (TLA+, Z3), and ~1500 tests with ~92% coverage.
 
 Key information:
 

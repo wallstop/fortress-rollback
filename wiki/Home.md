@@ -101,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 >
 > - All `panic!` and `assert!` converted to recoverable errors
 > - Deterministic `BTreeMap`/`BTreeSet` instead of `HashMap`/`HashSet`
-> - 1100+ tests with ~92% code coverage
+> - ~1500 tests with ~92% code coverage
 > - TLA+, Z3, and Kani formal verification
 >
 > [Full comparison](Fortress-vs-GGRS)

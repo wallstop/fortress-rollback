@@ -12,12 +12,17 @@ This document summarizes the key differences between **Fortress Rollback** (this
 |----------|------|-------------------|
 | **Determinism** | `HashMap`/`HashSet` (non-deterministic iteration) | `BTreeMap`/`BTreeSet` (guaranteed order) |
 | **Panic Safety** | Some `assert!` and `panic!` in library code | All converted to recoverable errors |
-| **Test Coverage** | Basic test suite | 1100+ tests (~92% coverage) |
+| **Test Coverage** | Basic test suite | ~1500 tests (~92% coverage) |
 | **Formal Verification** | None | TLA+, Z3 SMT proofs, Kani proofs |
 | **Hashing** | `DefaultHasher` (random seed per process) | FNV-1a deterministic hashing |
 | **Dependencies** | `bitfield-rle`, `varinteger`, `rand` | Internal implementations (fewer deps) |
 | **Type Safety** | `Config::Address` requires `Hash` | `Config::Address` requires `Hash` + `Ord` |
 | **Desync Detection** | Off by default (opt-in) | On by default (`interval: 60`) |
+| **WASM Support** | Requires `wasm-bindgen` + `getrandom/js` features | Works out of the box, no special features |
+| **Time API** | `std::time::Instant` (not WASM-compatible) | `web_time::Instant` (cross-platform) |
+| **Spectator Handles** | May include local players in spectator lists | Explicit `is_spectator_for()` validation |
+| **Error Types** | String-based allocation on hot paths | Dual-variant pattern (Copy for hot paths) |
+| **Build-time Validation** | Some panics at runtime | Returns `Result` at build time |
 
 ---
 
@@ -45,7 +50,19 @@ struct MyAddress { /* ... */ }
 
 **Why:** Enables deterministic iteration using `BTreeMap` instead of `HashMap`.
 
-### 3. New Configuration APIs
+### 3. New Type Aliases
+
+```rust
+// FortressResult type alias for ergonomic error handling
+pub type FortressResult<T, E = FortressError> = std::result::Result<T, E>;
+
+// InputVec uses SmallVec for better performance (no heap allocation for 1-4 players)
+pub type InputVec<I> = SmallVec<[(I, InputStatus); 4]>;
+```
+
+**Why InputVec matters:** `FortressRequest::AdvanceFrame` now provides inputs as `InputVec<T::Input>` instead of `Vec`. This avoids heap allocation for games with 1-4 players. The type implements `Deref<Target = [...]>`, so most code works unchanged.
+
+### 4. New Configuration APIs
 
 Fortress Rollback introduces structured configuration with presets:
 
@@ -63,15 +80,17 @@ let session = SessionBuilder::<MyConfig>::new()
 
 ## Bugs Fixed (By Priority)
 
-### 🔴 Critical - Would cause crashes or game-breaking issues
+### Critical - Would cause crashes or game-breaking issues
 
 #### 1. Frame 0 Rollback Crash
 
 **Likelihood:** High (occurs under poor network conditions early in game)
 
+**When this occurs:** During the initial synchronization phase when players connect with high latency or packet loss, frame 0 can receive corrected remote inputs before the local client has advanced to frame 1.
+
 **Issue:** When a misprediction was detected at frame 0 (the first frame) and a remote input correction arrived before advancing past it, the session would crash with:
 
-```
+```text
 InvalidFrame { frame: Frame(0), reason: "must load frame in the past" }
 ```
 
@@ -99,9 +118,45 @@ InvalidFrame { frame: Frame(0), reason: "must load frame in the past" }
 
 ---
 
-### 🟡 High - Could cause desyncs or incorrect behavior
+#### 3. Spectator Handle Bug
 
-#### 3. Non-Deterministic Collection Iteration
+**Likelihood:** Medium-High (affects any game with spectators)
+
+**Issue:** In original GGRS, methods like `spectator_handles()` could accidentally include local players in the spectator list, leading to incorrect input routing and state corruption.
+
+**Root Cause:** No explicit validation that handle indices represent spectators vs players. Player handles are `0` to `num_players - 1`, while spectator handles are `num_players` and above.
+
+**Fix:** Fortress implements explicit handle classification:
+
+```rust
+// Explicit spectator validation
+impl PlayerHandle {
+    pub fn is_spectator_for(&self, num_players: usize) -> bool {
+        self.0 >= num_players
+    }
+}
+
+// Pseudo-code: Simplified for illustration (actual API uses SessionBuilder::add_player)
+pub fn add_spectator(
+    &mut self,
+    handle: PlayerHandle,
+    address: A,
+) -> Result<(), FortressError> {
+    if !handle.is_spectator_for(self.num_players) {
+        return Err(InvalidRequestKind::InvalidSpectatorHandle {
+            handle,
+            num_players: self.num_players,
+        }.into());
+    }
+    // ...
+}
+```
+
+---
+
+### High - Could cause desyncs or incorrect behavior
+
+#### 4. Non-Deterministic Collection Iteration
 
 **Likelihood:** Medium-High (depends on player count and frame timing)
 
@@ -117,7 +172,7 @@ InvalidFrame { frame: Frame(0), reason: "must load frame in the past" }
 
 ---
 
-#### 4. False Positive Desync Detection
+#### 5. False Positive Desync Detection
 
 **Likelihood:** Medium (occurs during rollbacks with active desync checking)
 
@@ -131,9 +186,9 @@ InvalidFrame { frame: Frame(0), reason: "must load frame in the past" }
 
 ---
 
-### 🟢 Medium - Edge cases or quality-of-life issues
+### Medium - Edge cases or quality-of-life issues
 
-#### 5. `assert!` Panics in Production Code
+#### 6. `assert!` Panics in Production Code
 
 **Likelihood:** Low-Medium (depends on edge case triggers)
 
@@ -147,7 +202,7 @@ InvalidFrame { frame: Frame(0), reason: "must load frame in the past" }
 
 ---
 
-#### 6. Spectator Confirmed Input Panic
+#### 7. Spectator Confirmed Input Panic
 
 **Likelihood:** Low (spectator with missing data)
 
@@ -157,7 +212,7 @@ InvalidFrame { frame: Frame(0), reason: "must load frame in the past" }
 
 ---
 
-#### 7. Invalid Array Index in TimeSync
+#### 8. Invalid Array Index in TimeSync
 
 **Likelihood:** Low (negative frame numbers)
 
@@ -167,11 +222,68 @@ InvalidFrame { frame: Frame(0), reason: "must load frame in the past" }
 
 ---
 
+## Platform Improvements
+
+### WASM Compilation Simplification
+
+**Problem with GGRS:** WASM compilation requires special feature flags:
+
+```toml
+# GGRS requires these for WASM
+[dependencies]
+ggrs = { version = "0.11", features = ["wasm-bindgen"] }
+getrandom = { version = "0.2", features = ["js"] }
+```
+
+**Fortress solution:** Works on WASM out of the box with no special features needed:
+
+```toml
+# Fortress - just works
+[dependencies]
+fortress-rollback = "0.2"
+```
+
+**How this works:**
+
+1. **Custom PCG32 RNG** - Eliminates the `rand` crate dependency (and its transitive `getrandom` dependency)
+2. **`web_time::Instant`** - Cross-platform timing that works on native and WASM without conditional compilation
+
+### Cross-Platform Time Synchronization
+
+GGRS uses `std::time::Instant` which is not available in WASM environments. Fortress uses `web_time::Instant` which provides a unified API:
+
+- **Native platforms**: Delegates to `std::time::Instant`
+- **WASM**: Uses `performance.now()` from the Web Performance API
+
+This means the same code works across all platforms without feature flags or conditional compilation.
+
+---
+
 ## New Features
+
+### Custom PCG32 Random Number Generator
+
+Fortress implements its own PCG32 (Permuted Congruential Generator) to eliminate external dependencies:
+
+```rust
+use fortress_rollback::rng::Pcg32;
+
+let mut rng = Pcg32::seed_from_u64(12345);
+let value: u32 = rng.next_u32();
+let range_value: u32 = rng.gen_range(1..100);
+```
+
+**Why not use `rand`?**
+
+- **Fewer dependencies** - `rand` pulls in `getrandom` and platform-specific crates
+- **No WASM complexity** - `getrandom` requires `features = ["js"]` for WASM
+- **Full determinism** - No platform-specific entropy sources that could differ
+
+**Important:** The RNG is only used for testing and network simulation (ChaosSocket). Game state should never depend on this RNG - games must implement their own seeded RNG synchronized across peers.
 
 ### Deterministic Hashing Module
 
-```rust,ignore
+```rust
 use fortress_rollback::hash::{fnv1a_hash, DeterministicHasher};
 
 // Hash any serializable data deterministically
@@ -190,6 +302,43 @@ let hash = hasher.finish();
 let inputs = session.confirmed_inputs_for_frame(frame)?;
 ```
 
+### Structured Error Types (Hot Path Optimization)
+
+Fortress uses a dual-variant error pattern to avoid heap allocation on hot paths:
+
+```rust
+pub enum FortressError {
+    // Hot path: zero allocation (Copy types only)
+    InvalidFrameStructured {
+        frame: Frame,
+        reason: InvalidFrameReason,
+    },
+
+    // Backward compatibility: allocates a String
+    InvalidFrame {
+        frame: Frame,
+        reason: String,
+    },
+
+    // ... other variants
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidFrameReason {
+    NullFrame,
+    Negative,
+    MustBeNonNegative,
+    NotInPast { current_frame: Frame },
+    OutsidePredictionWindow { current_frame: Frame, max_prediction: usize },
+    WrongSavedFrame { saved_frame: Frame },
+    NotConfirmed { confirmed_frame: Frame },
+    NullOrNegative,
+    Custom(&'static str),
+}
+```
+
+**Why this matters:** In rollback netcode, error handling can occur thousands of times per second during prediction. String allocation on every error would cause significant GC pressure and latency spikes.
+
 ### Violation Pipeline
 
 Fortress Rollback replaces GGRS's `assert!` panics with a structured telemetry system. When internal invariants are violated, instead of crashing, the library:
@@ -202,7 +351,7 @@ Fortress Rollback replaces GGRS's `assert!` panics with a structured telemetry s
 
 #### Violation Severities
 
-```rust,ignore
+```rust
 ViolationSeverity::Warning   // Unexpected but recovered automatically
 ViolationSeverity::Error     // Serious issue, may degrade behavior
 ViolationSeverity::Critical  // State may be corrupted, desync possible
@@ -210,41 +359,55 @@ ViolationSeverity::Critical  // State may be corrupted, desync possible
 
 #### Violation Categories
 
-```rust,ignore
-ViolationKind::FrameSync         // Frame counter mismatch
-ViolationKind::InputQueue        // Input sequence gaps or corruption
-ViolationKind::StateManagement   // State save/load issues
-ViolationKind::NetworkProtocol   // Protocol state machine errors
-ViolationKind::ChecksumMismatch  // Desync detection triggered
-ViolationKind::Configuration     // Invalid parameter combinations
-ViolationKind::Synchronization   // Excessive sync retries, timeouts
-ViolationKind::InternalError     // Library bugs (should never happen)
+```rust
+ViolationKind::FrameSync          // Frame counter mismatch
+ViolationKind::InputQueue         // Input sequence gaps or corruption
+ViolationKind::StateManagement    // State save/load issues
+ViolationKind::NetworkProtocol    // Protocol state machine errors
+ViolationKind::ChecksumMismatch   // Desync detection triggered
+ViolationKind::Configuration      // Invalid parameter combinations
+ViolationKind::Synchronization    // Excessive sync retries, timeouts
+ViolationKind::InternalError      // Library bugs (should never happen)
+ViolationKind::Invariant          // Runtime invariant check failed
+ViolationKind::ArithmeticOverflow // Frame counter overflow detected
 ```
 
-#### Using the Violation Observer
+#### Violation Observer Integration
 
-```rust,ignore
-use fortress_rollback::telemetry::{CollectingObserver, ViolationSeverity};
+Sessions support pluggable violation observers:
+
+```rust
+use fortress_rollback::telemetry::{
+    TracingObserver,
+    CollectingObserver,
+    CompositeObserver,
+    ViolationSeverity,
+};
 use std::sync::Arc;
 
-let observer = Arc::new(CollectingObserver::new());
+// TracingObserver (default): logs to the `tracing` crate
+let tracing_observer = Arc::new(TracingObserver::new());
+
+// CollectingObserver: stores violations for testing/debugging
+let collecting_observer = Arc::new(CollectingObserver::new());
+
+// CompositeObserver: forwards to multiple observers
+let mut composite = CompositeObserver::new();
+composite.add(tracing_observer.clone());
+composite.add(collecting_observer.clone());
+let composite = Arc::new(composite);
+
 let session = SessionBuilder::new()
-    .with_violation_observer(observer.clone())
+    .with_violation_observer(composite)
     .start_p2p_session()?;
 
 // After gameplay, check for issues
-if !observer.is_empty() {
-    for violation in observer.violations_at_severity(ViolationSeverity::Error) {
+if !collecting_observer.is_empty() {
+    for violation in collecting_observer.violations_at_severity(ViolationSeverity::Error) {
         log::error!("Session issue: {} at {}", violation.message, violation.location);
     }
 }
 ```
-
-Built-in observers:
-
-- **`TracingObserver`** (default): Logs to the `tracing` crate
-- **`CollectingObserver`**: Stores violations for testing/debugging
-- **`CompositeObserver`**: Forwards to multiple observers
 
 ### Configuration Presets
 
@@ -262,7 +425,7 @@ Built-in observers:
 
 Built-in presets for common network scenarios:
 
-```rust,ignore
+```rust
 // Sync configuration presets
 SyncConfig::lan()               // LAN/local network (fast sync)
 SyncConfig::high_latency()      // High RTT connections (100-200ms)
@@ -310,13 +473,13 @@ ChaosConfig::intercontinental() // High-latency stable connection
 
 ### Formal Verification
 
-- **4 TLA+ specifications** covering core protocols
-- **56 Kani proofs** for bounded model checking
-- **45 Z3 SMT proofs** for algorithmic correctness
+- **7 TLA+ specifications** covering core protocols (Rollback, InputQueue, NetworkProtocol, TimeSync, ChecksumExchange, SpectatorSession, Concurrency)
+- **115 Kani proofs** for bounded model checking
+- **54 Z3 SMT proofs** for algorithmic correctness
 
 ### Testing
 
-- **1100+ tests** (unit + integration + property-based)
+- **~1500 tests** (unit + integration + property-based)
 - **~92% code coverage**
 - Property-based tests with proptest
 - Mutation testing (95% detection rate)
@@ -332,19 +495,25 @@ ChaosConfig::intercontinental() // High-latency stable connection
 
 ### Dependencies Reduced
 
-- Replaced `bitfield-rle` + `varinteger` with internal RLE implementation
-- Replaced `rand` with internal deterministic PRNG
-- Cleaner dependency tree
+| Dependency | GGRS | Fortress |
+|------------|------|----------|
+| `bitfield-rle` | Required | Internal RLE implementation |
+| `varinteger` | Required | Internal implementation |
+| `rand` | Required | Internal PCG32 RNG |
+| `getrandom` | Required (transitive) | Not needed |
+| Time handling | `std::time::Instant` | `web_time::Instant` |
 
 ---
 
 ## Migration Checklist
 
-- [ ] Update `Cargo.toml`: `ggrs = "0.11"` → `fortress-rollback = "0.2"`
-- [ ] Update imports: `use ggrs::*` → `use fortress_rollback::*`
-- [ ] Rename types: `GgrsError` → `FortressError`, etc.
+- [ ] Update `Cargo.toml`: `ggrs = "0.11"` -> `fortress-rollback = "0.2"`
+- [ ] Update imports: `use ggrs::*` -> `use fortress_rollback::*`
+- [ ] Rename types: `GgrsError` -> `FortressError`, etc.
 - [ ] Add `Ord` + `PartialOrd` to your `Config::Address` type
+- [ ] Remove WASM-specific feature flags (`wasm-bindgen`, `getrandom/js`)
 - [ ] (Optional) Update to new configuration APIs for better presets
+- [ ] (Optional) Add violation observer for debugging
 
 See the full [Migration Guide](./migration.md) for detailed instructions.
 
@@ -356,9 +525,11 @@ Fortress Rollback is a **correctness-first fork** of GGRS. The main benefits are
 
 1. **Determinism guaranteed** - No more subtle desyncs from collection iteration order
 2. **Panic-free** - All library code returns `Result` types
-3. **Battle-tested** - 1100+ tests and formal verification
+3. **Battle-tested** - ~1500 tests and formal verification
 4. **Better debugging** - Violation observers and deterministic hashing
+5. **WASM-ready** - Works on all platforms without special feature flags
+6. **Zero-allocation hot paths** - Structured error types avoid heap allocation
 
-For most users, migration is straightforward: rename imports, add `Ord` to your address type, and enjoy more reliable netcode.
+For most users, migration is straightforward: rename imports, add `Ord` to your address type, remove WASM feature flags, and enjoy more reliable netcode.
 
 See the [Migration Guide](./migration.md) for step-by-step instructions.
