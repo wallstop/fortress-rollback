@@ -61,7 +61,9 @@ TOTAL_OCCURRENCES=0
 
 while IFS= read -r -d '' file; do
     # Count occurrences in this file
+    # Use || true to handle grep exit code 1 (no matches), then default to 0 if empty
     COUNT=$(grep -Ec "$PATTERN" "$file" 2>/dev/null || true)
+    COUNT=${COUNT:-0}
 
     if [[ "$COUNT" -gt 0 ]]; then
         if [[ "$FOUND_ISSUES" -eq 0 ]]; then
