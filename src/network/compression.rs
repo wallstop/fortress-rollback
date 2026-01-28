@@ -33,7 +33,6 @@ use crate::{DeltaDecodeReason, FortressError, InternalErrorKind, RleDecodeReason
 /// [`DeltaDecodeReason`]) instead of strings, enabling zero-allocation error
 /// construction on hot paths and programmatic error inspection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum CompressionError {
     /// An error occurred during RLE decoding.
     RleDecode {

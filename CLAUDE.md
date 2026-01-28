@@ -38,6 +38,14 @@ actionlint
 
 **Always use `--no-capture`** (nextest) or `-- --nocapture` (cargo test) so that test output is visible immediately when failures occur. This avoids having to re-run tests to see what went wrong.
 
+## Changelog Reminder
+
+After code changes, ask: **Does this affect `pub` items or user-observable behavior?**
+
+- If YES → Add entry to `CHANGELOG.md` under `## [Unreleased]` (use `**Breaking:**` prefix for API changes)
+- If NO (`pub(crate)`, private, tests, CI) → No changelog needed
+- See [changelog-practices.md](.llm/skills/changelog-practices.md) for detailed guidance
+
 ## Kani Formal Verification
 
 **When modifying Kani proofs or code verified by Kani proofs, run the affected proof locally:**

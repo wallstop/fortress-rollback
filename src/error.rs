@@ -123,7 +123,6 @@ impl Display for IndexOutOfBounds {
 /// Using an enum instead of String allows for zero-allocation error construction
 /// on hot paths while still providing detailed error messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum InvalidFrameReason {
     /// Frame is NULL_FRAME (-1).
     NullFrame,
@@ -203,7 +202,6 @@ impl Display for InvalidFrameReason {
 /// Using an enum instead of String allows for zero-allocation error construction
 /// on hot paths while still providing detailed error messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum RleDecodeReason {
     /// The bitfield index was out of bounds during decode.
     BitfieldIndexOutOfBounds,
@@ -256,7 +254,6 @@ impl Display for RleDecodeReason {
 /// Using an enum instead of String allows for zero-allocation error construction
 /// and programmatic error inspection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum DeltaDecodeReason {
     /// The reference bytes were empty.
     EmptyReference,
@@ -324,7 +321,6 @@ impl Display for DeltaDecodeReason {
 /// Using an enum instead of String allows for zero-allocation error construction
 /// on hot paths while preserving full debugging context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum InternalErrorKind {
     /// An index was out of bounds.
     IndexOutOfBounds(IndexOutOfBounds),
@@ -424,7 +420,6 @@ impl Display for InternalErrorKind {
 /// Using an enum instead of String allows for zero-allocation error construction
 /// and programmatic error inspection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum InvalidRequestKind {
     // Player handle errors
     /// The player handle is already in use.
@@ -764,7 +759,6 @@ impl Display for InvalidRequestKind {
 /// Using an enum instead of String allows for zero-allocation error construction
 /// and programmatic error inspection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum SerializationErrorKind {
     /// Failed to create a protocol endpoint for remote players.
     EndpointCreationFailed,
@@ -793,7 +787,6 @@ impl Display for SerializationErrorKind {
 /// Using an enum instead of String allows for zero-allocation error construction
 /// and programmatic error inspection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum SocketErrorKind {
     /// Failed to bind socket to the specified port.
     BindFailed {
@@ -835,22 +828,20 @@ impl Display for SocketErrorKind {
 
 /// This enum contains all error messages this library can return. Most API functions will generally return a [`Result<(), FortressError>`].
 ///
-/// # Forward Compatibility
+/// # Error Handling
 ///
-/// This enum is marked `#[non_exhaustive]` because new error variants may be
-/// added in future versions. Always include a wildcard arm when matching:
+/// Match on specific error variants to handle each case:
 ///
 /// ```ignore
 /// match error {
 ///     FortressError::NotSynchronized => { /* handle */ }
 ///     FortressError::PredictionThreshold => { /* handle */ }
-///     _ => { /* handle unknown errors */ }
+///     // ... handle all other variants
 /// }
 /// ```
 ///
 /// [`Result<(), FortressError>`]: std::result::Result
-#[derive(Debug, Clone, PartialEq, Hash)]
-#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FortressError {
     /// When the prediction threshold has been reached, we cannot accept more inputs from the local player.
     PredictionThreshold,

@@ -950,7 +950,7 @@ pub enum FortressError {
     SerializationError { context: String },
     SocketError { context: String },
     InternalError { context: String },
-    // ... (non-exhaustive, new variants may be added)
+    // ... (see error.rs for all variants)
 }
 ```
 

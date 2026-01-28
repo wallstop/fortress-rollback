@@ -25,6 +25,8 @@ actionlint
 
 job-logs.txt
 
+net.rs
+game.rs
 
 # Added by cargo
 #

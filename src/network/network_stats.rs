@@ -1,7 +1,7 @@
 use crate::Frame;
 
 /// The `NetworkStats` struct contains statistics about the current session.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[must_use = "NetworkStats should be inspected or used after being queried"]
 pub struct NetworkStats {
     /// The length of the queue containing UDP packets which have not yet been acknowledged by the end client.

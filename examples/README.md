@@ -86,6 +86,26 @@ Demonstrates proper error handling patterns:
 cargo run --example error_handling
 ```
 
+## Sync Test Example
+
+Demonstrates using `SyncTestSession` to verify determinism in game logic:
+
+- Setting up a SyncTestSession with SessionBuilder
+- Running a simulation with known inputs
+- Handling all FortressRequest variants (Save, Load, Advance)
+- Computing and verifying checksums
+- Understanding what causes MismatchedChecksum errors
+
+This is a standalone example with no graphical dependencies, making it ideal for:
+
+- CI/CD integration testing
+- Understanding the sync test workflow
+- Debugging determinism issues
+
+```shell
+cargo run --example sync_test
+```
+
 ## ExGame
 
 ExGame is a very basic 2-4 player game example with each player controlling a coloured shape.

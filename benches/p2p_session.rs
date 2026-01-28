@@ -100,7 +100,6 @@ fn bench_advance_frame_no_rollback(c: &mut Criterion) {
                             FortressRequest::LoadGameState { cell, .. } => {
                                 black_box(cell.load());
                             },
-                            _ => {},
                         }
                     }
                 });
@@ -169,7 +168,6 @@ fn bench_advance_frame_with_rollback(c: &mut Criterion) {
                                     current_state = state.clone();
                                 }
                             },
-                            _ => {},
                         }
                     }
                 }
@@ -210,7 +208,6 @@ fn bench_advance_frame_with_rollback(c: &mut Criterion) {
                                     current_state = state.clone();
                                 }
                             },
-                            _ => {},
                         }
                     }
                 });

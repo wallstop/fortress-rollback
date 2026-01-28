@@ -86,7 +86,7 @@
 ///   - Valid transitions: Initializing -> Synchronizing -> Running -> Disconnected -> Shutdown
 ///   - `sync_remaining` counter never negative (SyncRemainingNonNegative invariant)
 ///   - Only Running state processes game inputs
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProtocolState {
     /// Initial state before any communication.
     ///
@@ -204,15 +204,14 @@ mod tests {
     }
 
     // ==========================================================================
-    // Clone Trait Tests
+    // Copy Trait Tests
     // ==========================================================================
 
     #[test]
-    #[allow(clippy::redundant_clone)]
-    fn protocol_state_clone() {
+    fn protocol_state_copy() {
         let state = ProtocolState::Running;
-        let cloned = state.clone();
-        assert_eq!(state, cloned);
+        let copied = state;
+        assert_eq!(state, copied);
     }
 
     // ==========================================================================

@@ -87,7 +87,7 @@ pub trait PredictionStrategy<I: Copy + Default>: Send + Sync {
 ///
 /// If there is no confirmed input yet (e.g., at the start of the game),
 /// this returns the default input value.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RepeatLastConfirmed;
 
 impl<I: Copy + Default> PredictionStrategy<I> for RepeatLastConfirmed {
@@ -100,7 +100,7 @@ impl<I: Copy + Default> PredictionStrategy<I> for RepeatLastConfirmed {
 ///
 /// This is useful when you want a "do nothing" prediction, which can be
 /// safer for some game types where repeating the last input could be dangerous.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlankPrediction;
 
 impl<I: Copy + Default> PredictionStrategy<I> for BlankPrediction {

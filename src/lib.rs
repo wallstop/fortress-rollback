@@ -828,15 +828,34 @@ impl From<PlayerHandle> for usize {
 // #############
 
 /// Desync detection by comparing checksums between peers.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+///
+/// Defaults to [`DesyncDetection::On`] with an interval of 60 (once per second at 60hz).
+/// This provides reasonable detection frequency while being bandwidth-friendly.
+/// For faster detection, you can decrease the interval; for bandwidth-constrained
+/// scenarios, you can increase the interval or disable detection entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DesyncDetection {
     /// Desync detection is turned on with a specified interval rate given by the user.
+    ///
+    /// The interval controls how often checksums are compared. An interval of 1 means
+    /// every frame, 10 means every 10th frame (6 times per second at 60hz), etc.
     On {
-        /// interval rate given by the user. e.g. at 60hz an interval of 10 results to 6 reports a second.
+        /// Interval rate for checksum comparison. At 60hz, an interval of 1 means
+        /// checksums are compared every frame, 10 means 6 times per second, etc.
         interval: u32,
     },
-    /// Desync detection is turned off
+    /// Desync detection is turned off.
+    ///
+    /// **Warning:** Disabling desync detection means state divergence between peers
+    /// will go undetected, potentially causing confusing gameplay bugs.
     Off,
+}
+
+impl Default for DesyncDetection {
+    /// Returns [`DesyncDetection::On`] with `interval: 60` (once per second at 60hz).
+    fn default() -> Self {
+        Self::On { interval: 60 }
+    }
 }
 
 /// Defines the three types of players that Fortress Rollback considers:
@@ -862,7 +881,7 @@ where
 /// A session is always in one of these states. You can query the current state of a session via [`current_state`].
 ///
 /// [`current_state`]: P2PSession#method.current_state
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SessionState {
     /// When synchronizing, the session attempts to establish a connection to the remote clients.
     Synchronizing,
@@ -871,7 +890,7 @@ pub enum SessionState {
 }
 
 /// [`InputStatus`] will always be given together with player inputs when requested to advance the frame.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InputStatus {
     /// The input of this player for this frame is an actual received input.
     Confirmed,
@@ -913,20 +932,18 @@ pub type InputVec<I> = SmallVec<[(I, InputStatus); 4]>;
 
 /// Notifications that you can receive from the session. Handling them is up to the user.
 ///
-/// # Forward Compatibility
+/// # Handling Events
 ///
-/// This enum is marked `#[non_exhaustive]` because new event types may be
-/// added in future versions. Always include a wildcard arm when matching:
+/// Events inform you about session state changes. Match on all variants to handle each case:
 ///
 /// ```ignore
 /// match event {
 ///     FortressEvent::Synchronized { addr } => { /* handle */ }
 ///     FortressEvent::Disconnected { addr } => { /* handle */ }
-///     _ => { /* handle unknown events */ }
+///     // ... handle all other variants
 /// }
 /// ```
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum FortressEvent<T>
 where
     T: Config,
@@ -1049,16 +1066,10 @@ where
 ///         FortressRequest::AdvanceFrame { inputs } => {
 ///             game_state.update(&inputs);
 ///         }
-///         _ => panic!("Unknown request type"),
 ///     }
 /// }
 /// ```
-///
-/// # Forward Compatibility
-///
-/// This enum is marked `#[non_exhaustive]` because new request types may be
-/// added in future versions. Always include a wildcard arm when matching.
-#[non_exhaustive]
+#[derive(Debug, Clone)]
 pub enum FortressRequest<T>
 where
     T: Config,

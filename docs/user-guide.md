@@ -2367,7 +2367,7 @@ builder.with_desync_detection_mode(DesyncDetection::Off);
 
 ## Error Handling
 
-Fortress Rollback uses `FortressError` for all error conditions. The enum is `#[non_exhaustive]`, so always include a wildcard arm when matching.
+Fortress Rollback uses `FortressError` for all error conditions.
 
 ### Error Types
 
@@ -2427,12 +2427,6 @@ fn handle_error(error: FortressError) -> Action {
         }
         FortressError::InternalError { context } => {
             eprintln!("Internal error (please report): {}", context);
-            Action::Fatal
-        }
-
-        // Forward compatibility: handle unknown errors
-        _ => {
-            eprintln!("Unknown error: {}", error);
             Action::Fatal
         }
     }

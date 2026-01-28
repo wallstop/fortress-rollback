@@ -725,6 +725,13 @@ PlayerType::Spectator(addr)    // Observer (no input)
 
 The changelog (`CHANGELOG.md`) is for **users of the library**, not developers.
 
+> **See also:** [changelog-practices.md](skills/changelog-practices.md) for detailed guidance, examples, and the visibility reference table.
+
+**Quick Decision:** Ask "Does this affect `pub` items or user-observable behavior?"
+
+- **YES** → Add changelog entry (use **Breaking:** prefix if API signature changed)
+- **NO** (pub(crate), private, tests, CI) → Skip changelog
+
 **Include in changelog:**
 
 - New features, APIs, or configuration options
@@ -771,7 +778,7 @@ Before submitting code:
 - [ ] Rustdoc comments with examples
 - [ ] 100% safe Rust (no unsafe)
 - [ ] Handles all error cases
-- [ ] Changelog updated if user-facing
+- [ ] **Changelog reviewed:** Asked "Does this affect `pub` items or user-observable behavior?" — if yes, added entry to CHANGELOG.md
 
 ---
 

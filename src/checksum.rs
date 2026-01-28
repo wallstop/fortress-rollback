@@ -251,7 +251,6 @@ pub fn fletcher16(data: &[u8]) -> u16 {
 
 /// Represents what checksum algorithm was being computed when an error occurred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum ChecksumAlgorithm {
     /// FNV-1a hashing (used by [`compute_checksum`]).
     Fnv1a,
@@ -294,7 +293,6 @@ impl std::fmt::Display for ChecksumAlgorithm {
 /// [`CodecError`]: crate::network::codec::CodecError
 /// [`RleDecodeReason`]: crate::RleDecodeReason
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum ChecksumError {
     /// Serialization of the state failed.
     ///
