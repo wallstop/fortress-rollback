@@ -68,7 +68,7 @@ use crate::{FortressError, InvalidRequestKind};
 ///     ..SyncConfig::default()
 /// };
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[must_use = "SyncConfig has no effect unless passed to SessionBuilder::with_sync_config()"]
 pub struct SyncConfig {
     /// Number of successful sync roundtrips required before considering
@@ -347,7 +347,7 @@ impl SyncConfig {
 ///     ..ProtocolConfig::default()
 /// };
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[must_use = "ProtocolConfig has no effect unless passed to SessionBuilder::with_protocol_config()"]
 pub struct ProtocolConfig {
     /// Interval between network quality reports.
@@ -694,7 +694,7 @@ impl ProtocolConfig {
 ///     ..SpectatorConfig::default()
 /// };
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[must_use = "SpectatorConfig has no effect unless passed to SessionBuilder::with_spectator_config()"]
 pub struct SpectatorConfig {
     /// The number of frames of input that the spectator can buffer.
@@ -852,7 +852,7 @@ impl SpectatorConfig {
 /// let minimal = InputQueueConfig::minimal();
 /// assert_eq!(minimal.queue_length, 32);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[must_use = "InputQueueConfig has no effect unless passed to SessionBuilder::with_input_queue_config()"]
 pub struct InputQueueConfig {
     /// The length of the input queue (circular buffer) per player.

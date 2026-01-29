@@ -401,7 +401,7 @@ pub trait ViolationObserver {
 ///
 /// This structured output is compatible with JSON logging formatters
 /// (like `tracing-subscriber`'s JSON layer) and log aggregation systems.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TracingObserver;
 
 impl TracingObserver {

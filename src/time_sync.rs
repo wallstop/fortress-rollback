@@ -28,7 +28,7 @@ const DEFAULT_FRAME_WINDOW_SIZE: usize = 30;
 ///     ..TimeSyncConfig::default()
 /// };
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[must_use = "TimeSyncConfig has no effect unless passed to SessionBuilder::with_time_sync_config()"]
 pub struct TimeSyncConfig {
     /// The number of frames to average when calculating frame advantage.

@@ -21,6 +21,7 @@ use std::collections::vec_deque::Drain;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::convert::TryInto;
+use std::fmt;
 use std::sync::Arc;
 
 /// Minimum frames between [`FortressEvent::WaitRecommendation`] events.
@@ -1605,6 +1606,20 @@ impl<T: Config> P2PSession<T> {
             },
             DesyncDetection::Off => (),
         }
+    }
+}
+
+impl<T: Config> fmt::Debug for P2PSession<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("P2PSession")
+            .field("num_players", &self.num_players)
+            .field("max_prediction", &self.max_prediction)
+            .field("state", &self.state)
+            .field("disconnect_frame", &self.disconnect_frame)
+            .field("current_frame", &self.sync_layer.current_frame())
+            .field("frames_ahead", &self.frames_ahead)
+            .field("desync_detection", &self.desync_detection)
+            .finish_non_exhaustive()
     }
 }
 

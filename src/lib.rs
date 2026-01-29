@@ -585,6 +585,403 @@ impl Frame {
     pub const fn abs_diff(self, other: Self) -> u32 {
         self.0.abs_diff(other.0)
     }
+
+    // === Ergonomic Conversion Methods ===
+
+    /// Returns the frame as a `usize`, or `None` if the frame is negative.
+    ///
+    /// This is useful for indexing into arrays or vectors where a valid
+    /// (non-negative) frame is required.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// assert_eq!(Frame::new(42).as_usize(), Some(42));
+    /// assert_eq!(Frame::new(0).as_usize(), Some(0));
+    /// assert_eq!(Frame::NULL.as_usize(), None);
+    /// assert_eq!(Frame::new(-5).as_usize(), None);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn as_usize(self) -> Option<usize> {
+        if self.0 >= 0 {
+            Some(self.0 as usize)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the frame as a `usize`, or a `FortressError` if negative.
+    ///
+    /// This is the Result-returning version of [`as_usize`](Self::as_usize),
+    /// useful when you want to use the `?` operator for error propagation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FortressError::InvalidFrameStructured`] with reason
+    /// [`InvalidFrameReason::MustBeNonNegative`] if the frame is negative.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::{Frame, FortressError, InvalidFrameReason};
+    ///
+    /// assert_eq!(Frame::new(42).try_as_usize().unwrap(), 42);
+    ///
+    /// let err = Frame::NULL.try_as_usize().unwrap_err();
+    /// match err {
+    ///     FortressError::InvalidFrameStructured { frame, reason } => {
+    ///         assert_eq!(frame, Frame::NULL);
+    ///         assert_eq!(reason, InvalidFrameReason::MustBeNonNegative);
+    ///     }
+    ///     _ => panic!("unexpected error variant"),
+    /// }
+    /// ```
+    ///
+    /// [`InvalidFrameReason::MustBeNonNegative`]: crate::InvalidFrameReason::MustBeNonNegative
+    #[inline]
+    #[track_caller]
+    pub fn try_as_usize(self) -> Result<usize, FortressError> {
+        if self.0 >= 0 {
+            Ok(self.0 as usize)
+        } else {
+            Err(FortressError::InvalidFrameStructured {
+                frame: self,
+                reason: InvalidFrameReason::MustBeNonNegative,
+            })
+        }
+    }
+
+    /// Calculates the buffer index for this frame using modular arithmetic.
+    ///
+    /// This is a common pattern for ring buffer indexing where you need to map
+    /// a frame number to a buffer slot. Returns `None` if the frame is negative
+    /// or if `buffer_size` is zero.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// // Frame 7 in a buffer of size 4 -> index 3
+    /// assert_eq!(Frame::new(7).buffer_index(4), Some(3));
+    ///
+    /// // Frame 0 in a buffer of size 4 -> index 0
+    /// assert_eq!(Frame::new(0).buffer_index(4), Some(0));
+    ///
+    /// // Negative frame returns None
+    /// assert_eq!(Frame::NULL.buffer_index(4), None);
+    ///
+    /// // Zero buffer size returns None
+    /// assert_eq!(Frame::new(5).buffer_index(0), None);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn buffer_index(self, buffer_size: usize) -> Option<usize> {
+        if self.0 >= 0 && buffer_size > 0 {
+            Some(self.0 as usize % buffer_size)
+        } else {
+            None
+        }
+    }
+
+    /// Calculates the buffer index for this frame, returning an error for invalid frames.
+    ///
+    /// This is the Result-returning version of [`buffer_index()`][Self::buffer_index].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FortressError::InvalidFrameStructured`] if the frame is negative.
+    /// Returns [`FortressError::InternalErrorStructured`] with [`InternalErrorKind::DivisionByZero`]
+    /// if `buffer_size` is zero.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::{Frame, FortressError, InternalErrorKind};
+    ///
+    /// // Valid frame and buffer size
+    /// assert_eq!(Frame::new(7).try_buffer_index(4).unwrap(), 3);
+    ///
+    /// // Negative frame returns error
+    /// assert!(Frame::NULL.try_buffer_index(4).is_err());
+    ///
+    /// // Zero buffer size returns error
+    /// let err = Frame::new(5).try_buffer_index(0).unwrap_err();
+    /// assert!(matches!(err, FortressError::InternalErrorStructured {
+    ///     kind: InternalErrorKind::DivisionByZero
+    /// }));
+    /// ```
+    ///
+    /// [`InternalErrorKind::DivisionByZero`]: crate::InternalErrorKind::DivisionByZero
+    #[inline]
+    #[track_caller]
+    pub fn try_buffer_index(self, buffer_size: usize) -> Result<usize, FortressError> {
+        if buffer_size == 0 {
+            return Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::DivisionByZero,
+            });
+        }
+        self.try_as_usize().map(|u| u % buffer_size)
+    }
+
+    // === Result-Returning Arithmetic ===
+
+    /// Adds a value to this frame, returning an error if overflow occurs.
+    ///
+    /// This is the Result-returning version of [`checked_add`](Self::checked_add),
+    /// useful when you want to use the `?` operator for error propagation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FortressError::FrameArithmeticOverflow`] if the addition would overflow.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::{Frame, FortressError};
+    ///
+    /// let frame = Frame::new(100);
+    /// assert_eq!(frame.try_add(50).unwrap(), Frame::new(150));
+    ///
+    /// let overflow_err = Frame::new(i32::MAX).try_add(1).unwrap_err();
+    /// assert!(matches!(overflow_err, FortressError::FrameArithmeticOverflow { .. }));
+    /// ```
+    #[inline]
+    #[track_caller]
+    pub fn try_add(self, rhs: i32) -> Result<Self, FortressError> {
+        self.checked_add(rhs)
+            .ok_or(FortressError::FrameArithmeticOverflow {
+                frame: self,
+                operand: rhs,
+                operation: "add",
+            })
+    }
+
+    /// Subtracts a value from this frame, returning an error if overflow occurs.
+    ///
+    /// This is the Result-returning version of [`checked_sub`](Self::checked_sub),
+    /// useful when you want to use the `?` operator for error propagation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FortressError::FrameArithmeticOverflow`] if the subtraction would overflow.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::{Frame, FortressError};
+    ///
+    /// let frame = Frame::new(100);
+    /// assert_eq!(frame.try_sub(50).unwrap(), Frame::new(50));
+    ///
+    /// let overflow_err = Frame::new(i32::MIN).try_sub(1).unwrap_err();
+    /// assert!(matches!(overflow_err, FortressError::FrameArithmeticOverflow { .. }));
+    /// ```
+    #[inline]
+    #[track_caller]
+    pub fn try_sub(self, rhs: i32) -> Result<Self, FortressError> {
+        self.checked_sub(rhs)
+            .ok_or(FortressError::FrameArithmeticOverflow {
+                frame: self,
+                operand: rhs,
+                operation: "sub",
+            })
+    }
+
+    // === Convenience Increment/Decrement Methods ===
+
+    /// Returns the next frame, or an error if overflow would occur.
+    ///
+    /// This is equivalent to `try_add(1)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FortressError::FrameArithmeticOverflow`] if the frame is `i32::MAX`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// assert_eq!(Frame::new(5).next().unwrap(), Frame::new(6));
+    /// assert!(Frame::new(i32::MAX).next().is_err());
+    /// ```
+    #[inline]
+    #[track_caller]
+    pub fn next(self) -> Result<Self, FortressError> {
+        self.try_add(1)
+    }
+
+    /// Returns the previous frame, or an error if overflow would occur.
+    ///
+    /// This is equivalent to `try_sub(1)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FortressError::FrameArithmeticOverflow`] if the frame is `i32::MIN`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// assert_eq!(Frame::new(5).prev().unwrap(), Frame::new(4));
+    /// assert!(Frame::new(i32::MIN).prev().is_err());
+    /// ```
+    #[inline]
+    #[track_caller]
+    pub fn prev(self) -> Result<Self, FortressError> {
+        self.try_sub(1)
+    }
+
+    /// Returns the next frame, saturating at `i32::MAX`.
+    ///
+    /// This is equivalent to `saturating_add(1)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// assert_eq!(Frame::new(5).saturating_next(), Frame::new(6));
+    /// assert_eq!(Frame::new(i32::MAX).saturating_next(), Frame::new(i32::MAX));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn saturating_next(self) -> Self {
+        self.saturating_add(1)
+    }
+
+    /// Returns the previous frame, saturating at `i32::MIN`.
+    ///
+    /// This is equivalent to `saturating_sub(1)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// assert_eq!(Frame::new(5).saturating_prev(), Frame::new(4));
+    /// assert_eq!(Frame::new(i32::MIN).saturating_prev(), Frame::new(i32::MIN));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn saturating_prev(self) -> Self {
+        self.saturating_sub(1)
+    }
+
+    // === Safe usize Construction ===
+
+    /// Creates a `Frame` from a `usize`, returning `None` if it exceeds `i32::MAX`.
+    ///
+    /// This is useful for converting array indices or sizes to frames safely.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// assert_eq!(Frame::from_usize(42), Some(Frame::new(42)));
+    /// assert_eq!(Frame::from_usize(0), Some(Frame::new(0)));
+    ///
+    /// // Values exceeding i32::MAX return None
+    /// let too_large = (i32::MAX as usize) + 1;
+    /// assert_eq!(Frame::from_usize(too_large), None);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn from_usize(value: usize) -> Option<Self> {
+        if value <= i32::MAX as usize {
+            Some(Self(value as i32))
+        } else {
+            None
+        }
+    }
+
+    /// Creates a `Frame` from a `usize`, returning an error if it exceeds `i32::MAX`.
+    ///
+    /// This is the Result-returning version of [`from_usize`](Self::from_usize),
+    /// useful when you want to use the `?` operator for error propagation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FortressError::FrameValueTooLarge`] if the value exceeds `i32::MAX`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::{Frame, FortressError};
+    ///
+    /// assert_eq!(Frame::try_from_usize(42).unwrap(), Frame::new(42));
+    ///
+    /// let too_large = (i32::MAX as usize) + 1;
+    /// let err = Frame::try_from_usize(too_large).unwrap_err();
+    /// assert!(matches!(err, FortressError::FrameValueTooLarge { .. }));
+    /// ```
+    #[inline]
+    #[track_caller]
+    pub fn try_from_usize(value: usize) -> Result<Self, FortressError> {
+        Self::from_usize(value).ok_or(FortressError::FrameValueTooLarge { value })
+    }
+
+    // === Distance and Range Methods ===
+
+    /// Returns the signed distance from `self` to `other` (`other - self`).
+    ///
+    /// Returns `None` if the subtraction would overflow.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// let a = Frame::new(100);
+    /// let b = Frame::new(150);
+    ///
+    /// assert_eq!(a.distance_to(b), Some(50));
+    /// assert_eq!(b.distance_to(a), Some(-50));
+    /// assert_eq!(a.distance_to(a), Some(0));
+    ///
+    /// // Overflow returns None
+    /// assert_eq!(Frame::new(i32::MIN).distance_to(Frame::new(i32::MAX)), None);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn distance_to(self, other: Self) -> Option<i32> {
+        other.0.checked_sub(self.0)
+    }
+
+    /// Returns `true` if `self` is within `window` frames of `reference`.
+    ///
+    /// This checks if the absolute difference between `self` and `reference`
+    /// is less than or equal to `window`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::Frame;
+    ///
+    /// let reference = Frame::new(100);
+    ///
+    /// // Within window
+    /// assert!(Frame::new(98).is_within(5, reference));  // diff = 2
+    /// assert!(Frame::new(105).is_within(5, reference)); // diff = 5
+    ///
+    /// // At boundary
+    /// assert!(Frame::new(95).is_within(5, reference));  // diff = 5 (exact)
+    ///
+    /// // Outside window
+    /// assert!(!Frame::new(94).is_within(5, reference)); // diff = 6
+    /// assert!(!Frame::new(106).is_within(5, reference)); // diff = 6
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn is_within(self, window: u32, reference: Self) -> bool {
+        self.abs_diff(reference) <= window
+    }
 }
 
 impl std::fmt::Display for Frame {
@@ -674,6 +1071,16 @@ impl From<Frame> for i32 {
     }
 }
 
+/// Converts a `usize` to a `Frame`.
+///
+/// # Warning
+///
+/// **Deprecated since 0.4.0**: This conversion silently truncates values larger
+/// than `i32::MAX`. For safe conversion with overflow detection, use
+/// [`Frame::from_usize()`] or [`Frame::try_from_usize()`] instead.
+///
+/// This impl cannot use `#[deprecated]` because Rust doesn't support that attribute
+/// on trait impl blocks. The deprecation is documented here in the doc comment.
 impl From<usize> for Frame {
     #[inline]
     fn from(value: usize) -> Self {
@@ -2012,6 +2419,262 @@ mod tests {
         // Negative sub = add
         let result = safe_frame_sub!(frame, -25, "test_negative_sub");
         assert_eq!(result, Frame::new(125));
+    }
+
+    // ==========================================
+    // Frame Ergonomic Methods Tests
+    // ==========================================
+
+    #[test]
+    fn frame_as_usize_positive() {
+        assert_eq!(Frame::new(0).as_usize(), Some(0));
+        assert_eq!(Frame::new(42).as_usize(), Some(42));
+        assert_eq!(Frame::new(i32::MAX).as_usize(), Some(i32::MAX as usize));
+    }
+
+    #[test]
+    fn frame_as_usize_negative() {
+        assert_eq!(Frame::NULL.as_usize(), None);
+        assert_eq!(Frame::new(-1).as_usize(), None);
+        assert_eq!(Frame::new(-100).as_usize(), None);
+        assert_eq!(Frame::new(i32::MIN).as_usize(), None);
+    }
+
+    #[test]
+    fn frame_try_as_usize_positive() {
+        assert_eq!(Frame::new(0).try_as_usize().unwrap(), 0);
+        assert_eq!(Frame::new(42).try_as_usize().unwrap(), 42);
+    }
+
+    #[test]
+    fn frame_try_as_usize_negative_returns_error() {
+        let err = Frame::NULL.try_as_usize().unwrap_err();
+        assert!(matches!(
+            err,
+            FortressError::InvalidFrameStructured {
+                reason: InvalidFrameReason::MustBeNonNegative,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn frame_buffer_index_basic() {
+        assert_eq!(Frame::new(0).buffer_index(4), Some(0));
+        assert_eq!(Frame::new(1).buffer_index(4), Some(1));
+        assert_eq!(Frame::new(4).buffer_index(4), Some(0));
+        assert_eq!(Frame::new(7).buffer_index(4), Some(3));
+        assert_eq!(Frame::new(100).buffer_index(8), Some(4)); // 100 % 8 = 4
+    }
+
+    #[test]
+    fn frame_buffer_index_negative_frame() {
+        assert_eq!(Frame::NULL.buffer_index(4), None);
+        assert_eq!(Frame::new(-5).buffer_index(4), None);
+    }
+
+    #[test]
+    fn frame_buffer_index_zero_size() {
+        assert_eq!(Frame::new(5).buffer_index(0), None);
+        assert_eq!(Frame::new(0).buffer_index(0), None);
+    }
+
+    #[test]
+    fn frame_try_buffer_index_success() {
+        assert_eq!(Frame::new(0).try_buffer_index(4).unwrap(), 0);
+        assert_eq!(Frame::new(1).try_buffer_index(4).unwrap(), 1);
+        assert_eq!(Frame::new(4).try_buffer_index(4).unwrap(), 0);
+        assert_eq!(Frame::new(7).try_buffer_index(4).unwrap(), 3);
+        assert_eq!(Frame::new(100).try_buffer_index(8).unwrap(), 4); // 100 % 8 = 4
+    }
+
+    #[test]
+    fn frame_try_buffer_index_negative_frame() {
+        let err = Frame::NULL.try_buffer_index(4).unwrap_err();
+        assert!(matches!(err, FortressError::InvalidFrameStructured { .. }));
+
+        let err = Frame::new(-5).try_buffer_index(4).unwrap_err();
+        assert!(matches!(err, FortressError::InvalidFrameStructured { .. }));
+    }
+
+    #[test]
+    fn frame_try_buffer_index_zero_size() {
+        let err = Frame::new(5).try_buffer_index(0).unwrap_err();
+        assert!(matches!(
+            err,
+            FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::DivisionByZero
+            }
+        ));
+    }
+
+    #[test]
+    fn frame_try_add_success() {
+        let frame = Frame::new(100);
+        assert_eq!(frame.try_add(50).unwrap(), Frame::new(150));
+        assert_eq!(frame.try_add(-50).unwrap(), Frame::new(50));
+        assert_eq!(frame.try_add(0).unwrap(), Frame::new(100));
+    }
+
+    #[test]
+    fn frame_try_add_overflow() {
+        let err = Frame::new(i32::MAX).try_add(1).unwrap_err();
+        assert!(matches!(
+            err,
+            FortressError::FrameArithmeticOverflow {
+                operation: "add",
+                operand: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn frame_try_sub_success() {
+        let frame = Frame::new(100);
+        assert_eq!(frame.try_sub(50).unwrap(), Frame::new(50));
+        assert_eq!(frame.try_sub(-50).unwrap(), Frame::new(150));
+    }
+
+    #[test]
+    fn frame_try_sub_overflow() {
+        let err = Frame::new(i32::MIN).try_sub(1).unwrap_err();
+        assert!(matches!(
+            err,
+            FortressError::FrameArithmeticOverflow {
+                operation: "sub",
+                operand: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn frame_next_success() {
+        assert_eq!(Frame::new(0).next().unwrap(), Frame::new(1));
+        assert_eq!(Frame::new(100).next().unwrap(), Frame::new(101));
+    }
+
+    #[test]
+    fn frame_next_overflow() {
+        assert!(Frame::new(i32::MAX).next().is_err());
+    }
+
+    #[test]
+    fn frame_prev_success() {
+        assert_eq!(Frame::new(1).prev().unwrap(), Frame::new(0));
+        assert_eq!(Frame::new(100).prev().unwrap(), Frame::new(99));
+    }
+
+    #[test]
+    fn frame_prev_overflow() {
+        assert!(Frame::new(i32::MIN).prev().is_err());
+    }
+
+    #[test]
+    fn frame_saturating_next() {
+        assert_eq!(Frame::new(0).saturating_next(), Frame::new(1));
+        assert_eq!(Frame::new(100).saturating_next(), Frame::new(101));
+        assert_eq!(Frame::new(i32::MAX).saturating_next(), Frame::new(i32::MAX));
+    }
+
+    #[test]
+    fn frame_saturating_prev() {
+        assert_eq!(Frame::new(1).saturating_prev(), Frame::new(0));
+        assert_eq!(Frame::new(100).saturating_prev(), Frame::new(99));
+        assert_eq!(Frame::new(i32::MIN).saturating_prev(), Frame::new(i32::MIN));
+    }
+
+    #[test]
+    fn frame_from_usize_valid() {
+        assert_eq!(Frame::from_usize(0), Some(Frame::new(0)));
+        assert_eq!(Frame::from_usize(42), Some(Frame::new(42)));
+        assert_eq!(
+            Frame::from_usize(i32::MAX as usize),
+            Some(Frame::new(i32::MAX))
+        );
+    }
+
+    #[test]
+    fn frame_from_usize_too_large() {
+        let too_large = (i32::MAX as usize) + 1;
+        assert_eq!(Frame::from_usize(too_large), None);
+        assert_eq!(Frame::from_usize(usize::MAX), None);
+    }
+
+    #[test]
+    fn frame_try_from_usize_valid() {
+        assert_eq!(Frame::try_from_usize(0).unwrap(), Frame::new(0));
+        assert_eq!(Frame::try_from_usize(42).unwrap(), Frame::new(42));
+    }
+
+    #[test]
+    fn frame_try_from_usize_too_large() {
+        let too_large = (i32::MAX as usize) + 1;
+        let err = Frame::try_from_usize(too_large).unwrap_err();
+        assert!(matches!(
+            err,
+            FortressError::FrameValueTooLarge { value } if value == too_large
+        ));
+    }
+
+    #[test]
+    fn frame_distance_to_basic() {
+        let a = Frame::new(100);
+        let b = Frame::new(150);
+
+        assert_eq!(a.distance_to(b), Some(50));
+        assert_eq!(b.distance_to(a), Some(-50));
+        assert_eq!(a.distance_to(a), Some(0));
+    }
+
+    #[test]
+    fn frame_distance_to_with_negative_frames() {
+        let a = Frame::new(-10);
+        let b = Frame::new(10);
+        assert_eq!(a.distance_to(b), Some(20));
+        assert_eq!(b.distance_to(a), Some(-20));
+    }
+
+    #[test]
+    fn frame_distance_to_overflow() {
+        // This would overflow: i32::MAX - i32::MIN
+        assert_eq!(Frame::new(i32::MIN).distance_to(Frame::new(i32::MAX)), None);
+        assert_eq!(Frame::new(i32::MAX).distance_to(Frame::new(i32::MIN)), None);
+    }
+
+    #[test]
+    fn frame_is_within_inside() {
+        let reference = Frame::new(100);
+        assert!(Frame::new(100).is_within(5, reference)); // diff = 0
+        assert!(Frame::new(98).is_within(5, reference)); // diff = 2
+        assert!(Frame::new(102).is_within(5, reference)); // diff = 2
+        assert!(Frame::new(95).is_within(5, reference)); // diff = 5 (boundary)
+        assert!(Frame::new(105).is_within(5, reference)); // diff = 5 (boundary)
+    }
+
+    #[test]
+    fn frame_is_within_outside() {
+        let reference = Frame::new(100);
+        assert!(!Frame::new(94).is_within(5, reference)); // diff = 6
+        assert!(!Frame::new(106).is_within(5, reference)); // diff = 6
+        assert!(!Frame::new(0).is_within(5, reference)); // diff = 100
+    }
+
+    #[test]
+    fn frame_is_within_zero_window() {
+        let reference = Frame::new(100);
+        assert!(Frame::new(100).is_within(0, reference)); // exact match
+        assert!(!Frame::new(99).is_within(0, reference)); // any diff is outside
+        assert!(!Frame::new(101).is_within(0, reference));
+    }
+
+    #[test]
+    fn frame_is_within_max_window() {
+        let reference = Frame::new(0);
+        // With max window, everything should be within
+        assert!(Frame::new(i32::MAX).is_within(u32::MAX, reference));
+        assert!(Frame::new(i32::MIN).is_within(u32::MAX, reference));
     }
 }
 

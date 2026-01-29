@@ -72,9 +72,9 @@ theme:
     repo: fontawesome/brands/github
     edit: material/pencil
     view: material/eye
-  # Custom logo/favicon (uncomment when available)
-  # logo: assets/logo.svg
-  # favicon: assets/favicon.png
+  # Custom logo/favicon
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
 
 # =============================================================================
 # Plugins

@@ -505,6 +505,22 @@ impl<'c, T> GameStateAccessor<'c, T> {
     }
 }
 
+#[cfg(not(loom))]
+impl<T: std::fmt::Debug> std::fmt::Debug for GameStateAccessor<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("GameStateAccessor").field(&*self.0).finish()
+    }
+}
+
+#[cfg(loom)]
+impl<T: std::fmt::Debug> std::fmt::Debug for GameStateAccessor<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("GameStateAccessor")
+            .field(&"<unavailable under loom>")
+            .finish()
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::panic,

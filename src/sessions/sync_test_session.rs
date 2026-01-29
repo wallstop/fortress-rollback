@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 
 use crate::error::{FortressError, InternalErrorKind, InvalidRequestKind};
@@ -328,6 +329,17 @@ impl<T: Config> SyncTestSession<T> {
             );
         }
         Ok(())
+    }
+}
+
+impl<T: Config> fmt::Debug for SyncTestSession<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SyncTestSession")
+            .field("num_players", &self.num_players)
+            .field("max_prediction", &self.max_prediction)
+            .field("check_distance", &self.check_distance)
+            .field("current_frame", &self.sync_layer.current_frame())
+            .finish_non_exhaustive()
     }
 }
 

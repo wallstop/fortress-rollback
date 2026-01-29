@@ -363,6 +363,10 @@ pub enum InternalErrorKind {
         /// The specific reason for the delta decode failure.
         reason: DeltaDecodeReason,
     },
+    /// Division by zero error.
+    ///
+    /// This occurs when a buffer size or divisor is zero.
+    DivisionByZero,
     /// Custom error (fallback for API compatibility).
     Custom(&'static str),
 }
@@ -410,6 +414,7 @@ impl Display for InternalErrorKind {
             Self::DeltaDecodeError { reason } => {
                 write!(f, "delta decode failed: {}", reason)
             },
+            Self::DivisionByZero => write!(f, "division by zero"),
             Self::Custom(s) => write!(f, "{}", s),
         }
     }
@@ -951,6 +956,26 @@ pub enum FortressError {
         /// The structured kind of socket error.
         kind: SocketErrorKind,
     },
+    /// Frame arithmetic operation would overflow.
+    ///
+    /// This error is returned when a frame arithmetic operation (e.g., `try_add`,
+    /// `try_sub`) would result in a value that cannot be represented as an `i32`.
+    FrameArithmeticOverflow {
+        /// The frame the operation was attempted on.
+        frame: Frame,
+        /// The operand that caused overflow.
+        operand: i32,
+        /// The operation that was attempted (e.g., "add", "sub").
+        operation: &'static str,
+    },
+    /// Frame value is too large to represent.
+    ///
+    /// This error is returned when converting a `usize` to a `Frame` and the
+    /// value exceeds `i32::MAX`.
+    FrameValueTooLarge {
+        /// The value that was too large.
+        value: usize,
+    },
 }
 
 impl Display for FortressError {
@@ -1030,6 +1055,25 @@ impl Display for FortressError {
             },
             Self::SocketErrorStructured { kind } => {
                 write!(f, "Socket error: {}", kind)
+            },
+            Self::FrameArithmeticOverflow {
+                frame,
+                operand,
+                operation,
+            } => {
+                write!(
+                    f,
+                    "Frame arithmetic overflow: {} {} on frame {}",
+                    operation, operand, frame
+                )
+            },
+            Self::FrameValueTooLarge { value } => {
+                write!(
+                    f,
+                    "Frame value too large: {} exceeds i32::MAX ({})",
+                    value,
+                    i32::MAX
+                )
             },
         }
     }
@@ -1957,5 +2001,81 @@ mod tests {
         };
         let kind3_copy = kind3; // Copy
         assert_eq!(kind3, kind3_copy);
+    }
+
+    // ==========================================
+    // Frame Arithmetic Error Tests
+    // ==========================================
+
+    #[test]
+    fn test_frame_arithmetic_overflow_display() {
+        let err = FortressError::FrameArithmeticOverflow {
+            frame: Frame::new(i32::MAX),
+            operand: 1,
+            operation: "add",
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Frame arithmetic overflow"));
+        assert!(display.contains("add"));
+        assert!(display.contains('1'));
+    }
+
+    #[test]
+    fn test_frame_arithmetic_overflow_sub_display() {
+        let err = FortressError::FrameArithmeticOverflow {
+            frame: Frame::new(i32::MIN),
+            operand: 1,
+            operation: "sub",
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Frame arithmetic overflow"));
+        assert!(display.contains("sub"));
+    }
+
+    #[test]
+    fn test_frame_value_too_large_display() {
+        let too_large = (i32::MAX as usize) + 1;
+        let err = FortressError::FrameValueTooLarge { value: too_large };
+        let display = format!("{}", err);
+        assert!(display.contains("Frame value too large"));
+        assert!(display.contains(&too_large.to_string()));
+        assert!(display.contains(&i32::MAX.to_string()));
+    }
+
+    #[test]
+    fn test_frame_arithmetic_overflow_debug() {
+        let err = FortressError::FrameArithmeticOverflow {
+            frame: Frame::new(100),
+            operand: 50,
+            operation: "add",
+        };
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("FrameArithmeticOverflow"));
+        assert!(debug.contains("100"));
+        assert!(debug.contains("50"));
+        assert!(debug.contains("add"));
+    }
+
+    #[test]
+    fn test_frame_value_too_large_debug() {
+        let err = FortressError::FrameValueTooLarge { value: 12345 };
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("FrameValueTooLarge"));
+        assert!(debug.contains("12345"));
+    }
+
+    #[test]
+    fn test_frame_errors_are_clone_and_eq() {
+        let err1 = FortressError::FrameArithmeticOverflow {
+            frame: Frame::new(100),
+            operand: 1,
+            operation: "add",
+        };
+        let err1_clone = err1.clone();
+        assert_eq!(err1, err1_clone);
+
+        let err2 = FortressError::FrameValueTooLarge { value: 999 };
+        let err2_clone = err2.clone();
+        assert_eq!(err2, err2_clone);
     }
 }

@@ -1,4 +1,5 @@
 use std::collections::{vec_deque::Drain, VecDeque};
+use std::fmt;
 use std::sync::Arc;
 
 use crate::{
@@ -418,6 +419,20 @@ impl<T: Config> SpectatorSession<T> {
         while self.event_queue.len() > self.max_event_queue_size {
             self.event_queue.pop_front();
         }
+    }
+}
+
+impl<T: Config> fmt::Debug for SpectatorSession<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SpectatorSession")
+            .field("state", &self.state)
+            .field("num_players", &self.num_players)
+            .field("current_frame", &self.current_frame)
+            .field("last_recv_frame", &self.last_recv_frame)
+            .field("buffer_size", &self.buffer_size)
+            .field("max_frames_behind", &self.max_frames_behind)
+            .field("catchup_speed", &self.catchup_speed)
+            .finish_non_exhaustive()
     }
 }
 

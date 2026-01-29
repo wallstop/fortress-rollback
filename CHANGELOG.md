@@ -14,6 +14,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Frame` ergonomic methods for safe arithmetic and conversion:
+  - `as_usize()`, `try_as_usize()` — convert to usize with Option/Result
+  - `buffer_index(size)`, `try_buffer_index(size)` — ring buffer index calculation
+  - `try_add(i32)`, `try_sub(i32)` — Result-returning arithmetic
+  - `next()`, `prev()` — Result-returning increment/decrement
+  - `saturating_next()`, `saturating_prev()` — saturating increment/decrement
+  - `from_usize(usize)`, `try_from_usize(usize)` — safe construction from usize
+  - `distance_to(Frame)` — signed distance calculation
+  - `is_within(window, reference)` — window proximity check
+- `FortressError::FrameArithmeticOverflow` for overflow detection in frame arithmetic
+- `FortressError::FrameValueTooLarge` for usize-to-Frame conversion failures
+- `InternalErrorKind::DivisionByZero` for division by zero errors
+- `Hash` derive for `ChaosStats`, `NetworkStats`, and `Pcg32` — enables use as map keys
+- `Copy`, `PartialEq`, `Eq`, and `Hash` derives for `TracingObserver` unit struct
+- `Hash` derive for configuration types: `TimeSyncConfig`, `SyncConfig`, `ProtocolConfig`, `SpectatorConfig`, `InputQueueConfig` — enables use as map keys for configuration caching
+- `PartialEq`, `Eq`, and `Hash` derives for `DeterministicHasher` and `DeterministicBuildHasher` — enables comparison and use as map keys
+
 ## [0.3.0]
 
 ### Added

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="../assets/logo.svg" alt="Fortress Rollback" width="128">
+  <img src="assets/logo.svg" alt="Fortress Rollback" width="128">
 </p>
 
 # Fortress Rollback Architecture Guide
