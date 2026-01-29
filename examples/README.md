@@ -86,6 +86,21 @@ Demonstrates proper error handling patterns:
 cargo run --example error_handling
 ```
 
+## Request Handling Example
+
+Demonstrates the different ways to handle `FortressRequest` in your game loop:
+
+- **Manual matching** — Full control with explicit `match` statements
+- **`handle_requests!` macro** — Less boilerplate, same semantics
+- Using `compute_checksum()` for desync detection
+- Understanding that `FortressRequest` is exhaustively matchable (no wildcard `_ =>` needed)
+
+This is the recommended starting point for understanding request handling patterns.
+
+```shell
+cargo run --example request_handling
+```
+
 ## Sync Test Example
 
 Demonstrates using `SyncTestSession` to verify determinism in game logic:

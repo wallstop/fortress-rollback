@@ -194,9 +194,9 @@ trivially_copy_pass_by_ref = "allow"
 unchecked_duration_subtraction = "allow"
 unchecked_time_subtraction = "allow"
 
-# Note: wildcard_enum_match_arm is NOT enabled because public enums use #[non_exhaustive],
-# which already forces external users to handle wildcards. Internal test code uses wildcards
-# intentionally for internal enums like MessageBody.
+# Note: wildcard_enum_match_arm is NOT enabled because internal test code uses wildcards
+# intentionally for internal enums like MessageBody, and we want to allow example code to
+# demonstrate patterns without requiring exhaustive matching.
 
 # === Defensive programming pattern enforcement ===
 # Warn about unneeded field patterns in struct destructuring

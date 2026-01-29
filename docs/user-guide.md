@@ -131,6 +131,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+> **📚 See Also — Reduce Boilerplate & Catch Bugs**
+>
+> - **[`handle_requests!` macro](#using-the-handle_requests-macro)** — Eliminate match boilerplate with a concise macro
+> - **[`compute_checksum()`](#computing-checksums)** — Enable desync detection with built-in deterministic hashing
+> - **[Config Presets](#syncconfig-presets)** — Use `SyncConfig::lan()`, `ProtocolConfig::competitive()`, etc. for common network conditions
+> - **[Request Handling Example](../examples/request_handling.rs)** — Complete example showing both manual matching and macro usage
+
 ---
 
 ## Defining Your Config
@@ -337,7 +344,13 @@ loop {
 
 ## Handling Requests
 
-Requests are returned by `advance_frame()` and must be processed in order:
+Requests are returned by `advance_frame()` and must be processed in order.
+
+> **💡 Exhaustive Matching — No Wildcard Needed**
+>
+> `FortressRequest` is **not** marked `#[non_exhaustive]`, so you can match all variants
+> without a wildcard `_ =>` arm. The compiler will notify you if new variants are added
+> in future versions, ensuring your code stays up-to-date.
 
 ```rust
 use fortress_rollback::{FortressRequest, compute_checksum};
@@ -2367,7 +2380,7 @@ builder.with_desync_detection_mode(DesyncDetection::Off);
 
 ## Error Handling
 
-Fortress Rollback uses `FortressError` for all error conditions.
+Fortress Rollback uses `FortressError` for all error conditions. The enum is exhaustive, so you can write complete matches without wildcard arms and the compiler will notify you if new variants are added in future versions.
 
 ### Error Types
 
@@ -2428,6 +2441,27 @@ fn handle_error(error: FortressError) -> Action {
         FortressError::InternalError { context } => {
             eprintln!("Internal error (please report): {}", context);
             Action::Fatal
+        }
+
+        // Structured variants (preferred for new code)
+        FortressError::InvalidFrameStructured { frame, reason } => {
+            eprintln!("Invalid frame {}: {:?}", frame, reason);
+            Action::Continue
+        }
+        FortressError::InternalErrorStructured { kind } => {
+            eprintln!("Internal error (please report): {:?}", kind);
+            Action::Fatal
+        }
+        FortressError::InvalidRequestStructured { kind } => {
+            panic!("Invalid request: {:?}", kind)
+        }
+        FortressError::SerializationErrorStructured { kind } => {
+            eprintln!("Serialization error: {:?}", kind);
+            Action::Fatal
+        }
+        FortressError::SocketErrorStructured { kind } => {
+            eprintln!("Socket error: {:?}", kind);
+            Action::Reconnect
         }
     }
 }

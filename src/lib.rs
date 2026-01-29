@@ -1195,10 +1195,11 @@ where
 /// # }
 /// ```
 ///
-/// # Forward Compatibility
+/// # Exhaustive Matching
 ///
-/// This macro handles unknown future request types by ignoring them, ensuring
-/// your code continues to work when new request types are added.
+/// `FortressRequest` is exhaustively matchable (not `#[non_exhaustive]`), so this
+/// macro handles all variants. If a new variant is added in a future version,
+/// the compiler will notify you at compile time.
 ///
 /// [`P2PSession::advance_frame`]: crate::P2PSession::advance_frame
 /// [`FortressRequest::SaveGameState`]: crate::FortressRequest::SaveGameState
@@ -1227,8 +1228,6 @@ macro_rules! handle_requests {
                     #[allow(clippy::redundant_closure_call)]
                     ($advance)(inputs);
                 },
-                // Handle unknown future variants gracefully
-                _ => {},
             }
         }
     }};

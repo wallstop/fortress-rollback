@@ -701,6 +701,18 @@ PlayerType::Spectator(addr)    // Observer (no input)
 - **Safety and correctness trump compatibility** — Make breaking changes if they improve quality
 - **Document all breaking changes** — Update `CHANGELOG.md` and `docs/migration.md`
 
+#### Breaking Change Checklist
+
+Before merging any breaking API change:
+
+- [ ] `CHANGELOG.md` updated with **Breaking:** prefix and migration guidance
+- [ ] `docs/migration.md` updated with before/after code examples
+- [ ] `README.md` examples updated if affected
+- [ ] `docs/user-guide.md` updated if affected
+- [ ] All `examples/*.rs` files compile: `cargo build --examples`
+- [ ] Rustdoc examples compile: `cargo test --doc`
+- [ ] Search for old API usage: `rg 'old_function_name' --type rust --type md`
+
 ### Test Coverage Requirements
 
 > **See also:** [rust-testing-guide.md](skills/rust-testing-guide.md) for comprehensive testing patterns.
@@ -841,6 +853,32 @@ The pre-commit hook runs `cargo doc` with strict `RUSTDOCFLAGS=-D warnings`, mat
 ```
 
 Use shorthand `[`TypeName`]` when the link text matches the final path segment. Place reference definitions at the end of doc blocks for readability.
+
+#### Documentation Synchronization
+
+When changing public APIs, update documentation in ALL locations:
+
+1. **Rustdoc comments** — The source of truth in `src/`
+2. **README.md** — Quick start examples and feature overview
+3. **docs/user-guide.md** — Detailed usage examples
+4. **examples/** — Runnable example files
+5. **CHANGELOG.md** — User-facing change description
+
+**Search for usages before committing:**
+
+```bash
+# Find all references to the changed API
+rg 'function_name|StructName' --type rust --type md
+
+# Check examples compile after API changes
+cargo build --examples
+```
+
+**Common synchronization failures:**
+
+- README shows old API signature while code has new one
+- Examples use deprecated methods
+- User guide references removed configuration options
 
 ### Full Verification (Before Committing)
 
