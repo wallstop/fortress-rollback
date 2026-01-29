@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FortressError::FrameArithmeticOverflow` for overflow detection in frame arithmetic
 - `FortressError::FrameValueTooLarge` for usize-to-Frame conversion failures
 - `InternalErrorKind::DivisionByZero` for division by zero errors
+- `Debug` impl for `P2PSession`, `SpectatorSession`, and `SyncTestSession` — enables logging session state for debugging
+- `Debug` impl for `ChaosSocket` — shows config, stats, and packet queue length
+- `Debug` impl for `GameStateAccessor` — delegates to inner `T` when `T: Debug`
+- `PartialEq` derive for `ChaosConfig` — enables configuration comparison in tests
 - `Hash` derive for `ChaosStats`, `NetworkStats`, and `Pcg32` — enables use as map keys
 - `Copy`, `PartialEq`, `Eq`, and `Hash` derives for `TracingObserver` unit struct
 - `Hash` derive for configuration types: `TimeSyncConfig`, `SyncConfig`, `ProtocolConfig`, `SpectatorConfig`, `InputQueueConfig` — enables use as map keys for configuration caching
