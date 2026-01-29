@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `P2PSession::local_player_handle()` for easily getting the first local player handle
 - `ProtocolConfig` now re-exported in `fortress_rollback::prelude`
 - `sync_test` example demonstrating `SyncTestSession` determinism verification
+- `request_handling` example demonstrating both manual matching and the `handle_requests!` macro
 - Structured error reason types for zero-allocation error construction and programmatic inspection:
   - `IndexOutOfBounds` struct for out-of-bounds errors with collection name, index, and length
   - `InvalidFrameReason`, `RleDecodeReason`, `DeltaDecodeReason` enums for specific failure modes
