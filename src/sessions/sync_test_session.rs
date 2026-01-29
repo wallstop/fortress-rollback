@@ -338,7 +338,6 @@ impl<T: Config> SyncTestSession<T> {
     clippy::expect_used,
     clippy::indexing_slicing
 )]
-#[allow(unreachable_patterns)] // FortressRequest is #[non_exhaustive]
 mod tests {
     use super::*;
     use crate::telemetry::CollectingObserver;
@@ -700,7 +699,6 @@ mod tests {
                         // Simulate game advancement - append frame number to state
                         game_state.push(frame_num as u8);
                     },
-                    _ => {},
                 }
             }
         }
@@ -765,7 +763,6 @@ mod tests {
                             FortressRequest::AdvanceFrame { .. } => {
                                 game_state.push(frame_num as u8);
                             },
-                            _ => {},
                         }
                     }
                 },
@@ -842,7 +839,6 @@ mod tests {
                     FortressRequest::AdvanceFrame { .. } => {
                         game_state.push(frame_num as u8);
                     },
-                    _ => {},
                 }
             }
         }
@@ -1033,7 +1029,6 @@ mod tests {
                     FortressRequest::AdvanceFrame { .. } => {
                         game_state.push(frame_num as u8);
                     },
-                    _ => {},
                 }
             }
         }

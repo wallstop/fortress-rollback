@@ -245,6 +245,42 @@ pub fn validate(&self) -> bool {
 
 ---
 
+## Example Code Maintenance
+
+When documenting API changes, also update example code:
+
+### Locations to Check
+
+| Location | Purpose |
+|----------|--------|
+| `examples/*.rs` | Runnable standalone examples |
+| `README.md` | Quick start code snippets |
+| `docs/user-guide.md` | Detailed usage examples |
+| Rustdoc `# Examples` | Inline documentation examples |
+
+### Verification Commands
+
+```bash
+# Ensure all examples compile
+cargo build --examples
+
+# Ensure rustdoc examples compile
+cargo test --doc
+
+# Find references to changed APIs
+rg 'changed_function|ChangedStruct' --type rust --type md
+```
+
+### Why This Matters
+
+- Outdated examples confuse users and erode trust
+- Broken examples in README are often the first impression
+- CI may not catch example drift if examples aren't compiled
+
+**Rule:** If you change a `pub` API, search the codebase for all usages before committing.
+
+---
+
 ## References
 
 - [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)

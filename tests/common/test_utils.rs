@@ -997,9 +997,6 @@ mod tests {
                             SocketErrorKind::Custom(_) => {
                                 // Custom errors are acceptable as fallback
                             },
-                            _ => {
-                                // Handle future variants (non_exhaustive enum)
-                            },
                         }
                     },
                     Err(other) => {
@@ -1058,9 +1055,6 @@ mod tests {
                     },
                     SocketErrorKind::Custom(_) => {
                         // Custom errors may not include port in struct form
-                    },
-                    _ => {
-                        // Handle future variants (non_exhaustive enum)
                     },
                 }
             }
@@ -1132,9 +1126,6 @@ mod tests {
                             },
                             SocketErrorKind::Custom(_) => {
                                 // Custom errors are acceptable as fallback
-                            },
-                            _ => {
-                                // Handle future variants (non_exhaustive enum)
                             },
                         }
                     }

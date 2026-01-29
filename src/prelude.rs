@@ -22,7 +22,7 @@
 //! - **Error handling**: [`FortressError`], [`FortressResult`]
 //! - **Game state**: [`GameStateCell`], [`GameStateAccessor`], [`InputVec`]
 //! - **Network monitoring**: [`NetworkStats`]
-//! - **Configuration**: [`SyncConfig`]
+//! - **Configuration**: [`SyncConfig`], [`ProtocolConfig`]
 //!
 //! # Example
 //!
@@ -88,4 +88,4 @@ pub use crate::InputVec;
 pub use crate::NetworkStats;
 
 // Common configuration types
-pub use crate::sessions::config::SyncConfig;
+pub use crate::sessions::config::{ProtocolConfig, SyncConfig};

@@ -108,7 +108,7 @@ fn test_synctest_input_iteration_determinism() {
                     FortressRequest::AdvanceFrame { .. } => {
                         frames_advanced += 1;
                     },
-                    _ => {},
+                    FortressRequest::LoadGameState { .. } => {},
                 }
             }
         }

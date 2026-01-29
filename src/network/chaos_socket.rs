@@ -401,7 +401,7 @@ where
 }
 
 /// Statistics about chaos socket behavior.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ChaosStats {
     /// Total packets sent through the socket
     pub packets_sent: u64,

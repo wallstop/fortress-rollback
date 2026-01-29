@@ -14,15 +14,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0]
+
+### Added
+
+- `SessionBuilder::add_local_player()` convenience method for adding local players
+- `SessionBuilder::add_remote_player()` convenience method for adding remote players
+- `P2PSession::local_player_handle()` for easily getting the first local player handle
+- `ProtocolConfig` now re-exported in `fortress_rollback::prelude`
+- `sync_test` example demonstrating `SyncTestSession` determinism verification
+- `request_handling` example demonstrating both manual matching and the `handle_requests!` macro
+- Structured error reason types for zero-allocation error construction and programmatic inspection:
+  - `IndexOutOfBounds` struct for out-of-bounds errors with collection name, index, and length
+  - `InvalidFrameReason`, `RleDecodeReason`, `DeltaDecodeReason` enums for specific failure modes
+  - `InternalErrorKind`, `InvalidRequestKind`, `SerializationErrorKind`, `SocketErrorKind` enums
+- New `FortressError` variants using structured types: `InvalidFrameStructured`, `InternalErrorStructured`, `InvalidRequestStructured`, `SerializationErrorStructured`, `SocketErrorStructured`
+- `ChecksumAlgorithm` and `CodecOperation` enums for identifying operations in errors
+- `CompressionError` enum for RLE and delta decode errors
+
+### Changed
+
+- **Breaking:** Removed `#[non_exhaustive]` from `FortressError`, `FortressEvent`, `FortressRequest`, `ViolationKind`, `CompressionError`, `CodecOperation`, `CodecError`, `ChecksumError`, `ChecksumAlgorithm`, `InvalidFrameReason`, `RleDecodeReason`, `DeltaDecodeReason`, `InternalErrorKind`, `InvalidRequestKind`, `SerializationErrorKind`, and `SocketErrorKind` — users can now write exhaustive matches without wildcard arms
+- **Breaking:** `ChecksumError::SerializationFailed` now uses struct fields `{ algorithm, message }` instead of tuple
+- **Breaking:** `CodecError::EncodeError` and `DecodeError` now use struct fields `{ message, operation }` instead of tuple
+
 ## [0.2.2] - 2026-01-22
-
-### Fixed
-
-- Removed the possibility for an internal panic under debug mode.
 
 ### Changed
 
 - **Breaking:** Renamed `Result` type alias to `FortressResult` to avoid shadowing `std::result::Result` when using glob imports (`use fortress_rollback::*`)
+
+### Fixed
+
+- Removed the possibility for an internal panic under debug builds
 
 ## [0.2.1] - 2025-12-26
 
@@ -255,7 +279,9 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/wallstop/fortress-rollback/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/wallstop/fortress-rollback/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/wallstop/fortress-rollback/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/wallstop/fortress-rollback/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/wallstop/fortress-rollback/compare/v0.1.0...v0.1.1

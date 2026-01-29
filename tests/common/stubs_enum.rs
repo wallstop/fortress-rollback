@@ -66,7 +66,6 @@ impl GameStubEnum {
                 FortressRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
                 FortressRequest::SaveGameState { cell, frame } => self.save_game_state(cell, frame),
                 FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
-                _ => unreachable!("Unknown request type"),
             }
         }
     }

@@ -1678,7 +1678,6 @@ mod p2p_checksum_tests {
                         let _ = cell.load();
                     },
                     FortressRequest::AdvanceFrame { .. } => {},
-                    _ => {}, // Handle any future variants
                 }
             }
             for req in requests2 {
@@ -1696,7 +1695,6 @@ mod p2p_checksum_tests {
                         let _ = cell.load();
                     },
                     FortressRequest::AdvanceFrame { .. } => {},
-                    _ => {}, // Handle any future variants
                 }
             }
         }

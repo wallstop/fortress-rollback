@@ -994,7 +994,7 @@ impl InputQueueConfig {
 /// let builder = SessionBuilder::<MyConfig>::new()
 ///     .with_save_mode(SaveMode::EveryFrame);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SaveMode {
     /// Save game state every frame.
     ///

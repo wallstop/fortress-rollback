@@ -33,7 +33,7 @@ use crate::Frame;
 ///     }
 /// }
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SyncHealth {
     /// Checksums match at the most recently compared frame.
     ///
@@ -134,14 +134,14 @@ mod tests {
     }
 
     #[test]
-    fn sync_health_clone() {
+    fn sync_health_copy() {
         let original = SyncHealth::DesyncDetected {
             frame: Frame::new(10),
             local_checksum: 0x1234,
             remote_checksum: 0x5678,
         };
-        let cloned = original.clone();
-        assert_eq!(original, cloned);
+        let copied = original;
+        assert_eq!(original, copied);
     }
 
     #[test]

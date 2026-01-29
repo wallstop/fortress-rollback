@@ -166,7 +166,6 @@ fn run_synctest_session(
                 FortressRequest::AdvanceFrame { inputs } => {
                     state.apply_inputs(&inputs);
                 },
-                _ => unreachable!("Unknown request type"),
             }
         }
     }
@@ -371,7 +370,6 @@ fn test_metamorphic_input_delay_invariance() {
                     FortressRequest::AdvanceFrame { inputs } => {
                         state.apply_inputs(&inputs);
                     },
-                    _ => unreachable!("Unknown request type"),
                 }
             }
         }
@@ -409,7 +407,6 @@ fn test_metamorphic_input_delay_invariance() {
                     FortressRequest::AdvanceFrame { inputs } => {
                         state.apply_inputs(&inputs);
                     },
-                    _ => unreachable!("Unknown request type"),
                 }
             }
         }
@@ -468,7 +465,6 @@ fn test_metamorphic_prediction_window_invariance() {
                     FortressRequest::AdvanceFrame { inputs } => {
                         state.apply_inputs(&inputs);
                     },
-                    _ => unreachable!("Unknown request type"),
                 }
             }
         }
@@ -506,7 +502,6 @@ fn test_metamorphic_prediction_window_invariance() {
                     FortressRequest::AdvanceFrame { inputs } => {
                         state.apply_inputs(&inputs);
                     },
-                    _ => unreachable!("Unknown request type"),
                 }
             }
         }
@@ -804,7 +799,6 @@ mod termination_tests {
                     FortressRequest::AdvanceFrame { inputs } => {
                         state.apply_inputs(&inputs);
                     },
-                    _ => unreachable!("Unknown request type"),
                 }
             }
         }
@@ -888,7 +882,6 @@ mod termination_tests {
                     FortressRequest::AdvanceFrame { inputs } => {
                         state.apply_inputs(&inputs);
                     },
-                    _ => unreachable!("Unknown request type"),
                 }
             }
         }
@@ -1042,7 +1035,6 @@ mod termination_property_tests {
                     FortressRequest::AdvanceFrame { inputs } => {
                         state.apply_inputs(&inputs);
                     },
-                    _ => unreachable!("Unknown request type"),
                 }
             }
         }

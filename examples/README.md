@@ -86,6 +86,41 @@ Demonstrates proper error handling patterns:
 cargo run --example error_handling
 ```
 
+## Request Handling Example
+
+Demonstrates the different ways to handle `FortressRequest` in your game loop:
+
+- **Manual matching** — Full control with explicit `match` statements
+- **`handle_requests!` macro** — Less boilerplate, same semantics
+- Using `compute_checksum()` for desync detection
+- Understanding that `FortressRequest` is exhaustively matchable (no wildcard `_ =>` needed)
+
+This is the recommended starting point for understanding request handling patterns.
+
+```shell
+cargo run --example request_handling
+```
+
+## Sync Test Example
+
+Demonstrates using `SyncTestSession` to verify determinism in game logic:
+
+- Setting up a SyncTestSession with SessionBuilder
+- Running a simulation with known inputs
+- Handling all FortressRequest variants (Save, Load, Advance)
+- Computing and verifying checksums
+- Understanding what causes MismatchedChecksum errors
+
+This is a standalone example with no graphical dependencies, making it ideal for:
+
+- CI/CD integration testing
+- Understanding the sync test workflow
+- Debugging determinism issues
+
+```shell
+cargo run --example sync_test
+```
+
 ## ExGame
 
 ExGame is a very basic 2-4 player game example with each player controlling a coloured shape.

@@ -64,7 +64,6 @@ impl GameStub {
                 FortressRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
                 FortressRequest::SaveGameState { cell, frame } => self.save_game_state(cell, frame),
                 FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
-                _ => unreachable!("Unknown request type"),
             }
         }
     }
@@ -119,7 +118,6 @@ impl RandomChecksumGameStub {
                 FortressRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
                 FortressRequest::SaveGameState { cell, frame } => self.save_game_state(cell, frame),
                 FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
-                _ => unreachable!("Unknown request type"),
             }
         }
     }
@@ -192,7 +190,6 @@ impl CorruptibleGameStub {
                 FortressRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
                 FortressRequest::SaveGameState { cell, frame } => self.save_game_state(cell, frame),
                 FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
-                _ => unreachable!("Unknown request type"),
             }
         }
     }

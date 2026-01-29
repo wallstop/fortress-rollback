@@ -13,18 +13,98 @@ use crate::report_violation;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::Frame;
 
-/// An [`Arc<Mutex>`] that you can [`save()`]/[`load()`] a `T` to/from. These will be handed to the user as part of a [`FortressRequest`].
+/// A thread-safe cell for saving and loading game states during rollback.
 ///
-/// [`save()`]: GameStateCell#method.save
-/// [`load()`]: GameStateCell#method.load
-/// [`FortressRequest`]: crate::FortressRequest
+/// `GameStateCell` wraps your game state in an [`Arc<Mutex>`], allowing it to be shared
+/// between the rollback system and your game code. You receive instances of this type
+/// through [`FortressRequest::SaveGameState`] and [`FortressRequest::LoadGameState`]
+/// requests when the session needs to save or restore game state.
+///
+/// # Thread Safety
+///
+/// This type is `Send + Sync` and uses interior mutability via a mutex. Multiple clones
+/// of the same cell share the underlying state (see the [`Clone`] implementation).
+///
+/// # Typical Usage
+///
+/// ```ignore
+/// // In your game loop, handle requests from the session:
+/// for request in session.advance_frame()? {
+///     match request {
+///         FortressRequest::SaveGameState { frame, cell } => {
+///             let checksum = compute_checksum(&game_state);
+///             cell.save(frame, Some(game_state.clone()), Some(checksum));
+///         }
+///         FortressRequest::LoadGameState { cell, frame } => {
+///             if let Some(loaded) = cell.load() {
+///                 game_state = loaded;
+///             }
+///         }
+///         // ... handle other requests
+///     }
+/// }
+/// ```
+///
+/// [`save()`]: GameStateCell::save
+/// [`load()`]: GameStateCell::load
+/// [`FortressRequest::SaveGameState`]: crate::FortressRequest::SaveGameState
+/// [`FortressRequest::LoadGameState`]: crate::FortressRequest::LoadGameState
 pub struct GameStateCell<T>(pub(crate) Arc<Mutex<GameState<T>>>);
 
 impl<T> GameStateCell<T> {
-    /// Saves a `T` the user creates into the cell.
+    /// Saves a game state into the cell.
+    ///
+    /// This method stores the provided game state, frame number, and optional checksum
+    /// in the cell. The cell uses interior mutability, so this works with a shared reference.
+    ///
+    /// # Arguments
+    ///
+    /// * `frame` - The frame number this state corresponds to. Must not be [`Frame::NULL`].
+    /// * `data` - The game state to save, or `None` to clear the cell.
+    /// * `checksum` - Optional checksum for desync detection.
     ///
     /// # Returns
-    /// Returns `false` if the frame is null (which would be a caller error), `true` otherwise.
+    ///
+    /// Returns `true` if the save succeeded, `false` if the frame was null (a caller error).
+    ///
+    /// # Examples
+    ///
+    /// Basic save with state and checksum:
+    ///
+    /// ```
+    /// use fortress_rollback::{Frame, GameStateCell};
+    ///
+    /// #[derive(Clone, Default)]
+    /// struct GameState {
+    ///     player_x: i32,
+    ///     player_y: i32,
+    /// }
+    ///
+    /// let cell = GameStateCell::<GameState>::default();
+    /// let frame = Frame::new(42);
+    /// let state = GameState { player_x: 100, player_y: 200 };
+    /// let checksum = Some(0xDEADBEEF_u128);
+    ///
+    /// // Save succeeds and returns true
+    /// assert!(cell.save(frame, Some(state), checksum));
+    ///
+    /// // Verify the data was saved
+    /// assert_eq!(cell.frame(), frame);
+    /// assert_eq!(cell.checksum(), checksum);
+    /// ```
+    ///
+    /// Saving with a null frame returns `false`:
+    ///
+    /// ```
+    /// use fortress_rollback::{Frame, GameStateCell};
+    ///
+    /// let cell = GameStateCell::<u32>::default();
+    ///
+    /// // Null frames are rejected
+    /// assert!(!cell.save(Frame::NULL, Some(42), None));
+    /// ```
+    ///
+    /// [`Frame::NULL`]: crate::Frame::NULL
     #[cfg(not(loom))]
     pub fn save(&self, frame: Frame, data: Option<T>, checksum: Option<u128>) -> bool {
         if frame.is_null() {
@@ -42,10 +122,13 @@ impl<T> GameStateCell<T> {
         true
     }
 
-    /// Saves a `T` the user creates into the cell (loom version).
+    /// Saves a game state into the cell (loom version).
+    ///
+    /// See the non-loom version for full documentation and examples.
     ///
     /// # Returns
-    /// Returns `false` if the frame is null (which would be a caller error), `true` otherwise.
+    ///
+    /// Returns `true` if the save succeeded, `false` if the frame was null.
     #[cfg(loom)]
     pub fn save(&self, frame: Frame, data: Option<T>, checksum: Option<u128>) -> bool {
         if frame.is_null() {
@@ -125,11 +208,27 @@ impl<T> GameStateCell<T> {
         None
     }
 
-    #[cfg(not(loom))]
     /// Returns the frame number for this saved state.
     ///
-    /// # Note
-    /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
+    /// Returns [`Frame::NULL`] if no state has been saved yet.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::{Frame, GameStateCell};
+    ///
+    /// let cell = GameStateCell::<u32>::default();
+    ///
+    /// // Initially null
+    /// assert!(cell.frame().is_null());
+    ///
+    /// // After saving, returns the saved frame
+    /// cell.save(Frame::new(10), Some(42), None);
+    /// assert_eq!(cell.frame(), Frame::new(10));
+    /// ```
+    ///
+    /// [`Frame::NULL`]: crate::Frame::NULL
+    #[cfg(not(loom))]
     #[must_use]
     pub fn frame(&self) -> Frame {
         self.0.lock().frame
@@ -141,11 +240,29 @@ impl<T> GameStateCell<T> {
         self.0.lock().unwrap().frame
     }
 
-    #[cfg(not(loom))]
     /// Returns the checksum for this saved state, if one was saved.
     ///
-    /// # Note
-    /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
+    /// Returns `None` if no state has been saved, or if the state was saved without a checksum.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fortress_rollback::{Frame, GameStateCell};
+    ///
+    /// let cell = GameStateCell::<u32>::default();
+    ///
+    /// // Initially no checksum
+    /// assert!(cell.checksum().is_none());
+    ///
+    /// // Save with a checksum
+    /// cell.save(Frame::new(5), Some(42), Some(0x12345678));
+    /// assert_eq!(cell.checksum(), Some(0x12345678));
+    ///
+    /// // Save without a checksum
+    /// cell.save(Frame::new(6), Some(99), None);
+    /// assert!(cell.checksum().is_none());
+    /// ```
+    #[cfg(not(loom))]
     #[must_use]
     pub fn checksum(&self) -> Option<u128> {
         self.0.lock().checksum
@@ -159,9 +276,57 @@ impl<T> GameStateCell<T> {
 }
 
 impl<T: Clone> GameStateCell<T> {
-    /// Loads a `T` that the user previously saved into this cell, by cloning the `T`.
+    /// Loads a previously saved game state by cloning it.
     ///
-    /// See also [data()](Self::data) if you want a reference to the `T` without cloning it.
+    /// Returns `None` if no state has been saved, or if `None` was explicitly saved.
+    /// This method clones the stored state, leaving the original in place for potential
+    /// future loads (e.g., during multiple rollbacks to the same frame).
+    ///
+    /// See also [`data()`](Self::data) if you want a reference to the `T` without cloning it.
+    ///
+    /// # Examples
+    ///
+    /// Loading a saved state:
+    ///
+    /// ```
+    /// use fortress_rollback::{Frame, GameStateCell};
+    ///
+    /// #[derive(Clone, PartialEq, Debug)]
+    /// struct GameState {
+    ///     score: u32,
+    /// }
+    ///
+    /// let cell = GameStateCell::<GameState>::default();
+    ///
+    /// // No state saved yet
+    /// assert!(cell.load().is_none());
+    ///
+    /// // Save and load
+    /// let original = GameState { score: 100 };
+    /// cell.save(Frame::new(1), Some(original.clone()), None);
+    ///
+    /// let loaded = cell.load();
+    /// assert_eq!(loaded, Some(original));
+    /// ```
+    ///
+    /// Handling the `Option` defensively (as used in request handling):
+    ///
+    /// ```
+    /// use fortress_rollback::{Frame, GameStateCell};
+    ///
+    /// #[derive(Clone, Default)]
+    /// struct GameState { value: i32 }
+    ///
+    /// let cell = GameStateCell::<GameState>::default();
+    /// let mut current_state = GameState { value: 42 };
+    ///
+    /// // Simulate a LoadGameState request handler
+    /// // (in practice, LoadGameState is only requested for previously saved frames)
+    /// if let Some(loaded) = cell.load() {
+    ///     current_state = loaded;
+    /// }
+    /// // If load() returns None, current_state is unchanged
+    /// ```
     #[cfg(not(loom))]
     #[must_use]
     pub fn load(&self) -> Option<T> {
@@ -178,12 +343,26 @@ impl<T: Clone> GameStateCell<T> {
     }
 }
 
+/// Creates an empty `GameStateCell` with no saved state.
+///
+/// The initial state has [`Frame::NULL`] and no data or checksum.
+/// This is primarily used internally by the rollback system.
+///
+/// [`Frame::NULL`]: crate::Frame::NULL
 impl<T> Default for GameStateCell<T> {
     fn default() -> Self {
         Self(Arc::new(Mutex::new(GameState::default())))
     }
 }
 
+/// Clones this cell, creating a new handle to the **same** underlying state.
+///
+/// This is a shallow clone using [`Arc::clone`] — both the original and the clone
+/// will see the same saved game state. Modifications via one cell (e.g., calling
+/// [`save()`](Self::save)) are immediately visible through the other.
+///
+/// This is the intended behavior: the rollback system may hold multiple references
+/// to the same cell across different frames.
 impl<T> Clone for GameStateCell<T> {
     fn clone(&self) -> Self {
         Self(Arc::clone(&self.0))
@@ -249,14 +428,68 @@ impl<T> Deref for GameStateAccessor<'_, T> {
 
 #[cfg(not(loom))]
 impl<T> GameStateAccessor<'_, T> {
-    /// Get mutable access to the `T` that the user previously saved into a [GameStateCell].
+    /// Get mutable access to the `T` that the user previously saved into a [`GameStateCell`].
     ///
-    /// You probably do not need this! It's safer to use [Self::deref()](Deref::deref) instead;
-    /// see [GameStateCell::data()](GameStateCell::data) for a usage example.
+    /// You probably do not need this! It's safer to use [`Deref::deref()`] instead;
+    /// see [`GameStateCell::data()`] for a usage example.
+    ///
+    /// # Safety Invariant
     ///
     /// **Danger**: the underlying `T` must _not_ be modified in any way that affects (or may ever
     /// in future affect) game logic. If this invariant is violated, you will almost certainly get
     /// desyncs.
+    ///
+    /// # Examples
+    ///
+    /// ## Safe: Updating non-gameplay metadata
+    ///
+    /// ```
+    /// use fortress_rollback::{Frame, GameStateCell};
+    ///
+    /// #[derive(Clone)]
+    /// struct GameState {
+    ///     // Gameplay-affecting state (NEVER modify via as_mut_dangerous)
+    ///     player_x: i32,
+    ///     player_y: i32,
+    ///     health: u32,
+    ///
+    ///     // Non-gameplay metadata (safe to modify)
+    ///     debug_load_count: u32,
+    ///     last_accessed_timestamp: u64,
+    /// }
+    ///
+    /// let cell = GameStateCell::<GameState>::default();
+    /// let state = GameState {
+    ///     player_x: 100,
+    ///     player_y: 200,
+    ///     health: 100,
+    ///     debug_load_count: 0,
+    ///     last_accessed_timestamp: 0,
+    /// };
+    /// cell.save(Frame::new(1), Some(state), None);
+    ///
+    /// // SAFE: Updating debug/telemetry counters that don't affect gameplay
+    /// if let Some(mut accessor) = cell.data() {
+    ///     let state = accessor.as_mut_dangerous();
+    ///     state.debug_load_count += 1;
+    ///     state.last_accessed_timestamp = 1234567890;
+    ///     // player_x, player_y, health remain unchanged
+    /// };
+    /// ```
+    ///
+    /// ## UNSAFE: Modifying gameplay state (DON'T DO THIS)
+    ///
+    /// ```ignore
+    /// // ❌ WRONG: This WILL cause desyncs!
+    /// if let Some(mut accessor) = cell.data() {
+    ///     let state = accessor.as_mut_dangerous();
+    ///     state.player_x += 10;  // NEVER modify gameplay state!
+    ///     state.health = 50;      // This breaks determinism!
+    /// }
+    /// ```
+    ///
+    /// The correct approach for gameplay changes is to modify your current game state
+    /// during `AdvanceFrame`, not the saved states in cells.
     pub fn as_mut_dangerous(&mut self) -> &mut T {
         &mut self.0
     }

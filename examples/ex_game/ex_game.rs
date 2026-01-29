@@ -90,10 +90,6 @@ impl Game {
                     self.save_game_state(cell, frame);
                 },
                 FortressRequest::AdvanceFrame { inputs } => self.advance_frame(inputs),
-                // Handle any future request variants gracefully (FortressRequest is #[non_exhaustive])
-                _ => {
-                    eprintln!("WARNING: Unknown FortressRequest variant encountered, skipping");
-                },
             }
         }
     }

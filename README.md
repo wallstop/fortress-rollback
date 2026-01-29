@@ -50,6 +50,7 @@ To get started with Fortress Rollback, check out the following resources:
 - 📖 **[User Guide](https://wallstop.github.io/fortress-rollback/)** — Full documentation site with guides, architecture, and API reference
 - 📚 **[GitHub Wiki](https://github.com/wallstop/fortress-rollback/wiki)** — Quick reference and community-editable docs
 - 💻 **[Examples](./examples/)** — Working code examples for common use cases
+- 🎮 **[Request Handling Example](./examples/request_handling.rs)** — How to handle game loop requests with manual matching or the `handle_requests!` macro
 - 📋 **[API Documentation](https://docs.rs/fortress-rollback/newest/fortress_rollback/)** — Auto-generated Rust docs on docs.rs
 
 ### System Dependencies for Examples
@@ -80,6 +81,8 @@ Alpha / experimental only.
 - **Panic-Free API**: All public APIs return `Result` types instead of panicking — no unexpected crashes
 - **Correctness-First**: Formally verified with TLA+ and Z3 proofs; ~1500 tests (~92% coverage) including multi-process network and resilience scenarios
 - **Enhanced Desync Detection**: Built-in checksum validation with `P2PSession::confirmed_inputs_for_frame()` for debugging state divergence
+- **`handle_requests!` Macro**: Eliminates boilerplate in the game loop — see [User Guide](./docs/user-guide.md#using-the-handle_requests-macro)
+- **Config Presets**: `SyncConfig::lan()`, `ProtocolConfig::mobile()`, etc. for common network conditions
 
 📋 **[Complete comparison with GGRS →](./docs/fortress-vs-ggrs.md)** — See all differences, bug fixes, and migration steps
 

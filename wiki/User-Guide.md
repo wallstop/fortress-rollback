@@ -2356,7 +2356,7 @@ builder.with_desync_detection_mode(DesyncDetection::Off);
 
 ## Error Handling
 
-Fortress Rollback uses `FortressError` for all error conditions. The enum is `#[non_exhaustive]`, so always include a wildcard arm when matching.
+Fortress Rollback uses `FortressError` for all error conditions. The enum is exhaustive, so you can write complete matches without wildcard arms and the compiler will notify you if new variants are added in future versions.
 
 ### Error Types
 
@@ -2419,10 +2419,26 @@ fn handle_error(error: FortressError) -> Action {
             Action::Fatal
         }
 
-        // Forward compatibility: handle unknown errors
-        _ => {
-            eprintln!("Unknown error: {}", error);
+        // Structured error variants with detailed error information
+        FortressError::InvalidFrameStructured { frame, reason } => {
+            eprintln!("Invalid frame {:?}: {:?}", frame, reason);
+            Action::Continue
+        }
+        FortressError::InternalErrorStructured { kind } => {
+            eprintln!("Internal error (please report): {:?}", kind);
             Action::Fatal
+        }
+        FortressError::InvalidRequestStructured { kind } => {
+            eprintln!("Invalid request: {:?}", kind);
+            Action::Fatal
+        }
+        FortressError::SerializationErrorStructured { kind } => {
+            eprintln!("Serialization error: {:?}", kind);
+            Action::Fatal
+        }
+        FortressError::SocketErrorStructured { kind } => {
+            eprintln!("Socket error: {:?}", kind);
+            Action::Reconnect
         }
     }
 }

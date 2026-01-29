@@ -771,6 +771,28 @@ impl<T: Config> P2PSession<T> {
         self.player_reg.local_player_handles()
     }
 
+    /// Returns the handle for the first local player, if any.
+    ///
+    /// This is a convenience method for games with a single local player.
+    /// For games with multiple local players, use [`Self::local_player_handles`].
+    ///
+    /// # Returns
+    ///
+    /// The first local player's handle, or `None` if there are no local players.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Typical usage: get the local player's handle for input submission
+    /// if let Some(handle) = session.local_player_handle() {
+    ///     session.add_local_input(handle, local_input)?;
+    /// }
+    /// ```
+    #[must_use]
+    pub fn local_player_handle(&self) -> Option<PlayerHandle> {
+        self.local_player_handles().first().copied()
+    }
+
     /// Returns the handles of remote players that have been added
     #[must_use]
     pub fn remote_player_handles(&self) -> Vec<PlayerHandle> {
@@ -1792,6 +1814,61 @@ mod tests {
         assert_eq!(handles.len(), 2);
         assert!(handles.contains(&PlayerHandle::new(0)));
         assert!(handles.contains(&PlayerHandle::new(1)));
+    }
+
+    // ==========================================
+    // local_player_handle Tests
+    // ==========================================
+
+    // Helper function to create a remote-only P2P session (no local players)
+    fn create_remote_only_session() -> P2PSession<TestConfig> {
+        SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(0))
+            .expect("Failed to add remote player 0")
+            .add_player(PlayerType::Remote(test_addr(8081)), PlayerHandle::new(1))
+            .expect("Failed to add remote player 1")
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session")
+    }
+
+    #[test]
+    fn p2p_session_local_player_handle_returns_some_with_one_local() {
+        // Arrange - session with one local player
+        let session = create_local_only_session();
+
+        // Act
+        let result = session.local_player_handle();
+
+        // Assert
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), PlayerHandle::new(0));
+    }
+
+    #[test]
+    fn p2p_session_local_player_handle_returns_first_with_multiple_locals() {
+        // Arrange - session with two local players
+        let session = create_two_local_players_session();
+
+        // Act
+        let result = session.local_player_handle();
+
+        // Assert - should return the first local player handle
+        let all_handles = session.local_player_handles();
+        assert_eq!(result, all_handles.first().copied());
+    }
+
+    #[test]
+    fn p2p_session_local_player_handle_returns_none_with_no_locals() {
+        // Arrange - session with only remote players
+        let session = create_remote_only_session();
+
+        // Act
+        let result = session.local_player_handle();
+
+        // Assert
+        assert!(result.is_none());
     }
 
     #[test]

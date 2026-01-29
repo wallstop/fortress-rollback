@@ -245,6 +245,72 @@ impl<T: Config> SessionBuilder<T> {
         Ok(self)
     }
 
+    /// Adds a local player at the specified handle index.
+    ///
+    /// This is a convenience wrapper around [`Self::add_player`] with [`PlayerType::Local`].
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - The player handle index (0-based)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the handle is invalid or a player already exists at this handle.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use fortress_rollback::prelude::*;
+    /// # use std::net::SocketAddr;
+    /// # #[derive(Debug)]
+    /// # struct TestConfig;
+    /// # impl Config for TestConfig {
+    /// #     type Input = u8;
+    /// #     type State = u8;
+    /// #     type Address = SocketAddr;
+    /// # }
+    /// let builder = SessionBuilder::<TestConfig>::new()
+    ///     .with_num_players(2).unwrap()
+    ///     .add_local_player(0).unwrap();
+    /// ```
+    pub fn add_local_player(self, handle: usize) -> Result<Self, FortressError> {
+        self.add_player(PlayerType::Local, PlayerHandle::new(handle))
+    }
+
+    /// Adds a remote player at the specified handle index.
+    ///
+    /// This is a convenience wrapper around [`Self::add_player`] with [`PlayerType::Remote`].
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - The player handle index (0-based)
+    /// * `addr` - The network address of the remote player
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the handle is invalid or a player already exists at this handle.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use fortress_rollback::prelude::*;
+    /// # use std::net::SocketAddr;
+    /// # #[derive(Debug)]
+    /// # struct TestConfig;
+    /// # impl Config for TestConfig {
+    /// #     type Input = u8;
+    /// #     type State = u8;
+    /// #     type Address = SocketAddr;
+    /// # }
+    /// let addr: SocketAddr = "127.0.0.1:7000".parse().unwrap();
+    /// let builder = SessionBuilder::<TestConfig>::new()
+    ///     .with_num_players(2).unwrap()
+    ///     .add_remote_player(0, addr).unwrap();
+    /// ```
+    pub fn add_remote_player(self, handle: usize, addr: T::Address) -> Result<Self, FortressError> {
+        self.add_player(PlayerType::Remote(addr), PlayerHandle::new(handle))
+    }
+
     /// Change the maximum prediction window. Default is 8.
     ///
     /// ## Lockstep mode
@@ -1070,5 +1136,158 @@ mod tests {
         let builder = SessionBuilder::<TestConfig>::new();
         assert_eq!(builder.event_queue_size, DEFAULT_EVENT_QUEUE_SIZE);
         assert_eq!(builder.event_queue_size, 100);
+    }
+
+    // ========================================================================
+    // Convenience Method Tests (add_local_player, add_remote_player)
+    // ========================================================================
+
+    fn test_addr(port: u16) -> SocketAddr {
+        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port)
+    }
+
+    #[test]
+    fn test_add_local_player_behaves_like_add_player_local() {
+        // Arrange
+        let builder_convenience = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .add_local_player(0)
+            .expect("add_local_player should succeed");
+
+        let builder_explicit = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("add_player should succeed");
+
+        // Assert - both builders should have the same player configuration
+        assert_eq!(
+            builder_convenience.local_players,
+            builder_explicit.local_players
+        );
+        assert_eq!(
+            builder_convenience.player_reg.handles.len(),
+            builder_explicit.player_reg.handles.len()
+        );
+        assert!(builder_convenience
+            .player_reg
+            .handles
+            .contains_key(&PlayerHandle::new(0)));
+    }
+
+    #[test]
+    fn test_add_remote_player_behaves_like_add_player_remote() {
+        // Arrange
+        let addr = test_addr(7000);
+
+        let builder_convenience = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .add_remote_player(0, addr)
+            .expect("add_remote_player should succeed");
+
+        let builder_explicit = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .add_player(PlayerType::Remote(addr), PlayerHandle::new(0))
+            .expect("add_player should succeed");
+
+        // Assert - both builders should have the same player configuration
+        assert_eq!(
+            builder_convenience.player_reg.handles.len(),
+            builder_explicit.player_reg.handles.len()
+        );
+        assert!(builder_convenience
+            .player_reg
+            .handles
+            .contains_key(&PlayerHandle::new(0)));
+    }
+
+    #[test]
+    fn test_add_local_player_propagates_handle_in_use_error() {
+        // Arrange - add a player at handle 0
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .add_local_player(0)
+            .expect("First add should succeed");
+
+        // Act - try to add another player at the same handle
+        let result = builder.add_local_player(0);
+
+        // Assert - should return an error
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_local_player_propagates_invalid_handle_error() {
+        // Arrange - create a builder with 2 players
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap();
+
+        // Act - try to add a player at an invalid handle (out of range)
+        let result = builder.add_local_player(5);
+
+        // Assert - should return an error
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_remote_player_propagates_handle_in_use_error() {
+        // Arrange - add a player at handle 0
+        let addr = test_addr(7000);
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .add_remote_player(0, addr)
+            .expect("First add should succeed");
+
+        // Act - try to add another player at the same handle
+        let result = builder.add_remote_player(0, addr);
+
+        // Assert - should return an error
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_remote_player_propagates_invalid_handle_error() {
+        // Arrange - create a builder with 2 players
+        let addr = test_addr(7000);
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap();
+
+        // Act - try to add a player at an invalid handle (out of range)
+        let result = builder.add_remote_player(5, addr);
+
+        // Assert - should return an error
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_local_player_and_add_remote_player_can_be_combined() {
+        // Arrange & Act - add local player then remote player
+        let addr = test_addr(7000);
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .add_local_player(0)
+            .expect("add_local_player should succeed")
+            .add_remote_player(1, addr)
+            .expect("add_remote_player should succeed");
+
+        // Assert
+        assert_eq!(builder.local_players, 1);
+        assert_eq!(builder.player_reg.handles.len(), 2);
+        assert!(builder
+            .player_reg
+            .handles
+            .contains_key(&PlayerHandle::new(0)));
+        assert!(builder
+            .player_reg
+            .handles
+            .contains_key(&PlayerHandle::new(1)));
     }
 }

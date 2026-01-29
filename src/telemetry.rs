@@ -91,14 +91,8 @@ impl std::fmt::Display for ViolationSeverity {
 ///
 /// Each category corresponds to a major subsystem of the library,
 /// making it easy to filter and route violations.
-///
-/// # Forward Compatibility
-///
-/// This enum is marked `#[non_exhaustive]` because new violation categories
-/// may be added in future versions. Always include a wildcard arm when matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum ViolationKind {
     /// Frame synchronization invariant violated.
     ///

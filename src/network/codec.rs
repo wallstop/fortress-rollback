@@ -52,7 +52,6 @@ fn config() -> impl bincode::config::Config {
 ///
 /// This helps with debugging by indicating what we were trying to encode or decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum CodecOperation {
     /// Encoding a network message.
     EncodeMessage,
@@ -114,7 +113,6 @@ impl fmt::Display for CodecOperation {
 /// [`CompressionError`]: crate::network::compression::CompressionError
 /// [`RleDecodeReason`]: crate::RleDecodeReason
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum CodecError {
     /// The encoding operation failed.
     EncodeError {
