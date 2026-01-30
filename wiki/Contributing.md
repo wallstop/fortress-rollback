@@ -86,6 +86,12 @@ pre-commit run check-links --all-files
 
 # Check a specific file
 ./scripts/verify-markdown-code.sh docs/user-guide.md
+
+# Check for invalid rustdoc-style code fence attributes in markdown
+./scripts/check-code-fence-syntax.sh
+
+# Check a specific directory
+./scripts/check-code-fence-syntax.sh docs/
 ```
 
 ### Bypassing Hooks (Emergencies Only)

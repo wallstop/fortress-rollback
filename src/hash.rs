@@ -68,7 +68,7 @@ const FNV_PRIME: u64 = 0x0100_0000_01b3;
 /// 42u32.hash(&mut hasher2);
 /// assert_eq!(hash, hasher2.finish());
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeterministicHasher {
     state: u64,
 }
@@ -147,7 +147,7 @@ pub fn fnv1a_hash<T: Hash>(value: &T) -> u64 {
 /// let map: HashMap<i32, &str, DeterministicBuildHasher> =
 ///     HashMap::with_hasher(DeterministicBuildHasher);
 /// ```
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct DeterministicBuildHasher;
 
 impl std::hash::BuildHasher for DeterministicBuildHasher {

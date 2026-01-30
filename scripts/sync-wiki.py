@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # Default directories (relative to script location's parent)
 DEFAULT_DOCS_DIR = Path("docs")
 DEFAULT_WIKI_DIR = Path("wiki")
-DEFAULT_ASSETS_DIR = Path("assets")
+DEFAULT_ASSETS_DIR = Path("docs/assets")
 
 # Files/directories to skip during sync
 SKIP_PATTERNS = {

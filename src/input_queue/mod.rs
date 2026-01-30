@@ -209,7 +209,7 @@ impl<T: Config> InputQueue<T> {
     /// Sets the frame delay for this input queue.
     ///
     /// # Errors
-    /// Returns `FortressError::InvalidRequest` if `delay >= queue_length`.
+    /// Returns a [`FortressError`] if `delay >= queue_length`.
     /// This constraint ensures the circular buffer doesn't overflow when advancing the queue head.
     pub fn set_frame_delay(&mut self, delay: usize) -> Result<(), FortressError> {
         let max_delay = self.max_frame_delay();

@@ -341,17 +341,20 @@ fn error_recovery_patterns() {
     println!("               Action::DesyncDetected");
     println!("           }}");
     println!("           FortressError::InvalidRequest {{ info }} => {{");
-    println!("               // Programming error - fix the code");
-    println!("               panic!(\"Invalid request: {{}}\", info);");
+    println!("               // Invalid request: likely programming error in application code");
+    println!("               eprintln!(\"Invalid request (likely programming error): {{info}}\");");
+    println!("               Action::Fatal");
     println!("           }}");
     println!("           FortressError::InvalidFrame {{ frame, reason }} => {{");
     println!("               log::warn!(\"Invalid frame {{}}: {{}}\", frame, reason);");
     println!("               Action::Continue");
     println!("           }}");
     println!("           FortressError::InvalidPlayerHandle {{ handle, max_handle }} => {{");
+    println!("               // Invalid player handle: check player setup logic");
     println!(
-        "               panic!(\"Invalid player handle {{}} (max: {{}})\", handle, max_handle);"
+        "               eprintln!(\"Invalid player handle {{handle}} (max: {{max_handle}}) — check player setup\");"
     );
+    println!("               Action::Fatal");
     println!("           }}");
     println!("           FortressError::MissingInput {{ player_handle, frame }} => {{");
     println!("               log::warn!(\"Missing input for player {{}} at frame {{}}\", player_handle, frame);");
@@ -380,8 +383,11 @@ fn error_recovery_patterns() {
     println!("               Action::Fatal");
     println!("           }}");
     println!("           FortressError::InvalidRequestStructured {{ kind }} => {{");
-    println!("               // Programming error - fix the code");
-    println!("               panic!(\"Invalid request: {{:?}}\", kind);");
+    println!("               // Invalid request: likely programming error in application code");
+    println!(
+        "               eprintln!(\"Invalid request (likely programming error): {{kind:?}}\");"
+    );
+    println!("               Action::Fatal");
     println!("           }}");
     println!("           FortressError::SerializationErrorStructured {{ kind }} => {{");
     println!("               log::error!(\"Serialization error: {{:?}}\", kind);");

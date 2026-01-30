@@ -2,6 +2,7 @@
 
 > **This document defines the defensive programming standards for Fortress Rollback.**
 > All production code, including library code and any editor/tooling code, MUST follow these practices.
+> **This also applies to documentation examples** — rustdoc examples are compiled and should demonstrate correct error handling.
 
 ## Core Philosophy
 
@@ -54,6 +55,193 @@ debug_assert!(condition);  // OK in debug builds, but prefer explicit handling
 unreachable!();
 unreachable!("this should never happen");
 ```
+
+### Documentation Examples Must Also Follow Zero-Panic
+
+**Rustdoc examples are compiled code.** They must demonstrate proper error handling, not panic shortcuts:
+
+```rust
+// ❌ FORBIDDEN in doc examples — teaches bad habits
+/// # Examples
+///
+/// ```
+/// let session = SessionBuilder::new().build().unwrap();
+/// let result = session.advance_frame();
+/// if result.is_err() {
+///     panic!("frame advance failed");  // NEVER show panic! as error handling
+/// }
+/// ```
+
+// ✅ REQUIRED in doc examples — demonstrates proper patterns
+/// # Examples
+///
+/// ```
+/// # use fortress_rollback::*;
+/// let session = SessionBuilder::new().build()?;
+/// let requests = session.advance_frame()?;
+/// for request in requests {
+///     // Handle each request...
+/// }
+/// # Ok::<(), FortressError>(())
+/// ```
+```
+
+**Why this matters:**
+
+- Doc examples are often copy-pasted by users
+- Examples with `panic!` or `unwrap()` teach incorrect patterns
+- Users learn from examples — show them the RIGHT way
+- The `# Ok::<(), Error>(())` pattern enables `?` in doc tests
+
+### When Different Patterns Are Acceptable in Doc Examples
+
+While the general rule is "no panics in examples," there are nuanced cases where different patterns are appropriate based on what the example is teaching:
+
+#### Use `if let Some` for Defensive Fallback Patterns
+
+When demonstrating how users should handle optional state in their game loops:
+
+```rust
+/// // Simulate a LoadGameState request handler
+/// // LoadGameState is only requested for previously saved frames,
+/// // but we handle None defensively to avoid crashing on library bugs
+/// if let Some(loaded) = cell.load() {
+///     current_state = loaded;
+/// }
+/// // If load() returns None, current_state is unchanged
+```
+
+**When to use:** Teaching defensive programming where the caller should gracefully handle missing data rather than crash.
+
+#### Use `.expect("reason")` for Provably-Present State
+
+When the example demonstrates a successful path where the state is guaranteed to exist by prior operations in the same example:
+
+```rust
+/// // We just saved the state above, so we know it exists
+/// let accessor = cell.data().expect("state was just saved");
+/// assert_eq!(accessor.player_name, "alex");
+```
+
+**When to use:** When the example's control flow proves the value exists, AND the focus is on demonstrating the happy path. The `.expect()` message must explain WHY it's safe.
+
+**Important:** This is acceptable ONLY when:
+
+- The example itself proves the value exists (e.g., save then load)
+- The message clearly explains the invariant
+- The example demonstrates API usage, not error handling
+
+#### Use `.ok_or(Error)?` for Error Propagation Patterns
+
+When demonstrating how users should handle missing state as an error condition:
+
+```rust
+/// let loaded = cell.load_or_err(frame)?;
+/// // Or manually:
+/// let loaded = cell.load()
+///     .ok_or(FortressError::InvalidFrameStructured {
+///         frame,
+///         reason: InvalidFrameReason::MissingState,
+///     })?;
+```
+
+**When to use:** Teaching error propagation where missing data is a genuine error that should be returned to the caller.
+
+#### Decision Guide for Doc Examples
+
+| Scenario | Pattern | Example |
+|----------|---------|---------|
+| Teaching defensive game loop handling | `if let Some` | `if let Some(s) = cell.load() { state = s; }` |
+| Demonstrating happy path with proven state | `.expect("why")` | `cell.data().expect("just saved")` |
+| Teaching error propagation | `.ok_or()?` | `cell.load().ok_or(Error::Missing)?` |
+| General fallible operations | `?` operator | `session.advance_frame()?` |
+
+### Documentation Example Verification (CRITICAL)
+
+**ALWAYS verify that types, methods, and error variants used in documentation examples actually exist in the source code.** Fabricated examples that don't compile erode trust and waste users' time.
+
+#### Before Writing Doc Examples
+
+```bash
+# Verify error variants exist
+rg 'enum FortressError' -A 100 src/error.rs | head -120
+
+# Verify a specific variant exists
+rg 'DesyncDetected|InvalidFrame|NetworkError' src/error.rs
+
+# Verify struct/method exists
+rg 'pub fn method_name|pub struct TypeName' --type rust
+```
+
+#### Common Doc Example Mistakes
+
+```rust
+// ❌ FORBIDDEN: Using non-existent error variants
+/// ```
+/// match result {
+///     Err(FortressError::DesyncDetected) => { /* ... */ }  // Does this exist?
+/// }
+/// ```
+
+// ❌ FORBIDDEN: Incomplete match on #[non_exhaustive] enums
+/// ```
+/// match event {
+///     FortressEvent::Synchronizing { total, count, .. } => { /* ... */ }
+///     FortressEvent::Disconnected { .. } => { /* ... */ }
+///     // Missing other variants AND missing `_ =>` fallback!
+/// }
+/// ```
+
+// ✅ REQUIRED: Verify variants exist, handle exhaustiveness
+/// ```
+/// match event {
+///     FortressEvent::Synchronizing { total, count, .. } => { /* ... */ }
+///     FortressEvent::Disconnected { addr, .. } => { /* ... */ }
+///     FortressEvent::NetworkInterrupted { addr, .. } => { /* ... */ }
+///     // ... all other variants ...
+///     _ => { /* Handle future variants gracefully */ }
+/// }
+/// ```
+```
+
+#### Matching on `#[non_exhaustive]` Enums in Examples
+
+When demonstrating match statements on `#[non_exhaustive]` enums (like `FortressEvent`), you **must** include a wildcard arm:
+
+```rust
+// ✅ REQUIRED for #[non_exhaustive] enums in doc examples
+/// ```
+/// for event in session.events()? {
+///     match event {
+///         FortressEvent::Synchronizing { total, count, .. } => {
+///             println!("Sync progress: {count}/{total}");
+///         }
+///         FortressEvent::Disconnected { addr, .. } => {
+///             println!("Player at {addr} disconnected");
+///         }
+///         _ => {
+///             // Handle other/future event types
+///         }
+///     }
+/// }
+/// ```
+```
+
+**Why this matters:**
+
+- `#[non_exhaustive]` means new variants may be added without a breaking change
+- Examples without `_ =>` won't compile (teaching users broken patterns)
+- The wildcard arm shows users how to future-proof their code
+
+#### Verification Checklist for Doc Examples
+
+Before committing documentation with code examples:
+
+- [ ] All error variants used actually exist in `FortressError`
+- [ ] All struct/method names are spelled correctly and exist
+- [ ] Match statements on `#[non_exhaustive]` enums include `_ =>` arm
+- [ ] Examples compile: `cargo test --doc`
+- [ ] Examples follow zero-panic policy (no `unwrap()` without justification)
 
 ### Required Patterns
 
@@ -510,6 +698,58 @@ return Err(FortressError::InvalidPlayerIndex {
     player_count: self.players.len(),
 });
 ```
+
+### Error Categorization: `InvalidRequest*` vs `InternalError*`
+
+Choosing the correct error category is critical for debugging and API contracts.
+
+**`InvalidRequestStructured` / `InvalidRequest`**: Use for **caller-provided invalid arguments**.
+The caller made a mistake; this is expected and recoverable.
+
+**`InternalErrorStructured` / `InternalError`**: Use for **library bugs or invariant violations**.
+Something went wrong inside the library that should never happen under normal API usage.
+
+**Decision tree:**
+
+```
+Is the invalid value provided by the caller as an argument?
+├─ YES → InvalidRequestStructured (caller's responsibility)
+└─ NO → Is it derived from internal library state?
+        ├─ YES → InternalErrorStructured (library bug)
+        └─ NO → Trace back: who created this value?
+                └─ Usually leads to one of the above
+```
+
+**Example: Division by zero**
+
+```rust
+// Function signature: pub fn try_buffer_index(&self, buffer_size: usize) -> Result<...>
+
+// ❌ WRONG: buffer_size == 0 is caller's fault, not a library bug
+if buffer_size == 0 {
+    return Err(FortressError::InternalErrorStructured {
+        kind: InternalErrorKind::DivisionByZero,  // Wrong category!
+    });
+}
+
+// ✅ CORRECT: Caller passed invalid argument
+if buffer_size == 0 {
+    return Err(FortressError::InvalidRequestStructured {
+        kind: InvalidRequestKind::ZeroBufferSize,
+    });
+}
+```
+
+**Why this matters:**
+
+- `InternalError` tells users: "Report this as a bug" — wrong if it's their fault
+- `InvalidRequest` tells users: "Fix your input" — actionable guidance
+- Incorrect categorization erodes trust and wastes debugging time
+
+**Quick test:** Ask "If a user follows the documented API correctly, can they ever trigger this error?"
+
+- **NO** (impossible with correct usage) → `InternalError` (indicates library bug)
+- **YES** (possible with incorrect arguments) → `InvalidRequest` (user error)
 
 ### Unknown/Fallback Variants in Error Reason Enums
 
@@ -973,6 +1213,7 @@ Before committing any production code, verify:
 - [ ] Custom trait impls use exhaustive destructuring
 - [ ] `#[must_use]` on important return types
 - [ ] Sensitive data redacted in `Debug` implementations
+- [ ] `cargo doc --no-deps` passes — no broken intra-doc links
 
 ---
 

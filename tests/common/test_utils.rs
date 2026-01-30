@@ -240,7 +240,7 @@ impl PortAllocator {
     #[allow(dead_code)]
     #[must_use]
     #[deprecated(
-        since = "0.11.0",
+        since = "0.2.0",
         note = "Use bind_socket_ephemeral() for actual socket binding to avoid TIME_WAIT conflicts on Windows CI. This method should only be used for mock addresses that won't be bound."
     )]
     pub fn next_pair() -> (u16, u16) {

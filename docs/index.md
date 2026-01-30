@@ -4,7 +4,7 @@ description: A correctness-first fork of GGRS providing peer-to-peer rollback ne
 ---
 
 <p align="center">
-  <img src="../assets/logo.svg" alt="Fortress Rollback" width="160">
+  <img src="assets/logo.svg" alt="Fortress Rollback" width="160">
 </p>
 
 # Fortress Rollback

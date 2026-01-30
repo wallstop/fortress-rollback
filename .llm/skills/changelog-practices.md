@@ -56,6 +56,70 @@ Examples:
 - Adding required trait bounds
 - Changing return types
 - Changing default behavior
+- **Adding enum variants to exhaustively matchable enums** (see below)
+
+### Enum Variants Are Breaking Changes (Unless `#[non_exhaustive]`)
+
+**Critical:** Adding a new variant to a public enum is a **breaking change** if users can exhaustively match on it.
+
+```rust
+// ❌ Exhaustively matchable — adding variants is BREAKING
+pub enum ConnectionState {
+    Disconnected,
+    Connecting,
+    Connected,
+}
+
+// ✅ Non-exhaustive — adding variants is NOT breaking
+#[non_exhaustive]
+pub enum ConnectionState {
+    Disconnected,
+    Connecting,
+    Connected,
+}
+```
+
+**Why it breaks:** Users with exhaustive matches will get compile errors:
+
+```rust
+// User's code that breaks when you add a variant
+match state {
+    ConnectionState::Disconnected => { ... }
+    ConnectionState::Connecting => { ... }
+    ConnectionState::Connected => { ... }
+    // ERROR: non-exhaustive patterns: `NewVariant` not covered
+}
+```
+
+**CHANGELOG entries for new enum variants:**
+
+```markdown
+# ❌ WRONG — Listed as "Added" but it's breaking
+### Added
+- `ConnectionState::Syncing` variant for synchronization phase
+
+# ✅ CORRECT — Marked as breaking with migration guidance
+### Changed
+- **Breaking:** Added `ConnectionState::Syncing` variant. Update exhaustive matches to handle this new state.
+```
+
+**Prevention:** When creating public enums that may grow, use `#[non_exhaustive]`:
+
+```rust
+/// Connection states for peer sessions.
+///
+/// This enum is `#[non_exhaustive]`; new variants may be added
+/// in future versions without a breaking change.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    Disconnected,
+    Connecting,
+    Connected,
+}
+```
+
+> **See also:** [workspace-organization.md](workspace-organization.md) for `#[non_exhaustive]` best practices.
 
 ### New Features (SHOULD document)
 
@@ -217,8 +281,9 @@ When making changes, ask:
 1. **Is this `pub`?** If yes, consider changelog entry
 2. **Does behavior change?** If yes, document it
 3. **Could user code break?** If yes, mark as **Breaking:**
-4. **Is this a bug fix users would care about?** If yes, document it
-5. **Is this purely internal?** If yes, skip changelog
+4. **Adding enum variants?** Check if enum is `#[non_exhaustive]` — if not, it's **Breaking:**
+5. **Is this a bug fix users would care about?** If yes, document it
+6. **Is this purely internal?** If yes, skip changelog
 
 ---
 
@@ -281,8 +346,28 @@ rg 'changed_function|ChangedStruct' --type rust --type md
 
 ---
 
+## Verification Before Committing
+
+**Always verify CHANGELOG claims match actual code:**
+
+```bash
+# Verify derives exist before claiming them
+rg '#\[derive.*Hash' src/lib.rs
+
+# Verify method/type exists
+rg 'pub fn method_name|pub struct TypeName' --type rust
+
+# Build docs to catch broken links
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+```
+
+> **See also:** [documentation-code-consistency.md](documentation-code-consistency.md) for comprehensive verification commands and common pitfalls.
+
+---
+
 ## References
 
 - [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - [Semantic Versioning](https://semver.org/)
 - [Rust API Guidelines - Documentation](https://rust-lang.github.io/api-guidelines/documentation.html)
+- [documentation-code-consistency.md](documentation-code-consistency.md) — Keeping docs and code in sync

@@ -77,10 +77,28 @@ fn basic_configuration() {
 }
 
 /// Using built-in presets for common network conditions
+///
+/// NOTE: For even simpler configuration, use the new convenience presets:
+/// - `with_lan_defaults()` - LAN/local play with minimal latency
+/// - `with_internet_defaults()` - Typical online play (2-frame input delay)
+/// - `with_high_latency_defaults()` - Mobile/unstable connections (4-frame input delay)
+///
+/// Example:
+/// ```ignore
+/// SessionBuilder::<GameConfig>::new()
+///     .with_num_players(2).unwrap()
+///     .with_lan_defaults()
+///     .add_local_player(0).unwrap()
+///     .add_remote_player(1, addr).unwrap()
+///     .start_p2p_session(socket)
+/// ```
 fn network_presets() {
     println!("--- Network Presets ---");
+    println!("TIP: Use with_lan_defaults(), with_internet_defaults(), or");
+    println!("     with_high_latency_defaults() for quick configuration!\n");
 
     // LAN/Local play - fast connections, minimal latency
+    // Equivalent to: .with_lan_defaults()
     let lan_builder = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -99,6 +117,7 @@ fn network_presets() {
     println!("  Builder: {:?}\n", lan_builder);
 
     // Regional internet (20-80ms RTT)
+    // Equivalent to: .with_internet_defaults().with_max_prediction_window(8)
     let regional_builder = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
         .unwrap()
@@ -116,6 +135,7 @@ fn network_presets() {
     println!("  Builder: {:?}\n", regional_builder);
 
     // High-latency networks (80-200ms RTT)
+    // Similar to: .with_high_latency_defaults().with_max_prediction_window(12)
     let high_latency_builder = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
         .unwrap()

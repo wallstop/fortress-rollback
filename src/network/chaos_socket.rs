@@ -35,6 +35,7 @@
 //! - **Deterministic**: Seeded RNG for reproducible test scenarios
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
@@ -46,7 +47,7 @@ use crate::NonBlockingSocket;
 ///
 /// Use [`ChaosConfig::builder()`] for a fluent configuration API.
 /// All durations default to zero and all rates default to 0.0 (no effect).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[must_use = "ChaosConfig has no effect unless passed to ChaosSocket::new()"]
 pub struct ChaosConfig {
     /// Base latency added to all packets (default: 0ms)
@@ -401,7 +402,7 @@ where
 }
 
 /// Statistics about chaos socket behavior.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChaosStats {
     /// Total packets sent through the socket
     pub packets_sent: u64,
@@ -757,6 +758,21 @@ where
         self.apply_reordering(&mut ready);
 
         ready
+    }
+}
+
+impl<A, S> fmt::Debug for ChaosSocket<A, S>
+where
+    A: Clone + PartialEq + Eq + Hash + Send + Sync,
+    S: NonBlockingSocket<A>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChaosSocket")
+            .field("config", &self.config)
+            .field("stats", &self.stats)
+            .field("packets_in_flight", &self.in_flight.len())
+            .field("burst_loss_remaining", &self.burst_loss_remaining)
+            .finish_non_exhaustive()
     }
 }
 

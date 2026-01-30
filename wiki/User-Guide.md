@@ -131,6 +131,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+> **📚 See Also — Reduce Boilerplate & Catch Bugs**
+>
+> - **[`handle_requests!` macro](#using-the-handle_requests-macro)** — Eliminate match boilerplate with a concise macro
+> - **[`compute_checksum()`](#computing-checksums)** — Enable desync detection with built-in deterministic hashing
+> - **[Config Presets](#syncconfig-presets)** — Use `SyncConfig::lan()`, `ProtocolConfig::competitive()`, etc. for common network conditions
+> - **[Request Handling Example](https://github.com/wallstop/fortress-rollback/blob/main/examples/request_handling.rs)** — Complete example showing both manual matching and macro usage
+
 ---
 
 ## Defining Your Config
@@ -337,7 +344,13 @@ loop {
 
 ## Handling Requests
 
-Requests are returned by `advance_frame()` and must be processed in order:
+Requests are returned by `advance_frame()` and must be processed in order.
+
+> **💡 Exhaustive Matching — No Wildcard Needed**
+>
+> `FortressRequest` is **not** marked `#[non_exhaustive]`, so you can match all variants
+> without a wildcard `_ =>` arm. The compiler will notify you if new variants are added
+> in future versions, ensuring your code stays up-to-date.
 
 ```rust
 use fortress_rollback::{FortressRequest, compute_checksum};
@@ -484,7 +497,7 @@ The `compute_checksum` function:
 
 For a faster but weaker checksum, use `compute_checksum_fletcher16`:
 
-```rust,ignore
+```rust
 use fortress_rollback::compute_checksum_fletcher16;
 
 // Faster, simpler checksum (16-bit result stored as u128)
@@ -495,7 +508,7 @@ let checksum = compute_checksum_fletcher16(&game_state)?;
 
 For advanced use cases, you can compute checksums manually using the lower-level utilities:
 
-```rust,ignore
+```rust
 use fortress_rollback::checksum::{hash_bytes_fnv1a, fletcher16};
 use fortress_rollback::network::codec::encode;
 
@@ -576,6 +589,14 @@ fn handle_event(event: FortressEvent<GameConfig>) {
                 frame, addr, local_checksum, remote_checksum
             );
             // This is bad! Debug your determinism.
+        }
+
+        FortressEvent::SyncTimeout { addr, elapsed_ms } => {
+            eprintln!(
+                "Sync timeout with {} after {}ms",
+                addr, elapsed_ms
+            );
+            // Session continues trying, but you may choose to abort
         }
     }
 }
@@ -1244,7 +1265,7 @@ impl NonBlockingSocket<MyAddress> for MyCustomSocket {
 
 Test network resilience with `ChaosSocket`:
 
-```rust,ignore
+```rust
 use fortress_rollback::{ChaosConfigBuilder, ChaosSocket, UdpNonBlockingSocket};
 
 let inner_socket = UdpNonBlockingSocket::bind_to_port(7000)?;
@@ -1292,7 +1313,7 @@ fortress-rollback = { version = "0.2", features = ["sync-send"] }
 
 **Without `sync-send`:**
 
-```rust,ignore
+```rust
 pub trait Config: 'static {
     type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned;
     type State;
@@ -1302,7 +1323,7 @@ pub trait Config: 'static {
 
 **With `sync-send`:**
 
-```rust,ignore
+```rust
 pub trait Config: 'static + Send + Sync {
     type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned + Send + Sync;
     type State: Clone + Send + Sync;
@@ -1321,7 +1342,7 @@ fortress-rollback = { version = "0.2", features = ["tokio"] }
 
 **Example usage:**
 
-```rust,ignore
+```rust
 use fortress_rollback::tokio_socket::TokioUdpSocket;
 use fortress_rollback::{SessionBuilder, PlayerType, PlayerHandle};
 
@@ -1354,7 +1375,7 @@ fortress-rollback = { version = "0.2", features = ["json"] }
 
 **Example usage:**
 
-```rust,ignore
+```rust
 use fortress_rollback::telemetry::{SpecViolation, ViolationSeverity, ViolationKind};
 
 let violation = SpecViolation::new(
@@ -1524,7 +1545,7 @@ Matchbox provides:
 
 #### Basic Matchbox Integration
 
-```rust,ignore
+```rust
 use fortress_rollback::{Config, PlayerHandle, PlayerType, SessionBuilder};
 use matchbox_socket::WebRtcSocket;
 
@@ -1550,7 +1571,7 @@ let session = SessionBuilder::<GameConfig>::new()
 
 For other transports, implement `NonBlockingSocket`:
 
-```rust,ignore
+```rust
 use fortress_rollback::{Message, NonBlockingSocket};
 
 struct MyWebSocketTransport {
@@ -1560,7 +1581,7 @@ struct MyWebSocketTransport {
 impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
     fn send_to(&mut self, msg: &Message, addr: &MyPeerId) {
         // Serialize msg and send via WebSocket
-        let bytes = bincode::serialize(msg).unwrap();
+        let Ok(bytes) = bincode::serialize(msg) else { return };
         self.send_to_peer(addr, &bytes);
     }
 
@@ -1590,6 +1611,17 @@ wasm-pack build --target web
 cargo install trunk
 trunk serve
 ```
+
+#### Binary Size Optimization
+
+For smaller WASM binaries, add to your project's `Cargo.toml`:
+
+```toml
+[profile.release]
+opt-level = "s"  # Size-optimized; try "z" for even smaller binaries
+```
+
+This trades some runtime performance for smaller binaries. Test both `"s"` and `"z"` to find the best tradeoff for your game.
 
 ### Platform-Specific Features
 
@@ -1831,7 +1863,10 @@ loop {
         match session.sync_health(peer_handle) {
             Some(SyncHealth::InSync) => break,  // Safe to exit
             Some(SyncHealth::DesyncDetected { frame, .. }) => {
-                panic!("Desync detected at frame {}", frame);
+                // Desync is a critical error — your application decides how to handle it.
+                // Options: return error, show UI, attempt recovery, or terminate.
+                eprintln!("Desync detected at frame {} — investigation required", frame);
+                return Err(format!("Desync detected at frame {}", frame).into());
             }
             _ => continue,  // Still waiting for checksum verification
         }
@@ -1927,7 +1962,7 @@ Desync (desynchronization) occurs when peers' game states diverge, typically due
 
 The `SyncHealth` enum represents the synchronization state with a specific peer:
 
-```rust,ignore
+```rust
 use fortress_rollback::SyncHealth;
 
 pub enum SyncHealth {
@@ -2052,7 +2087,9 @@ loop {
                 break;
             }
             Some(SyncHealth::DesyncDetected { frame, .. }) => {
-                panic!("Cannot terminate: desync at frame {}", frame);
+                // Desync handling is application-specific — you decide the response.
+                eprintln!("Cannot terminate: desync at frame {} — investigation required", frame);
+                return Err(format!("Desync at frame {}", frame).into());
             }
             _ => continue,  // Keep polling for verification
         }
@@ -2215,7 +2252,7 @@ This section documents all configuration options available when building a sessi
 
 Configure the initial connection handshake with `with_sync_config()`:
 
-```rust,ignore
+```rust
 use fortress_rollback::SyncConfig;
 
 let config = SyncConfig {
@@ -2239,7 +2276,7 @@ let config = SyncConfig {
 
 Configure network behavior with `with_protocol_config()`:
 
-```rust,ignore
+```rust
 use fortress_rollback::ProtocolConfig;
 
 let config = ProtocolConfig {
@@ -2395,15 +2432,31 @@ fn handle_error(error: FortressError) -> Action {
             Action::DesyncDetected
         }
 
-        // Programming errors: fix the code
-        FortressError::InvalidRequest { info } => panic!("Invalid request: {}", info),
+        // Invalid requests: likely programming errors in application code
+        // Log for debugging, then signal fatal error (let app decide how to handle)
+        FortressError::InvalidRequest { info } => {
+            eprintln!("Invalid request (likely programming error): {info}");
+            Action::Fatal
+        }
         FortressError::InvalidPlayerHandle { handle, max_handle } => {
-            panic!("Invalid player handle {} (max: {})", handle, max_handle)
+            eprintln!("Invalid player handle {handle} (max: {max_handle}) — check player setup");
+            Action::Fatal
         }
         FortressError::InvalidFrame { frame, reason } => {
             eprintln!("Invalid frame {}: {}", frame, reason);
             Action::Continue
         }
+
+        // Frame arithmetic errors: typically from overflow in frame calculations
+        FortressError::FrameArithmeticOverflow { .. } => {
+            eprintln!("Frame arithmetic overflow — frame calculation exceeded limits");
+            Action::Fatal
+        }
+        FortressError::FrameValueTooLarge { .. } => {
+            eprintln!("Frame value too large — conversion from usize failed");
+            Action::Fatal
+        }
+
         FortressError::MissingInput { player_handle, frame } => {
             eprintln!("Missing input for player {} at frame {}", player_handle, frame);
             Action::Continue
@@ -2419,9 +2472,9 @@ fn handle_error(error: FortressError) -> Action {
             Action::Fatal
         }
 
-        // Structured error variants with detailed error information
+        // Structured variants (preferred for new code)
         FortressError::InvalidFrameStructured { frame, reason } => {
-            eprintln!("Invalid frame {:?}: {:?}", frame, reason);
+            eprintln!("Invalid frame {}: {:?}", frame, reason);
             Action::Continue
         }
         FortressError::InternalErrorStructured { kind } => {
@@ -2429,7 +2482,7 @@ fn handle_error(error: FortressError) -> Action {
             Action::Fatal
         }
         FortressError::InvalidRequestStructured { kind } => {
-            eprintln!("Invalid request: {:?}", kind);
+            eprintln!("Invalid request (likely programming error): {kind:?}");
             Action::Fatal
         }
         FortressError::SerializationErrorStructured { kind } => {
@@ -2616,7 +2669,7 @@ If no observer is set, violations are logged via the `tracing` crate:
 
 Enable tracing to see violations:
 
-```rust,ignore
+```rust
 tracing_subscriber::init();
 ```
 
@@ -2624,7 +2677,7 @@ tracing_subscriber::init();
 
 The `TracingObserver` outputs all fields as structured tracing fields, making it compatible with JSON logging formatters and log aggregation systems:
 
-```rust,ignore
+```rust
 // Example: Using tracing-subscriber with JSON output
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -2643,7 +2696,7 @@ This produces machine-parseable output like:
 
 All telemetry types implement `serde::Serialize` for direct JSON serialization:
 
-```rust,ignore
+```rust
 use fortress_rollback::telemetry::{SpecViolation, ViolationSeverity, ViolationKind};
 use fortress_rollback::Frame;
 
@@ -2657,11 +2710,12 @@ let violation = SpecViolation::new(
  .with_context("actual", "100");
 
 // Direct JSON serialization
-let json = serde_json::to_string(&violation).unwrap();
+let json = serde_json::to_string(&violation)?;
 
 // Or use the convenience method
-let json = violation.to_json().unwrap();
-let json_pretty = violation.to_json_pretty().unwrap();
+let json = violation.to_json()?;
+let json_pretty = violation.to_json_pretty()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 Example JSON output:

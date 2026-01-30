@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="../assets/logo.svg" alt="Fortress Rollback" width="128">
+  <img src="assets/logo.svg" alt="Fortress Rollback" width="128">
 </p>
 
 # Fortress Rollback User Guide
@@ -589,6 +589,14 @@ fn handle_event(event: FortressEvent<GameConfig>) {
                 frame, addr, local_checksum, remote_checksum
             );
             // This is bad! Debug your determinism.
+        }
+
+        FortressEvent::SyncTimeout { addr, elapsed_ms } => {
+            eprintln!(
+                "Sync timeout with {} after {}ms",
+                addr, elapsed_ms
+            );
+            // Session continues trying, but you may choose to abort
         }
     }
 }
@@ -1573,7 +1581,7 @@ struct MyWebSocketTransport {
 impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
     fn send_to(&mut self, msg: &Message, addr: &MyPeerId) {
         // Serialize msg and send via WebSocket
-        let bytes = bincode::serialize(msg).unwrap();
+        let Ok(bytes) = bincode::serialize(msg) else { return };
         self.send_to_peer(addr, &bytes);
     }
 
@@ -1855,7 +1863,10 @@ loop {
         match session.sync_health(peer_handle) {
             Some(SyncHealth::InSync) => break,  // Safe to exit
             Some(SyncHealth::DesyncDetected { frame, .. }) => {
-                panic!("Desync detected at frame {}", frame);
+                // Desync is a critical error — your application decides how to handle it.
+                // Options: return error, show UI, attempt recovery, or terminate.
+                eprintln!("Desync detected at frame {} — investigation required", frame);
+                return Err(format!("Desync detected at frame {}", frame).into());
             }
             _ => continue,  // Still waiting for checksum verification
         }
@@ -2076,7 +2087,9 @@ loop {
                 break;
             }
             Some(SyncHealth::DesyncDetected { frame, .. }) => {
-                panic!("Cannot terminate: desync at frame {}", frame);
+                // Desync handling is application-specific — you decide the response.
+                eprintln!("Cannot terminate: desync at frame {} — investigation required", frame);
+                return Err(format!("Desync at frame {}", frame).into());
             }
             _ => continue,  // Keep polling for verification
         }
@@ -2419,15 +2432,31 @@ fn handle_error(error: FortressError) -> Action {
             Action::DesyncDetected
         }
 
-        // Programming errors: fix the code
-        FortressError::InvalidRequest { info } => panic!("Invalid request: {}", info),
+        // Invalid requests: likely programming errors in application code
+        // Log for debugging, then signal fatal error (let app decide how to handle)
+        FortressError::InvalidRequest { info } => {
+            eprintln!("Invalid request (likely programming error): {info}");
+            Action::Fatal
+        }
         FortressError::InvalidPlayerHandle { handle, max_handle } => {
-            panic!("Invalid player handle {} (max: {})", handle, max_handle)
+            eprintln!("Invalid player handle {handle} (max: {max_handle}) — check player setup");
+            Action::Fatal
         }
         FortressError::InvalidFrame { frame, reason } => {
             eprintln!("Invalid frame {}: {}", frame, reason);
             Action::Continue
         }
+
+        // Frame arithmetic errors: typically from overflow in frame calculations
+        FortressError::FrameArithmeticOverflow { .. } => {
+            eprintln!("Frame arithmetic overflow — frame calculation exceeded limits");
+            Action::Fatal
+        }
+        FortressError::FrameValueTooLarge { .. } => {
+            eprintln!("Frame value too large — conversion from usize failed");
+            Action::Fatal
+        }
+
         FortressError::MissingInput { player_handle, frame } => {
             eprintln!("Missing input for player {} at frame {}", player_handle, frame);
             Action::Continue
@@ -2453,7 +2482,8 @@ fn handle_error(error: FortressError) -> Action {
             Action::Fatal
         }
         FortressError::InvalidRequestStructured { kind } => {
-            panic!("Invalid request: {:?}", kind)
+            eprintln!("Invalid request (likely programming error): {kind:?}");
+            Action::Fatal
         }
         FortressError::SerializationErrorStructured { kind } => {
             eprintln!("Serialization error: {:?}", kind);
@@ -2680,11 +2710,12 @@ let violation = SpecViolation::new(
  .with_context("actual", "100");
 
 // Direct JSON serialization
-let json = serde_json::to_string(&violation).unwrap();
+let json = serde_json::to_string(&violation)?;
 
 // Or use the convenience method
-let json = violation.to_json().unwrap();
-let json_pretty = violation.to_json_pretty().unwrap();
+let json = violation.to_json()?;
+let json_pretty = violation.to_json_pretty()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 Example JSON output:

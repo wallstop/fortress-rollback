@@ -37,7 +37,7 @@ use std::cell::RefCell;
 ///
 /// A minimal implementation of the PCG-XSH-RR variant with 64-bit state.
 /// Suitable for game development and testing, but NOT cryptographically secure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Pcg32 {
     state: u64,
     inc: u64,

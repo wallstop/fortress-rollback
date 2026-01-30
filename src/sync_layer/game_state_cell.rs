@@ -176,8 +176,11 @@ impl<T> GameStateCell<T> {
     /// // println!("{}", cell.load().player_name); // compile error: Clone bound not satisfied
     ///
     /// // But we can still read the game state without cloning:
-    /// let game_state_accessor = cell.data().expect("should have a gamestate stored");
-    /// assert_eq!(game_state_accessor.player_name, "alex");
+    /// {
+    ///     // We just saved the state above, so we know it exists
+    ///     let accessor = cell.data().expect("state was just saved");
+    ///     assert_eq!(accessor.player_name, "alex");
+    /// }
     /// ```
     ///
     /// If you really, really need mutable access to the `T`, then consider using the aptly named
@@ -341,6 +344,71 @@ impl<T: Clone> GameStateCell<T> {
         let guard = self.0.lock().unwrap();
         guard.data.clone()
     }
+
+    /// Loads a previously saved state, returning an error if none exists.
+    ///
+    /// Use this when you expect a state to be present (e.g., during
+    /// `LoadGameState` handling). For optional loads, use [`load()`].
+    ///
+    /// # Arguments
+    ///
+    /// * `frame` - The frame number for error context. This should match
+    ///   the `frame` from the [`FortressRequest::LoadGameState`] request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FortressError::InvalidFrameStructured`] with
+    /// [`InvalidFrameReason::MissingState`] if no state is saved in this cell.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage with request handling:
+    ///
+    /// ```
+    /// use fortress_rollback::{Frame, GameStateCell, FortressError, InvalidFrameReason};
+    ///
+    /// #[derive(Clone, PartialEq, Debug, Default)]
+    /// struct GameState { score: u32 }
+    ///
+    /// let cell = GameStateCell::<GameState>::default();
+    /// let frame = Frame::new(10);
+    ///
+    /// // Before saving, load_or_err returns an error
+    /// let result = cell.load_or_err(frame);
+    /// assert!(matches!(
+    ///     result,
+    ///     Err(FortressError::InvalidFrameStructured {
+    ///         frame: f,
+    ///         reason: InvalidFrameReason::MissingState
+    ///     }) if f == frame
+    /// ));
+    ///
+    /// // After saving, load_or_err succeeds
+    /// cell.save(frame, Some(GameState { score: 100 }), None);
+    /// let loaded = cell.load_or_err(frame)?;
+    /// assert_eq!(loaded.score, 100);
+    /// # Ok::<(), FortressError>(())
+    /// ```
+    ///
+    /// Typical usage in request handling loop:
+    ///
+    /// ```ignore
+    /// FortressRequest::LoadGameState { cell, frame } => {
+    ///     *game_state = cell.load_or_err(frame)?;
+    /// }
+    /// ```
+    ///
+    /// [`load()`]: Self::load
+    /// [`FortressRequest::LoadGameState`]: crate::FortressRequest::LoadGameState
+    /// [`FortressError::InvalidFrameStructured`]: crate::FortressError::InvalidFrameStructured
+    /// [`InvalidFrameReason::MissingState`]: crate::InvalidFrameReason::MissingState
+    pub fn load_or_err(&self, frame: Frame) -> Result<T, crate::FortressError> {
+        self.load()
+            .ok_or(crate::FortressError::InvalidFrameStructured {
+                frame,
+                reason: crate::InvalidFrameReason::MissingState,
+            })
+    }
 }
 
 /// Creates an empty `GameStateCell` with no saved state.
@@ -469,23 +537,22 @@ impl<T> GameStateAccessor<'_, T> {
     /// cell.save(Frame::new(1), Some(state), None);
     ///
     /// // SAFE: Updating debug/telemetry counters that don't affect gameplay
-    /// if let Some(mut accessor) = cell.data() {
-    ///     let state = accessor.as_mut_dangerous();
-    ///     state.debug_load_count += 1;
-    ///     state.last_accessed_timestamp = 1234567890;
-    ///     // player_x, player_y, health remain unchanged
-    /// };
+    /// // We just saved the state, so we know it exists
+    /// let mut accessor = cell.data().expect("state was just saved");
+    /// let state = accessor.as_mut_dangerous();
+    /// state.debug_load_count += 1;
+    /// state.last_accessed_timestamp = 1234567890;
+    /// // player_x, player_y, health remain unchanged
     /// ```
     ///
     /// ## UNSAFE: Modifying gameplay state (DON'T DO THIS)
     ///
     /// ```ignore
     /// // ❌ WRONG: This WILL cause desyncs!
-    /// if let Some(mut accessor) = cell.data() {
-    ///     let state = accessor.as_mut_dangerous();
-    ///     state.player_x += 10;  // NEVER modify gameplay state!
-    ///     state.health = 50;      // This breaks determinism!
-    /// }
+    /// let mut accessor = cell.data().expect("state exists");
+    /// let state = accessor.as_mut_dangerous();
+    /// state.player_x += 10;  // NEVER modify gameplay state!
+    /// state.health = 50;      // This breaks determinism!
     /// ```
     ///
     /// The correct approach for gameplay changes is to modify your current game state
@@ -505,6 +572,22 @@ impl<'c, T> GameStateAccessor<'c, T> {
     }
 }
 
+#[cfg(not(loom))]
+impl<T: std::fmt::Debug> std::fmt::Debug for GameStateAccessor<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("GameStateAccessor").field(&*self.0).finish()
+    }
+}
+
+#[cfg(loom)]
+impl<T: std::fmt::Debug> std::fmt::Debug for GameStateAccessor<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("GameStateAccessor")
+            .field(&"<unavailable under loom>")
+            .finish()
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::panic,
@@ -514,6 +597,7 @@ impl<'c, T> GameStateAccessor<'c, T> {
 )]
 mod tests {
     use super::*;
+    use crate::error::{FortressError, InvalidFrameReason};
 
     // ==========================================
     // GameStateCell Basic Tests
@@ -836,5 +920,34 @@ mod tests {
         // Last save wins
         assert_eq!(cell.load(), Some(3));
         assert_eq!(cell.frame(), frame);
+    }
+
+    // ==========================================
+    // load_or_err() Tests
+    // ==========================================
+
+    #[test]
+    fn load_or_err_returns_error_when_empty() {
+        let cell = GameStateCell::<u32>::default();
+        let frame = Frame::new(10);
+
+        let result = cell.load_or_err(frame);
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidFrameStructured {
+                frame: f,
+                reason: InvalidFrameReason::MissingState
+            }) if f == frame
+        ));
+    }
+
+    #[test]
+    fn load_or_err_succeeds_after_save() {
+        let cell = GameStateCell::<u32>::default();
+        let frame = Frame::new(10);
+        cell.save(frame, Some(42), None);
+
+        let result = cell.load_or_err(frame);
+        assert_eq!(result.unwrap(), 42);
     }
 }

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo-banner.svg" alt="Fortress Rollback" width="600">
+  <img src="docs/assets/logo-banner.svg" alt="Fortress Rollback" width="600">
 </p>
 
 <p align="center">

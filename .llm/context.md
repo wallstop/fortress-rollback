@@ -558,9 +558,11 @@ if !valid { return Err(FortressError::InvalidState); }  // Explicit error
 - **Never swallow errors** — Use `?` to propagate, never `let _ = result`
 - **Validate all inputs** — Don't assume internal state is valid
 - **Prefer pattern matching** — Use `match` and `.get()` over indexing
-- **Exhaustive matches** — Never use `_ =>` wildcards on enums
+- **Exhaustive matches** — Never use `_ =>` wildcards on enums (except `#[non_exhaustive]`)
 - **Enums over booleans** — `Compression::Enabled` not `true`
 - **Type safety** — Make invalid states unrepresentable
+- **Doc examples too** — Rustdoc examples must use `?` and `Result`, never `panic!` or `unwrap()`
+- **Verify doc examples** — Always verify error variants/types used in examples actually exist in source code
 
 **See also:** [type-driven-design.md](skills/type-driven-design.md), [rust-pitfalls.md](skills/rust-pitfalls.md)
 
@@ -749,6 +751,7 @@ The changelog (`CHANGELOG.md`) is for **users of the library**, not developers.
 - New features, APIs, or configuration options
 - Bug fixes that affect user-visible behavior
 - Breaking changes (with migration guidance)
+- New enum variants on exhaustively matchable enums (**Breaking:** — see skill doc)
 - Performance improvements users would notice
 - Dependency updates that affect compatibility
 
@@ -827,6 +830,8 @@ Workflow syntax errors are easy to introduce and tedious to debug in CI. Always 
 **Workflow reliability:** Workflows that call GitHub APIs (releases, artifact uploads, API queries) should include retry logic. Transient API failures are common; handle them gracefully rather than failing the entire workflow.
 
 ### Documentation Changes
+
+> **See also:** [documentation-code-consistency.md](skills/documentation-code-consistency.md) — Keeping docs and code in sync, verifying CHANGELOG accuracy, error documentation patterns.
 
 **Run after modifying any rustdoc comments:**
 

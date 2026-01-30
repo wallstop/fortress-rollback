@@ -636,7 +636,7 @@ FortressRequest::LoadGameState { cell, frame }
 
 ### AdvanceFrame Contract
 
-```rust,ignore
+```rust
 FortressRequest::AdvanceFrame { inputs }
 ```
 

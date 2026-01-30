@@ -298,8 +298,9 @@ fn encode_len_with_offset(buf: &[u8], offset: usize) -> usize {
 ///
 /// let original = vec![0, 0, 0, 1, 2, 3, 255, 255];
 /// let encoded = encode(&original);
-/// let decoded = decode(&encoded).unwrap();
+/// let decoded = decode(&encoded)?;
 /// assert_eq!(original, decoded);
+/// # Ok::<(), fortress_rollback::FortressError>(())
 /// ```
 pub fn decode(buf: impl AsRef<[u8]>) -> RleResult<Vec<u8>> {
     decode_with_offset(buf.as_ref(), 0)

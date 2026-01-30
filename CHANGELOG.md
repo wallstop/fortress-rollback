@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo-small.svg" alt="Fortress Rollback" width="64">
+  <img src="docs/assets/logo-small.svg" alt="Fortress Rollback" width="64">
 </p>
 
 # Changelog
@@ -14,7 +14,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.0]
+### Added
+
+- `GameStateCell::load_or_err()` method for strict state loading with proper error handling
+- `SessionBuilder::with_lan_defaults()` preset for low-latency LAN play
+- `SessionBuilder::with_internet_defaults()` preset for typical online play
+- `SessionBuilder::with_high_latency_defaults()` preset for mobile/unstable connections
+- `Frame` ergonomic methods for safe arithmetic and conversion:
+  - `as_usize()`, `try_as_usize()` — convert to usize with Option/Result
+  - `buffer_index(size)`, `try_buffer_index(size)` — ring buffer index calculation
+  - `try_add(i32)`, `try_sub(i32)` — Result-returning arithmetic
+  - `next()`, `prev()` — Result-returning increment/decrement
+  - `saturating_next()`, `saturating_prev()` — saturating increment/decrement
+  - `from_usize(usize)`, `try_from_usize(usize)` — safe construction from usize
+  - `distance_to(Frame)` — signed distance calculation
+  - `is_within(window, reference)` — window proximity check
+- `Debug` impl for `P2PSession`, `SpectatorSession`, and `SyncTestSession` — enables logging session state for debugging
+- `Debug` impl for `ChaosSocket` — shows config, stats, and packet queue length
+- `Debug` impl for `GameStateAccessor` — delegates to inner `T` when `T: Debug`
+- `PartialEq` derive for `ChaosConfig` — enables configuration comparison in tests
+- `Hash` derive for `ChaosStats`, `NetworkStats`, and `Pcg32` — enables use as map keys
+- `Copy`, `PartialEq`, `Eq`, and `Hash` derives for `TracingObserver` unit struct
+- `Hash` derive for configuration types: `TimeSyncConfig`, `SyncConfig`, `ProtocolConfig`, `SpectatorConfig`, `InputQueueConfig` — enables use as map keys for configuration caching
+- `PartialEq`, `Eq`, and `Hash` derives for `DeterministicHasher` and `DeterministicBuildHasher` — enables comparison and use as map keys
+
+### Changed
+
+- **Breaking:** Added `InvalidFrameReason::MissingState` variant — exhaustive matches on `InvalidFrameReason` must now handle this case
+- **Breaking:** Added `FortressError::FrameArithmeticOverflow` variant — exhaustive matches on `FortressError` must now handle this case
+- **Breaking:** Added `FortressError::FrameValueTooLarge` variant — exhaustive matches on `FortressError` must now handle this case
+- **Breaking:** Added `InvalidRequestKind::ZeroBufferSize` variant — exhaustive matches on `InvalidRequestKind` must now handle this case
+
+## [0.3.0] - 2026-01-28
 
 ### Added
 
@@ -224,7 +255,7 @@ fortress-rollback = "0.2"
 
 ### Import Path Change
 
-```rust
+```text
 // Before
 use ggrs::{SessionBuilder, P2PSession, GgrsError};
 
@@ -244,7 +275,7 @@ use fortress_rollback::{SessionBuilder, P2PSession, FortressError};
 
 `Config::Address` now requires `Ord` + `PartialOrd`:
 
-```rust
+```text
 // Before
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct MyAddress { /* ... */ }
@@ -258,7 +289,7 @@ struct MyAddress { /* ... */ }
 
 The `inputs` field in `FortressRequest::AdvanceFrame` is now `InputVec<T::Input>` (a `SmallVec`) instead of `Vec`:
 
-```rust
+```text
 // If you have explicit type annotations:
 // Before
 fn handle_inputs(inputs: Vec<(MyInput, InputStatus)>) { ... }
@@ -279,7 +310,8 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/wallstop/fortress-rollback/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/wallstop/fortress-rollback/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/wallstop/fortress-rollback/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/wallstop/fortress-rollback/compare/v0.1.2...v0.2.0

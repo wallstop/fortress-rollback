@@ -172,8 +172,9 @@ pub fn compute_checksum<T: Serialize>(state: &T) -> Result<u128, ChecksumError> 
 /// #[derive(Serialize)]
 /// struct State { frame: u32 }
 ///
-/// let checksum = compute_checksum_fletcher16(&State { frame: 100 })
-///     .expect("should succeed");
+/// let checksum = compute_checksum_fletcher16(&State { frame: 100 })?;
+/// assert!(checksum > 0);
+/// # Ok::<(), fortress_rollback::checksum::ChecksumError>(())
 /// ```
 pub fn compute_checksum_fletcher16<T: Serialize>(state: &T) -> Result<u128, ChecksumError> {
     let bytes = encode(state).map_err(|e| {

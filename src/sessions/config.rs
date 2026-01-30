@@ -68,7 +68,7 @@ use crate::{FortressError, InvalidRequestKind};
 ///     ..SyncConfig::default()
 /// };
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[must_use = "SyncConfig has no effect unless passed to SessionBuilder::with_sync_config()"]
 pub struct SyncConfig {
     /// Number of successful sync roundtrips required before considering
@@ -347,7 +347,7 @@ impl SyncConfig {
 ///     ..ProtocolConfig::default()
 /// };
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[must_use = "ProtocolConfig has no effect unless passed to SessionBuilder::with_protocol_config()"]
 pub struct ProtocolConfig {
     /// Interval between network quality reports.
@@ -582,7 +582,7 @@ impl ProtocolConfig {
     ///
     /// # Errors
     ///
-    /// Returns `FortressError::InvalidRequest` if any configuration value is out of range.
+    /// Returns a [`FortressError`] if any configuration value is out of range.
     pub fn validate(&self) -> Result<(), FortressError> {
         // Validate quality_report_interval: 1ms to 10000ms
         if self.quality_report_interval < Duration::from_millis(1)
@@ -694,7 +694,7 @@ impl ProtocolConfig {
 ///     ..SpectatorConfig::default()
 /// };
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[must_use = "SpectatorConfig has no effect unless passed to SessionBuilder::with_spectator_config()"]
 pub struct SpectatorConfig {
     /// The number of frames of input that the spectator can buffer.
@@ -852,7 +852,7 @@ impl SpectatorConfig {
 /// let minimal = InputQueueConfig::minimal();
 /// assert_eq!(minimal.queue_length, 32);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[must_use = "InputQueueConfig has no effect unless passed to SessionBuilder::with_input_queue_config()"]
 pub struct InputQueueConfig {
     /// The length of the input queue (circular buffer) per player.
@@ -929,7 +929,7 @@ impl InputQueueConfig {
     ///
     /// # Errors
     ///
-    /// Returns `FortressError::InvalidRequest` if `frame_delay >= queue_length`.
+    /// Returns a [`FortressError`] if `frame_delay >= queue_length`.
     pub fn validate_frame_delay(&self, frame_delay: usize) -> Result<(), FortressError> {
         if frame_delay >= self.queue_length {
             return Err(InvalidRequestKind::FrameDelayTooLarge {
@@ -945,7 +945,7 @@ impl InputQueueConfig {
     ///
     /// # Errors
     ///
-    /// Returns `FortressError::InvalidRequest` if `queue_length < 2`.
+    /// Returns a [`FortressError`] if `queue_length < 2`.
     pub fn validate(&self) -> Result<(), FortressError> {
         if self.queue_length < 2 {
             return Err(InvalidRequestKind::QueueLengthTooSmall {

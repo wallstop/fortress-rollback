@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 
 use crate::error::{FortressError, InternalErrorKind, InvalidRequestKind};
@@ -93,10 +94,9 @@ impl<T: Config> SyncTestSession<T> {
     /// In a sync test, all players are considered to be local, so you need to add input for all of them.
     ///
     /// # Errors
-    /// - Returns [`InvalidRequest`] when the given handle is not valid (i.e. not between 0 and num_players).
+    /// - Returns a [`FortressError`] when the given handle is not valid (i.e. not between 0 and num_players).
     ///
     /// [`advance_frame()`]: Self#method.advance_frame
-    /// [`InvalidRequest`]: FortressError::InvalidRequest
     pub fn add_local_input(
         &mut self,
         player_handle: PlayerHandle,
@@ -328,6 +328,17 @@ impl<T: Config> SyncTestSession<T> {
             );
         }
         Ok(())
+    }
+}
+
+impl<T: Config> fmt::Debug for SyncTestSession<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SyncTestSession")
+            .field("num_players", &self.num_players)
+            .field("max_prediction", &self.max_prediction)
+            .field("check_distance", &self.check_distance)
+            .field("current_frame", &self.sync_layer.current_frame())
+            .finish_non_exhaustive()
     }
 }
 

@@ -11,6 +11,8 @@
 .claude/**
 .idea/**
 
+site/
+
 *.zip
 
 .vscode/**
