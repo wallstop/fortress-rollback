@@ -567,13 +567,102 @@ fn main() -> Result<(), FortressError> {
 
 ---
 
-## Summary: The Five Rules
+## Best Practices: Doc Comment Grammar
+
+### The Problem
+
+Doc comments are English sentences that describe code. Common grammar mistakes make documentation unclear or unprofessional:
+
+```rust
+// ❌ WRONG: Missing verb — "information" is a noun, not a verb
+/// Returns a [`NetworkStats`] struct that information about...
+
+// ❌ WRONG: Missing auxiliary verb
+/// Returns a [`NetworkStats`] struct that give information...
+
+// ❌ WRONG: Wrong verb form (plural with singular subject)
+/// Returns a [`NetworkStats`] struct that provide details...
+```
+
+### The Pattern: Third-Person Singular
+
+Rust doc comments use **third-person singular** because the implied subject is "this function/method":
+
+```rust
+// ✅ CORRECT: Third-person singular throughout
+/// Returns a [`NetworkStats`] struct that gives information about...
+/// Registers local input for a player for the current frame.
+/// Creates a new session with the specified configuration.
+/// Validates the input and returns an error if invalid.
+```
+
+**Rule:** The main verb and any verbs in subordinate clauses must agree with their subjects.
+
+### Common Grammar Mistakes
+
+| Mistake | Incorrect | Correct |
+|---------|-----------|---------|
+| Missing verb | "struct that information" | "struct that **gives** information" |
+| Missing auxiliary | "struct that give" | "struct that **gives**" |
+| Plural with singular | "struct that provide" | "struct that **provides**" |
+| Wrong tense | "Returns a struct that gave" | "Returns a struct that **gives**" |
+| Dangling modifier | "Returning a struct, the caller..." | "Returns a struct that the caller..." |
+
+### Correct Patterns for Common Doc Comments
+
+```rust
+// Function descriptions (implied subject: "this function")
+/// Creates a new session builder.
+/// Validates the configuration parameters.
+/// Computes the checksum of the game state.
+
+// Returns clauses
+/// Returns a [`NetworkStats`] struct that contains connection quality metrics.
+/// Returns `true` if the session is synchronized.
+/// Returns an error if the player handle is invalid.
+
+// Complex descriptions with relative clauses
+/// Returns a [`SavedStates`] buffer that stores game states for rollback.
+/// Creates a [`SessionBuilder`] that allows configuring all session parameters.
+/// Registers input that will be sent to remote players.
+```
+
+### Detection: Reading Aloud
+
+Read your doc comments aloud. If they sound wrong, they probably are:
+
+```rust
+// Read aloud: "Returns a struct that information about..."
+// Sounds wrong → Missing verb
+
+// Read aloud: "Returns a struct that gives information about..."
+// Sounds correct → ✅
+```
+
+### Verification Commands
+
+```bash
+# Find potential grammar issues in doc comments (heuristic)
+# Look for "that" followed by a noun without a verb
+rg '/// .* that (information|data|details|metrics|stats)' --type rust
+
+# Find doc comments to review manually
+rg '/// Returns a \[' --type rust | head -20
+```
+
+> **Note:** This heuristic catches common patterns but won't find all grammar issues
+> (e.g., "not referring" instead of "does not refer"). Manual review is still valuable.
+
+---
+
+## Summary: The Six Rules
 
 1. **Verify before documenting** — Always check code exists before claiming it does
 2. **Build docs with warnings as errors** — `RUSTDOCFLAGS="-D warnings" cargo doc`
 3. **Prefer stable patterns** — Use `[`FortressError`]` over specific variants when stability matters
 4. **Use valid deprecation versions** — Only reference published versions, not future or inherited ones
 5. **Use correct code fence language** — `text` for pseudo-code, `rust` only for compilable examples
+6. **Use correct grammar** — Match verb forms to subjects; read aloud to verify
 
 ---
 

@@ -531,7 +531,7 @@ impl<T: Config> P2PSession<T> {
     /// one checksum comparison has occurred. Use these to detect game state divergence.
     ///
     /// # Errors
-    /// - Returns a [`FortressError`] if the handle not referring to a remote player or spectator.
+    /// - Returns a [`FortressError`] if the handle does not refer to a remote player or spectator.
     /// - Returns a [`FortressError`] if the session is not connected to other clients yet.
     pub fn network_stats(
         &self,
