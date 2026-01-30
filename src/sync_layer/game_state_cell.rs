@@ -177,10 +177,9 @@ impl<T> GameStateCell<T> {
     ///
     /// // But we can still read the game state without cloning:
     /// {
-    ///     let game_state_accessor = cell.data();
-    ///     if let Some(accessor) = game_state_accessor {
-    ///         assert_eq!(accessor.player_name, "alex");
-    ///     }
+    ///     // We just saved the state above, so we know it exists
+    ///     let accessor = cell.data().expect("state was just saved");
+    ///     assert_eq!(accessor.player_name, "alex");
     /// }
     /// ```
     ///
@@ -538,23 +537,22 @@ impl<T> GameStateAccessor<'_, T> {
     /// cell.save(Frame::new(1), Some(state), None);
     ///
     /// // SAFE: Updating debug/telemetry counters that don't affect gameplay
-    /// if let Some(mut accessor) = cell.data() {
-    ///     let state = accessor.as_mut_dangerous();
-    ///     state.debug_load_count += 1;
-    ///     state.last_accessed_timestamp = 1234567890;
-    ///     // player_x, player_y, health remain unchanged
-    /// };
+    /// // We just saved the state, so we know it exists
+    /// let mut accessor = cell.data().expect("state was just saved");
+    /// let state = accessor.as_mut_dangerous();
+    /// state.debug_load_count += 1;
+    /// state.last_accessed_timestamp = 1234567890;
+    /// // player_x, player_y, health remain unchanged
     /// ```
     ///
     /// ## UNSAFE: Modifying gameplay state (DON'T DO THIS)
     ///
     /// ```ignore
     /// // ❌ WRONG: This WILL cause desyncs!
-    /// if let Some(mut accessor) = cell.data() {
-    ///     let state = accessor.as_mut_dangerous();
-    ///     state.player_x += 10;  // NEVER modify gameplay state!
-    ///     state.health = 50;      // This breaks determinism!
-    /// }
+    /// let mut accessor = cell.data().expect("state exists");
+    /// let state = accessor.as_mut_dangerous();
+    /// state.player_x += 10;  // NEVER modify gameplay state!
+    /// state.health = 50;      // This breaks determinism!
     /// ```
     ///
     /// The correct approach for gameplay changes is to modify your current game state

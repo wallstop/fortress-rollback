@@ -1099,14 +1099,15 @@ impl From<Frame> for i32 {
 
 /// Converts a `usize` to a `Frame`.
 ///
-/// # Warning
+/// # ⚠️ Discouraged
 ///
-/// **Deprecated since 0.3.0**: This conversion silently truncates values larger
+/// **Soft-deprecated**: This conversion silently truncates values larger
 /// than `i32::MAX`. For safe conversion with overflow detection, use
 /// [`Frame::from_usize()`] or [`Frame::try_from_usize()`] instead.
 ///
 /// This impl cannot use `#[deprecated]` because Rust doesn't support that attribute
-/// on trait impl blocks. The deprecation is documented here in the doc comment.
+/// on trait impl blocks — no compiler warning will be emitted. Consider using the
+/// safer alternatives listed above.
 impl From<usize> for Frame {
     #[inline]
     fn from(value: usize) -> Self {

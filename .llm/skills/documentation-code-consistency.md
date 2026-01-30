@@ -470,15 +470,19 @@ pub fn with_sparse_saving_mode(self, sparse_saving: bool) -> Self { }
 
 ### Doc Comment Deprecation (When `#[deprecated]` Can't Be Used)
 
-For trait impls where `#[deprecated]` isn't supported:
+For trait impls where `#[deprecated]` isn't supported, use "Soft-deprecated"
+instead of "Deprecated since X.Y.Z" to avoid implying a compiler warning exists:
 
 ```rust
 /// Converts a `usize` to a `Frame`.
 ///
-/// # Warning
+/// # ⚠️ Discouraged
 ///
-/// **Deprecated since 0.3.0**: This conversion silently truncates values.
+/// **Soft-deprecated**: This conversion silently truncates values.
 /// Use [`Frame::from_usize()`] or [`Frame::try_from_usize()`] instead.
+///
+/// This impl cannot use `#[deprecated]` because Rust doesn't support that
+/// attribute on trait impl blocks — no compiler warning will be emitted.
 impl From<usize> for Frame {
     fn from(value: usize) -> Self {
         Self(value as i32)

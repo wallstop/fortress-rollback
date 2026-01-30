@@ -93,6 +93,69 @@ unreachable!("this should never happen");
 - Users learn from examples — show them the RIGHT way
 - The `# Ok::<(), Error>(())` pattern enables `?` in doc tests
 
+### When Different Patterns Are Acceptable in Doc Examples
+
+While the general rule is "no panics in examples," there are nuanced cases where different patterns are appropriate based on what the example is teaching:
+
+#### Use `if let Some` for Defensive Fallback Patterns
+
+When demonstrating how users should handle optional state in their game loops:
+
+```rust
+/// // Simulate a LoadGameState request handler
+/// // LoadGameState is only requested for previously saved frames,
+/// // but we handle None defensively to avoid crashing on library bugs
+/// if let Some(loaded) = cell.load() {
+///     current_state = loaded;
+/// }
+/// // If load() returns None, current_state is unchanged
+```
+
+**When to use:** Teaching defensive programming where the caller should gracefully handle missing data rather than crash.
+
+#### Use `.expect("reason")` for Provably-Present State
+
+When the example demonstrates a successful path where the state is guaranteed to exist by prior operations in the same example:
+
+```rust
+/// // We just saved the state above, so we know it exists
+/// let accessor = cell.data().expect("state was just saved");
+/// assert_eq!(accessor.player_name, "alex");
+```
+
+**When to use:** When the example's control flow proves the value exists, AND the focus is on demonstrating the happy path. The `.expect()` message must explain WHY it's safe.
+
+**Important:** This is acceptable ONLY when:
+
+- The example itself proves the value exists (e.g., save then load)
+- The message clearly explains the invariant
+- The example demonstrates API usage, not error handling
+
+#### Use `.ok_or(Error)?` for Error Propagation Patterns
+
+When demonstrating how users should handle missing state as an error condition:
+
+```rust
+/// let loaded = cell.load_or_err(frame)?;
+/// // Or manually:
+/// let loaded = cell.load()
+///     .ok_or(FortressError::InvalidFrameStructured {
+///         frame,
+///         reason: InvalidFrameReason::MissingState,
+///     })?;
+```
+
+**When to use:** Teaching error propagation where missing data is a genuine error that should be returned to the caller.
+
+#### Decision Guide for Doc Examples
+
+| Scenario | Pattern | Example |
+|----------|---------|---------|
+| Teaching defensive game loop handling | `if let Some` | `if let Some(s) = cell.load() { state = s; }` |
+| Demonstrating happy path with proven state | `.expect("why")` | `cell.data().expect("just saved")` |
+| Teaching error propagation | `.ok_or()?` | `cell.load().ok_or(Error::Missing)?` |
+| General fallible operations | `?` operator | `session.advance_frame()?` |
+
 ### Required Patterns
 
 All fallible operations MUST return `Result`:
