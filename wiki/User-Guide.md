@@ -590,6 +590,14 @@ fn handle_event(event: FortressEvent<GameConfig>) {
             );
             // This is bad! Debug your determinism.
         }
+
+        FortressEvent::SyncTimeout { addr, elapsed_ms } => {
+            eprintln!(
+                "Sync timeout with {} after {}ms",
+                addr, elapsed_ms
+            );
+            // Session continues trying, but you may choose to abort
+        }
     }
 }
 ```
@@ -1573,7 +1581,7 @@ struct MyWebSocketTransport {
 impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
     fn send_to(&mut self, msg: &Message, addr: &MyPeerId) {
         // Serialize msg and send via WebSocket
-        let bytes = bincode::serialize(msg).unwrap();
+        let Ok(bytes) = bincode::serialize(msg) else { return };
         self.send_to_peer(addr, &bytes);
     }
 
@@ -1855,8 +1863,10 @@ loop {
         match session.sync_health(peer_handle) {
             Some(SyncHealth::InSync) => break,  // Safe to exit
             Some(SyncHealth::DesyncDetected { frame, .. }) => {
+                // Desync is a critical error — your application decides how to handle it.
+                // Options: return error, show UI, attempt recovery, or terminate.
                 eprintln!("Desync detected at frame {} — investigation required", frame);
-                return Err(FortressError::DesyncDetected { frame });
+                return Err(format!("Desync detected at frame {}", frame).into());
             }
             _ => continue,  // Still waiting for checksum verification
         }
@@ -2077,8 +2087,9 @@ loop {
                 break;
             }
             Some(SyncHealth::DesyncDetected { frame, .. }) => {
+                // Desync handling is application-specific — you decide the response.
                 eprintln!("Cannot terminate: desync at frame {} — investigation required", frame);
-                return Err(FortressError::DesyncDetected { frame });
+                return Err(format!("Desync at frame {}", frame).into());
             }
             _ => continue,  // Keep polling for verification
         }
@@ -2699,11 +2710,12 @@ let violation = SpecViolation::new(
  .with_context("actual", "100");
 
 // Direct JSON serialization
-let json = serde_json::to_string(&violation).unwrap();
+let json = serde_json::to_string(&violation)?;
 
 // Or use the convenience method
-let json = violation.to_json().unwrap();
-let json_pretty = violation.to_json_pretty().unwrap();
+let json = violation.to_json()?;
+let json_pretty = violation.to_json_pretty()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 Example JSON output:

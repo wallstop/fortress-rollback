@@ -156,6 +156,93 @@ When demonstrating how users should handle missing state as an error condition:
 | Teaching error propagation | `.ok_or()?` | `cell.load().ok_or(Error::Missing)?` |
 | General fallible operations | `?` operator | `session.advance_frame()?` |
 
+### Documentation Example Verification (CRITICAL)
+
+**ALWAYS verify that types, methods, and error variants used in documentation examples actually exist in the source code.** Fabricated examples that don't compile erode trust and waste users' time.
+
+#### Before Writing Doc Examples
+
+```bash
+# Verify error variants exist
+rg 'enum FortressError' -A 100 src/error.rs | head -120
+
+# Verify a specific variant exists
+rg 'DesyncDetected|InvalidFrame|NetworkError' src/error.rs
+
+# Verify struct/method exists
+rg 'pub fn method_name|pub struct TypeName' --type rust
+```
+
+#### Common Doc Example Mistakes
+
+```rust
+// ❌ FORBIDDEN: Using non-existent error variants
+/// ```
+/// match result {
+///     Err(FortressError::DesyncDetected) => { /* ... */ }  // Does this exist?
+/// }
+/// ```
+
+// ❌ FORBIDDEN: Incomplete match on #[non_exhaustive] enums
+/// ```
+/// match event {
+///     FortressEvent::Synchronizing { total, count, .. } => { /* ... */ }
+///     FortressEvent::Disconnected { .. } => { /* ... */ }
+///     // Missing other variants AND missing `_ =>` fallback!
+/// }
+/// ```
+
+// ✅ REQUIRED: Verify variants exist, handle exhaustiveness
+/// ```
+/// match event {
+///     FortressEvent::Synchronizing { total, count, .. } => { /* ... */ }
+///     FortressEvent::Disconnected { addr, .. } => { /* ... */ }
+///     FortressEvent::NetworkInterrupted { addr, .. } => { /* ... */ }
+///     // ... all other variants ...
+///     _ => { /* Handle future variants gracefully */ }
+/// }
+/// ```
+```
+
+#### Matching on `#[non_exhaustive]` Enums in Examples
+
+When demonstrating match statements on `#[non_exhaustive]` enums (like `FortressEvent`), you **must** include a wildcard arm:
+
+```rust
+// ✅ REQUIRED for #[non_exhaustive] enums in doc examples
+/// ```
+/// for event in session.events()? {
+///     match event {
+///         FortressEvent::Synchronizing { total, count, .. } => {
+///             println!("Sync progress: {count}/{total}");
+///         }
+///         FortressEvent::Disconnected { addr, .. } => {
+///             println!("Player at {addr} disconnected");
+///         }
+///         _ => {
+///             // Handle other/future event types
+///         }
+///     }
+/// }
+/// ```
+```
+
+**Why this matters:**
+
+- `#[non_exhaustive]` means new variants may be added without a breaking change
+- Examples without `_ =>` won't compile (teaching users broken patterns)
+- The wildcard arm shows users how to future-proof their code
+
+#### Verification Checklist for Doc Examples
+
+Before committing documentation with code examples:
+
+- [ ] All error variants used actually exist in `FortressError`
+- [ ] All struct/method names are spelled correctly and exist
+- [ ] Match statements on `#[non_exhaustive]` enums include `_ =>` arm
+- [ ] Examples compile: `cargo test --doc`
+- [ ] Examples follow zero-panic policy (no `unwrap()` without justification)
+
 ### Required Patterns
 
 All fallible operations MUST return `Result`:
@@ -1126,6 +1213,7 @@ Before committing any production code, verify:
 - [ ] Custom trait impls use exhaustive destructuring
 - [ ] `#[must_use]` on important return types
 - [ ] Sensitive data redacted in `Debug` implementations
+- [ ] `cargo doc --no-deps` passes — no broken intra-doc links
 
 ---
 

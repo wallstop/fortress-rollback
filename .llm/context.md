@@ -558,10 +558,11 @@ if !valid { return Err(FortressError::InvalidState); }  // Explicit error
 - **Never swallow errors** — Use `?` to propagate, never `let _ = result`
 - **Validate all inputs** — Don't assume internal state is valid
 - **Prefer pattern matching** — Use `match` and `.get()` over indexing
-- **Exhaustive matches** — Never use `_ =>` wildcards on enums
+- **Exhaustive matches** — Never use `_ =>` wildcards on enums (except `#[non_exhaustive]`)
 - **Enums over booleans** — `Compression::Enabled` not `true`
 - **Type safety** — Make invalid states unrepresentable
 - **Doc examples too** — Rustdoc examples must use `?` and `Result`, never `panic!` or `unwrap()`
+- **Verify doc examples** — Always verify error variants/types used in examples actually exist in source code
 
 **See also:** [type-driven-design.md](skills/type-driven-design.md), [rust-pitfalls.md](skills/rust-pitfalls.md)
 
