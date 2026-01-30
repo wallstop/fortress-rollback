@@ -561,6 +561,7 @@ if !valid { return Err(FortressError::InvalidState); }  // Explicit error
 - **Exhaustive matches** — Never use `_ =>` wildcards on enums
 - **Enums over booleans** — `Compression::Enabled` not `true`
 - **Type safety** — Make invalid states unrepresentable
+- **Doc examples too** — Rustdoc examples must use `?` and `Result`, never `panic!` or `unwrap()`
 
 **See also:** [type-driven-design.md](skills/type-driven-design.md), [rust-pitfalls.md](skills/rust-pitfalls.md)
 
@@ -749,6 +750,7 @@ The changelog (`CHANGELOG.md`) is for **users of the library**, not developers.
 - New features, APIs, or configuration options
 - Bug fixes that affect user-visible behavior
 - Breaking changes (with migration guidance)
+- New enum variants on exhaustively matchable enums (**Breaking:** — see skill doc)
 - Performance improvements users would notice
 - Dependency updates that affect compatibility
 

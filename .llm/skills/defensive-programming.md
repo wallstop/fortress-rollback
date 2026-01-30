@@ -2,6 +2,7 @@
 
 > **This document defines the defensive programming standards for Fortress Rollback.**
 > All production code, including library code and any editor/tooling code, MUST follow these practices.
+> **This also applies to documentation examples** — rustdoc examples are compiled and should demonstrate correct error handling.
 
 ## Core Philosophy
 
@@ -54,6 +55,43 @@ debug_assert!(condition);  // OK in debug builds, but prefer explicit handling
 unreachable!();
 unreachable!("this should never happen");
 ```
+
+### Documentation Examples Must Also Follow Zero-Panic
+
+**Rustdoc examples are compiled code.** They must demonstrate proper error handling, not panic shortcuts:
+
+```rust
+// ❌ FORBIDDEN in doc examples — teaches bad habits
+/// # Examples
+///
+/// ```
+/// let session = SessionBuilder::new().build().unwrap();
+/// let result = session.advance_frame();
+/// if result.is_err() {
+///     panic!("frame advance failed");  // NEVER show panic! as error handling
+/// }
+/// ```
+
+// ✅ REQUIRED in doc examples — demonstrates proper patterns
+/// # Examples
+///
+/// ```
+/// # use fortress_rollback::*;
+/// let session = SessionBuilder::new().build()?;
+/// let requests = session.advance_frame()?;
+/// for request in requests {
+///     // Handle each request...
+/// }
+/// # Ok::<(), FortressError>(())
+/// ```
+```
+
+**Why this matters:**
+
+- Doc examples are often copy-pasted by users
+- Examples with `panic!` or `unwrap()` teach incorrect patterns
+- Users learn from examples — show them the RIGHT way
+- The `# Ok::<(), Error>(())` pattern enables `?` in doc tests
 
 ### Required Patterns
 

@@ -1855,7 +1855,8 @@ loop {
         match session.sync_health(peer_handle) {
             Some(SyncHealth::InSync) => break,  // Safe to exit
             Some(SyncHealth::DesyncDetected { frame, .. }) => {
-                panic!("Desync detected at frame {}", frame);
+                eprintln!("Desync detected at frame {} — investigation required", frame);
+                return Err(FortressError::DesyncDetected { frame });
             }
             _ => continue,  // Still waiting for checksum verification
         }
@@ -2076,7 +2077,8 @@ loop {
                 break;
             }
             Some(SyncHealth::DesyncDetected { frame, .. }) => {
-                panic!("Cannot terminate: desync at frame {}", frame);
+                eprintln!("Cannot terminate: desync at frame {} — investigation required", frame);
+                return Err(FortressError::DesyncDetected { frame });
             }
             _ => continue,  // Keep polling for verification
         }
@@ -2419,15 +2421,31 @@ fn handle_error(error: FortressError) -> Action {
             Action::DesyncDetected
         }
 
-        // Programming errors: fix the code
-        FortressError::InvalidRequest { info } => panic!("Invalid request: {}", info),
+        // Invalid requests: likely programming errors in application code
+        // Log for debugging, then signal fatal error (let app decide how to handle)
+        FortressError::InvalidRequest { info } => {
+            eprintln!("Invalid request (likely programming error): {info}");
+            Action::Fatal
+        }
         FortressError::InvalidPlayerHandle { handle, max_handle } => {
-            panic!("Invalid player handle {} (max: {})", handle, max_handle)
+            eprintln!("Invalid player handle {handle} (max: {max_handle}) — check player setup");
+            Action::Fatal
         }
         FortressError::InvalidFrame { frame, reason } => {
             eprintln!("Invalid frame {}: {}", frame, reason);
             Action::Continue
         }
+
+        // Frame arithmetic errors: typically from overflow in frame calculations
+        FortressError::FrameArithmeticOverflow { .. } => {
+            eprintln!("Frame arithmetic overflow — frame calculation exceeded limits");
+            Action::Fatal
+        }
+        FortressError::FrameValueTooLarge { .. } => {
+            eprintln!("Frame value too large — conversion from usize failed");
+            Action::Fatal
+        }
+
         FortressError::MissingInput { player_handle, frame } => {
             eprintln!("Missing input for player {} at frame {}", player_handle, frame);
             Action::Continue
@@ -2453,7 +2471,8 @@ fn handle_error(error: FortressError) -> Action {
             Action::Fatal
         }
         FortressError::InvalidRequestStructured { kind } => {
-            panic!("Invalid request: {:?}", kind)
+            eprintln!("Invalid request (likely programming error): {kind:?}");
+            Action::Fatal
         }
         FortressError::SerializationErrorStructured { kind } => {
             eprintln!("Serialization error: {:?}", kind);

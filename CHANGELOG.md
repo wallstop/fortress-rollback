@@ -17,7 +17,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `GameStateCell::load_or_err()` method for strict state loading with proper error handling
-- `InvalidFrameReason::MissingState` variant for clearer error messages when loading missing states
 - `SessionBuilder::with_lan_defaults()` preset for low-latency LAN play
 - `SessionBuilder::with_internet_defaults()` preset for typical online play
 - `SessionBuilder::with_high_latency_defaults()` preset for mobile/unstable connections
@@ -30,9 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `from_usize(usize)`, `try_from_usize(usize)` — safe construction from usize
   - `distance_to(Frame)` — signed distance calculation
   - `is_within(window, reference)` — window proximity check
-- `FortressError::FrameArithmeticOverflow` for overflow detection in frame arithmetic
-- `FortressError::FrameValueTooLarge` for usize-to-Frame conversion failures
-- `InvalidRequestKind::ZeroBufferSize` for zero buffer size validation
 - `Debug` impl for `P2PSession`, `SpectatorSession`, and `SyncTestSession` — enables logging session state for debugging
 - `Debug` impl for `ChaosSocket` — shows config, stats, and packet queue length
 - `Debug` impl for `GameStateAccessor` — delegates to inner `T` when `T: Debug`
@@ -42,7 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Hash` derive for configuration types: `TimeSyncConfig`, `SyncConfig`, `ProtocolConfig`, `SpectatorConfig`, `InputQueueConfig` — enables use as map keys for configuration caching
 - `PartialEq`, `Eq`, and `Hash` derives for `DeterministicHasher` and `DeterministicBuildHasher` — enables comparison and use as map keys
 
-## [0.3.0]
+### Changed
+
+- **Breaking:** Added `InvalidFrameReason::MissingState` variant — exhaustive matches on `InvalidFrameReason` must now handle this case
+- **Breaking:** Added `FortressError::FrameArithmeticOverflow` variant — exhaustive matches on `FortressError` must now handle this case
+- **Breaking:** Added `FortressError::FrameValueTooLarge` variant — exhaustive matches on `FortressError` must now handle this case
+- **Breaking:** Added `InvalidRequestKind::ZeroBufferSize` variant — exhaustive matches on `InvalidRequestKind` must now handle this case
+
+## [0.3.0] - 2026-01-28
 
 ### Added
 
@@ -307,7 +310,8 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/wallstop/fortress-rollback/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/wallstop/fortress-rollback/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/wallstop/fortress-rollback/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/wallstop/fortress-rollback/compare/v0.1.2...v0.2.0
