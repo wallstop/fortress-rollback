@@ -694,13 +694,13 @@ impl Frame {
     /// # Errors
     ///
     /// Returns [`FortressError::InvalidFrameStructured`] if the frame is negative.
-    /// Returns [`FortressError::InternalErrorStructured`] with [`InternalErrorKind::DivisionByZero`]
+    /// Returns [`FortressError::InvalidRequestStructured`] with [`InvalidRequestKind::ZeroBufferSize`]
     /// if `buffer_size` is zero.
     ///
     /// # Examples
     ///
     /// ```
-    /// use fortress_rollback::{Frame, FortressError, InternalErrorKind};
+    /// use fortress_rollback::{Frame, FortressError, InvalidRequestKind};
     ///
     /// // Valid frame and buffer size
     /// assert_eq!(Frame::new(7).try_buffer_index(4).unwrap(), 3);
@@ -710,18 +710,18 @@ impl Frame {
     ///
     /// // Zero buffer size returns error
     /// let err = Frame::new(5).try_buffer_index(0).unwrap_err();
-    /// assert!(matches!(err, FortressError::InternalErrorStructured {
-    ///     kind: InternalErrorKind::DivisionByZero
+    /// assert!(matches!(err, FortressError::InvalidRequestStructured {
+    ///     kind: InvalidRequestKind::ZeroBufferSize
     /// }));
     /// ```
     ///
-    /// [`InternalErrorKind::DivisionByZero`]: crate::InternalErrorKind::DivisionByZero
+    /// [`InvalidRequestKind::ZeroBufferSize`]: crate::InvalidRequestKind::ZeroBufferSize
     #[inline]
     #[track_caller]
     pub fn try_buffer_index(self, buffer_size: usize) -> Result<usize, FortressError> {
         if buffer_size == 0 {
-            return Err(FortressError::InternalErrorStructured {
-                kind: InternalErrorKind::DivisionByZero,
+            return Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ZeroBufferSize,
             });
         }
         self.try_as_usize().map(|u| u % buffer_size)
@@ -2502,8 +2502,17 @@ mod tests {
         let err = Frame::new(5).try_buffer_index(0).unwrap_err();
         assert!(matches!(
             err,
-            FortressError::InternalErrorStructured {
-                kind: InternalErrorKind::DivisionByZero
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ZeroBufferSize
+            }
+        ));
+
+        // Verify ZeroBufferSize error takes precedence even with Frame::new(0)
+        let err = Frame::new(0).try_buffer_index(0).unwrap_err();
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ZeroBufferSize
             }
         ));
     }

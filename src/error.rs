@@ -374,10 +374,6 @@ pub enum InternalErrorKind {
         /// The specific reason for the delta decode failure.
         reason: DeltaDecodeReason,
     },
-    /// Division by zero error.
-    ///
-    /// This occurs when a buffer size or divisor is zero.
-    DivisionByZero,
     /// Custom error (fallback for API compatibility).
     Custom(&'static str),
 }
@@ -425,7 +421,6 @@ impl Display for InternalErrorKind {
             Self::DeltaDecodeError { reason } => {
                 write!(f, "delta decode failed: {}", reason)
             },
-            Self::DivisionByZero => write!(f, "division by zero"),
             Self::Custom(s) => write!(f, "{}", s),
         }
     }
@@ -539,6 +534,8 @@ pub enum InvalidRequestKind {
     ZeroPlayers,
     /// FPS must be greater than 0.
     ZeroFps,
+    /// Buffer size must be greater than 0.
+    ZeroBufferSize,
     /// Not enough players have been registered.
     NotEnoughPlayers {
         /// The expected number of players.
@@ -712,6 +709,7 @@ impl Display for InvalidRequestKind {
             },
             Self::ZeroPlayers => write!(f, "number of players must be greater than 0"),
             Self::ZeroFps => write!(f, "FPS must be greater than 0"),
+            Self::ZeroBufferSize => write!(f, "buffer size must be greater than 0"),
             Self::NotEnoughPlayers { expected, actual } => {
                 write!(
                     f,
@@ -1642,6 +1640,14 @@ mod tests {
         let kind = InvalidRequestKind::ZeroFps;
         let display = format!("{}", kind);
         assert!(display.contains("FPS"));
+        assert!(display.contains("greater than 0"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_zero_buffer_size() {
+        let kind = InvalidRequestKind::ZeroBufferSize;
+        let display = format!("{}", kind);
+        assert!(display.contains("buffer size"));
         assert!(display.contains("greater than 0"));
     }
 

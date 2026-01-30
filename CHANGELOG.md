@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `is_within(window, reference)` — window proximity check
 - `FortressError::FrameArithmeticOverflow` for overflow detection in frame arithmetic
 - `FortressError::FrameValueTooLarge` for usize-to-Frame conversion failures
-- `InternalErrorKind::DivisionByZero` for division by zero errors
+- `InvalidRequestKind::ZeroBufferSize` for zero buffer size validation
 - `Debug` impl for `P2PSession`, `SpectatorSession`, and `SyncTestSession` — enables logging session state for debugging
 - `Debug` impl for `ChaosSocket` — shows config, stats, and packet queue length
 - `Debug` impl for `GameStateAccessor` — delegates to inner `T` when `T: Debug`

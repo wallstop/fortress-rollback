@@ -511,6 +511,58 @@ return Err(FortressError::InvalidPlayerIndex {
 });
 ```
 
+### Error Categorization: `InvalidRequest*` vs `InternalError*`
+
+Choosing the correct error category is critical for debugging and API contracts.
+
+**`InvalidRequestStructured` / `InvalidRequest`**: Use for **caller-provided invalid arguments**.
+The caller made a mistake; this is expected and recoverable.
+
+**`InternalErrorStructured` / `InternalError`**: Use for **library bugs or invariant violations**.
+Something went wrong inside the library that should never happen under normal API usage.
+
+**Decision tree:**
+
+```
+Is the invalid value provided by the caller as an argument?
+├─ YES → InvalidRequestStructured (caller's responsibility)
+└─ NO → Is it derived from internal library state?
+        ├─ YES → InternalErrorStructured (library bug)
+        └─ NO → Trace back: who created this value?
+                └─ Usually leads to one of the above
+```
+
+**Example: Division by zero**
+
+```rust
+// Function signature: pub fn try_buffer_index(&self, buffer_size: usize) -> Result<...>
+
+// ❌ WRONG: buffer_size == 0 is caller's fault, not a library bug
+if buffer_size == 0 {
+    return Err(FortressError::InternalErrorStructured {
+        kind: InternalErrorKind::DivisionByZero,  // Wrong category!
+    });
+}
+
+// ✅ CORRECT: Caller passed invalid argument
+if buffer_size == 0 {
+    return Err(FortressError::InvalidRequestStructured {
+        kind: InvalidRequestKind::ZeroBufferSize,
+    });
+}
+```
+
+**Why this matters:**
+
+- `InternalError` tells users: "Report this as a bug" — wrong if it's their fault
+- `InvalidRequest` tells users: "Fix your input" — actionable guidance
+- Incorrect categorization erodes trust and wastes debugging time
+
+**Quick test:** Ask "If a user follows the documented API correctly, can they ever trigger this error?"
+
+- **NO** (impossible with correct usage) → `InternalError` (indicates library bug)
+- **YES** (possible with incorrect arguments) → `InvalidRequest` (user error)
+
 ### Unknown/Fallback Variants in Error Reason Enums
 
 When creating "reason" enums for structured errors, include an `Unknown` or fallback variant
