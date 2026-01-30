@@ -154,6 +154,16 @@ pub enum InvalidFrameReason {
     },
     /// Frame is NULL or negative (general validation).
     NullOrNegative,
+    /// No saved state exists for this frame.
+    ///
+    /// Returned when attempting to load a game state that was never saved.
+    /// This typically indicates a programming error — [`LoadGameState`] requests
+    /// should only be issued for frames that were previously saved via
+    /// [`SaveGameState`].
+    ///
+    /// [`LoadGameState`]: crate::FortressRequest::LoadGameState
+    /// [`SaveGameState`]: crate::FortressRequest::SaveGameState
+    MissingState,
     /// Custom reason (fallback for API compatibility).
     Custom(&'static str),
 }
@@ -192,6 +202,7 @@ impl Display for InvalidFrameReason {
                 )
             },
             Self::NullOrNegative => write!(f, "frame is NULL or negative"),
+            Self::MissingState => write!(f, "no saved state exists for this frame"),
             Self::Custom(s) => write!(f, "{}", s),
         }
     }
@@ -1334,6 +1345,16 @@ mod tests {
         let display = format!("{}", reason);
         assert!(display.contains("not confirmed"));
         assert!(display.contains("50"));
+    }
+
+    #[test]
+    fn invalid_frame_reason_missing_state_display() {
+        let reason = InvalidFrameReason::MissingState;
+        let display = format!("{reason}");
+        assert!(
+            display.contains("saved state"),
+            "Expected 'saved state' in: {display}"
+        );
     }
 
     #[test]

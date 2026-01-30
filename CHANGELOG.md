@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `GameStateCell::load_or_err()` method for strict state loading with proper error handling
+- `InvalidFrameReason::MissingState` variant for clearer error messages when loading missing states
+- `SessionBuilder::with_lan_defaults()` preset for low-latency LAN play
+- `SessionBuilder::with_internet_defaults()` preset for typical online play
+- `SessionBuilder::with_high_latency_defaults()` preset for mobile/unstable connections
 - `Frame` ergonomic methods for safe arithmetic and conversion:
   - `as_usize()`, `try_as_usize()` — convert to usize with Option/Result
   - `buffer_index(size)`, `try_buffer_index(size)` — ring buffer index calculation

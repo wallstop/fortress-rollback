@@ -765,6 +765,141 @@ impl<T: Config> SessionBuilder<T> {
         self
     }
 
+    // =========================================================================
+    // Session Presets
+    // =========================================================================
+
+    /// Applies LAN-optimized defaults for low-latency local network play.
+    ///
+    /// This preset configures the session for minimal latency scenarios typical
+    /// of local area networks, where RTT is typically <10ms and packet loss is rare.
+    ///
+    /// # Configuration Applied
+    ///
+    /// - **Sync**: Fast handshake with fewer required roundtrips ([`SyncConfig::lan()`])
+    /// - **Protocol**: Competitive settings with quick detection ([`ProtocolConfig::competitive()`])
+    /// - **Time Sync**: Small window for responsive sync ([`TimeSyncConfig::lan()`])
+    /// - **Input Delay**: 0 frames (can be adjusted with [`with_input_delay()`])
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_lan_defaults();
+    /// ```
+    ///
+    /// [`SyncConfig::lan()`]: crate::SyncConfig::lan
+    /// [`ProtocolConfig::competitive()`]: crate::ProtocolConfig::competitive
+    /// [`TimeSyncConfig::lan()`]: crate::TimeSyncConfig::lan
+    /// [`with_input_delay()`]: Self::with_input_delay
+    pub fn with_lan_defaults(self) -> Self {
+        self.with_sync_config(SyncConfig::lan())
+            .with_protocol_config(ProtocolConfig::competitive())
+            .with_time_sync_config(TimeSyncConfig::lan())
+    }
+
+    /// Applies Internet-optimized defaults for typical online play.
+    ///
+    /// This preset configures the session for typical internet connections with
+    /// moderate latency (30-100ms RTT) and occasional packet loss (<5%).
+    ///
+    /// # Configuration Applied
+    ///
+    /// - **Sync**: Default handshake settings ([`SyncConfig::default()`])
+    /// - **Protocol**: Default network timing ([`ProtocolConfig::default()`])
+    /// - **Time Sync**: Default averaging window ([`TimeSyncConfig::default()`])
+    /// - **Input Delay**: 2 frames (recommended for hiding network jitter)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FortressError::InvalidRequest`] if the input delay cannot be set
+    /// (e.g., if the input queue is too small).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, FortressError};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_internet_defaults()?;
+    /// # Ok::<(), FortressError>(())
+    /// ```
+    ///
+    /// [`SyncConfig::default()`]: crate::SyncConfig::default
+    /// [`ProtocolConfig::default()`]: crate::ProtocolConfig::default
+    /// [`TimeSyncConfig::default()`]: crate::TimeSyncConfig::default
+    /// [`FortressError::InvalidRequest`]: crate::FortressError::InvalidRequest
+    pub fn with_internet_defaults(self) -> Result<Self, FortressError> {
+        self.with_sync_config(SyncConfig::default())
+            .with_protocol_config(ProtocolConfig::default())
+            .with_time_sync_config(TimeSyncConfig::default())
+            .with_input_delay(2)
+    }
+
+    /// Applies mobile/high-latency defaults for unstable connections.
+    ///
+    /// This preset configures the session for challenging network conditions
+    /// typical of mobile/cellular networks or high-latency connections:
+    /// - High RTT (100-300ms)
+    /// - Variable latency (high jitter)
+    /// - Intermittent packet loss (5-20%)
+    /// - Connection handoffs (WiFi/cellular switches)
+    ///
+    /// # Configuration Applied
+    ///
+    /// - **Sync**: Robust handshake with more retries ([`SyncConfig::mobile()`])
+    /// - **Protocol**: Tolerant settings with larger buffers ([`ProtocolConfig::mobile()`])
+    /// - **Time Sync**: Large window for stable sync ([`TimeSyncConfig::mobile()`])
+    /// - **Input Queue**: Larger queue for longer history ([`InputQueueConfig::high_latency()`])
+    /// - **Input Delay**: 4 frames (helps absorb jitter spikes)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FortressError::InvalidRequest`] if the input delay cannot be set.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{SessionBuilder, Config, FortressError};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_high_latency_defaults()?;
+    /// # Ok::<(), FortressError>(())
+    /// ```
+    ///
+    /// [`SyncConfig::mobile()`]: crate::SyncConfig::mobile
+    /// [`ProtocolConfig::mobile()`]: crate::ProtocolConfig::mobile
+    /// [`TimeSyncConfig::mobile()`]: crate::TimeSyncConfig::mobile
+    /// [`InputQueueConfig::high_latency()`]: crate::InputQueueConfig::high_latency
+    /// [`FortressError::InvalidRequest`]: crate::FortressError::InvalidRequest
+    pub fn with_high_latency_defaults(self) -> Result<Self, FortressError> {
+        self.with_sync_config(SyncConfig::mobile())
+            .with_protocol_config(ProtocolConfig::mobile())
+            .with_time_sync_config(TimeSyncConfig::mobile())
+            .with_input_queue_config(InputQueueConfig::high_latency())
+            .with_input_delay(4)
+    }
+
     /// Consumes the builder to construct a [`P2PSession`] and starts synchronization of endpoints.
     /// # Errors
     /// - Returns [`InvalidRequest`] if insufficient players have been registered.
@@ -1289,5 +1424,106 @@ mod tests {
             .player_reg
             .handles
             .contains_key(&PlayerHandle::new(1)));
+    }
+
+    // ========================================================================
+    // Session Preset Tests
+    // ========================================================================
+
+    #[test]
+    fn with_lan_defaults_returns_valid_builder() {
+        // Arrange & Act: Create builder with LAN preset
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_lan_defaults();
+
+        // Assert: Builder is in a valid state and can accept players
+        let result = builder.add_local_player(0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn with_internet_defaults_returns_valid_builder() {
+        // Arrange & Act: Create builder with internet preset
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_internet_defaults()
+            .expect("with_internet_defaults should succeed");
+
+        // Assert: Builder is in a valid state and can accept players
+        let result = builder.add_local_player(0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn with_high_latency_defaults_returns_valid_builder() {
+        // Arrange & Act: Create builder with high-latency preset
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_high_latency_defaults()
+            .expect("with_high_latency_defaults should succeed");
+
+        // Assert: Builder is in a valid state and can accept players
+        let result = builder.add_local_player(0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn with_lan_defaults_applies_expected_configs() {
+        // Arrange & Act
+        let builder = SessionBuilder::<TestConfig>::new().with_lan_defaults();
+
+        // Assert: Verify the preset applied the expected configuration
+        assert_eq!(builder.sync_config, SyncConfig::lan());
+        assert_eq!(builder.protocol_config, ProtocolConfig::competitive());
+        assert_eq!(builder.time_sync_config, TimeSyncConfig::lan());
+    }
+
+    #[test]
+    fn with_internet_defaults_applies_expected_configs() {
+        // Arrange & Act
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_internet_defaults()
+            .expect("with_internet_defaults should succeed");
+
+        // Assert: Verify the preset applied the expected configuration
+        assert_eq!(builder.sync_config, SyncConfig::default());
+        assert_eq!(builder.protocol_config, ProtocolConfig::default());
+        assert_eq!(builder.time_sync_config, TimeSyncConfig::default());
+        assert_eq!(builder.input_delay, 2);
+    }
+
+    #[test]
+    fn with_high_latency_defaults_applies_expected_configs() {
+        // Arrange & Act
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_high_latency_defaults()
+            .expect("with_high_latency_defaults should succeed");
+
+        // Assert: Verify the preset applied the expected configuration
+        assert_eq!(builder.sync_config, SyncConfig::mobile());
+        assert_eq!(builder.protocol_config, ProtocolConfig::mobile());
+        assert_eq!(builder.time_sync_config, TimeSyncConfig::mobile());
+        assert_eq!(builder.input_queue_config, InputQueueConfig::high_latency());
+        assert_eq!(builder.input_delay, 4);
+    }
+
+    #[test]
+    fn presets_are_chainable_with_other_methods() {
+        // Arrange & Act: Chain preset with additional configuration
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_num_players(4)
+            .unwrap()
+            .with_lan_defaults()
+            .with_max_prediction_window(6)
+            .with_desync_detection_mode(DesyncDetection::Off);
+
+        // Assert: Both preset and subsequent configs applied
+        assert_eq!(builder.sync_config, SyncConfig::lan());
+        assert_eq!(builder.max_prediction, 6);
+        assert_eq!(builder.desync_detection, DesyncDetection::Off);
     }
 }

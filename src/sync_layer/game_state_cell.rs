@@ -341,6 +341,71 @@ impl<T: Clone> GameStateCell<T> {
         let guard = self.0.lock().unwrap();
         guard.data.clone()
     }
+
+    /// Loads a previously saved state, returning an error if none exists.
+    ///
+    /// Use this when you expect a state to be present (e.g., during
+    /// `LoadGameState` handling). For optional loads, use [`load()`].
+    ///
+    /// # Arguments
+    ///
+    /// * `frame` - The frame number for error context. This should match
+    ///   the `frame` from the [`FortressRequest::LoadGameState`] request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FortressError::InvalidFrameStructured`] with
+    /// [`InvalidFrameReason::MissingState`] if no state is saved in this cell.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage with request handling:
+    ///
+    /// ```
+    /// use fortress_rollback::{Frame, GameStateCell, FortressError, InvalidFrameReason};
+    ///
+    /// #[derive(Clone, PartialEq, Debug, Default)]
+    /// struct GameState { score: u32 }
+    ///
+    /// let cell = GameStateCell::<GameState>::default();
+    /// let frame = Frame::new(10);
+    ///
+    /// // Before saving, load_or_err returns an error
+    /// let result = cell.load_or_err(frame);
+    /// assert!(matches!(
+    ///     result,
+    ///     Err(FortressError::InvalidFrameStructured {
+    ///         frame: f,
+    ///         reason: InvalidFrameReason::MissingState
+    ///     }) if f == frame
+    /// ));
+    ///
+    /// // After saving, load_or_err succeeds
+    /// cell.save(frame, Some(GameState { score: 100 }), None);
+    /// let loaded = cell.load_or_err(frame)?;
+    /// assert_eq!(loaded.score, 100);
+    /// # Ok::<(), FortressError>(())
+    /// ```
+    ///
+    /// Typical usage in request handling loop:
+    ///
+    /// ```ignore
+    /// FortressRequest::LoadGameState { cell, frame } => {
+    ///     *game_state = cell.load_or_err(frame)?;
+    /// }
+    /// ```
+    ///
+    /// [`load()`]: Self::load
+    /// [`FortressRequest::LoadGameState`]: crate::FortressRequest::LoadGameState
+    /// [`FortressError::InvalidFrameStructured`]: crate::FortressError::InvalidFrameStructured
+    /// [`InvalidFrameReason::MissingState`]: crate::InvalidFrameReason::MissingState
+    pub fn load_or_err(&self, frame: Frame) -> Result<T, crate::FortressError> {
+        self.load()
+            .ok_or(crate::FortressError::InvalidFrameStructured {
+                frame,
+                reason: crate::InvalidFrameReason::MissingState,
+            })
+    }
 }
 
 /// Creates an empty `GameStateCell` with no saved state.
@@ -530,6 +595,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for GameStateAccessor<'_, T> {
 )]
 mod tests {
     use super::*;
+    use crate::error::{FortressError, InvalidFrameReason};
 
     // ==========================================
     // GameStateCell Basic Tests
@@ -852,5 +918,34 @@ mod tests {
         // Last save wins
         assert_eq!(cell.load(), Some(3));
         assert_eq!(cell.frame(), frame);
+    }
+
+    // ==========================================
+    // load_or_err() Tests
+    // ==========================================
+
+    #[test]
+    fn load_or_err_returns_error_when_empty() {
+        let cell = GameStateCell::<u32>::default();
+        let frame = Frame::new(10);
+
+        let result = cell.load_or_err(frame);
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidFrameStructured {
+                frame: f,
+                reason: InvalidFrameReason::MissingState
+            }) if f == frame
+        ));
+    }
+
+    #[test]
+    fn load_or_err_succeeds_after_save() {
+        let cell = GameStateCell::<u32>::default();
+        let frame = Frame::new(10);
+        cell.save(frame, Some(42), None);
+
+        let result = cell.load_or_err(frame);
+        assert_eq!(result.unwrap(), 42);
     }
 }
