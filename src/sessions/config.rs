@@ -582,7 +582,7 @@ impl ProtocolConfig {
     ///
     /// # Errors
     ///
-    /// Returns `FortressError::InvalidRequest` if any configuration value is out of range.
+    /// Returns a [`FortressError`] if any configuration value is out of range.
     pub fn validate(&self) -> Result<(), FortressError> {
         // Validate quality_report_interval: 1ms to 10000ms
         if self.quality_report_interval < Duration::from_millis(1)
@@ -929,7 +929,7 @@ impl InputQueueConfig {
     ///
     /// # Errors
     ///
-    /// Returns `FortressError::InvalidRequest` if `frame_delay >= queue_length`.
+    /// Returns a [`FortressError`] if `frame_delay >= queue_length`.
     pub fn validate_frame_delay(&self, frame_delay: usize) -> Result<(), FortressError> {
         if frame_delay >= self.queue_length {
             return Err(InvalidRequestKind::FrameDelayTooLarge {
@@ -945,7 +945,7 @@ impl InputQueueConfig {
     ///
     /// # Errors
     ///
-    /// Returns `FortressError::InvalidRequest` if `queue_length < 2`.
+    /// Returns a [`FortressError`] if `queue_length < 2`.
     pub fn validate(&self) -> Result<(), FortressError> {
         if self.queue_length < 2 {
             return Err(InvalidRequestKind::QueueLengthTooSmall {

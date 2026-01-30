@@ -199,10 +199,9 @@ impl<T: Config> P2PSession<T> {
     /// If this is called multiple times for the same player before advancing the frame, older given inputs will be overwritten.
     ///
     /// # Errors
-    /// - Returns [`InvalidRequest`] when the given handle does not refer to a local player.
+    /// - Returns a [`FortressError`] when the given handle does not refer to a local player.
     ///
     /// [`advance_frame()`]: Self#method.advance_frame
-    /// [`InvalidRequest`]: FortressError::InvalidRequest
     pub fn add_local_input(
         &mut self,
         player_handle: PlayerHandle,
@@ -229,12 +228,10 @@ impl<T: Config> P2PSession<T> {
     /// Failure to do so will cause panics later.
     ///
     /// # Errors
-    /// - Returns [`InvalidRequest`] if the provided player handle refers to a remote player.
-    /// - Returns [`NotSynchronized`] if the session is not yet ready to accept input. In this case, you either need to start the session or wait for synchronization between clients.
+    /// - Returns a [`FortressError`] if the provided player handle refers to a remote player.
+    /// - Returns a [`FortressError`] if the session is not yet ready to accept input. In this case, you either need to start the session or wait for synchronization between clients.
     ///
     /// [`Vec<FortressRequest>`]: FortressRequest
-    /// [`InvalidRequest`]: FortressError::InvalidRequest
-    /// [`NotSynchronized`]: FortressError::NotSynchronized
     #[must_use = "FortressRequests must be processed to advance the game state"]
     pub fn advance_frame(&mut self) -> Result<Vec<FortressRequest<T>>, FortressError> {
         // receive info from remote players, trigger events and send messages
@@ -481,9 +478,7 @@ impl<T: Config> P2PSession<T> {
 
     /// Disconnects a remote player and all other remote players with the same address from the session.
     /// # Errors
-    /// - Returns [`InvalidRequest`] if you try to disconnect a local player or the provided handle is invalid.
-    ///
-    /// [`InvalidRequest`]: FortressError::InvalidRequest
+    /// - Returns a [`FortressError`] if you try to disconnect a local player or the provided handle is invalid.
     #[must_use = "disconnect errors should be handled"]
     pub fn disconnect_player(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError> {
         match self.player_reg.handles.get(&player_handle) {
@@ -536,11 +531,8 @@ impl<T: Config> P2PSession<T> {
     /// one checksum comparison has occurred. Use these to detect game state divergence.
     ///
     /// # Errors
-    /// - Returns [`InvalidRequest`] if the handle not referring to a remote player or spectator.
-    /// - Returns [`NotSynchronized`] if the session is not connected to other clients yet.
-    ///
-    /// [`InvalidRequest`]: FortressError::InvalidRequest
-    /// [`NotSynchronized`]: FortressError::NotSynchronized
+    /// - Returns a [`FortressError`] if the handle not referring to a remote player or spectator.
+    /// - Returns a [`FortressError`] if the session is not connected to other clients yet.
     pub fn network_stats(
         &self,
         player_handle: PlayerHandle,

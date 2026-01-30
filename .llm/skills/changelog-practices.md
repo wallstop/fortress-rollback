@@ -281,8 +281,28 @@ rg 'changed_function|ChangedStruct' --type rust --type md
 
 ---
 
+## Verification Before Committing
+
+**Always verify CHANGELOG claims match actual code:**
+
+```bash
+# Verify derives exist before claiming them
+rg '#\[derive.*Hash' src/lib.rs
+
+# Verify method/type exists
+rg 'pub fn method_name|pub struct TypeName' --type rust
+
+# Build docs to catch broken links
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+```
+
+> **See also:** [documentation-code-consistency.md](documentation-code-consistency.md) for comprehensive verification commands and common pitfalls.
+
+---
+
 ## References
 
 - [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - [Semantic Versioning](https://semver.org/)
 - [Rust API Guidelines - Documentation](https://rust-lang.github.io/api-guidelines/documentation.html)
+- [documentation-code-consistency.md](documentation-code-consistency.md) — Keeping docs and code in sync

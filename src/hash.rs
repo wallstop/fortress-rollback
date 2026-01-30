@@ -68,7 +68,7 @@ const FNV_PRIME: u64 = 0x0100_0000_01b3;
 /// 42u32.hash(&mut hasher2);
 /// assert_eq!(hash, hasher2.finish());
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeterministicHasher {
     state: u64,
 }

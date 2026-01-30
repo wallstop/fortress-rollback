@@ -1,7 +1,7 @@
 //! # Fortress Rollback (formerly GGRS)
 //!
 //! <p align="center">
-//!   <img src="https://raw.githubusercontent.com/wallstop/fortress-rollback/main/assets/logo-banner.svg" alt="Fortress Rollback" width="400">
+//!   <img src="https://raw.githubusercontent.com/wallstop/fortress-rollback/main/docs/assets/logo-banner.svg" alt="Fortress Rollback" width="400">
 //! </p>
 //!
 //! Fortress Rollback is a fortified, verified reimagination of the GGPO network SDK written in 100% safe Rust.

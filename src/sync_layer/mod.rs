@@ -287,8 +287,8 @@ impl<T: Config> SyncLayer<T> {
     /// Sets the frame delay for a player.
     ///
     /// # Errors
-    /// Returns `FortressError::InvalidPlayerHandle` if `player_handle >= num_players`.
-    /// Returns `FortressError::InvalidRequest` if `delay` exceeds the maximum allowed value.
+    /// Returns a [`FortressError`] if `player_handle >= num_players`.
+    /// Returns a [`FortressError`] if `delay` exceeds the maximum allowed value.
     ///
     /// # Note
     /// This method is exposed via `__internal` for testing. It is not part of the stable public API.

@@ -94,10 +94,9 @@ impl<T: Config> SyncTestSession<T> {
     /// In a sync test, all players are considered to be local, so you need to add input for all of them.
     ///
     /// # Errors
-    /// - Returns [`InvalidRequest`] when the given handle is not valid (i.e. not between 0 and num_players).
+    /// - Returns a [`FortressError`] when the given handle is not valid (i.e. not between 0 and num_players).
     ///
     /// [`advance_frame()`]: Self#method.advance_frame
-    /// [`InvalidRequest`]: FortressError::InvalidRequest
     pub fn add_local_input(
         &mut self,
         player_handle: PlayerHandle,

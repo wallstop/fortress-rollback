@@ -67,9 +67,9 @@
   <!-- Rollback arcs with glow (following circle edge) -->
   <g fill="none" stroke="url(#arrowGrad)" stroke-width="4" stroke-linecap="round" filter="url(#glow)">
     <!-- Left arc: from ~210° to ~135° -->
-    <path d="M 12 94 A 60 60 0 0 1 22 22"/>
+    <path d="M 12 94 A 60 60 0 0 1 21 22"/>
     <!-- Right arc: from ~30° to ~315° -->
-    <path d="M 116 34 A 60 60 0 0 1 106 106"/>
+    <path d="M 116 34 A 60 60 0 0 1 107 106"/>
   </g>
 
   <!-- R letter overlay on center tower (subtle) -->

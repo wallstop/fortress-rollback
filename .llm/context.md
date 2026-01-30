@@ -828,6 +828,8 @@ Workflow syntax errors are easy to introduce and tedious to debug in CI. Always 
 
 ### Documentation Changes
 
+> **See also:** [documentation-code-consistency.md](skills/documentation-code-consistency.md) — Keeping docs and code in sync, verifying CHANGELOG accuracy, error documentation patterns.
+
 **Run after modifying any rustdoc comments:**
 
 ```bash

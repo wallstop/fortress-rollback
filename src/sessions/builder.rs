@@ -193,10 +193,9 @@ impl<T: Config> SessionBuilder<T> {
     /// Later, you will need the player handle to add input, change parameters or disconnect the player or spectator.
     ///
     /// # Errors
-    /// - Returns [`InvalidRequest`] if a player with that handle has been added before
-    /// - Returns [`InvalidRequest`] if the handle is invalid for the given [`PlayerType`]
+    /// - Returns a [`FortressError`] if a player with that handle has been added before
+    /// - Returns a [`FortressError`] if the handle is invalid for the given [`PlayerType`]
     ///
-    /// [`InvalidRequest`]: FortressError::InvalidRequest
     /// [`num_players`]: Self#structfield.num_players
     pub fn add_player(
         mut self,
@@ -334,7 +333,7 @@ impl<T: Config> SessionBuilder<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`FortressError::InvalidRequest`] if `delay` exceeds the maximum allowed value.
+    /// Returns a [`FortressError`] if `delay` exceeds the maximum allowed value.
     /// The maximum delay is `queue_length - 1` (default 127, configurable via
     /// [`with_input_queue_config`](Self::with_input_queue_config)).
     ///
@@ -384,7 +383,7 @@ impl<T: Config> SessionBuilder<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`FortressError::InvalidRequest`] if `num_players` is 0.
+    /// Returns a [`FortressError`] if `num_players` is 0.
     pub fn with_num_players(mut self, num_players: usize) -> Result<Self, FortressError> {
         if num_players == 0 {
             return Err(InvalidRequestKind::ZeroPlayers.into());
@@ -651,7 +650,7 @@ impl<T: Config> SessionBuilder<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`FortressError::InvalidRequest`] if `size` is less than 10.
+    /// Returns a [`FortressError`] if `size` is less than 10.
     ///
     /// # Example
     ///
@@ -679,9 +678,7 @@ impl<T: Config> SessionBuilder<T> {
 
     /// Sets the FPS this session is used with. This influences estimations for frame synchronization between sessions.
     /// # Errors
-    /// - Returns [`InvalidRequest`] if the fps is 0
-    ///
-    /// [`InvalidRequest`]: FortressError::InvalidRequest
+    /// - Returns a [`FortressError`] if the fps is 0
     pub fn with_fps(mut self, fps: usize) -> Result<Self, FortressError> {
         if fps == 0 {
             return Err(InvalidRequestKind::ZeroFps.into());
@@ -820,7 +817,7 @@ impl<T: Config> SessionBuilder<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`FortressError::InvalidRequest`] if the input delay cannot be set
+    /// Returns a [`FortressError`] if the input delay cannot be set
     /// (e.g., if the input queue is too small).
     ///
     /// # Example
@@ -842,7 +839,6 @@ impl<T: Config> SessionBuilder<T> {
     /// [`SyncConfig::default()`]: crate::SyncConfig::default
     /// [`ProtocolConfig::default()`]: crate::ProtocolConfig::default
     /// [`TimeSyncConfig::default()`]: crate::TimeSyncConfig::default
-    /// [`FortressError::InvalidRequest`]: crate::FortressError::InvalidRequest
     pub fn with_internet_defaults(self) -> Result<Self, FortressError> {
         self.with_sync_config(SyncConfig::default())
             .with_protocol_config(ProtocolConfig::default())
@@ -869,7 +865,7 @@ impl<T: Config> SessionBuilder<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`FortressError::InvalidRequest`] if the input delay cannot be set.
+    /// Returns a [`FortressError`] if the input delay cannot be set.
     ///
     /// # Example
     ///
@@ -891,7 +887,6 @@ impl<T: Config> SessionBuilder<T> {
     /// [`ProtocolConfig::mobile()`]: crate::ProtocolConfig::mobile
     /// [`TimeSyncConfig::mobile()`]: crate::TimeSyncConfig::mobile
     /// [`InputQueueConfig::high_latency()`]: crate::InputQueueConfig::high_latency
-    /// [`FortressError::InvalidRequest`]: crate::FortressError::InvalidRequest
     pub fn with_high_latency_defaults(self) -> Result<Self, FortressError> {
         self.with_sync_config(SyncConfig::mobile())
             .with_protocol_config(ProtocolConfig::mobile())
@@ -902,9 +897,7 @@ impl<T: Config> SessionBuilder<T> {
 
     /// Consumes the builder to construct a [`P2PSession`] and starts synchronization of endpoints.
     /// # Errors
-    /// - Returns [`InvalidRequest`] if insufficient players have been registered.
-    ///
-    /// [`InvalidRequest`]: FortressError::InvalidRequest
+    /// - Returns a [`FortressError`] if insufficient players have been registered.
     pub fn start_p2p_session(
         mut self,
         socket: impl NonBlockingSocket<T::Address> + 'static,

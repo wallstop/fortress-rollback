@@ -131,6 +131,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+> **📚 See Also — Reduce Boilerplate & Catch Bugs**
+>
+> - **[`handle_requests!` macro](#using-the-handle_requests-macro)** — Eliminate match boilerplate with a concise macro
+> - **[`compute_checksum()`](#computing-checksums)** — Enable desync detection with built-in deterministic hashing
+> - **[Config Presets](#syncconfig-presets)** — Use `SyncConfig::lan()`, `ProtocolConfig::competitive()`, etc. for common network conditions
+> - **[Request Handling Example](https://github.com/wallstop/fortress-rollback/blob/main/examples/request_handling.rs)** — Complete example showing both manual matching and macro usage
+
 ---
 
 ## Defining Your Config
@@ -337,7 +344,13 @@ loop {
 
 ## Handling Requests
 
-Requests are returned by `advance_frame()` and must be processed in order:
+Requests are returned by `advance_frame()` and must be processed in order.
+
+> **💡 Exhaustive Matching — No Wildcard Needed**
+>
+> `FortressRequest` is **not** marked `#[non_exhaustive]`, so you can match all variants
+> without a wildcard `_ =>` arm. The compiler will notify you if new variants are added
+> in future versions, ensuring your code stays up-to-date.
 
 ```rust
 use fortress_rollback::{FortressRequest, compute_checksum};
@@ -484,7 +497,7 @@ The `compute_checksum` function:
 
 For a faster but weaker checksum, use `compute_checksum_fletcher16`:
 
-```rust,ignore
+```rust
 use fortress_rollback::compute_checksum_fletcher16;
 
 // Faster, simpler checksum (16-bit result stored as u128)
@@ -495,7 +508,7 @@ let checksum = compute_checksum_fletcher16(&game_state)?;
 
 For advanced use cases, you can compute checksums manually using the lower-level utilities:
 
-```rust,ignore
+```rust
 use fortress_rollback::checksum::{hash_bytes_fnv1a, fletcher16};
 use fortress_rollback::network::codec::encode;
 
@@ -1244,7 +1257,7 @@ impl NonBlockingSocket<MyAddress> for MyCustomSocket {
 
 Test network resilience with `ChaosSocket`:
 
-```rust,ignore
+```rust
 use fortress_rollback::{ChaosConfigBuilder, ChaosSocket, UdpNonBlockingSocket};
 
 let inner_socket = UdpNonBlockingSocket::bind_to_port(7000)?;
@@ -1292,7 +1305,7 @@ fortress-rollback = { version = "0.2", features = ["sync-send"] }
 
 **Without `sync-send`:**
 
-```rust,ignore
+```rust
 pub trait Config: 'static {
     type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned;
     type State;
@@ -1302,7 +1315,7 @@ pub trait Config: 'static {
 
 **With `sync-send`:**
 
-```rust,ignore
+```rust
 pub trait Config: 'static + Send + Sync {
     type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned + Send + Sync;
     type State: Clone + Send + Sync;
@@ -1321,7 +1334,7 @@ fortress-rollback = { version = "0.2", features = ["tokio"] }
 
 **Example usage:**
 
-```rust,ignore
+```rust
 use fortress_rollback::tokio_socket::TokioUdpSocket;
 use fortress_rollback::{SessionBuilder, PlayerType, PlayerHandle};
 
@@ -1354,7 +1367,7 @@ fortress-rollback = { version = "0.2", features = ["json"] }
 
 **Example usage:**
 
-```rust,ignore
+```rust
 use fortress_rollback::telemetry::{SpecViolation, ViolationSeverity, ViolationKind};
 
 let violation = SpecViolation::new(
@@ -1524,7 +1537,7 @@ Matchbox provides:
 
 #### Basic Matchbox Integration
 
-```rust,ignore
+```rust
 use fortress_rollback::{Config, PlayerHandle, PlayerType, SessionBuilder};
 use matchbox_socket::WebRtcSocket;
 
@@ -1550,7 +1563,7 @@ let session = SessionBuilder::<GameConfig>::new()
 
 For other transports, implement `NonBlockingSocket`:
 
-```rust,ignore
+```rust
 use fortress_rollback::{Message, NonBlockingSocket};
 
 struct MyWebSocketTransport {
@@ -1590,6 +1603,17 @@ wasm-pack build --target web
 cargo install trunk
 trunk serve
 ```
+
+#### Binary Size Optimization
+
+For smaller WASM binaries, add to your project's `Cargo.toml`:
+
+```toml
+[profile.release]
+opt-level = "s"  # Size-optimized; try "z" for even smaller binaries
+```
+
+This trades some runtime performance for smaller binaries. Test both `"s"` and `"z"` to find the best tradeoff for your game.
 
 ### Platform-Specific Features
 
@@ -1927,7 +1951,7 @@ Desync (desynchronization) occurs when peers' game states diverge, typically due
 
 The `SyncHealth` enum represents the synchronization state with a specific peer:
 
-```rust,ignore
+```rust
 use fortress_rollback::SyncHealth;
 
 pub enum SyncHealth {
@@ -2215,7 +2239,7 @@ This section documents all configuration options available when building a sessi
 
 Configure the initial connection handshake with `with_sync_config()`:
 
-```rust,ignore
+```rust
 use fortress_rollback::SyncConfig;
 
 let config = SyncConfig {
@@ -2239,7 +2263,7 @@ let config = SyncConfig {
 
 Configure network behavior with `with_protocol_config()`:
 
-```rust,ignore
+```rust
 use fortress_rollback::ProtocolConfig;
 
 let config = ProtocolConfig {
@@ -2419,9 +2443,9 @@ fn handle_error(error: FortressError) -> Action {
             Action::Fatal
         }
 
-        // Structured error variants with detailed error information
+        // Structured variants (preferred for new code)
         FortressError::InvalidFrameStructured { frame, reason } => {
-            eprintln!("Invalid frame {:?}: {:?}", frame, reason);
+            eprintln!("Invalid frame {}: {:?}", frame, reason);
             Action::Continue
         }
         FortressError::InternalErrorStructured { kind } => {
@@ -2429,8 +2453,7 @@ fn handle_error(error: FortressError) -> Action {
             Action::Fatal
         }
         FortressError::InvalidRequestStructured { kind } => {
-            eprintln!("Invalid request: {:?}", kind);
-            Action::Fatal
+            panic!("Invalid request: {:?}", kind)
         }
         FortressError::SerializationErrorStructured { kind } => {
             eprintln!("Serialization error: {:?}", kind);
@@ -2616,7 +2639,7 @@ If no observer is set, violations are logged via the `tracing` crate:
 
 Enable tracing to see violations:
 
-```rust,ignore
+```rust
 tracing_subscriber::init();
 ```
 
@@ -2624,7 +2647,7 @@ tracing_subscriber::init();
 
 The `TracingObserver` outputs all fields as structured tracing fields, making it compatible with JSON logging formatters and log aggregation systems:
 
-```rust,ignore
+```rust
 // Example: Using tracing-subscriber with JSON output
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -2643,7 +2666,7 @@ This produces machine-parseable output like:
 
 All telemetry types implement `serde::Serialize` for direct JSON serialization:
 
-```rust,ignore
+```rust
 use fortress_rollback::telemetry::{SpecViolation, ViolationSeverity, ViolationKind};
 use fortress_rollback::Frame;
 
