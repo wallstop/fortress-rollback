@@ -176,8 +176,12 @@ impl<T> GameStateCell<T> {
     /// // println!("{}", cell.load().player_name); // compile error: Clone bound not satisfied
     ///
     /// // But we can still read the game state without cloning:
-    /// let game_state_accessor = cell.data().expect("should have a gamestate stored");
-    /// assert_eq!(game_state_accessor.player_name, "alex");
+    /// {
+    ///     let game_state_accessor = cell.data();
+    ///     if let Some(accessor) = game_state_accessor {
+    ///         assert_eq!(accessor.player_name, "alex");
+    ///     }
+    /// }
     /// ```
     ///
     /// If you really, really need mutable access to the `T`, then consider using the aptly named

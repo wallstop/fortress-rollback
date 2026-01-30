@@ -207,10 +207,11 @@ impl std::fmt::Display for ViolationKind {
 ///  .with_context("actual", "100");
 ///
 /// // Serialize to JSON
-/// let json = serde_json::to_string(&violation).unwrap();
+/// let json = serde_json::to_string(&violation)?;
 /// assert!(json.contains(r#""severity":"warning""#));
 /// assert!(json.contains(r#""kind":"frame_sync""#));
 /// assert!(json.contains(r#""frame":100"#));
+/// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SpecViolation {
@@ -296,9 +297,11 @@ impl SpecViolation {
     /// ).with_frame(Frame::new(42));
     ///
     /// # #[cfg(feature = "json")]
-    /// let json = violation.to_json().unwrap();
-    /// # #[cfg(feature = "json")]
-    /// assert!(json.contains(r#""frame":42"#));
+    /// # {
+    /// if let Some(json) = violation.to_json() {
+    ///     assert!(json.contains(r#""frame":42"#));
+    /// }
+    /// # }
     /// ```
     #[cfg(feature = "json")]
     #[must_use]

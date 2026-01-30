@@ -255,7 +255,7 @@ fortress-rollback = "0.2"
 
 ### Import Path Change
 
-```rust
+```text
 // Before
 use ggrs::{SessionBuilder, P2PSession, GgrsError};
 
@@ -275,7 +275,7 @@ use fortress_rollback::{SessionBuilder, P2PSession, FortressError};
 
 `Config::Address` now requires `Ord` + `PartialOrd`:
 
-```rust
+```text
 // Before
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct MyAddress { /* ... */ }
@@ -289,7 +289,7 @@ struct MyAddress { /* ... */ }
 
 The `inputs` field in `FortressRequest::AdvanceFrame` is now `InputVec<T::Input>` (a `SmallVec`) instead of `Vec`:
 
-```rust
+```text
 // If you have explicit type annotations:
 // Before
 fn handle_inputs(inputs: Vec<(MyInput, InputStatus)>) { ... }

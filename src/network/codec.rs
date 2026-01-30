@@ -200,8 +200,9 @@ pub type CodecResult<T> = Result<T, CodecError>;
 /// use fortress_rollback::network::codec::encode;
 ///
 /// let data: u32 = 42;
-/// let bytes = encode(&data).expect("encoding should succeed");
+/// let bytes = encode(&data)?;
 /// assert!(!bytes.is_empty());
+/// # Ok::<(), fortress_rollback::network::codec::CodecError>(())
 /// ```
 pub fn encode<T: Serialize>(value: &T) -> CodecResult<Vec<u8>> {
     bincode::serde::encode_to_vec(value, config())
@@ -224,9 +225,10 @@ pub fn encode<T: Serialize>(value: &T) -> CodecResult<Vec<u8>> {
 ///
 /// let data: u32 = 42;
 /// let mut buffer = [0u8; 64];
-/// let len = encode_into(&data, &mut buffer).expect("encoding should succeed");
+/// let len = encode_into(&data, &mut buffer)?;
 /// assert!(len > 0);
 /// assert!(len <= buffer.len());
+/// # Ok::<(), fortress_rollback::network::codec::CodecError>(())
 /// ```
 pub fn encode_into<T: Serialize>(value: &T, buffer: &mut [u8]) -> CodecResult<usize> {
     bincode::serde::encode_into_slice(value, buffer, config()).map_err(|e| {
@@ -254,9 +256,10 @@ pub fn encode_into<T: Serialize>(value: &T, buffer: &mut [u8]) -> CodecResult<us
 /// use fortress_rollback::network::codec::encode_append;
 ///
 /// let mut buffer = Vec::new();
-/// encode_append(&42u32, &mut buffer).expect("encoding should succeed");
-/// encode_append(&"hello", &mut buffer).expect("encoding should succeed");
+/// encode_append(&42u32, &mut buffer)?;
+/// encode_append(&"hello", &mut buffer)?;
 /// assert!(!buffer.is_empty());
+/// # Ok::<(), fortress_rollback::network::codec::CodecError>(())
 /// ```
 pub fn encode_append<T: Serialize>(value: &T, buffer: &mut Vec<u8>) -> CodecResult<usize> {
     let start_len = buffer.len();
@@ -275,10 +278,11 @@ pub fn encode_append<T: Serialize>(value: &T, buffer: &mut Vec<u8>) -> CodecResu
 /// use fortress_rollback::network::codec::{encode, decode};
 ///
 /// let original: u32 = 42;
-/// let bytes = encode(&original).expect("encoding should succeed");
-/// let (decoded, bytes_read): (u32, _) = decode(&bytes).expect("decoding should succeed");
+/// let bytes = encode(&original)?;
+/// let (decoded, bytes_read): (u32, _) = decode(&bytes)?;
 /// assert_eq!(original, decoded);
 /// assert_eq!(bytes_read, bytes.len());
+/// # Ok::<(), fortress_rollback::network::codec::CodecError>(())
 /// ```
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<(T, usize)> {
     bincode::serde::decode_from_slice(bytes, config())
@@ -295,9 +299,10 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<(T, usize)> {
 /// use fortress_rollback::network::codec::{encode, decode_value};
 ///
 /// let original: u32 = 42;
-/// let bytes = encode(&original).expect("encoding should succeed");
-/// let decoded: u32 = decode_value(&bytes).expect("decoding should succeed");
+/// let bytes = encode(&original)?;
+/// let decoded: u32 = decode_value(&bytes)?;
 /// assert_eq!(original, decoded);
+/// # Ok::<(), fortress_rollback::network::codec::CodecError>(())
 /// ```
 pub fn decode_value<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<T> {
     decode(bytes).map(|(value, _)| value)

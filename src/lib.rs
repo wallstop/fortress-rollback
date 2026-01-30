@@ -126,7 +126,7 @@ pub use checksum::{compute_checksum, compute_checksum_fletcher16, fletcher16, ha
 ///
 ///     // Use with SessionBuilder
 ///     let session = SessionBuilder::<MyConfig>::new()
-///         .with_num_players(2).unwrap()
+///         .with_num_players(2)?
 ///         .add_player(PlayerType::Local, PlayerHandle::new(0))?
 ///         .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
 ///         .start_p2p_session(socket)?;
@@ -628,16 +628,20 @@ impl Frame {
     /// ```
     /// use fortress_rollback::{Frame, FortressError, InvalidFrameReason};
     ///
-    /// assert_eq!(Frame::new(42).try_as_usize().unwrap(), 42);
+    /// // Successful conversion
+    /// let value = Frame::new(42).try_as_usize()?;
+    /// assert_eq!(value, 42);
     ///
-    /// let err = Frame::NULL.try_as_usize().unwrap_err();
-    /// match err {
-    ///     FortressError::InvalidFrameStructured { frame, reason } => {
-    ///         assert_eq!(frame, Frame::NULL);
-    ///         assert_eq!(reason, InvalidFrameReason::MustBeNonNegative);
-    ///     }
-    ///     _ => panic!("unexpected error variant"),
-    /// }
+    /// // Error case - negative frame
+    /// let result = Frame::NULL.try_as_usize();
+    /// assert!(matches!(
+    ///     result,
+    ///     Err(FortressError::InvalidFrameStructured {
+    ///         frame,
+    ///         reason: InvalidFrameReason::MustBeNonNegative,
+    ///     }) if frame == Frame::NULL
+    /// ));
+    /// # Ok::<(), FortressError>(())
     /// ```
     ///
     /// [`InvalidFrameReason::MustBeNonNegative`]: crate::InvalidFrameReason::MustBeNonNegative
@@ -703,16 +707,21 @@ impl Frame {
     /// use fortress_rollback::{Frame, FortressError, InvalidRequestKind};
     ///
     /// // Valid frame and buffer size
-    /// assert_eq!(Frame::new(7).try_buffer_index(4).unwrap(), 3);
+    /// let index = Frame::new(7).try_buffer_index(4)?;
+    /// assert_eq!(index, 3);
     ///
     /// // Negative frame returns error
     /// assert!(Frame::NULL.try_buffer_index(4).is_err());
     ///
     /// // Zero buffer size returns error
-    /// let err = Frame::new(5).try_buffer_index(0).unwrap_err();
-    /// assert!(matches!(err, FortressError::InvalidRequestStructured {
-    ///     kind: InvalidRequestKind::ZeroBufferSize
-    /// }));
+    /// let result = Frame::new(5).try_buffer_index(0);
+    /// assert!(matches!(
+    ///     result,
+    ///     Err(FortressError::InvalidRequestStructured {
+    ///         kind: InvalidRequestKind::ZeroBufferSize
+    ///     })
+    /// ));
+    /// # Ok::<(), FortressError>(())
     /// ```
     ///
     /// [`InvalidRequestKind::ZeroBufferSize`]: crate::InvalidRequestKind::ZeroBufferSize
@@ -744,10 +753,13 @@ impl Frame {
     /// use fortress_rollback::{Frame, FortressError};
     ///
     /// let frame = Frame::new(100);
-    /// assert_eq!(frame.try_add(50).unwrap(), Frame::new(150));
+    /// let result = frame.try_add(50)?;
+    /// assert_eq!(result, Frame::new(150));
     ///
-    /// let overflow_err = Frame::new(i32::MAX).try_add(1).unwrap_err();
-    /// assert!(matches!(overflow_err, FortressError::FrameArithmeticOverflow { .. }));
+    /// // Overflow returns error
+    /// let overflow_result = Frame::new(i32::MAX).try_add(1);
+    /// assert!(matches!(overflow_result, Err(FortressError::FrameArithmeticOverflow { .. })));
+    /// # Ok::<(), FortressError>(())
     /// ```
     #[inline]
     #[track_caller]
@@ -775,10 +787,13 @@ impl Frame {
     /// use fortress_rollback::{Frame, FortressError};
     ///
     /// let frame = Frame::new(100);
-    /// assert_eq!(frame.try_sub(50).unwrap(), Frame::new(50));
+    /// let result = frame.try_sub(50)?;
+    /// assert_eq!(result, Frame::new(50));
     ///
-    /// let overflow_err = Frame::new(i32::MIN).try_sub(1).unwrap_err();
-    /// assert!(matches!(overflow_err, FortressError::FrameArithmeticOverflow { .. }));
+    /// // Overflow returns error
+    /// let overflow_result = Frame::new(i32::MIN).try_sub(1);
+    /// assert!(matches!(overflow_result, Err(FortressError::FrameArithmeticOverflow { .. })));
+    /// # Ok::<(), FortressError>(())
     /// ```
     #[inline]
     #[track_caller]
@@ -804,10 +819,14 @@ impl Frame {
     /// # Examples
     ///
     /// ```
-    /// use fortress_rollback::Frame;
+    /// use fortress_rollback::{Frame, FortressError};
     ///
-    /// assert_eq!(Frame::new(5).next().unwrap(), Frame::new(6));
+    /// let next_frame = Frame::new(5).next()?;
+    /// assert_eq!(next_frame, Frame::new(6));
+    ///
+    /// // MAX returns error
     /// assert!(Frame::new(i32::MAX).next().is_err());
+    /// # Ok::<(), FortressError>(())
     /// ```
     #[inline]
     #[track_caller]
@@ -826,10 +845,14 @@ impl Frame {
     /// # Examples
     ///
     /// ```
-    /// use fortress_rollback::Frame;
+    /// use fortress_rollback::{Frame, FortressError};
     ///
-    /// assert_eq!(Frame::new(5).prev().unwrap(), Frame::new(4));
+    /// let prev_frame = Frame::new(5).prev()?;
+    /// assert_eq!(prev_frame, Frame::new(4));
+    ///
+    /// // MIN returns error
     /// assert!(Frame::new(i32::MIN).prev().is_err());
+    /// # Ok::<(), FortressError>(())
     /// ```
     #[inline]
     #[track_caller]
@@ -915,11 +938,14 @@ impl Frame {
     /// ```
     /// use fortress_rollback::{Frame, FortressError};
     ///
-    /// assert_eq!(Frame::try_from_usize(42).unwrap(), Frame::new(42));
+    /// let frame = Frame::try_from_usize(42)?;
+    /// assert_eq!(frame, Frame::new(42));
     ///
+    /// // Values exceeding i32::MAX return error
     /// let too_large = (i32::MAX as usize) + 1;
-    /// let err = Frame::try_from_usize(too_large).unwrap_err();
-    /// assert!(matches!(err, FortressError::FrameValueTooLarge { .. }));
+    /// let result = Frame::try_from_usize(too_large);
+    /// assert!(matches!(result, Err(FortressError::FrameValueTooLarge { .. })));
+    /// # Ok::<(), FortressError>(())
     /// ```
     #[inline]
     #[track_caller]
@@ -1075,7 +1101,7 @@ impl From<Frame> for i32 {
 ///
 /// # Warning
 ///
-/// **Deprecated since 0.4.0**: This conversion silently truncates values larger
+/// **Deprecated since 0.3.0**: This conversion silently truncates values larger
 /// than `i32::MAX`. For safe conversion with overflow detection, use
 /// [`Frame::from_usize()`] or [`Frame::try_from_usize()`] instead.
 ///

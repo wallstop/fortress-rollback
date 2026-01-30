@@ -413,11 +413,163 @@ This catches:
 
 ---
 
-## Summary: The Three Rules
+## Best Practices: Deprecation Version Accuracy
+
+### The Problem
+
+Deprecation attributes and documentation must reference ACTUAL published versions, not:
+
+- Future versions that don't exist yet
+- Inherited versions from forked projects
+- Placeholder versions
+
+```rust
+// ❌ WRONG: Version 0.12.0 doesn't exist (crate is at 0.3.0)
+#[deprecated(since = "0.12.0", note = "Use new_method() instead")]
+pub fn old_method() { }
+
+// ❌ WRONG: Doc claims deprecation in unreleased version
+/// **Deprecated since 0.4.0**: Use `new_method()` instead.
+```
+
+### Why This Matters
+
+- Users see deprecation warnings with version numbers
+- Invalid versions confuse users ("Is my crate out of date?")
+- Creates false changelog expectations
+
+### Verification Before Using `#[deprecated]`
+
+```bash
+# Check current crate version
+rg '^version = ' Cargo.toml
+
+# Find all deprecation versions in codebase
+rg 'since = "\d+\.\d+\.\d+"' --type rust
+
+# Verify versions are valid (exist in CHANGELOG or are current)
+rg '## \[\d+\.\d+\.\d+\]' CHANGELOG.md
+```
+
+### Choosing the Correct Version
+
+| Situation | Version to Use |
+|-----------|----------------|
+| Deprecating in unreleased code | Use `[Unreleased]` or omit `since` |
+| Deprecating in a published version | Use that version (e.g., `0.3.0`) |
+| Inherited from fork | Update to Fortress version when deprecated |
+
+```rust
+// ✅ CORRECT: Use version when deprecation was added
+#[deprecated(
+    since = "0.2.0",  // When Fortress introduced the replacement
+    note = "Use `with_save_mode(SaveMode::Sparse)` instead"
+)]
+pub fn with_sparse_saving_mode(self, sparse_saving: bool) -> Self { }
+```
+
+### Doc Comment Deprecation (When `#[deprecated]` Can't Be Used)
+
+For trait impls where `#[deprecated]` isn't supported:
+
+```rust
+/// Converts a `usize` to a `Frame`.
+///
+/// # Warning
+///
+/// **Deprecated since 0.3.0**: This conversion silently truncates values.
+/// Use [`Frame::from_usize()`] or [`Frame::try_from_usize()`] instead.
+impl From<usize> for Frame {
+    fn from(value: usize) -> Self {
+        Self(value as i32)
+    }
+}
+```
+
+---
+
+## Best Practices: Code Fence Language in Documentation
+
+### The Problem
+
+Using ` ```rust ` for illustrative pseudo-code that won't compile causes confusion:
+
+```markdown
+# ❌ WRONG: Claims to be Rust but won't compile
+` ` `rust
+fn handle_inputs(inputs: Vec<(MyInput, InputStatus)>) { ... }
+` ` `
+```
+
+Users might try to copy-paste this and get compiler errors.
+
+### When to Use Each Fence Type
+
+| Content Type | Fence Language | Example |
+|--------------|----------------|---------|
+| Compilable Rust code | ` ```rust ` | Full examples with all imports |
+| Illustrative pseudo-code | ` ```text ` | Migration patterns with `...`, `MyType` |
+| Shell commands | ` ```bash ` | Terminal commands |
+| Configuration | ` ```toml ` | Cargo.toml snippets |
+| Conceptual structure | ` ```text ` | Type outlines, patterns |
+
+### Detecting Non-Compilable Rust Fences
+
+```bash
+# Find rust fences with pseudo-code markers
+rg -A 5 '```rust' CHANGELOG.md | rg '\.\.\.|MyType|MyInput|/\* \.\.\. \*/'
+
+# Find rust fences in markdown files
+rg '```rust' --type md -l
+
+# Then manually verify each is actually compilable
+```
+
+### Migration Guide Examples
+
+For migration documentation showing before/after patterns:
+
+```markdown
+# ✅ CORRECT: Use text fence for illustrative code
+### Address Trait Bounds
+
+` ` `text
+// Before
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct MyAddress { /* ... */ }
+
+// After
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+struct MyAddress { /* ... */ }
+` ` `
+```
+
+### README and Doc Examples
+
+For README or rustdoc examples that SHOULD compile, use proper Rust:
+
+```rust
+// ✅ CORRECT: Full compilable example
+use fortress_rollback::{SessionBuilder, P2PSession, FortressError};
+
+fn main() -> Result<(), FortressError> {
+    let session = SessionBuilder::new()
+        .with_num_players(2)?
+        .with_input_delay(2)?
+        .build()?;
+    Ok(())
+}
+```
+
+---
+
+## Summary: The Five Rules
 
 1. **Verify before documenting** — Always check code exists before claiming it does
 2. **Build docs with warnings as errors** — `RUSTDOCFLAGS="-D warnings" cargo doc`
 3. **Prefer stable patterns** — Use `[`FortressError`]` over specific variants when stability matters
+4. **Use valid deprecation versions** — Only reference published versions, not future or inherited ones
+5. **Use correct code fence language** — `text` for pseudo-code, `rust` only for compilable examples
 
 ---
 

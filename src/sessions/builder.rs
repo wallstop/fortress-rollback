@@ -269,8 +269,9 @@ impl<T: Config> SessionBuilder<T> {
     /// #     type Address = SocketAddr;
     /// # }
     /// let builder = SessionBuilder::<TestConfig>::new()
-    ///     .with_num_players(2).unwrap()
-    ///     .add_local_player(0).unwrap();
+    ///     .with_num_players(2)?
+    ///     .add_local_player(0)?;
+    /// # Ok::<(), FortressError>(())
     /// ```
     pub fn add_local_player(self, handle: usize) -> Result<Self, FortressError> {
         self.add_player(PlayerType::Local, PlayerHandle::new(handle))
@@ -301,10 +302,11 @@ impl<T: Config> SessionBuilder<T> {
     /// #     type State = u8;
     /// #     type Address = SocketAddr;
     /// # }
-    /// let addr: SocketAddr = "127.0.0.1:7000".parse().unwrap();
+    /// let addr: SocketAddr = "127.0.0.1:7000".parse()?;
     /// let builder = SessionBuilder::<TestConfig>::new()
-    ///     .with_num_players(2).unwrap()
-    ///     .add_remote_player(0, addr).unwrap();
+    ///     .with_num_players(2)?
+    ///     .add_remote_player(0, addr)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn add_remote_player(self, handle: usize, addr: T::Address) -> Result<Self, FortressError> {
         self.add_player(PlayerType::Remote(addr), PlayerHandle::new(handle))
@@ -427,7 +429,7 @@ impl<T: Config> SessionBuilder<T> {
     /// Recommended if saving your gamestate takes much more time than advancing
     /// the game state.
     #[deprecated(
-        since = "0.12.0",
+        since = "0.2.0",
         note = "Use `with_save_mode(SaveMode::Sparse)` instead"
     )]
     pub fn with_sparse_saving_mode(mut self, sparse_saving: bool) -> Self {

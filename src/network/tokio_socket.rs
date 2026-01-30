@@ -338,9 +338,9 @@ impl TokioUdpSocket {
     /// use fortress_rollback::network::messages::{Message, MessageBody, MessageHeader};
     /// use std::net::SocketAddr;
     ///
-    /// # async fn example() -> std::io::Result<()> {
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut socket = TokioUdpSocket::bind_to_port(7000).await?;
-    /// let target: SocketAddr = "192.168.1.2:7000".parse().unwrap();
+    /// let target: SocketAddr = "192.168.1.2:7000".parse()?;
     /// let msg = Message {
     ///     header: MessageHeader { magic: 0x1234 },
     ///     body: MessageBody::KeepAlive,
@@ -371,9 +371,9 @@ impl TokioUdpSocket {
     /// use fortress_rollback::tokio_socket::TokioUdpSocket;
     /// use std::net::SocketAddr;
     ///
-    /// # async fn example() -> std::io::Result<()> {
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut socket = TokioUdpSocket::bind_to_port(7000).await?;
-    /// let target: SocketAddr = "192.168.1.2:7000".parse().unwrap();
+    /// let target: SocketAddr = "192.168.1.2:7000".parse()?;
     ///
     /// // Messages are typically sent through the session API
     /// // socket.send_to_async(&msg, &target).await;
