@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `Display` impl for core types: `Frame`, `PlayerHandle`, `DesyncDetection`, `PlayerType`, `SessionState`, `InputStatus`, `FortressEvent`, `FortressRequest` — enables human-readable formatting for logging and debugging
 - `Display` impl for configuration types: `SyncConfig`, `ProtocolConfig`, `SpectatorConfig`, `InputQueueConfig`, `TimeSyncConfig`, `SaveMode` — enables configuration summary output
-- `Display` impl for network types: `NetworkStats`, `ConnectionStatus`, `ProtocolState`, `Event`, `ChaosConfig`, `ChaosStats`, `CodecOperation`, `CodecError`, `CompressionError` — enables network diagnostics logging
+- `Display` impl for network types: `NetworkStats`, `ConnectionStatus`, `ProtocolState`, `Event`, `ChaosConfig`, `ChaosStats` — enables network diagnostics logging
 - `Display` impl for sync types: `SyncHealth` — enables sync status display
 - `Display` impl for prediction strategies: `RepeatLastConfirmed`, `BlankPrediction` — enables strategy identification in logs
 - `Display` impl for error types: `FortressError`, `IndexOutOfBounds`, `InvalidFrameReason`, `RleDecodeReason`, `DeltaDecodeReason`, `InternalErrorKind`, `InvalidRequestKind`, `SerializationErrorKind`, `SocketErrorKind` — enables structured error output
