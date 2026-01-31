@@ -581,20 +581,34 @@ Before dropping a session, verify:
 3. ✅ No pending `DesyncDetected` events
 4. ✅ Final game state has been synchronized
 
-### Session State Machine
+### SessionState vs ProtocolState
+
+**Important:** There are two distinct state types in Fortress Rollback:
+
+- **`SessionState`** (2 states): The high-level session state visible to users
+  - `Synchronizing` — Establishing connection with remotes
+  - `Running` — Synchronized and accepting input
+
+- **`ProtocolState`** (5 states): Internal per-peer protocol state
+  - `Initializing` → `Synchronizing` → `Running` → `Disconnected` → `Shutdown`
+
+The session exposes `SessionState` via `session.current_state()`. The protocol states are internal implementation details.
+
+### Protocol State Machine
+
+The diagram below shows `ProtocolState` transitions for each remote peer connection. Note that `NetworkInterrupted` and `NetworkResumed` are **events** emitted during the `Running` state, not separate states.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Synchronizing
+    [*] --> Initializing
 
-    Synchronizing --> Running: All peers synchronized
+    Initializing --> Synchronizing: synchronize() called
+
+    Synchronizing --> Running: All sync roundtrips complete
     Synchronizing --> Synchronizing: Retry after 200ms
 
-    Running --> NetworkInterrupted: Connection interrupted
-    Running --> Disconnected: Peer timeout (2000ms) or disconnect
-
-    NetworkInterrupted --> Running: Network resumed
-    NetworkInterrupted --> Disconnected: Timeout exceeded
+    Running --> Disconnected: Peer timeout (2000ms) or disconnect request
+    note right of Running: Emits NetworkInterrupted/NetworkResumed events
 
     Disconnected --> Shutdown: UDP_SHUTDOWN_TIMER (5000ms)
     Shutdown --> [*]
@@ -1035,8 +1049,8 @@ Compile-time parameterization bundles all type requirements:
 ```rust
 pub trait Config: 'static {
     type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned;
-    type State: Clone;
-    type Address: Clone + PartialEq + Eq + Hash + Debug;
+    type State;
+    type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Debug;
 }
 ```
 

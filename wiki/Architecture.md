@@ -1035,8 +1035,8 @@ Compile-time parameterization bundles all type requirements:
 ```rust
 pub trait Config: 'static {
     type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned;
-    type State: Clone;
-    type Address: Clone + PartialEq + Eq + Hash + Debug;
+    type State;
+    type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Debug;
 }
 ```
 

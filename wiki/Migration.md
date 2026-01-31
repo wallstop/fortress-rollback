@@ -22,7 +22,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.2"  # current version
+fortress-rollback = "0.4"  # current version
 ```
 
 If you were using a git/path dependency, point it to the new repository:
@@ -151,12 +151,11 @@ struct MyAddress {
 
 ## Features
 
-Existing feature flags (`sync-send`, `wasm-bindgen`) remain compatible. Fortress Rollback adds several new features:
+The `sync-send` feature flag remains compatible. Fortress Rollback adds several new features:
 
 | Feature | Description | New in Fortress |
 |---------|-------------|-----------------|
 | `sync-send` | Multi-threaded trait bounds | ❌ (existing) |
-| `wasm-bindgen` | WASM compatibility | ❌ (existing) |
 | `tokio` | Async Tokio UDP socket adapter | ✅ |
 | `json` | JSON serialization for telemetry types | ✅ |
 | `paranoid` | Runtime invariant checking | ✅ |

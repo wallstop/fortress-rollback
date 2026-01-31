@@ -226,31 +226,24 @@ pub fn add_spectator(
 
 ### WASM Compilation Simplification
 
-**Problem with GGRS:** WASM compilation requires special feature flags:
-
-```toml
-# GGRS requires these for WASM
-[dependencies]
-ggrs = { version = "0.11", features = ["wasm-bindgen"] }
-getrandom = { version = "0.2", features = ["js"] }
-```
+**GGRS WASM considerations:** While GGRS uses the `instant` crate for cross-platform time (which works on WASM), it still depends on the `rand` crate which may require additional configuration for WASM targets depending on your RNG needs.
 
 **Fortress solution:** Works on WASM out of the box with no special features needed:
 
 ```toml
 # Fortress - just works
 [dependencies]
-fortress-rollback = "0.2"
+fortress-rollback = "0.4"
 ```
 
 **How this works:**
 
-1. **Custom PCG32 RNG** - Eliminates the `rand` crate dependency (and its transitive `getrandom` dependency)
+1. **Custom PCG32 RNG** - Eliminates the `rand` crate dependency entirely
 2. **`web_time::Instant`** - Cross-platform timing that works on native and WASM without conditional compilation
 
 ### Cross-Platform Time Synchronization
 
-GGRS uses `std::time::Instant` which is not available in WASM environments. Fortress uses `web_time::Instant` which provides a unified API:
+Both GGRS (via the `instant` crate) and Fortress (via `web_time`) provide cross-platform `Instant`. Fortress uses `web_time::Instant` which provides a unified API:
 
 - **Native platforms**: Delegates to `std::time::Instant`
 - **WASM**: Uses `performance.now()` from the Web Performance API
@@ -507,7 +500,7 @@ ChaosConfig::intercontinental() // High-latency stable connection
 
 ## Migration Checklist
 
-- [ ] Update `Cargo.toml`: `ggrs = "0.11"` -> `fortress-rollback = "0.2"`
+- [ ] Update `Cargo.toml`: `ggrs = "0.11"` -> `fortress-rollback = "0.4"`
 - [ ] Update imports: `use ggrs::*` -> `use fortress_rollback::*`
 - [ ] Rename types: `GgrsError` -> `FortressError`, etc.
 - [ ] Add `Ord` + `PartialOrd` to your `Config::Address` type

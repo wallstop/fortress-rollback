@@ -24,7 +24,10 @@ This guide walks you through integrating Fortress Rollback into your game. By th
      - [Competitive/Tournament](#competitivetournament-strict-requirements)
      - [Casual Multiplayer](#casual-multiplayer-4-players)
      - [Spectator Streaming](#spectator-streaming)
+     - [Network Quality Monitoring](#network-quality-monitoring)
 9. [Advanced Configuration](#advanced-configuration)
+    - [ChaosSocket for Testing](#chaossocket-for-testing)
+    - [ChaosConfig Presets](#chaosconfig-presets)
 10. [Feature Flags](#feature-flags)
     - [Feature Flag Reference](#feature-flag-reference)
     - [Feature Flag Combinations](#feature-flag-combinations)
@@ -1137,7 +1140,10 @@ flowchart TD
 For games with matchmaking, consider adjusting configuration based on measured network conditions:
 
 ```rust
-fn configure_for_network(rtt_ms: u32, packet_loss_percent: f32) -> SessionBuilder<GameConfig> {
+fn configure_for_network(
+    rtt_ms: u32,
+    packet_loss_percent: f32,
+) -> Result<SessionBuilder<GameConfig>, FortressError> {
     let mut builder = SessionBuilder::<GameConfig>::new()
         .with_num_players(2);
 
@@ -1149,7 +1155,7 @@ fn configure_for_network(rtt_ms: u32, packet_loss_percent: f32) -> SessionBuilde
         101..=150 => 3,
         _ => 4,
     };
-    builder = builder.with_input_delay(input_delay);
+    builder = builder.with_input_delay(input_delay)?;
 
     // Choose sync config based on conditions
     let sync_config = if packet_loss_percent > 5.0 {
@@ -1172,15 +1178,17 @@ fn configure_for_network(rtt_ms: u32, packet_loss_percent: f32) -> SessionBuilde
     };
     builder = builder.with_max_prediction_window(prediction_window);
 
-    builder
+    Ok(builder)
 }
 ```
 
 ### Network Quality Monitoring
 
-Monitor network quality using session statistics:
+Monitor network quality using the `NetworkStats` struct returned by `session.network_stats(handle)`:
 
 ```rust
+use fortress_rollback::NetworkStats;
+
 // Check network stats for each remote player
 for handle in session.remote_player_handles() {
     if let Ok(stats) = session.network_stats(handle) {
@@ -1194,6 +1202,44 @@ for handle in session.remote_player_handles() {
 
         if pending > 10 {
             println!("Warning: Network congestion with player {:?}", handle);
+        }
+    }
+}
+```
+
+#### NetworkStats Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ping` | `u128` | Round-trip time in milliseconds |
+| `send_queue_len` | `usize` | Number of unacknowledged packets (connection quality indicator) |
+| `kbps_sent` | `usize` | Estimated bandwidth usage in kilobits per second |
+| `local_frames_behind` | `i32` | How many frames behind the local client is compared to remote |
+| `remote_frames_behind` | `i32` | How many frames behind the remote client is compared to local |
+| `last_compared_frame` | `Option<Frame>` | Most recent frame where checksums were compared |
+| `local_checksum` | `Option<u128>` | Local checksum at `last_compared_frame` |
+| `remote_checksum` | `Option<u128>` | Remote checksum at `last_compared_frame` |
+| `checksums_match` | `Option<bool>` | `true` if synchronized, `false` if desync detected |
+
+#### Example: Debug Overlay
+
+```rust
+fn display_network_debug(session: &P2PSession<MyConfig>) {
+    for handle in session.remote_player_handles() {
+        if let Ok(stats) = session.network_stats(handle) {
+            println!("Player {:?}:", handle);
+            println!("  RTT: {}ms", stats.ping);
+            println!("  Bandwidth: {} kbps", stats.kbps_sent);
+            println!("  Send queue: {} packets", stats.send_queue_len);
+            println!("  Frame diff: local {} behind, remote {} behind",
+                     stats.local_frames_behind, stats.remote_frames_behind);
+
+            // Desync status
+            match stats.checksums_match {
+                Some(true) => println!("  Sync: ✓ OK"),
+                Some(false) => println!("  Sync: ✗ DESYNC!"),
+                None => println!("  Sync: pending"),
+            }
         }
     }
 }
@@ -1271,12 +1317,68 @@ use fortress_rollback::{ChaosConfigBuilder, ChaosSocket, UdpNonBlockingSocket};
 let inner_socket = UdpNonBlockingSocket::bind_to_port(7000)?;
 
 let chaos_config = ChaosConfigBuilder::default()
-    .latency(50)           // 50ms base latency
-    .jitter(20)            // +/- 20ms jitter
-    .packet_loss(0.05)     // 5% packet loss
+    .latency_ms(50)        // 50ms base latency
+    .jitter_ms(20)         // +/- 20ms jitter
+    .packet_loss_rate(0.05) // 5% packet loss
     .build();
 
 let socket = ChaosSocket::new(inner_socket, chaos_config);
+```
+
+#### ChaosConfig Presets
+
+`ChaosConfig` provides several presets for common network scenarios:
+
+| Preset | Latency | Jitter | Loss | Use Case |
+|--------|---------|--------|------|----------|
+| `passthrough()` | 0ms | 0ms | 0% | No chaos (transparent wrapper) |
+| `poor_network()` | 100ms | 50ms | 5% | Typical poor connection |
+| `terrible_network()` | 250ms | 100ms | 15% | Stress testing, 2% duplication, reordering |
+| `mobile_network()` | 60ms | 40ms | 12% | 4G/LTE with burst loss (handoff simulation) |
+| `wifi_interference()` | 15ms | 25ms | 3% | Congested WiFi with bursty loss |
+| `intercontinental()` | 120ms | 15ms | 2% | Transatlantic/transpacific connections |
+
+**Using presets:**
+
+```rust
+use fortress_rollback::{ChaosSocket, ChaosConfig, UdpNonBlockingSocket};
+
+// Test with poor network conditions
+let inner = UdpNonBlockingSocket::bind_to_port(7000)?;
+let socket = ChaosSocket::new(inner, ChaosConfig::poor_network());
+
+// Test mobile network behavior (burst loss, high jitter)
+let inner = UdpNonBlockingSocket::bind_to_port(7001)?;
+let mobile_socket = ChaosSocket::new(inner, ChaosConfig::mobile_network());
+
+// Cross-region testing (high stable latency)
+let inner = UdpNonBlockingSocket::bind_to_port(7002)?;
+let intl_socket = ChaosSocket::new(inner, ChaosConfig::intercontinental());
+```
+
+**Custom configurations:**
+
+For more control, use the builder pattern with `high_latency()` or `lossy()`:
+
+```rust
+use fortress_rollback::ChaosConfig;
+use std::time::Duration;
+
+// High latency only
+let high_lat = ChaosConfig::high_latency(200); // 200ms latency
+
+// Packet loss only
+let lossy = ChaosConfig::lossy(0.10); // 10% symmetric loss
+
+// Fully custom
+let custom = ChaosConfig::builder()
+    .latency(Duration::from_millis(75))
+    .jitter(Duration::from_millis(25))
+    .send_loss_rate(0.08)
+    .receive_loss_rate(0.05)
+    .duplication_rate(0.01)
+    .seed(42)  // Deterministic for reproducible tests
+    .build();
 ```
 
 ---
@@ -1308,7 +1410,7 @@ When enabled, the `Config` and `NonBlockingSocket` traits require their associat
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.2", features = ["sync-send"] }
+fortress-rollback = { version = "0.4", features = ["sync-send"] }
 ```
 
 **Without `sync-send`:**
@@ -1337,7 +1439,7 @@ Enables `TokioUdpSocket`, an adapter that wraps a Tokio async UDP socket and imp
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.2", features = ["tokio"] }
+fortress-rollback = { version = "0.4", features = ["tokio"] }
 ```
 
 **Example usage:**
@@ -1370,7 +1472,7 @@ Enables JSON serialization methods (`to_json()` and `to_json_pretty()`) on telem
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.2", features = ["json"] }
+fortress-rollback = { version = "0.4", features = ["json"] }
 ```
 
 **Example usage:**
@@ -1400,7 +1502,7 @@ Enables runtime invariant checking in release builds. Normally, invariant checks
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.2", features = ["paranoid"] }
+fortress-rollback = { version = "0.4", features = ["paranoid"] }
 ```
 
 **Use cases:**
@@ -1498,19 +1600,19 @@ Most features are independent and can be combined freely. Here's a matrix showin
 ```toml
 # Standard multi-threaded game
 [dependencies]
-fortress-rollback = { version = "0.2", features = ["sync-send"] }
+fortress-rollback = { version = "0.4", features = ["sync-send"] }
 
 # Async server with Tokio
 [dependencies]
-fortress-rollback = { version = "0.2", features = ["sync-send", "tokio"] }
+fortress-rollback = { version = "0.4", features = ["sync-send", "tokio"] }
 
 # Debugging production issues
 [dependencies]
-fortress-rollback = { version = "0.2", features = ["sync-send", "paranoid"] }
+fortress-rollback = { version = "0.4", features = ["sync-send", "paranoid"] }
 
 # Development with examples
 [dependencies]
-fortress-rollback = { version = "0.2", features = ["sync-send", "graphical-examples"] }
+fortress-rollback = { version = "0.4", features = ["sync-send", "graphical-examples"] }
 ```
 
 ### Web / WASM Integration
@@ -1532,7 +1634,7 @@ Browsers don't support raw UDP sockets. For browser games, you need WebRTC or We
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.2", features = ["sync-send"] }
+fortress-rollback = { version = "0.4", features = ["sync-send"] }
 matchbox_socket = { version = "0.13", features = ["ggrs"] }
 ```
 
@@ -1700,12 +1802,7 @@ let mut session = SessionBuilder::<GameConfig>::new()
     .with_input_delay(2)?
     .start_synctest_session()?;
 
-// Add players
-// Note: All players are local in sync test
-session.add_player(PlayerType::Local, PlayerHandle::new(0))?;
-session.add_player(PlayerType::Local, PlayerHandle::new(1))?;
-
-// Run game loop
+// Run game loop - players are created automatically from with_num_players()
 for frame in 0..1000 {
     // Provide input for all players
     for handle in 0..2 {
@@ -1794,11 +1891,11 @@ This section covers subtle API misuses that can lead to hard-to-debug issues. Th
 
 **The Problem:**
 
-A common mistake is using `last_confirmed_frame()` or `confirmed_frame()` to determine when a session is "complete":
+A common mistake is using `confirmed_frame()` to determine when a session is "complete":
 
 ```rust
 // ⚠️ WRONG: This is a pit of failure!
-if session.last_confirmed_frame() >= target_frames {
+if session.confirmed_frame() >= target_frames {
     break;  // Stop simulation
 }
 ```
