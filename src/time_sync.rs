@@ -48,6 +48,14 @@ impl Default for TimeSyncConfig {
     }
 }
 
+impl std::fmt::Display for TimeSyncConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to ensure all fields are included when new fields are added.
+        let Self { window_size } = self;
+        write!(f, "TimeSyncConfig {{ window_size: {} }}", window_size)
+    }
+}
+
 impl TimeSyncConfig {
     /// Creates a new `TimeSyncConfig` with default values.
     pub fn new() -> Self {
@@ -448,6 +456,19 @@ mod sync_layer_tests {
                 ts.average_frame_advantage()
             );
         }
+    }
+
+    // ==========================================================================
+    // TimeSyncConfig Display Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_time_sync_config_display() {
+        let config = TimeSyncConfig { window_size: 30 };
+        assert_eq!(config.to_string(), "TimeSyncConfig { window_size: 30 }");
+
+        let config = TimeSyncConfig { window_size: 60 };
+        assert_eq!(config.to_string(), "TimeSyncConfig { window_size: 60 }");
     }
 
     // ==========================================================================

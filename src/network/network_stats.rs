@@ -68,6 +68,63 @@ impl NetworkStats {
     }
 }
 
+impl std::fmt::Display for NetworkStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to ensure all fields are included when new fields are added.
+        let Self {
+            send_queue_len,
+            ping,
+            kbps_sent,
+            local_frames_behind,
+            remote_frames_behind,
+            last_compared_frame,
+            local_checksum,
+            remote_checksum,
+            checksums_match,
+        } = self;
+
+        write!(
+            f,
+            "NetworkStats {{ ping: {}ms, queue: {}, kbps: {}, local_behind: {}, remote_behind: {}",
+            ping, send_queue_len, kbps_sent, local_frames_behind, remote_frames_behind
+        )?;
+
+        // Include checksum fields if any checksum data is available
+        if last_compared_frame.is_some()
+            || local_checksum.is_some()
+            || remote_checksum.is_some()
+            || checksums_match.is_some()
+        {
+            write!(f, ", last_compared_frame: ")?;
+            match last_compared_frame {
+                Some(frame) => write!(f, "{}", frame.as_i32())?,
+                None => write!(f, "None")?,
+            }
+
+            write!(f, ", local_checksum: ")?;
+            match local_checksum {
+                Some(cs) => write!(f, "0x{:016x}", cs)?,
+                None => write!(f, "None")?,
+            }
+
+            write!(f, ", remote_checksum: ")?;
+            match remote_checksum {
+                Some(cs) => write!(f, "0x{:016x}", cs)?,
+                None => write!(f, "None")?,
+            }
+
+            write!(f, ", checksums_match: ")?;
+            match checksums_match {
+                Some(true) => write!(f, "true")?,
+                Some(false) => write!(f, "false")?,
+                None => write!(f, "None")?,
+            }
+        }
+
+        write!(f, " }}")
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::panic,
@@ -185,5 +242,91 @@ mod tests {
         assert_eq!(stats.local_checksum, Some(0xDEAD_BEEF));
         assert_eq!(stats.remote_checksum, Some(0xCAFE_BABE));
         assert_eq!(stats.checksums_match, Some(false));
+    }
+
+    // ==========================================================================
+    // Display Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_network_stats_display_without_checksum() {
+        let stats = NetworkStats {
+            send_queue_len: 5,
+            ping: 100,
+            kbps_sent: 50,
+            local_frames_behind: 2,
+            remote_frames_behind: -1,
+            last_compared_frame: None,
+            local_checksum: None,
+            remote_checksum: None,
+            checksums_match: None,
+        };
+        let display = format!("{}", stats);
+        assert!(display.starts_with("NetworkStats {"));
+        assert!(display.contains("ping: 100ms"));
+        assert!(display.contains("queue: 5"));
+        assert!(display.contains("kbps: 50"));
+        assert!(display.contains("local_behind: 2"));
+        assert!(display.contains("remote_behind: -1"));
+        // Should not include checksum fields when all are None
+        assert!(!display.contains("local_checksum"));
+    }
+
+    #[test]
+    fn test_network_stats_display_with_checksum() {
+        let stats = NetworkStats {
+            send_queue_len: 3,
+            ping: 50,
+            kbps_sent: 100,
+            local_frames_behind: 0,
+            remote_frames_behind: 0,
+            last_compared_frame: Some(Frame::new(42)),
+            local_checksum: Some(0xDEAD_BEEF_CAFE_BABE),
+            remote_checksum: Some(0x1234_5678_9ABC_DEF0),
+            checksums_match: Some(true),
+        };
+        let display = format!("{}", stats);
+        assert!(display.contains("ping: 50ms"));
+        assert!(display.contains("last_compared_frame: 42"));
+        assert!(display.contains("local_checksum: 0xdeadbeefcafebabe"));
+        assert!(display.contains("remote_checksum: 0x123456789abcdef0"));
+        assert!(display.contains("checksums_match: true"));
+    }
+
+    #[test]
+    fn test_network_stats_display_checksum_mismatch() {
+        let stats = NetworkStats {
+            send_queue_len: 0,
+            ping: 0,
+            kbps_sent: 0,
+            local_frames_behind: 0,
+            remote_frames_behind: 0,
+            last_compared_frame: Some(Frame::new(100)),
+            local_checksum: Some(0xAAAA),
+            remote_checksum: Some(0xBBBB),
+            checksums_match: Some(false),
+        };
+        let display = format!("{}", stats);
+        assert!(display.contains("checksums_match: false"));
+    }
+
+    #[test]
+    fn test_network_stats_display_partial_checksum() {
+        // Test when only some checksum fields are set
+        let stats = NetworkStats {
+            send_queue_len: 0,
+            ping: 0,
+            kbps_sent: 0,
+            local_frames_behind: 0,
+            remote_frames_behind: 0,
+            last_compared_frame: Some(Frame::new(50)),
+            local_checksum: None,
+            remote_checksum: None,
+            checksums_match: None,
+        };
+        let display = format!("{}", stats);
+        // Should still include checksum section because last_compared_frame is Some
+        assert!(display.contains("last_compared_frame: 50"));
+        assert!(display.contains("local_checksum: None"));
     }
 }

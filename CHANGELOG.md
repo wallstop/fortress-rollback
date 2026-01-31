@@ -14,7 +14,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.0]
+### Added
+
+- `Display` impl for core types: `Frame`, `PlayerHandle`, `DesyncDetection`, `PlayerType`, `SessionState`, `InputStatus`, `FortressEvent`, `FortressRequest` — enables human-readable formatting for logging and debugging
+- `Display` impl for configuration types: `SyncConfig`, `ProtocolConfig`, `SpectatorConfig`, `InputQueueConfig`, `TimeSyncConfig`, `SaveMode` — enables configuration summary output
+- `Display` impl for network types: `NetworkStats`, `ConnectionStatus`, `ProtocolState`, `Event`, `ChaosConfig`, `ChaosStats` — enables network diagnostics logging
+- `Display` impl for sync types: `SyncHealth` — enables sync status display
+- `Display` impl for prediction strategies: `RepeatLastConfirmed`, `BlankPrediction` — enables strategy identification in logs
+- `Display` impl for error types: `FortressError`, `IndexOutOfBounds`, `InvalidFrameReason`, `RleDecodeReason`, `DeltaDecodeReason`, `InternalErrorKind`, `InvalidRequestKind`, `SerializationErrorKind`, `SocketErrorKind` — enables structured error output
+- `Display` impl for checksum types: `ChecksumAlgorithm`, `ChecksumError` — enables checksum diagnostics
+- `Display` impl for telemetry types: `ViolationSeverity`, `ViolationKind`, `SpecViolation`, `InvariantViolation` — enables telemetry output
+
+### Changed
+
+- **Breaking:** `PlayerHandle` Display format changed from raw index (`0`) to labeled format (`PlayerHandle(0)`) for clearer log output. Update any code that parses `PlayerHandle` Display output.
+
+## [0.4.0] - 2026-01-30
 
 ### Added
 
@@ -252,7 +267,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.2"
+fortress-rollback = "0.4"
 ```
 
 ### Import Path Change
@@ -312,7 +327,8 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/wallstop/fortress-rollback/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/wallstop/fortress-rollback/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/wallstop/fortress-rollback/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/wallstop/fortress-rollback/compare/v0.2.0...v0.2.1

@@ -110,7 +110,7 @@ pub use checksum::{compute_checksum, compute_checksum_fletcher16, fletcher16, ha
 ///
 /// ```toml
 /// [dependencies]
-/// fortress-rollback = { version = "0.2", features = ["tokio"] }
+/// fortress-rollback = { version = "0.4", features = ["tokio"] }
 /// ```
 ///
 /// # Example
@@ -1237,7 +1237,7 @@ impl PlayerHandle {
 
 impl std::fmt::Display for PlayerHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "PlayerHandle({})", self.0)
     }
 }
 
@@ -1292,6 +1292,15 @@ impl Default for DesyncDetection {
     }
 }
 
+impl std::fmt::Display for DesyncDetection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::On { interval } => write!(f, "On(interval={})", interval),
+            Self::Off => write!(f, "Off"),
+        }
+    }
+}
+
 /// Defines the three types of players that Fortress Rollback considers:
 /// - local players, who play on the local device,
 /// - remote players, who play on other devices and
@@ -1312,6 +1321,19 @@ where
     Spectator(A),
 }
 
+impl<A> std::fmt::Display for PlayerType<A>
+where
+    A: Clone + PartialEq + Eq + PartialOrd + Ord + std::hash::Hash + std::fmt::Display,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local => write!(f, "Local"),
+            Self::Remote(addr) => write!(f, "Remote({})", addr),
+            Self::Spectator(addr) => write!(f, "Spectator({})", addr),
+        }
+    }
+}
+
 /// A session is always in one of these states. You can query the current state of a session via [`current_state`].
 ///
 /// [`current_state`]: P2PSession#method.current_state
@@ -1323,6 +1345,15 @@ pub enum SessionState {
     Running,
 }
 
+impl std::fmt::Display for SessionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Synchronizing => write!(f, "Synchronizing"),
+            Self::Running => write!(f, "Running"),
+        }
+    }
+}
+
 /// [`InputStatus`] will always be given together with player inputs when requested to advance the frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InputStatus {
@@ -1332,6 +1363,16 @@ pub enum InputStatus {
     Predicted,
     /// The player has disconnected at or prior to this frame, so this input is a dummy.
     Disconnected,
+}
+
+impl std::fmt::Display for InputStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Confirmed => write!(f, "Confirmed"),
+            Self::Predicted => write!(f, "Predicted"),
+            Self::Disconnected => write!(f, "Disconnected"),
+        }
+    }
 }
 
 /// Stack-allocated vector type for player inputs.
@@ -1446,6 +1487,57 @@ where
     },
 }
 
+impl<T: Config> std::fmt::Display for FortressEvent<T>
+where
+    T::Address: std::fmt::Display,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Synchronizing {
+                addr,
+                total,
+                count,
+                total_requests_sent,
+                elapsed_ms,
+            } => write!(
+                f,
+                "Synchronizing({}/{}, addr={}, requests_sent={}, elapsed={}ms)",
+                count, total, addr, total_requests_sent, elapsed_ms
+            ),
+            Self::Synchronized { addr } => write!(f, "Synchronized(addr={})", addr),
+            Self::Disconnected { addr } => write!(f, "Disconnected(addr={})", addr),
+            Self::NetworkInterrupted {
+                addr,
+                disconnect_timeout,
+            } => write!(
+                f,
+                "NetworkInterrupted(addr={}, timeout={}ms)",
+                addr, disconnect_timeout
+            ),
+            Self::NetworkResumed { addr } => write!(f, "NetworkResumed(addr={})", addr),
+            Self::WaitRecommendation { skip_frames } => {
+                write!(f, "WaitRecommendation(skip_frames={})", skip_frames)
+            },
+            Self::DesyncDetected {
+                frame,
+                local_checksum,
+                remote_checksum,
+                addr,
+            } => write!(
+                f,
+                "DesyncDetected(frame={}, local={:#x}, remote={:#x}, addr={})",
+                frame.as_i32(),
+                local_checksum,
+                remote_checksum,
+                addr
+            ),
+            Self::SyncTimeout { addr, elapsed_ms } => {
+                write!(f, "SyncTimeout(addr={}, elapsed={}ms)", addr, elapsed_ms)
+            },
+        }
+    }
+}
+
 /// Requests that you can receive from the session. Handling them is mandatory.
 ///
 /// # ⚠️ CRITICAL: Request Ordering
@@ -1532,6 +1624,22 @@ where
         /// The collection implements `Deref<Target = [T]>`, so `.iter()` and indexing work normally.
         inputs: InputVec<T::Input>,
     },
+}
+
+impl<T: Config> std::fmt::Display for FortressRequest<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SaveGameState { frame, .. } => {
+                write!(f, "SaveGameState(frame={})", frame.as_i32())
+            },
+            Self::LoadGameState { frame, .. } => {
+                write!(f, "LoadGameState(frame={})", frame.as_i32())
+            },
+            Self::AdvanceFrame { inputs } => {
+                write!(f, "AdvanceFrame(inputs={})", inputs.len())
+            },
+        }
+    }
 }
 
 /// Macro to simplify handling [`FortressRequest`] variants in a game loop.
@@ -2066,6 +2174,173 @@ mod tests {
     }
 
     // ==========================================
+    // FortressEvent Display Tests
+    // ==========================================
+
+    #[test]
+    fn fortress_event_display_synchronizing() {
+        let event: FortressEvent<TestConfig> = FortressEvent::Synchronizing {
+            addr: test_addr(8080),
+            total: 5,
+            count: 2,
+            total_requests_sent: 3,
+            elapsed_ms: 100,
+        };
+        let display = event.to_string();
+        assert!(display.starts_with("Synchronizing("));
+        assert!(display.contains("2/5"));
+        assert!(display.contains("127.0.0.1:8080"));
+        assert!(display.contains("requests_sent=3"));
+        assert!(display.contains("elapsed=100ms"));
+    }
+
+    #[test]
+    fn fortress_event_display_synchronized() {
+        let event: FortressEvent<TestConfig> = FortressEvent::Synchronized {
+            addr: test_addr(9000),
+        };
+        assert_eq!(event.to_string(), "Synchronized(addr=127.0.0.1:9000)");
+    }
+
+    #[test]
+    fn fortress_event_display_disconnected() {
+        let event: FortressEvent<TestConfig> = FortressEvent::Disconnected {
+            addr: test_addr(7000),
+        };
+        assert_eq!(event.to_string(), "Disconnected(addr=127.0.0.1:7000)");
+    }
+
+    #[test]
+    fn fortress_event_display_network_interrupted() {
+        let event: FortressEvent<TestConfig> = FortressEvent::NetworkInterrupted {
+            addr: test_addr(8080),
+            disconnect_timeout: 5000,
+        };
+        let display = event.to_string();
+        assert!(display.starts_with("NetworkInterrupted("));
+        assert!(display.contains("127.0.0.1:8080"));
+        assert!(display.contains("timeout=5000ms"));
+    }
+
+    #[test]
+    fn fortress_event_display_network_resumed() {
+        let event: FortressEvent<TestConfig> = FortressEvent::NetworkResumed {
+            addr: test_addr(8080),
+        };
+        assert_eq!(event.to_string(), "NetworkResumed(addr=127.0.0.1:8080)");
+    }
+
+    #[test]
+    fn fortress_event_display_wait_recommendation() {
+        let event: FortressEvent<TestConfig> = FortressEvent::WaitRecommendation { skip_frames: 3 };
+        assert_eq!(event.to_string(), "WaitRecommendation(skip_frames=3)");
+    }
+
+    #[test]
+    fn fortress_event_display_desync_detected() {
+        let event: FortressEvent<TestConfig> = FortressEvent::DesyncDetected {
+            frame: Frame::new(100),
+            local_checksum: 0x1234,
+            remote_checksum: 0x5678,
+            addr: test_addr(8080),
+        };
+        let display = event.to_string();
+        assert!(display.starts_with("DesyncDetected("));
+        assert!(display.contains("frame=100"));
+        assert!(display.contains("local=0x1234"));
+        assert!(display.contains("remote=0x5678"));
+        assert!(display.contains("127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn fortress_event_display_sync_timeout() {
+        let event: FortressEvent<TestConfig> = FortressEvent::SyncTimeout {
+            addr: test_addr(8080),
+            elapsed_ms: 10000,
+        };
+        let display = event.to_string();
+        assert!(display.starts_with("SyncTimeout("));
+        assert!(display.contains("127.0.0.1:8080"));
+        assert!(display.contains("elapsed=10000ms"));
+    }
+
+    // ==========================================
+    // SessionState Display Tests
+    // ==========================================
+
+    #[test]
+    fn session_state_display_synchronizing() {
+        assert_eq!(SessionState::Synchronizing.to_string(), "Synchronizing");
+    }
+
+    #[test]
+    fn session_state_display_running() {
+        assert_eq!(SessionState::Running.to_string(), "Running");
+    }
+
+    // ==========================================
+    // InputStatus Display Tests
+    // ==========================================
+
+    #[test]
+    fn input_status_display_confirmed() {
+        assert_eq!(InputStatus::Confirmed.to_string(), "Confirmed");
+    }
+
+    #[test]
+    fn input_status_display_predicted() {
+        assert_eq!(InputStatus::Predicted.to_string(), "Predicted");
+    }
+
+    #[test]
+    fn input_status_display_disconnected() {
+        assert_eq!(InputStatus::Disconnected.to_string(), "Disconnected");
+    }
+
+    // ==========================================
+    // Frame Display Tests
+    // ==========================================
+
+    #[test]
+    fn frame_display_valid() {
+        assert_eq!(Frame::new(42).to_string(), "42");
+        assert_eq!(Frame::new(0).to_string(), "0");
+        assert_eq!(Frame::new(12345).to_string(), "12345");
+    }
+
+    #[test]
+    fn frame_display_null() {
+        assert_eq!(Frame::NULL.to_string(), "NULL_FRAME");
+    }
+
+    #[test]
+    fn frame_display_negative() {
+        // Negative frames other than NULL show as-is
+        assert_eq!(Frame::new(-5).to_string(), "-5");
+    }
+
+    // ==========================================
+    // DesyncDetection Display Tests
+    // ==========================================
+
+    #[test]
+    fn desync_detection_display_on() {
+        let detection = DesyncDetection::On { interval: 60 };
+        assert_eq!(detection.to_string(), "On(interval=60)");
+    }
+
+    #[test]
+    fn desync_detection_display_on_custom_interval() {
+        let detection = DesyncDetection::On { interval: 1 };
+        assert_eq!(detection.to_string(), "On(interval=1)");
+    }
+
+    #[test]
+    fn desync_detection_display_off() {
+        assert_eq!(DesyncDetection::Off.to_string(), "Off");
+    }
+
+    // ==========================================
     // PlayerType Tests
     // ==========================================
 
@@ -2203,6 +2478,93 @@ mod tests {
         let handle = PlayerHandle::new(3);
         let debug = format!("{:?}", handle);
         assert!(debug.contains('3'));
+    }
+
+    #[test]
+    fn player_handle_display_format() {
+        let handle = PlayerHandle::new(0);
+        assert_eq!(format!("{}", handle), "PlayerHandle(0)");
+
+        let handle = PlayerHandle::new(5);
+        assert_eq!(format!("{}", handle), "PlayerHandle(5)");
+
+        let handle = PlayerHandle::new(42);
+        assert_eq!(format!("{}", handle), "PlayerHandle(42)");
+    }
+
+    // ==========================================
+    // PlayerType Display Tests
+    // ==========================================
+
+    #[test]
+    fn player_type_display_local() {
+        let player: PlayerType<SocketAddr> = PlayerType::Local;
+        assert_eq!(format!("{}", player), "Local");
+    }
+
+    #[test]
+    fn player_type_display_remote() {
+        let addr = test_addr(8080);
+        let player: PlayerType<SocketAddr> = PlayerType::Remote(addr);
+        let display = format!("{}", player);
+        assert!(display.starts_with("Remote("));
+        assert!(display.contains("127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn player_type_display_spectator() {
+        let addr = test_addr(9000);
+        let player: PlayerType<SocketAddr> = PlayerType::Spectator(addr);
+        let display = format!("{}", player);
+        assert!(display.starts_with("Spectator("));
+        assert!(display.contains("127.0.0.1:9000"));
+    }
+
+    // ==========================================
+    // FortressRequest Display Tests
+    // ==========================================
+
+    #[test]
+    fn fortress_request_display_save_game_state() {
+        let cell = GameStateCell::<Vec<u8>>::default();
+        let request: FortressRequest<TestConfig> = FortressRequest::SaveGameState {
+            cell,
+            frame: Frame::new(100),
+        };
+        let display = format!("{}", request);
+        assert_eq!(display, "SaveGameState(frame=100)");
+    }
+
+    #[test]
+    fn fortress_request_display_load_game_state() {
+        let cell = GameStateCell::<Vec<u8>>::default();
+        let request: FortressRequest<TestConfig> = FortressRequest::LoadGameState {
+            cell,
+            frame: Frame::new(50),
+        };
+        let display = format!("{}", request);
+        assert_eq!(display, "LoadGameState(frame=50)");
+    }
+
+    #[test]
+    fn fortress_request_display_advance_frame() {
+        use crate::InputVec;
+        let inputs: InputVec<u8> = smallvec::smallvec![
+            (1_u8, InputStatus::Confirmed),
+            (2_u8, InputStatus::Predicted),
+        ];
+        let request: FortressRequest<TestConfig> = FortressRequest::AdvanceFrame { inputs };
+        let display = format!("{}", request);
+        assert_eq!(display, "AdvanceFrame(inputs=2)");
+    }
+
+    #[test]
+    fn fortress_request_display_advance_frame_empty() {
+        use crate::InputVec;
+        let inputs: InputVec<u8> = smallvec::smallvec![];
+        let request: FortressRequest<TestConfig> = FortressRequest::AdvanceFrame { inputs };
+        let display = format!("{}", request);
+        assert_eq!(display, "AdvanceFrame(inputs=0)");
     }
 
     // ==========================================

@@ -18,6 +18,29 @@
 //! - **Chaos conditions**: Testing with packet loss, latency, jitter
 //! - **Stress tests**: High frame counts, aggressive network conditions
 
+// =============================================================================
+// TODO: Consolidate legacy tests into parameterized scenarios
+// =============================================================================
+//
+// This file contains two testing styles:
+//
+// 1. **Legacy tests** (e.g., `test_packet_loss_5_percent`, `test_latency_30ms`):
+//    - Individual test functions with inline `PeerConfig` setup
+//    - Harder to maintain, easy to forget sync presets
+//
+// 2. **Modern scenario tests** (e.g., `test_asymmetric_scenarios`):
+//    - Use `NetworkScenario` and `NetworkProfile` abstractions
+//    - Auto-sync preset selection via `with_auto_sync_preset()`
+//    - Parameterized, table-driven, easier to extend
+//
+// **Consolidation opportunity:**
+// - Convert legacy tests to use `NetworkScenario::symmetric()` with profiles
+// - Group related tests into parameterized scenario arrays
+// - Use `with_auto_sync_preset()` to prevent future sync timeout regressions
+//
+// See: `.llm/skills/network-chaos-testing.md` for chaos testing best practices
+// =============================================================================
+
 // Allow test-specific patterns that are appropriate for test code
 #![allow(
     clippy::panic,
@@ -473,6 +496,55 @@ impl NetworkProfile {
             burst_loss_len: 5,
         }
     }
+
+    /// Suggests an appropriate sync preset based on the profile's network conditions.
+    ///
+    /// Returns `None` for good network conditions where default sync is sufficient.
+    /// This helps prevent flaky tests by ensuring aggressive network profiles
+    /// use appropriately robust sync configurations.
+    ///
+    /// # Sync Preset Selection Guidelines
+    ///
+    /// - **None (default)**: Packet loss ≤5%, no burst loss
+    /// - **"lossy"**: Packet loss 5-15%, no significant burst loss
+    /// - **"mobile"**: Packet loss 10-20%, burst loss ≤5%
+    /// - **"extreme"**: Packet loss >20% without burst loss, or moderate burst loss alone
+    /// - **"stress_test"**: Burst loss >5% combined with >20% packet loss, or extreme burst (10%+ with 8+ bursts)
+    const fn suggested_sync_preset(&self) -> Option<&'static str> {
+        // High burst loss with long bursts requires stress_test preset
+        if self.burst_loss_prob >= 0.10 && self.burst_loss_len >= 8 {
+            return Some("stress_test");
+        }
+
+        // Very high packet loss (>20%) combined with significant burst loss
+        // The combination is much worse than either alone - use stress_test
+        if self.packet_loss >= 0.20 && self.burst_loss_prob >= 0.03 && self.burst_loss_len >= 3 {
+            return Some("stress_test");
+        }
+
+        // Very high packet loss (>20%) without burst loss - extreme is sufficient
+        if self.packet_loss >= 0.20 {
+            return Some("extreme");
+        }
+
+        // Significant burst loss requires mobile preset
+        if self.burst_loss_prob >= 0.02 && self.burst_loss_len >= 3 {
+            return Some("mobile");
+        }
+
+        // High packet loss (15-20%) requires mobile preset
+        if self.packet_loss >= 0.15 {
+            return Some("mobile");
+        }
+
+        // Moderate packet loss requires lossy preset
+        if self.packet_loss >= 0.08 {
+            return Some("lossy");
+        }
+
+        // Good conditions - default is fine
+        None
+    }
 }
 
 #[allow(dead_code)]
@@ -528,6 +600,8 @@ impl NetworkScenario {
     }
 
     /// One peer on good network, one on terrible network.
+    ///
+    /// Uses "extreme" sync preset for the terrible profile's 25% loss (>20% threshold).
     fn asymmetric_extreme() -> Self {
         Self::asymmetric(
             "asymmetric_extreme",
@@ -535,6 +609,7 @@ impl NetworkScenario {
             NetworkProfile::lan(),
         )
         .with_timeout(180)
+        .with_sync_preset("extreme")
     }
 
     /// Builder: Set frame count.
@@ -563,6 +638,84 @@ impl NetworkScenario {
     fn with_sync_preset(mut self, preset: &str) -> Self {
         self.sync_preset = Some(preset.to_string());
         self
+    }
+
+    /// Builder: Auto-apply the suggested sync preset based on network profiles.
+    ///
+    /// Uses `NetworkProfile::suggested_sync_preset()` to determine the most
+    /// appropriate preset for the worst-case profile in the scenario.
+    /// If a preset is already set, it won't be overwritten.
+    fn with_auto_sync_preset(mut self) -> Self {
+        if self.sync_preset.is_some() {
+            return self;
+        }
+
+        // Use the more aggressive suggestion from either profile
+        let preset1 = self.peer1_profile.suggested_sync_preset();
+        let preset2 = self.peer2_profile.suggested_sync_preset();
+
+        self.sync_preset = match (preset1, preset2) {
+            (None, None) => None,
+            (Some(p), None) | (None, Some(p)) => Some(p.to_string()),
+            (Some(p1), Some(p2)) => {
+                // Pick the more aggressive preset
+                let rank = |p: &str| match p {
+                    "stress_test" | "extreme" => 4,
+                    "mobile" => 3,
+                    "lossy" => 2,
+                    _ => 1,
+                };
+                if rank(p1) >= rank(p2) {
+                    Some(p1.to_string())
+                } else {
+                    Some(p2.to_string())
+                }
+            },
+        };
+        self
+    }
+
+    /// Validates that aggressive network profiles have appropriate sync presets.
+    ///
+    /// Call this at test runtime to catch potential misconfiguration early.
+    /// Prints a warning if the network conditions suggest a sync preset but none is set.
+    fn validate_sync_preset(&self) {
+        let suggested1 = self.peer1_profile.suggested_sync_preset();
+        let suggested2 = self.peer2_profile.suggested_sync_preset();
+
+        let suggested = match (suggested1, suggested2) {
+            (None, None) => None,
+            (Some(p), None) | (None, Some(p)) => Some(p),
+            (Some(p1), Some(p2)) => {
+                let rank = |p: &str| match p {
+                    "stress_test" | "extreme" => 4,
+                    "mobile" => 3,
+                    "lossy" => 2,
+                    _ => 1,
+                };
+                if rank(p1) >= rank(p2) {
+                    Some(p1)
+                } else {
+                    Some(p2)
+                }
+            },
+        };
+
+        if let Some(recommended) = suggested {
+            if self.sync_preset.is_none() {
+                eprintln!(
+                    "⚠️  WARNING: Scenario '{}' has aggressive network conditions \
+                     (loss={:.0}%/{:.0}%, burst={:.0}%/{:.0}%) but no sync preset. \
+                     Consider using .with_sync_preset(\"{}\") or .with_auto_sync_preset()",
+                    self.name,
+                    self.peer1_profile.packet_loss * 100.0,
+                    self.peer2_profile.packet_loss * 100.0,
+                    self.peer1_profile.burst_loss_prob * 100.0,
+                    self.peer2_profile.burst_loss_prob * 100.0,
+                    recommended
+                );
+            }
+        }
     }
 
     /// Creates peer configs for this scenario at the given port base.
@@ -610,6 +763,9 @@ impl NetworkScenario {
 
     /// Runs the test and verifies determinism.
     fn run_test(&self, port_base: u16) -> (TestResult, TestResult) {
+        // Warn about potentially misconfigured scenarios
+        self.validate_sync_preset();
+
         let (peer1, peer2) = self.to_peer_configs(port_base);
         let (result1, result2) = run_two_peer_test(peer1, peer2);
 
@@ -2951,18 +3107,24 @@ fn test_network_scenario_suite() {
     let scenarios = [
         (10300, NetworkScenario::lan().with_frames(100)),
         (10302, NetworkScenario::wifi_good().with_frames(100)),
+        // mobile_4g has 8% loss + 1% burst loss; borderline case but adding
+        // "lossy" preset for reliability.
         (
             10304,
             NetworkScenario::mobile_4g()
                 .with_frames(80)
-                .with_input_delay(3),
+                .with_input_delay(3)
+                .with_sync_preset("lossy"),
         ),
+        // wifi_congested has 15% loss + burst loss; per sync preset recommendations,
+        // this needs at least "lossy" or "mobile" for reliability on CI.
         (
             10306,
             NetworkScenario::symmetric("wifi_congested", NetworkProfile::wifi_congested())
                 .with_frames(60)
                 .with_input_delay(4)
-                .with_timeout(180),
+                .with_timeout(180)
+                .with_sync_preset("mobile"),
         ),
     ];
 
@@ -3002,6 +3164,7 @@ fn test_asymmetric_scenarios() {
 
     let scenarios = [
         // WiFi vs Mobile
+        // mobile_4g has 8% loss + 1% burst; adding "lossy" preset for reliability.
         (
             10320,
             NetworkScenario::asymmetric(
@@ -3010,9 +3173,12 @@ fn test_asymmetric_scenarios() {
                 NetworkProfile::mobile_4g(),
             )
             .with_frames(80)
-            .with_input_delay(3),
+            .with_input_delay(3)
+            .with_sync_preset("lossy"),
         ),
         // LAN vs WiFi congested
+        // WiFi congested has 15% loss + burst loss; per sync preset recommendations,
+        // this needs at least "lossy" or "mobile" for reliability on CI.
         (
             10322,
             NetworkScenario::asymmetric(
@@ -3022,9 +3188,14 @@ fn test_asymmetric_scenarios() {
             )
             .with_frames(60)
             .with_input_delay(4)
-            .with_timeout(150),
+            .with_timeout(150)
+            .with_sync_preset("lossy"),
         ),
         // Good vs Terrible (extreme asymmetry)
+        // The terrible profile has 25% loss (>20%) + 5% burst loss (5-packet bursts).
+        // The combination of high packet loss WITH burst loss is significantly worse
+        // than either alone. Using "stress_test" preset (40 sync packets, 60s timeout)
+        // for reliability on CI.
         (
             10324,
             NetworkScenario::asymmetric(
@@ -3034,7 +3205,8 @@ fn test_asymmetric_scenarios() {
             )
             .with_frames(50)
             .with_input_delay(5)
-            .with_timeout(180),
+            .with_timeout(180)
+            .with_sync_preset("stress_test"),
         ),
     ];
 
@@ -3343,6 +3515,138 @@ mod infrastructure_tests {
         }
     }
 
+    /// Test that `suggested_sync_preset()` returns appropriate presets for each profile.
+    #[test]
+    fn test_suggested_sync_preset() {
+        let test_cases = [
+            // Good network conditions - no preset needed
+            ("local", NetworkProfile::local(), None),
+            ("lan", NetworkProfile::lan(), None),
+            ("wifi_good", NetworkProfile::wifi_good(), None),
+            ("wifi_average", NetworkProfile::wifi_average(), None),
+            // Moderate conditions - lossy or mobile preset
+            ("mobile_4g", NetworkProfile::mobile_4g(), Some("lossy")),
+            // High loss/burst conditions - mobile preset
+            (
+                "wifi_congested",
+                NetworkProfile::wifi_congested(),
+                Some("mobile"),
+            ),
+            ("mobile_3g", NetworkProfile::mobile_3g(), Some("mobile")),
+            // Extreme packet loss (>20%) combined with burst loss - stress_test preset
+            ("terrible", NetworkProfile::terrible(), Some("stress_test")),
+            (
+                "bursty_survivable",
+                NetworkProfile::bursty_survivable(),
+                Some("mobile"),
+            ),
+            // Extreme conditions - stress_test preset
+            ("bursty", NetworkProfile::bursty(), Some("stress_test")),
+            // No loss profiles
+            ("heavy_reorder", NetworkProfile::heavy_reorder(), None),
+            ("duplicating", NetworkProfile::duplicating(), None),
+            ("intercontinental", NetworkProfile::intercontinental(), None),
+        ];
+
+        println!("=== Suggested Sync Preset Validation ===");
+        for (name, profile, expected) in test_cases {
+            let suggested = profile.suggested_sync_preset();
+            println!(
+                "{:<20} loss={:>5.1}% burst={:>4.1}%x{} -> {:?}",
+                name,
+                profile.packet_loss * 100.0,
+                profile.burst_loss_prob * 100.0,
+                profile.burst_loss_len,
+                suggested
+            );
+            assert_eq!(
+                suggested, expected,
+                "{}: expected {:?}, got {:?}",
+                name, expected, suggested
+            );
+        }
+        println!("=========================================");
+    }
+
+    /// Test edge cases for combined packet loss + burst loss sync preset selection.
+    ///
+    /// This tests the boundary conditions for the rule that upgrades to `stress_test`
+    /// when high packet loss (>20%) is combined with significant burst loss.
+    #[test]
+    fn test_suggested_sync_preset_combined_conditions() {
+        println!("=== Combined Conditions Edge Cases ===");
+
+        // Edge case: exactly at threshold (20% loss + 3% burst with 3-packet bursts)
+        let at_threshold = NetworkProfile {
+            packet_loss: 0.20,
+            latency_ms: 50,
+            jitter_ms: 25,
+            reorder_rate: 0.0,
+            reorder_buffer_size: 0,
+            duplicate_rate: 0.0,
+            burst_loss_prob: 0.03,
+            burst_loss_len: 3,
+        };
+        assert_eq!(
+            at_threshold.suggested_sync_preset(),
+            Some("stress_test"),
+            "Exactly at combined threshold should return stress_test"
+        );
+
+        // Edge case: high packet loss but burst just below threshold (2.9% burst)
+        let high_loss_low_burst = NetworkProfile {
+            packet_loss: 0.25,
+            latency_ms: 50,
+            jitter_ms: 25,
+            reorder_rate: 0.0,
+            reorder_buffer_size: 0,
+            duplicate_rate: 0.0,
+            burst_loss_prob: 0.02, // Below 3% threshold
+            burst_loss_len: 3,
+        };
+        assert_eq!(
+            high_loss_low_burst.suggested_sync_preset(),
+            Some("extreme"), // Falls through to packet_loss >= 0.20 check
+            "High loss + low burst should return extreme (not stress_test)"
+        );
+
+        // Edge case: high packet loss but burst len too short
+        let high_loss_short_burst = NetworkProfile {
+            packet_loss: 0.25,
+            latency_ms: 50,
+            jitter_ms: 25,
+            reorder_rate: 0.0,
+            reorder_buffer_size: 0,
+            duplicate_rate: 0.0,
+            burst_loss_prob: 0.05,
+            burst_loss_len: 2, // Below 3-packet threshold
+        };
+        assert_eq!(
+            high_loss_short_burst.suggested_sync_preset(),
+            Some("extreme"), // Falls through to packet_loss >= 0.20 check
+            "High loss + short burst should return extreme (not stress_test)"
+        );
+
+        // Edge case: just below 20% loss with burst (should return mobile, not stress_test)
+        let moderate_loss_with_burst = NetworkProfile {
+            packet_loss: 0.19, // Below 20%
+            latency_ms: 50,
+            jitter_ms: 25,
+            reorder_rate: 0.0,
+            reorder_buffer_size: 0,
+            duplicate_rate: 0.0,
+            burst_loss_prob: 0.05,
+            burst_loss_len: 5,
+        };
+        assert_eq!(
+            moderate_loss_with_burst.suggested_sync_preset(),
+            Some("mobile"), // Falls through to burst check
+            "Moderate loss + burst should return mobile (not stress_test)"
+        );
+
+        println!("All combined condition edge cases passed!");
+    }
+
     /// Test NetworkScenario builder pattern.
     #[test]
     fn test_network_scenario_builder() {
@@ -3602,8 +3906,8 @@ mod infrastructure_tests {
             SyncPresetRecommendation {
                 profile_name: "terrible",
                 profile: NetworkProfile::terrible(),
-                recommended_preset: Some("mobile"),
-                reason: "30% loss is extreme - mobile preset required",
+                recommended_preset: Some("stress_test"),
+                reason: "25% loss + 5% burst loss (combined hostile) - stress_test preset required",
             },
             SyncPresetRecommendation {
                 profile_name: "heavy_reorder",
@@ -3620,7 +3924,7 @@ mod infrastructure_tests {
             SyncPresetRecommendation {
                 profile_name: "bursty",
                 profile: NetworkProfile::bursty(),
-                recommended_preset: Some("extreme"),
+                recommended_preset: Some("stress_test"),
                 reason: "10% burst loss with 8-packet bursts can drop entire sync exchanges",
             },
         ];
@@ -3650,9 +3954,19 @@ mod infrastructure_tests {
             if p.burst_loss_prob >= 0.10 && p.burst_loss_len >= 8 {
                 assert_eq!(
                     rec.recommended_preset,
-                    Some("extreme"),
-                    "{}: High burst loss ({}%x{}) should recommend 'extreme' preset",
+                    Some("stress_test"),
+                    "{}: High burst loss ({}%x{}) should recommend 'stress_test' preset",
                     rec.profile_name,
+                    p.burst_loss_prob * 100.0,
+                    p.burst_loss_len
+                );
+            } else if p.packet_loss >= 0.20 && p.burst_loss_prob >= 0.03 && p.burst_loss_len >= 3 {
+                assert_eq!(
+                    rec.recommended_preset,
+                    Some("stress_test"),
+                    "{}: High loss ({}%) + burst ({}%x{}) should recommend 'stress_test' preset",
+                    rec.profile_name,
+                    p.packet_loss * 100.0,
                     p.burst_loss_prob * 100.0,
                     p.burst_loss_len
                 );

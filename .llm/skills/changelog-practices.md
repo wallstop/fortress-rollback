@@ -12,6 +12,7 @@
 - Error type/message changes users might match on
 - Performance improvements users would notice
 - Bug fixes affecting user-visible behavior
+- New trait implementations (`Display`, `Debug`, `Hash`, `Serialize`, etc.)
 
 **NEVER document:**
 
@@ -57,6 +58,7 @@ Examples:
 - Changing return types
 - Changing default behavior
 - **Adding enum variants to exhaustively matchable enums** (see below)
+- **Changing `Display` or `Debug` output format** (see "Output Format Changes" below)
 
 ### Enum Variants Are Breaking Changes (Unless `#[non_exhaustive]`)
 
@@ -120,6 +122,65 @@ pub enum ConnectionState {
 ```
 
 > **See also:** [workspace-organization.md](workspace-organization.md) for `#[non_exhaustive]` best practices.
+
+### Trait Implementations (SHOULD document)
+
+New implementations of standard traits on public types **should be documented** under `### Added`:
+
+```markdown
+### Added
+
+- `Display` implementation for `Frame` and `PlayerHandle` for readable formatting
+- `Hash` implementation for `SessionConfig` to enable use in collections
+```
+
+**Why trait impls matter to users:**
+
+- `Display` — Users can use `{}` formatting, `to_string()`, and error messages
+- `Debug` — Users can use `{:?}` formatting and debugging tools
+- `Hash` — Users can use the type as `HashMap`/`HashSet` keys
+- `Serialize`/`Deserialize` — Users can persist or transmit values
+- `Clone`/`Copy` — Changes how users can work with the type
+
+### Output Format Changes (MUST document as Breaking)
+
+**Critical:** Changing the output of `Display` or `Debug` implementations is a **breaking change** if users might depend on the format.
+
+```rust
+// ❌ Format change — BREAKING if users parse/match output
+// Before: "Player 0"
+// After:  "PlayerHandle(0)"
+impl Display for PlayerHandle { ... }
+```
+
+**Why format changes break user code:**
+
+- Log parsing scripts may match on specific patterns
+- Tests may assert on formatted output
+- Error messages containing formatted types change
+- Serialization or display in UIs may break
+
+**CHANGELOG entry for format changes:**
+
+```markdown
+### Changed
+
+- **Breaking:** `PlayerHandle` now displays as `PlayerHandle(N)` instead of `Player N`. Update any code that parses or matches the previous format.
+```
+
+**When format changes are NOT breaking:**
+
+- The type is new (no existing users)
+- The previous format was explicitly documented as unstable
+- The change only affects `Debug` AND the type documents that `Debug` output is not stable
+
+**Best practice:** If you want flexibility to change formats, document that the format is not stable:
+
+```rust
+/// Note: The exact format of the `Display` output is not stable
+/// and may change in future versions.
+impl Display for InternalId { ... }
+```
 
 ### New Features (SHOULD document)
 
@@ -283,7 +344,8 @@ When making changes, ask:
 3. **Could user code break?** If yes, mark as **Breaking:**
 4. **Adding enum variants?** Check if enum is `#[non_exhaustive]` — if not, it's **Breaking:**
 5. **Is this a bug fix users would care about?** If yes, document it
-6. **Is this purely internal?** If yes, skip changelog
+6. **Adding trait impls?** `Display`, `Debug`, `Hash`, `Serialize` — document under Added
+7. **Is this purely internal?** If yes, skip changelog
 
 ---
 

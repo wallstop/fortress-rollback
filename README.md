@@ -35,13 +35,22 @@
 
 Fortress Rollback is a fortified, correctness-first port of the original, phenomenal [ggrs crate](https://github.com/gschup/ggrs) and reimagination of the [GGPO network SDK](https://www.ggpo.net/), written in 100% safe [Rust 🦀](https://www.rust-lang.org/). This crate was primarily developed with AI assistance. The callback-style API from the original library has been replaced with a simple, request-driven control flow: instead of registering callback functions, Fortress Rollback returns a list of requests for the user to fulfill.
 
-> crates.io publication is being prepared. Until the first release is live, depend on the git repository: `fortress-rollback = { git = "https://github.com/wallstop/fortress-rollback", branch = "main" }`.
-
 If you are interested in integrating rollback networking into your game or just want to chat with other rollback developers (not limited to Rust), check out the [GGPO Developers Discord](https://discord.com/invite/8FKKhCRCCE)!
 
-## Live Demonstrations
+## Interactive Examples
 
-Fortress Rollback currently ships with the same demos you may know from GGRS. One is written with [macroquad](https://github.com/not-fl3/macroquad), the other with [bevy](https://bevyengine.org/). Both use [matchbox](https://github.com/johanhelsing/matchbox). Try it out with a friend! Just click the link and match with another player! (You can also open the link in two separate windows to play against yourself)
+Fortress Rollback includes interactive game examples built with [macroquad](https://github.com/not-fl3/macroquad). Run them locally to see rollback networking in action:
+
+```shell
+# P2P session (run in two terminals with different ports)
+cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7000 --remote-addr 127.0.0.1:7001
+cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7001 --remote-addr 127.0.0.1:7000
+
+# Sync test (determinism verification)
+cargo run --example ex_game_synctest --features graphical-examples
+```
+
+See the [examples README](./examples/README.md) for system dependencies and more options.
 
 ## Getting Started
 
@@ -79,7 +88,7 @@ Alpha / experimental only.
 
 - **100% Deterministic**: All collections use `BTreeMap`/`BTreeSet` for guaranteed iteration order; new `hash` module provides FNV-1a deterministic hashing
 - **Panic-Free API**: All public APIs return `Result` types instead of panicking — no unexpected crashes
-- **Correctness-First**: Formally verified with TLA+ and Z3 proofs; ~1500 tests (~92% coverage) including multi-process network and resilience scenarios
+- **Correctness-First**: Formally verified with TLA+ and Z3 proofs; ~1600 tests (~92% coverage) including multi-process network and resilience scenarios
 - **Enhanced Desync Detection**: Built-in checksum validation with `P2PSession::confirmed_inputs_for_frame()` for debugging state divergence
 - **`handle_requests!` Macro**: Eliminates boilerplate in the game loop — see [User Guide](./docs/user-guide.md#using-the-handle_requests-macro)
 - **Config Presets**: `SyncConfig::lan()`, `ProtocolConfig::mobile()`, etc. for common network conditions
@@ -119,13 +128,13 @@ Moving from the original `ggrs` crate? See the step-by-step guide in [migration.
 
 ### Web / WASM Support
 
-Fortress Rollback works in the browser! WASM support is **automatic** — no feature flags needed. The library detects `target_arch = "wasm32"` at compile time and uses browser-compatible APIs (`js-sys` for time).
+Fortress Rollback works in the browser! WASM support is **automatic** — no feature flags needed. The library detects `target_arch = "wasm32"` at compile time and uses browser-compatible APIs (`web_time` for timing, `js_sys::Date` for epoch timestamps).
 
 For networking in the browser, use **[Matchbox](https://github.com/johanhelsing/matchbox)** — it provides WebRTC sockets that implement `NonBlockingSocket` and work seamlessly with Fortress Rollback:
 
 ```toml
 [dependencies]
-fortress-rollback = "0.2"
+fortress-rollback = "0.4"
 matchbox_socket = { version = "0.13", features = ["ggrs"] }
 ```
 

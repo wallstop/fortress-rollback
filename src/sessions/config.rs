@@ -116,6 +116,29 @@ impl Default for SyncConfig {
     }
 }
 
+impl std::fmt::Display for SyncConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to ensure all fields are included when new fields are added.
+        let Self {
+            num_sync_packets,
+            sync_retry_interval,
+            sync_timeout,
+            running_retry_interval,
+            keepalive_interval,
+        } = self;
+
+        write!(
+            f,
+            "SyncConfig {{ num_sync_packets: {}, sync_retry: {:?}, timeout: {}, running_retry: {:?}, keepalive: {:?} }}",
+            num_sync_packets,
+            sync_retry_interval,
+            sync_timeout.map_or_else(|| "None".to_string(), |d| format!("{:?}", d)),
+            running_retry_interval,
+            keepalive_interval,
+        )
+    }
+}
+
 impl SyncConfig {
     /// Creates a new `SyncConfig` with default values.
     pub fn new() -> Self {
@@ -462,6 +485,35 @@ impl Default for ProtocolConfig {
     }
 }
 
+impl std::fmt::Display for ProtocolConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to ensure all fields are included when new fields are added.
+        let Self {
+            quality_report_interval,
+            shutdown_delay,
+            max_checksum_history,
+            pending_output_limit,
+            sync_retry_warning_threshold,
+            sync_duration_warning_ms,
+            input_history_multiplier,
+            protocol_rng_seed,
+        } = self;
+
+        write!(
+            f,
+            "ProtocolConfig {{ quality_report: {:?}, shutdown: {:?}, checksum_history: {}, pending_limit: {}, retry_warn: {}, duration_warn_ms: {}, history_mult: {}, seed: {} }}",
+            quality_report_interval,
+            shutdown_delay,
+            max_checksum_history,
+            pending_output_limit,
+            sync_retry_warning_threshold,
+            sync_duration_warning_ms,
+            input_history_multiplier,
+            protocol_rng_seed.map_or_else(|| "None".to_string(), |s| s.to_string()),
+        )
+    }
+}
+
 impl ProtocolConfig {
     /// Creates a new `ProtocolConfig` with default values.
     pub fn new() -> Self {
@@ -735,6 +787,23 @@ impl Default for SpectatorConfig {
     }
 }
 
+impl std::fmt::Display for SpectatorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to ensure all fields are included when new fields are added.
+        let Self {
+            buffer_size,
+            catchup_speed,
+            max_frames_behind,
+        } = self;
+
+        write!(
+            f,
+            "SpectatorConfig {{ buffer: {}, catchup_speed: {}, max_behind: {} }}",
+            buffer_size, catchup_speed, max_frames_behind,
+        )
+    }
+}
+
 impl SpectatorConfig {
     /// Creates a new `SpectatorConfig` with default values.
     pub fn new() -> Self {
@@ -887,6 +956,14 @@ impl Default for InputQueueConfig {
     }
 }
 
+impl std::fmt::Display for InputQueueConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to ensure all fields are included when new fields are added.
+        let Self { queue_length } = self;
+        write!(f, "InputQueueConfig {{ queue_length: {} }}", queue_length)
+    }
+}
+
 impl InputQueueConfig {
     /// Creates a new `InputQueueConfig` with default values.
     pub fn new() -> Self {
@@ -1022,6 +1099,15 @@ pub enum SaveMode {
     Sparse,
 }
 
+impl std::fmt::Display for SaveMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EveryFrame => write!(f, "EveryFrame"),
+            Self::Sparse => write!(f, "Sparse"),
+        }
+    }
+}
+
 // =============================================================================
 // Unit Tests
 // =============================================================================
@@ -1059,6 +1145,12 @@ mod tests {
         let sparse = SaveMode::Sparse;
         assert_eq!(format!("{:?}", every_frame), "EveryFrame");
         assert_eq!(format!("{:?}", sparse), "Sparse");
+    }
+
+    #[test]
+    fn test_save_mode_display() {
+        assert_eq!(SaveMode::EveryFrame.to_string(), "EveryFrame");
+        assert_eq!(SaveMode::Sparse.to_string(), "Sparse");
     }
 
     #[test]
@@ -1208,6 +1300,15 @@ mod tests {
         assert!(config.validate_frame_delay(100).is_err());
     }
 
+    #[test]
+    fn test_input_queue_config_display() {
+        let config = InputQueueConfig { queue_length: 128 };
+        assert_eq!(config.to_string(), "InputQueueConfig { queue_length: 128 }");
+
+        let config = InputQueueConfig { queue_length: 256 };
+        assert_eq!(config.to_string(), "InputQueueConfig { queue_length: 256 }");
+    }
+
     // ========================================================================
     // SyncConfig Tests
     // ========================================================================
@@ -1333,6 +1434,23 @@ mod tests {
     }
 
     #[test]
+    fn sync_config_display() {
+        // Test default (no timeout)
+        let config = SyncConfig::default();
+        let display_str = config.to_string();
+        assert!(display_str.contains("SyncConfig"));
+        assert!(display_str.contains("num_sync_packets: 5"));
+        assert!(display_str.contains("timeout: None"));
+
+        // Test with timeout
+        let config = SyncConfig::lan();
+        let display_str = config.to_string();
+        assert!(display_str.contains("SyncConfig"));
+        assert!(display_str.contains("num_sync_packets: 3"));
+        assert!(display_str.contains("5s")); // timeout: 5s
+    }
+
+    #[test]
     fn sync_config_presets_differ() {
         // Ensure all presets are distinct configurations
         let presets = [
@@ -1455,6 +1573,23 @@ mod tests {
         assert!(debug_str.contains("ProtocolConfig"));
         assert!(debug_str.contains("quality_report_interval"));
         assert!(debug_str.contains("shutdown_delay"));
+    }
+
+    #[test]
+    fn protocol_config_display() {
+        // Test default (no seed)
+        let config = ProtocolConfig::default();
+        let display_str = config.to_string();
+        assert!(display_str.contains("ProtocolConfig"));
+        assert!(display_str.contains("checksum_history: 32"));
+        assert!(display_str.contains("pending_limit: 128"));
+        assert!(display_str.contains("seed: None"));
+
+        // Test with seed
+        let config = ProtocolConfig::deterministic(42);
+        let display_str = config.to_string();
+        assert!(display_str.contains("ProtocolConfig"));
+        assert!(display_str.contains("seed: 42"));
     }
 
     #[test]
@@ -2097,6 +2232,113 @@ mod tests {
         // Config with seed should validate successfully
         let config = ProtocolConfig::deterministic(42);
         config.validate().unwrap();
+    }
+
+    // ========================================================================
+    // SpectatorConfig Tests
+    // ========================================================================
+
+    #[test]
+    fn spectator_config_default_values() {
+        let config = SpectatorConfig::default();
+        assert_eq!(config.buffer_size, 60);
+        assert_eq!(config.catchup_speed, 1);
+        assert_eq!(config.max_frames_behind, 10);
+    }
+
+    #[test]
+    fn spectator_config_new_equals_default() {
+        let new_config = SpectatorConfig::new();
+        let default_config = SpectatorConfig::default();
+        assert_eq!(new_config, default_config);
+    }
+
+    #[test]
+    fn spectator_config_fast_paced_preset() {
+        let config = SpectatorConfig::fast_paced();
+        assert_eq!(config.buffer_size, 90);
+        assert_eq!(config.catchup_speed, 2);
+        assert_eq!(config.max_frames_behind, 15);
+    }
+
+    #[test]
+    fn spectator_config_slow_connection_preset() {
+        let config = SpectatorConfig::slow_connection();
+        assert_eq!(config.buffer_size, 120);
+        assert_eq!(config.catchup_speed, 1);
+        assert_eq!(config.max_frames_behind, 20);
+    }
+
+    #[test]
+    fn spectator_config_local_preset() {
+        let config = SpectatorConfig::local();
+        assert_eq!(config.buffer_size, 30);
+        assert_eq!(config.catchup_speed, 2);
+        assert_eq!(config.max_frames_behind, 5);
+    }
+
+    #[test]
+    fn spectator_config_broadcast_preset() {
+        let config = SpectatorConfig::broadcast();
+        assert_eq!(config.buffer_size, 180);
+        assert_eq!(config.catchup_speed, 1);
+        assert_eq!(config.max_frames_behind, 30);
+    }
+
+    #[test]
+    fn spectator_config_mobile_preset() {
+        let config = SpectatorConfig::mobile();
+        assert_eq!(config.buffer_size, 120);
+        assert_eq!(config.catchup_speed, 1);
+        assert_eq!(config.max_frames_behind, 25);
+    }
+
+    #[test]
+    fn spectator_config_display() {
+        let config = SpectatorConfig::default();
+        let display_str = config.to_string();
+        assert!(display_str.contains("SpectatorConfig"));
+        assert!(display_str.contains("buffer: 60"));
+        assert!(display_str.contains("catchup_speed: 1"));
+        assert!(display_str.contains("max_behind: 10"));
+
+        let config = SpectatorConfig::broadcast();
+        let display_str = config.to_string();
+        assert!(display_str.contains("buffer: 180"));
+        assert!(display_str.contains("max_behind: 30"));
+    }
+
+    #[test]
+    fn spectator_config_equality() {
+        let config1 = SpectatorConfig::default();
+        let config2 = SpectatorConfig::default();
+        let config3 = SpectatorConfig::broadcast();
+        assert_eq!(config1, config2);
+        assert_ne!(config1, config3);
+    }
+
+    #[test]
+    #[allow(clippy::clone_on_copy)]
+    fn spectator_config_clone() {
+        let config = SpectatorConfig::fast_paced();
+        let cloned = config.clone();
+        assert_eq!(config, cloned);
+    }
+
+    #[test]
+    fn spectator_config_copy() {
+        let config = SpectatorConfig::local();
+        let copied: SpectatorConfig = config;
+        assert_eq!(config, copied);
+    }
+
+    #[test]
+    fn spectator_config_debug_format() {
+        let config = SpectatorConfig::default();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("SpectatorConfig"));
+        assert!(debug_str.contains("buffer_size"));
+        assert!(debug_str.contains("catchup_speed"));
     }
 }
 

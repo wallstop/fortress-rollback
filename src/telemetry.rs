@@ -1090,7 +1090,10 @@ impl InvariantViolation {
         let _ = write!(
             details,
             "Desync at frame {} with player {}: local={:#x}, remote={:#x}",
-            frame, player_handle, local_checksum, remote_checksum
+            frame,
+            player_handle.as_usize(),
+            local_checksum,
+            remote_checksum
         );
         self.details = Some(details);
         self

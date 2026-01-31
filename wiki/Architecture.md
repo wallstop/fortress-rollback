@@ -1035,15 +1035,15 @@ Compile-time parameterization bundles all type requirements:
 ```rust
 pub trait Config: 'static {
     type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned;
-    type State: Clone;
-    type Address: Clone + PartialEq + Eq + Hash + Debug;
+    type State;
+    type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Debug;
 }
 ```
 
 This ensures:
 
 - Input types are serializable for network transmission
-- State types are clonable for saving
+- State types are clonable (required in practice for `GameStateCell::load()` during rollback; compile-time `Clone` bound only with `sync-send` feature)
 - Addresses can be used as map keys
 
 ---

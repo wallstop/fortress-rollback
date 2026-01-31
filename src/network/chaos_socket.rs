@@ -101,6 +101,39 @@ impl Default for ChaosConfig {
     }
 }
 
+impl std::fmt::Display for ChaosConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to ensure all fields are included when new fields are added.
+        let Self {
+            latency,
+            jitter,
+            send_loss_rate,
+            receive_loss_rate,
+            duplication_rate,
+            reorder_buffer_size,
+            reorder_rate,
+            burst_loss_probability,
+            burst_loss_length,
+            seed,
+        } = self;
+
+        write!(
+            f,
+            "ChaosConfig {{ latency: {:?}, jitter: {:?}, send_loss: {:.1}%, recv_loss: {:.1}%, dup: {:.1}%, reorder_buf: {}, reorder: {:.1}%, burst_prob: {:.1}%, burst_len: {}, seed: {} }}",
+            latency,
+            jitter,
+            send_loss_rate * 100.0,
+            receive_loss_rate * 100.0,
+            duplication_rate * 100.0,
+            reorder_buffer_size,
+            reorder_rate * 100.0,
+            burst_loss_probability * 100.0,
+            burst_loss_length,
+            seed.map_or_else(|| "None".to_string(), |s| s.to_string()),
+        )
+    }
+}
+
 impl ChaosConfig {
     /// Creates a new builder for fluent configuration.
     pub fn builder() -> ChaosConfigBuilder {
@@ -420,6 +453,34 @@ pub struct ChaosStats {
     pub burst_loss_events: u64,
     /// Packets dropped due to burst loss
     pub packets_dropped_burst: u64,
+}
+
+impl std::fmt::Display for ChaosStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to ensure all fields are included when new fields are added.
+        let Self {
+            packets_sent,
+            packets_dropped_send,
+            packets_duplicated,
+            packets_received,
+            packets_dropped_receive,
+            packets_reordered,
+            burst_loss_events,
+            packets_dropped_burst,
+        } = self;
+        write!(
+            f,
+            "ChaosStats {{ sent: {}, dropped_send: {}, dup: {}, recv: {}, dropped_recv: {}, reordered: {}, bursts: {}, dropped_burst: {} }}",
+            packets_sent,
+            packets_dropped_send,
+            packets_duplicated,
+            packets_received,
+            packets_dropped_receive,
+            packets_reordered,
+            burst_loss_events,
+            packets_dropped_burst
+        )
+    }
 }
 
 impl<A, S> ChaosSocket<A, S>
@@ -957,6 +1018,42 @@ mod tests {
         assert_eq!(terrible.latency, Duration::from_millis(250));
         assert_eq!(terrible.send_loss_rate, 0.15);
         assert!(terrible.reorder_buffer_size > 0);
+    }
+
+    #[test]
+    fn test_chaos_config_display() {
+        // Test passthrough (all zeros)
+        let config = ChaosConfig::passthrough();
+        let display_str = config.to_string();
+        assert!(display_str.contains("ChaosConfig"));
+        assert!(display_str.contains("send_loss: 0.0%"));
+        assert!(display_str.contains("recv_loss: 0.0%"));
+        assert!(display_str.contains("seed: None"));
+
+        // Test with values
+        let config = ChaosConfig::builder()
+            .latency_ms(100)
+            .jitter_ms(20)
+            .packet_loss_rate(0.15)
+            .duplication_rate(0.05)
+            .seed(42)
+            .build();
+        let display_str = config.to_string();
+        assert!(display_str.contains("ChaosConfig"));
+        assert!(display_str.contains("100ms")); // latency
+        assert!(display_str.contains("20ms")); // jitter
+        assert!(display_str.contains("send_loss: 15.0%"));
+        assert!(display_str.contains("recv_loss: 15.0%"));
+        assert!(display_str.contains("dup: 5.0%"));
+        assert!(display_str.contains("seed: 42"));
+    }
+
+    #[test]
+    fn test_chaos_config_display_poor_network() {
+        let config = ChaosConfig::poor_network();
+        let display_str = config.to_string();
+        assert!(display_str.contains("send_loss: 5.0%"));
+        assert!(display_str.contains("recv_loss: 5.0%"));
     }
 
     #[test]
@@ -2061,5 +2158,71 @@ mod tests {
             "Expected at least 5 reorders with 100% rate on 10 packets, got {}",
             socket.stats().packets_reordered
         );
+    }
+
+    /// Tests for Display implementations
+    mod display_tests {
+        use super::*;
+
+        /// Test ChaosStats Display with default (all zeros).
+        #[test]
+        fn test_chaos_stats_display_default() {
+            let stats = ChaosStats::default();
+            let display = stats.to_string();
+
+            assert_eq!(
+                display,
+                "ChaosStats { sent: 0, dropped_send: 0, dup: 0, recv: 0, dropped_recv: 0, reordered: 0, bursts: 0, dropped_burst: 0 }"
+            );
+        }
+
+        /// Test ChaosStats Display with populated values.
+        #[test]
+        fn test_chaos_stats_display_populated() {
+            let stats = ChaosStats {
+                packets_sent: 100,
+                packets_dropped_send: 5,
+                packets_duplicated: 3,
+                packets_received: 95,
+                packets_dropped_receive: 2,
+                packets_reordered: 10,
+                burst_loss_events: 1,
+                packets_dropped_burst: 4,
+            };
+            let display = stats.to_string();
+
+            assert_eq!(
+                display,
+                "ChaosStats { sent: 100, dropped_send: 5, dup: 3, recv: 95, dropped_recv: 2, reordered: 10, bursts: 1, dropped_burst: 4 }"
+            );
+        }
+
+        /// Test ChaosStats Display format verification (all fields present).
+        #[test]
+        fn test_chaos_stats_display_format() {
+            let stats = ChaosStats {
+                packets_sent: 42,
+                packets_dropped_send: 1,
+                packets_duplicated: 2,
+                packets_received: 38,
+                packets_dropped_receive: 3,
+                packets_reordered: 4,
+                burst_loss_events: 5,
+                packets_dropped_burst: 6,
+            };
+            let display = stats.to_string();
+
+            // Verify all field abbreviations are present
+            assert!(display.starts_with("ChaosStats {"));
+            assert!(display.ends_with('}'));
+            assert!(display.contains("sent: 42"));
+            assert!(display.contains("dropped_send: 1"));
+            assert!(display.contains("dup: 2"));
+            assert!(display.contains("recv: 38"));
+            assert!(display.contains("dropped_recv: 3"));
+            assert!(display.contains("reordered: 4"));
+            assert!(display.contains("bursts: 5"));
+            assert!(display.contains("dropped_burst: 6"));
+        }
     }
 }

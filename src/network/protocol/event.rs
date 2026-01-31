@@ -51,6 +51,40 @@ where
     },
 }
 
+impl<T: Config> std::fmt::Display for Event<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Synchronizing {
+                total,
+                count,
+                total_requests_sent,
+                elapsed_ms,
+            } => write!(
+                f,
+                "Synchronizing({}/{}, requests_sent={}, elapsed={}ms)",
+                count, total, total_requests_sent, elapsed_ms
+            ),
+            Self::Synchronized => write!(f, "Synchronized"),
+            Self::Input { input, player } => {
+                write!(
+                    f,
+                    "Input(player={}, frame={})",
+                    player,
+                    input.frame.as_i32()
+                )
+            },
+            Self::Disconnected => write!(f, "Disconnected"),
+            Self::NetworkInterrupted { disconnect_timeout } => {
+                write!(f, "NetworkInterrupted(timeout={}ms)", disconnect_timeout)
+            },
+            Self::NetworkResumed => write!(f, "NetworkResumed"),
+            Self::SyncTimeout { elapsed_ms } => {
+                write!(f, "SyncTimeout(elapsed={}ms)", elapsed_ms)
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::panic,
@@ -316,6 +350,71 @@ mod tests {
         let debug = format!("{:?}", event);
         assert!(debug.contains("SyncTimeout"));
         assert!(debug.contains("10000"));
+    }
+
+    // ==========================================================================
+    // Display Trait Tests
+    // ==========================================================================
+
+    #[test]
+    fn event_display_synchronizing() {
+        let event: Event<TestConfig> = Event::Synchronizing {
+            total: 10,
+            count: 5,
+            total_requests_sent: 7,
+            elapsed_ms: 1234,
+        };
+        let display = format!("{}", event);
+        assert_eq!(
+            display,
+            "Synchronizing(5/10, requests_sent=7, elapsed=1234ms)"
+        );
+    }
+
+    #[test]
+    fn event_display_synchronized() {
+        let event: Event<TestConfig> = Event::Synchronized;
+        let display = format!("{}", event);
+        assert_eq!(display, "Synchronized");
+    }
+
+    #[test]
+    fn event_display_input() {
+        let input = PlayerInput::new(Frame::new(42), TestInput(123));
+        let player = PlayerHandle::new(1);
+        let event: Event<TestConfig> = Event::Input { input, player };
+        let display = format!("{}", event);
+        assert_eq!(display, "Input(player=PlayerHandle(1), frame=42)");
+    }
+
+    #[test]
+    fn event_display_disconnected() {
+        let event: Event<TestConfig> = Event::Disconnected;
+        let display = format!("{}", event);
+        assert_eq!(display, "Disconnected");
+    }
+
+    #[test]
+    fn event_display_network_interrupted() {
+        let event: Event<TestConfig> = Event::NetworkInterrupted {
+            disconnect_timeout: 5000,
+        };
+        let display = format!("{}", event);
+        assert_eq!(display, "NetworkInterrupted(timeout=5000ms)");
+    }
+
+    #[test]
+    fn event_display_network_resumed() {
+        let event: Event<TestConfig> = Event::NetworkResumed;
+        let display = format!("{}", event);
+        assert_eq!(display, "NetworkResumed");
+    }
+
+    #[test]
+    fn event_display_sync_timeout() {
+        let event: Event<TestConfig> = Event::SyncTimeout { elapsed_ms: 10000 };
+        let display = format!("{}", event);
+        assert_eq!(display, "SyncTimeout(elapsed=10000ms)");
     }
 
     // ==========================================================================

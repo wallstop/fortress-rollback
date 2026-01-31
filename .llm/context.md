@@ -292,6 +292,7 @@ pub fn function(param1: Type) -> Result<ReturnType, FortressError> {
 > - [property-testing.md](skills/property-testing.md) — Property-based testing to find edge cases automatically
 > - [mutation-testing.md](skills/mutation-testing.md) — Mutation testing for test quality verification
 > - [rust-fuzzing-guide.md](skills/rust-fuzzing-guide.md) — Fuzz testing with cargo-fuzz, LibAFL, and structured fuzzing
+> - [network-chaos-testing.md](skills/network-chaos-testing.md) — Network chaos testing, sync preset selection, diagnosing sync failures
 > - [cross-platform-ci-cd.md](skills/cross-platform-ci-cd.md) — CI/CD workflows for multi-platform builds
 > - [ci-cd-debugging.md](skills/ci-cd-debugging.md) — Reproducing and debugging CI failures locally
 
@@ -793,7 +794,9 @@ Before submitting code:
 - [ ] Rustdoc comments with examples
 - [ ] 100% safe Rust (no unsafe)
 - [ ] Handles all error cases
-- [ ] **Changelog reviewed:** Asked "Does this affect `pub` items or user-observable behavior?" — if yes, added entry to CHANGELOG.md
+- [ ] **No duplicate methods:** If implementing `Display`/`Debug`/`Hash`/etc., don't add separate methods duplicating that functionality
+- [ ] **Feature-dependent APIs documented:** If `#[cfg(feature = ...)]` affects trait bounds or available methods, document it in rustdoc
+- [ ] **Changelog reviewed:** Asked "Does this affect `pub` items or user-observable behavior?" — if yes, added entry to CHANGELOG.md (including new trait impls like `Display`)
 
 ---
 

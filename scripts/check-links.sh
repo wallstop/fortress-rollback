@@ -145,6 +145,12 @@ check_anchor() {
         return 0
     fi
 
+    # Check for MkDocs-style custom anchors: { #anchor-name }
+    if grep -qE "\{[[:space:]]*#${anchor}[[:space:]]*\}" "$file" 2>/dev/null; then
+        log_verbose "  ${GREEN}✓${NC} #$anchor (mkdocs)"
+        return 0
+    fi
+
     log_warning "Possibly broken anchor in $file: '#$anchor'"
     return 0  # Don't fail on anchor warnings, they can be complex
 }

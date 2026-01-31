@@ -25,6 +25,22 @@ impl Default for ConnectionStatus {
     }
 }
 
+impl std::fmt::Display for ConnectionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to ensure all fields are included when new fields are added.
+        let Self {
+            disconnected,
+            last_frame,
+        } = self;
+
+        if *disconnected {
+            write!(f, "Disconnected(last_frame={})", last_frame.as_i32())
+        } else {
+            write!(f, "Connected(last_frame={})", last_frame.as_i32())
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct SyncRequest {
     pub random_request: u32, // please reply back with this random data
@@ -185,6 +201,33 @@ mod tests {
         assert_eq!(cloned.last_frame, Frame::new(100));
         let debug = format!("{:?}", status);
         assert!(debug.contains("ConnectionStatus"));
+    }
+
+    #[test]
+    fn test_connection_status_display_connected() {
+        let status = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(42),
+        };
+        let display = format!("{}", status);
+        assert_eq!(display, "Connected(last_frame=42)");
+    }
+
+    #[test]
+    fn test_connection_status_display_disconnected() {
+        let status = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(100),
+        };
+        let display = format!("{}", status);
+        assert_eq!(display, "Disconnected(last_frame=100)");
+    }
+
+    #[test]
+    fn test_connection_status_display_null_frame() {
+        let status = ConnectionStatus::default();
+        let display = format!("{}", status);
+        assert_eq!(display, "Connected(last_frame=-1)");
     }
 
     #[test]

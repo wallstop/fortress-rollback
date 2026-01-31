@@ -655,7 +655,133 @@ rg '/// Returns a \[' --type rust | head -20
 
 ---
 
-## Summary: The Six Rules
+## Best Practices: Parallel Documentation Synchronization
+
+### The Problem
+
+Projects often maintain documentation in multiple locations that can drift out of sync:
+
+```text
+docs/user-guide.md      ← MkDocs site documentation
+wiki/User-Guide.md      ← GitHub Wiki documentation
+README.md               ← Repository quick start
+```
+
+When content exists in multiple places, changes to one location are easily forgotten in others, leading to:
+
+- Contradictory information ("docs/ says X, wiki/ says Y")
+- Stale examples in one location
+- Users getting different answers depending on where they look
+
+### Parallel Files Checklist
+
+Identify and track files that contain overlapping content:
+
+| Primary Source | Parallel Location(s) | Content Type |
+|----------------|---------------------|--------------|
+| `docs/user-guide.md` | `wiki/User-Guide.md` | Usage examples, API patterns |
+| `docs/migration.md` | `wiki/Migration.md` | Migration guidance |
+| `docs/architecture.md` | `wiki/Architecture.md` | System design |
+| `README.md` | `docs/index.md` | Quick start, overview |
+| `CHANGELOG.md` | `docs/changelog.md` | Release history |
+
+### Verification Commands
+
+**Check for documentation drift between parallel files:**
+
+```bash
+# Compare docs/ and wiki/ versions (shows differences)
+diff -u docs/user-guide.md wiki/User-Guide.md | head -50
+
+# Find content that might be out of sync
+# Look for version numbers, method names, or key phrases
+rg 'SessionBuilder|with_input_delay|PlayerHandle' docs/ wiki/ --type md
+
+# Check if parallel files have different modification times
+ls -la docs/user-guide.md wiki/User-Guide.md
+
+# Find potential inconsistencies in trait bound claims
+rg 'trait bounds|no.*(trait|bound).*required|requires.*Clone' docs/ wiki/ --type md -i
+```
+
+### Warning Signs of Documentation Drift
+
+Watch for these indicators:
+
+1. **Different timestamps** — Parallel files modified on different dates
+2. **Version mismatches** — One file references newer API than the other
+3. **Example differences** — Code examples use different patterns
+4. **Contradictory claims** — "No trait bounds required" vs code requiring `Clone`
+
+### Prevention Strategies
+
+**Option 1: Single Source of Truth**
+
+Eliminate parallel files by having one authoritative location:
+
+```yaml
+# mkdocs.yml - Include wiki as a symlink or git submodule
+nav:
+  - User Guide: user-guide.md  # Single source
+```
+
+**Option 2: Automated Sync Check**
+
+Add a CI check that compares parallel files:
+
+```bash
+#!/bin/bash
+# scripts/check-doc-sync.sh
+if ! diff -q docs/user-guide.md wiki/User-Guide.md > /dev/null 2>&1; then
+    echo "WARNING: docs/user-guide.md and wiki/User-Guide.md have drifted"
+    echo "Run: diff docs/user-guide.md wiki/User-Guide.md"
+    exit 1
+fi
+```
+
+**Option 3: Include Markers**
+
+Add sync markers to help track parallel content:
+
+```markdown
+<!-- SYNC: This content is duplicated in wiki/User-Guide.md -->
+<!-- Last synced: 2025-01-15 -->
+```
+
+### When Editing Parallel Documentation
+
+**Always ask:** Does this content exist elsewhere?
+
+```bash
+# Before editing docs/user-guide.md, check for parallel content
+rg -l 'user.guide|User.Guide' --type md
+
+# Search for the specific content being changed
+rg 'PlayerHandle.*Display|format.*Player' docs/ wiki/ README.md --type md
+```
+
+### Handling Intentional Differences
+
+Sometimes parallel docs SHOULD differ (e.g., wiki has more detail). Document this:
+
+```markdown
+<!-- NOTE: This wiki version includes extended examples not in docs/user-guide.md -->
+<!-- The docs/ version is the authoritative quick reference -->
+```
+
+### Checklist for Parallel Documentation
+
+Before committing documentation changes:
+
+- [ ] Identified all parallel files containing similar content
+- [ ] Updated ALL parallel locations with the same changes
+- [ ] Verified no contradictions between locations
+- [ ] Checked that examples compile in all locations
+- [ ] Added sync markers if maintaining intentional differences
+
+---
+
+## Summary: The Seven Rules
 
 1. **Verify before documenting** — Always check code exists before claiming it does
 2. **Build docs with warnings as errors** — `RUSTDOCFLAGS="-D warnings" cargo doc`
@@ -663,6 +789,7 @@ rg '/// Returns a \[' --type rust | head -20
 4. **Use valid deprecation versions** — Only reference published versions, not future or inherited ones
 5. **Use correct code fence language** — `text` for pseudo-code, `rust` only for compilable examples
 6. **Use correct grammar** — Match verb forms to subjects; read aloud to verify
+7. **Sync parallel documentation** — Update all locations when content exists in multiple places (docs/, wiki/, README)
 
 ---
 
