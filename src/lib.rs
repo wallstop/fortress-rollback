@@ -1334,30 +1334,6 @@ where
     }
 }
 
-/// Display implementation with minimal bounds - only requires `A: Display`.
-///
-/// This version uses a different trait approach to reduce boilerplate
-/// when you only need Display formatting.
-impl<A> PlayerType<A>
-where
-    A: Clone + PartialEq + Eq + PartialOrd + Ord + std::hash::Hash,
-{
-    /// Formats the player type for display when the address type implements Display.
-    ///
-    /// This method provides the same formatting as the Display trait but can be
-    /// called explicitly when the trait bounds are available.
-    pub fn display_with<W: std::fmt::Write>(&self, f: &mut W) -> std::fmt::Result
-    where
-        A: std::fmt::Display,
-    {
-        match self {
-            Self::Local => write!(f, "Local"),
-            Self::Remote(addr) => write!(f, "Remote({})", addr),
-            Self::Spectator(addr) => write!(f, "Spectator({})", addr),
-        }
-    }
-}
-
 /// A session is always in one of these states. You can query the current state of a session via [`current_state`].
 ///
 /// [`current_state`]: P2PSession#method.current_state

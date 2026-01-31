@@ -12,6 +12,7 @@
 - Error type/message changes users might match on
 - Performance improvements users would notice
 - Bug fixes affecting user-visible behavior
+- New trait implementations (`Display`, `Debug`, `Hash`, `Serialize`, etc.)
 
 **NEVER document:**
 
@@ -120,6 +121,25 @@ pub enum ConnectionState {
 ```
 
 > **See also:** [workspace-organization.md](workspace-organization.md) for `#[non_exhaustive]` best practices.
+
+### Trait Implementations (SHOULD document)
+
+New implementations of standard traits on public types **should be documented** under `### Added`:
+
+```markdown
+### Added
+
+- `Display` implementation for `Frame` and `PlayerHandle` for readable formatting
+- `Hash` implementation for `SessionConfig` to enable use in collections
+```
+
+**Why trait impls matter to users:**
+
+- `Display` — Users can use `{}` formatting, `to_string()`, and error messages
+- `Debug` — Users can use `{:?}` formatting and debugging tools
+- `Hash` — Users can use the type as `HashMap`/`HashSet` keys
+- `Serialize`/`Deserialize` — Users can persist or transmit values
+- `Clone`/`Copy` — Changes how users can work with the type
 
 ### New Features (SHOULD document)
 
@@ -283,7 +303,8 @@ When making changes, ask:
 3. **Could user code break?** If yes, mark as **Breaking:**
 4. **Adding enum variants?** Check if enum is `#[non_exhaustive]` — if not, it's **Breaking:**
 5. **Is this a bug fix users would care about?** If yes, document it
-6. **Is this purely internal?** If yes, skip changelog
+6. **Adding trait impls?** `Display`, `Debug`, `Hash`, `Serialize` — document under Added
+7. **Is this purely internal?** If yes, skip changelog
 
 ---
 

@@ -771,6 +771,62 @@ mod async_std_impl;
 // Users choose which to use via type selection, not feature exclusion
 ```
 
+### Document Feature-Dependent API Differences
+
+When features affect trait bounds, available methods, or API behavior, **document this clearly**:
+
+```rust
+// ❌ ANTI-PATTERN: Undocumented feature-dependent bounds
+/// Configuration for game sessions.
+pub trait Config: Clone + Send + Sync { }
+
+// Meanwhile in code: #[cfg(feature = "sync")] adds + Send + Sync
+
+// ✅ CORRECT: Document all requirements
+/// Configuration for game sessions.
+///
+/// # Trait Bounds
+///
+/// This trait requires `Clone` for state management.
+///
+/// **With the `sync` feature enabled**, this trait additionally requires
+/// `Send + Sync` for thread-safe session sharing.
+pub trait Config: Clone + Send + Sync { }
+```
+
+**Where to document feature-dependent behavior:**
+
+1. **Rustdoc for the item** — Primary location, users see it first
+2. **Crate-level docs** — Feature flags table in `//!` at top of lib.rs
+3. **CHANGELOG** — When adding or changing feature-dependent behavior
+
+**Example: Feature table in crate docs:**
+
+```rust
+//! ## Feature Flags
+//!
+//! | Feature | Effect |
+//! |---------|--------|
+//! | `sync`  | Adds `Send + Sync` bounds to `Config` trait |
+//! | `serde` | Adds `Serialize`/`Deserialize` to public types |
+//! | `tokio` | Enables async socket implementation |
+```
+
+**Anti-pattern: Conditional bounds without documentation**
+
+```rust
+// ❌ Users can't tell why their code fails with/without a feature
+#[cfg(feature = "sync")]
+pub trait Config: Clone + Send + Sync {}
+
+#[cfg(not(feature = "sync"))]
+pub trait Config: Clone {}
+
+// ✅ At minimum, add #[doc(cfg(...))] or explain in docs
+#[cfg_attr(feature = "sync", doc = "Requires `Send + Sync` when `sync` feature is enabled.")]
+pub trait Config: /* ... */ {}
+```
+
 ---
 
 ## Versioning and Compatibility

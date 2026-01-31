@@ -1034,6 +1034,42 @@ pub struct PlayerId(u32);
 
 **Why:** The orphan rule prevents downstream users from adding these impls.
 
+**Anti-pattern: Duplicate methods alongside trait implementations**
+
+When implementing a standard trait, don't add a separate method that does the same thing:
+
+```rust
+// ❌ ANTI-PATTERN: Duplicate functionality
+impl std::fmt::Display for Frame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Frame {
+    // This duplicates Display and will likely never be used
+    pub fn display_with(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// ✅ CORRECT: Just implement the trait
+impl std::fmt::Display for Frame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// Users use: format!("{}", frame) or frame.to_string()
+```
+
+**Why duplicate methods are problematic:**
+
+- Increases maintenance burden (two places to update)
+- Confuses users about which to use
+- May never be discovered or tested
+- Violates DRY (Don't Repeat Yourself)
+
 ---
 
 ### 28. Meaningful Error Types (C-GOOD-ERR)

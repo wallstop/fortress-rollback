@@ -793,7 +793,9 @@ Before submitting code:
 - [ ] Rustdoc comments with examples
 - [ ] 100% safe Rust (no unsafe)
 - [ ] Handles all error cases
-- [ ] **Changelog reviewed:** Asked "Does this affect `pub` items or user-observable behavior?" — if yes, added entry to CHANGELOG.md
+- [ ] **No duplicate methods:** If implementing `Display`/`Debug`/`Hash`/etc., don't add separate methods duplicating that functionality
+- [ ] **Feature-dependent APIs documented:** If `#[cfg(feature = ...)]` affects trait bounds or available methods, document it in rustdoc
+- [ ] **Changelog reviewed:** Asked "Does this affect `pub` items or user-observable behavior?" — if yes, added entry to CHANGELOG.md (including new trait impls like `Display`)
 
 ---
 
