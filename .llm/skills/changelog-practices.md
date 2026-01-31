@@ -58,6 +58,7 @@ Examples:
 - Changing return types
 - Changing default behavior
 - **Adding enum variants to exhaustively matchable enums** (see below)
+- **Changing `Display` or `Debug` output format** (see "Output Format Changes" below)
 
 ### Enum Variants Are Breaking Changes (Unless `#[non_exhaustive]`)
 
@@ -140,6 +141,46 @@ New implementations of standard traits on public types **should be documented** 
 - `Hash` — Users can use the type as `HashMap`/`HashSet` keys
 - `Serialize`/`Deserialize` — Users can persist or transmit values
 - `Clone`/`Copy` — Changes how users can work with the type
+
+### Output Format Changes (MUST document as Breaking)
+
+**Critical:** Changing the output of `Display` or `Debug` implementations is a **breaking change** if users might depend on the format.
+
+```rust
+// ❌ Format change — BREAKING if users parse/match output
+// Before: "Player 0"
+// After:  "PlayerHandle(0)"
+impl Display for PlayerHandle { ... }
+```
+
+**Why format changes break user code:**
+
+- Log parsing scripts may match on specific patterns
+- Tests may assert on formatted output
+- Error messages containing formatted types change
+- Serialization or display in UIs may break
+
+**CHANGELOG entry for format changes:**
+
+```markdown
+### Changed
+
+- **Breaking:** `PlayerHandle` now displays as `PlayerHandle(N)` instead of `Player N`. Update any code that parses or matches the previous format.
+```
+
+**When format changes are NOT breaking:**
+
+- The type is new (no existing users)
+- The previous format was explicitly documented as unstable
+- The change only affects `Debug` AND the type documents that `Debug` output is not stable
+
+**Best practice:** If you want flexibility to change formats, document that the format is not stable:
+
+```rust
+/// Note: The exact format of the `Display` output is not stable
+/// and may change in future versions.
+impl Display for InternalId { ... }
+```
 
 ### New Features (SHOULD document)
 

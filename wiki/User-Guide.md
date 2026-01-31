@@ -61,7 +61,7 @@ struct MyInput {
     buttons: u8,
 }
 
-// 2. Define your game state (must be Clone + Serialize/Deserialize for checksums)
+// 2. Define your game state (Clone required for rollback, Serialize/Deserialize needed for checksums)
 #[derive(Clone, Serialize, Deserialize)]
 struct MyGameState {
     frame: i32,
@@ -192,9 +192,10 @@ Your input type must:
 
 ### State Type Requirements
 
-Your state type must:
+Your state type requirements depend on feature flags:
 
-- Be `Clone` (for saving/loading)
+- **Default** (no `sync-send`): No compile-time bounds on `State`, but `Clone` is required in practice for `GameStateCell::load()` during rollback
+- **With `sync-send` feature**: `State` must be `Clone + Send + Sync`
 
 **Optional but recommended:**
 

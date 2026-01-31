@@ -1057,7 +1057,7 @@ pub trait Config: 'static {
 This ensures:
 
 - Input types are serializable for network transmission
-- State types are clonable for saving
+- State types are clonable (required in practice for `GameStateCell::load()` during rollback; compile-time `Clone` bound only with `sync-send` feature)
 - Addresses can be used as map keys
 
 ---
