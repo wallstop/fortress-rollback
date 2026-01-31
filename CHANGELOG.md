@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+## [0.4.1]
+
 - **Breaking:** `PlayerHandle` Display format changed from raw index (`0`) to labeled format (`PlayerHandle(0)`) for clearer log output. Update any code that parses `PlayerHandle` Display output.
 
 ## [0.4.0] - 2026-01-30
