@@ -64,6 +64,26 @@ pub enum SyncHealth {
     },
 }
 
+impl std::fmt::Display for SyncHealth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InSync => write!(f, "InSync"),
+            Self::Pending => write!(f, "Pending"),
+            Self::DesyncDetected {
+                frame,
+                local_checksum,
+                remote_checksum,
+            } => write!(
+                f,
+                "DesyncDetected(frame={}, local={:#x}, remote={:#x})",
+                frame.as_i32(),
+                local_checksum,
+                remote_checksum
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::panic,
@@ -162,5 +182,33 @@ mod tests {
         let debug_str = format!("{:?}", desync);
         assert!(debug_str.contains("DesyncDetected"));
         assert!(debug_str.contains("42"));
+    }
+
+    // ==========================================
+    // SyncHealth Display Tests
+    // ==========================================
+
+    #[test]
+    fn sync_health_display_in_sync() {
+        assert_eq!(SyncHealth::InSync.to_string(), "InSync");
+    }
+
+    #[test]
+    fn sync_health_display_pending() {
+        assert_eq!(SyncHealth::Pending.to_string(), "Pending");
+    }
+
+    #[test]
+    fn sync_health_display_desync_detected() {
+        let desync = SyncHealth::DesyncDetected {
+            frame: Frame::new(42),
+            local_checksum: 0x1234,
+            remote_checksum: 0x5678,
+        };
+        let display = desync.to_string();
+        assert!(display.starts_with("DesyncDetected("));
+        assert!(display.contains("frame=42"));
+        assert!(display.contains("local=0x1234"));
+        assert!(display.contains("remote=0x5678"));
     }
 }

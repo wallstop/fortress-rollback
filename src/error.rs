@@ -391,28 +391,28 @@ impl Display for InternalErrorKind {
                 write!(
                     f,
                     "disconnect status not found for player handle {}",
-                    player_handle
+                    player_handle.as_usize()
                 )
             },
             Self::EndpointNotFoundForRemote { player_handle } => {
                 write!(
                     f,
                     "endpoint not found for registered remote player {}",
-                    player_handle
+                    player_handle.as_usize()
                 )
             },
             Self::EndpointNotFoundForSpectator { player_handle } => {
                 write!(
                     f,
                     "endpoint not found for registered spectator {}",
-                    player_handle
+                    player_handle.as_usize()
                 )
             },
             Self::ConnectionStatusIndexOutOfBounds { player_handle } => {
                 write!(
                     f,
                     "connection status index out of bounds for player handle {}",
-                    player_handle
+                    player_handle.as_usize()
                 )
             },
             Self::RleDecodeError { reason } => {
@@ -599,20 +599,20 @@ impl Display for InvalidRequestKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PlayerHandleInUse { handle } => {
-                write!(f, "player handle {} is already in use", handle)
+                write!(f, "player handle {} is already in use", handle.as_usize())
             },
             Self::NotLocalPlayer { handle } => {
                 write!(
                     f,
                     "player handle {} does not refer to a local player",
-                    handle
+                    handle.as_usize()
                 )
             },
             Self::NotRemotePlayerOrSpectator { handle } => {
                 write!(
                     f,
                     "player handle {} does not refer to a remote player or spectator",
-                    handle
+                    handle.as_usize()
                 )
             },
             Self::InvalidLocalPlayerHandle {
@@ -622,7 +622,8 @@ impl Display for InvalidRequestKind {
                 write!(
                     f,
                     "invalid local player handle {}: num_players is {}",
-                    handle, num_players
+                    handle.as_usize(),
+                    num_players
                 )
             },
             Self::InvalidRemotePlayerHandle {
@@ -632,7 +633,8 @@ impl Display for InvalidRequestKind {
                 write!(
                     f,
                     "invalid remote player handle {}: num_players is {}",
-                    handle, num_players
+                    handle.as_usize(),
+                    num_players
                 )
             },
             Self::InvalidSpectatorHandle {
@@ -642,7 +644,8 @@ impl Display for InvalidRequestKind {
                 write!(
                     f,
                     "invalid spectator handle {}: num_players is {}",
-                    handle, num_players
+                    handle.as_usize(),
+                    num_players
                 )
             },
             Self::MissingLocalInput => write!(f, "missing local input for one or more players"),
@@ -745,13 +748,17 @@ impl Display for InvalidRequestKind {
                 )
             },
             Self::DisconnectInvalidHandle { handle } => {
-                write!(f, "cannot disconnect: player handle {} is invalid", handle)
+                write!(
+                    f,
+                    "cannot disconnect: player handle {} is invalid",
+                    handle.as_usize()
+                )
             },
             Self::DisconnectLocalPlayer { handle } => {
-                write!(f, "cannot disconnect local player {}", handle)
+                write!(f, "cannot disconnect local player {}", handle.as_usize())
             },
             Self::AlreadyDisconnected { handle } => {
-                write!(f, "player {} is already disconnected", handle)
+                write!(f, "player {} is already disconnected", handle.as_usize())
             },
             Self::WrongProtocolState {
                 current_state,
@@ -1041,7 +1048,8 @@ impl Display for FortressError {
                 write!(
                     f,
                     "Missing input for player {} at frame {}",
-                    player_handle, frame
+                    player_handle.as_usize(),
+                    frame
                 )
             },
             Self::SerializationError { context } => {

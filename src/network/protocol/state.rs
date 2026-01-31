@@ -159,6 +159,12 @@ impl ProtocolState {
     }
 }
 
+impl std::fmt::Display for ProtocolState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::panic,
@@ -272,6 +278,32 @@ mod tests {
         assert_eq!(format!("{:?}", ProtocolState::Running), "Running");
         assert_eq!(format!("{:?}", ProtocolState::Disconnected), "Disconnected");
         assert_eq!(format!("{:?}", ProtocolState::Shutdown), "Shutdown");
+    }
+
+    // ==========================================================================
+    // Display Trait Tests
+    // ==========================================================================
+
+    #[test]
+    fn protocol_state_display_all_variants() {
+        assert_eq!(format!("{}", ProtocolState::Initializing), "Initializing");
+        assert_eq!(format!("{}", ProtocolState::Synchronizing), "Synchronizing");
+        assert_eq!(format!("{}", ProtocolState::Running), "Running");
+        assert_eq!(format!("{}", ProtocolState::Disconnected), "Disconnected");
+        assert_eq!(format!("{}", ProtocolState::Shutdown), "Shutdown");
+    }
+
+    #[test]
+    fn protocol_state_display_matches_as_str() {
+        for state in [
+            ProtocolState::Initializing,
+            ProtocolState::Synchronizing,
+            ProtocolState::Running,
+            ProtocolState::Disconnected,
+            ProtocolState::Shutdown,
+        ] {
+            assert_eq!(format!("{}", state), state.as_str());
+        }
     }
 
     // ==========================================================================

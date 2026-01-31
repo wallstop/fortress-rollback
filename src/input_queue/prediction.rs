@@ -90,6 +90,12 @@ pub trait PredictionStrategy<I: Copy + Default>: Send + Sync {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RepeatLastConfirmed;
 
+impl std::fmt::Display for RepeatLastConfirmed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RepeatLastConfirmed")
+    }
+}
+
 impl<I: Copy + Default> PredictionStrategy<I> for RepeatLastConfirmed {
     fn predict(&self, _frame: Frame, last_confirmed_input: Option<I>, _player_index: usize) -> I {
         last_confirmed_input.unwrap_or_default()
@@ -102,6 +108,12 @@ impl<I: Copy + Default> PredictionStrategy<I> for RepeatLastConfirmed {
 /// safer for some game types where repeating the last input could be dangerous.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlankPrediction;
+
+impl std::fmt::Display for BlankPrediction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "BlankPrediction")
+    }
+}
 
 impl<I: Copy + Default> PredictionStrategy<I> for BlankPrediction {
     fn predict(&self, _frame: Frame, _last_confirmed: Option<I>, _player_index: usize) -> I {
@@ -181,6 +193,16 @@ mod tests {
         let strategy = BlankPrediction;
         let debug_str = format!("{:?}", strategy);
         assert!(debug_str.contains("BlankPrediction"));
+    }
+
+    #[test]
+    fn test_repeat_last_confirmed_display() {
+        assert_eq!(RepeatLastConfirmed.to_string(), "RepeatLastConfirmed");
+    }
+
+    #[test]
+    fn test_blank_prediction_display() {
+        assert_eq!(BlankPrediction.to_string(), "BlankPrediction");
     }
 
     #[test]
