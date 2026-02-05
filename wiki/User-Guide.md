@@ -1,3 +1,5 @@
+<!-- SYNC: This file should be kept in sync with docs/user-guide.md -->
+
 <p align="center">
   <img src="assets/logo.svg" alt="Fortress Rollback" width="128">
 </p>
@@ -11,11 +13,12 @@ This guide walks you through integrating Fortress Rollback into your game. By th
 1. [Quick Start](#quick-start)
 2. [Defining Your Config](#defining-your-config)
 3. [Setting Up a P2P Session](#setting-up-a-p2p-session)
-4. [The Game Loop](#the-game-loop)
-5. [Handling Requests](#handling-requests)
-6. [Handling Events](#handling-events)
-7. [Determinism Requirements](#determinism-requirements)
-8. [Network Requirements](#network-requirements)
+4. [Player Handle Convenience Methods](#player-handle-convenience-methods)
+5. [The Game Loop](#the-game-loop)
+6. [Handling Requests](#handling-requests)
+7. [Handling Events](#handling-events)
+8. [Determinism Requirements](#determinism-requirements)
+9. [Network Requirements](#network-requirements)
    - [Network Scenario Configuration Guide](#network-scenario-configuration-guide)
      - [LAN / Local Network](#lan--local-network--20ms-rtt)
      - [Regional Internet](#regional-internet-20-80ms-rtt)
@@ -24,21 +27,27 @@ This guide walks you through integrating Fortress Rollback into your game. By th
      - [Competitive/Tournament](#competitivetournament-strict-requirements)
      - [Casual Multiplayer](#casual-multiplayer-4-players)
      - [Spectator Streaming](#spectator-streaming)
-9. [Advanced Configuration](#advanced-configuration)
-10. [Feature Flags](#feature-flags)
+     - [Network Quality Monitoring](#network-quality-monitoring)
+10. [Advanced Configuration](#advanced-configuration)
+    - [ChaosSocket for Testing](#chaossocket-for-testing)
+    - [ChaosConfig Presets](#chaosconfig-presets)
+    - [ChaosStats](#chaosstats)
+    - [SessionState](#sessionstate)
+    - [Prediction Strategies](#prediction-strategies)
+11. [Feature Flags](#feature-flags)
     - [Feature Flag Reference](#feature-flag-reference)
     - [Feature Flag Combinations](#feature-flag-combinations)
     - [Web / WASM Integration](#web--wasm-integration)
     - [Platform-Specific Features](#platform-specific-features)
-11. [Spectator Sessions](#spectator-sessions)
-12. [Testing with SyncTest](#testing-with-synctest)
-13. [Common Patterns](#common-patterns)
-14. [Common Pitfalls](#common-pitfalls)
+12. [Spectator Sessions](#spectator-sessions)
+13. [Testing with SyncTest](#testing-with-synctest)
+14. [Common Patterns](#common-patterns)
+15. [Common Pitfalls](#common-pitfalls)
     - [Session Termination Anti-Pattern](#session-termination-the-last_confirmed_frame-anti-pattern)
     - [Desync Detection Defaults](#understanding-desync-detection-defaults)
     - [NetworkStats Checksum Fields](#networkstats-checksum-fields-for-desync-detection)
-15. [Desync Detection and SyncHealth API](#desync-detection-and-synchealth-api)
-16. [Troubleshooting](#troubleshooting)
+16. [Desync Detection and SyncHealth API](#desync-detection-and-synchealth-api)
+17. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -102,6 +111,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Only process frames when synchronized
         if session.current_state() == SessionState::Running {
             // Add local input
+            // Tip: For cleaner player handle management, see the
+            // "Player Handle Convenience Methods" section below
             let input = MyInput { buttons: 0 }; // Get real input here
             session.add_local_input(PlayerHandle::new(0), input)?;
 
@@ -136,7 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 > - **[`handle_requests!` macro](#using-the-handle_requests-macro)** — Eliminate match boilerplate with a concise macro
 > - **[`compute_checksum()`](#computing-checksums)** — Enable desync detection with built-in deterministic hashing
 > - **[Config Presets](#syncconfig-presets)** — Use `SyncConfig::lan()`, `ProtocolConfig::competitive()`, etc. for common network conditions
-> - **[Request Handling Example](https://github.com/wallstop/fortress-rollback/blob/main/examples/request_handling.rs)** — Complete example showing both manual matching and macro usage
+> - **[Request Handling Example](../examples/request_handling.rs)** — Complete example showing both manual matching and macro usage
 
 ---
 
@@ -274,6 +285,187 @@ In lockstep mode:
 - No save/load requests
 - Frame rate limited by slowest connection
 - Good for turn-based or slower-paced games
+
+---
+
+## Player Handle Convenience Methods
+
+Once you've added players to a session, you'll often need to work with their handles—for adding inputs, checking player types, or iterating over specific player groups. Fortress Rollback provides convenience methods that make common patterns cleaner and less error-prone.
+
+### Two-Player Games (1v1)
+
+For the typical 1v1 networked game with one local and one remote player:
+
+```rust
+# use fortress_rollback::{FortressError, PlayerHandle};
+# struct Session;
+# impl Session {
+#     fn local_player_handle_required(&self) -> Result<PlayerHandle, FortressError> { Ok(PlayerHandle::new(0)) }
+#     fn remote_player_handle_required(&self) -> Result<PlayerHandle, FortressError> { Ok(PlayerHandle::new(1)) }
+#     fn add_local_input(&mut self, h: PlayerHandle, i: u8) -> Result<(), FortressError> { Ok(()) }
+#     fn network_stats(&self, h: PlayerHandle) -> Result<Stats, FortressError> { Ok(Stats) }
+# }
+# struct Stats;
+# fn get_local_input() -> u8 { 0 }
+# fn main() -> Result<(), FortressError> {
+# let mut session = Session;
+// Get the single local player's handle (returns error if not exactly 1)
+let local = session.local_player_handle_required()?;
+session.add_local_input(local, get_local_input())?;
+
+// Get the single remote player's handle for stats
+let remote = session.remote_player_handle_required()?;
+let stats = session.network_stats(remote)?;
+# Ok(())
+# }
+```
+
+The `*_required()` methods return an error if there isn't exactly one player of that type, catching configuration mistakes early.
+
+### Multi-Player Games
+
+For games with multiple local players (couch co-op) or multiple remotes:
+
+```rust
+# use fortress_rollback::{FortressError, PlayerHandle};
+# use fortress_rollback::HandleVec;
+# struct Session;
+# impl Session {
+#     fn local_player_handles(&self) -> HandleVec { HandleVec::new() }
+#     fn remote_player_handles(&self) -> HandleVec { HandleVec::new() }
+#     fn add_local_input(&mut self, h: PlayerHandle, i: u8) -> Result<(), FortressError> { Ok(()) }
+#     fn network_stats(&self, h: PlayerHandle) -> Result<Stats, FortressError> { Ok(Stats) }
+# }
+# struct Stats { ping: u32 }
+# fn get_input_for_controller(i: usize) -> u8 { 0 }
+# fn main() -> Result<(), FortressError> {
+# let mut session = Session;
+// Add input for all local players (e.g., two controllers on one machine)
+for (i, handle) in session.local_player_handles().into_iter().enumerate() {
+    let input = get_input_for_controller(i);
+    session.add_local_input(handle, input)?;
+}
+
+// Check network stats for all remote players
+for handle in session.remote_player_handles() {
+    let stats = session.network_stats(handle)?;
+    if stats.ping > 150 {
+        println!("High latency with player {:?}", handle);
+    }
+}
+# Ok(())
+# }
+```
+
+### Checking Player Types
+
+When you need to handle different player types differently:
+
+```rust
+# use fortress_rollback::{PlayerHandle, PlayerType};
+# use std::net::SocketAddr;
+# use fortress_rollback::HandleVec;
+# struct Session;
+# impl Session {
+#     fn all_player_handles(&self) -> HandleVec { HandleVec::new() }
+#     fn is_local_player(&self, h: PlayerHandle) -> bool { false }
+#     fn is_remote_player(&self, h: PlayerHandle) -> bool { false }
+#     fn is_spectator_handle(&self, h: PlayerHandle) -> bool { false }
+#     fn player_type(&self, h: PlayerHandle) -> Option<PlayerType<SocketAddr>> { None }
+# }
+# fn main() {
+# let session = Session;
+// Iterate all handles and branch by type
+for handle in session.all_player_handles() {
+    if session.is_local_player(handle) {
+        // Add local input
+    } else if session.is_remote_player(handle) {
+        // Show network indicator in UI
+    } else if session.is_spectator_handle(handle) {
+        // Show spectator badge
+    }
+}
+
+// Or use player_type() for full details
+for handle in session.all_player_handles() {
+    match session.player_type(handle) {
+        Some(PlayerType::Local) => println!("Local player: {:?}", handle),
+        Some(PlayerType::Remote(addr)) => println!("Remote at {}: {:?}", addr, handle),
+        Some(PlayerType::Spectator(addr)) => println!("Spectator at {}: {:?}", addr, handle),
+        None => {} // Handle not found
+    }
+}
+# }
+```
+
+### Counting Players
+
+For matchmaking UI or game logic that depends on player counts:
+
+```rust
+# struct Session;
+# impl Session {
+#     fn num_local_players(&self) -> usize { 1 }
+#     fn num_remote_players(&self) -> usize { 1 }
+# }
+# fn main() {
+# let session = Session;
+let local_count = session.num_local_players();
+let remote_count = session.num_remote_players();
+
+if local_count > 1 {
+    println!("Local co-op mode with {} players", local_count);
+}
+println!("Connected to {} remote players", remote_count);
+# }
+```
+
+### SyncTestSession Methods
+
+`SyncTestSession` has similar methods for consistency, though all players are local:
+
+```rust
+# use fortress_rollback::{FortressError, PlayerHandle, SyncTestSession};
+# use std::net::SocketAddr;
+# struct TestConfig;
+# impl fortress_rollback::Config for TestConfig {
+#     type Input = u8;
+#     type State = ();
+#     type Address = SocketAddr;
+# }
+# fn main() -> Result<(), FortressError> {
+let session: SyncTestSession<TestConfig> =
+    fortress_rollback::SessionBuilder::new()
+        .with_num_players(1)?
+        .start_synctest_session()?;
+
+// Single-player sync test
+let handle = session.local_player_handle_required()?;
+
+// Multi-player sync test
+let all_handles = session.local_player_handles();
+# Ok(())
+# }
+```
+
+### Method Reference
+
+| Method | Returns | Use Case |
+|--------|---------|----------|
+| `local_player_handle()` | `Option<PlayerHandle>` | First local player (if any) |
+| `local_player_handle_required()` | `Result<PlayerHandle>` | Single local player or error |
+| `local_player_handles()` | `HandleVec` | All local players |
+| `remote_player_handle()` | `Option<PlayerHandle>` | First remote player (if any) |
+| `remote_player_handle_required()` | `Result<PlayerHandle>` | Single remote player or error |
+| `remote_player_handles()` | `HandleVec` | All remote players |
+| `is_local_player(handle)` | `bool` | Check if handle is local |
+| `is_remote_player(handle)` | `bool` | Check if handle is remote |
+| `is_spectator_handle(handle)` | `bool` | Check if handle is spectator |
+| `spectator_handles()` | `HandleVec` | All spectator handles |
+| `player_type(handle)` | `Option<PlayerType>` | Full type info for handle |
+| `num_local_players()` | `usize` | Count of local players |
+| `num_remote_players()` | `usize` | Count of remote players |
+| `all_player_handles()` | `HandleVec` | All handles (local + remote + spectators) |
 
 ---
 
@@ -1138,9 +1330,12 @@ flowchart TD
 For games with matchmaking, consider adjusting configuration based on measured network conditions:
 
 ```rust
-fn configure_for_network(rtt_ms: u32, packet_loss_percent: f32) -> SessionBuilder<GameConfig> {
+fn configure_for_network(
+    rtt_ms: u32,
+    packet_loss_percent: f32,
+) -> Result<SessionBuilder<GameConfig>, FortressError> {
     let mut builder = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2);
+        .with_num_players(2)?;
 
     // Adjust input delay based on RTT
     let input_delay = match rtt_ms {
@@ -1150,7 +1345,7 @@ fn configure_for_network(rtt_ms: u32, packet_loss_percent: f32) -> SessionBuilde
         101..=150 => 3,
         _ => 4,
     };
-    builder = builder.with_input_delay(input_delay);
+    builder = builder.with_input_delay(input_delay)?;
 
     // Choose sync config based on conditions
     let sync_config = if packet_loss_percent > 5.0 {
@@ -1173,15 +1368,17 @@ fn configure_for_network(rtt_ms: u32, packet_loss_percent: f32) -> SessionBuilde
     };
     builder = builder.with_max_prediction_window(prediction_window);
 
-    builder
+    Ok(builder)
 }
 ```
 
 ### Network Quality Monitoring
 
-Monitor network quality using session statistics:
+Monitor network quality using the `NetworkStats` struct returned by `session.network_stats(handle)`:
 
 ```rust
+use fortress_rollback::NetworkStats;
+
 // Check network stats for each remote player
 for handle in session.remote_player_handles() {
     if let Ok(stats) = session.network_stats(handle) {
@@ -1195,6 +1392,44 @@ for handle in session.remote_player_handles() {
 
         if pending > 10 {
             println!("Warning: Network congestion with player {:?}", handle);
+        }
+    }
+}
+```
+
+#### NetworkStats Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ping` | `u128` | Round-trip time in milliseconds |
+| `send_queue_len` | `usize` | Number of unacknowledged packets (connection quality indicator) |
+| `kbps_sent` | `usize` | Estimated bandwidth usage in kilobits per second |
+| `local_frames_behind` | `i32` | How many frames behind the local client is compared to remote |
+| `remote_frames_behind` | `i32` | How many frames behind the remote client is compared to local |
+| `last_compared_frame` | `Option<Frame>` | Most recent frame where checksums were compared |
+| `local_checksum` | `Option<u128>` | Local checksum at `last_compared_frame` |
+| `remote_checksum` | `Option<u128>` | Remote checksum at `last_compared_frame` |
+| `checksums_match` | `Option<bool>` | `true` if synchronized, `false` if desync detected |
+
+#### Example: Debug Overlay
+
+```rust
+fn display_network_debug(session: &P2PSession<MyConfig>) {
+    for handle in session.remote_player_handles() {
+        if let Ok(stats) = session.network_stats(handle) {
+            println!("Player {:?}:", handle);
+            println!("  RTT: {}ms", stats.ping);
+            println!("  Bandwidth: {} kbps", stats.kbps_sent);
+            println!("  Send queue: {} packets", stats.send_queue_len);
+            println!("  Frame diff: local {} behind, remote {} behind",
+                     stats.local_frames_behind, stats.remote_frames_behind);
+
+            // Desync status
+            match stats.checksums_match {
+                Some(true) => println!("  Sync: ✓ OK"),
+                Some(false) => println!("  Sync: ✗ DESYNC!"),
+                None => println!("  Sync: pending"),
+            }
         }
     }
 }
@@ -1267,18 +1502,189 @@ impl NonBlockingSocket<MyAddress> for MyCustomSocket {
 Test network resilience with `ChaosSocket`:
 
 ```rust
-use fortress_rollback::{ChaosConfigBuilder, ChaosSocket, UdpNonBlockingSocket};
+use fortress_rollback::{ChaosConfig, ChaosSocket, UdpNonBlockingSocket};
 
 let inner_socket = UdpNonBlockingSocket::bind_to_port(7000)?;
 
-let chaos_config = ChaosConfigBuilder::default()
-    .latency(50)           // 50ms base latency
-    .jitter(20)            // +/- 20ms jitter
-    .packet_loss(0.05)     // 5% packet loss
+let chaos_config = ChaosConfig::builder()
+    .latency_ms(50)        // 50ms base latency
+    .jitter_ms(20)         // +/- 20ms jitter
+    .packet_loss_rate(0.05) // 5% packet loss
     .build();
 
 let socket = ChaosSocket::new(inner_socket, chaos_config);
 ```
+
+#### ChaosConfig Presets
+
+`ChaosConfig` provides several presets for common network scenarios:
+
+| Preset | Latency | Jitter | Loss | Use Case |
+|--------|---------|--------|------|----------|
+| `passthrough()` | 0ms | 0ms | 0% | No chaos (transparent wrapper) |
+| `poor_network()` | 100ms | 50ms | 5% | Typical poor connection |
+| `terrible_network()` | 250ms | 100ms | 15% | Stress testing, 2% duplication, reordering |
+| `mobile_network()` | 60ms | 40ms | 12% | 4G/LTE with burst loss (handoff simulation) |
+| `wifi_interference()` | 15ms | 25ms | 3% | Congested WiFi with bursty loss |
+| `intercontinental()` | 120ms | 15ms | 2% | Transatlantic/transpacific connections |
+
+**Using presets:**
+
+```rust
+use fortress_rollback::{ChaosSocket, ChaosConfig, UdpNonBlockingSocket};
+
+// Test with poor network conditions
+let inner = UdpNonBlockingSocket::bind_to_port(7000)?;
+let socket = ChaosSocket::new(inner, ChaosConfig::poor_network());
+
+// Test mobile network behavior (burst loss, high jitter)
+let inner = UdpNonBlockingSocket::bind_to_port(7001)?;
+let mobile_socket = ChaosSocket::new(inner, ChaosConfig::mobile_network());
+
+// Cross-region testing (high stable latency)
+let inner = UdpNonBlockingSocket::bind_to_port(7002)?;
+let intl_socket = ChaosSocket::new(inner, ChaosConfig::intercontinental());
+```
+
+**Custom configurations:**
+
+For more control, use the builder pattern with `high_latency()` or `lossy()`:
+
+```rust
+use fortress_rollback::ChaosConfig;
+use std::time::Duration;
+
+// High latency only
+let high_lat = ChaosConfig::high_latency(200); // 200ms latency
+
+// Packet loss only
+let lossy = ChaosConfig::lossy(0.10); // 10% symmetric loss
+
+// Fully custom
+let custom = ChaosConfig::builder()
+    .latency(Duration::from_millis(75))
+    .jitter(Duration::from_millis(25))
+    .send_loss_rate(0.08)
+    .receive_loss_rate(0.05)
+    .duplication_rate(0.01)
+    .seed(42)  // Deterministic for reproducible tests
+    .build();
+```
+
+### ChaosStats
+
+`ChaosStats` provides statistics about `ChaosSocket` behavior, useful for verifying your test scenarios and debugging network simulation:
+
+```rust
+use fortress_rollback::{ChaosSocket, ChaosConfig, ChaosStats, UdpNonBlockingSocket};
+
+let inner = UdpNonBlockingSocket::bind_to_port(7000)?;
+let mut socket = ChaosSocket::new(inner, ChaosConfig::poor_network());
+
+// ... run your session for a while ...
+
+// Query statistics
+let stats: &ChaosStats = socket.stats();
+
+println!("Packets sent: {}", stats.packets_sent);
+println!("Packets dropped (send): {}", stats.packets_dropped_send);
+println!("Packets dropped (receive): {}", stats.packets_dropped_receive);
+println!("Packets duplicated: {}", stats.packets_duplicated);
+println!("Packets reordered: {}", stats.packets_reordered);
+println!("Burst loss events: {}", stats.burst_loss_events);
+
+// Reset statistics if needed
+socket.reset_stats();
+```
+
+| Field | Description |
+|-------|-------------|
+| `packets_sent` | Total packets sent through the socket |
+| `packets_dropped_send` | Packets dropped on send |
+| `packets_dropped_receive` | Packets dropped on receive |
+| `packets_duplicated` | Packets duplicated on send |
+| `packets_received` | Total packets received |
+| `packets_reordered` | Packets reordered |
+| `burst_loss_events` | Number of burst loss events triggered |
+| `packets_dropped_burst` | Packets dropped due to burst loss |
+
+### SessionState
+
+`SessionState` indicates the current state of a P2P or Spectator session:
+
+```rust
+use fortress_rollback::SessionState;
+
+match session.current_state() {
+    SessionState::Synchronizing => {
+        // Still establishing connection with remote peers
+        // Don't add input or advance frames yet
+        println!("Waiting for peers to synchronize...");
+    }
+    SessionState::Running => {
+        // Session is fully synchronized and ready for gameplay
+        // Safe to add local input and advance frames
+        session.add_local_input(local_handle, input)?;
+        for request in session.advance_frame()? {
+            // Handle requests...
+        }
+    }
+}
+```
+
+| State | Description | Actions Allowed |
+|-------|-------------|------------------|
+| `Synchronizing` | Establishing connection with remote peers | `poll_remote_clients()` only |
+| `Running` | Fully synchronized, ready for gameplay | All session operations |
+
+**Important:** Always check `session.current_state() == SessionState::Running` before calling `add_local_input()` or `advance_frame()`. Attempting these operations while synchronizing will return an error.
+
+### Prediction Strategies
+
+When a remote player's input hasn't arrived yet, Fortress Rollback uses a *prediction strategy* to guess what input to use. The prediction is later corrected via rollback if wrong.
+
+Two built-in strategies are available:
+
+| Strategy | Behavior | Use Case |
+|----------|----------|----------|
+| `RepeatLastConfirmed` | Repeats the player's last confirmed input | Default; good for most games |
+| `BlankPrediction` | Returns the default (blank) input | Games where repeating input is dangerous |
+
+**`RepeatLastConfirmed`** (default) assumes players tend to hold inputs for multiple frames, which is true for most games:
+
+```rust
+use fortress_rollback::RepeatLastConfirmed;
+
+// This is the default behavior - no configuration needed
+// The session automatically uses RepeatLastConfirmed
+```
+
+**`BlankPrediction`** returns a neutral/default input, useful when repeating the last input could cause unintended actions (e.g., in a game where holding "attack" is dangerous if mispredicted):
+
+```rust
+use fortress_rollback::BlankPrediction;
+
+// BlankPrediction always returns Input::default()
+// Useful for games where "do nothing" is safer than "repeat last action"
+```
+
+**Custom Strategies:** You can implement the `PredictionStrategy` trait for game-specific prediction logic:
+
+```rust
+use fortress_rollback::{Frame, PredictionStrategy};
+
+struct MyPrediction;
+
+impl<I: Copy + Default> PredictionStrategy<I> for MyPrediction {
+    fn predict(&self, frame: Frame, last_confirmed: Option<I>, player_index: usize) -> I {
+        // Custom logic here
+        // CRITICAL: Must be deterministic across all peers!
+        last_confirmed.unwrap_or_default()
+    }
+}
+```
+
+> **⚠️ Determinism Requirement:** Custom prediction strategies MUST be deterministic. All peers must produce the exact same prediction given the same inputs, or desyncs will occur.
 
 ---
 
@@ -1597,7 +2003,7 @@ impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
 }
 ```
 
-See the [custom socket example](https://github.com/wallstop/fortress-rollback/blob/main/examples/custom_socket.rs) for a complete implementation guide.
+See the [custom socket example](../examples/custom_socket.rs) for a complete implementation guide.
 
 #### Building for WASM
 
@@ -1704,11 +2110,8 @@ let mut session = SessionBuilder::<GameConfig>::new()
 // Run game loop - players are created automatically from with_num_players()
 for frame in 0..1000 {
     // Provide input for all players
-    for handle in 0..2 {
-        session.add_local_input(
-            PlayerHandle::new(handle),
-            random_input() // Use deterministic "random" for testing
-        )?;
+    for handle in session.local_player_handles() {
+        session.add_local_input(handle, random_input())?;
     }
 
     let requests = session.advance_frame()?;
@@ -1784,7 +2187,7 @@ let adjusted_time = if session.frames_ahead() > 2 {
 
 ## Common Pitfalls
 
-This section covers subtle API misuses that can lead to hard-to-debug issues. These patterns may _appear_ to work in many cases but will fail under specific conditions.
+This section covers subtle API misuses that can lead to hard-to-debug issues. These patterns may *appear* to work in many cases but will fail under specific conditions.
 
 ### Session Termination: The `last_confirmed_frame()` Anti-Pattern
 
@@ -1808,7 +2211,7 @@ This seems logical but is **fundamentally incorrect** because:
 
 **The Symptom:**
 
-Both peers show different final values even though game logic is perfectly deterministic. The frame counts differ (e.g., 179 vs 184), and checksums differ because they represent _different frames_.
+Both peers show different final values even though game logic is perfectly deterministic. The frame counts differ (e.g., 179 vs 184), and checksums differ because they represent *different frames*.
 
 **The Solution:**
 

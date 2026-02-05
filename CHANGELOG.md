@@ -16,6 +16,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `HandleVec` type alias — stack-allocated `SmallVec<[PlayerHandle; 8]>` for zero-allocation player handle queries
+- Zero-allocation iterator methods for `PlayerRegistry`:
+  - `local_player_handles_iter()` — iterate over local players without allocation
+  - `remote_player_handles_iter()` — iterate over remote players without allocation
+  - `spectator_handles_iter()` — iterate over spectators without allocation
+  - `all_player_handles_iter()` — iterate over all handles without allocation
+  - `handles_by_address_iter(addr)` — iterate over handles by address without allocation
+- Zero-allocation iterator methods for `P2PSession`:
+  - `local_player_handles_iter()` — iterate over local players without allocation
+  - `remote_player_handles_iter()` — iterate over remote players without allocation
+  - `spectator_handles_iter()` — iterate over spectators without allocation
+  - `all_player_handles_iter()` — iterate over all handles without allocation
+  - `handles_by_address_iter(addr)` — iterate over handles by address without allocation
+- Zero-allocation iterator method for `SyncTestSession`:
+  - `local_player_handles_iter()` — iterate over local players without allocation
+- `PlayerRegistry` convenience methods for player type queries:
+  - `is_local_player(handle)` — check if handle is a local player
+  - `is_remote_player(handle)` — check if handle is a remote player
+  - `is_spectator_handle(handle)` — check if handle is a spectator
+  - `player_type(handle)` — get the `PlayerType` for a handle
+  - `num_local_players()` — count of local players
+  - `num_remote_players()` — count of remote players (excluding spectators)
+  - `all_player_handles()` — all registered handles
+  - `remote_player_handle_required()` — returns error if not exactly 1 remote player
+- `P2PSession` convenience methods for 1-local-player games:
+  - `local_player_handle()` — first local player handle (returns `Option`)
+  - `local_player_handle_required()` — returns error if not exactly 1 local player
+  - `remote_player_handle()` — first remote player handle
+  - `remote_player_handle_required()` — returns error if not exactly 1 remote player
+  - `is_local_player(handle)` — check if handle is a local player
+  - `is_remote_player(handle)` — check if handle is a remote player
+  - `is_spectator_handle(handle)` — check if handle is a spectator
+  - `player_type(handle)` — get the `PlayerType` for a handle
+  - `num_local_players()` — count of local players
+  - `num_remote_players()` — count of remote players
+  - `all_player_handles()` — all registered handles
+- `SyncTestSession` convenience methods:
+  - `local_player_handles()` — all player handles (all are local in sync test)
+  - `local_player_handle()` — first local player handle (returns `Option`)
+  - `local_player_handle_required()` — returns error if not exactly 1 player
 - `Display` impl for core types: `Frame`, `PlayerHandle`, `DesyncDetection`, `PlayerType`, `SessionState`, `InputStatus`, `FortressEvent`, `FortressRequest` — enables human-readable formatting for logging and debugging
 - `Display` impl for configuration types: `SyncConfig`, `ProtocolConfig`, `SpectatorConfig`, `InputQueueConfig`, `TimeSyncConfig`, `SaveMode` — enables configuration summary output
 - `Display` impl for network types: `NetworkStats`, `ConnectionStatus`, `ProtocolState`, `Event`, `ChaosConfig`, `ChaosStats` — enables network diagnostics logging
@@ -26,6 +66,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Display` impl for telemetry types: `ViolationSeverity`, `ViolationKind`, `SpecViolation`, `InvariantViolation` — enables telemetry output
 
 ### Changed
+
+- **Breaking:** `PlayerRegistry::local_player_handles()` now returns `HandleVec` instead of `Vec<PlayerHandle>`. `HandleVec` implements `Deref<Target = [PlayerHandle]>`, so most code using `.iter()`, `.len()`, or slice operations works unchanged. Use `.to_vec()` if you need a `Vec`.
+- **Breaking:** `PlayerRegistry::remote_player_handles()` now returns `HandleVec` instead of `Vec<PlayerHandle>`
+- **Breaking:** `PlayerRegistry::spectator_handles()` now returns `HandleVec` instead of `Vec<PlayerHandle>`
+- **Breaking:** `PlayerRegistry::all_player_handles()` now returns `HandleVec` instead of `Vec<PlayerHandle>`
+- **Breaking:** `PlayerRegistry::handles_by_address()` now returns `HandleVec` instead of `Vec<PlayerHandle>`
+- **Breaking:** `P2PSession::local_player_handles()` now returns `HandleVec` instead of `Vec<PlayerHandle>`
+- **Breaking:** `P2PSession::remote_player_handles()` now returns `HandleVec` instead of `Vec<PlayerHandle>`
+- **Breaking:** `P2PSession::spectator_handles()` now returns `HandleVec` instead of `Vec<PlayerHandle>`
+- **Breaking:** `P2PSession::all_player_handles()` now returns `HandleVec` instead of `Vec<PlayerHandle>`
+- **Breaking:** `P2PSession::handles_by_address()` now returns `HandleVec` instead of `Vec<PlayerHandle>`
+- **Breaking:** `SyncTestSession::local_player_handles()` now returns `HandleVec` instead of `Vec<PlayerHandle>`
+- **Breaking:** Added `InvalidRequestKind::NoLocalPlayers` variant — exhaustive matches on `InvalidRequestKind` must now handle this case
+- **Breaking:** Added `InvalidRequestKind::MultipleLocalPlayers` variant — exhaustive matches on `InvalidRequestKind` must now handle this case
+- **Breaking:** Added `InvalidRequestKind::NoRemotePlayers` variant — exhaustive matches on `InvalidRequestKind` must now handle this case
+- **Breaking:** Added `InvalidRequestKind::MultipleRemotePlayers` variant — exhaustive matches on `InvalidRequestKind` must now handle this case
+- **Breaking:** `P2PSession::is_spectator()` renamed to `is_spectator_handle()` for consistency with `PlayerRegistry`. Update calls from `session.is_spectator(handle)` to `session.is_spectator_handle(handle)`.
+- Optimized convenience methods `local_player_handle()`, `remote_player_handle()`, `local_player_handle_required()`, and `remote_player_handle_required()` to use iterators directly, avoiding temporary allocations
 
 ## [0.4.1]
 

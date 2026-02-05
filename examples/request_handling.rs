@@ -283,12 +283,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Simulating Frames ---\n");
 
     for frame_num in 0..5 {
-        // Add local input for both players
+        // Add local input for both players using local_player_handles()
         let input = GameInput {
             buttons: (frame_num % 3) as u8,
         };
-        session.add_local_input(PlayerHandle::new(0), input)?;
-        session.add_local_input(PlayerHandle::new(1), input)?;
+        for handle in session.local_player_handles() {
+            session.add_local_input(handle, input)?;
+        }
 
         // Check if session is ready (both "local" players are always ready)
         if session.current_state() == SessionState::Running {

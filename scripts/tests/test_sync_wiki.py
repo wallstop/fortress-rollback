@@ -26,6 +26,7 @@ import pytest
 # Import functions from the loaded module
 convert_admonitions = sync_wiki.convert_admonitions
 convert_grid_cards_to_list = sync_wiki.convert_grid_cards_to_list
+convert_links = sync_wiki.convert_links
 dedent_mkdocs_tabs = sync_wiki.dedent_mkdocs_tabs
 find_code_fence_ranges = sync_wiki.find_code_fence_ranges
 find_inline_code_ranges = sync_wiki.find_inline_code_ranges
@@ -34,6 +35,7 @@ strip_mkdocs_attributes = sync_wiki.strip_mkdocs_attributes
 strip_mkdocs_features = sync_wiki.strip_mkdocs_features
 strip_mkdocs_icons = sync_wiki.strip_mkdocs_icons
 transform_outside_code_blocks = sync_wiki.transform_outside_code_blocks
+WIKI_STRUCTURE = sync_wiki.WIKI_STRUCTURE
 
 
 class TestFindCodeFenceRanges:
@@ -862,6 +864,78 @@ class TestAngleBracketContent:
         assert "**Test**" in result
         assert "Actual description." in result
         assert "<!--" not in result
+
+
+class TestConvertLinks:
+    """Tests for convert_links function."""
+
+    def test_architecture_md_converts_to_wiki_name(self) -> None:
+        """The exact bug case: architecture.md should become Architecture."""
+        content = "[Guide](architecture.md)"
+        result = convert_links(content, "user-guide.md", WIKI_STRUCTURE)
+        assert result == "[Guide](Architecture)"
+
+    def test_link_with_anchor(self) -> None:
+        """Links with anchors should preserve the anchor after conversion."""
+        content = "[Section](architecture.md#overview)"
+        result = convert_links(content, "user-guide.md", WIKI_STRUCTURE)
+        assert result == "[Section](Architecture#overview)"
+
+    def test_external_link_unchanged(self) -> None:
+        """External URLs should not be modified."""
+        content = "[GitHub](https://github.com)"
+        result = convert_links(content, "index.md", WIKI_STRUCTURE)
+        assert result == "[GitHub](https://github.com)"
+
+    def test_anchor_only_link_unchanged(self) -> None:
+        """Anchor-only links should not be modified."""
+        content = "[Section](#overview)"
+        result = convert_links(content, "index.md", WIKI_STRUCTURE)
+        assert result == "[Section](#overview)"
+
+    def test_specs_link_converts(self) -> None:
+        """Links to specs/ files should convert to their wiki names."""
+        content = "[Spec](specs/formal-spec.md)"
+        result = convert_links(content, "index.md", WIKI_STRUCTURE)
+        assert result == "[Spec](Formal-Specification)"
+
+    def test_user_guide_link_converts(self) -> None:
+        """Links to user-guide.md should become User-Guide."""
+        content = "[Guide](user-guide.md)"
+        result = convert_links(content, "index.md", WIKI_STRUCTURE)
+        assert result == "[Guide](User-Guide)"
+
+    def test_link_inside_code_block_unchanged(self) -> None:
+        """Links inside code fences should not be modified."""
+        content = "before\n```\n[Guide](architecture.md)\n```\nafter"
+        result = convert_links(content, "index.md", WIKI_STRUCTURE)
+        assert "[Guide](architecture.md)" in result
+
+    def test_multiple_links_all_convert(self) -> None:
+        """Multiple links in one content string should all be converted."""
+        content = "See [Guide](user-guide.md) and [Arch](architecture.md) for details."
+        result = convert_links(content, "index.md", WIKI_STRUCTURE)
+        assert "[Guide](User-Guide)" in result
+        assert "[Arch](Architecture)" in result
+
+    def test_link_to_non_markdown_unchanged(self) -> None:
+        """Links to non-markdown files should be converted to GitHub URLs."""
+        content = "[Code](../src/lib.rs)"
+        result = convert_links(content, "index.md", WIKI_STRUCTURE)
+        expected = "[Code](https://github.com/wallstop/fortress-rollback/blob/main/src/lib.rs)"
+        assert result == expected
+
+    def test_relative_link_from_nested_source(self) -> None:
+        """Relative links with ../ from nested source files should resolve correctly."""
+        content = "[API](../architecture.md)"
+        result = convert_links(content, "specs/formal-spec.md", WIKI_STRUCTURE)
+        assert result == "[API](Architecture)"
+
+    def test_unknown_page_auto_generates_wiki_name(self) -> None:
+        """Links to .md files not in WIKI_STRUCTURE should auto-generate wiki names."""
+        content = "[Unknown](some-unknown-page.md)"
+        result = convert_links(content, "index.md", WIKI_STRUCTURE)
+        assert result == "[Unknown](Some-Unknown-Page)"
 
 
 if __name__ == "__main__":

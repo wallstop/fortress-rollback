@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use fortress_rollback::{
     compute_checksum_fletcher16, fletcher16, handle_requests, Config, FortressRequest, Frame,
-    GameStateCell, InputStatus, InputVec, PlayerHandle,
+    GameStateCell, HandleVec, InputStatus, InputVec, PlayerHandle,
 };
 use macroquad::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -212,8 +212,8 @@ impl Game {
     }
 
     #[allow(dead_code)]
-    pub fn register_local_handles(&mut self, handles: Vec<PlayerHandle>) {
-        self.local_handles = handles
+    pub fn register_local_handles(&mut self, handles: HandleVec) {
+        self.local_handles = handles.into_vec()
     }
 
     #[allow(dead_code)]

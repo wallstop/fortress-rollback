@@ -1149,6 +1149,96 @@ read_config(PathBuf::from("config.toml"));
 
 ---
 
+## Iteration Patterns for Copy Types and SmallVec
+
+### Prefer Consuming Iteration for Copy Types
+
+When iterating over collections of `Copy` types (like `PlayerHandle`, `Frame`, `u32`),
+prefer consuming iteration over `.iter()` + dereference. Since the values are `Copy`,
+consuming the collection yields owned values directly, avoiding unnecessary references.
+
+```rust
+// ❌ Avoid: .iter() yields references, requiring explicit dereference
+for handle in handles.iter() {
+    session.add_local_input(*handle, input)?;
+}
+
+// ✅ Prefer: Direct iteration yields owned Copy values
+for handle in handles {
+    session.add_local_input(handle, input)?;
+}
+```
+
+### When You Need an Index
+
+Use `.into_iter().enumerate()` — the explicit `.into_iter()` is necessary because
+`.enumerate()` is a method on `Iterator`, not on the collection itself:
+
+```rust
+// ❌ Avoid: .iter().enumerate() yields (usize, &T)
+for (i, handle) in handles.iter().enumerate() {
+    session.add_local_input(*handle, get_input(i))?;
+}
+
+// ✅ Prefer: .into_iter().enumerate() yields (usize, T) for Copy types
+for (i, handle) in handles.into_iter().enumerate() {
+    session.add_local_input(handle, get_input(i))?;
+}
+```
+
+### SmallVec and HandleVec Patterns
+
+`HandleVec` (`SmallVec<[PlayerHandle; 8]>`) supports the same iteration patterns as `Vec`.
+Since `PlayerHandle` is `Copy`, always prefer consuming iteration:
+
+```rust
+// ❌ Avoid: .iter() on HandleVec yields &PlayerHandle
+let all_synced = session.local_player_handles()
+    .iter()
+    .filter_map(|h| session.sync_health(*h))
+    .all(|health| matches!(health, SyncHealth::InSync));
+
+// ✅ Prefer: .into_iter() on HandleVec yields PlayerHandle (owned)
+let all_synced = session.local_player_handles()
+    .into_iter()
+    .filter_map(|h| session.sync_health(h))
+    .all(|health| matches!(health, SyncHealth::InSync));
+```
+
+### When .iter() IS Appropriate
+
+Use `.iter()` when you need to borrow the collection (keep it alive for later use)
+or when iterating over non-Copy types:
+
+```rust
+// ✅ OK: Need to use handles again after the loop
+let handles = session.local_player_handles();
+for &handle in handles.iter() {  // Destructure the reference
+    process(handle);
+}
+let count = handles.len();  // handles still available
+
+// ✅ OK: Iterating over non-Copy types (e.g., String, Vec<T>)
+for item in complex_items.iter() {
+    process(item);  // Borrows, doesn't move
+}
+```
+
+### Consistency Rules
+
+| Pattern | Loop Variable | Use When |
+|---------|--------------|----------|
+| `for x in collection` | Owned `T` | Default for Copy types, consuming OK |
+| `for x in collection.into_iter()` | Owned `T` | When chaining `.enumerate()`, `.filter()`, etc. |
+| `for x in &collection` / `.iter()` | `&T` | Need collection after loop, or non-Copy types |
+| `for &x in collection.iter()` | Owned `T` (destructured) | Copy types when borrowing collection |
+
+**Key rule:** Within a single code block or documentation example, use ONE consistent
+pattern. Never mix `.iter()` + dereference in one loop and direct iteration in an
+adjacent loop over the same type.
+
+---
+
 ## Quick Decision Guide
 
 | Situation | Pattern to Use |

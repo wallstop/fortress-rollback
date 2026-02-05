@@ -256,7 +256,9 @@ match session.sync_health(peer_handle) {
     Some(SyncHealth::InSync) => println!("Synchronized"),
     Some(SyncHealth::Pending) => println!("Waiting for checksum data"),
     Some(SyncHealth::DesyncDetected { frame, .. }) => {
-        panic!("Desync detected at frame {}", frame)
+        // Handle desync according to your application's needs
+        eprintln!("ERROR: Desync detected at frame {frame} — investigation required");
+        // Application-specific response: could restart session, alert user, etc.
     }
     None => {} // Not a remote player
 }
@@ -302,13 +304,16 @@ The correct pattern uses the new `SyncHealth` API:
 if session.confirmed_frame() >= target_frames {
     match session.sync_health(peer_handle) {
         Some(SyncHealth::InSync) => break, // Safe to exit
-        Some(SyncHealth::DesyncDetected { .. }) => panic!("Desync!"),
+        Some(SyncHealth::DesyncDetected { frame, .. }) => {
+            eprintln!("Desync detected at frame {frame:?}");
+            break; // Exit with error state for application to handle
+        }
         _ => continue, // Keep polling until verified
     }
 }
 ```
 
-See [Common Pitfalls](user-guide.md#common-pitfalls) in the User Guide for full details.
+See the [Session Termination Anti-Pattern](user-guide.md#session-termination-the-last_confirmed_frame-anti-pattern) section in the User Guide for comprehensive examples, edge cases, and solutions.
 
 ### Desync Detection Default
 

@@ -84,6 +84,9 @@ pub use crate::sync_layer::{GameStateAccessor, GameStateCell};
 // Input vector type for advance frame
 pub use crate::InputVec;
 
+// Player handle vector type for zero-allocation queries
+pub use crate::HandleVec;
+
 // Network monitoring
 pub use crate::NetworkStats;
 

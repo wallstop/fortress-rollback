@@ -186,13 +186,14 @@ fn basic_sync_test() -> Result<(), FortressError> {
 
     for frame in 0..total_frames {
         // Step 3a: Add input for ALL players
-        // In a sync test, all players are treated as local
-        for player in 0..num_players {
+        // Use local_player_handles() to get all player handles in a sync test.
+        // In a sync test, all players are treated as local.
+        for (idx, handle) in session.local_player_handles().into_iter().enumerate() {
             let input = CounterInput {
                 increment: frame % 3 != 0, // Increment 2 out of every 3 frames
-                amount: ((player + 1) * 10) as u8,
+                amount: ((idx + 1) * 10) as u8,
             };
-            session.add_local_input(PlayerHandle::new(player), input)?;
+            session.add_local_input(handle, input)?;
         }
 
         // Step 3b: Advance the frame and get requests

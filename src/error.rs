@@ -469,6 +469,32 @@ pub enum InvalidRequestKind {
         /// The number of players in the session.
         num_players: usize,
     },
+    /// No local players registered in the session.
+    ///
+    /// Returned when a method that requires exactly one local player is called,
+    /// but no local players have been registered.
+    NoLocalPlayers,
+    /// Multiple local players registered when exactly one is required.
+    ///
+    /// Returned when a method that requires exactly one local player is called,
+    /// but more than one local player has been registered.
+    MultipleLocalPlayers {
+        /// The number of local players registered.
+        count: usize,
+    },
+    /// No remote players registered in the session.
+    ///
+    /// Returned when a method that requires exactly one remote player is called,
+    /// but no remote players have been registered.
+    NoRemotePlayers,
+    /// Multiple remote players registered when exactly one is required.
+    ///
+    /// Returned when a method that requires exactly one remote player is called,
+    /// but more than one remote player has been registered.
+    MultipleRemotePlayers {
+        /// The number of remote players registered.
+        count: usize,
+    },
 
     // Input errors
     /// Missing local input for one or more players.
@@ -646,6 +672,22 @@ impl Display for InvalidRequestKind {
                     "invalid spectator handle {}: num_players is {}",
                     handle.as_usize(),
                     num_players
+                )
+            },
+            Self::NoLocalPlayers => write!(f, "no local players registered in the session"),
+            Self::MultipleLocalPlayers { count } => {
+                write!(
+                    f,
+                    "multiple local players registered ({}) when exactly one is required",
+                    count
+                )
+            },
+            Self::NoRemotePlayers => write!(f, "no remote players registered in the session"),
+            Self::MultipleRemotePlayers { count } => {
+                write!(
+                    f,
+                    "multiple remote players registered ({}) when exactly one is required",
+                    count
                 )
             },
             Self::MissingLocalInput => write!(f, "missing local input for one or more players"),
