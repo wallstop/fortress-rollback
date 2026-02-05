@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1770265739150,
+  "lastUpdate": 1770265778555,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "66f784064260303d8e536608db7e893a24419934",
-          "message": "Simplify kani proof (#20)",
-          "timestamp": "2025-12-19T23:21:51-08:00",
-          "tree_id": "56b2a764696704a3adb77c060d7208a67986e441",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/66f784064260303d8e536608db7e893a24419934"
-        },
-        "date": 1766215849504,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 106,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 159,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 540,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 807,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1151,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 118786,
-            "range": "± 1025",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 25404,
-            "range": "± 273",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 11529,
-            "range": "± 121",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 101",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 872,
             "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4e4a11d6cface7021090969cbd9d15a1974f713f",
+          "message": "chore(deps): bump criterion from 0.8.1 to 0.8.2 (#79)\n\nBumps [criterion](https://github.com/criterion-rs/criterion.rs) from\n0.8.1 to 0.8.2.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/criterion-rs/criterion.rs/releases\">criterion's\nreleases</a>.</em></p>\n<blockquote>\n<h2>criterion-plot-v0.8.2</h2>\n<h3>Other</h3>\n<ul>\n<li>Update Readme</li>\n</ul>\n<h2>criterion-v0.8.2</h2>\n<h3>Fixed</h3>\n<ul>\n<li>don't build alloca on unsupported targets</li>\n</ul>\n<h3>Other</h3>\n<ul>\n<li><em>(deps)</em> bump crate-ci/typos from 1.40.0 to 1.43.0</li>\n<li>Fix panic with uniform iteration durations in benchmarks</li>\n<li>Update Readme</li>\n<li>Exclude development scripts from published package</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/criterion-rs/criterion.rs/blob/master/CHANGELOG.md\">criterion's\nchangelog</a>.</em></p>\n<blockquote>\n<h2><a\nhref=\"https://github.com/criterion-rs/criterion.rs/compare/criterion-v0.8.1...criterion-v0.8.2\">0.8.2</a>\n- 2026-02-04</h2>\n<h3>Fixed</h3>\n<ul>\n<li>don't build alloca on unsupported targets</li>\n</ul>\n<h3>Other</h3>\n<ul>\n<li><em>(deps)</em> bump crate-ci/typos from 1.40.0 to 1.43.0</li>\n<li>Fix panic with uniform iteration durations in benchmarks</li>\n<li>Update Readme</li>\n<li>Exclude development scripts from published package</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/criterion-rs/criterion.rs/commit/7f0d745532e3c7b2e11bbf9de9b911f91790d3b1\"><code>7f0d745</code></a>\nchore: release v0.8.2</li>\n<li><a\nhref=\"https://github.com/criterion-rs/criterion.rs/commit/4a467ce964052ae9bd9266c0706b470b817613e0\"><code>4a467ce</code></a>\nchore(deps): bump crate-ci/typos from 1.40.0 to 1.43.0</li>\n<li><a\nhref=\"https://github.com/criterion-rs/criterion.rs/commit/b277a751453cf9ce0595e41bddf819210a6d6e47\"><code>b277a75</code></a>\nFix panic with uniform iteration durations in benchmarks</li>\n<li><a\nhref=\"https://github.com/criterion-rs/criterion.rs/commit/828af1450d648c599a92a077b75e292747761d99\"><code>828af14</code></a>\nfix: don't build alloca on unsupported targets</li>\n<li><a\nhref=\"https://github.com/criterion-rs/criterion.rs/commit/b01316b76e42028f3b1cf3731f643bea7f354f39\"><code>b01316b</code></a>\nUpdate Readme</li>\n<li><a\nhref=\"https://github.com/criterion-rs/criterion.rs/commit/4c02a3b4e560fe1f296c0ed1e9b53e3154a3cac6\"><code>4c02a3b</code></a>\nExclude development scripts from published package</li>\n<li>See full diff in <a\nhref=\"https://github.com/criterion-rs/criterion.rs/compare/criterion-v0.8.1...criterion-v0.8.2\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=criterion&package-manager=cargo&previous-version=0.8.1&new-version=0.8.2)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-02-04T20:23:48-08:00",
+          "tree_id": "fc4ac105479c5f9730ec6261cac803dcb5bb96a4",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/4e4a11d6cface7021090969cbd9d15a1974f713f"
+        },
+        "date": 1770265777718,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 99,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 149,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 502,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 720,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1092,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 103952,
+            "range": "± 439",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 27627,
+            "range": "± 1025",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1242,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1554,
+            "range": "± 70",
             "unit": "ns/iter"
           },
           {
