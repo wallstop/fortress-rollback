@@ -326,10 +326,11 @@ For games with multiple local players (couch co-op) or multiple remotes:
 
 ```rust
 # use fortress_rollback::{FortressError, PlayerHandle};
+# use fortress_rollback::HandleVec;
 # struct Session;
 # impl Session {
-#     fn local_player_handles(&self) -> Vec<PlayerHandle> { vec![] }
-#     fn remote_player_handles(&self) -> Vec<PlayerHandle> { vec![] }
+#     fn local_player_handles(&self) -> HandleVec { HandleVec::new() }
+#     fn remote_player_handles(&self) -> HandleVec { HandleVec::new() }
 #     fn add_local_input(&mut self, h: PlayerHandle, i: u8) -> Result<(), FortressError> { Ok(()) }
 #     fn network_stats(&self, h: PlayerHandle) -> Result<Stats, FortressError> { Ok(Stats) }
 # }
@@ -361,12 +362,13 @@ When you need to handle different player types differently:
 ```rust
 # use fortress_rollback::{PlayerHandle, PlayerType};
 # use std::net::SocketAddr;
+# use fortress_rollback::HandleVec;
 # struct Session;
 # impl Session {
-#     fn all_player_handles(&self) -> Vec<PlayerHandle> { vec![] }
+#     fn all_player_handles(&self) -> HandleVec { HandleVec::new() }
 #     fn is_local_player(&self, h: PlayerHandle) -> bool { false }
 #     fn is_remote_player(&self, h: PlayerHandle) -> bool { false }
-#     fn is_spectator(&self, h: PlayerHandle) -> bool { false }
+#     fn is_spectator_handle(&self, h: PlayerHandle) -> bool { false }
 #     fn player_type(&self, h: PlayerHandle) -> Option<PlayerType<SocketAddr>> { None }
 # }
 # fn main() {
@@ -377,7 +379,7 @@ for handle in session.all_player_handles() {
         // Add local input
     } else if session.is_remote_player(handle) {
         // Show network indicator in UI
-    } else if session.is_spectator(handle) {
+    } else if session.is_spectator_handle(handle) {
         // Show spectator badge
     }
 }
@@ -450,18 +452,18 @@ let all_handles = session.local_player_handles();
 |--------|---------|----------|
 | `local_player_handle()` | `Option<PlayerHandle>` | First local player (if any) |
 | `local_player_handle_required()` | `Result<PlayerHandle>` | Single local player or error |
-| `local_player_handles()` | `Vec<PlayerHandle>` | All local players |
+| `local_player_handles()` | `HandleVec` | All local players |
 | `remote_player_handle()` | `Option<PlayerHandle>` | First remote player (if any) |
 | `remote_player_handle_required()` | `Result<PlayerHandle>` | Single remote player or error |
-| `remote_player_handles()` | `Vec<PlayerHandle>` | All remote players |
+| `remote_player_handles()` | `HandleVec` | All remote players |
 | `is_local_player(handle)` | `bool` | Check if handle is local |
 | `is_remote_player(handle)` | `bool` | Check if handle is remote |
-| `is_spectator(handle)` | `bool` | Check if handle is spectator |
-| `spectator_handles()` | `Vec<PlayerHandle>` | All spectator handles |
+| `is_spectator_handle(handle)` | `bool` | Check if handle is spectator |
+| `spectator_handles()` | `HandleVec` | All spectator handles |
 | `player_type(handle)` | `Option<PlayerType>` | Full type info for handle |
 | `num_local_players()` | `usize` | Count of local players |
 | `num_remote_players()` | `usize` | Count of remote players |
-| `all_player_handles()` | `Vec<PlayerHandle>` | All handles (local + remote + spectators) |
+| `all_player_handles()` | `HandleVec` | All handles (local + remote + spectators) |
 
 ---
 

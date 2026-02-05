@@ -781,7 +781,207 @@ Before committing documentation changes:
 
 ---
 
-## Summary: The Seven Rules
+## Best Practices: API Renaming and Signature Changes
+
+### The Problem
+
+When methods are renamed or return types change, documentation drift occurs across multiple files:
+
+- **Method reference tables** show old return types (e.g., `Vec<PlayerHandle>` → `HandleVec`)
+- **Code examples** call old method names (e.g., `is_spectator()` → `is_spectator_handle()`)
+- **Stub implementations** in doc examples use old signatures
+- **Wiki files** have stale information separate from main docs
+
+This creates confusion when users find contradictory information depending on where they look.
+
+### API Renaming Checklist
+
+**BEFORE renaming a method or changing a return type:**
+
+```bash
+# 1. Find ALL references to the method/type being changed
+rg 'old_method_name|OldReturnType' --type rust --type md
+
+# 2. Specifically check documentation files
+rg 'old_method_name' docs/ wiki/ README.md examples/
+
+# 3. Find method reference tables (usually in | format)
+rg '\| `?old_method_name' --type md
+
+# 4. Find stub implementations in doc examples
+rg '#\s*fn old_method_name|#\s*fn.*OldReturnType' --type md
+```
+
+**AFTER making the code change:**
+
+- [ ] Update all `docs/*.md` files
+- [ ] Update all `wiki/*.md` files (if they exist)
+- [ ] Update `README.md` examples
+- [ ] Update `examples/*.rs` files
+- [ ] Update `CHANGELOG.md` with migration guidance
+- [ ] Run `cargo test --doc` to verify doc examples compile
+- [ ] Run `cargo build --examples` to verify examples compile
+
+### Method Reference Tables
+
+Documentation often contains reference tables like:
+
+```markdown
+| Method | Return Type | Description |
+|--------|-------------|-------------|
+| `local_player_handles()` | `HandleVec` | All local players |
+| `is_spectator_handle(h)` | `bool` | Check if spectator |
+```
+
+**Finding reference tables that need updates:**
+
+```bash
+# Find tables containing the old method/type name
+rg '\|.*old_method_name.*\|' --type md
+
+# Find tables with old return types
+rg '\|.*`Vec<PlayerHandle>`.*\|' --type md
+rg '\|.*`Vec<.*>`.*\|' --type md  # Broader search for Vec return types
+
+# List all reference tables in docs (to manually verify)
+rg '^\|.*\|.*\|$' docs/ wiki/ --type md | grep -v '^\|---'
+```
+
+**Verification after updating tables:**
+
+```bash
+# Verify table return types match actual code
+rg 'pub fn local_player_handles' --type rust -A 1  # Check actual signature
+rg '\| `local_player_handles' --type md            # Check documented signature
+```
+
+### Stub Implementations in Doc Examples
+
+Doc examples often contain hidden stub code to make examples compile:
+
+```rust
+/// # Example
+/// ```
+/// # use fortress_rollback::{PlayerHandle, HandleVec};
+/// # struct FakeSession;
+/// # impl FakeSession {
+/// #     fn local_player_handles(&self) -> HandleVec { HandleVec::new() }
+/// # }
+/// let session = FakeSession;
+/// for handle in session.local_player_handles() {
+///     // ...
+/// }
+/// ```
+```
+
+**Finding stubs that need updates:**
+
+```bash
+# Find stub method definitions (lines starting with # fn)
+rg '#\s*fn\s+method_name' --type rust --type md
+
+# Find stub return types
+rg '#.*-> Vec<PlayerHandle>' --type rust --type md
+rg '#.*-> HandleVec' --type rust --type md
+
+# Find all stub implementations in a specific file
+rg '^#\s*(fn|impl|struct|use)' docs/user-guide.md
+```
+
+**Critical:** Stub signatures must match the real API exactly, or doc tests will pass but teach users incorrect patterns.
+
+### Complete API Change Workflow
+
+When changing `fn old_name() -> OldType` to `fn new_name() -> NewType`:
+
+```bash
+# Step 1: Audit all references BEFORE changing code
+echo "=== Finding all references ==="
+rg 'old_name|OldType' --type rust --type md -l
+
+# Step 2: Make the code change
+# ... edit source files ...
+
+# Step 3: Update documentation systematically
+echo "=== Updating docs/ ==="
+rg -l 'old_name|OldType' docs/ | xargs -I{} echo "Update: {}"
+
+echo "=== Updating wiki/ ==="
+rg -l 'old_name|OldType' wiki/ | xargs -I{} echo "Update: {}"
+
+echo "=== Updating examples/ ==="
+rg -l 'old_name|OldType' examples/ | xargs -I{} echo "Update: {}"
+
+# Step 4: Verify no stale references remain
+echo "=== Verification ==="
+rg 'old_name|OldType' --type rust --type md
+# Should return no results (or only CHANGELOG migration notes)
+
+# Step 5: Verify everything compiles
+cargo test --doc
+cargo build --examples
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+```
+
+### Example: Renaming `is_spectator` to `is_spectator_handle`
+
+```bash
+# Find all affected files
+rg 'is_spectator\(' --type md -l
+# Results:
+#   docs/user-guide.md
+#   wiki/User-Guide.md
+#   wiki/API-Contracts.md
+
+# Check reference tables
+rg '\| `is_spectator\(' --type md
+# Update any matches to is_spectator_handle
+
+# Check code examples
+rg 'session\.is_spectator\(' --type md
+# Update to session.is_spectator_handle()
+
+# Check stub implementations
+rg '#.*fn is_spectator\(' --type md
+# Update stub signatures
+
+# Verify no stale references (except CHANGELOG migration notes)
+rg 'is_spectator\(' --type md | grep -v CHANGELOG | grep -v 'renamed to'
+```
+
+### Common Pitfalls
+
+1. **Forgetting wiki/** — Wiki files are often maintained separately and easy to miss
+2. **Partial table updates** — Updating the method name but not the return type in a reference table
+3. **Stale stubs** — Updating visible example code but not the hidden `# impl` stubs
+4. **Missing CHANGELOG** — Not documenting the breaking change with migration guidance
+5. **README drift** — README quick-start examples using old API patterns
+
+### Prevention: Documentation Change Hooks
+
+Consider adding a pre-commit check for common documentation drift patterns:
+
+```bash
+#!/bin/bash
+# scripts/check-doc-api-sync.sh
+
+# Check for common return type mismatches
+if rg 'Vec<PlayerHandle>' docs/ wiki/ --type md -q; then
+    echo "WARNING: Found Vec<PlayerHandle> in docs - should this be HandleVec?"
+    rg 'Vec<PlayerHandle>' docs/ wiki/ --type md
+fi
+
+# Check for old method names (add patterns as needed)
+OLD_PATTERNS='is_spectator\(|\.players\(\)'
+if rg "$OLD_PATTERNS" docs/ wiki/ --type md -q; then
+    echo "WARNING: Found potentially outdated method references"
+    rg "$OLD_PATTERNS" docs/ wiki/ --type md
+fi
+```
+
+---
+
+## Summary: The Eight Rules
 
 1. **Verify before documenting** — Always check code exists before claiming it does
 2. **Build docs with warnings as errors** — `RUSTDOCFLAGS="-D warnings" cargo doc`
@@ -790,6 +990,7 @@ Before committing documentation changes:
 5. **Use correct code fence language** — `text` for pseudo-code, `rust` only for compilable examples
 6. **Use correct grammar** — Match verb forms to subjects; read aloud to verify
 7. **Sync parallel documentation** — Update all locations when content exists in multiple places (docs/, wiki/, README)
+8. **Follow API change workflow** — When renaming methods or changing types, audit ALL references before and after
 
 ---
 

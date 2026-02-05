@@ -298,7 +298,7 @@ Each API is documented with:
 
 ---
 
-### `local_player_handles(&self) -> Vec<PlayerHandle>`
+### `local_player_handles(&self) -> HandleVec`
 
 ```rust
 /// Get handles of all local players.
@@ -306,7 +306,7 @@ Each API is documented with:
 
 **Pre:** None
 
-**Post:** Returns vector of handles where `player_type = Local`
+**Post:** Returns `HandleVec` of handles where `player_type = Local`
 
 **Errors:** None
 

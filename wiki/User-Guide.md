@@ -334,7 +334,7 @@ for handle in session.all_player_handles() {
         // Add local input
     } else if session.is_remote_player(handle) {
         // Show network indicator in UI
-    } else if session.is_spectator(handle) {
+    } else if session.is_spectator_handle(handle) {
         // Show spectator badge
     }
 }
@@ -387,18 +387,18 @@ let all_handles = session.local_player_handles();
 |--------|---------|----------|
 | `local_player_handle()` | `Option<PlayerHandle>` | First local player (if any) |
 | `local_player_handle_required()` | `Result<PlayerHandle>` | Single local player or error |
-| `local_player_handles()` | `Vec<PlayerHandle>` | All local players |
+| `local_player_handles()` | `HandleVec` | All local players |
 | `remote_player_handle()` | `Option<PlayerHandle>` | First remote player (if any) |
 | `remote_player_handle_required()` | `Result<PlayerHandle>` | Single remote player or error |
-| `remote_player_handles()` | `Vec<PlayerHandle>` | All remote players |
+| `remote_player_handles()` | `HandleVec` | All remote players |
 | `is_local_player(handle)` | `bool` | Check if handle is local |
 | `is_remote_player(handle)` | `bool` | Check if handle is remote |
-| `is_spectator(handle)` | `bool` | Check if handle is spectator |
-| `spectator_handles()` | `Vec<PlayerHandle>` | All spectator handles |
+| `is_spectator_handle(handle)` | `bool` | Check if handle is spectator |
+| `spectator_handles()` | `HandleVec` | All spectator handles |
 | `player_type(handle)` | `Option<PlayerType>` | Full type info for handle |
 | `num_local_players()` | `usize` | Count of local players |
 | `num_remote_players()` | `usize` | Count of remote players |
-| `all_player_handles()` | `Vec<PlayerHandle>` | All handles (local + remote + spectators) |
+| `all_player_handles()` | `HandleVec` | All handles (local + remote + spectators) |
 
 ---
 

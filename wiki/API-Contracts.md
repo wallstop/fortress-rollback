@@ -349,7 +349,7 @@ pub enum SaveMode {
 
 ---
 
-### `local_player_handles(&self) -> Vec<PlayerHandle>`
+### `local_player_handles(&self) -> HandleVec`
 
 ```rust
 /// Get handles of all local players.
