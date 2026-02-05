@@ -544,8 +544,8 @@ loop {
 
     // Check if synchronized
     let all_synced = session.local_player_handles()
-        .iter()
-        .filter_map(|h| session.sync_health(*h))
+        .into_iter()
+        .filter_map(|h| session.sync_health(h))
         .all(|health| matches!(health, SyncHealth::InSync));
 
     if all_synced && session.confirmed_frame() >= target_frame {

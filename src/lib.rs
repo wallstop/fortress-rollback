@@ -1424,7 +1424,7 @@ pub type InputVec<I> = SmallVec<[(I, InputStatus); 4]>;
 ///
 /// ```ignore
 /// let handles = session.local_player_handles();
-/// for handle in handles.iter() {
+/// for handle in handles {
 ///     // Process each player handle
 /// }
 /// ```

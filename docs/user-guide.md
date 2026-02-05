@@ -341,13 +341,13 @@ For games with multiple local players (couch co-op) or multiple remotes:
 # fn main() -> Result<(), FortressError> {
 # let mut session = Session;
 // Add input for all local players (e.g., two controllers on one machine)
-for (i, handle) in session.local_player_handles().iter().enumerate() {
+for (i, handle) in session.local_player_handles().into_iter().enumerate() {
     let input = get_input_for_controller(i);
-    session.add_local_input(*handle, input)?;
+    session.add_local_input(handle, input)?;
 }
 
 // Check network stats for all remote players
-for handle in session.remote_player_handles().iter() {
+for handle in session.remote_player_handles() {
     let stats = session.network_stats(handle)?;
     if stats.ping > 150 {
         println!("High latency with player {:?}", handle);
