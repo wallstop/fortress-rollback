@@ -9,7 +9,7 @@ use crate::report_violation;
 use crate::sessions::config::SaveMode;
 use crate::sync_layer::SyncLayer;
 use crate::telemetry::{ViolationKind, ViolationObserver, ViolationSeverity};
-use crate::{Config, FortressRequest, Frame, PlayerHandle};
+use crate::{Config, FortressRequest, Frame, HandleVec, PlayerHandle};
 
 /// During a [`SyncTestSession`], Fortress Rollback will simulate a rollback every frame and resimulate the last n states, where n is the given check distance.
 ///
@@ -242,6 +242,160 @@ impl<T: Config> SyncTestSession<T> {
     #[must_use]
     pub fn violation_observer(&self) -> Option<&Arc<dyn ViolationObserver>> {
         self.violation_observer.as_ref()
+    }
+
+    /// Returns handles for all players in the session.
+    ///
+    /// In a sync test session, all players are local (simulated locally for
+    /// determinism testing), so this returns handles for all players.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use fortress_rollback::{SyncTestSession, PlayerHandle, FortressError};
+    /// # use std::net::SocketAddr;
+    /// # struct TestConfig;
+    /// # impl fortress_rollback::Config for TestConfig {
+    /// #     type Input = u32;
+    /// #     type State = Vec<u8>;
+    /// #     type Address = SocketAddr;
+    /// # }
+    /// # fn main() -> Result<(), FortressError> {
+    /// let session: SyncTestSession<TestConfig> =
+    ///     fortress_rollback::SessionBuilder::new()
+    ///         .with_num_players(2)?
+    ///         .with_check_distance(2)
+    ///         .start_synctest_session()?;
+    ///
+    /// let handles = session.local_player_handles();
+    /// assert_eq!(handles.len(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn local_player_handles(&self) -> HandleVec {
+        self.local_player_handles_iter().collect()
+    }
+
+    /// Returns an iterator over all player handles in the session.
+    ///
+    /// This is a zero-allocation alternative to [`local_player_handles`].
+    /// In a sync test session, all players are local (simulated locally for
+    /// determinism testing), so this iterates over all player handles.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use fortress_rollback::{SyncTestSession, PlayerHandle, FortressError};
+    /// # use std::net::SocketAddr;
+    /// # struct TestConfig;
+    /// # impl fortress_rollback::Config for TestConfig {
+    /// #     type Input = u32;
+    /// #     type State = Vec<u8>;
+    /// #     type Address = SocketAddr;
+    /// # }
+    /// # fn main() -> Result<(), FortressError> {
+    /// let session: SyncTestSession<TestConfig> =
+    ///     fortress_rollback::SessionBuilder::new()
+    ///         .with_num_players(2)?
+    ///         .with_check_distance(2)
+    ///         .start_synctest_session()?;
+    ///
+    /// let count = session.local_player_handles_iter().count();
+    /// assert_eq!(count, 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [`local_player_handles`]: Self::local_player_handles
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
+    pub fn local_player_handles_iter(&self) -> impl Iterator<Item = PlayerHandle> {
+        (0..self.num_players).map(PlayerHandle::new)
+    }
+
+    /// Returns the single player's handle if there is exactly one player.
+    ///
+    /// This is a zero-allocation convenience method for single-player sync tests. It returns
+    /// an error if there are no players or more than one player.
+    ///
+    /// # Errors
+    ///
+    /// - [`InvalidRequestKind::NoLocalPlayers`] if no players are configured.
+    /// - [`InvalidRequestKind::MultipleLocalPlayers`] if more than one player is configured.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use fortress_rollback::{SyncTestSession, PlayerHandle, FortressError};
+    /// # use std::net::SocketAddr;
+    /// # struct TestConfig;
+    /// # impl fortress_rollback::Config for TestConfig {
+    /// #     type Input = u32;
+    /// #     type State = Vec<u8>;
+    /// #     type Address = SocketAddr;
+    /// # }
+    /// # fn main() -> Result<(), FortressError> {
+    /// let session: SyncTestSession<TestConfig> =
+    ///     fortress_rollback::SessionBuilder::new()
+    ///         .with_num_players(1)?
+    ///         .with_check_distance(2)
+    ///         .start_synctest_session()?;
+    ///
+    /// let handle = session.local_player_handle_required()?;
+    /// assert_eq!(handle, PlayerHandle::new(0));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [`InvalidRequestKind::NoLocalPlayers`]: crate::InvalidRequestKind::NoLocalPlayers
+    /// [`InvalidRequestKind::MultipleLocalPlayers`]: crate::InvalidRequestKind::MultipleLocalPlayers
+    #[must_use = "returns the local player handle which should be used"]
+    pub fn local_player_handle_required(&self) -> Result<PlayerHandle, FortressError> {
+        match self.num_players {
+            0 => Err(InvalidRequestKind::NoLocalPlayers.into()),
+            1 => Ok(PlayerHandle::new(0)),
+            count => Err(InvalidRequestKind::MultipleLocalPlayers { count }.into()),
+        }
+    }
+
+    /// Returns the first player's handle, if any.
+    ///
+    /// This is a zero-allocation convenience method for games with a single player.
+    /// In a sync test session, all players are local (simulated locally for determinism testing).
+    /// For sessions with multiple players, use [`Self::local_player_handles`].
+    ///
+    /// # Returns
+    ///
+    /// The first player's handle, or `None` if there are no players.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use fortress_rollback::{SyncTestSession, PlayerHandle, FortressError};
+    /// # use std::net::SocketAddr;
+    /// # struct TestConfig;
+    /// # impl fortress_rollback::Config for TestConfig {
+    /// #     type Input = u32;
+    /// #     type State = Vec<u8>;
+    /// #     type Address = SocketAddr;
+    /// # }
+    /// # fn main() -> Result<(), FortressError> {
+    /// let session: SyncTestSession<TestConfig> =
+    ///     fortress_rollback::SessionBuilder::new()
+    ///         .with_num_players(2)?
+    ///         .with_check_distance(2)
+    ///         .start_synctest_session()?;
+    ///
+    /// // Get the first player handle (useful for single-player sync tests)
+    /// if let Some(handle) = session.local_player_handle() {
+    ///     assert_eq!(handle, PlayerHandle::new(0));
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn local_player_handle(&self) -> Option<PlayerHandle> {
+        self.local_player_handles_iter().next()
     }
 
     /// Updates the `checksum_history` and checks if the checksum is identical if it already has been recorded once
@@ -1071,6 +1225,84 @@ mod tests {
             assert_eq!(inputs[0].1, crate::InputStatus::Confirmed);
         } else {
             panic!("Should have AdvanceFrame request");
+        }
+    }
+
+    // ==========================================
+    // local_player_handles Tests
+    // ==========================================
+
+    #[test]
+    fn local_player_handles_returns_all_players() {
+        let session: SyncTestSession<TestConfig> = SyncTestSession::new(3, 8, 2, 0, None);
+
+        let handles = session.local_player_handles();
+        assert_eq!(handles.len(), 3);
+        assert_eq!(handles[0], PlayerHandle::new(0));
+        assert_eq!(handles[1], PlayerHandle::new(1));
+        assert_eq!(handles[2], PlayerHandle::new(2));
+    }
+
+    #[test]
+    fn local_player_handles_single_player() {
+        let session: SyncTestSession<TestConfig> = SyncTestSession::new(1, 8, 2, 0, None);
+
+        let handles = session.local_player_handles();
+        assert_eq!(handles.len(), 1);
+        assert_eq!(handles[0], PlayerHandle::new(0));
+    }
+
+    // ==========================================
+    // local_player_handle_required Tests
+    // ==========================================
+
+    #[test]
+    fn local_player_handle_required_with_one_player_succeeds() {
+        let session: SyncTestSession<TestConfig> = SyncTestSession::new(1, 8, 2, 0, None);
+
+        let handle = session.local_player_handle_required();
+        assert!(handle.is_ok());
+        assert_eq!(handle.unwrap(), PlayerHandle::new(0));
+    }
+
+    #[test]
+    fn local_player_handle_required_with_zero_players_returns_error() {
+        // Create a session with 0 players (unusual but possible for edge case testing)
+        let session: SyncTestSession<TestConfig> = SyncTestSession::with_queue_length(
+            0, // num_players
+            8, // max_prediction
+            0, // check_distance
+            0, // input_delay
+            None, 16, // queue_length
+        );
+
+        let result = session.local_player_handle_required();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        match err {
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::NoLocalPlayers,
+            } => (), // Expected
+            _ => panic!("Expected NoLocalPlayers error, got: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn local_player_handle_required_with_multiple_players_returns_error() {
+        let session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 2, 0, None);
+
+        let result = session.local_player_handle_required();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        match err {
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::MultipleLocalPlayers { count },
+            } => {
+                assert_eq!(count, 2);
+            },
+            _ => panic!("Expected MultipleLocalPlayers error, got: {:?}", err),
         }
     }
 }

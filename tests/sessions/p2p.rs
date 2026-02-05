@@ -1326,3 +1326,174 @@ fn run_timing_test_case(case: &TimingTestCase) -> Result<(), Box<dyn std::error:
 
     Ok(())
 }
+
+// ==========================================
+// P2PSession local_player_handle_required Tests
+// ==========================================
+
+#[test]
+#[serial]
+fn p2p_session_local_player_handle_required_with_one_local_returns_ok() -> Result<(), FortressError>
+{
+    // Create a session with exactly 1 local player and 1 remote player
+    let (socket, _addr0) = bind_socket_ephemeral()?;
+    let [port1] = PortAllocator::next_ports::<1>();
+    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+
+    let sess = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
+        .start_p2p_session(socket)?;
+
+    let result = sess.local_player_handle_required();
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), PlayerHandle::new(0));
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn p2p_session_local_player_handle_required_with_zero_local_returns_error(
+) -> Result<(), FortressError> {
+    use fortress_rollback::InvalidRequestKind;
+
+    // Create a session with 0 local players (all remote) - requires at least 2 players
+    let (socket, _addr0) = bind_socket_ephemeral()?;
+    let [port1, port2] = PortAllocator::next_ports::<2>();
+    let remote_addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let remote_addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
+
+    let sess = SessionBuilder::<StubConfig>::new()
+        .with_num_players(2)?
+        .add_player(PlayerType::Remote(remote_addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket)?;
+
+    let result = sess.local_player_handle_required();
+    assert!(result.is_err());
+
+    let err = result.unwrap_err();
+    match err {
+        FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::NoLocalPlayers,
+        } => (), // Expected
+        _ => panic!("Expected NoLocalPlayers error, got: {:?}", err),
+    }
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn p2p_session_local_player_handle_required_with_multiple_local_returns_error(
+) -> Result<(), FortressError> {
+    use fortress_rollback::InvalidRequestKind;
+
+    // Create a session with 2 local players (no remote)
+    let (socket, _addr0) = bind_socket_ephemeral()?;
+
+    let sess = SessionBuilder::<StubConfig>::new()
+        .with_num_players(2)?
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket)?;
+
+    let result = sess.local_player_handle_required();
+    assert!(result.is_err());
+
+    let err = result.unwrap_err();
+    match err {
+        FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::MultipleLocalPlayers { count },
+        } => {
+            assert_eq!(count, 2);
+        },
+        _ => panic!("Expected MultipleLocalPlayers error, got: {:?}", err),
+    }
+    Ok(())
+}
+
+// ==========================================
+// P2PSession remote_player_handle_required Tests
+// ==========================================
+
+#[test]
+#[serial]
+fn p2p_session_remote_player_handle_required_with_one_remote_returns_ok(
+) -> Result<(), FortressError> {
+    // Create a session with 1 local player and exactly 1 remote player
+    let (socket, _addr0) = bind_socket_ephemeral()?;
+    let [port1] = PortAllocator::next_ports::<1>();
+    let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+
+    let sess = SessionBuilder::<StubConfig>::new()
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
+        .start_p2p_session(socket)?;
+
+    let result = sess.remote_player_handle_required();
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), PlayerHandle::new(1));
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn p2p_session_remote_player_handle_required_with_zero_remote_returns_error(
+) -> Result<(), FortressError> {
+    use fortress_rollback::InvalidRequestKind;
+
+    // Create a session with 2 local players (no remote)
+    let (socket, _addr0) = bind_socket_ephemeral()?;
+
+    let sess = SessionBuilder::<StubConfig>::new()
+        .with_num_players(2)?
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket)?;
+
+    let result = sess.remote_player_handle_required();
+    assert!(result.is_err());
+
+    let err = result.unwrap_err();
+    match err {
+        FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::NoRemotePlayers,
+        } => (), // Expected
+        _ => panic!("Expected NoRemotePlayers error, got: {:?}", err),
+    }
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn p2p_session_remote_player_handle_required_with_multiple_remote_returns_error(
+) -> Result<(), FortressError> {
+    use fortress_rollback::InvalidRequestKind;
+
+    // Create a session with 1 local player and 2 remote players
+    let (socket, _addr0) = bind_socket_ephemeral()?;
+    let [port1, port2] = PortAllocator::next_ports::<2>();
+    let remote_addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
+    let remote_addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
+
+    let sess = SessionBuilder::<StubConfig>::new()
+        .with_num_players(3)?
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr1), PlayerHandle::new(1))?
+        .add_player(PlayerType::Remote(remote_addr2), PlayerHandle::new(2))?
+        .start_p2p_session(socket)?;
+
+    let result = sess.remote_player_handle_required();
+    assert!(result.is_err());
+
+    let err = result.unwrap_err();
+    match err {
+        FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::MultipleRemotePlayers { count },
+        } => {
+            assert_eq!(count, 2);
+        },
+        _ => panic!("Expected MultipleRemotePlayers error, got: {:?}", err),
+    }
+    Ok(())
+}

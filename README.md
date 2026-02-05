@@ -92,6 +92,7 @@ Alpha / experimental only.
 - **Enhanced Desync Detection**: Built-in checksum validation with `P2PSession::confirmed_inputs_for_frame()` for debugging state divergence
 - **`handle_requests!` Macro**: Eliminates boilerplate in the game loop — see [User Guide](./docs/user-guide.md#using-the-handle_requests-macro)
 - **Config Presets**: `SyncConfig::lan()`, `ProtocolConfig::mobile()`, etc. for common network conditions
+- **Player Handle Convenience Methods**: Easy access to local/remote handles for 1v1 games, player type checking, and iteration — see [User Guide](./docs/user-guide.md#player-handle-convenience-methods)
 
 📋 **[Complete comparison with GGRS →](./docs/fortress-vs-ggrs.md)** — See all differences, bug fixes, and migration steps
 

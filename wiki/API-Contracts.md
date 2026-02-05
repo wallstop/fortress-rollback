@@ -4,8 +4,8 @@
 
 # Fortress Rollback API Contracts
 
-**Version:** 1.0
-**Date:** December 6, 2025
+**Version:** 1.1
+**Date:** February 5, 2026
 **Status:** Complete
 
 This document specifies preconditions, postconditions, and invariants for all public APIs. It complements formal-spec.md and serves as a reference for verification and documentation.
@@ -179,17 +179,68 @@ Each API is documented with:
 
 ### `with_sparse_saving_mode(self, sparse: bool) -> Self`
 
+> ⚠️ **Deprecated since 0.2.0:** Use `with_save_mode(SaveMode::Sparse)` instead.
+
 ```rust
 /// Enable sparse saving (fewer saves, longer potential rollbacks).
+#[deprecated(since = "0.2.0", note = "Use with_save_mode(SaveMode::Sparse) instead")]
 ```
 
 **Pre:** None
 
-**Post:** `self.sparse_saving = sparse`
+**Post:** `self.save_mode = if sparse { SaveMode::Sparse } else { SaveMode::EveryFrame }`
 
 **Errors:** None
 
 **Panics:** Never
+
+**Migration:** Replace calls to `with_sparse_saving_mode(true)` with `with_save_mode(SaveMode::Sparse)` and `with_sparse_saving_mode(false)` with `with_save_mode(SaveMode::EveryFrame)`.
+
+---
+
+### `with_save_mode(self, save_mode: SaveMode) -> Self`
+
+```rust
+/// Configure the game state saving strategy.
+```
+
+**Pre:** None
+
+**Post:** `self.save_mode = save_mode`
+
+**Errors:** None
+
+**Panics:** Never
+
+**Notes:** This method replaces the deprecated `with_sparse_saving_mode`. The `SaveMode` enum provides more explicit control over saving behavior.
+
+---
+
+## SaveMode Enum
+
+```rust
+/// Strategy for saving game states during rollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SaveMode {
+    /// Save game state every frame (default).
+    /// - Pros: Fastest rollbacks, minimal resimulation
+    /// - Cons: Higher memory usage
+    #[default]
+    EveryFrame,
+
+    /// Save game states less frequently.
+    /// - Pros: Lower memory usage
+    /// - Cons: Longer potential rollbacks, more resimulation
+    Sparse,
+}
+```
+
+**Variants:**
+
+| Variant | Description | Use Case |
+|---------|-------------|----------|
+| `EveryFrame` | Saves state every frame (default) | Low-latency games, games with fast state serialization |
+| `Sparse` | Saves state at intervals | Memory-constrained environments, large game states |
 
 ---
 

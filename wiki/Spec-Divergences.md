@@ -4,8 +4,8 @@
 
 # Spec-Production Divergences
 
-**Version:** 1.2
-**Date:** December 9, 2025
+**Version:** 1.3
+**Date:** December 15, 2025
 **Status:** Documented
 
 This document lists intentional divergences between formal specifications and production code, with justification for each.

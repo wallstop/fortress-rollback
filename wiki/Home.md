@@ -71,6 +71,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_player(PlayerType::Remote(remote), PlayerHandle::new(1))?
         .start_p2p_session(socket)?;
 
+    // Tip: For cleaner player handle management, see the
+    // "Player Handle Convenience Methods" section in the User Guide.
+
     // Your game loop handles FortressRequests...
     Ok(())
 }

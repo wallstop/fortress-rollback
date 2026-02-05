@@ -10,6 +10,7 @@ use crate::telemetry::{
     InvariantChecker, InvariantViolation, ViolationKind, ViolationObserver, ViolationSeverity,
 };
 use crate::DesyncDetection;
+use crate::HandleVec;
 use crate::{
     network::protocol::Event, Config, FortressEvent, FortressRequest, Frame, InvalidFrameReason,
     NonBlockingSocket, PlayerHandle, PlayerType, SessionState,
@@ -207,12 +208,8 @@ impl<T: Config> P2PSession<T> {
         player_handle: PlayerHandle,
         input: T::Input,
     ) -> Result<(), FortressError> {
-        // make sure the input is for a registered local player
-        if !self
-            .player_reg
-            .local_player_handles()
-            .contains(&player_handle)
-        {
+        // make sure the input is for a registered local player (zero-allocation check)
+        if !self.player_reg.is_local_player(player_handle) {
             return Err(InvalidRequestKind::NotLocalPlayer {
                 handle: player_handle,
             }
@@ -243,8 +240,8 @@ impl<T: Config> P2PSession<T> {
             return Err(FortressError::NotSynchronized);
         }
 
-        // check if input for all local players is queued
-        for handle in self.player_reg.local_player_handles() {
+        // check if input for all local players is queued (zero-allocation via iterator)
+        for handle in self.player_reg.local_player_handles_iter() {
             if !self.local_inputs.contains_key(&handle) {
                 return Err(InvalidRequestKind::MissingLocalInput.into());
             }
@@ -335,8 +332,8 @@ impl<T: Config> P2PSession<T> {
          *  INPUTS
          */
 
-        // register local inputs in the system and send them
-        for handle in self.player_reg.local_player_handles() {
+        // register local inputs in the system and send them (zero-allocation via iterator)
+        for handle in self.player_reg.local_player_handles_iter() {
             // we have checked that these all exist above, but return error for safety
             let player_input =
                 self.local_inputs
@@ -758,15 +755,38 @@ impl<T: Config> P2PSession<T> {
         self.player_reg.num_spectators()
     }
 
-    /// Returns the handles of local players that have been added
+    /// Returns an iterator over local player handles.
+    ///
+    /// This is a zero-allocation alternative to [`local_player_handles`].
+    /// Use this when you only need to iterate once or want to avoid allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// for handle in session.local_player_handles_iter() {
+    ///     session.add_local_input(handle, get_local_input())?;
+    /// }
+    /// ```
+    ///
+    /// [`local_player_handles`]: Self::local_player_handles
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
+    pub fn local_player_handles_iter(&self) -> impl Iterator<Item = PlayerHandle> + '_ {
+        self.player_reg.local_player_handles_iter()
+    }
+
+    /// Returns the handles of local players that have been added.
+    ///
+    /// For a zero-allocation alternative, see [`local_player_handles_iter`].
+    ///
+    /// [`local_player_handles_iter`]: Self::local_player_handles_iter
     #[must_use]
-    pub fn local_player_handles(&self) -> Vec<PlayerHandle> {
+    pub fn local_player_handles(&self) -> HandleVec {
         self.player_reg.local_player_handles()
     }
 
     /// Returns the handle for the first local player, if any.
     ///
-    /// This is a convenience method for games with a single local player.
+    /// This is a zero-allocation convenience method for games with a single local player.
     /// For games with multiple local players, use [`Self::local_player_handles`].
     ///
     /// # Returns
@@ -783,24 +803,302 @@ impl<T: Config> P2PSession<T> {
     /// ```
     #[must_use]
     pub fn local_player_handle(&self) -> Option<PlayerHandle> {
-        self.local_player_handles().first().copied()
+        self.player_reg.local_player_handles_iter().next()
     }
 
-    /// Returns the handles of remote players that have been added
+    /// Returns the single local player's handle, or an error if there isn't exactly one.
+    ///
+    /// This is a zero-allocation convenience method for the common case of games with exactly one
+    /// local player (typical client in a networked game). It returns an error if:
+    /// - No local players are registered (`NoLocalPlayers`)
+    /// - More than one local player is registered (`MultipleLocalPlayers`)
+    ///
+    /// For games with multiple local players (e.g., local co-op), use
+    /// [`Self::local_player_handles`] instead.
+    ///
+    /// # Errors
+    ///
+    /// - [`InvalidRequestKind::NoLocalPlayers`] if no local players are registered.
+    /// - [`InvalidRequestKind::MultipleLocalPlayers`] if more than one local player is registered.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Typical usage for single-local-player games
+    /// let handle = session.local_player_handle_required()?;
+    /// session.add_local_input(handle, local_input)?;
+    /// ```
+    ///
+    /// [`InvalidRequestKind::NoLocalPlayers`]: crate::InvalidRequestKind::NoLocalPlayers
+    /// [`InvalidRequestKind::MultipleLocalPlayers`]: crate::InvalidRequestKind::MultipleLocalPlayers
+    #[must_use = "returns the local player handle which should be used"]
+    pub fn local_player_handle_required(&self) -> Result<PlayerHandle, FortressError> {
+        self.player_reg.local_player_handle_required()
+    }
+
+    /// Returns an iterator over remote player handles.
+    ///
+    /// This is a zero-allocation alternative to [`remote_player_handles`].
+    /// Use this when you only need to iterate once or want to avoid allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// for handle in session.remote_player_handles_iter() {
+    ///     let stats = session.network_stats(handle)?;
+    ///     println!("Remote player {:?}: ping={}ms", handle, stats.local_frame_advantage);
+    /// }
+    /// ```
+    ///
+    /// [`remote_player_handles`]: Self::remote_player_handles
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
+    pub fn remote_player_handles_iter(&self) -> impl Iterator<Item = PlayerHandle> + '_ {
+        self.player_reg.remote_player_handles_iter()
+    }
+
+    /// Returns the first remote player's handle, if any.
+    ///
+    /// This is a zero-allocation convenience method for games with a single remote player
+    /// (typical 1v1 networked game). For games with multiple remote players,
+    /// use [`Self::remote_player_handles`].
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// if let Some(remote) = session.remote_player_handle() {
+    ///     println!("Connected to remote player: {:?}", remote);
+    /// }
+    /// ```
     #[must_use]
-    pub fn remote_player_handles(&self) -> Vec<PlayerHandle> {
+    pub fn remote_player_handle(&self) -> Option<PlayerHandle> {
+        self.player_reg.remote_player_handles_iter().next()
+    }
+
+    /// Returns the single remote player's handle, or an error if there isn't exactly one.
+    ///
+    /// This is the preferred zero-allocation method for 1v1 games where you expect exactly one
+    /// remote opponent. For games with multiple remote players, use [`Self::remote_player_handles`] instead.
+    ///
+    /// # Errors
+    ///
+    /// * [`FortressError::InvalidRequestStructured`] with [`InvalidRequestKind::NoRemotePlayers`]
+    ///   if no remote players are registered.
+    /// * [`FortressError::InvalidRequestStructured`] with [`InvalidRequestKind::MultipleRemotePlayers`]
+    ///   if more than one remote player is registered.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Typical 1v1 game: get the opponent's handle
+    /// let opponent = session.remote_player_handle_required()?;
+    /// let stats = session.network_stats(opponent)?;
+    /// println!("Ping to opponent: {}ms", stats.local_frame_advantage);
+    /// ```
+    ///
+    /// [`FortressError::InvalidRequestStructured`]: crate::FortressError::InvalidRequestStructured
+    /// [`InvalidRequestKind::NoRemotePlayers`]: crate::InvalidRequestKind::NoRemotePlayers
+    /// [`InvalidRequestKind::MultipleRemotePlayers`]: crate::InvalidRequestKind::MultipleRemotePlayers
+    #[must_use = "returns the remote player handle which should be used"]
+    pub fn remote_player_handle_required(&self) -> Result<PlayerHandle, FortressError> {
+        self.player_reg.remote_player_handle_required()
+    }
+
+    /// Returns `true` if the given handle refers to a local player.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// for handle in session.all_player_handles() {
+    ///     if session.is_local_player(handle) {
+    ///         session.add_local_input(handle, get_local_input())?;
+    ///     }
+    /// }
+    /// ```
+    #[must_use]
+    pub fn is_local_player(&self, handle: PlayerHandle) -> bool {
+        self.player_reg.is_local_player(handle)
+    }
+
+    /// Returns `true` if the given handle refers to a remote player.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// for handle in session.all_player_handles() {
+    ///     if session.is_remote_player(handle) {
+    ///         println!("Remote player: {:?}", handle);
+    ///     }
+    /// }
+    /// ```
+    #[must_use]
+    pub fn is_remote_player(&self, handle: PlayerHandle) -> bool {
+        self.player_reg.is_remote_player(handle)
+    }
+
+    /// Returns `true` if the given handle refers to a spectator.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// for handle in session.spectator_handles() {
+    ///     assert!(session.is_spectator_handle(handle));
+    /// }
+    /// ```
+    #[must_use]
+    pub fn is_spectator_handle(&self, handle: PlayerHandle) -> bool {
+        self.player_reg.is_spectator_handle(handle)
+    }
+
+    /// Returns the player type for the given handle, if registered.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// match session.player_type(handle) {
+    ///     Some(PlayerType::Local) => println!("Local player"),
+    ///     Some(PlayerType::Remote(addr)) => println!("Remote at {}", addr),
+    ///     Some(PlayerType::Spectator(addr)) => println!("Spectator at {}", addr),
+    ///     None => println!("Unknown handle"),
+    /// }
+    /// ```
+    #[must_use]
+    pub fn player_type(&self, handle: PlayerHandle) -> Option<PlayerType<T::Address>> {
+        self.player_reg.player_type(handle)
+    }
+
+    /// Returns the number of local players in the session.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// if session.num_local_players() > 1 {
+    ///     println!("This is a local co-op session");
+    /// }
+    /// ```
+    #[must_use]
+    pub fn num_local_players(&self) -> usize {
+        self.player_reg.num_local_players()
+    }
+
+    /// Returns the number of remote players in the session (excluding spectators).
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let remote_count = session.num_remote_players();
+    /// println!("Connected to {} remote players", remote_count);
+    /// ```
+    #[must_use]
+    pub fn num_remote_players(&self) -> usize {
+        self.player_reg.num_remote_players()
+    }
+
+    /// Returns an iterator over all registered player handles.
+    ///
+    /// This is a zero-allocation alternative to [`all_player_handles`].
+    /// Handles are returned in sorted order (BTreeMap iteration order).
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// for handle in session.all_player_handles_iter() {
+    ///     println!("Player handle: {:?}", handle);
+    /// }
+    /// ```
+    ///
+    /// [`all_player_handles`]: Self::all_player_handles
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
+    pub fn all_player_handles_iter(&self) -> impl Iterator<Item = PlayerHandle> + '_ {
+        self.player_reg.all_player_handles_iter()
+    }
+
+    /// Returns all registered player handles in sorted order.
+    ///
+    /// This includes local players, remote players, and spectators.
+    /// For a zero-allocation alternative, see [`all_player_handles_iter`].
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// for handle in session.all_player_handles() {
+    ///     println!("Player handle: {:?}", handle);
+    /// }
+    /// ```
+    ///
+    /// [`all_player_handles_iter`]: Self::all_player_handles_iter
+    #[must_use]
+    pub fn all_player_handles(&self) -> HandleVec {
+        self.player_reg.all_player_handles()
+    }
+
+    /// Returns the handles of remote players that have been added.
+    ///
+    /// For a zero-allocation alternative, see [`remote_player_handles_iter`].
+    ///
+    /// [`remote_player_handles_iter`]: Self::remote_player_handles_iter
+    #[must_use]
+    pub fn remote_player_handles(&self) -> HandleVec {
         self.player_reg.remote_player_handles()
     }
 
-    /// Returns the handles of spectators that have been added
+    /// Returns an iterator over spectator handles.
+    ///
+    /// This is a zero-allocation alternative to [`spectator_handles`].
+    /// Use this when you only need to iterate once or want to avoid allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// for handle in session.spectator_handles_iter() {
+    ///     println!("Spectator: {:?}", handle);
+    /// }
+    /// ```
+    ///
+    /// [`spectator_handles`]: Self::spectator_handles
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
+    pub fn spectator_handles_iter(&self) -> impl Iterator<Item = PlayerHandle> + '_ {
+        self.player_reg.spectator_handles_iter()
+    }
+
+    /// Returns the handles of spectators that have been added.
+    ///
+    /// For a zero-allocation alternative, see [`spectator_handles_iter`].
+    ///
+    /// [`spectator_handles_iter`]: Self::spectator_handles_iter
     #[must_use]
-    pub fn spectator_handles(&self) -> Vec<PlayerHandle> {
+    pub fn spectator_handles(&self) -> HandleVec {
         self.player_reg.spectator_handles()
     }
 
-    /// Returns all handles associated to a certain address
+    /// Returns an iterator over handles associated with a given address.
+    ///
+    /// This is a zero-allocation alternative to [`handles_by_address`].
+    /// Use this when you only need to iterate once or want to avoid allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// for handle in session.handles_by_address_iter(peer_addr) {
+    ///     println!("Handle at {}: {:?}", peer_addr, handle);
+    /// }
+    /// ```
+    ///
+    /// [`handles_by_address`]: Self::handles_by_address
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
+    pub fn handles_by_address_iter(
+        &self,
+        addr: T::Address,
+    ) -> impl Iterator<Item = PlayerHandle> + '_ {
+        self.player_reg.handles_by_address_iter(addr)
+    }
+
+    /// Returns all handles associated to a certain address.
+    ///
+    /// For a zero-allocation alternative, see [`handles_by_address_iter`].
+    ///
+    /// [`handles_by_address_iter`]: Self::handles_by_address_iter
     #[must_use]
-    pub fn handles_by_address(&self, addr: T::Address) -> Vec<PlayerHandle> {
+    pub fn handles_by_address(&self, addr: T::Address) -> HandleVec {
         self.player_reg.handles_by_address(addr)
     }
 

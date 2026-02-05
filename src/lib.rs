@@ -1405,6 +1405,39 @@ impl std::fmt::Display for InputStatus {
 /// If you need a `Vec`, use `.to_vec()`.
 pub type InputVec<I> = SmallVec<[(I, InputStatus); 4]>;
 
+/// Stack-allocated vector for player handles.
+///
+/// This type uses [`SmallVec`] to avoid heap allocations for the common case of
+/// up to 8 players. Games with more than 8 players will "spill" to the heap automatically,
+/// meaning the data moves from the stack to a heap allocation. This spilling is transparent
+/// and the API remains the same — it just incurs the performance cost of heap allocation.
+///
+/// # Performance
+///
+/// For games with 1-8 players, handle vectors are stack-allocated, avoiding the
+/// overhead of heap allocation and deallocation. This provides measurable performance
+/// improvements when querying player handles frequently.
+///
+/// # Usage
+///
+/// `HandleVec` is returned by methods like [`P2PSession::local_player_handles()`]:
+///
+/// ```ignore
+/// let handles = session.local_player_handles();
+/// for handle in handles.iter() {
+///     // Process each player handle
+/// }
+/// ```
+///
+/// # Migration from `Vec`
+///
+/// `HandleVec` implements `Deref<Target = [PlayerHandle]>`, so most code
+/// using `.iter()`, `.len()`, indexing, or other slice methods will work unchanged.
+/// If you need a `Vec`, use `.to_vec()`.
+///
+/// [`P2PSession::local_player_handles()`]: crate::P2PSession::local_player_handles
+pub type HandleVec = SmallVec<[PlayerHandle; 8]>;
+
 /// Notifications that you can receive from the session. Handling them is up to the user.
 ///
 /// # Handling Events

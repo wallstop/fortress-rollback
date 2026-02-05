@@ -31,6 +31,8 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | `Rollback.tla` | `Rollback.cfg` | ✓ CI | Rollback mechanism |
 | `Concurrency.tla` | `Concurrency.cfg` | ✓ CI | GameStateCell thread safety |
 | `ChecksumExchange.tla` | `ChecksumExchange.cfg` | ✓ CI | Checksum exchange for desync detection |
+| `SpectatorSession.tla` | `SpectatorSession.cfg` | ✓ CI | Spectator session with frame delay and catchup |
+| `TimeSync.tla` | `TimeSync.cfg` | ✓ CI | Time synchronization for peer frame rate coordination |
 
 ## Properties Verified
 

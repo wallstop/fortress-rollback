@@ -322,7 +322,7 @@ The primary session type for peer-to-peer multiplayer:
 
 ```rust
 let mut session = SessionBuilder::<MyConfig>::new()
-    .with_num_players(2)
+    .with_num_players(2)?
     .with_input_delay(2)
     .with_max_prediction_window(8)
     .add_player(PlayerType::Local, PlayerHandle::new(0))?
@@ -344,7 +344,7 @@ For observers who don't contribute inputs:
 
 ```rust
 let session = SessionBuilder::<MyConfig>::new()
-    .with_num_players(2)
+    .with_num_players(2)?
     .start_spectator_session(host_addr, socket);
 ```
 
@@ -360,7 +360,7 @@ For testing determinism locally:
 
 ```rust
 let session = SessionBuilder::<MyConfig>::new()
-    .with_num_players(1)
+    .with_num_players(1)?
     .with_check_distance(2)
     .start_synctest_session()?;
 ```
@@ -399,7 +399,7 @@ Sessions are created using `SessionBuilder`:
 
 ```rust
 let session = SessionBuilder::<MyConfig>::new()
-    .with_num_players(2)
+    .with_num_players(2)?
     .with_input_delay(2)
     .with_max_prediction_window(8)
     .with_fps(60)?
@@ -511,6 +511,8 @@ while game_running {
 ### Phase 4: Termination (Critical!)
 
 **⚠️ WARNING: Improper termination is the #1 cause of multiplayer bugs.**
+
+> See the [Session Termination Anti-Pattern](user-guide.md#session-termination-the-last_confirmed_frame-anti-pattern) section in the User Guide for detailed examples and solutions.
 
 #### The Anti-Pattern (DON'T DO THIS)
 
