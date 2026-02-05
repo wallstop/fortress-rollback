@@ -89,6 +89,12 @@ check_local_file() {
 
     incr_checked
 
+    # Warn about .md extension usage in wiki files (convention is extensionless)
+    if [[ "$source_file" == *"/wiki/"* ]] && [[ "$path" =~ \.md$ ]]; then
+        local extensionless="${path%.md}"
+        log_warning "Wiki file uses .md extension: '$link' in $source_file — use '${extensionless}' instead (GitHub Wiki convention)"
+    fi
+
     if [[ -z "$resolved_path" ]] || [[ ! -e "$resolved_path" ]]; then
         # For wiki files, try adding .md extension (GitHub Wiki uses extensionless links)
         if [[ "$source_file" == *"/wiki/"* ]] && [[ ! "$path" =~ \. ]]; then

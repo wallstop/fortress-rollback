@@ -3143,7 +3143,7 @@ Key serialization behaviors:
 
 ## Next Steps
 
-- Read the [Architecture Guide](architecture.md) for deeper understanding
+- Read the [Architecture Guide](Architecture) for deeper understanding
 - Check the examples in `examples/ex_game/` for working code
 - See `examples/configuration.rs` for configuration patterns
 - See `examples/error_handling.rs` for error handling patterns
