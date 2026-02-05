@@ -846,7 +846,7 @@ impl<T: Config> P2PSession<T> {
     /// ```ignore
     /// for handle in session.remote_player_handles_iter() {
     ///     let stats = session.network_stats(handle)?;
-    ///     println!("Remote player {:?}: ping={}ms", handle, stats.local_frame_advantage);
+    ///     println!("Remote player {:?}: ping={}ms", handle, stats.ping);
     /// }
     /// ```
     ///
@@ -892,7 +892,7 @@ impl<T: Config> P2PSession<T> {
     /// // Typical 1v1 game: get the opponent's handle
     /// let opponent = session.remote_player_handle_required()?;
     /// let stats = session.network_stats(opponent)?;
-    /// println!("Ping to opponent: {}ms", stats.local_frame_advantage);
+    /// println!("Ping to opponent: {}ms", stats.ping);
     /// ```
     ///
     /// [`FortressError::InvalidRequestStructured`]: crate::FortressError::InvalidRequestStructured

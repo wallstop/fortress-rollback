@@ -8,8 +8,10 @@
 
 1. **Verify derives exist:** `rg '#\[derive.*Hash' --type rust` before claiming Hash in CHANGELOG
 2. **Verify error variants:** Check actual `return Err(...)` statements match `# Errors` docs
-3. **Run doc build:** `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`
-4. **Test doc examples:** `cargo test --doc`
+3. **Verify struct field names:** `rg 'pub struct TypeName' --type rust -A 10` before writing examples
+4. **Check parallel files:** `diff docs/file.md wiki/File.md` to detect drift
+5. **Run doc build:** `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`
+6. **Test doc examples:** `cargo test --doc`
 
 ---
 
@@ -76,6 +78,58 @@ return Err(FortressError::InvalidRequestStructured {
 /// Returns a [`FortressError`] if invalid.
 ```
 
+### 4. Struct Field Name Mismatch in Examples
+
+**The Issue:** Doc examples use field names that don't exist on the actual struct.
+
+```rust
+// ❌ Doc example uses wrong field name:
+/// ```
+/// for (input, status) in inputs {
+///     match status {
+///         InputStatus::Confirmed => game.apply(input),
+///         InputStatus::Predicted => game.apply_predicted(input),
+///     }
+/// }
+/// ```
+
+// ❌ But the actual struct has different fields:
+pub struct PlayerInput<I> {
+    pub input: I,           // Field is 'input', not tuple index
+    pub status: InputStatus, // Field is 'status', not tuple index
+}
+```
+
+**Why It Happens:**
+
+- Struct definition evolved but examples weren't updated
+- Examples written from memory without checking actual definitions
+- Different iteration patterns assumed (tuple vs named fields)
+
+### 5. Inconsistent Iteration Patterns
+
+**The Issue:** Different doc examples use different patterns for the same data structure.
+
+```rust
+// Example A: Tuple destructuring (wrong if struct has named fields)
+for (input, status) in inputs { ... }
+
+// Example B: Field access (correct for named fields)
+for player_input in inputs {
+    let input = player_input.input;
+    let status = player_input.status;
+}
+
+// Example C: Pattern matching (correct for named fields)
+for PlayerInput { input, status } in inputs { ... }
+```
+
+**Why This Matters:**
+
+- Users copy-paste examples; wrong patterns won't compile
+- Inconsistent patterns confuse users about the correct approach
+- Makes documentation look unmaintained
+
 ---
 
 ## Prevention: Verification Commands
@@ -112,6 +166,35 @@ rg 'impl From<.*> for FortressError' src/error.rs
 
 # Find all uses of a specific error variant
 rg 'FortressError::InvalidRequest' --type rust
+```
+
+### Before Writing Struct Examples
+
+Verify struct field names match actual definitions:
+
+```bash
+# Check actual struct definition before writing examples
+rg 'pub struct PlayerInput' --type rust -A 10
+
+# Find all field names for a struct
+rg 'pub struct FrameInputs' --type rust -A 20 | rg 'pub \w+:'
+
+# Verify iteration patterns in existing examples match struct
+rg 'for.*in.*inputs' docs/ wiki/ --type md -B 2 -A 5
+```
+
+**Example verification workflow:**
+
+```bash
+# Before writing: for (input, status) in inputs
+# Check if inputs is Vec<(I, InputStatus)> or Vec<PlayerInput<I>>
+
+rg 'type.*Inputs|struct.*Inputs|fn.*inputs.*->' --type rust | head -10
+
+# If struct has named fields, use:
+#   for player_input in inputs { ... player_input.input ... }
+# or:
+#   for PlayerInput { input, status } in inputs { ... }
 ```
 
 ### Build and Test Documentation
@@ -680,6 +763,7 @@ Identify and track files that contain overlapping content:
 | Primary Source | Parallel Location(s) | Content Type |
 |----------------|---------------------|--------------|
 | `docs/user-guide.md` | `wiki/User-Guide.md` | Usage examples, API patterns |
+| `docs/specs/spec-divergences.md` | `wiki/Spec-Divergences.md` | Spec-production alignment (versioned) |
 | `docs/migration.md` | `wiki/Migration.md` | Migration guidance |
 | `docs/architecture.md` | `wiki/Architecture.md` | System design |
 | `README.md` | `docs/index.md` | Quick start, overview |
@@ -778,6 +862,51 @@ Before committing documentation changes:
 - [ ] Verified no contradictions between locations
 - [ ] Checked that examples compile in all locations
 - [ ] Added sync markers if maintaining intentional differences
+
+### Versioned Documents (spec-divergences, etc.)
+
+Some parallel documents include version headers that must stay synchronized:
+
+```markdown
+**Version:** 1.4
+**Date:** February 5, 2026
+**Status:** Documented
+```
+
+**Common version drift patterns:**
+
+```text
+docs/specs/spec-divergences.md: Version 1.3, January 15, 2026
+wiki/Spec-Divergences.md:       Version 1.4, February 5, 2026
+```
+
+**Verification for versioned documents:**
+
+```bash
+# Check version headers in parallel files
+rg '\*\*Version:\*\*|\*\*Date:\*\*' docs/ wiki/ --type md
+
+# Compare revision histories
+rg -A 5 'Revision History' docs/specs/ wiki/ --type md
+
+# Find version mismatches
+diff <(rg 'Version:' docs/specs/spec-divergences.md) \
+     <(rg 'Version:' wiki/Spec-Divergences.md)
+```
+
+**When syncing versioned documents:**
+
+1. **Identify the more recent version** — Check revision history
+2. **Copy content from newer to older** — Preserve any location-specific paths (e.g., image refs)
+3. **Bump version number** — Increment to indicate sync occurred
+4. **Update date** — Use the current date since you're modifying the document
+5. **Add revision entry** — Document the sync in revision history
+
+**Example revision history entry for sync:**
+
+```markdown
+| 1.4 | 2026-02-05 | Synchronized docs/ and wiki/ versions; no content changes |
+```
 
 ---
 
@@ -981,7 +1110,7 @@ fi
 
 ---
 
-## Summary: The Eight Rules
+## Summary: The Ten Rules
 
 1. **Verify before documenting** — Always check code exists before claiming it does
 2. **Build docs with warnings as errors** — `RUSTDOCFLAGS="-D warnings" cargo doc`
@@ -991,6 +1120,8 @@ fi
 6. **Use correct grammar** — Match verb forms to subjects; read aloud to verify
 7. **Sync parallel documentation** — Update all locations when content exists in multiple places (docs/, wiki/, README)
 8. **Follow API change workflow** — When renaming methods or changing types, audit ALL references before and after
+9. **Verify struct field names** — Check actual struct definitions before writing examples with field access
+10. **Use consistent iteration patterns** — Match iteration style to actual data structure (tuple vs named fields)
 
 ---
 

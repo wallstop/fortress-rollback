@@ -1,11 +1,13 @@
+<!-- SYNC: This file should be kept in sync with wiki/Spec-Divergences.md -->
+
 <p align="center">
   <img src="../assets/logo-small.svg" alt="Fortress Rollback" width="64">
 </p>
 
 # Spec-Production Divergences
 
-**Version:** 1.2
-**Date:** December 9, 2025
+**Version:** 1.4
+**Date:** February 5, 2026
 **Status:** Documented
 
 This document lists intentional divergences between formal specifications and production code, with justification for each.
@@ -188,6 +190,7 @@ When modifying specs or production code:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.4 | 2026-02-05 | Synchronized docs/ and wiki/ versions; no content changes |
 | 1.3 | 2025-12-15 | Fixed InputQueue.tla to use `lastConfirmedInput` matching production's `last_confirmed_input` (was incorrectly named `prediction`, which modeled original GGPO behavior) |
 | 1.2 | 2025-12-09 | Comprehensive config struct documentation: SyncConfig, ProtocolConfig, SpectatorConfig, TimeSyncConfig |
 | 1.1 | 2025-12-09 | Phase 10: Documented configurable constants (InputQueueConfig) |

@@ -1,3 +1,5 @@
+<!-- SYNC: This file should be kept in sync with wiki/User-Guide.md -->
+
 <p align="center">
   <img src="assets/logo.svg" alt="Fortress Rollback" width="128">
 </p>
@@ -345,7 +347,7 @@ for (i, handle) in session.local_player_handles().iter().enumerate() {
 }
 
 // Check network stats for all remote players
-for handle in session.remote_player_handles() {
+for handle in session.remote_player_handles().iter() {
     let stats = session.network_stats(handle)?;
     if stats.ping > 150 {
         println!("High latency with player {:?}", handle);
