@@ -135,7 +135,7 @@ For networking in the browser, use **[Matchbox](https://github.com/johanhelsing/
 
 ```toml
 [dependencies]
-fortress-rollback = "0.4"
+fortress-rollback = "0.5"
 matchbox_socket = { version = "0.13", features = ["ggrs"] }
 ```
 
