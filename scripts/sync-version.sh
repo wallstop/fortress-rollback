@@ -42,6 +42,10 @@
 #   fortress-rollback = { version = "0.2", features = ["tokio"] }
 #   fortress-rollback = { version = "0.2.0", features = ["sync-send"] }
 #
+# Pattern 3 - CHANGELOG.md link footers:
+#   [Unreleased]: https://github.com/.../compare/v0.2.0...HEAD
+#   [0.2.0]: https://github.com/.../compare/v0.1.0...v0.2.0
+#
 # These patterns are matched in ALL contexts including:
 #   - Rust doc comments (/// and //!)
 #   - Regular Rust comments (//)
@@ -159,12 +163,28 @@ should_exclude_file() {
 
     # Exclude paths containing these directories
     case "$file" in
-        */target/*|*/.git/*|*/node_modules/*)
+        */target/*|*/.git/*|*/node_modules/*|*/.tla-tools/*|*/site/*|*/proptest-regressions/*|*/mutants.out*/*|*/.venv/*|*/fuzz/target/*)
             return 0  # true = exclude
             ;;
     esac
 
     return 1  # false = don't exclude
+}
+
+# De-duplicate when adding files to the INCONSISTENT_FILES array
+# (called from main(); accesses main()'s local INCONSISTENT_FILES via shared scope)
+add_inconsistent_file() {
+    local relative_path="$1"
+    local already_listed=false
+    for f in "${INCONSISTENT_FILES[@]+"${INCONSISTENT_FILES[@]}"}"; do
+        if [[ "$f" == "$relative_path" ]]; then
+            already_listed=true
+            break
+        fi
+    done
+    if [[ "$already_listed" == "false" ]]; then
+        INCONSISTENT_FILES+=("$relative_path")
+    fi
 }
 
 # Main logic
@@ -215,6 +235,11 @@ main() {
         ! -path "*/.git/*" \
         ! -path "*/node_modules/*" \
         ! -path "*/.tla-tools/*" \
+        ! -path "*/site/*" \
+        ! -path "*/proptest-regressions/*" \
+        ! -path "*/mutants.out*/*" \
+        ! -path "*/.venv/*" \
+        ! -path "*/fuzz/target/*" \
         ! -name "Cargo.toml" \
         ! -name "Cargo.lock" \
         2>/dev/null | sort || true)
@@ -270,23 +295,13 @@ main() {
 
             # Check if any don't match the current version
             local current_matches
-            current_matches=$(grep -E "$PATTERN1" "$file" 2>/dev/null | grep -c "\"$MAJOR_MINOR\"" | tr -d '[:space:]' || true)
+            current_matches=$(grep -E "$PATTERN1" "$file" 2>/dev/null | grep -cF "\"$MAJOR_MINOR\"" | tr -d '[:space:]' || true)
             current_matches=${current_matches:-0}
 
             if [[ "$matches" != "$current_matches" ]]; then
                 log "${YELLOW}  → Found outdated version (pattern 1): $relative_path${NC}"
 
-                # Add to inconsistent list if not already there
-                local already_listed=false
-                for f in "${INCONSISTENT_FILES[@]+"${INCONSISTENT_FILES[@]}"}"; do
-                    if [[ "$f" == "$relative_path" ]]; then
-                        already_listed=true
-                        break
-                    fi
-                done
-                if [[ "$already_listed" == "false" ]]; then
-                    INCONSISTENT_FILES+=("$relative_path")
-                fi
+                add_inconsistent_file "$relative_path"
 
                 if [[ "$CHECK_ONLY" == "false" ]]; then
                     if [[ "$DRY_RUN" == "true" ]]; then
@@ -317,23 +332,13 @@ main() {
 
             # Check if any don't match the current version
             local current_matches
-            current_matches=$(grep -E "$PATTERN2" "$file" 2>/dev/null | grep -c "version = \"$MAJOR_MINOR\"" | tr -d '[:space:]' || true)
+            current_matches=$(grep -E "$PATTERN2" "$file" 2>/dev/null | grep -cF "version = \"$MAJOR_MINOR\"" | tr -d '[:space:]' || true)
             current_matches=${current_matches:-0}
 
             if [[ "$matches" != "$current_matches" ]]; then
                 log "${YELLOW}  → Found outdated version (pattern 2): $relative_path${NC}"
 
-                # Add to inconsistent list if not already there
-                local already_listed=false
-                for f in "${INCONSISTENT_FILES[@]+"${INCONSISTENT_FILES[@]}"}"; do
-                    if [[ "$f" == "$relative_path" ]]; then
-                        already_listed=true
-                        break
-                    fi
-                done
-                if [[ "$already_listed" == "false" ]]; then
-                    INCONSISTENT_FILES+=("$relative_path")
-                fi
+                add_inconsistent_file "$relative_path"
 
                 if [[ "$CHECK_ONLY" == "false" ]]; then
                     if [[ "$DRY_RUN" == "true" ]]; then
@@ -361,6 +366,76 @@ main() {
     done <<< "$FILES_TO_SCAN"
 
     # ═══════════════════════════════════════════════════════════════════════════
+    # Pattern 3: CHANGELOG.md Link Footers
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    local CHANGELOG="$PROJECT_ROOT/CHANGELOG.md"
+    if [[ -f "$CHANGELOG" ]]; then
+        log "${MAGENTA}Checking CHANGELOG.md link footers...${NC}"
+
+        # Check that [Unreleased] link footer exists
+        if ! grep -qE '^\[Unreleased\]: https://' "$CHANGELOG" 2>/dev/null; then
+            log_always "${YELLOW}  ⚠ CHANGELOG.md is missing [Unreleased] link footer${NC}"
+            add_inconsistent_file "CHANGELOG.md (link footers)"
+        fi
+
+        # Check [Unreleased] link points to current version
+        local UNRELEASED_PATTERN='\[Unreleased\]: https://github\.com/.*/compare/v[0-9]+\.[0-9]+\.[0-9]+\.\.\.HEAD'
+        if grep -qE "$UNRELEASED_PATTERN" "$CHANGELOG" 2>/dev/null; then
+            local current_unreleased
+            current_unreleased=$(grep -oE 'compare/v[0-9]+\.[0-9]+\.[0-9]+\.\.\.HEAD' "$CHANGELOG" | head -1 | sed -E 's|compare/v([0-9]+\.[0-9]+\.[0-9]+)\.\.\.HEAD|\1|')
+            if [[ "$current_unreleased" != "$VERSION" ]]; then
+                log "${YELLOW}  → [Unreleased] link points to v$current_unreleased, should be v$VERSION${NC}"
+                add_inconsistent_file "CHANGELOG.md (link footers)"
+
+                if [[ "$CHECK_ONLY" == "false" ]]; then
+                    if [[ "$DRY_RUN" == "true" ]]; then
+                        echo -e "${YELLOW}Would update:${NC} CHANGELOG.md [Unreleased] link footer"
+                    else
+                        sd "(\\[Unreleased\\]: https://github\\.com/.*/compare/v)[0-9]+\\.[0-9]+\\.[0-9]+(\\.\\.\\.HEAD)" "\${1}$VERSION\${2}" "$CHANGELOG"
+                        echo -e "${GREEN}✓ Updated:${NC} CHANGELOG.md [Unreleased] link → v$VERSION"
+                        ((FILES_CHANGED++)) || true
+                        ((TOTAL_REPLACEMENTS++)) || true
+                    fi
+                fi
+            fi
+        fi
+
+        # Check that a [$VERSION] link entry exists
+        local ESCAPED_VERSION="${VERSION//./\\.}"
+        if ! grep -qE "^\[$ESCAPED_VERSION\]: https://github\.com/" "$CHANGELOG" 2>/dev/null; then
+            log "${YELLOW}  → Missing [$VERSION] link entry in CHANGELOG.md${NC}"
+            # Flag as inconsistent in all modes — adding entries
+            # requires knowledge of the previous version tag
+            add_inconsistent_file "CHANGELOG.md (link footers)"
+            if [[ "$DRY_RUN" == "true" ]]; then
+                echo -e "${YELLOW}⚠ CHANGELOG.md is missing a [$VERSION] link footer entry (dry-run)${NC}"
+            else
+                echo -e "${YELLOW}⚠ CHANGELOG.md is missing a [$VERSION] link footer entry${NC}"
+            fi
+        else
+            log "${GREEN}  ✓ [$VERSION] link entry exists in CHANGELOG.md${NC}"
+        fi
+
+        # Check that every ## [x.y.z] header has a matching [x.y.z]: link footer
+        local version_headers
+        version_headers=$(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' "$CHANGELOG" | sed -E 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\]/\1/' || true)
+        if [[ -n "$version_headers" ]]; then
+            while IFS= read -r header_version; do
+                [[ -z "$header_version" ]] && continue
+                local ESCAPED_HEADER_VERSION="${header_version//./\\.}"
+                if ! grep -qE "^\[$ESCAPED_HEADER_VERSION\]: https://" "$CHANGELOG" 2>/dev/null; then
+                    log "${YELLOW}  → ## [$header_version] header has no matching [$header_version]: link footer${NC}"
+                    add_inconsistent_file "CHANGELOG.md (link footers)"
+                    echo -e "${YELLOW}⚠ CHANGELOG.md ## [$header_version] header is missing a matching link footer${NC}"
+                else
+                    log "${GREEN}  ✓ [$header_version] link footer matches header${NC}"
+                fi
+            done <<< "$version_headers"
+        fi
+    fi
+
+    # ═══════════════════════════════════════════════════════════════════════════
     # Summary Report
     # ═══════════════════════════════════════════════════════════════════════════
 
@@ -374,6 +449,7 @@ main() {
             echo ""
             for f in "${INCONSISTENT_FILES[@]}"; do
                 local ext="${f##*.}"
+                ext="${ext%% (*}"
                 echo -e "  ${YELLOW}•${NC} $f ${MAGENTA}($ext)${NC}"
             done
             echo ""
@@ -394,7 +470,13 @@ main() {
         if [[ $FILES_CHANGED -gt 0 ]]; then
             echo -e "${GREEN}✓ Updated $FILES_CHANGED file(s) with $TOTAL_REPLACEMENTS replacement(s)${NC}"
             echo -e "${BLUE}All version references now match:${NC} ${GREEN}$MAJOR_MINOR${NC}"
-        else
+        fi
+        if [[ ${#INCONSISTENT_FILES[@]} -gt 0 ]]; then
+            echo -e "${YELLOW}⚠ ${#INCONSISTENT_FILES[@]} issue(s) require manual intervention:${NC}"
+            for f in "${INCONSISTENT_FILES[@]}"; do
+                echo -e "  ${YELLOW}•${NC} $f"
+            done
+        elif [[ $FILES_CHANGED -eq 0 ]]; then
             echo -e "${GREEN}✓ All version references are already consistent with Cargo.toml ($VERSION)${NC}"
         fi
     fi
