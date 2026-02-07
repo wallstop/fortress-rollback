@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0]
+
 ### Added
 
 - `Session<T: Config>` trait — unified interface for `P2PSession`, `SpectatorSession`, and `SyncTestSession`, enabling generic code that works with any session type
@@ -346,7 +348,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.5"
+fortress-rollback = "0.6"
 ```
 
 ### Import Path Change
@@ -406,7 +408,7 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.6.0...HEAD
 [0.5.0]: https://github.com/wallstop/fortress-rollback/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/wallstop/fortress-rollback/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/wallstop/fortress-rollback/compare/v0.3.0...v0.4.0
