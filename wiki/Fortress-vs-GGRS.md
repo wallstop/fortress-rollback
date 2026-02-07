@@ -233,7 +233,7 @@ pub fn add_spectator(
 ```toml
 # Fortress - just works
 [dependencies]
-fortress-rollback = "0.5"
+fortress-rollback = "0.6"
 ```
 
 **How this works:**
@@ -500,7 +500,7 @@ ChaosConfig::intercontinental() // High-latency stable connection
 
 ## Migration Checklist
 
-- [ ] Update `Cargo.toml`: `ggrs = "0.11"` -> `fortress-rollback = "0.5"`
+- [ ] Update `Cargo.toml`: `ggrs = "0.11"` -> `fortress-rollback = "0.6"`
 - [ ] Update imports: `use ggrs::*` -> `use fortress_rollback::*`
 - [ ] Rename types: `GgrsError` -> `FortressError`, etc.
 - [ ] Add `Ord` + `PartialOrd` to your `Config::Address` type

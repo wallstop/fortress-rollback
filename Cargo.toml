@@ -5,7 +5,7 @@ members = [".", "tests/network-peer"]
 
 [package]
 name = "fortress-rollback"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["wallstop <wallstop@wallstopstudios.com>"]
 edition = "2021"
 rust-version = "1.86"  # Minimum Supported Rust Version (MSRV) - required by criterion 0.8.1
