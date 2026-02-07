@@ -417,7 +417,7 @@ pub enum SaveMode {
 
 ---
 
-### `advance_frame(&mut self) -> Result<Vec<FortressRequest>, FortressError>`
+### `advance_frame(&mut self) -> FortressResult<RequestVec<T>>`
 
 ```rust
 /// Advance the simulation by one frame, handling rollbacks as needed.
@@ -544,7 +544,7 @@ pub enum SaveMode {
 
 ## SpectatorSession
 
-### `advance_frame(&mut self) -> Result<Vec<FortressRequest>, FortressError>`
+### `advance_frame(&mut self) -> FortressResult<RequestVec<T>>`
 
 ```rust
 /// Advance spectator simulation.
@@ -567,7 +567,7 @@ pub enum SaveMode {
 
 ## SyncTestSession
 
-### `advance_frame(&mut self) -> Result<Vec<FortressRequest>, FortressError>`
+### `advance_frame(&mut self) -> FortressResult<RequestVec<T>>`
 
 ```rust
 /// Advance with automatic rollback testing.

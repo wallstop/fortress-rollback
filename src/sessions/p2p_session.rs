@@ -4,6 +4,7 @@ use crate::network::messages::ConnectionStatus;
 use crate::network::network_stats::NetworkStats;
 use crate::sessions::config::{ProtocolConfig, SaveMode};
 use crate::sessions::player_registry::PlayerRegistry;
+use crate::sessions::session_trait::Session;
 use crate::sessions::sync_health::SyncHealth;
 use crate::sync_layer::SyncLayer;
 use crate::telemetry::{
@@ -12,18 +13,17 @@ use crate::telemetry::{
 use crate::DesyncDetection;
 use crate::HandleVec;
 use crate::{
-    network::protocol::Event, Config, FortressEvent, FortressRequest, Frame, InvalidFrameReason,
-    NonBlockingSocket, PlayerHandle, PlayerType, SessionState,
+    network::protocol::Event, Config, EventDrain, FortressEvent, FortressRequest, FortressResult,
+    Frame, InvalidFrameReason, NonBlockingSocket, PlayerHandle, PlayerType, RequestVec,
+    SessionState,
 };
 use crate::{report_violation, safe_frame_add};
-use tracing::{debug, trace};
-
-use std::collections::vec_deque::Drain;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::fmt;
 use std::sync::Arc;
+use tracing::{debug, trace};
 
 /// Minimum frames between [`FortressEvent::WaitRecommendation`] events.
 ///
@@ -52,6 +52,11 @@ const MIN_RECOMMENDATION: u32 = 3;
 const DEFAULT_MAX_EVENT_QUEUE_SIZE: usize = 100;
 
 /// A [`P2PSession`] provides all functionality to connect to remote clients in a peer-to-peer fashion, exchange inputs and handle the gamestate by saving, loading and advancing.
+///
+/// This type implements the [`Session`] trait, enabling it to be used in generic
+/// code that works with any session type.
+///
+/// [`Session`]: crate::Session
 pub struct P2PSession<T>
 where
     T: Config,
@@ -221,16 +226,16 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// You should call this to notify Fortress Rollback that you are ready to advance your gamestate by a single frame.
-    /// Returns an order-sensitive [`Vec<FortressRequest>`]. You should fulfill all requests in the exact order they are provided.
+    /// Returns an order-sensitive [`RequestVec`]. You should fulfill all requests in the exact order they are provided.
     /// Failure to do so will cause panics later.
     ///
     /// # Errors
     /// - Returns a [`FortressError`] if the provided player handle refers to a remote player.
     /// - Returns a [`FortressError`] if the session is not yet ready to accept input. In this case, you either need to start the session or wait for synchronization between clients.
     ///
-    /// [`Vec<FortressRequest>`]: FortressRequest
+    /// [`RequestVec`]: crate::RequestVec
     #[must_use = "FortressRequests must be processed to advance the game state"]
-    pub fn advance_frame(&mut self) -> Result<Vec<FortressRequest<T>>, FortressError> {
+    pub fn advance_frame(&mut self) -> FortressResult<RequestVec<T>> {
         // receive info from remote players, trigger events and send messages
         self.poll_remote_clients();
 
@@ -262,9 +267,9 @@ impl<T: Config> P2PSession<T> {
         }
 
         // This list of requests will be returned to the user.
-        // Pre-allocate with capacity for typical case: 1 save + 1 advance = 2 requests.
-        // During rollback, more requests will be added but Vec will grow as needed.
-        let mut requests = Vec::with_capacity(2);
+        // SmallVec inline capacity of 4 covers the typical case (save + advance)
+        // without heap allocation. During rollback, it spills to the heap as needed.
+        let mut requests = RequestVec::<T>::new();
 
         /*
          * ROLLBACKS AND GAME STATE MANAGEMENT
@@ -698,9 +703,9 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// Returns all events that happened since last queried for events. If the number of stored events exceeds `MAX_EVENT_QUEUE_SIZE`, the oldest events will be discarded.
-    #[must_use]
-    pub fn events(&mut self) -> Drain<'_, FortressEvent<T>> {
-        self.event_queue.drain(..)
+    #[must_use = "events should be handled to react to session state changes"]
+    pub fn events(&mut self) -> EventDrain<'_, T> {
+        EventDrain::from_drain(self.event_queue.drain(..))
     }
 
     /// Returns the confirmed inputs for all players at a specific frame.
@@ -1377,7 +1382,7 @@ impl<T: Config> P2PSession<T> {
         &mut self,
         first_incorrect: Frame,
         min_confirmed: Frame,
-        requests: &mut Vec<FortressRequest<T>>,
+        requests: &mut RequestVec<T>,
     ) -> Result<(), FortressError> {
         let current_frame = self.sync_layer.current_frame();
         // determine the frame to load
@@ -1650,7 +1655,7 @@ impl<T: Config> P2PSession<T> {
         &mut self,
         last_saved: Frame,
         confirmed_frame: Frame,
-        requests: &mut Vec<FortressRequest<T>>,
+        requests: &mut RequestVec<T>,
     ) -> Result<(), FortressError> {
         // in sparse saving mode, we need to make sure not to lose the last saved frame
         if self.sync_layer.current_frame() - last_saved >= self.max_prediction as i32 {
@@ -1960,6 +1965,36 @@ impl<T: Config> InvariantChecker for P2PSession<T> {
         }
 
         Ok(())
+    }
+}
+
+impl<T: Config> Session<T> for P2PSession<T> {
+    fn advance_frame(&mut self) -> FortressResult<RequestVec<T>> {
+        Self::advance_frame(self)
+    }
+
+    fn local_player_handle_required(&self) -> FortressResult<PlayerHandle> {
+        Self::local_player_handle_required(self)
+    }
+
+    fn add_local_input(
+        &mut self,
+        player_handle: PlayerHandle,
+        input: T::Input,
+    ) -> FortressResult<()> {
+        Self::add_local_input(self, player_handle, input)
+    }
+
+    fn events(&mut self) -> EventDrain<'_, T> {
+        Self::events(self)
+    }
+
+    fn current_state(&self) -> SessionState {
+        Self::current_state(self)
+    }
+
+    fn poll_remote_clients(&mut self) {
+        Self::poll_remote_clients(self)
     }
 }
 

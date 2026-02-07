@@ -15,7 +15,7 @@ use std::hash::Hash;
 use std::net::SocketAddr;
 
 use fortress_rollback::hash::fnv1a_hash;
-use fortress_rollback::{Config, FortressRequest, Frame, GameStateCell, InputVec};
+use fortress_rollback::{Config, FortressRequest, Frame, GameStateCell, InputVec, RequestVec};
 use serde::{Deserialize, Serialize};
 
 fn calculate_hash<T: Hash>(t: &T) -> u64 {
@@ -60,7 +60,7 @@ impl GameStubEnum {
     }
 
     #[allow(dead_code)]
-    pub fn handle_requests(&mut self, requests: Vec<FortressRequest<StubEnumConfig>>) {
+    pub fn handle_requests(&mut self, requests: RequestVec<StubEnumConfig>) {
         for request in requests {
             match request {
                 FortressRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
@@ -125,7 +125,7 @@ impl GameStubHandler<StubEnumConfig> for GameStubEnum {
         GameStubEnum::new()
     }
 
-    fn handle_requests(&mut self, requests: Vec<FortressRequest<StubEnumConfig>>) {
+    fn handle_requests(&mut self, requests: RequestVec<StubEnumConfig>) {
         GameStubEnum::handle_requests(self, requests);
     }
 

@@ -17,7 +17,7 @@ use std::hash::Hash;
 use std::net::SocketAddr;
 
 use fortress_rollback::hash::fnv1a_hash;
-use fortress_rollback::{Config, FortressRequest, Frame, GameStateCell, InputVec};
+use fortress_rollback::{Config, FortressRequest, Frame, GameStateCell, InputVec, RequestVec};
 
 fn calculate_hash<T: Hash>(t: &T) -> u64 {
     fnv1a_hash(t)
@@ -58,7 +58,7 @@ impl GameStub {
     }
 
     #[allow(dead_code)]
-    pub fn handle_requests(&mut self, requests: Vec<FortressRequest<StubConfig>>) {
+    pub fn handle_requests(&mut self, requests: RequestVec<StubConfig>) {
         for request in requests {
             match request {
                 FortressRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
@@ -112,7 +112,7 @@ impl RandomChecksumGameStub {
     }
 
     #[allow(dead_code)]
-    pub fn handle_requests(&mut self, requests: Vec<FortressRequest<StubConfig>>) {
+    pub fn handle_requests(&mut self, requests: RequestVec<StubConfig>) {
         for request in requests {
             match request {
                 FortressRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
@@ -184,7 +184,7 @@ impl CorruptibleGameStub {
     }
 
     #[allow(dead_code)]
-    pub fn handle_requests(&mut self, requests: Vec<FortressRequest<StubConfig>>) {
+    pub fn handle_requests(&mut self, requests: RequestVec<StubConfig>) {
         for request in requests {
             match request {
                 FortressRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
@@ -255,7 +255,7 @@ impl GameStubHandler<StubConfig> for GameStub {
         GameStub::new()
     }
 
-    fn handle_requests(&mut self, requests: Vec<FortressRequest<StubConfig>>) {
+    fn handle_requests(&mut self, requests: RequestVec<StubConfig>) {
         GameStub::handle_requests(self, requests);
     }
 

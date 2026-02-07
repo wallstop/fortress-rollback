@@ -15,6 +15,7 @@ mod sessions {
     pub mod macro_tests;
     pub mod p2p;
     pub mod p2p_enum;
+    pub mod session_trait;
     pub mod spectator;
     pub mod synctest;
     pub mod synctest_enum;

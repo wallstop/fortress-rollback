@@ -103,7 +103,8 @@ fn update(state: &mut GameState) {
 
 **Implementation:**
 
-- ✅ Library uses `rand::random()` only for sync handshake (not game state)
+- ✅ Library uses its own internal PCG32 RNG (`rng::random()`) only for sync handshake nonces (not game state)
+- ✅ No `rand` crate dependency — custom `Pcg32` implementation in `src/rng.rs`
 - ✅ No RNG affects input processing or state management
 
 **User Responsibility:**
@@ -366,7 +367,7 @@ Use `SyncTestSession` to detect non-determinism locally:
 
 ```rust
 let mut session = SessionBuilder::<Config>::new()
-    .with_num_players(1)
+    .with_num_players(1)?
     .with_check_distance(4) // Compare last 4 frames
     .start_synctest_session()?;
 
@@ -389,8 +390,8 @@ Monitor for `FortressEvent::DesyncDetected`:
 
 ```rust
 for event in session.events() {
-    if let FortressEvent::DesyncDetected { frame, local, remote, .. } = event {
-        panic!("Desync at frame {}: local={}, remote={}", frame, local, remote);
+    if let FortressEvent::DesyncDetected { frame, local_checksum, remote_checksum, addr } = event {
+        eprintln!("Desync at frame {}: local={:#x}, remote={:#x}, addr={}", frame, local_checksum, remote_checksum, addr);
     }
 }
 ```

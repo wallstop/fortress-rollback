@@ -60,7 +60,7 @@ To get started with Fortress Rollback, check out the following resources:
 - 📚 **[GitHub Wiki](https://github.com/wallstop/fortress-rollback/wiki)** — Quick reference and community-editable docs
 - 💻 **[Examples](./examples/)** — Working code examples for common use cases
 - 🎮 **[Request Handling Example](./examples/request_handling.rs)** — How to handle game loop requests with manual matching or the `handle_requests!` macro
-- 📋 **[API Documentation](https://docs.rs/fortress-rollback/newest/fortress_rollback/)** — Auto-generated Rust docs on docs.rs
+- 📋 **[API Documentation](https://docs.rs/fortress-rollback/latest/fortress_rollback/)** — Auto-generated Rust docs on docs.rs
 
 ### System Dependencies for Examples
 
@@ -93,6 +93,7 @@ Alpha / experimental only.
 - **`handle_requests!` Macro**: Eliminates boilerplate in the game loop — see [User Guide](./docs/user-guide.md#using-the-handle_requests-macro)
 - **Config Presets**: `SyncConfig::lan()`, `ProtocolConfig::mobile()`, etc. for common network conditions
 - **Player Handle Convenience Methods**: Easy access to local/remote handles for 1v1 games, player type checking, and iteration — see [User Guide](./docs/user-guide.md#player-handle-convenience-methods)
+- **Unified Session Trait**: Write generic game loops via `Session<T>` — works with P2P, spectator, and sync test sessions — see [User Guide](./docs/user-guide.md#using-the-session-trait)
 
 📋 **[Complete comparison with GGRS →](./docs/fortress-vs-ggrs.md)** — See all differences, bug fixes, and migration steps
 
@@ -120,6 +121,8 @@ For detailed configuration guidance, see the [User Guide](./docs/user-guide.md#n
 | `graphical-examples` | Enables ex_game graphical examples (requires macroquad deps) |
 | `loom` | Loom-compatible synchronization primitives for concurrency testing |
 | `json` | JSON serialization for telemetry types (`to_json()` methods) |
+| `z3-verification` | Enables Z3 SMT solver proofs (development/CI only — requires Z3 installed) |
+| `z3-verification-bundled` | Like `z3-verification` but builds Z3 from source (slow, no system Z3 needed) |
 
 For detailed feature documentation, see the [User Guide](./docs/user-guide.md#feature-flags).
 
@@ -138,6 +141,8 @@ For networking in the browser, use **[Matchbox](https://github.com/johanhelsing/
 fortress-rollback = "0.5"
 matchbox_socket = { version = "0.13", features = ["ggrs"] }
 ```
+
+> **Note:** The `ggrs` feature of `matchbox_socket` implements the **original GGRS crate's** `NonBlockingSocket` trait, not Fortress Rollback's. You'll need a thin adapter wrapper to bridge the two traits. See the [custom socket example](./examples/custom_socket.rs) for the recommended approach to implementing your own `NonBlockingSocket`.
 
 Matchbox handles:
 

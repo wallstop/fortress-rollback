@@ -1,4 +1,4 @@
-use std::collections::{vec_deque::Drain, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 
@@ -9,10 +9,11 @@ use crate::{
         protocol::{Event, UdpProtocol},
     },
     report_violation, safe_frame_add,
+    sessions::session_trait::Session,
     telemetry::{ViolationKind, ViolationObserver, ViolationSeverity},
-    Config, FortressError, FortressEvent, FortressRequest, Frame, InputStatus, InputVec,
-    InternalErrorKind, InvalidFrameReason, NetworkStats, NonBlockingSocket, PlayerHandle,
-    SessionState,
+    Config, EventDrain, FortressError, FortressEvent, FortressRequest, FortressResult, Frame,
+    InputStatus, InputVec, InternalErrorKind, InvalidFrameReason, InvalidRequestKind, NetworkStats,
+    NonBlockingSocket, PlayerHandle, RequestVec, SessionState,
 };
 
 /// The number of frames the spectator advances in a single step during normal operation.
@@ -25,6 +26,12 @@ const NORMAL_SPEED: usize = 1;
 ///
 /// The host will broadcast all confirmed inputs to this session.
 /// This session can be used to spectate a session without contributing to the game input.
+///
+/// This type implements the [`Session`] trait. Note that [`add_local_input`](Session::add_local_input)
+/// and [`local_player_handle_required`](Session::local_player_handle_required) return
+/// "not supported" errors, since spectators do not contribute input.
+///
+/// [`Session`]: crate::Session
 pub struct SpectatorSession<T>
 where
     T: Config,
@@ -122,9 +129,50 @@ impl<T: Config> SpectatorSession<T> {
         self.host.network_stats()
     }
 
+    /// Returns the local player handle.
+    ///
+    /// Spectators do not have a local player, so this always returns a
+    /// "not supported" error.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`InvalidRequestKind::NotSupported`].
+    ///
+    /// [`InvalidRequestKind::NotSupported`]: crate::InvalidRequestKind::NotSupported
+    #[must_use = "returns the local player handle which should be used"]
+    pub fn local_player_handle_required(&self) -> FortressResult<PlayerHandle> {
+        Err(InvalidRequestKind::NotSupported {
+            operation: "local_player_handle_required",
+        }
+        .into())
+    }
+
+    /// Adds local input for the given player.
+    ///
+    /// Spectators do not contribute input, so this always returns a
+    /// "not supported" error.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`InvalidRequestKind::NotSupported`].
+    ///
+    /// [`InvalidRequestKind::NotSupported`]: crate::InvalidRequestKind::NotSupported
+    #[must_use = "error should be handled"]
+    pub fn add_local_input(
+        &mut self,
+        _player_handle: PlayerHandle,
+        _input: T::Input,
+    ) -> FortressResult<()> {
+        Err(InvalidRequestKind::NotSupported {
+            operation: "add_local_input",
+        }
+        .into())
+    }
+
     /// Returns all events that happened since last queried for events. If the number of stored events exceeds `MAX_EVENT_QUEUE_SIZE`, the oldest events will be discarded.
-    pub fn events(&mut self) -> Drain<'_, FortressEvent<T>> {
-        self.event_queue.drain(..)
+    #[must_use = "events should be handled to react to session state changes"]
+    pub fn events(&mut self) -> EventDrain<'_, T> {
+        EventDrain::from_drain(self.event_queue.drain(..))
     }
 
     /// Returns a reference to the violation observer, if one was configured.
@@ -138,17 +186,17 @@ impl<T: Config> SpectatorSession<T> {
     }
 
     /// You should call this to notify Fortress Rollback that you are ready to advance your gamestate by a single frame.
-    /// Returns an order-sensitive [`Vec<FortressRequest>`]. You should fulfill all requests in the exact order they are provided.
+    /// Returns an order-sensitive [`RequestVec`]. You should fulfill all requests in the exact order they are provided.
     /// Failure to do so will cause panics later.
     ///
     /// # Errors
     /// - Returns [`NotSynchronized`] if the session is not yet ready to accept input.
     ///   In this case, you either need to start the session or wait for synchronization between clients.
     ///
-    /// [`Vec<FortressRequest>`]: FortressRequest
+    /// [`RequestVec`]: crate::RequestVec
     /// [`NotSynchronized`]: FortressError::NotSynchronized
     #[must_use = "FortressRequests must be processed to advance the game state"]
-    pub fn advance_frame(&mut self) -> Result<Vec<FortressRequest<T>>, FortressError> {
+    pub fn advance_frame(&mut self) -> FortressResult<RequestVec<T>> {
         // receive info from host, trigger events and send messages
         self.poll_remote_clients();
 
@@ -163,8 +211,9 @@ impl<T: Config> SpectatorSession<T> {
         };
 
         // Pre-allocate for the expected number of frames to advance.
-        // In normal operation this is 1, in catchup mode it's catchup_speed.
-        let mut requests = Vec::with_capacity(frames_to_advance);
+        // In normal operation this is 1 (fits inline), in catchup mode it's catchup_speed
+        // which may exceed the inline capacity of 4, so we keep with_capacity here.
+        let mut requests = RequestVec::<T>::with_capacity(frames_to_advance);
 
         for _ in 0..frames_to_advance {
             // get inputs for the next frame
@@ -433,6 +482,36 @@ impl<T: Config> fmt::Debug for SpectatorSession<T> {
             .field("max_frames_behind", &self.max_frames_behind)
             .field("catchup_speed", &self.catchup_speed)
             .finish_non_exhaustive()
+    }
+}
+
+impl<T: Config> Session<T> for SpectatorSession<T> {
+    fn advance_frame(&mut self) -> FortressResult<RequestVec<T>> {
+        Self::advance_frame(self)
+    }
+
+    fn local_player_handle_required(&self) -> FortressResult<PlayerHandle> {
+        Self::local_player_handle_required(self)
+    }
+
+    fn add_local_input(
+        &mut self,
+        player_handle: PlayerHandle,
+        input: T::Input,
+    ) -> FortressResult<()> {
+        Self::add_local_input(self, player_handle, input)
+    }
+
+    fn events(&mut self) -> EventDrain<'_, T> {
+        Self::events(self)
+    }
+
+    fn current_state(&self) -> SessionState {
+        Self::current_state(self)
+    }
+
+    fn poll_remote_clients(&mut self) {
+        Self::poll_remote_clients(self)
     }
 }
 

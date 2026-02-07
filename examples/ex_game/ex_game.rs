@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use fortress_rollback::{
     compute_checksum_fletcher16, fletcher16, handle_requests, Config, FortressRequest, Frame,
-    GameStateCell, HandleVec, InputStatus, InputVec, PlayerHandle,
+    GameStateCell, HandleVec, InputStatus, InputVec, PlayerHandle, RequestVec,
 };
 use macroquad::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -62,11 +62,7 @@ impl Game {
     }
 
     // for each request, call the appropriate function
-    pub fn handle_requests(
-        &mut self,
-        requests: Vec<FortressRequest<FortressConfig>>,
-        in_lockstep: bool,
-    ) {
+    pub fn handle_requests(&mut self, requests: RequestVec<FortressConfig>, in_lockstep: bool) {
         for request in requests {
             match request {
                 FortressRequest::LoadGameState { cell, frame } => {
@@ -108,7 +104,7 @@ impl Game {
     /// }
     /// ```
     #[allow(dead_code)]
-    pub fn handle_requests_with_macro(&mut self, requests: Vec<FortressRequest<FortressConfig>>) {
+    pub fn handle_requests_with_macro(&mut self, requests: RequestVec<FortressConfig>) {
         handle_requests!(
             requests,
             save: |cell: GameStateCell<State>, frame: Frame| {

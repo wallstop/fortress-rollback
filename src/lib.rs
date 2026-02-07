@@ -82,12 +82,14 @@ pub use sessions::builder::SessionBuilder;
 pub use sessions::config::{
     InputQueueConfig, ProtocolConfig, SaveMode, SpectatorConfig, SyncConfig,
 };
+pub use sessions::event_drain::EventDrain;
 pub use sessions::p2p_session::P2PSession;
 pub use sessions::p2p_spectator_session::SpectatorSession;
 pub use sessions::player_registry::PlayerRegistry;
+pub use sessions::session_trait::Session;
 pub use sessions::sync_health::SyncHealth;
 pub use sessions::sync_test_session::SyncTestSession;
-// Re-export smallvec for users who need to work with InputVec directly
+// Re-export smallvec for users who need to work with SmallVec-backed types directly
 pub use smallvec::SmallVec;
 pub use sync_layer::{GameStateAccessor, GameStateCell};
 pub use time_sync::TimeSyncConfig;
@@ -213,11 +215,15 @@ pub mod sessions {
     #[doc(hidden)]
     pub mod config;
     #[doc(hidden)]
+    pub mod event_drain;
+    #[doc(hidden)]
     pub mod p2p_session;
     #[doc(hidden)]
     pub mod p2p_spectator_session;
     #[doc(hidden)]
     pub mod player_registry;
+    #[doc(hidden)]
+    pub mod session_trait;
     #[doc(hidden)]
     pub mod sync_health;
     #[doc(hidden)]
@@ -1438,6 +1444,43 @@ pub type InputVec<I> = SmallVec<[(I, InputStatus); 4]>;
 /// [`P2PSession::local_player_handles()`]: crate::P2PSession::local_player_handles
 pub type HandleVec = SmallVec<[PlayerHandle; 8]>;
 
+/// Stack-allocated vector for frame advance [`FortressRequest`]s.
+///
+/// Uses [`SmallVec`] with inline capacity of 4 to avoid heap allocations for
+/// the common case (1 save + 1 advance = 2 requests per frame). During
+/// rollbacks, the count can grow to `2 * max_prediction + 2` (typically ~18),
+/// at which point it spills to the heap automatically.
+///
+/// # Performance
+///
+/// For the overwhelmingly common non-rollback path, request vectors are
+/// fully stack-allocated. Rollback is already an expensive operation
+/// (loading state + resimulating N frames), so the marginal cost of a
+/// heap allocation during rollback is negligible.
+///
+/// # Usage
+///
+/// `RequestVec` is returned by session `advance_frame()` methods and can be
+/// iterated like a regular slice:
+///
+/// ```ignore
+/// let requests: RequestVec<MyConfig> = session.advance_frame()?;
+/// for request in requests {
+///     // Handle each request (save, load, advance)
+/// }
+/// ```
+///
+/// # Migration from `Vec`
+///
+/// `RequestVec` implements `Deref<Target = [FortressRequest<T>]>`, so most
+/// code using `.iter()`, `.len()`, indexing, or other slice methods will work
+/// unchanged. If you need a `Vec`, use `.to_vec()`. The [`handle_requests!`]
+/// macro works unchanged because it uses `for request in $requests`, and
+/// `SmallVec` implements `IntoIterator`.
+///
+/// [`handle_requests!`]: crate::handle_requests
+pub type RequestVec<T> = SmallVec<[FortressRequest<T>; 4]>;
+
 /// Notifications that you can receive from the session. Handling them is up to the user.
 ///
 /// # Handling Events
@@ -1683,7 +1726,7 @@ impl<T: Config> std::fmt::Display for FortressRequest<T> {
 /// # Usage
 ///
 /// ```
-/// # use fortress_rollback::{Config, Frame, FortressRequest, GameStateCell, InputVec, handle_requests};
+/// # use fortress_rollback::{Config, Frame, FortressRequest, GameStateCell, InputVec, RequestVec, handle_requests};
 /// # use serde::{Deserialize, Serialize};
 /// # use std::net::SocketAddr;
 /// #
@@ -1702,7 +1745,7 @@ impl<T: Config> std::fmt::Display for FortressRequest<T> {
 /// #
 /// # fn compute_checksum(_: &MyState) -> u128 { 0 }
 /// #
-/// # fn example(mut state: MyState, requests: Vec<FortressRequest<MyConfig>>) {
+/// # fn example(mut state: MyState, requests: RequestVec<MyConfig>) {
 /// handle_requests!(
 ///     requests,
 ///     save: |cell: GameStateCell<MyState>, frame: Frame| {
@@ -1726,7 +1769,7 @@ impl<T: Config> std::fmt::Display for FortressRequest<T> {
 ///
 /// # Parameters
 ///
-/// - `requests`: An iterable of [`FortressRequest<T>`] (usually `Vec<FortressRequest<T>>`)
+/// - `requests`: An iterable of [`FortressRequest<T>`] (usually [`RequestVec<T>`])
 /// - `save`: Closure taking `(cell: GameStateCell<State>, frame: Frame)` — called for [`FortressRequest::SaveGameState`]
 /// - `load`: Closure taking `(cell: GameStateCell<State>, frame: Frame)` — called for [`FortressRequest::LoadGameState`]
 /// - `advance`: Closure taking `(inputs: InputVec<Input>)` — called for [`FortressRequest::AdvanceFrame`]
@@ -1743,7 +1786,7 @@ impl<T: Config> std::fmt::Display for FortressRequest<T> {
 /// or `LoadGameState` requests. You can provide empty closures:
 ///
 /// ```
-/// # use fortress_rollback::{Config, Frame, FortressRequest, GameStateCell, InputVec, handle_requests};
+/// # use fortress_rollback::{Config, Frame, FortressRequest, GameStateCell, InputVec, RequestVec, handle_requests};
 /// # use serde::{Deserialize, Serialize};
 /// # use std::net::SocketAddr;
 /// #
@@ -1758,7 +1801,7 @@ impl<T: Config> std::fmt::Display for FortressRequest<T> {
 /// #     type Address = SocketAddr;
 /// # }
 /// #
-/// # fn example(mut state: MyState, requests: Vec<FortressRequest<MyConfig>>) {
+/// # fn example(mut state: MyState, requests: RequestVec<MyConfig>) {
 /// handle_requests!(
 ///     requests,
 ///     save: |_, _| { /* Never called in lockstep */ },
@@ -1777,6 +1820,7 @@ impl<T: Config> std::fmt::Display for FortressRequest<T> {
 /// the compiler will notify you at compile time.
 ///
 /// [`P2PSession::advance_frame`]: crate::P2PSession::advance_frame
+/// [`RequestVec<T>`]: crate::RequestVec
 /// [`FortressRequest::SaveGameState`]: crate::FortressRequest::SaveGameState
 /// [`FortressRequest::LoadGameState`]: crate::FortressRequest::LoadGameState
 /// [`FortressRequest::AdvanceFrame`]: crate::FortressRequest::AdvanceFrame

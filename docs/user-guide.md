@@ -41,13 +41,14 @@ This guide walks you through integrating Fortress Rollback into your game. By th
     - [Platform-Specific Features](#platform-specific-features)
 12. [Spectator Sessions](#spectator-sessions)
 13. [Testing with SyncTest](#testing-with-synctest)
-14. [Common Patterns](#common-patterns)
-15. [Common Pitfalls](#common-pitfalls)
+14. [Using the Session Trait](#using-the-session-trait)
+15. [Common Patterns](#common-patterns)
+16. [Common Pitfalls](#common-pitfalls)
     - [Session Termination Anti-Pattern](#session-termination-the-last_confirmed_frame-anti-pattern)
     - [Desync Detection Defaults](#understanding-desync-detection-defaults)
     - [NetworkStats Checksum Fields](#networkstats-checksum-fields-for-desync-detection)
-16. [Desync Detection and SyncHealth API](#desync-detection-and-synchealth-api)
-17. [Troubleshooting](#troubleshooting)
+17. [Desync Detection and SyncHealth API](#desync-detection-and-synchealth-api)
+18. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -546,10 +547,10 @@ Requests are returned by `advance_frame()` and must be processed in order.
 > in future versions, ensuring your code stays up-to-date.
 
 ```rust
-use fortress_rollback::{FortressRequest, compute_checksum};
+use fortress_rollback::{FortressRequest, RequestVec, compute_checksum};
 
 fn handle_requests(
-    requests: Vec<FortressRequest<GameConfig>>,
+    requests: RequestVec<GameConfig>,
     game_state: &mut GameState,
 ) {
     for request in requests {
@@ -613,11 +614,11 @@ For simpler cases, you can use the `handle_requests!` macro to reduce boilerplat
 
 ```rust
 use fortress_rollback::{
-    handle_requests, compute_checksum, FortressRequest, Frame, GameStateCell, InputVec,
+    handle_requests, compute_checksum, FortressRequest, Frame, GameStateCell, InputVec, RequestVec,
 };
 
 fn handle_requests_simple(
-    requests: Vec<FortressRequest<GameConfig>>,
+    requests: RequestVec<GameConfig>,
     game_state: &mut GameState,
 ) {
     handle_requests!(
@@ -635,7 +636,7 @@ fn handle_requests_simple(
                 eprintln!("WARNING: LoadGameState for frame {frame:?} but no state found");
             }
         },
-        advance: |inputs: InputVec<Input>| {
+        advance: |inputs: InputVec<GameInput>| {
             for (_input, _status) in inputs.iter() {
                 // Apply input
             }
@@ -652,7 +653,7 @@ handle_requests!(
     requests,
     save: |_, _| { /* Never called in lockstep */ },
     load: |_, _| { /* Never called in lockstep */ },
-    advance: |inputs: InputVec<Input>| {
+    advance: |inputs: InputVec<GameInput>| {
         game_state.frame += 1;
     }
 );
@@ -927,6 +928,8 @@ let session = SessionBuilder::<GameConfig>::new()
 | `lossy()` | 8 | 200ms | 10s | Unstable connections |
 | `mobile()` | 10 | 350ms | 15s | Mobile/cellular networks |
 | `competitive()` | 4 | 100ms | 3s | Esports, tournaments |
+| `extreme()` | 20 | 250ms | 30s | Extreme burst loss, hostile networks |
+| `stress_test()` | 40 | 150ms | 60s | Automated testing only (not for production) |
 
 ### Network Scenario Configuration Guide
 
@@ -1275,13 +1278,16 @@ let host_session = SessionBuilder::<GameConfig>::new()
     .start_p2p_session(socket)?;
 
 // Spectator side: uses high-latency tolerant config
-let spectator_session = SessionBuilder::<GameConfig>::new()
+let mut spectator_session = SessionBuilder::<GameConfig>::new()
     .with_num_players(2)?
     .with_sync_config(SyncConfig::high_latency())
     .with_protocol_config(ProtocolConfig::high_latency())
     .with_max_frames_behind(30)?
     .with_catchup_speed(2)?
-    .start_spectator_session(host_addr, spectator_socket);
+    .start_spectator_session(host_addr, spectator_socket)
+    .ok_or(FortressError::InvalidRequest {
+        info: "spectator session initialization failed".into(),
+    })?;
 ```
 
 **SpectatorConfig presets:**
@@ -1685,6 +1691,8 @@ impl<I: Copy + Default> PredictionStrategy<I> for MyPrediction {
 ```
 
 > **⚠️ Determinism Requirement:** Custom prediction strategies MUST be deterministic. All peers must produce the exact same prediction given the same inputs, or desyncs will occur.
+>
+> **Note:** The `PredictionStrategy` trait requires `Send + Sync` supertrait bounds (`pub trait PredictionStrategy<I>: Send + Sync`). Your custom strategy type must be thread-safe.
 
 ---
 
@@ -2072,11 +2080,15 @@ let session = SessionBuilder::<GameConfig>::new()
 let host_addr = "192.168.1.100:7000".parse()?;
 let socket = UdpNonBlockingSocket::bind_to_port(8000)?;
 
+// Note: start_spectator_session returns Option<SpectatorSession>
 let mut session = SessionBuilder::<GameConfig>::new()
     .with_num_players(2)?
     .with_max_frames_behind(10)?  // When to start catching up
     .with_catchup_speed(2)?       // How fast to catch up
-    .start_spectator_session(host_addr, socket);
+    .start_spectator_session(host_addr, socket)
+    .ok_or(FortressError::InvalidRequest {
+        info: "spectator session initialization failed".into(),
+    })?;
 
 // Spectator loop
 loop {
@@ -2120,6 +2132,137 @@ for frame in 0..1000 {
 ```
 
 If checksums mismatch, you have a determinism bug!
+
+---
+
+## Using the Session Trait
+
+Fortress Rollback provides a unified `Session<T>` trait that all session types implement. This lets you write **generic code** that works identically with `P2PSession`, `SpectatorSession`, and `SyncTestSession` — no code duplication required.
+
+The trait is available in the prelude:
+
+```rust
+use fortress_rollback::prelude::*;
+```
+
+### Why Use the Session Trait?
+
+- **Write once, run anywhere**: A single game loop function works for P2P, spectator, and sync testing
+- **Easier testing**: Swap a `P2PSession` for a `SyncTestSession` without changing game logic
+- **Cleaner architecture**: Decouple your game loop from a specific session type
+
+### Method Overview
+
+The `Session` trait has 2 required methods and 4 provided methods with defaults:
+
+| Method | `P2PSession` | `SpectatorSession` | `SyncTestSession` |
+|--------|:-:|:-:|:-:|
+| `advance_frame()` | ✅ Override | ✅ Override | ✅ Override |
+| `local_player_handle_required()` | ✅ Override | ✅ Override (error) | ✅ Override |
+| `add_local_input()` | ✅ Override | ✅ Override (error) | ✅ Override |
+| `events()` | ✅ Override | ✅ Override | ✅ Override |
+| `current_state()` | ✅ Override | ✅ Override | ❌ Default (`Running`) |
+| `poll_remote_clients()` | ✅ Override | ✅ Override | ❌ Default (no-op) |
+
+Methods marked "Default" return a sensible no-op or constant. For example, `SyncTestSession` has no network, so `poll_remote_clients()` is a no-op.
+
+Note that `network_stats()` is deliberately **not** on the trait — it only makes sense for networked sessions and takes a `PlayerHandle` argument that varies by session type.
+
+### Writing Generic Functions
+
+Use `&mut impl Session<T>` to accept any session type:
+
+```rust
+use fortress_rollback::prelude::*;
+
+fn run_frame<T: Config>(
+    session: &mut impl Session<T>,
+    input: T::Input,
+) -> FortressResult<RequestVec<T>> {
+    let player = session.local_player_handle_required()?;
+    session.add_local_input(player, input)?;
+    let requests = session.advance_frame()?;
+    Ok(requests)
+}
+```
+
+This function works with any session:
+
+```rust
+# use fortress_rollback::prelude::*;
+# fn run_frame<T: Config>(
+#     session: &mut impl Session<T>,
+#     input: T::Input,
+# ) -> FortressResult<RequestVec<T>> {
+#     let player = session.local_player_handle_required()?;
+#     session.add_local_input(player, input)?;
+#     let requests = session.advance_frame()?;
+#     Ok(requests)
+# }
+// Works with P2PSession
+// run_frame(&mut p2p_session, my_input)?;
+
+// Works with SyncTestSession
+// run_frame(&mut sync_test_session, my_input)?;
+```
+
+### Practical Example: Generic Game Loop
+
+Here is a more complete example that handles requests generically:
+
+```rust
+use fortress_rollback::prelude::*;
+
+fn game_loop_step<T: Config>(
+    session: &mut impl Session<T>,
+    input: T::Input,
+    game_state: &mut T::State,
+) -> FortressResult<()>
+where
+    T::State: Clone,
+{
+    // Poll for network data (no-op for SyncTestSession)
+    session.poll_remote_clients();
+
+    // Add input and advance
+    let player = session.local_player_handle_required()?;
+    session.add_local_input(player, input)?;
+
+    for request in session.advance_frame()? {
+        match request {
+            FortressRequest::SaveGameState { cell, frame } => {
+                cell.save(frame, Some(game_state.clone()), None);
+            }
+            FortressRequest::LoadGameState { cell, .. } => {
+                if let Some(loaded) = cell.load() {
+                    *game_state = loaded;
+                }
+            }
+            FortressRequest::AdvanceFrame { inputs } => {
+                // Apply inputs to your game state
+                let _ = &inputs; // placeholder — call your update function
+            }
+        }
+    }
+
+    // Drain events (works for all session types)
+    for event in session.events() {
+        let _ = event; // handle events as needed
+    }
+
+    Ok(())
+}
+```
+
+### Gradual Adoption
+
+The `Session` trait is **additive** — adopting it does not require changing existing code. You can:
+
+1. Continue using concrete session types directly (nothing changes)
+2. Start writing new helper functions as generic over `impl Session<T>`
+3. Gradually move your game loop to trait-based code as needed
+
+For the trait's design rationale, see the [Architecture Guide](architecture.md#the-session-trait). If migrating from concrete session types, the [Migration Guide](migration.md#session-trait-new) covers adoption.
 
 ---
 
@@ -2646,6 +2789,21 @@ This section documents all configuration options available when building a sessi
 | `with_disconnect_notify_delay(duration)` | 500ms | Time before warning about potential disconnect |
 | `with_check_distance(frames)` | 2 | Frames to resimulate in SyncTestSession |
 | `with_violation_observer(observer)` | None | Custom observer for spec violations |
+| `add_player(type, handle)` | — | Register a player (local, remote, or spectator) |
+| `add_local_player(handle)` | — | Convenience: add a local player by handle index |
+| `add_remote_player(handle, addr)` | — | Convenience: add a remote player by handle index and address |
+| `with_sync_config(config)` | `SyncConfig::default()` | Synchronization protocol settings |
+| `with_protocol_config(config)` | `ProtocolConfig::default()` | Network protocol behavior |
+| `with_spectator_config(config)` | `SpectatorConfig::default()` | Spectator session behavior |
+| `with_time_sync_config(config)` | `TimeSyncConfig::default()` | Time synchronization averaging |
+| `with_input_queue_config(config)` | `InputQueueConfig::default()` | Input queue buffer sizing |
+| `with_event_queue_size(size)` | 100 | Maximum buffered events before dropping |
+| `with_max_frames_behind(frames)` | 10 | When spectator starts catching up |
+| `with_catchup_speed(speed)` | 1 | Frames per step when spectator catches up |
+| `with_sparse_saving_mode(bool)` | `false` | Deprecated: use `with_save_mode()` instead |
+| `with_lan_defaults()` | — | Preset: LAN-optimized config (SyncConfig::lan + ProtocolConfig::competitive + TimeSyncConfig::lan) |
+| `with_internet_defaults()` | — | Preset: Internet-optimized config (defaults + input delay 2) |
+| `with_high_latency_defaults()` | — | Preset: Mobile/high-latency config (mobile presets + input delay 4) |
 
 ### SyncConfig (Synchronization Protocol)
 
@@ -2653,6 +2811,7 @@ Configure the initial connection handshake with `with_sync_config()`:
 
 ```rust
 use fortress_rollback::SyncConfig;
+use web_time::Duration;
 
 let config = SyncConfig {
     num_sync_packets: 5,                              // Roundtrips required (default: 5)
@@ -2670,6 +2829,10 @@ let config = SyncConfig {
 - `SyncConfig::lan()` - Fast sync for local networks (3 packets, 100ms intervals)
 - `SyncConfig::high_latency()` - Tolerant for 100-200ms RTT (400ms intervals)
 - `SyncConfig::lossy()` - Reliable for 5-15% packet loss (8 packets)
+- `SyncConfig::mobile()` - High tolerance for variable mobile networks (10 packets, 350ms)
+- `SyncConfig::competitive()` - Fast sync with strict timeouts (4 packets, 100ms, 3s timeout)
+- `SyncConfig::extreme()` - Extreme burst loss survival (20 packets, 250ms, 30s timeout)
+- `SyncConfig::stress_test()` - Automated testing only (40 packets, 150ms, 60s timeout)
 
 ### ProtocolConfig (Network Protocol)
 
@@ -2677,6 +2840,7 @@ Configure network behavior with `with_protocol_config()`:
 
 ```rust
 use fortress_rollback::ProtocolConfig;
+use web_time::Duration;
 
 let config = ProtocolConfig {
     quality_report_interval: Duration::from_millis(200), // RTT measurement interval
@@ -2695,6 +2859,8 @@ let config = ProtocolConfig {
 - `ProtocolConfig::competitive()` - Fast quality reports (100ms), short shutdown
 - `ProtocolConfig::high_latency()` - Tolerant thresholds, longer timeouts
 - `ProtocolConfig::debug()` - Low thresholds to observe telemetry easily
+- `ProtocolConfig::mobile()` - Tolerant for mobile/cellular networks (350ms reports, large buffers)
+- `ProtocolConfig::deterministic(seed)` - Fixed RNG seed for reproducible sessions
 
 ### TimeSyncConfig (Time Synchronization)
 
@@ -2714,6 +2880,8 @@ let config = TimeSyncConfig {
 - `TimeSyncConfig::responsive()` - 15-frame window (faster adaptation)
 - `TimeSyncConfig::smooth()` - 60-frame window (more stable)
 - `TimeSyncConfig::lan()` - 10-frame window (for stable LAN)
+- `TimeSyncConfig::mobile()` - 90-frame window (smooths mobile jitter)
+- `TimeSyncConfig::competitive()` - 20-frame window (fast adaptation, assumes stable network)
 
 ### SpectatorConfig (Spectator Sessions)
 
@@ -2736,6 +2904,8 @@ let config = SpectatorConfig {
 - `SpectatorConfig::fast_paced()` - 90-frame buffer, 2x catchup speed
 - `SpectatorConfig::slow_connection()` - 120-frame buffer, tolerant
 - `SpectatorConfig::local()` - 30-frame buffer, 2x catchup (minimal latency)
+- `SpectatorConfig::broadcast()` - 180-frame buffer, smooth streaming for broadcasts
+- `SpectatorConfig::mobile()` - 120-frame buffer, tolerant for mobile networks
 
 ### InputQueueConfig (Input Buffer)
 
@@ -2754,6 +2924,7 @@ let config = InputQueueConfig {
 - `InputQueueConfig::default()` - 128 frames (~2.1s at 60 FPS)
 - `InputQueueConfig::high_latency()` - 256 frames (~4.3s at 60 FPS)
 - `InputQueueConfig::minimal()` - 32 frames (~0.5s at 60 FPS)
+- `InputQueueConfig::standard()` - Same as default (128 frames)
 
 **Note:** Maximum input delay is `queue_length - 1`. Call `with_input_queue_config()` before `with_input_delay()` to ensure validation uses the correct limit.
 
@@ -3111,9 +3282,9 @@ let violation = SpecViolation::new(
 // Direct JSON serialization
 let json = serde_json::to_string(&violation)?;
 
-// Or use the convenience method
-let json = violation.to_json()?;
-let json_pretty = violation.to_json_pretty()?;
+// Or use the convenience method (returns Option<String>)
+let json = violation.to_json();
+let json_pretty = violation.to_json_pretty();
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 

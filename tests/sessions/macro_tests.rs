@@ -11,6 +11,7 @@
     clippy::indexing_slicing
 )]
 
+use fortress_rollback::RequestVec;
 use fortress_rollback::{handle_requests, Config, FortressRequest, Frame, GameStateCell, InputVec};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -235,4 +236,32 @@ fn test_handle_requests_function_refs() {
     );
 
     // If this compiles and runs, the test passes
+}
+
+/// Test that the macro works with `RequestVec` (the actual return type from `advance_frame`)
+#[test]
+fn test_handle_requests_with_request_vec() {
+    use fortress_rollback::SmallVec;
+
+    let mut advance_count = 0u32;
+
+    // Construct requests using RequestVec, mirroring what advance_frame() returns
+    let mut requests: RequestVec<MacroTestConfig> = RequestVec::new();
+    requests.push(FortressRequest::AdvanceFrame {
+        inputs: SmallVec::new(),
+    });
+    requests.push(FortressRequest::AdvanceFrame {
+        inputs: SmallVec::new(),
+    });
+
+    handle_requests!(
+        requests,
+        save: |_cell: GameStateCell<MacroTestState>, _frame: Frame| {},
+        load: |_cell: GameStateCell<MacroTestState>, _frame: Frame| {},
+        advance: |_inputs: InputVec<MacroTestInput>| {
+            advance_count += 1;
+        }
+    );
+
+    assert_eq!(advance_count, 2);
 }

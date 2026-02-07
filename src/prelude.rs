@@ -14,13 +14,14 @@
 //! The prelude includes:
 //!
 //! - **Session types**: [`P2PSession`], [`SpectatorSession`], [`SyncTestSession`], [`SessionBuilder`]
-//! - **Core traits**: [`Config`], [`NonBlockingSocket`]
+//! - **Core traits**: [`Config`], [`NonBlockingSocket`], [`Session`]
 //! - **Socket implementations**: [`UdpNonBlockingSocket`]
 //! - **Fundamental types**: [`Frame`], [`PlayerHandle`], [`PlayerType`], [`NULL_FRAME`]
 //! - **Session state**: [`SessionState`], [`InputStatus`], [`DesyncDetection`]
-//! - **Request/Event handling**: [`FortressRequest`], [`FortressEvent`], [`handle_requests`]
+//! - **Request/Event handling**: [`FortressRequest`], [`FortressEvent`], [`EventDrain`], [`handle_requests`]
 //! - **Error handling**: [`FortressError`], [`FortressResult`]
-//! - **Game state**: [`GameStateCell`], [`GameStateAccessor`], [`InputVec`]
+//! - **Game state**: [`GameStateCell`], [`GameStateAccessor`]
+//! - **Collection types**: [`InputVec`], [`HandleVec`], [`RequestVec`]
 //! - **Network monitoring**: [`NetworkStats`]
 //! - **Configuration**: [`SyncConfig`], [`ProtocolConfig`]
 //!
@@ -61,7 +62,7 @@ pub use crate::sessions::p2p_spectator_session::SpectatorSession;
 pub use crate::sessions::sync_test_session::SyncTestSession;
 
 // Core traits
-pub use crate::{Config, NonBlockingSocket};
+pub use crate::{Config, NonBlockingSocket, Session};
 
 // Standard socket implementation
 pub use crate::UdpNonBlockingSocket;
@@ -75,6 +76,9 @@ pub use crate::{DesyncDetection, InputStatus, SessionState};
 // Request and event handling
 pub use crate::{handle_requests, FortressEvent, FortressRequest};
 
+// Event drain iterator
+pub use crate::EventDrain;
+
 // Error handling
 pub use crate::{FortressError, FortressResult};
 
@@ -86,6 +90,9 @@ pub use crate::InputVec;
 
 // Player handle vector type for zero-allocation queries
 pub use crate::HandleVec;
+
+// Request vector type for frame advance requests
+pub use crate::RequestVec;
 
 // Network monitoring
 pub use crate::NetworkStats;

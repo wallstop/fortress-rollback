@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 
@@ -7,13 +7,26 @@ use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::report_violation;
 use crate::sessions::config::SaveMode;
+use crate::sessions::event_drain::EventDrain;
+use crate::sessions::session_trait::Session;
 use crate::sync_layer::SyncLayer;
 use crate::telemetry::{ViolationKind, ViolationObserver, ViolationSeverity};
-use crate::{Config, FortressRequest, Frame, HandleVec, PlayerHandle};
+use crate::{
+    Config, FortressEvent, FortressRequest, FortressResult, Frame, HandleVec, PlayerHandle,
+    RequestVec,
+};
 
 /// During a [`SyncTestSession`], Fortress Rollback will simulate a rollback every frame and resimulate the last n states, where n is the given check distance.
 ///
 /// The resimulated checksums will be compared with the original checksums and report if there was a mismatch.
+///
+/// This type implements the [`Session`] trait. The default implementations for
+/// [`current_state`](Session::current_state) (returns [`SessionState::Running`]) and
+/// [`poll_remote_clients`](Session::poll_remote_clients) (no-op) are used,
+/// since sync tests have no network component.
+///
+/// [`Session`]: crate::Session
+/// [`SessionState::Running`]: crate::SessionState::Running
 pub struct SyncTestSession<T>
 where
     T: Config,
@@ -25,6 +38,8 @@ where
     dummy_connect_status: Vec<ConnectionStatus>,
     checksum_history: BTreeMap<Frame, Option<u128>>,
     local_inputs: BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
+    /// Pending events to be consumed via [`events()`](Self::events).
+    event_queue: VecDeque<FortressEvent<T>>,
     /// Optional observer for specification violations.
     violation_observer: Option<Arc<dyn ViolationObserver>>,
 }
@@ -85,6 +100,7 @@ impl<T: Config> SyncTestSession<T> {
             dummy_connect_status,
             checksum_history: BTreeMap::new(),
             local_inputs: BTreeMap::new(),
+            event_queue: VecDeque::new(),
             violation_observer,
         }
     }
@@ -115,19 +131,19 @@ impl<T: Config> SyncTestSession<T> {
     }
 
     /// In a sync test, this will advance the state by a single frame and afterwards rollback `check_distance` amount of frames,
-    /// resimulate and compare checksums with the original states. Returns an order-sensitive [`Vec<FortressRequest>`].
+    /// resimulate and compare checksums with the original states. Returns an order-sensitive [`RequestVec`].
     /// You should fulfill all requests in the exact order they are provided. Failure to do so will cause panics later.
     ///
     /// # Errors
     /// - Returns [`MismatchedChecksum`] if checksums don't match after resimulation.
     ///
-    /// [`Vec<FortressRequest>`]: FortressRequest
+    /// [`RequestVec`]: crate::RequestVec
     /// [`MismatchedChecksum`]: FortressError::MismatchedChecksum
     #[must_use = "FortressRequests must be processed to advance the game state"]
-    pub fn advance_frame(&mut self) -> Result<Vec<FortressRequest<T>>, FortressError> {
-        // Pre-allocate with capacity for typical case: 1 save + 1 advance = 2 requests.
-        // During rollback testing, more requests will be added as the Vec grows.
-        let mut requests = Vec::with_capacity(2);
+    pub fn advance_frame(&mut self) -> FortressResult<RequestVec<T>> {
+        // SmallVec inline capacity of 4 covers the typical case (save + advance)
+        // without heap allocation. During rollback testing, it spills to the heap as needed.
+        let mut requests = RequestVec::<T>::new();
 
         // if we advanced far enough into the game do comparisons and rollbacks
         let current_frame = self.sync_layer.current_frame();
@@ -398,6 +414,45 @@ impl<T: Config> SyncTestSession<T> {
         self.local_player_handles_iter().next()
     }
 
+    /// Returns an iterator that drains all pending events from the session.
+    ///
+    /// `SyncTestSession` does not currently produce any events, so this
+    /// always returns an empty iterator. The method exists to provide API
+    /// consistency with [`P2PSession`] and [`SpectatorSession`], and to
+    /// enable future desync-detection events.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use fortress_rollback::{SyncTestSession, FortressError};
+    /// # use std::net::SocketAddr;
+    /// # struct TestConfig;
+    /// # impl fortress_rollback::Config for TestConfig {
+    /// #     type Input = u32;
+    /// #     type State = Vec<u8>;
+    /// #     type Address = SocketAddr;
+    /// # }
+    /// # fn main() -> Result<(), FortressError> {
+    /// let mut session: SyncTestSession<TestConfig> =
+    ///     fortress_rollback::SessionBuilder::new()
+    ///         .with_num_players(2)?
+    ///         .with_check_distance(2)
+    ///         .start_synctest_session()?;
+    ///
+    /// // SyncTestSession currently produces no events
+    /// let events: Vec<_> = session.events().collect();
+    /// assert!(events.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [`P2PSession`]: crate::P2PSession
+    /// [`SpectatorSession`]: crate::SpectatorSession
+    #[must_use = "events should be handled to react to session state changes"]
+    pub fn events(&mut self) -> EventDrain<'_, T> {
+        EventDrain::from_drain(self.event_queue.drain(..))
+    }
+
     /// Updates the `checksum_history` and checks if the checksum is identical if it already has been recorded once
     fn checksums_consistent(&mut self, frame_to_check: Frame) -> bool {
         // remove entries older than the `check_distance`
@@ -421,7 +476,7 @@ impl<T: Config> SyncTestSession<T> {
     fn adjust_gamestate(
         &mut self,
         frame_to: Frame,
-        requests: &mut Vec<FortressRequest<T>>,
+        requests: &mut RequestVec<T>,
     ) -> Result<(), FortressError> {
         let start_frame = self.sync_layer.current_frame();
         let count = start_frame - frame_to;
@@ -493,6 +548,28 @@ impl<T: Config> fmt::Debug for SyncTestSession<T> {
             .field("check_distance", &self.check_distance)
             .field("current_frame", &self.sync_layer.current_frame())
             .finish_non_exhaustive()
+    }
+}
+
+impl<T: Config> Session<T> for SyncTestSession<T> {
+    fn advance_frame(&mut self) -> FortressResult<RequestVec<T>> {
+        Self::advance_frame(self)
+    }
+
+    fn local_player_handle_required(&self) -> FortressResult<PlayerHandle> {
+        Self::local_player_handle_required(self)
+    }
+
+    fn add_local_input(
+        &mut self,
+        player_handle: PlayerHandle,
+        input: T::Input,
+    ) -> FortressResult<()> {
+        Self::add_local_input(self, player_handle, input)
+    }
+
+    fn events(&mut self) -> EventDrain<'_, T> {
+        Self::events(self)
     }
 }
 
@@ -1304,5 +1381,43 @@ mod tests {
             },
             _ => panic!("Expected MultipleLocalPlayers error, got: {:?}", err),
         }
+    }
+
+    // ==========================================
+    // events() Tests
+    // ==========================================
+
+    #[test]
+    fn events_returns_empty_drain_on_new_session() {
+        let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 2, 0, None);
+        assert!(session.events().next().is_none());
+    }
+
+    #[test]
+    fn events_returns_empty_after_advance_frame() {
+        let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(1, 8, 0, 0, None);
+        session
+            .add_local_input(PlayerHandle::new(0), 42)
+            .expect("should succeed");
+        session.advance_frame().expect("should advance");
+
+        assert!(session.events().next().is_none());
+    }
+
+    #[test]
+    fn events_drain_is_zero_len() {
+        let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 2, 0, None);
+        let drain = session.events();
+        assert_eq!(drain.len(), 0);
+    }
+
+    #[test]
+    fn events_can_be_called_multiple_times() {
+        let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 2, 0, None);
+
+        // Calling events multiple times should always return empty
+        assert!(session.events().next().is_none());
+        assert!(session.events().next().is_none());
+        assert!(session.events().next().is_none());
     }
 }
