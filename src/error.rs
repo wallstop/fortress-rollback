@@ -617,6 +617,14 @@ pub enum InvalidRequestKind {
         expected_state: &'static str,
     },
 
+    /// The operation is not supported by this session type.
+    ///
+    /// For example, calling `add_local_input` on a spectator session.
+    NotSupported {
+        /// Description of the unsupported operation.
+        operation: &'static str,
+    },
+
     /// Custom error (fallback for API compatibility).
     Custom(&'static str),
 }
@@ -810,6 +818,13 @@ impl Display for InvalidRequestKind {
                     f,
                     "operation called in wrong protocol state: current '{}', expected '{}'",
                     current_state, expected_state
+                )
+            },
+            Self::NotSupported { operation } => {
+                write!(
+                    f,
+                    "operation '{}' is not supported by this session type",
+                    operation
                 )
             },
             Self::Custom(s) => write!(f, "{}", s),
@@ -1794,6 +1809,30 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_request_kind_not_supported() {
+        let kind = InvalidRequestKind::NotSupported {
+            operation: "add_local_input",
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("add_local_input"));
+        assert!(display.contains("not supported"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_not_supported_converts_to_error() {
+        let kind = InvalidRequestKind::NotSupported {
+            operation: "poll_remote_clients",
+        };
+        let error: FortressError = kind.into();
+        match error {
+            FortressError::InvalidRequestStructured { kind: k } => {
+                assert_eq!(k, kind);
+            },
+            _ => panic!("Expected InvalidRequestStructured"),
+        }
+    }
+
+    #[test]
     fn test_invalid_request_kind_custom() {
         let kind = InvalidRequestKind::Custom("custom error message");
         let display = format!("{}", kind);
@@ -1812,6 +1851,12 @@ mod tests {
         };
         let kind_with_data2 = kind_with_data; // Copy
         assert_eq!(kind_with_data, kind_with_data2);
+
+        let kind_not_supported = InvalidRequestKind::NotSupported {
+            operation: "test_op",
+        };
+        let kind_not_supported2 = kind_not_supported; // Copy
+        assert_eq!(kind_not_supported, kind_not_supported2);
     }
 
     // =========================================================================

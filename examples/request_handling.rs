@@ -29,8 +29,8 @@
 
 use fortress_rollback::{
     compute_checksum, handle_requests, Config, DesyncDetection, FortressRequest, Frame,
-    GameStateCell, InputStatus, InputVec, PlayerHandle, PlayerType, SessionBuilder, SessionState,
-    UdpNonBlockingSocket,
+    GameStateCell, InputStatus, InputVec, PlayerHandle, PlayerType, RequestVec, SessionBuilder,
+    SessionState, UdpNonBlockingSocket,
 };
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -107,7 +107,7 @@ impl Config for GameConfig {
 ///
 /// - **`compute_checksum`**: Enables desync detection by computing a
 ///   deterministic hash of your game state.
-fn handle_requests_manual(requests: Vec<FortressRequest<GameConfig>>, game_state: &mut GameState) {
+fn handle_requests_manual(requests: RequestVec<GameConfig>, game_state: &mut GameState) {
     for request in requests {
         // No wildcard `_ =>` arm needed — all variants are covered
         match request {
@@ -176,10 +176,7 @@ fn handle_requests_manual(requests: Vec<FortressRequest<GameConfig>>, game_state
 ///
 /// - **Exhaustive**: The macro handles all `FortressRequest` variants.
 #[allow(unused)]
-fn handle_requests_with_macro(
-    requests: Vec<FortressRequest<GameConfig>>,
-    game_state: &mut GameState,
-) {
+fn handle_requests_with_macro(requests: RequestVec<GameConfig>, game_state: &mut GameState) {
     handle_requests!(
         requests,
         save: |cell: GameStateCell<GameState>, frame: Frame| {
@@ -212,10 +209,7 @@ fn handle_requests_with_macro(
 /// When `max_prediction_window` is 0, the session operates in lockstep mode.
 /// You'll never receive `SaveGameState` or `LoadGameState` requests.
 #[allow(unused)]
-fn handle_requests_lockstep(
-    requests: Vec<FortressRequest<GameConfig>>,
-    game_state: &mut GameState,
-) {
+fn handle_requests_lockstep(requests: RequestVec<GameConfig>, game_state: &mut GameState) {
     handle_requests!(
         requests,
         save: |_, _| {

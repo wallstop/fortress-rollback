@@ -50,10 +50,10 @@ The following aspects are verified to be perfectly aligned:
 
 | Component | TLA+ Spec | Production Code | Status |
 |-----------|-----------|-----------------|--------|
-| `ProtocolState` enum | `NetworkProtocol.tla` | `src/network/protocol.rs:220` | ✅ Aligned |
-| State transitions | `NetworkProtocol.tla` | `protocol.rs` various methods | ✅ Aligned |
-| `SyncLayer` fields | `Rollback.tla` | `src/sync_layer.rs:263` | ✅ Aligned |
-| `InputQueue` fields | `InputQueue.tla` | `src/input_queue.rs:100` | ✅ Aligned |
+| `ProtocolState` enum | `specs/tla/NetworkProtocol.tla` | `src/network/protocol/state.rs` | ✅ Aligned |
+| State transitions | `specs/tla/NetworkProtocol.tla` | `src/network/protocol/mod.rs` various methods | ✅ Aligned |
+| `SyncLayer` fields | `specs/tla/Rollback.tla` | `src/sync_layer/mod.rs` | ✅ Aligned |
+| `InputQueue` fields | `specs/tla/InputQueue.tla` | `src/input_queue/mod.rs` | ✅ Aligned |
 
 ### Prediction Strategy Alignment (Fixed Dec 15, 2025)
 
@@ -77,12 +77,12 @@ production naming and document this design decision.
 
 | Invariant | Spec Location | Code Location | Status |
 |-----------|---------------|---------------|--------|
-| INV-1 (Frame Monotonicity) | `Rollback.tla:FrameMonotonicity` | `sync_layer.rs:advance_frame`, `load_frame` | ✅ Verified |
-| INV-2 (Rollback Bounds) | `Rollback.tla:RollbackBounded` | `sync_layer.rs:394` | ✅ Verified |
-| INV-4 (Queue Length) | `InputQueue.tla:QueueLengthBounded` | `input_queue.rs:check_invariants` | ✅ Verified |
-| INV-5 (Queue Index) | `InputQueue.tla:QueueIndexValid` | `input_queue.rs:check_invariants` | ✅ Verified |
-| INV-7 (Confirmed Frame) | `Rollback.tla:ConfirmedFrameConsistency` | `sync_layer.rs:check_invariants` | ✅ Verified |
-| INV-8 (Saved Frame) | `Rollback.tla:SavedFrameConsistency` | `sync_layer.rs:check_invariants` | ✅ Verified |
+| INV-1 (Frame Monotonicity) | `Rollback.tla:FrameMonotonicity` | `sync_layer/mod.rs:advance_frame`, `load_frame` | ✅ Verified |
+| INV-2 (Rollback Bounds) | `Rollback.tla:RollbackBounded` | `sync_layer/mod.rs` | ✅ Verified |
+| INV-4 (Queue Length) | `InputQueue.tla:QueueLengthBounded` | `input_queue/mod.rs:check_invariants` | ✅ Verified |
+| INV-5 (Queue Index) | `InputQueue.tla:QueueIndexValid` | `input_queue/mod.rs:check_invariants` | ✅ Verified |
+| INV-7 (Confirmed Frame) | `Rollback.tla:ConfirmedFrameConsistency` | `sync_layer/mod.rs:check_invariants` | ✅ Verified |
+| INV-8 (Saved Frame) | `Rollback.tla:SavedFrameConsistency` | `sync_layer/mod.rs:check_invariants` | ✅ Verified |
 
 ### Default Values
 

@@ -14,6 +14,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Session<T: Config>` trait — unified interface for `P2PSession`, `SpectatorSession`, and `SyncTestSession`, enabling generic code that works with any session type
+- `RequestVec<T>` — stack-allocated `SmallVec<[FortressRequest<T>; 4]>` for frame advance requests, avoiding heap allocation in the common case
+- `EventDrain<'_, T>` — zero-allocation opaque iterator for session events, replacing direct `std::collections::vec_deque::Drain` exposure
+- `SyncTestSession::events()` — drain pending events for API consistency with `P2PSession` and `SpectatorSession` (currently always empty; enables future desync-detection events)
+- `InvalidRequestKind::NotSupported` variant for operations not supported by a particular session type (e.g., `add_local_input` on a spectator session)
+
+### Changed
+
+- **Breaking:** `P2PSession::advance_frame()` now returns `FortressResult<RequestVec<T>>` instead of `Result<Vec<FortressRequest<T>>, FortressError>`. `RequestVec` implements `Deref<Target = [FortressRequest<T>]>` and `IntoIterator`, so most code (including `handle_requests!`) works unchanged. Use `.to_vec()` if you need a `Vec`.
+- **Breaking:** `SpectatorSession::advance_frame()` now returns `FortressResult<RequestVec<T>>` instead of `Result<Vec<FortressRequest<T>>, FortressError>`
+- **Breaking:** `SyncTestSession::advance_frame()` now returns `FortressResult<RequestVec<T>>` instead of `Result<Vec<FortressRequest<T>>, FortressError>`
+- **Breaking:** `P2PSession::events()` now returns `EventDrain<'_, T>` instead of `std::collections::vec_deque::Drain<'_, FortressEvent<T>>`
+- **Breaking:** `SpectatorSession::events()` now returns `EventDrain<'_, T>` instead of `std::collections::vec_deque::Drain<'_, FortressEvent<T>>`
+- **Breaking:** Added `InvalidRequestKind::NotSupported` variant for unsupported session operations. Exhaustive matches on `InvalidRequestKind` must now handle this new variant.
+
 ## [0.5.0]
 
 ### Added

@@ -1110,7 +1110,273 @@ fi
 
 ---
 
-## Summary: The Ten Rules
+## Best Practices: Version Numbers in Documentation Examples
+
+### The Problem
+
+Dependency version snippets in documentation (e.g., `Cargo.toml` examples) drift out of sync
+with the actual crate version. Users copy-paste stale version numbers and get unexpected behavior
+or resolution failures.
+
+```toml
+# ❌ WRONG: docs/ says 0.2.0 but Cargo.toml is at 0.3.0
+[dependencies]
+fortress-rollback = "0.2.0"
+```
+
+### Why This Matters
+
+- Users follow quick-start guides verbatim — stale versions cause immediate friction
+- Different docs locations (docs/, wiki/, README) may show different versions
+- Version mismatches erode trust in documentation accuracy
+
+### Verification Commands
+
+```bash
+# Check the actual crate version
+rg '^version = ' Cargo.toml
+
+# Find all version references in documentation
+rg 'fortress-rollback.*version' docs/ wiki/ --type md
+
+# Find Cargo.toml dependency snippets in markdown
+rg 'fortress-rollback.*=.*"\d+\.\d+' docs/ wiki/ README.md --type md
+```
+
+### When to Update
+
+**Every time the crate version bumps**, update ALL documentation snippets:
+
+```bash
+# After bumping version in Cargo.toml, find all stale references
+OLD_VERSION='0\.2\.0'
+rg "$OLD_VERSION" docs/ wiki/ README.md examples/ --type md --type toml -l
+```
+
+### Common Anti-Patterns
+
+| Anti-Pattern | Why It Happens | Prevention |
+|--------------|----------------|------------|
+| Updating docs/ but forgetting wiki/ | Wiki is maintained separately | Search both: `rg 'fortress-rollback' docs/ wiki/` |
+| Updating README but forgetting user-guide | Multiple quick-start locations | Search all md files at once |
+| Hardcoded version in CI examples | Copy-pasted from old docs | Use `rg` after every version bump |
+
+### Automated Check
+
+Add to your version-bump workflow:
+
+```bash
+#!/bin/bash
+# scripts/check-doc-versions.sh
+CRATE_VERSION=$(rg '^version = "(.+)"' Cargo.toml -o -r '$1')
+echo "Crate version: $CRATE_VERSION"
+
+# Find any version references that DON'T match current
+rg 'fortress-rollback.*=.*"\d+\.\d+' docs/ wiki/ README.md --type md \
+  | grep -v "$CRATE_VERSION" \
+  && echo "ERROR: Stale version references found" && exit 1 \
+  || echo "OK: All version references match $CRATE_VERSION"
+```
+
+---
+
+## Best Practices: Zero-Panic Language in Doc Comments
+
+### The Problem
+
+Doc comments that claim the library "will panic" or "will cause panics" directly contradict
+the project's zero-panic policy. This confuses users and undermines trust in the safety guarantees.
+
+```rust
+// ❌ WRONG: Claims the library panics — violates zero-panic policy
+/// If the input queue is full, this will panic.
+
+// ❌ WRONG: Suggests panics are an expected outcome
+/// Using an invalid player handle may cause a panic.
+```
+
+### Why This Matters
+
+- Fortress Rollback's core promise is **zero panics in production code**
+- Doc comments saying "will panic" tell users the library is unsafe
+- Users may add unnecessary defensive code (or worse, avoid the API)
+- Contradicts `# Panics` being absent from documentation (by design)
+
+### Correct Alternatives
+
+Describe the **actual** consequences — errors, incorrect state, or desync:
+
+```rust
+// ✅ CORRECT: Describes actual error behavior
+/// If the input queue is full, returns
+/// [`FortressError::InvalidRequestStructured`].
+
+// ✅ CORRECT: Describes consequence without claiming panic
+/// Using an invalid player handle returns an error. If the error is
+/// not handled, the session may enter an inconsistent state.
+
+// ✅ CORRECT: Describes desync risk
+/// Failing to process all [`FortressRequest`] items may lead to
+/// state desync between peers.
+```
+
+### Verification Commands
+
+```bash
+# Find panic language in doc comments
+rg 'will.*panic|cause.*panic|may.*panic|could.*panic' src/ --type rust
+
+# Also check for "# Panics" sections (should not exist in production code)
+rg '# Panics' src/ --type rust
+
+# Check documentation files too
+rg 'will.*panic|cause.*panic' docs/ wiki/ --type md
+```
+
+### Exceptions
+
+Panic language is acceptable in these limited contexts:
+
+| Context | Why It's OK |
+|---------|-------------|
+| `#[cfg(test)]` code and test comments | Tests may use `unwrap()` and assert macros |
+| `debug_assert!` documentation | Debug-only checks that are stripped in release |
+| Migration guides describing old behavior | "Previously this would panic; now it returns `Result`" |
+| Documenting what happens if `debug_assertions` are enabled | Explicitly scoped to debug builds |
+
+### Anti-Pattern: `# Panics` Section
+
+Production code should **never** have a `# Panics` rustdoc section. If you find yourself
+writing one, the function needs to be refactored to return `Result` instead:
+
+```rust
+// ❌ WRONG: Function that documents its own panics
+/// # Panics
+///
+/// Panics if `index` is out of bounds.
+pub fn get_player(&self, index: usize) -> &Player {
+    &self.players[index]  // Forbidden: direct indexing
+}
+
+// ✅ CORRECT: Function returns Result, no panic possible
+/// # Errors
+///
+/// Returns [`FortressError::InvalidPlayerIndex`] if `index`
+/// is out of bounds.
+pub fn get_player(&self, index: usize) -> Result<&Player, FortressError> {
+    self.players.get(index).ok_or(FortressError::InvalidPlayerIndex {
+        index,
+        count: self.players.len(),
+    })
+}
+```
+
+---
+
+## Best Practices: Self-Contained Code Examples
+
+### The Problem
+
+Code examples in documentation use identifiers (`socket`, `remote_addr`, `MyConfig`) that
+are neither imported nor defined within the snippet. Users cannot run these examples without
+guessing what the undefined references should be.
+
+````rust
+// ❌ WRONG: Where do `socket`, `remote_addr`, and `MyConfig` come from?
+let session = SessionBuilder::<MyConfig>::new()
+    .with_num_players(2)?
+    .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
+    .start_p2p_session(socket)?;
+````
+
+### Why This Matters
+
+- Users copy-paste examples and get immediate compile errors
+- Undefined identifiers force users to search for types/constructors
+- Incomplete examples suggest the library is poorly documented
+- New users have no way to know what `MyConfig` should implement
+
+### Two Levels of Completeness
+
+#### Level 1: Conceptual Snippets (Illustrative)
+
+For snippets showing patterns or API shapes, add comments explaining undefined references:
+
+````rust
+// ✅ OK: Comments explain what users must provide
+// `MyConfig` must implement `fortress_rollback::Config`
+// `socket` is any type implementing `NonBlockingSocket<SocketAddr>`
+// `remote_addr` is the `SocketAddr` of the remote peer
+let session = SessionBuilder::<MyConfig>::new()
+    .with_num_players(2)?
+    .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
+    .start_p2p_session(socket)?;
+````
+
+#### Level 2: Complete Examples (Runnable)
+
+For examples that should compile, include ALL imports and variable definitions:
+
+````rust
+// ✅ CORRECT: Fully self-contained
+use fortress_rollback::{
+    SessionBuilder, PlayerType, PlayerHandle, FortressError,
+    NonBlockingSocket,
+};
+use std::net::SocketAddr;
+
+# struct MyConfig;
+# impl fortress_rollback::Config for MyConfig {
+#     type Input = Vec<u8>;
+#     type State = Vec<u8>;
+#     type Address = SocketAddr;
+# }
+# let remote_addr: SocketAddr = "127.0.0.1:7000".parse().unwrap();
+# let socket = /* ... */;
+
+let session = SessionBuilder::<MyConfig>::new()
+    .with_num_players(2)?
+    .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
+    .start_p2p_session(socket)?;
+# Ok::<(), FortressError>(())
+````
+
+### Common Missing Identifiers
+
+| Identifier | What Users Need |
+|------------|-----------------|
+| `MyConfig` | A struct implementing `Config` trait |
+| `socket` | A type implementing `NonBlockingSocket` |
+| `remote_addr` | A `SocketAddr` (or the session's address type) |
+| `game_state` | The user's game state struct |
+| `FortressError` | Must be imported for `.ok_or()` and `?` usage |
+| `input` | The user's input type matching `Config::Input` |
+
+### Verification Commands
+
+```bash
+# Find examples that reference common undefined identifiers
+rg 'socket|remote_addr|MyConfig|game_state' docs/ wiki/ --type md -C 3
+
+# Check that FortressError is imported when used in .ok_or()
+rg '\.ok_or\(FortressError' docs/ wiki/ --type md -B 10 | rg 'use.*FortressError'
+
+# Find code fences and check for imports
+rg -A 20 '```rust' docs/ wiki/ --type md | rg 'use fortress_rollback'
+```
+
+### Rule of Thumb
+
+**If a user cannot determine the type or value of every identifier in the snippet
+by reading only the snippet itself, the example is incomplete.** Either:
+
+1. Add comments explaining undefined references (conceptual snippets)
+2. Add imports and definitions to make it self-contained (complete examples)
+3. Use `text` fence instead of `rust` if it's purely illustrative
+
+---
+
+## Summary: The Thirteen Rules
 
 1. **Verify before documenting** — Always check code exists before claiming it does
 2. **Build docs with warnings as errors** — `RUSTDOCFLAGS="-D warnings" cargo doc`
@@ -1122,6 +1388,9 @@ fi
 8. **Follow API change workflow** — When renaming methods or changing types, audit ALL references before and after
 9. **Verify struct field names** — Check actual struct definitions before writing examples with field access
 10. **Use consistent iteration patterns** — Match iteration style to actual data structure (tuple vs named fields)
+11. **Keep version numbers in sync** — Dependency snippets in docs/wiki MUST match `Cargo.toml` version; check ALL locations when bumping
+12. **No panic language in doc comments** — Never claim the library "will panic"; describe actual consequences (errors, desync, incorrect state)
+13. **Make examples self-contained** — All identifiers in code examples must be imported, defined, or explained with comments
 
 ---
 

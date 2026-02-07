@@ -546,10 +546,10 @@ Requests are returned by `advance_frame()` and must be processed in order.
 > in future versions, ensuring your code stays up-to-date.
 
 ```rust
-use fortress_rollback::{FortressRequest, compute_checksum};
+use fortress_rollback::{FortressRequest, RequestVec, compute_checksum};
 
 fn handle_requests(
-    requests: Vec<FortressRequest<GameConfig>>,
+    requests: RequestVec<GameConfig>,
     game_state: &mut GameState,
 ) {
     for request in requests {
@@ -613,11 +613,11 @@ For simpler cases, you can use the `handle_requests!` macro to reduce boilerplat
 
 ```rust
 use fortress_rollback::{
-    handle_requests, compute_checksum, FortressRequest, Frame, GameStateCell, InputVec,
+    handle_requests, compute_checksum, FortressRequest, Frame, GameStateCell, InputVec, RequestVec,
 };
 
 fn handle_requests_simple(
-    requests: Vec<FortressRequest<GameConfig>>,
+    requests: RequestVec<GameConfig>,
     game_state: &mut GameState,
 ) {
     handle_requests!(
@@ -1253,7 +1253,8 @@ Best for: Live event streaming, replay viewers, tournament broadcasts.
 
 ```rust
 use fortress_rollback::{
-    ProtocolConfig, SessionBuilder, SpectatorConfig, SyncConfig,
+    FortressError, PlayerHandle, PlayerType, ProtocolConfig,
+    SessionBuilder, SpectatorConfig, SyncConfig,
 };
 use web_time::Duration;
 
@@ -1275,13 +1276,16 @@ let host_session = SessionBuilder::<GameConfig>::new()
     .start_p2p_session(socket)?;
 
 // Spectator side: uses high-latency tolerant config
-let spectator_session = SessionBuilder::<GameConfig>::new()
+let mut spectator_session = SessionBuilder::<GameConfig>::new()
     .with_num_players(2)?
     .with_sync_config(SyncConfig::high_latency())
     .with_protocol_config(ProtocolConfig::high_latency())
     .with_max_frames_behind(30)?
     .with_catchup_speed(2)?
-    .start_spectator_session(host_addr, spectator_socket);
+    .start_spectator_session(host_addr, spectator_socket)
+    .ok_or(FortressError::InvalidRequest {
+        info: "spectator session initialization failed".into(),
+    })?;
 ```
 
 **SpectatorConfig presets:**
@@ -1752,11 +1756,15 @@ fortress-rollback = { version = "0.5", features = ["tokio"] }
 ```rust
 use fortress_rollback::tokio_socket::TokioUdpSocket;
 use fortress_rollback::{SessionBuilder, PlayerType, PlayerHandle};
+use std::net::SocketAddr;
+
+// MyConfig is your game's Config implementation (see "Defining Your Config")
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create and bind a Tokio UDP socket adapter
     let socket = TokioUdpSocket::bind_to_port(7000).await?;
+    let remote_addr: SocketAddr = "127.0.0.1:7001".parse()?;
 
     // Use with SessionBuilder
     let session = SessionBuilder::<MyConfig>::new()
@@ -2069,14 +2077,20 @@ let session = SessionBuilder::<GameConfig>::new()
 ### Spectator Side
 
 ```rust
+use fortress_rollback::{FortressError, SessionBuilder, SessionState, UdpNonBlockingSocket};
+
 let host_addr = "192.168.1.100:7000".parse()?;
 let socket = UdpNonBlockingSocket::bind_to_port(8000)?;
 
+// Note: start_spectator_session returns Option<SpectatorSession>
 let mut session = SessionBuilder::<GameConfig>::new()
     .with_num_players(2)?
     .with_max_frames_behind(10)?  // When to start catching up
     .with_catchup_speed(2)?       // How fast to catch up
-    .start_spectator_session(host_addr, socket);
+    .start_spectator_session(host_addr, socket)
+    .ok_or(FortressError::InvalidRequest {
+        info: "spectator session initialization failed".into(),
+    })?;
 
 // Spectator loop
 loop {

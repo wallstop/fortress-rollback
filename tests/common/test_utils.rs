@@ -787,7 +787,7 @@ pub fn assert_spectator_synchronized<C: Config>(
 // Generic P2P Session Test Helpers
 // ============================================================================
 
-use fortress_rollback::{FortressRequest, PlayerHandle, PlayerType};
+use fortress_rollback::{PlayerHandle, PlayerType, RequestVec};
 
 /// Trait for game stubs that can handle fortress requests.
 ///
@@ -801,7 +801,7 @@ pub trait GameStubHandler<C: Config> {
     fn new() -> Self;
 
     /// Handles a list of fortress requests.
-    fn handle_requests(&mut self, requests: Vec<FortressRequest<C>>);
+    fn handle_requests(&mut self, requests: RequestVec<C>);
 
     /// Returns the current frame number of the game state.
     fn current_frame(&self) -> i32;

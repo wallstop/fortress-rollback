@@ -165,7 +165,7 @@ Get up and running with Fortress Rollback in minutes.
 
     - :material-shield-check: All `panic!` and `assert!` converted to recoverable errors
     - :material-sort-variant: Deterministic `BTreeMap`/`BTreeSet` instead of `HashMap`/`HashSet`
-    - :material-test-tube: ~1500 tests with ~92% code coverage
+    - :material-test-tube: ~1600 tests with ~92% code coverage
     - :material-file-certificate: TLA+, Z3, and Kani formal verification
 
     [:octicons-arrow-right-24: Full comparison](fortress-vs-ggrs.md)

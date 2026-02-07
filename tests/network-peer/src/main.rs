@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 
 use fortress_rollback::{
     hash::DeterministicHasher, ChaosConfig, ChaosSocket, Config, FortressRequest, Frame,
-    InputStatus, PlayerHandle, PlayerType, SessionBuilder, SessionState, SyncConfig,
+    InputStatus, PlayerHandle, PlayerType, RequestVec, SessionBuilder, SessionState, SyncConfig,
     UdpNonBlockingSocket,
 };
 use serde::{Deserialize, Serialize};
@@ -293,7 +293,7 @@ impl TestGame {
         }
     }
 
-    fn handle_requests(&mut self, requests: Vec<FortressRequest<TestConfig>>) {
+    fn handle_requests(&mut self, requests: RequestVec<TestConfig>) {
         for request in requests {
             match request {
                 FortressRequest::LoadGameState { cell, frame } => {
