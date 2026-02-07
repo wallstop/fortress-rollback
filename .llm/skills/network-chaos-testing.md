@@ -345,6 +345,151 @@ scenario.run_test(port);  // Should pass without retry
 
 ---
 
+## CI Flakiness Prevention for Network Tests
+
+### The `sync_timeout` vs Iteration Count Problem
+
+**Critical insight:** `sync_timeout` fires based on **wall-clock time**, not iteration count.
+On slow CI runners (macOS VMs, shared GitHub Actions runners), each iteration takes
+2–3× longer than on a local dev machine. A test that completes in 30s locally may
+need 85s on CI — well past a 60s `sync_timeout`.
+
+```rust
+// ❌ FRAGILE: sync_timeout is wall-clock dependent
+let sync_config = SyncConfig {
+    num_sync_packets: 40,
+    sync_retry_interval: Duration::from_millis(200),
+    sync_timeout: Some(Duration::from_secs(60)),
+    running_retry_interval: Duration::from_millis(200),
+    keepalive_interval: Duration::from_millis(200),
+};
+// On a 2.8× slower CI runner, 40 roundtrips may need ~84s — timeout fires at 60s!
+
+// ✅ ROBUST: iteration count is the only budget controller
+let sync_config = SyncConfig {
+    num_sync_packets: 20,
+    sync_retry_interval: Duration::from_millis(200),
+    sync_timeout: None,  // Let max_iterations be the budget, not wall-clock
+    running_retry_interval: Duration::from_millis(200),
+    keepalive_interval: Duration::from_millis(200),
+};
+```
+
+**Why `sync_timeout: None` is preferred for chaos tests:**
+
+- Chaos tests already have a `max_iterations` budget that bounds execution
+- `sync_timeout` adds a **second, non-deterministic** deadline that races against iterations
+- Removing it makes test outcome depend only on iteration count — same on every machine
+- If the test needs a safety net, use `max_iterations` (deterministic) not `sync_timeout` (wall-clock)
+
+### Budget Headroom Calculation
+
+A test must leave enough iteration budget to absorb CI slowdown.
+Use the **2.8× rule**: if a test uses N% of its budget locally, it uses
+~2.8×N% on the slowest CI runner.
+
+| Local Budget Usage | CI Usage (×2.8) | Verdict |
+|--------------------|----------------|---------|
+| ≤50% | ≤140% | ✅ Safe (with margin) |
+| 50–70% | 140–196% | ⚠️ Risky — may flake |
+| >70% | >196% | ❌ Will flake on slow CI |
+
+**Rule of thumb:** A test should use **≤50% of its iteration budget locally** to leave
+room for 2.8× CI slowdown.
+
+```rust
+// Example: 20 roundtrips under 30% burst loss
+// Locally completes in ~800 iterations out of 2000 max (40% usage)
+// On CI: ~800 × 2.8 = ~2240 — still under 2000? NO!
+//
+// Fix: either reduce roundtrips or increase max_iterations
+let max_iterations = 5000;  // 800/5000 = 16% local → ~45% on CI ✅
+```
+
+### Reduce Roundtrip Requirements for Harsh Conditions
+
+The probability of completing N consecutive roundtrips under loss is **exponential in N**.
+With 30% effective bidirectional loss, the expected attempts to get one successful roundtrip
+is ~1.43, but for 40 consecutive successes it becomes astronomically unlikely without
+many retries.
+
+| Roundtrips | Relative Difficulty (at 30% loss) | Recommendation |
+|------------|-----------------------------------|----------------|
+| 10 | Baseline | Good for moderate loss |
+| 20 | ~10× harder | Upper limit for harsh conditions |
+| 40 | ~100× harder | Too many — reduce or expect failure |
+
+**Guideline:** For burst loss scenarios, use **≤20 roundtrips**. If you need to validate
+that sync *works* under extreme conditions, 20 roundtrips is sufficient proof.
+
+### Use Explicit `SyncConfig`, Not Presets, for Chaos Tests
+
+Presets like `SyncConfig::stress_test()` bundle roundtrip counts, retry intervals,
+and timeouts that may not align with a chaos test's actual requirements.
+
+```rust
+// ❌ FRAGILE: preset has sync_timeout that may not suit this test
+let sync_config = SyncConfig::stress_test();  // 40 roundtrips, 60s timeout
+
+// ✅ EXPLICIT: construct exactly what the test needs
+let sync_config = SyncConfig {
+    num_sync_packets: 20,
+    sync_retry_interval: Duration::from_millis(150),
+    sync_timeout: None,  // Iteration budget is the only limit
+    running_retry_interval: Duration::from_millis(200),
+    keepalive_interval: Duration::from_millis(200),
+};
+```
+
+**Why explicit construction is better:**
+
+- Makes test requirements visible in the test code
+- Avoids inheriting preset defaults that cause flakiness
+- Each chaos scenario may need different roundtrip/timeout combinations
+- Preset changes won't silently break unrelated tests
+
+### Include Expected-Failure Test Cases
+
+Data-driven chaos tests should include cases where sync is **expected to fail**.
+This validates the test infrastructure and provides confidence that success cases
+are meaningful.
+
+```rust
+// ✅ GOOD: test both success and expected-failure conditions
+let cases = vec![
+    // Moderate loss — should succeed
+    ChaosCase {
+        name: "moderate_loss",
+        profile: NetworkProfile::wifi_congested(),
+        expect_sync: true,
+    },
+    // Extreme burst loss — should fail to sync (validates infrastructure)
+    ChaosCase {
+        name: "high_burst_loss",
+        profile: NetworkProfile::extreme_burst(),
+        expect_sync: false,  // Confirms chaos is actually applied
+    },
+];
+
+for case in &cases {
+    let result = run_chaos_test(case);
+    if case.expect_sync {
+        assert!(result.synced, "{}: expected sync success", case.name);
+    } else {
+        assert!(!result.synced, "{}: expected sync failure", case.name);
+    }
+}
+```
+
+**Why expected-failure cases matter:**
+
+- If *everything* passes, your chaos might not be applied
+- Expected failures prove the chaos socket is working
+- They catch regressions where error handling silently changes
+- They document the boundary between survivable and unsurvivable conditions
+
+---
+
 ## Checklist for New Chaos Tests
 
 - [ ] Network profile has accurate `packet_loss`, `burst_loss_prob`, `burst_loss_len`
@@ -355,6 +500,11 @@ scenario.run_test(port);  // Should pass without retry
 - [ ] Timeout is appropriate for the chaos level (higher chaos → longer timeout)
 - [ ] Test has been run 10+ times locally to verify it's not flaky
 - [ ] Comments document why specific preset/timeout was chosen
+- [ ] Uses `sync_timeout: None` (iteration budget is the only limit)
+- [ ] Uses explicit `SyncConfig` construction, not presets
+- [ ] Local budget usage is ≤50% (leaves room for 2.8× CI slowdown)
+- [ ] Roundtrip count is ≤20 for harsh loss/burst conditions
+- [ ] Includes expected-failure cases for extreme conditions
 
 ---
 
