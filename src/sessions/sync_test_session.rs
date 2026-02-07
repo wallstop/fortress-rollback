@@ -132,7 +132,7 @@ impl<T: Config> SyncTestSession<T> {
 
     /// In a sync test, this will advance the state by a single frame and afterwards rollback `check_distance` amount of frames,
     /// resimulate and compare checksums with the original states. Returns an order-sensitive [`RequestVec`].
-    /// You should fulfill all requests in the exact order they are provided. Failure to do so will cause panics later.
+    /// You should fulfill all requests in the exact order they are provided. Failure to do so will result in incorrect game state, mismatched checksums, or errors returned from subsequent API calls.
     ///
     /// # Errors
     /// - Returns [`MismatchedChecksum`] if checksums don't match after resimulation.

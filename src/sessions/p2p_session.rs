@@ -227,7 +227,7 @@ impl<T: Config> P2PSession<T> {
 
     /// You should call this to notify Fortress Rollback that you are ready to advance your gamestate by a single frame.
     /// Returns an order-sensitive [`RequestVec`]. You should fulfill all requests in the exact order they are provided.
-    /// Failure to do so will cause panics later.
+    /// Failure to do so will result in incorrect game state, potential desync, or errors returned from subsequent API calls.
     ///
     /// # Errors
     /// - Returns a [`FortressError`] if the provided player handle refers to a remote player.

@@ -1253,7 +1253,8 @@ Best for: Live event streaming, replay viewers, tournament broadcasts.
 
 ```rust
 use fortress_rollback::{
-    ProtocolConfig, SessionBuilder, SpectatorConfig, SyncConfig,
+    FortressError, PlayerHandle, PlayerType, ProtocolConfig,
+    SessionBuilder, SpectatorConfig, SyncConfig,
 };
 use web_time::Duration;
 
@@ -1275,13 +1276,16 @@ let host_session = SessionBuilder::<GameConfig>::new()
     .start_p2p_session(socket)?;
 
 // Spectator side: uses high-latency tolerant config
-let spectator_session = SessionBuilder::<GameConfig>::new()
+let mut spectator_session = SessionBuilder::<GameConfig>::new()
     .with_num_players(2)?
     .with_sync_config(SyncConfig::high_latency())
     .with_protocol_config(ProtocolConfig::high_latency())
     .with_max_frames_behind(30)?
     .with_catchup_speed(2)?
-    .start_spectator_session(host_addr, spectator_socket);
+    .start_spectator_session(host_addr, spectator_socket)
+    .ok_or(FortressError::InvalidRequest {
+        info: "spectator session initialization failed".into(),
+    })?;
 ```
 
 **SpectatorConfig presets:**
@@ -1715,7 +1719,7 @@ When enabled, the `Config` and `NonBlockingSocket` traits require their associat
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.4", features = ["sync-send"] }
+fortress-rollback = { version = "0.5", features = ["sync-send"] }
 ```
 
 **Without `sync-send`:**
@@ -1744,7 +1748,7 @@ Enables `TokioUdpSocket`, an adapter that wraps a Tokio async UDP socket and imp
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.4", features = ["tokio"] }
+fortress-rollback = { version = "0.5", features = ["tokio"] }
 ```
 
 **Example usage:**
@@ -1752,11 +1756,15 @@ fortress-rollback = { version = "0.4", features = ["tokio"] }
 ```rust
 use fortress_rollback::tokio_socket::TokioUdpSocket;
 use fortress_rollback::{SessionBuilder, PlayerType, PlayerHandle};
+use std::net::SocketAddr;
+
+// MyConfig is your game's Config implementation (see "Defining Your Config")
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create and bind a Tokio UDP socket adapter
     let socket = TokioUdpSocket::bind_to_port(7000).await?;
+    let remote_addr: SocketAddr = "127.0.0.1:7001".parse()?;
 
     // Use with SessionBuilder
     let session = SessionBuilder::<MyConfig>::new()
@@ -1777,7 +1785,7 @@ Enables JSON serialization methods (`to_json()` and `to_json_pretty()`) on telem
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.4", features = ["json"] }
+fortress-rollback = { version = "0.5", features = ["json"] }
 ```
 
 **Example usage:**
@@ -1807,7 +1815,7 @@ Enables runtime invariant checking in release builds. Normally, invariant checks
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.4", features = ["paranoid"] }
+fortress-rollback = { version = "0.5", features = ["paranoid"] }
 ```
 
 **Use cases:**
@@ -1905,19 +1913,19 @@ Most features are independent and can be combined freely. Here's a matrix showin
 ```toml
 # Standard multi-threaded game
 [dependencies]
-fortress-rollback = { version = "0.4", features = ["sync-send"] }
+fortress-rollback = { version = "0.5", features = ["sync-send"] }
 
 # Async server with Tokio
 [dependencies]
-fortress-rollback = { version = "0.4", features = ["sync-send", "tokio"] }
+fortress-rollback = { version = "0.5", features = ["sync-send", "tokio"] }
 
 # Debugging production issues
 [dependencies]
-fortress-rollback = { version = "0.4", features = ["sync-send", "paranoid"] }
+fortress-rollback = { version = "0.5", features = ["sync-send", "paranoid"] }
 
 # Development with examples
 [dependencies]
-fortress-rollback = { version = "0.4", features = ["sync-send", "graphical-examples"] }
+fortress-rollback = { version = "0.5", features = ["sync-send", "graphical-examples"] }
 ```
 
 ### Web / WASM Integration
@@ -1939,7 +1947,7 @@ Browsers don't support raw UDP sockets. For browser games, you need WebRTC or We
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.4", features = ["sync-send"] }
+fortress-rollback = { version = "0.5", features = ["sync-send"] }
 matchbox_socket = { version = "0.13", features = ["ggrs"] }
 ```
 
@@ -2069,14 +2077,20 @@ let session = SessionBuilder::<GameConfig>::new()
 ### Spectator Side
 
 ```rust
+use fortress_rollback::{FortressError, SessionBuilder, SessionState, UdpNonBlockingSocket};
+
 let host_addr = "192.168.1.100:7000".parse()?;
 let socket = UdpNonBlockingSocket::bind_to_port(8000)?;
 
+// Note: start_spectator_session returns Option<SpectatorSession>
 let mut session = SessionBuilder::<GameConfig>::new()
     .with_num_players(2)?
     .with_max_frames_behind(10)?  // When to start catching up
     .with_catchup_speed(2)?       // How fast to catch up
-    .start_spectator_session(host_addr, socket);
+    .start_spectator_session(host_addr, socket)
+    .ok_or(FortressError::InvalidRequest {
+        info: "spectator session initialization failed".into(),
+    })?;
 
 // Spectator loop
 loop {

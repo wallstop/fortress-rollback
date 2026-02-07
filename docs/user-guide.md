@@ -1256,7 +1256,8 @@ Best for: Live event streaming, replay viewers, tournament broadcasts.
 
 ```rust
 use fortress_rollback::{
-    ProtocolConfig, SessionBuilder, SpectatorConfig, SyncConfig,
+    FortressError, PlayerHandle, PlayerType, ProtocolConfig,
+    SessionBuilder, SpectatorConfig, SyncConfig,
 };
 use web_time::Duration;
 
@@ -1760,11 +1761,15 @@ fortress-rollback = { version = "0.5", features = ["tokio"] }
 ```rust
 use fortress_rollback::tokio_socket::TokioUdpSocket;
 use fortress_rollback::{SessionBuilder, PlayerType, PlayerHandle};
+use std::net::SocketAddr;
+
+// MyConfig is your game's Config implementation (see "Defining Your Config")
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create and bind a Tokio UDP socket adapter
     let socket = TokioUdpSocket::bind_to_port(7000).await?;
+    let remote_addr: SocketAddr = "127.0.0.1:7001".parse()?;
 
     // Use with SessionBuilder
     let session = SessionBuilder::<MyConfig>::new()
@@ -2077,6 +2082,8 @@ let session = SessionBuilder::<GameConfig>::new()
 ### Spectator Side
 
 ```rust
+use fortress_rollback::{FortressError, SessionBuilder, SessionState, UdpNonBlockingSocket};
+
 let host_addr = "192.168.1.100:7000".parse()?;
 let socket = UdpNonBlockingSocket::bind_to_port(8000)?;
 
