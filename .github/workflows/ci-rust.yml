@@ -285,7 +285,9 @@ jobs:
       - name: Install nightly with Miri
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          # Pin Miri toolchain to avoid breakages from nightly regressions.
+          # Bump intentionally after validating Miri on all CI platforms.
+          toolchain: nightly-2026-02-10
           components: miri
 
       - name: Cache cargo registry (no target for Miri)
