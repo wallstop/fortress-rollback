@@ -298,11 +298,12 @@ jobs:
           # `cargo miri` writes toolchain-specific wrapper artifacts under `target/miri/`.
           # Caching/restoring those across changing nightly toolchains can break builds with:
           #   "contains outdated or invalid JSON; try `cargo clean`".
-          # Include matrix.name in cache key for job-specific caching
-          key: miri-${{ matrix.os }}-${{ matrix.name }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          # IMPORTANT: use a versioned cache namespace so we never restore pre-fix caches
+          # that may have included `target/`.
+          key: miri-v2-${{ matrix.os }}-${{ matrix.name }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            miri-${{ matrix.os }}-${{ matrix.name }}-cargo-
-            miri-${{ matrix.os }}-cargo-
+            miri-v2-${{ matrix.os }}-${{ matrix.name }}-cargo-
+            miri-v2-${{ matrix.os }}-cargo-
 
       - name: Miri toolchain diagnostics
         shell: bash
@@ -311,6 +312,12 @@ jobs:
           rustc -Vv
           cargo -Vv
           cargo miri --version
+
+      - name: Clean stale Miri artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf target/miri
 
       - name: Setup Miri
         run: cargo miri setup
