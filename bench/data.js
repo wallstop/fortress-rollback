@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1770491257777,
+  "lastUpdate": 1770934480589,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "b7d9b727424239b31e763ecdf7e2fc813b2d894b",
-          "message": "Investigate and fix test failures (#23)\n\nThe ChaosSocket reorder buffer had a bug where packets would be held\nindefinitely if fewer packets arrived than the configured buffer\nthreshold. This caused the flaky test_out_of_order_delivery test failure\non macOS.\n\nRoot cause analysis:\n- The apply_reordering() function only released packets when the buffer\nreached the configured threshold size (e.g., 5 packets)\n- If fewer packets arrived, they remained stuck in the buffer forever\n- This caused P2P sessions to stall because remote inputs never arrived\n\nFix:\n- Release buffered packets when no new messages arrive (empty batch)\n- This simulates real-world behavior where delayed packets eventually\narrive\n- Added should_reorder() helper for semantic clarity (replaces\nshould_drop)\n\nAlso added comprehensive unit tests for reorder buffer edge cases:\n- test_reorder_buffer_releases_on_empty_batch\n- test_reorder_buffer_releases_at_threshold\n- test_reorder_buffer_no_indefinite_holding\n- test_reorder_buffer_single_packet\n- test_reorder_buffer_disabled_when_size_zero\n- test_reorder_buffer_disabled_when_rate_zero\n- test_reorder_buffer_burst_exceeds_size\n- test_reorder_stats_accuracy\n\nCo-authored-by: Claude <noreply@anthropic.com>",
-          "timestamp": "2025-12-23T21:19:49-08:00",
-          "tree_id": "fa036c7223d335e1552f6292bd69872746ebc016",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/b7d9b727424239b31e763ecdf7e2fc813b2d894b"
-        },
-        "date": 1766553880334,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 95,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 153,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 676,
-            "range": "± 21",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 976,
-            "range": "± 20",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1426,
-            "range": "± 22",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 115560,
-            "range": "± 3381",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 24522,
-            "range": "± 122",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 10673,
-            "range": "± 484",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 869,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 868,
             "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "176437cf10a40980eb914031b675b37433646e34",
+          "message": "chore(deps): bump clap from 4.5.57 to 4.5.58 (#90)\n\nBumps [clap](https://github.com/clap-rs/clap) from 4.5.57 to 4.5.58.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/releases\">clap's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v4.5.58</h2>\n<h2>[4.5.58] - 2026-02-11</h2>\n</blockquote>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/blob/master/CHANGELOG.md\">clap's\nchangelog</a>.</em></p>\n<blockquote>\n<h2>[4.5.58] - 2026-02-11</h2>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/88f13cb4b0eed760139de41ecf80aefd19a707c1\"><code>88f13cb</code></a>\nchore: Release</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/fe2d731605e98597f241d4dd56950eb4226dfde9\"><code>fe2d731</code></a>\ndocs: Update changelog</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/b2567390457ce0b7ceab722a6318ba278f637a45\"><code>b256739</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6131\">#6131</a>\nfrom mernen/do-not-suggest-opts-after-escape</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/8aaf704f5679e2329a2f8048ff3cfad40696fde7\"><code>8aaf704</code></a>\nfix(complete): Do not suggest options after &quot;--&quot;</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/4a86fee1b523aeade43b628294a18a68df5ee165\"><code>4a86fee</code></a>\ntest(complete): Illustrate current behavior</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/281f8aec7ce468d677ae24bf5bc17d41e9c7cbcb\"><code>281f8ae</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6126\">#6126</a>\nfrom epage/p</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/3cbce42cc2115975432647c4238fa5dc9a2d662a\"><code>3cbce42</code></a>\ndocs(cookbook): Make typed-derive easier to maintain</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/9fd4dc9e4e6a6b2f5b696e8753b767a46e2aca7e\"><code>9fd4dc9</code></a>\ndocs(cookbook): Provide a custom TypedValueParser</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/8f8e8613459e3ccdd25051c97f011cd8d5e49ed9\"><code>8f8e861</code></a>\ndocs(cookbook): Add local enum to typed-derive</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/926bafef0b8860c4b437db0c41567fc270586089\"><code>926bafe</code></a>\ndocs(cookbook): Hint at overriding value_name</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/clap-rs/clap/compare/clap_complete-v4.5.57...clap_complete-v4.5.58\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=clap&package-manager=cargo&previous-version=4.5.57&new-version=4.5.58)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-02-12T14:09:23-08:00",
+          "tree_id": "1481acd5baf7d048698560a906d50dd56ded46f3",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/176437cf10a40980eb914031b675b37433646e34"
+        },
+        "date": 1770934479383,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 113,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 160,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 448,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 696,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1042,
+            "range": "± 25",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 102685,
+            "range": "± 564",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 27272,
+            "range": "± 1110",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 93",
             "unit": "ns/iter"
           },
           {
