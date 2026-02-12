@@ -336,13 +336,16 @@ miri:
         toolchain: nightly
         components: miri
 
-    - name: Cache cargo registry and build
-      uses: actions/cache@v4
+    - name: Cache cargo registry (avoid target/ for Miri)
+      uses: actions/cache@v5
       with:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
-          target
+        # NOTE: Avoid caching `target/` for Miri.
+        # `cargo miri` writes toolchain-specific wrapper artifacts under `target/miri/`.
+        # Restoring those across changing nightlies can fail with:
+        #   "contains outdated or invalid JSON; try `cargo clean`".
         key: miri-${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
           miri-${{ matrix.os }}-cargo-
