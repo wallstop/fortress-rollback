@@ -226,7 +226,7 @@ jobs:
         shell: bash
 
       - name: Upload mutation report
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutation-report-${{ matrix.os }}
@@ -236,7 +236,7 @@ jobs:
           retention-days: 30
 
       - name: Upload missed mutations
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: missed-mutations-${{ matrix.os }}
