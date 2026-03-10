@@ -2007,21 +2007,21 @@ mod kani_sync_layer_proofs {
     ///
     /// Verifies that after saving, last_saved_frame == current_frame.
     ///
-    /// Note: unwind(15) accounts for SyncLayer construction + loop iterations
+    /// Note: unwind(12) accounts for SyncLayer construction with 1 player, 1 prediction window
+    /// (1 InputQueue of 8 + SavedStates of 2 + buffer)
     ///
     /// - Tier: 3 (Slow, >2min)
     /// - Verifies: Save updates last_saved_frame (INV-8)
     /// - Related: proof_load_frame_validates_bounds, proof_saved_states_count
+    ///   (proof_load_frame_validates_bounds and proof_load_frame_success_maintains_invariants
+    ///   still exercise SyncLayer::new(2, 3) for broader multi-player coverage)
     #[kani::proof]
-    #[kani::unwind(15)]
+    #[kani::unwind(12)]
     fn proof_save_maintains_inv8() {
-        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 3);
+        let mut sync_layer = SyncLayer::<TestConfig>::new(1, 1);
 
-        // Advance a bit (concrete count for tractability)
-        let advances: usize = 2;
-        for _ in 0..advances {
-            sync_layer.advance_frame();
-        }
+        // Advance one frame (sufficient to verify save property)
+        sync_layer.advance_frame();
 
         let frame_before_save = sync_layer.current_frame();
         let _request = sync_layer.save_current_state();
@@ -2202,21 +2202,22 @@ mod kani_sync_layer_proofs {
 
     /// Proof: reset_prediction doesn't affect frame state.
     ///
-    /// Note: unwind(15) accounts for SyncLayer construction + loop iterations
+    /// Note: unwind(12) accounts for SyncLayer construction with 1 player, 1 prediction window
+    /// (1 InputQueue of 8 + SavedStates of 2 + buffer)
     ///
     /// - Tier: 3 (Slow, >2min)
     /// - Verifies: reset_prediction preserves frame invariants
     /// - Related: proof_new_sync_layer_valid
+    ///   (proof_load_frame_validates_bounds and proof_load_frame_success_maintains_invariants
+    ///   still exercise SyncLayer::new(2, 3) for broader multi-player coverage)
     #[kani::proof]
-    #[kani::unwind(15)]
+    #[kani::unwind(12)]
     fn proof_reset_prediction_preserves_frames() {
-        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 3);
+        let mut sync_layer = SyncLayer::<TestConfig>::new(1, 1);
 
-        // Advance and save
-        for _ in 0..3 {
-            sync_layer.save_current_state();
-            sync_layer.advance_frame();
-        }
+        // A single save+advance is sufficient to set non-trivial frame values
+        sync_layer.save_current_state();
+        sync_layer.advance_frame();
 
         let current_before = sync_layer.current_frame();
         let confirmed_before = sync_layer.last_confirmed_frame();

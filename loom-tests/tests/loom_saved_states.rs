@@ -11,9 +11,8 @@
 
 #![cfg(loom)]
 
+use fortress_rollback::Frame;
 use fortress_rollback::__internal::SavedStates;
-use fortress_rollback::{Frame, GameStateCell};
-use loom::sync::Arc;
 use loom::thread;
 
 /// Test concurrent access to different SavedStates cells.

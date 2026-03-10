@@ -237,6 +237,15 @@ The project runs comprehensive safety checks beyond standard linting:
 
 See also: `ci-rust.yml` (Miri UB detection), `ci-security.yml` (cargo-geiger, cargo-deny)
 
+**CI will fail if:**
+
+- Code is not formatted (`cargo fmt --check`)
+- Clippy warnings exist (`cargo clippy` with warnings as errors)
+- Rustdoc has broken links or warnings (`RUSTDOCFLAGS=-D warnings`)
+- Markdown has lint errors (lists need blank lines around them)
+- GitHub Actions workflows have syntax errors
+- Kani proofs are not registered in tier lists
+
 > **See also:** CI/CD guides in `.llm/skills/`:
 >
 > - [github-actions-best-practices.md](skills/github-actions-best-practices.md) — Workflow linting, shellcheck, Miri CI, timeout values, cross-platform scripts
@@ -478,7 +487,15 @@ When modifying Kani proofs or code verified by them:
 **Remember:**
 
 - All loops with symbolic bounds require `#[kani::unwind(N)]` where N = max_iterations + 1. This is the #1 cause of Kani CI failures.
+- CI uses `--default-unwind 8` via `--quick` mode; proofs without explicit bounds that iterate over larger structures will time out.
 - **Verify proof assertions match actual implementation.** The #2 cause of failures is proofs that assert the wrong thing (e.g., asserting `ConnectionStatus::Connected` when the code returns `ConnectionStatus::Disconnected`).
+
+**Kani installation (Linux/macOS only):**
+
+```bash
+cargo install --locked kani-verifier
+cargo kani setup
+```
 
 See [kani-verification.md](skills/kani-verification.md) for details.
 

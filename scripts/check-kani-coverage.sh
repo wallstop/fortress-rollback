@@ -227,6 +227,9 @@ main() {
         echo ""
     fi
 
+    # Advisory check for unwind attributes
+    check_unwind_attributes
+
     # Final result
     if [[ "$has_errors" == "true" ]]; then
         echo -e "${RED}FAILED: Kani proof coverage is incomplete.${NC}"
@@ -239,6 +242,111 @@ main() {
     else
         echo -e "${GREEN}SUCCESS: All $SOURCE_COUNT Kani proofs are covered in tier lists.${NC}"
         exit 0
+    fi
+}
+
+# Check that #[kani::proof] functions have #[kani::unwind(N)] attributes.
+# This is advisory only - many simple proofs work fine without explicit unwind bounds.
+check_unwind_attributes() {
+    local src_dir="$PROJECT_ROOT/src"
+
+    if [[ ! -d "$src_dir" ]]; then
+        return
+    fi
+
+    echo ""
+    echo -e "${BLUE}Checking for explicit #[kani::unwind(N)] attributes...${NC}"
+
+    local warning_count=0
+
+    # Find all .rs files with #[kani::proof]
+    local rs_files
+    rs_files=$(grep -rl '#\[kani::proof\]' "$src_dir" --include='*.rs' 2>/dev/null || true)
+
+    if [[ -z "$rs_files" ]]; then
+        echo -e "${GREEN}[OK] No Kani proofs found to check.${NC}"
+        return
+    fi
+
+    while IFS= read -r rs_file; do
+        [[ -z "$rs_file" ]] && continue
+
+        # Get line numbers of #[kani::proof] attributes
+        local proof_lines
+        proof_lines=$(grep -n '#\[kani::proof\]' "$rs_file" 2>/dev/null | cut -d: -f1 || true)
+
+        while IFS= read -r line_num; do
+            [[ -z "$line_num" ]] && continue
+
+            # Find the fn name on this or subsequent lines (up to 10 lines ahead)
+            local fn_name=""
+            local end_line=$((line_num + 10))
+            local total_lines
+            total_lines=$(wc -l < "$rs_file")
+            if [[ $end_line -gt $total_lines ]]; then
+                end_line=$total_lines
+            fi
+
+            fn_name=$(/bin/sed -n "${line_num},${end_line}p" "$rs_file" \
+                | grep -m1 'fn ' \
+                | /bin/sed 's/.*fn \([a-zA-Z_][a-zA-Z0-9_]*\).*/\1/' || true)
+
+            if [[ -z "$fn_name" ]]; then
+                continue
+            fi
+
+            # Check for #[kani::unwind(N)] in the attribute block:
+            # - Up to 10 lines before #[kani::proof]
+            # - Between #[kani::proof] and the fn declaration
+            local start_line=$((line_num - 10))
+            if [[ $start_line -lt 1 ]]; then
+                start_line=1
+            fi
+
+            local has_unwind=false
+            if /bin/sed -n "${start_line},${end_line}p" "$rs_file" \
+                | grep -q '#\[kani::unwind([0-9]' 2>/dev/null; then
+                has_unwind=true
+            fi
+
+            if [[ "$has_unwind" == "true" ]]; then
+                continue
+            fi
+
+            # Check for // kani::no-unwind-needed allowlist marker in preceding 3 lines
+            local allow_start=$((line_num - 3))
+            if [[ $allow_start -lt 1 ]]; then
+                allow_start=1
+            fi
+
+            local has_allowlist=false
+            if /bin/sed -n "${allow_start},${line_num}p" "$rs_file" \
+                | grep -q '//.*kani::no-unwind-needed' 2>/dev/null; then
+                has_allowlist=true
+            fi
+
+            if [[ "$has_allowlist" == "true" ]]; then
+                continue
+            fi
+
+            local rel_path="${rs_file#"$PROJECT_ROOT/"}"
+            if [[ "$VERBOSE" == "true" ]]; then
+                echo -e "  ${YELLOW}WARNING: proof '$fn_name' in file '$rel_path' has no explicit #[kani::unwind(N)]. CI uses --default-unwind 8; larger data structures may cause timeouts.${NC}"
+            fi
+            warning_count=$((warning_count + 1))
+
+        done <<< "$proof_lines"
+    done <<< "$rs_files"
+
+    if [[ $warning_count -gt 0 ]]; then
+        echo ""
+        if [[ "$VERBOSE" == "true" ]]; then
+            echo -e "${YELLOW}[Advisory] $warning_count proof(s) without explicit #[kani::unwind(N)].${NC}"
+        else
+            echo -e "${YELLOW}[Advisory] $warning_count proof(s) without explicit #[kani::unwind(N)]. Run with --verbose for details.${NC}"
+        fi
+    else
+        echo -e "${GREEN}[OK] All proofs have explicit #[kani::unwind(N)] or allowlist markers.${NC}"
     fi
 }
 

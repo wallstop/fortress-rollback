@@ -677,6 +677,79 @@ fn verify_full_state_machine() { /* ... */ }
 
 ---
 
+## CI Quick Mode and Unwind Bounds
+
+CI runs Kani with the `--quick` flag, which sets `--default-unwind 8`. This has important implications for proof authoring.
+
+### How It Works
+
+- `--quick` mode passes `--default-unwind 8` to Kani
+- Any proof **without** an explicit `#[kani::unwind(N)]` attribute inherits this default
+- Without explicit `#[kani::unwind(N)]`, proofs with loops exceeding 8 iterations will **fail with an unwinding assertion violation** (Kani enables unwinding assertions by default). This manifests as either a verification failure or a timeout, depending on solver behavior and proof complexity.
+- Data structures with arrays larger than 8 elements (e.g., `[u8; 16]`) trigger the same issue -- CBMC cannot fully explore the loop iterations, causing unwinding assertion failures or solver timeouts
+
+### Rule: Always Add `#[kani::unwind(N)]`
+
+Every `#[kani::proof]` function should have an explicit `#[kani::unwind(N)]` attribute:
+
+```rust
+// ❌ Relies on CI default (--default-unwind 8) — may time out
+#[kani::proof]
+fn proof_my_invariant() {
+    let arr: [u8; 16] = kani::any();
+    for item in arr.iter() { /* ... */ }
+}
+
+// ✅ Explicit bound — works regardless of CI mode
+#[kani::proof]
+#[kani::unwind(17)]  // 16 elements + 1 for termination check
+fn proof_my_invariant() {
+    let arr: [u8; 16] = kani::any();
+    for item in arr.iter() { /* ... */ }
+}
+```
+
+### How to Calculate Correct Unwind Bounds
+
+The unwind bound N should be **max(array_sizes) + 1**:
+
+| Data Structure | Max Iterations | Unwind Bound (N) |
+|----------------|----------------|-------------------|
+| `[u8; 4]` | 4 | 5 |
+| `[u32; 8]` | 8 | 9 |
+| `[u64; 16]` | 16 | 17 |
+| Nested loops (3 x 4) | 4 (outer) | 5 (covers deepest) |
+| `kani::assume(n <= 10)` | 10 | 11 |
+
+For nested loops, the unwind bound applies to ALL loops in the proof. Set it to `max(all_loop_bounds) + 1`.
+
+### Testing Locally with CI-Equivalent Settings
+
+To reproduce CI behavior locally:
+
+```bash
+# Simulate CI --quick mode
+cargo kani --harness proof_my_invariant --default-unwind 8
+
+# If it times out or fails, add explicit #[kani::unwind(N)]
+# with a bound that covers your actual data structures
+```
+
+### Allowlist for Simple Proofs
+
+Simple proofs with no loops or only fixed-iteration loops do not need `#[kani::unwind(N)]`. To suppress the advisory warning from `check-kani-coverage`, add a comment:
+
+```rust
+// kani::no-unwind-needed
+#[kani::proof]
+fn proof_simple_property() {
+    let x: u32 = kani::any();
+    assert!(x.wrapping_add(0) == x);
+}
+```
+
+---
+
 ## Integration with AI/LLM Workflows
 
 ### The Kani Feedback Loop
@@ -752,6 +825,8 @@ fn verify_bounded() {
     }
 }
 ```
+
+**CI `--quick` mode compounds this problem:** CI runs with `--default-unwind 8`. Even proofs that iterate over fixed-size arrays larger than 8 elements will time out unless they have an explicit `#[kani::unwind(N)]`. See [CI Quick Mode and Unwind Bounds](#ci-quick-mode-and-unwind-bounds) for details.
 
 **Remember:** Run `cargo kani --harness your_proof_name` locally before pushing!
 

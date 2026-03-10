@@ -376,9 +376,15 @@ run_kani() {
     export NO_COLOR=1
     export TERM=dumb
     if [[ "$verbose" == "true" ]]; then
-        "${kani_cmd[@]}" 2>&1 | tee "$output_file" || exit_code=$?
+        timeout "$KANI_TIMEOUT" "${kani_cmd[@]}" 2>&1 | tee "$output_file" || exit_code=$?
     else
-        "${kani_cmd[@]}" > "$output_file" 2>&1 || exit_code=$?
+        timeout "$KANI_TIMEOUT" "${kani_cmd[@]}" > "$output_file" 2>&1 || exit_code=$?
+    fi
+
+    # Check for timeout (exit code 124 from the timeout command)
+    if [[ $exit_code -eq 124 ]]; then
+        local timed_out_harness="${harness:-all}"
+        echo -e "${RED}TIMEOUT: proof '$timed_out_harness' timed out after ${KANI_TIMEOUT}s. Consider adding/increasing #[kani::unwind(N)].${NC}"
     fi
 
     local end_time
@@ -543,6 +549,9 @@ run_tier_proofs() {
         else
             any_failed=true
             ((tier_failed++))
+            if [[ "$quick" == "true" ]]; then
+                echo -e "${YELLOW}Note: Running in --quick mode (--default-unwind 8). Proofs iterating over structures with >8 elements need explicit #[kani::unwind(N)].${NC}"
+            fi
             if [[ "$fail_fast" == "true" ]]; then
                 echo -e "${RED}Stopping early due to --fail-fast${NC}"
                 echo ""
@@ -688,6 +697,9 @@ main() {
             echo -e "${BLUE}Verifying harness: $harness${NC}"
             if ! run_kani "$harness" "$quick" "$verbose" "$jobs"; then
                 any_failed=true
+                if [[ "$quick" == "true" ]]; then
+                    echo -e "${YELLOW}Note: Running in --quick mode (--default-unwind 8). Proofs iterating over structures with >8 elements need explicit #[kani::unwind(N)].${NC}"
+                fi
                 if [[ "$fail_fast" == "true" ]]; then
                     echo -e "${RED}Stopping early due to --fail-fast${NC}"
                     break
