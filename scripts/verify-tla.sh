@@ -188,7 +188,7 @@ verify_spec() {
 
         # Extract stats
         local states
-        states=$(grep -oP '\d+ states generated' "$output_file" | head -1 || echo "")
+        states=$(grep -o '[0-9][0-9]* states generated' "$output_file" | head -1 || echo "")
         if [[ -n "$states" ]]; then
             echo "  $states"
         fi

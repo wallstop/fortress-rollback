@@ -135,6 +135,20 @@ repos:
         pass_filenames: false
         files: '^(docs/.*\.md|wiki/.*\.md|scripts/sync-wiki\.py)$'
 
+      - id: llm-line-limit
+        name: check .llm file line limit (300)
+        entry: python scripts/hooks/check-llm-line-limit.py
+        language: python
+        pass_filenames: false
+        files: '^\.llm/.*\.md$'
+
+      - id: regenerate-skills-index
+        name: regenerate skills index
+        entry: python scripts/hooks/regenerate-skills-index.py
+        language: python
+        pass_filenames: false
+        files: '^\.llm/skills/.*\.md$'
+
       # ══════════════════════════════════════════════════════════════════════
       # CI validation (skip gracefully if tools not installed)
       # ══════════════════════════════════════════════════════════════════════

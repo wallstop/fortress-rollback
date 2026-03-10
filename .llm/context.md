@@ -1,341 +1,176 @@
-# Fortress Rollback — LLM Development Guide
+# Fortress Rollback -- LLM Development Guide
 
-> **This is the canonical source of truth** for project context. All other LLM instruction files (CLAUDE.md, AGENTS.md, copilot-instructions.md) point here.
+> **Canonical source of truth** for project context. All other LLM instruction files point here.
 
-## TL;DR — What You Need to Know
+## TL;DR
 
-**Fortress Rollback** is a correctness-first fork of GGRS (Good Game Rollback System), written in 100% safe Rust. It provides peer-to-peer rollback networking for deterministic multiplayer games.
+**Fortress Rollback** is a correctness-first fork of GGRS, written in 100% safe Rust. Peer-to-peer rollback networking for deterministic multiplayer games.
 
-### The Five Pillars
+### Five Pillars
 
-1. **Zero-panic production code** — All errors returned as `Result`, never panic
-2. **>90% test coverage** — All code must be thoroughly tested
-3. **Formal verification** — TLA+, Z3, and Kani for critical components
-4. **Enhanced usability** — Intuitive, type-safe, hard-to-misuse APIs
-5. **Code clarity** — Readable, maintainable, well-documented
+1. **Zero-panic production code** -- All errors returned as `Result`, never panic
+2. **>90% test coverage** -- All code must be thoroughly tested
+3. **Formal verification** -- TLA+, Z3, and Kani for critical components
+4. **Enhanced usability** -- Intuitive, type-safe, hard-to-misuse APIs
+5. **Code clarity** -- Readable, maintainable, well-documented
 
-### Quick Commands
+## Quick Commands
 
 ```bash
-# Run after every change
-cargo fmt && cargo clippy --all-targets && cargo nextest run --no-capture
-
-# Aliases from .cargo/config.toml
-cargo c && cargo t
-
-# Additional checks
-typos                                    # Spell check (CI enforced)
+cargo fmt && cargo clippy --all-targets && cargo nextest run --no-capture  # Pre-commit
+cargo c && cargo t                        # Aliases from .cargo/config.toml
+typos                                     # Spell check (CI enforced)
 cargo test --features z3-verification -- --nocapture  # Z3 proofs (slow)
 ```
 
-**Always use `--no-capture`** (nextest) or `-- --nocapture` (cargo test) so that test output is visible immediately when failures occur. This avoids having to re-run tests to see what went wrong.
-
----
+Always use `--no-capture` (nextest) or `-- --nocapture` (cargo test) so test output is visible on failure.
 
 ## CLI Tools (Dev Container)
-
-Use modern tools instead of traditional counterparts. Shell aliases are pre-configured.
 
 | Use | Instead of | Key flags |
 |-----|------------|-----------|
 | `rg` | `grep` | `-l` list files, `-C 3` context, `--type rust` |
-| `fd` | `find` | `-e toml` extension, `--type d` dirs, `-x cmd {}` exec |
-| `bat --paging=never` | `cat` | `-n` line numbers, `-r 10:20` range, `-l rust` language |
+| `fd` | `find` | `-e toml` extension, `--type d` dirs |
+| `bat --paging=never` | `cat` | `-n` line numbers, `-r 10:20` range |
 | `eza` | `ls` | `-la`, `--tree`, `--git` |
 | `sd` | `sed` | `sd 'old' 'new' file`, `-F` literal |
-| `dust` | `du` | `-d 2` depth, `-n 20` top entries |
-| `procs` | `ps` | `--tree`, `procs cargo` filter |
+| `dust` | `du` | `-d 2` depth |
 | `tokei` | `wc -l` | Code stats by language |
 | `hyperfine` | `time` | Statistical benchmarking |
 
-**Critical rules:**
+Rules: always `bat --paging=never` (bare `bat` blocks); never redirect to `/dev/null`; use `rg --no-ignore` for gitignored files.
 
-- Always use `bat --paging=never` (bare `bat` blocks)
-- Never redirect to `/dev/null` — hides errors
-- Use `rg` with `--no-ignore` to include gitignored files
+## Non-Negotiable Requirements
 
----
-
-## How to Approach Development
-
-### Before Writing Any Code
-
-1. **Understand the context** — Read relevant source files and tests
-2. **Check for similar patterns** — See how existing code handles similar cases
-3. **Consider the impact** — Will this change affect other components?
-4. **Plan tests first** — What tests will verify correctness?
-
-### When Implementing Features
-
-1. **Write tests first** (TDD) — Define expected behavior before implementing
-2. **Keep functions focused** — Single responsibility, clear intent
-3. **Handle all errors** — No panics, use `Result<T, FortressError>`
-4. **Document as you go** — Rustdoc with examples for all public items
-5. **Consider edge cases** — Zero values, max values, empty collections
-6. **Update changelog** — Only for user-facing changes (see Changelog Policy below)
-
-### When Fixing Bugs
-
-1. **Reproduce first** — Write a failing test that demonstrates the bug
-2. **Root cause analysis** — Understand *why* it fails, not just *what* fails
-3. **Fix at the right level** — Production bug vs test bug (see below)
-4. **Add regression tests** — Ensure the bug can't return
-5. **Check for similar issues** — Are there related bugs elsewhere?
-
----
-
-## Code Quality Standards
-
-### Non-Negotiable Requirements
-
-- **100% safe Rust** — `#![forbid(unsafe_code)]`
-- **ZERO-PANIC POLICY** — Production code must NEVER panic; all errors as `Result`
-- **All clippy lints pass** — `clippy::all`, `clippy::pedantic`, `clippy::nursery`
-- **No broken doc links** — All intra-doc links must resolve
-- **Public items documented** — Rustdoc with examples
-- **Overflow checks in release** — Integer overflow is caught at runtime
-- **Deterministic behavior** — Same inputs must always produce same outputs
-
-### Code Design Principles
-
-These principles apply to **all code** — production, tests, CI/CD, documentation, and examples.
-
-#### Minimal Comments
-
-- **Rely on descriptive names** — Function, variable, and type names should be self-documenting
-- **Comment only the "why"** — Explain non-obvious design decisions, not what the code does
-- **Avoid redundant comments** — If the code is clear, don't add noise
-- **Rustdoc is different** — Public API documentation is mandatory and valuable
+- **100% safe Rust** -- `#![forbid(unsafe_code)]`
+- **ZERO-PANIC POLICY** -- Production code must NEVER panic; all errors as `Result`
+- **All clippy lints pass** -- `clippy::all`, `clippy::pedantic`, `clippy::nursery`
+- **No broken doc links** -- All intra-doc links must resolve
+- **Public items documented** -- Rustdoc with examples
+- **Overflow checks in release** -- Integer overflow caught at runtime
+- **Deterministic behavior** -- Same inputs must always produce same outputs
 
 ```rust
-// ❌ Avoid: Redundant comment
-// Increment the frame counter
-frame_counter += 1;
-
-// ✅ Prefer: Self-documenting code, no comment needed
-frame_counter += 1;
-
-// ✅ Good: Explains non-obvious "why"
-// Skip checksum validation for spectators to reduce bandwidth
-if player.is_spectator() { return Ok(()); }
+// FORBIDDEN in production:  value.unwrap(), .expect(), array[i], panic!(), todo!()
+// REQUIRED:  value.ok_or(FortressError::MissingValue)?, array.get(i).ok_or(...)?,
+//            if !valid { return Err(FortressError::InvalidState); }
 ```
 
-#### SOLID Principles
+Zero-panic key principles: never swallow errors (use `?`), validate all inputs, prefer `.get()` over indexing, exhaustive `match` (no `_ =>` on enums), enums over booleans, doc examples must use `?` and `Result`. See [defensive-programming.md](skills/defensive-programming.md) for the complete guide.
 
-- **Single Responsibility** — Each module, struct, and function does one thing well
-- **Open/Closed** — Extend behavior through traits and generics, not modification
-- **Liskov Substitution** — Trait implementations must honor the trait's contract
-- **Interface Segregation** — Prefer small, focused traits over large monolithic ones
-- **Dependency Inversion** — Depend on abstractions (traits), not concrete types
+## Code Design Principles
 
-#### DRY (Don't Repeat Yourself)
+Follow SOLID, DRY, and Clean Architecture. Rely on descriptive names; comment only the "why." Prefer zero-cost abstractions (generics/traits over dynamic dispatch), value types, and minimal allocations.
 
-- **Extract common patterns** — If code appears twice, consider abstracting it
-- **Prefer composition** — Build complex behavior from simple, reusable pieces
-- **Centralize constants** — Magic numbers and strings belong in named constants
-- **Share test utilities** — Common test setup belongs in shared modules
+Design patterns used: **Builder** (SessionBuilder), **State Machine** (protocol/connection states), **Strategy** (input prediction), **Iterator** (combinators over manual loops).
 
-```rust
-// ❌ Avoid: Duplicated validation logic
-fn process_input(input: Input) -> Result<(), Error> {
-    if input.frame < 0 { return Err(Error::InvalidFrame); }
-    // ... process
-}
-fn validate_input(input: Input) -> Result<(), Error> {
-    if input.frame < 0 { return Err(Error::InvalidFrame); }
-    // ... validate
-}
+Before writing new code, search for similar existing patterns. Extract shared utilities; avoid copy-paste.
 
-// ✅ Prefer: Single source of truth
-impl Input {
-    fn validate(&self) -> Result<(), Error> {
-        if self.frame < 0 { return Err(Error::InvalidFrame); }
-        Ok(())
-    }
-}
+## Skills Reference
+
+See [`.llm/skills/_index.md`](skills/_index.md) for the categorized index of deep-dive guides covering: defensive programming, testing (unit/property/mutation/fuzz/chaos), formal verification (Kani/TLA+/Z3/Loom/Miri), rollback netcode, determinism, performance, WASM, CI/CD, API design, documentation, and more.
+
+## Project Architecture
+
+### Repository Structure
+
+```
+src/
+  lib.rs                           # Public API entry point
+  error.rs                         # FortressError types
+  frame_info.rs / hash.rs / rle.rs / rng.rs  # Core utilities
+  time_sync.rs / sync.rs / checksum.rs / telemetry.rs
+  input_queue/
+    mod.rs                         # Input buffering
+    prediction.rs                  # Input prediction strategies
+  sync_layer/
+    mod.rs                         # Core synchronization (SyncLayer)
+    game_state_cell.rs             # Thread-safe game state
+    saved_states.rs                # Circular buffer for rollback
+  network/
+    compression.rs / messages.rs / network_stats.rs
+    chaos_socket.rs / udp_socket.rs / codec.rs / tokio_socket.rs
+    protocol/
+      mod.rs / event.rs / input_bytes.rs / state.rs
+  sessions/
+    builder.rs                     # SessionBuilder pattern
+    p2p_session.rs                 # P2P gameplay
+    p2p_spectator_session.rs       # Spectator mode
+    sync_test_session.rs           # Determinism testing
+    config.rs / player_registry.rs / sync_health.rs
 ```
 
-#### Clean Architecture
+### Session Types
 
-- **Separate concerns** — Keep business logic independent of I/O and frameworks
-- **Layer dependencies inward** — Core logic shouldn't know about network or storage details
-- **Define clear boundaries** — Use traits to define interfaces between layers
+- **P2PSession** -- Standard peer-to-peer gameplay
+- **SpectatorSession** -- Observe but don't participate
+- **SyncTestSession** -- Verify determinism by running simulation twice
 
-#### Design Patterns
+### Critical Determinism Rules
 
-Use established patterns where appropriate:
+1. **No `HashMap` iteration** -- Use `BTreeMap` or sort before iterating
+2. **Control floating-point** -- Use `libm` feature or fixed-point math
+3. **Seeded RNG only** -- `rand_pcg` or `rand_chacha` with shared seed
+4. **Frame counters, not time** -- Never use `Instant::now()` in simulation
+5. **Sort ECS queries** -- Bevy queries are non-deterministic; sort by stable ID
+6. **Pin toolchain** -- Use `rust-toolchain.toml` for reproducible builds
+7. **Audit features** -- Check for `ahash`, `const-random` leaks with `cargo tree -f "{p} {f}"`
 
-- **Builder** — For complex object construction (see `SessionBuilder`)
-- **State Machine** — For protocol and connection state management
-- **Strategy** — For swappable algorithms (e.g., input prediction)
-- **Factory** — For creating related objects with consistent configuration
-- **Iterator** — Leverage Rust's iterator combinators over manual loops
+## Kani Essentials
 
-#### Lightweight Abstractions
+**The #1 cause of Kani CI failures:** All loops with symbolic bounds require `#[kani::unwind(N)]` where N = max_iterations + 1. CI uses `--default-unwind 8` via `--quick` mode.
 
-When creating abstractions for common patterns:
+**The #2 cause:** Proofs that assert the wrong thing (e.g., wrong enum variant).
 
-- **Prefer value types** — Use `Copy` types and stack allocation when possible
-- **Minimize allocations** — Avoid `Box`, `Vec`, `String` in hot paths unless necessary
-- **Use zero-cost abstractions** — Generics and traits over dynamic dispatch
-- **Function-based over object-based** — Simple functions often beat complex types
-
-```rust
-// ❌ Avoid: Unnecessary allocation for simple abstraction
-struct FrameValidator {
-    valid_range: Box<dyn Fn(Frame) -> bool>,
-}
-
-// ✅ Prefer: Zero-cost, value-typed abstraction
-#[derive(Clone, Copy)]
-struct FrameRange { min: Frame, max: Frame }
-
-impl FrameRange {
-    const fn contains(self, frame: Frame) -> bool {
-        frame >= self.min && frame <= self.max
-    }
-}
+```bash
+cargo kani --harness proof_function_name    # Run specific proof
+./scripts/verify-kani.sh --tier 1 --quick   # Fast proofs (~15 min)
+./scripts/verify-kani.sh --list             # List all proofs and tiers
+./scripts/check-kani-coverage.sh            # Validate proof registration
 ```
 
-#### Code Consolidation
+New proofs must be registered in `scripts/verify-kani.sh`:
 
-- **Look for patterns first** — Before writing new code, search for similar existing code
-- **Extract shared utilities** — Test helpers, validation logic, formatting
-- **Avoid copy-paste** — If tempted to copy code, create a shared abstraction instead
-- **Refactor proactively** — When adding features, improve structure of touched code
+- **Tier 1:** Fast (<30s) -- simple property checks
+- **Tier 2:** Medium (30s-2min) -- moderate complexity
+- **Tier 3:** Slow (>2min) -- complex state verification
 
-> **See also:** Performance and code quality guides in `.llm/skills/`:
->
-> - [high-performance-rust.md](skills/high-performance-rust.md) — Performance optimization patterns and build configuration
-> - [rust-binary-size-optimization.md](skills/rust-binary-size-optimization.md) — Minimizing binary size for WASM, embedded, and containers
-> - [rust-refactoring-guide.md](skills/rust-refactoring-guide.md) — Safe code transformation patterns with verification
-> - [rust-idioms-patterns.md](skills/rust-idioms-patterns.md) — Idiomatic Rust patterns and best practices
-> - [clippy-configuration.md](skills/clippy-configuration.md) — Clippy lint configuration and enforcement
-> - [zero-copy-memory-patterns.md](skills/zero-copy-memory-patterns.md) — Zero-copy and memory efficiency patterns
-> - [async-rust-best-practices.md](skills/async-rust-best-practices.md) — Async Rust patterns for concurrent code
-> - [rust-compile-time-optimization.md](skills/rust-compile-time-optimization.md) — Build and compile time optimization
->
-> **Crate publishing and organization guides:**
->
-> - [crate-publishing-guide.md](skills/crate-publishing-guide.md) — Publishing crates to crates.io with best practices
-> - [workspace-organization.md](skills/workspace-organization.md) — Workspace structure, module organization, when to split crates
-> - [public-api-design.md](skills/public-api-design.md) — Designing stable, ergonomic public APIs
-> - [dependency-management.md](skills/dependency-management.md) — Evaluating, managing, and securing dependencies
+Pre-commit validates registration only, NOT that proofs pass. Run affected proofs locally before committing.
 
-### Safety-Focused CI Checks (ci-safety.yml)
-
-The project runs comprehensive safety checks beyond standard linting:
+## Safety CI Checks
 
 | Check | Purpose |
 |-------|---------|
-| **Cargo Careful** | Extra runtime safety checks using nightly |
+| **Cargo Careful** | Extra runtime safety checks (nightly) |
 | **Overflow Checks** | Release builds with `-C overflow-checks=on` |
 | **Debug Assertions** | Release builds with `-C debug-assertions=on` |
-| **Panic Patterns** | Counts `unwrap`, `expect`, `panic!`, `todo!` usage |
-| **Strict Clippy** | Nursery lints enabled for experimental checks |
-| **Documentation** | Doc build with `-D warnings` (warnings as errors) |
+| **Panic Patterns** | Counts `unwrap`, `expect`, `panic!`, `todo!` |
+| **Strict Clippy** | Nursery lints enabled |
+| **Documentation** | Doc build with `-D warnings` |
 
-See also: `ci-rust.yml` (Miri UB detection), `ci-security.yml` (cargo-geiger, cargo-deny)
+Also: `ci-rust.yml` (Miri), `ci-security.yml` (cargo-geiger, cargo-deny).
 
-**CI will fail if:**
+**CI fails on:** unformatted code, clippy warnings, broken doc links, markdown lint errors, workflow syntax errors, unregistered Kani proofs.
 
-- Code is not formatted (`cargo fmt --check`)
-- Clippy warnings exist (`cargo clippy` with warnings as errors)
-- Rustdoc has broken links or warnings (`RUSTDOCFLAGS=-D warnings`)
-- Markdown has lint errors (lists need blank lines around them)
-- GitHub Actions workflows have syntax errors
-- Kani proofs are not registered in tier lists
+## Development Workflow
 
-> **See also:** CI/CD guides in `.llm/skills/`:
->
-> - [github-actions-best-practices.md](skills/github-actions-best-practices.md) — Workflow linting, shellcheck, Miri CI, timeout values, cross-platform scripts
-> - [cross-platform-ci-cd.md](skills/cross-platform-ci-cd.md) — Multi-platform build strategies and release workflows
-> - [ci-cd-debugging.md](skills/ci-cd-debugging.md) — Reproducing and debugging CI failures locally
+### Before Writing Code
 
-### Documentation Template
+1. Read relevant source files and tests for context
+2. Check existing patterns for consistency
+3. Consider impact on other components
+4. Plan tests first -- define expected behavior
 
-```rust
-/// Brief one-line description ending with a period.
-///
-/// Longer explanation if needed, explaining the "why" not just "what".
-///
-/// # Arguments
-///
-/// * `param1` - What this parameter represents
-///
-/// # Returns
-///
-/// What the function returns and when.
-///
-/// # Errors
-///
-/// * [`FortressError::Variant`] - When this specific error occurs
-///
-/// # Examples
-///
-/// ```
-/// # use fortress_rollback::*;
-/// let result = function(arg)?;
-/// assert_eq!(result, expected);
-/// # Ok::<(), FortressError>(())
-/// ```
-///
-/// [`FortressError::Variant`]: crate::error::FortressError::Variant
-pub fn function(param1: Type) -> Result<ReturnType, FortressError> {
-    // Implementation
-}
-```
+### When Fixing Bugs
 
-**Intra-doc link best practices:**
+1. Write a failing test that reproduces the bug
+2. Root-cause analysis -- understand *why*, not just *what*
+3. Fix at the right level (production bug vs test bug)
+4. Add regression tests; check for similar issues elsewhere
 
-- Use shorthand `[`TypeName`]` when link text matches the final path segment
-- Place link reference definitions at the end of doc blocks
-- Run `cargo doc --no-deps` after documentation changes to verify links
+## Test Writing
 
-### Test Writing Best Practices
-
-> **See also:** Complete testing guides in `.llm/skills/`:
->
-> - [rust-testing-guide.md](skills/rust-testing-guide.md) — Comprehensive testing best practices and patterns
-> - [testing-tools-reference.md](skills/testing-tools-reference.md) — Tool ecosystem reference (nextest, proptest, mockall, etc.)
-> - [property-testing.md](skills/property-testing.md) — Property-based testing to find edge cases automatically
-> - [mutation-testing.md](skills/mutation-testing.md) — Mutation testing for test quality verification
-> - [rust-fuzzing-guide.md](skills/rust-fuzzing-guide.md) — Fuzz testing with cargo-fuzz, LibAFL, and structured fuzzing
-> - [network-chaos-testing.md](skills/network-chaos-testing.md) — Network chaos testing, sync preset selection, diagnosing sync failures
-> - [cross-platform-ci-cd.md](skills/cross-platform-ci-cd.md) — CI/CD workflows for multi-platform builds
-> - [ci-cd-debugging.md](skills/ci-cd-debugging.md) — Reproducing and debugging CI failures locally
-
-#### Test Organization
-
-| Location | Use Case |
-|----------|----------|
-| `src/*.rs` with `#[cfg(test)] mod tests` | Unit tests (access private functions) |
-| `tests/it/*.rs` (single crate) | Integration tests (public API only) |
-| `tests/common/mod.rs` | Shared test utilities |
-
-**Critical:** Integration tests in `tests/` should be consolidated into a single crate (`tests/it/main.rs`) to avoid slow compilation.
-
-#### Test Structure (Arrange-Act-Assert)
-
-```rust
-#[test]
-fn descriptive_name_explaining_what_is_tested() {
-    // Arrange: Set up test conditions
-    let mut session = create_test_session();
-    let input = prepare_test_input();
-
-    // Act: Execute the behavior being tested
-    let result = session.some_operation(input);
-
-    // Assert: Verify expected outcomes
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), expected_value);
-}
-```
-
-#### The `check` Helper Pattern (Recommended)
-
-Decouple tests from API changes with helper functions:
+Use **Arrange-Act-Assert** pattern. Name tests: `what_condition_expected_behavior` (e.g., `parse_empty_input_returns_none`).
 
 ```rust
 #[track_caller]  // Shows actual test location on failure
@@ -343,653 +178,61 @@ fn check_parse(input: &str, expected: Option<Ast>) {
     let actual = parse(input).ok();
     assert_eq!(actual, expected, "parse({:?})", input);
 }
-
-#[test]
-fn parse_empty_returns_none() {
-    check_parse("", None);
-}
-
-#[test]
-fn parse_valid_expression() {
-    check_parse("1 + 2", Some(expected_ast()));
-}
 ```
 
-#### Test Naming Convention
+Consolidate integration tests into a single crate (`tests/it/main.rs`). Anti-patterns: `assert!(result.is_ok())` (use `assert_eq!`), sleep-based synchronization, testing implementation details.
 
-Names should describe: **what** + **condition** + **expected behavior**
+## Changelog Policy
 
-```rust
-// ❌ BAD
-fn test1() { }
-fn it_works() { }
+**Quick decision:** "Does this affect `pub` items or user-observable behavior?"
 
-// ✅ GOOD
-fn parse_empty_input_returns_none() { }
-fn session_with_zero_players_returns_error() { }
-fn rollback_preserves_confirmed_frames() { }
-```
+- **YES** -- Add entry (use **Breaking:** prefix if API signature changed)
+- **NO** (pub(crate), private, tests, CI) -- Skip
 
----
+**Include:** new features/APIs, user-visible bug fixes, breaking changes (with migration guidance), performance improvements, dependency updates affecting compatibility.
 
-## Root Cause Analysis — When Tests Fail
+**Exclude:** internal refactoring, test improvements, doc-only changes, CI/tooling, lint fixes.
 
-**CRITICAL: The goal is NOT to make the test pass — it's to understand and fix the underlying issue.**
+## Mandatory Linting
 
-### Investigation Steps
+- **After Rust changes:** `cargo fmt && cargo clippy --all-targets` (or `cargo c`)
+- **After workflow changes:** `actionlint` (no exceptions)
+- **After doc changes:** `cargo doc --no-deps`
+- **After markdown changes:** `npx markdownlint 'file.md' --config .markdownlint.json --fix`
+- **Link validation:** `./scripts/check-links.sh`
+- **Spell check:** `typos`
+- **Vale (advisory):** `vale docs/` -- checks prose quality, non-blocking in CI
+- **Full pre-commit:** `cargo fmt && cargo clippy --all-targets && cargo nextest run --no-capture`
 
-1. **Reproduce** — Is it consistent or flaky? Under what conditions?
-2. **Understand** — What property is the test verifying? Why should it hold?
-3. **Trace** — Add logging, use debugger, examine state at failure
-4. **Hypothesize** — What could cause this specific failure mode?
-5. **Verify** — Confirm understanding before implementing any fix
-6. **Scope** — Are there similar issues elsewhere?
-
-### Production Bug vs Test Bug
-
-**It's a production bug if:**
-
-- Test expectations align with documented behavior
-- Multiple tests depend on the same behavior
-- The test logic is simple and clearly correct
-
-**It's a test bug if:**
-
-- Test makes assumptions not guaranteed by the API
-- Test has inherent race conditions or timing issues
-- Test expectations contradict documentation
-
-### Strictly Forbidden "Fixes"
-
-- ❌ Commenting out or weakening assertions
-- ❌ Adding `Thread::sleep()` to "fix" timing
-- ❌ Catching and swallowing errors
-- ❌ `#[ignore]` without a documented fix plan
-- ❌ Relaxing tolerances without understanding why
-- ❌ Changing expected values to match actual without analysis
-
----
-
-## Formal Verification Philosophy
-
-> **See also:** Complete guides in `.llm/skills/`:
->
-> - [tla-plus-modeling.md](skills/tla-plus-modeling.md) — TLA+ specification patterns
-> - [kani-verification.md](skills/kani-verification.md) — Kani proof harnesses
-> - [z3-verification.md](skills/z3-verification.md) — Z3 SMT solver proofs
-> - [loom-testing.md](skills/loom-testing.md) — Loom concurrency testing
-> - [miri-verification.md](skills/miri-verification.md) — Miri UB detection
-> - [mutation-testing.md](skills/mutation-testing.md) — Test quality verification
-> - [property-testing.md](skills/property-testing.md) — Property-based testing
-
-**Core principles:**
-
-- **Specs model production** — TLA+/Kani/Z3 specs represent real code behavior
-- **When verification fails, assume production bug first** — Investigate before relaxing specs
-- **Never "fix" specs just to make them pass** — That defeats the purpose
-- **Invariants represent real safety properties** — Only relax with strong justification
-
-### Quick Commands
-
-```bash
-# Kani proofs
-cargo kani
-cargo kani --harness proof_specific_function
-
-# Kani with tiered execution
-./scripts/verify-kani.sh --tier 1 --quick   # Fast proofs (~15 min)
-./scripts/verify-kani.sh --list             # List all proofs and tiers
-
-# Validate Kani proof coverage (pre-commit runs this)
-./scripts/check-kani-coverage.sh
-
-# TLA+ verification
-./scripts/verify-tla.sh
-
-# Z3 proofs
-cargo test --features z3-verification
-
-# Loom concurrency tests
-cd loom-tests && RUSTFLAGS="--cfg loom" cargo test --release
-
-# Miri UB detection
-cargo +nightly miri test
-
-# Mutation testing
-cargo mutants -f src/module.rs --timeout 30 --jobs 4
-```
-
-### CRITICAL: Kani Proof Changes
-
-**Pre-commit only validates that proofs are registered, NOT that they pass.**
-
-When modifying Kani proofs or code verified by them:
-
-1. **Run the affected proof locally** before committing:
-
-   ```bash
-   cargo kani --harness proof_function_name
-   ```
-
-2. **Ensure new proofs are registered** in `scripts/verify-kani.sh`:
-   - Tier 1: Fast proofs (<30s) — simple property checks
-   - Tier 2: Medium proofs (30s-2min) — moderate complexity
-   - Tier 3: Slow proofs (>2min) — complex state verification
-
-3. **Validate coverage** before pushing:
-
-   ```bash
-   ./scripts/check-kani-coverage.sh
-   ```
-
-**Why?** Kani verification is too slow for pre-commit (15+ minutes), so CI catches failures. Running affected proofs locally prevents CI surprises.
-
-**Remember:**
-
-- All loops with symbolic bounds require `#[kani::unwind(N)]` where N = max_iterations + 1. This is the #1 cause of Kani CI failures.
-- CI uses `--default-unwind 8` via `--quick` mode; proofs without explicit bounds that iterate over larger structures will time out.
-- **Verify proof assertions match actual implementation.** The #2 cause of failures is proofs that assert the wrong thing (e.g., asserting `ConnectionStatus::Connected` when the code returns `ConnectionStatus::Disconnected`).
-
-**Kani installation (Linux/macOS only):**
-
-```bash
-cargo install --locked kani-verifier
-cargo kani setup
-```
-
-See [kani-verification.md](skills/kani-verification.md) for details.
-
-### After Finding a Bug via Verification
-
-1. **Direct reproduction** — Cover the exact discovered scenario
-2. **Edge cases** — Zero, max, boundary conditions
-3. **Chained operations** — Sequential calls that might compound
-4. **Lifecycle tests** — Create-use-modify-destroy cycles
-5. **Negative tests** — Ensure violations are detected
-
----
-
-## Rollback Netcode Development
-
-> **See also:** The rollback netcode guides in `.llm/skills/`:
->
-> - [rollback-netcode-conversion.md](skills/rollback-netcode-conversion.md) — Complete guide to converting games to rollback netcode
-> - [rollback-engine-integration.md](skills/rollback-engine-integration.md) — Patterns for Bevy and custom engine integration
-> - [determinism-guide.md](skills/determinism-guide.md) — Achieving and verifying determinism in Rust games (includes reproducible builds, WASM, float handling, crate recommendations)
-> - [deterministic-simulation-testing.md](skills/deterministic-simulation-testing.md) — DST frameworks (madsim, turmoil), failure injection, controlled concurrency
-> - [cross-platform-games.md](skills/cross-platform-games.md) — Cross-platform game development (WASM, mobile, desktop)
-> - [cross-platform-rust.md](skills/cross-platform-rust.md) — Multi-platform project architecture and tooling
-> - [rust-binary-size-optimization.md](skills/rust-binary-size-optimization.md) — Minimizing binary size for WASM, embedded, and containers
-> - [rust-ffi-best-practices.md](skills/rust-ffi-best-practices.md) — Hybrid Rust/C/C++ applications and FFI patterns
-> - [wasm-rust-guide.md](skills/wasm-rust-guide.md) — Rust to WebAssembly compilation and toolchain
-> - [no-std-guide.md](skills/no-std-guide.md) — `no_std` patterns for WASM and embedded
-> - [wasm-threading.md](skills/wasm-threading.md) — Threading and concurrency in WebAssembly
-> - [wasm-portability.md](skills/wasm-portability.md) — WASM determinism and sandboxing
-
-### Essential Rollback Concepts
-
-| Concept | Description |
-|---------|-------------|
-| **Determinism** | Same inputs MUST produce identical outputs on all machines |
-| **State Serialization** | Must save/restore complete game state efficiently |
-| **Input Prediction** | Guess remote inputs and continue simulation without waiting |
-| **Rollback** | Restore saved state when prediction was wrong, resimulate |
-| **Desync Detection** | Compare checksums between peers to catch divergence |
-| **DST** | Deterministic Simulation Testing — control time, I/O, and concurrency for reproducible tests |
-
-### Critical Determinism Rules
-
-1. **No `HashMap` iteration** — Use `BTreeMap` or sort before iterating
-2. **Control floating-point** — Use `libm` feature or fixed-point math
-3. **Seeded RNG only** — `rand_pcg` or `rand_chacha` with shared seed
-4. **Frame counters, not time** — Never use `Instant::now()` in simulation
-5. **Sort ECS queries** — Bevy queries are non-deterministic; sort by stable ID
-6. **Pin toolchain** — Use `rust-toolchain.toml` for reproducible builds
-7. **Audit features** — Check for `ahash`, `const-random` feature leaks with `cargo tree -f "{p} {f}"`
-
----
-
-## Defensive Programming Patterns
-
-> **See [defensive-programming.md](skills/defensive-programming.md)** for the complete zero-panic guide with all patterns.
-
-### Zero-Panic Policy (CRITICAL)
-
-**Production code must NEVER panic.** This is non-negotiable.
-
-```rust
-// ❌ FORBIDDEN in production code
-value.unwrap()                    // Panics on None
-value.expect("msg")               // Panics with message
-array[index]                      // Panics on out-of-bounds
-panic!("something went wrong")   // Explicit panic
-todo!()                           // Panics as placeholder
-
-// ✅ REQUIRED - Return Results, let caller decide
-value.ok_or(FortressError::MissingValue)?          // Convert Option to Result
-array.get(index).ok_or(FortressError::OutOfBounds)?  // Safe indexing
-if !valid { return Err(FortressError::InvalidState); }  // Explicit error
-```
-
-### Key Principles
-
-- **Never swallow errors** — Use `?` to propagate, never `let _ = result`
-- **Validate all inputs** — Don't assume internal state is valid
-- **Prefer pattern matching** — Use `match` and `.get()` over indexing
-- **Exhaustive matches** — Never use `_ =>` wildcards on enums (except `#[non_exhaustive]`)
-- **Enums over booleans** — `Compression::Enabled` not `true`
-- **Type safety** — Make invalid states unrepresentable
-- **Doc examples too** — Rustdoc examples must use `?` and `Result`, never `panic!` or `unwrap()`
-- **Verify doc examples** — Always verify error variants/types used in examples actually exist in source code
-
-**See also:** [type-driven-design.md](skills/type-driven-design.md), [rust-pitfalls.md](skills/rust-pitfalls.md)
-
----
-
-## Project Architecture
-
-> **See also:** Organization and publishing guides in `.llm/skills/`:
->
-> - [workspace-organization.md](skills/workspace-organization.md) — When to split crates, module patterns, test organization
-> - [public-api-design.md](skills/public-api-design.md) — Designing stable, ergonomic public APIs
-> - [crate-publishing-guide.md](skills/crate-publishing-guide.md) — Publishing crates to crates.io
-
-### Repository Structure
-
-```
-src/
-├── lib.rs                           # Public API entry point
-├── error.rs                         # FortressError types
-├── frame_info.rs                    # Frame metadata
-├── hash.rs                          # Deterministic FNV-1a hashing
-├── rle.rs                           # Run-length encoding
-├── rng.rs                           # Deterministic PCG32 RNG
-├── time_sync.rs                     # Time synchronization
-├── sync.rs                          # Synchronization primitives (loom-compatible)
-├── checksum.rs                      # State checksum utilities
-├── telemetry.rs                     # Structured telemetry pipeline
-│
-├── input_queue/
-│   ├── mod.rs                       # Input buffering
-│   └── prediction.rs                # Input prediction strategies
-│
-├── sync_layer/
-│   ├── mod.rs                       # Core synchronization (SyncLayer)
-│   ├── game_state_cell.rs           # Thread-safe game state
-│   └── saved_states.rs              # Circular buffer for rollback
-│
-├── network/
-│   ├── compression.rs               # Message compression
-│   ├── messages.rs                  # Protocol messages
-│   ├── network_stats.rs             # Statistics tracking
-│   ├── chaos_socket.rs              # Testing socket with chaos
-│   ├── udp_socket.rs                # UDP abstraction
-│   ├── codec.rs                     # Binary codec for serialization
-│   ├── tokio_socket.rs              # Tokio async adapter
-│   └── protocol/
-│       ├── mod.rs                   # UDP protocol implementation
-│       ├── event.rs                 # Protocol events
-│       ├── input_bytes.rs           # Byte-encoded input data
-│       └── state.rs                 # Protocol state machine
-│
-└── sessions/
-    ├── builder.rs                   # SessionBuilder pattern
-    ├── p2p_session.rs               # P2P gameplay
-    ├── p2p_spectator_session.rs     # Spectator mode
-    ├── sync_test_session.rs         # Determinism testing
-    ├── config.rs                    # Session configuration presets
-    ├── player_registry.rs           # Player tracking and connection states
-    └── sync_health.rs               # Synchronization health status
-```
-
-### Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| **Frame** | Discrete time step in game simulation (typically 60 FPS) |
-| **Rollback** | Restoring previous state when predictions are wrong |
-| **Input Delay** | Buffer frames to reduce network jitter (typically 2-3 frames) |
-| **Prediction** | Continue simulation before remote inputs arrive |
-| **Prediction Window** | Maximum frames ahead we'll predict (typically 6-8) |
-| **Desync** | State divergence between peers (detected via checksums) |
-| **Determinism** | Same inputs must always produce same outputs |
-| **Checksum** | Hash of game state for desync detection |
-| **Confirmed Frame** | Oldest frame where all inputs are known |
-| **Resimulation** | Re-running frames with corrected inputs after rollback |
-
-### Session Types
-
-- **P2PSession** — Standard peer-to-peer gameplay
-- **SpectatorSession** — Observe but don't participate
-- **SyncTestSession** — Verify determinism by running simulation twice
-
----
-
-## Common Code Patterns
-
-### Session Builder
-
-```rust
-let session = SessionBuilder::<MyConfig>::new()
-    .with_num_players(2)
-    .with_input_delay(2)
-    .with_max_prediction(8)
-    .add_player(PlayerType::Local, PlayerHandle::new(0))?
-    .add_player(PlayerType::Remote(addr), PlayerHandle::new(1))?
-    .start_p2p_session(socket)?;
-```
-
-### Request Handling Loop
-
-```rust
-for request in session.advance_frame()? {
-    match request {
-        FortressRequest::SaveGameState { frame, cell } => {
-            cell.save(frame, Some(game_state.clone()), None);
-        }
-        FortressRequest::LoadGameState { cell, frame } => {
-            // LoadGameState is only requested for previously saved frames.
-            // Missing state indicates a library bug, but we handle gracefully.
-            if let Some(loaded) = cell.load() {
-                game_state = loaded;
-            } else {
-                eprintln!("WARNING: LoadGameState for frame {frame:?} but no state found");
-            }
-        }
-        FortressRequest::AdvanceFrame { inputs } => {
-            game_state.update(&inputs);
-        }
-    }
-}
-```
-
-### Player Types
-
-```rust
-PlayerType::Local              // Local player on this device
-PlayerType::Remote(addr)       // Remote player (SocketAddr)
-PlayerType::Spectator(addr)    // Observer (no input)
-```
-
----
-
-## Development Policies
-
-### Breaking Changes Are Acceptable
-
-- **API compatibility is NOT required** — This is a correctness-first fork
-- **Safety and correctness trump compatibility** — Make breaking changes if they improve quality
-- **Document all breaking changes** — Update `CHANGELOG.md` and `docs/migration.md`
-
-#### Breaking Change Checklist
-
-Before merging any breaking API change:
+## Breaking Changes Checklist
 
 - [ ] `CHANGELOG.md` updated with **Breaking:** prefix and migration guidance
-- [ ] `docs/migration.md` updated with before/after code examples
-- [ ] `README.md` examples updated if affected
-- [ ] `docs/user-guide.md` updated if affected
-- [ ] All `examples/*.rs` files compile: `cargo build --examples`
+- [ ] `docs/migration.md` updated with before/after examples
+- [ ] `README.md` and `docs/user-guide.md` updated if affected
+- [ ] All `examples/*.rs` compile: `cargo build --examples`
 - [ ] Rustdoc examples compile: `cargo test --doc`
-- [ ] Search for old API usage: `rg 'old_function_name' --type rust --type md`
+- [ ] Search for old API usage: `rg 'old_name' --type rust --type md`
 
-### Test Coverage Requirements
+## Documentation Sync
 
-> **See also:** [rust-testing-guide.md](skills/rust-testing-guide.md) for comprehensive testing patterns.
-
-- All new features must include tests
-- Aim for >90% code coverage
-- Include positive and negative test cases
-- Test edge cases and error conditions
-- Use integration tests for cross-component behavior
-- Use `cargo nextest run` for faster test execution
-- Run mutation testing (`cargo mutants`) to verify test quality
-
-**Testing anti-patterns to avoid:**
-
-- `assert!(result.is_ok())` — Use `assert_eq!` with specific values
-- Multiple assertions testing different behaviors in one test
-- Sleep-based synchronization — Use proper channels/signals
-- Testing implementation details instead of behavior
-- Ignoring tests without documented fix plan
-
-### Changelog Policy
-
-The changelog (`CHANGELOG.md`) is for **users of the library**, not developers.
-
-> **See also:** [changelog-practices.md](skills/changelog-practices.md) for detailed guidance, examples, and the visibility reference table.
-
-**Quick Decision:** Ask "Does this affect `pub` items or user-observable behavior?"
-
-- **YES** → Add changelog entry (use **Breaking:** prefix if API signature changed)
-- **NO** (pub(crate), private, tests, CI) → Skip changelog
-
-**Include in changelog:**
-
-- New features, APIs, or configuration options
-- Bug fixes that affect user-visible behavior
-- Breaking changes (with migration guidance)
-- New enum variants on exhaustively matchable enums (**Breaking:** — see skill doc)
-- Performance improvements users would notice
-- Dependency updates that affect compatibility
-
-**Do NOT include in changelog:**
-
-- Internal refactoring (module splits, code reorganization)
-- Test improvements or new tests
-- Documentation-only changes
-- CI/CD or tooling changes
-- Code style or lint fixes
-
-**Exception:** If a release contains *only* internal work (no user-facing changes), add a single summary line like:
-> "Internal: Improved test coverage and code organization"
-
-This keeps the changelog focused and useful for library consumers.
-
----
-
-## Resources
-
-| Resource | Link |
-|----------|------|
-| Original GGPO | <https://www.ggpo.net/> |
-| GGPO Discord | <https://discord.com/invite/8FKKhCRCCE> |
-| Bevy GGRS Plugin | <https://github.com/gschup/bevy_ggrs> |
-| TLA+ Resources | <https://lamport.azurewebsites.net/tla/tla.html> |
-| Z3 Prover | <https://github.com/Z3Prover/z3> |
-
----
+When changing public APIs, update: rustdoc comments (source of truth), README.md, docs/user-guide.md, examples/, CHANGELOG.md. Search with `rg 'function_name|StructName' --type rust --type md`.
 
 ## Quality Checklist
 
-Before submitting code:
-
-- [ ] `cargo fmt` run (no formatting changes)
-- [ ] `cargo clippy --all-targets` passes with no warnings
-- [ ] All tests pass (`cargo nextest run` or `cargo test`)
-- [ ] Includes tests for new functionality
+- [ ] `cargo fmt` run
+- [ ] `cargo clippy --all-targets` passes
+- [ ] All tests pass (`cargo nextest run`)
+- [ ] Tests for new functionality included
 - [ ] Rustdoc comments with examples
 - [ ] 100% safe Rust (no unsafe)
-- [ ] Handles all error cases
-- [ ] **No duplicate methods:** If implementing `Display`/`Debug`/`Hash`/etc., don't add separate methods duplicating that functionality
-- [ ] **Feature-dependent APIs documented:** If `#[cfg(feature = ...)]` affects trait bounds or available methods, document it in rustdoc
-- [ ] **Changelog reviewed:** Asked "Does this affect `pub` items or user-observable behavior?" — if yes, added entry to CHANGELOG.md (including new trait impls like `Display`)
+- [ ] All error cases handled
+- [ ] No duplicate methods (e.g., don't add method duplicating `Display` impl)
+- [ ] Feature-dependent APIs documented in rustdoc
+- [ ] Changelog reviewed for pub/user-observable changes
 
----
+## For Agents
 
-## Mandatory Linting — Run After EVERY Change
-
-> **Critical:** Run linters after EVERY code change, not just before committing. This catches errors immediately while context is fresh and prevents accumulating technical debt.
-
-### Rust Code Changes
-
-**Run after EVERY Rust file modification:**
-
-```bash
-cargo fmt && cargo clippy --all-targets
-```
-
-**Or use the alias:**
-
-```bash
-cargo c  # Defined in .cargo/config.toml
-```
-
-This catches formatting issues and lint warnings immediately. Don't wait until you have multiple changes — lint after each edit.
-
-### GitHub Actions Workflow Changes
-
-**Run `actionlint` IMMEDIATELY after ANY workflow modification — no exceptions:**
-
-```bash
-actionlint
-```
-
-Workflow syntax errors are easy to introduce and tedious to debug in CI. Always validate locally first.
-
-**Workflow reliability:** Workflows that call GitHub APIs (releases, artifact uploads, API queries) should include retry logic. Transient API failures are common; handle them gracefully rather than failing the entire workflow.
-
-### Documentation Changes
-
-> **See also:** [documentation-code-consistency.md](skills/documentation-code-consistency.md) — Keeping docs and code in sync, verifying CHANGELOG accuracy, error documentation patterns.
-
-**Run after modifying any rustdoc comments:**
-
-```bash
-cargo doc --no-deps
-```
-
-The pre-commit hook runs `cargo doc` with strict `RUSTDOCFLAGS=-D warnings`, matching CI. This catches:
-
-- Broken intra-doc links
-- Invalid HTML in documentation
-- Missing documentation for public items (when enabled)
-
-**Intra-doc link syntax:** Prefer shorthand syntax with link reference definitions:
-
-```rust
-// ❌ Avoid: Inline explicit links (verbose, duplicates path)
-/// Returns a [`PlayerHandle`](crate::sessions::PlayerHandle).
-
-// ✅ Prefer: Shorthand with reference definition
-/// Returns a [`PlayerHandle`].
-///
-/// [`PlayerHandle`]: crate::sessions::PlayerHandle
-```
-
-Use shorthand `[`TypeName`]` when the link text matches the final path segment. Place reference definitions at the end of doc blocks for readability.
-
-#### Documentation Synchronization
-
-When changing public APIs, update documentation in ALL locations:
-
-1. **Rustdoc comments** — The source of truth in `src/`
-2. **README.md** — Quick start examples and feature overview
-3. **docs/user-guide.md** — Detailed usage examples
-4. **examples/** — Runnable example files
-5. **CHANGELOG.md** — User-facing change description
-
-**Search for usages before committing:**
-
-```bash
-# Find all references to the changed API
-rg 'function_name|StructName' --type rust --type md
-
-# Check examples compile after API changes
-cargo build --examples
-```
-
-**Common synchronization failures:**
-
-- README shows old API signature while code has new one
-- Examples use deprecated methods
-- User guide references removed configuration options
-
-### Full Verification (Before Committing)
-
-**Run the complete check before any commit:**
-
-```bash
-# Format + lint + test (with output capture for debugging)
-cargo fmt && cargo clippy --all-targets && cargo nextest run --no-capture
-```
-
-**Or use the aliases:**
-
-```bash
-cargo c && cargo t  # Defined in .cargo/config.toml (includes --no-capture)
-```
-
-### Additional Checks
-
-**Spell checking:** Run `typos` before committing. CI enforces this.
-
-```bash
-typos                                    # Spell check
-actionlint                               # GitHub Actions linting
-```
-
-### Markdown Formatting
-
-**Always run markdownlint after editing any markdown file.** The `--fix` flag auto-fixes most issues:
-
-```bash
-# Fix a specific file
-npx markdownlint 'docs/file.md' --config .markdownlint.json --fix
-
-# Fix all markdown files in a directory
-npx markdownlint 'docs/**/*.md' --config .markdownlint.json --fix
-
-# Check all workspace markdown
-npx markdownlint '**/*.md' --config .markdownlint.json --fix
-```
-
-**Pre-commit hook:** The hook automatically runs markdownlint with `--fix` on staged markdown files.
-
-**Link validation:** Run `./scripts/check-links.sh` after editing markdown — CI will fail on broken links.
-
-**See also:** [markdown-formatting.md](skills/markdown-formatting.md) for complete style rules, common fixes, and CI configuration.
-
-### Vale Prose Linting (docs/ directory)
-
-Vale runs on the `docs/` directory to check prose quality. While currently advisory (non-blocking), it catches common writing issues.
-
-```bash
-# Install Vale (if not using dev container)
-brew install vale    # macOS
-# or download from https://vale.sh/docs/vale-cli/installation/
-
-# Sync Vale packages (one-time, or when .vale.ini changes)
-vale sync
-
-# Run Vale on docs/
-vale docs/
-
-# Check a specific file
-vale docs/user-guide.md
-```
-
-**What Vale checks:**
-
-- Passive voice usage (suggestion)
-- Weasel words like "very", "quite", "really" (suggestion)
-- Wordy phrases that could be simplified (suggestion)
-- Clichés (warning)
-- Word illusions ("the the") (warning)
-
-**Configuration:** `.vale.ini` controls which rules are enabled. Project-specific vocabulary is in `.vale/styles/config/vocabularies/Fortress/`.
-
-**CI behavior:** Vale runs in `ci-docs.yml` with `continue-on-error: true` and `fail_on_error: false`. This makes it advisory only, not blocking.
-
-### For Agents and Sub-Agents
-
-When spawning sub-agents or using Task tools to make code changes:
-
-1. The sub-agent MUST run `cargo fmt` on any files it modifies
-2. The sub-agent MUST verify `cargo clippy --all-targets` passes
-3. If the sub-agent cannot run these commands, the parent agent must run them after receiving the changes
-
-**See also:** [GitHub Actions Best Practices](skills/github-actions-best-practices.md), [Markdown Link Validation](skills/markdown-link-validation.md), and [CI/CD Debugging](skills/ci-cd-debugging.md) for detailed guidance.
+When spawning sub-agents or using Task tools: the sub-agent MUST run `cargo fmt` and verify `cargo clippy --all-targets` passes on any modified files. If the sub-agent cannot run these, the parent agent must run them after receiving changes.
 
 ---
 

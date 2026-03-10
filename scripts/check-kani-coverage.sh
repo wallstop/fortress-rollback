@@ -52,13 +52,13 @@ get_source_proofs() {
     if command -v rg &> /dev/null; then
         rg -A 3 '#\[kani::proof\]' "$PROJECT_ROOT/src/" 2>/dev/null \
             | grep 'fn proof_' \
-            | /bin/sed 's/.*fn \(proof_[a-zA-Z0-9_]*\).*/\1/' \
+            | sed 's/.*fn \(proof_[a-zA-Z0-9_]*\).*/\1/' \
             | sort \
             | uniq
     else
         grep -r -A 3 '#\[kani::proof\]' "$PROJECT_ROOT/src/" 2>/dev/null \
             | grep 'fn proof_' \
-            | /bin/sed 's/.*fn \(proof_[a-zA-Z0-9_]*\).*/\1/' \
+            | sed 's/.*fn \(proof_[a-zA-Z0-9_]*\).*/\1/' \
             | sort \
             | uniq
     fi
@@ -68,7 +68,7 @@ get_source_proofs() {
 get_tiered_proofs() {
     # Extract all proof names from TIER1_PROOFS, TIER2_PROOFS, and TIER3_PROOFS arrays
     grep -E '^\s*"proof_[^"]+"\s*$' "$VERIFY_KANI_SCRIPT" \
-        | /bin/sed 's/.*"\(proof_[^"]*\)".*/\1/' \
+        | sed 's/.*"\(proof_[^"]*\)".*/\1/' \
         | sort \
         | uniq
 }
@@ -164,7 +164,11 @@ main() {
             if [[ -n "$proof" ]]; then
                 # Find which file contains this proof
                 local file
-                file=$(rg -l "fn $proof" "$PROJECT_ROOT/src/" 2>/dev/null | head -1 || echo "unknown")
+                if command -v rg &>/dev/null; then
+                    file=$(rg -l "fn $proof" "$PROJECT_ROOT/src/" 2>/dev/null | head -1 || echo "unknown")
+                else
+                    file=$(grep -rl "fn $proof" "$PROJECT_ROOT/src/" 2>/dev/null | head -1 || echo "unknown")
+                fi
                 file=${file#"$PROJECT_ROOT/"}
                 echo -e "  ${YELLOW}$proof${NC} (in $file)"
             fi
@@ -261,7 +265,7 @@ check_unwind_attributes() {
 
     # Find all .rs files with #[kani::proof]
     local rs_files
-    rs_files=$(grep -rl '#\[kani::proof\]' "$src_dir" --include='*.rs' 2>/dev/null || true)
+    rs_files=$(find "$src_dir" -name '*.rs' -exec grep -l '#\[kani::proof\]' {} + 2>/dev/null || true)
 
     if [[ -z "$rs_files" ]]; then
         echo -e "${GREEN}[OK] No Kani proofs found to check.${NC}"
@@ -287,9 +291,9 @@ check_unwind_attributes() {
                 end_line=$total_lines
             fi
 
-            fn_name=$(/bin/sed -n "${line_num},${end_line}p" "$rs_file" \
+            fn_name=$(sed -n "${line_num},${end_line}p" "$rs_file" \
                 | grep -m1 'fn ' \
-                | /bin/sed 's/.*fn \([a-zA-Z_][a-zA-Z0-9_]*\).*/\1/' || true)
+                | sed 's/.*fn \([a-zA-Z_][a-zA-Z0-9_]*\).*/\1/' || true)
 
             if [[ -z "$fn_name" ]]; then
                 continue
@@ -304,7 +308,7 @@ check_unwind_attributes() {
             fi
 
             local has_unwind=false
-            if /bin/sed -n "${start_line},${end_line}p" "$rs_file" \
+            if sed -n "${start_line},${end_line}p" "$rs_file" \
                 | grep -q '#\[kani::unwind([0-9]' 2>/dev/null; then
                 has_unwind=true
             fi
@@ -320,7 +324,7 @@ check_unwind_attributes() {
             fi
 
             local has_allowlist=false
-            if /bin/sed -n "${allow_start},${line_num}p" "$rs_file" \
+            if sed -n "${allow_start},${line_num}p" "$rs_file" \
                 | grep -q '//.*kani::no-unwind-needed' 2>/dev/null; then
                 has_allowlist=true
             fi
