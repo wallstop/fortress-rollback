@@ -2007,8 +2007,8 @@ mod kani_sync_layer_proofs {
     ///
     /// Verifies that after saving, last_saved_frame == current_frame.
     ///
-    /// Note: unwind(12) accounts for SyncLayer construction with 1 player, 1 prediction window
-    /// (1 InputQueue of 8 + SavedStates of 2 + buffer)
+    /// Note: unwind(5) accounts for SyncLayer construction with 1 player, 1 prediction window,
+    /// and a minimal queue length of 2 (reducing vec construction overhead for CBMC).
     ///
     /// - Tier: 3 (Slow, >2min)
     /// - Verifies: Save updates last_saved_frame (INV-8)
@@ -2016,9 +2016,9 @@ mod kani_sync_layer_proofs {
     ///   (proof_load_frame_validates_bounds and proof_load_frame_success_maintains_invariants
     ///   still exercise SyncLayer::new(2, 3) for broader multi-player coverage)
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(5)]
     fn proof_save_maintains_inv8() {
-        let mut sync_layer = SyncLayer::<TestConfig>::new(1, 1);
+        let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(1, 1, 2);
 
         // Advance one frame (sufficient to verify save property)
         sync_layer.advance_frame();
@@ -2202,8 +2202,8 @@ mod kani_sync_layer_proofs {
 
     /// Proof: reset_prediction doesn't affect frame state.
     ///
-    /// Note: unwind(12) accounts for SyncLayer construction with 1 player, 1 prediction window
-    /// (1 InputQueue of 8 + SavedStates of 2 + buffer)
+    /// Note: unwind(5) accounts for SyncLayer construction with 1 player, 1 prediction window,
+    /// and a minimal queue length of 2 (reducing vec construction overhead for CBMC).
     ///
     /// - Tier: 3 (Slow, >2min)
     /// - Verifies: reset_prediction preserves frame invariants
@@ -2211,9 +2211,9 @@ mod kani_sync_layer_proofs {
     ///   (proof_load_frame_validates_bounds and proof_load_frame_success_maintains_invariants
     ///   still exercise SyncLayer::new(2, 3) for broader multi-player coverage)
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(5)]
     fn proof_reset_prediction_preserves_frames() {
-        let mut sync_layer = SyncLayer::<TestConfig>::new(1, 1);
+        let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(1, 1, 2);
 
         // A single save+advance is sufficient to set non-trivial frame values
         sync_layer.save_current_state();

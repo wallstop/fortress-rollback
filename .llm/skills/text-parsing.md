@@ -43,7 +43,7 @@ Track state: opening fence char (`` ` `` or `~`), length, and match closing fenc
 |---------|-------|-------|
 | Character class stops early | `[^*]+` in `**([^*]+)**` | `(.+?)` non-greedy |
 | Greedy matches too much | `.*` before capture | `.*?` non-greedy |
-| Overly broad HTML detection | `startswith("<")` | `re.match(r'^<(!--|[a-zA-Z])')` |
+| Overly broad HTML detection | `startswith("<")` | `re.match(r'^<(!--\|[a-zA-Z])')` |
 | Single-line comment assumption | `startswith("<!--")` | Track multi-line state |
 | Mixed regex modes (BRE/ERE) | `grep` then `grep -E` | Consistent `-E` everywhere |
 
@@ -77,6 +77,7 @@ For Wikipedia URLs with parens, use balanced-counting parser instead of regex.
 ## Empty Section Detection
 
 After content conversion, validate sections are not empty:
+
 - Track multi-line HTML comment state
 - Skip blank lines and `---`
 - Report headers followed by only whitespace/comments
@@ -86,6 +87,7 @@ After content conversion, validate sections are not empty:
 When using `enumerate(lines, 1)` for line numbers, note that the 1-indexed line number of the current line equals the 0-indexed position of the next line (`i = (i-1) + 1`).
 
 Clearer alternative:
+
 ```python
 for idx, line in enumerate(lines):
     line_num = idx + 1  # for error reporting
@@ -95,6 +97,7 @@ for idx, line in enumerate(lines):
 ## Testing Text Processing
 
 ### Property-Based Testing
+
 ```python
 @given(st.text())
 def test_parser_never_crashes(text):
@@ -104,6 +107,7 @@ def test_parser_never_crashes(text):
 ```
 
 ### Overlap Testing
+
 ```python
 @given(st.text(alphabet='`abc\n '))
 def test_ranges_dont_overlap(text):

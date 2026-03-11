@@ -12,6 +12,7 @@ on:
       - 'scripts/check-wiki-consistency.py'
       - 'scripts/validate-wiki-output.py'
       - 'scripts/tests/test_sync_wiki.py'
+      - 'scripts/tests/test_check_wiki_consistency.py'
       - '.markdownlint.json'
       - '.markdown-link-check.json'
       - '.lychee.toml'
@@ -32,6 +33,7 @@ on:
       - 'scripts/check-wiki-consistency.py'
       - 'scripts/validate-wiki-output.py'
       - 'scripts/tests/test_sync_wiki.py'
+      - 'scripts/tests/test_check_wiki_consistency.py'
       - '.markdownlint.json'
       - '.markdown-link-check.json'
       - '.lychee.toml'
@@ -194,6 +196,9 @@ jobs:
 
       - name: Run wiki validation tests
         run: python -m pytest scripts/tests/test_validate_wiki_output.py -v
+
+      - name: Run wiki consistency tests
+        run: python -m pytest scripts/tests/test_check_wiki_consistency.py -v
 
       - name: Generate wiki (dry-run)
         run: python scripts/sync-wiki.py --dest wiki-test-output

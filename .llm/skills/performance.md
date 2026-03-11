@@ -70,6 +70,13 @@ rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/bin/ld64.lld"]
 
 Impact: 2-10x faster linking.
 
+**Important:** When `.cargo/config.toml` specifies a custom linker (lld/mold), all cargo
+commands that invoke the linker will fail if the linker is not installed. Pre-commit hook
+scripts that run cargo must detect linker availability and fall back gracefully. Use
+`scripts/cargo_linker.py:get_cargo_env()` in any Python script that runs cargo commands.
+The pattern: `env = os.environ.copy(); env.update(get_cargo_env())`. For CI, override
+via env vars: `CARGO_TARGET_<TRIPLE>_LINKER=cc` and `CARGO_TARGET_<TRIPLE>_RUSTFLAGS=""`.
+
 ### CPU-Specific Instructions
 
 ```bash

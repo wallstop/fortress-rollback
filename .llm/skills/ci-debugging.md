@@ -11,6 +11,7 @@
 | Test assertion failures | Test logic | `RUST_BACKTRACE=1 cargo test name -- --nocapture` |
 | `VERIFICATION RESULT: FAILURE` | Kani | Verify assertion matches impl; add `#[kani::unwind(N)]` |
 | `linker cc not found` | Cross-compilation | Check Cross.toml, avoid unstable image tags |
+| `invalid linker name in argument '-fuse-ld=lld'` | Missing linker | Install lld, or use `cargo_linker.get_cargo_env()` fallback |
 | Timeout / cancelled | Performance | Add `#[kani::unwind(N)]`; increase `timeout-minutes` |
 | `actionlint` errors | Workflow syntax | Run `actionlint` locally |
 | `unresolved link` | Documentation | Add link reference definition |
