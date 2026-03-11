@@ -59,6 +59,38 @@ After the container starts, verify all tools:
 ./scripts/check-tools.sh
 ```
 
+## Build Performance
+
+The Dockerfile uses **cargo-binstall** to download pre-built binaries instead of
+compiling tools from source, reducing build time from ~25 minutes to ~3-5 minutes.
+
+| Method | Build Time | When to Use |
+|--------|-----------|-------------|
+| **Pre-built image (GHCR)** | ~30 seconds | Optional fast path when the image is available |
+| **Local Dockerfile build** | ~3-5 min | When modifying the Dockerfile |
+| **Without binstall (old)** | ~25-30 min | N/A (deprecated) |
+
+### Using the pre-built image (fastest)
+
+The local Dockerfile build remains the default path until the published image has been validated across the environments this project supports.
+
+In `devcontainer.json`, comment out the `"build"` block and uncomment the `"image"` line:
+
+```jsonc
+// "build": { ... },
+"image": "ghcr.io/wallstop/fortress-rollback/devcontainer:latest",
+```
+
+The image is automatically rebuilt weekly and on changes to `.devcontainer/` files.
+
+> **Note:** The pre-built GHCR image is x86_64 (amd64) only. Apple Silicon (arm64)
+> users should use the local Dockerfile build, which includes architecture detection.
+
+### Building locally
+
+The default `devcontainer.json` builds from the Dockerfile. Docker layer caching
+means subsequent rebuilds only reprocess changed layers.
+
 ## Running Verification
 
 ### All Verifiers
@@ -129,7 +161,7 @@ npm install -g markdownlint-cli markdown-link-check
 
 # actionlint (GitHub Actions linter)
 # Download the script first, then run with bash (avoids shell issues)
-curl -sL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash -o /tmp/download-actionlint.bash
+curl --proto '=https' --tlsv1.2 -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash -o /tmp/download-actionlint.bash
 bash /tmp/download-actionlint.bash latest /tmp
 sudo mv /tmp/actionlint /usr/local/bin/
 rm /tmp/download-actionlint.bash
@@ -151,10 +183,10 @@ If you see this error in other scripts, ensure they are run with bash explicitly
 
 ```bash
 # Instead of piping to sh
-curl -sL https://example.com/script.sh | bash
+curl --proto '=https' --tlsv1.2 -sSfL https://example.com/script.sh | bash
 
 # Download first, then run with bash
-curl -sL https://example.com/script.sh -o /tmp/script.sh
+curl --proto '=https' --tlsv1.2 -sSfL https://example.com/script.sh -o /tmp/script.sh
 bash /tmp/script.sh
 rm /tmp/script.sh
 ```
@@ -173,7 +205,7 @@ Try removing old containers and images:
 
 ```bash
 # List and remove devcontainer images
-docker images | grep vsc-ggrs | awk '{print $3}' | xargs -r docker rmi -f
+docker images | grep fortress-rollback | awk '{print $3}' | xargs -r docker rmi -f
 
 # Or prune all unused images
 docker system prune -a
@@ -202,7 +234,7 @@ Download manually:
 
 ```bash
 mkdir -p .tla-tools
-curl -L https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o .tla-tools/tla2tools.jar
+curl --proto '=https' --tlsv1.2 -sSfL https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o .tla-tools/tla2tools.jar
 ```
 
 ## Files

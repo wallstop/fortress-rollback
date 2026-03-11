@@ -1,0 +1,75 @@
+# Pre-build the devcontainer image and push to GitHub Container Registry (GHCR).
+#
+# This allows developers to pull a pre-built image (~30 seconds) instead of
+# building locally (~3-5 min with binstall, or ~25 min without).
+#
+# To use the pre-built image, update devcontainer.json:
+#   "image": "ghcr.io/wallstop/fortress-rollback/devcontainer:latest"
+#
+# The image is rebuilt:
+# - On pushes to main that change .devcontainer/ files
+# - Weekly (Sundays at 2am UTC) to pick up tool updates
+# - Manually via workflow_dispatch
+
+name: Build DevContainer Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.devcontainer/**'
+      - '.github/workflows/devcontainer-build.yml'
+  schedule:
+    # Weekly rebuild on Sundays at 2am UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/devcontainer
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=
+            type=schedule,pattern={{date 'YYYYMMDD'}}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: .devcontainer/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Build for x86_64 (primary CI/Codespaces arch)
+          # Add linux/arm64 if needed for Apple Silicon users
+          platforms: linux/amd64
