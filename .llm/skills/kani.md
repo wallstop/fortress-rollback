@@ -224,6 +224,41 @@ cargo kani                                  # Run all proofs
 cargo kani --harness proof_name --default-unwind 8  # Simulate CI
 ```
 
+## Common Timeout Causes
+
+### `format!()` in macros creates explosive CBMC state space
+
+The `format!()` macro generates complex string-formatting code that CBMC must
+model symbolically. When a macro like `report_violation!` calls `format!()`,
+and that macro is used inside hot paths (e.g., `safe_frame_add!`,
+`safe_frame_sub!`), each call site multiplies the state space. This is the
+most common cause of Kani proof timeouts after missing unwind bounds.
+
+**Standard fix:** gate expensive logging/telemetry code with
+`#[cfg(not(kani))]` so it becomes a no-op during verification.
+
+```rust
+// The report_violation! macro is ALREADY gated:
+//   #[cfg(not(kani))] { /* actual reporting */ }
+// So callers do NOT need to add their own #[cfg(not(kani))] guards.
+```
+
+### Macros already gated in this project
+
+| Macro | Status | Notes |
+|-------|--------|-------|
+| `report_violation!` | No-op under `cfg(kani)` | All arms gated internally |
+| `safe_frame_add!` | Safe to use in proofs | Calls `report_violation!` (no-op) |
+| `safe_frame_sub!` | Safe to use in proofs | Calls `report_violation!` (no-op) |
+
+### General principle
+
+Kani proofs verify **correctness properties** (no panics, arithmetic safety,
+state machine invariants), not logging or telemetry behavior. If a proof
+times out, check whether the code under verification calls macros that expand
+to `format!()`, `tracing::*`, or other string-heavy infrastructure, and gate
+those with `#[cfg(not(kani))]`.
+
 ## Common Pitfalls
 
 ### Proof assertions don't match implementation (CRITICAL)
@@ -257,10 +292,7 @@ Use `kani::any()` (symbolic), not literal values like `let x: u32 = 42`.
 
 ## Checklist for New Kani Proofs
 
-- [ ] Identify ALL loops (including nested and in called functions)
-- [ ] Add `#[kani::unwind(N)]` (N = max + 1)
-- [ ] Run locally: `cargo kani --harness proof_name`
-- [ ] Verify it completes in under 5 minutes
-- [ ] Add to tier list in `scripts/verify-kani.sh`
-- [ ] Run `./scripts/check-kani-coverage.sh`
+- [ ] Identify ALL loops (including nested/called functions) and add `#[kani::unwind(N)]` (N = max + 1)
+- [ ] Run locally (`cargo kani --harness proof_name`) and verify it completes in under 5 minutes
+- [ ] Add to tier list in `scripts/verify-kani.sh` and run `./scripts/check-kani-coverage.sh`
 - [ ] Proof assertions match actual implementation behavior

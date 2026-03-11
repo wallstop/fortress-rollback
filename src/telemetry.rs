@@ -750,31 +750,47 @@ impl std::fmt::Debug for CompositeObserver {
 /// report_violation!(ViolationSeverity::Warning, ViolationKind::FrameSync,
 ///     "frame mismatch: expected={}, actual={}", expected, actual);
 /// ```
+///
+/// # Kani (Formal Verification)
+///
+/// Under `cfg(kani)`, this macro expands to a no-op. The `format!()` call and
+/// tracing infrastructure create massive symbolic state space for CBMC, causing
+/// proof timeouts. Since this macro only performs logging (no state mutation),
+/// skipping it under Kani does not affect correctness verification.
 #[macro_export]
 macro_rules! report_violation {
+    // Under Kani, report_violation is a no-op to avoid CBMC state explosion
+    // from format!() and tracing infrastructure. Kani proofs verify correctness
+    // properties, not logging behavior.
+
     // Basic: severity, kind, message (no format args)
     ($severity:expr, $kind:expr, $msg:literal) => {{
-        use $crate::telemetry::ViolationObserver as _;
-        let violation = $crate::telemetry::SpecViolation::new(
-            $severity,
-            $kind,
-            $msg,
-            concat!(file!(), ":", line!()),
-        );
-        // Log via tracing by default
-        $crate::telemetry::TracingObserver.on_violation(&violation);
+        #[cfg(not(kani))]
+        {
+            use $crate::telemetry::ViolationObserver as _;
+            let violation = $crate::telemetry::SpecViolation::new(
+                $severity,
+                $kind,
+                $msg,
+                concat!(file!(), ":", line!()),
+            );
+            $crate::telemetry::TracingObserver.on_violation(&violation);
+        }
     }};
 
     // With format args: severity, kind, format, args...
     ($severity:expr, $kind:expr, $fmt:literal, $($arg:tt)+) => {{
-        use $crate::telemetry::ViolationObserver as _;
-        let violation = $crate::telemetry::SpecViolation::new(
-            $severity,
-            $kind,
-            format!($fmt, $($arg)+),
-            concat!(file!(), ":", line!()),
-        );
-        $crate::telemetry::TracingObserver.on_violation(&violation);
+        #[cfg(not(kani))]
+        {
+            use $crate::telemetry::ViolationObserver as _;
+            let violation = $crate::telemetry::SpecViolation::new(
+                $severity,
+                $kind,
+                format!($fmt, $($arg)+),
+                concat!(file!(), ":", line!()),
+            );
+            $crate::telemetry::TracingObserver.on_violation(&violation);
+        }
     }};
 }
 

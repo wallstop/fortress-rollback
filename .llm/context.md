@@ -122,6 +122,8 @@ src/
 
 **The #2 cause:** Proofs that assert the wrong thing (e.g., wrong enum variant).
 
+**The #3 cause:** `format!()` inside macros (e.g., `report_violation!`) creating explosive CBMC state space. The `report_violation!` macro is already a no-op under `cfg(kani)` -- no additional gating needed when calling it. See [kani.md](skills/kani.md#common-timeout-causes) for details.
+
 ```bash
 cargo kani --harness proof_function_name    # Run specific proof
 ./scripts/verify-kani.sh --tier 1 --quick   # Fast proofs (~15 min)
@@ -199,6 +201,7 @@ Consolidate integration tests into a single crate (`tests/it/main.rs`). Anti-pat
 - **After workflow changes:** `actionlint` (no exceptions)
 - **After doc changes:** `cargo doc --no-deps`
 - **After markdown changes:** `npx markdownlint 'file.md' --config .markdownlint.json --fix`
+- **After `.llm/` changes:** All `.md` files under `.llm/` must be **300 lines or fewer** (enforced by pre-commit hook `llm-line-limit`)
 - **Link validation:** `./scripts/check-links.sh`
 - **Spell check:** `typos`
 - **Vale (advisory):** `vale docs/` -- checks prose quality, non-blocking in CI
