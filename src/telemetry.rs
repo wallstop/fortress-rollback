@@ -753,10 +753,11 @@ impl std::fmt::Debug for CompositeObserver {
 ///
 /// # Kani (Formal Verification)
 ///
-/// Under `cfg(kani)`, this macro expands to a no-op. The `format!()` call and
-/// tracing infrastructure create massive symbolic state space for CBMC, causing
-/// proof timeouts. Since this macro only performs logging (no state mutation),
-/// skipping it under Kani does not affect correctness verification.
+/// Under `cfg(kani)`, this macro evaluates its arguments (to suppress unused
+/// import/variable warnings) but skips `format!()` and tracing. The formatting
+/// and tracing infrastructure create massive symbolic state space for CBMC,
+/// causing proof timeouts. Since this macro only performs logging (no state
+/// mutation), skipping reporting under Kani does not affect correctness verification.
 #[macro_export]
 macro_rules! report_violation {
     // Under Kani, report_violation is a no-op to avoid CBMC state explosion
@@ -776,6 +777,13 @@ macro_rules! report_violation {
             );
             $crate::telemetry::TracingObserver.on_violation(&violation);
         }
+        // Under Kani, evaluate severity and kind to suppress unused import warnings
+        // for ViolationSeverity/ViolationKind, but avoid format!() and tracing
+        // which cause CBMC state space explosion.
+        #[cfg(kani)]
+        {
+            let _ = ($severity, $kind);
+        }
     }};
 
     // With format args: severity, kind, format, args...
@@ -790,6 +798,13 @@ macro_rules! report_violation {
                 concat!(file!(), ":", line!()),
             );
             $crate::telemetry::TracingObserver.on_violation(&violation);
+        }
+        // Under Kani, evaluate severity, kind, and all format arguments to suppress
+        // unused import/variable warnings, but avoid format!() and tracing which
+        // cause CBMC state space explosion.
+        #[cfg(kani)]
+        {
+            let _ = ($severity, $kind, $($arg)+);
         }
     }};
 }

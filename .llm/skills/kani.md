@@ -238,18 +238,20 @@ most common cause of Kani proof timeouts after missing unwind bounds.
 `#[cfg(not(kani))]` so it becomes a no-op during verification.
 
 ```rust
-// The report_violation! macro is ALREADY gated:
-//   #[cfg(not(kani))] { /* actual reporting */ }
-// So callers do NOT need to add their own #[cfg(not(kani))] guards.
+// report_violation! handles cfg(kani) internally:
+//   #[cfg(not(kani))] { /* actual reporting with format!() */ }
+//   #[cfg(kani)] { let _ = (severity, kind, args...); }  // uses args, avoids format!()
+// Callers do NOT need their own #[cfg(not(kani))] guards.
 ```
 
-### Macros already gated in this project
+**Key:** `#[cfg(kani)]` no-op macros must consume all arguments via `let _ = (args...)`
+to suppress unused import/variable warnings from `#![deny(warnings)]`.
 
 | Macro | Status | Notes |
 |-------|--------|-------|
-| `report_violation!` | No-op under `cfg(kani)` | All arms gated internally |
-| `safe_frame_add!` | Safe to use in proofs | Calls `report_violation!` (no-op) |
-| `safe_frame_sub!` | Safe to use in proofs | Calls `report_violation!` (no-op) |
+| `report_violation!` | Kani-safe | Args consumed via `let _ = (...)` |
+| `safe_frame_add!` | Kani-safe | Delegates to `report_violation!` |
+| `safe_frame_sub!` | Kani-safe | Delegates to `report_violation!` |
 
 ### General principle
 
