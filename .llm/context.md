@@ -207,6 +207,19 @@ Consolidate integration tests into a single crate (`tests/it/main.rs`). Anti-pat
 - **Vale (advisory):** `vale docs/` -- checks prose quality, non-blocking in CI
 - **Full pre-commit:** `cargo fmt && cargo clippy --all-targets && cargo nextest run --no-capture`
 
+## Skill Code Examples
+
+Code examples in `.llm/skills/` must follow zero-panic rules with these exceptions:
+
+- **`build.rs`:** `.unwrap()` OK (comment `// build.rs:`)
+- **Test code:** `.unwrap()` OK (comment `// test:` or `// In tests:`)
+- **Fuzz targets:** `.expect()` OK (comment `// Fuzz target:`)
+- **Loom tests:** `.unwrap()` on `.join()` OK (comment `// Loom test:`)
+- **`#[allow]` examples:** showing lint suppression is the point
+- Also accepted: `// proptest:`, `// allowed:`, `// SAFETY:`, `#[test]`, `#[fixture]`, `#[cfg(test)]` attributes
+
+Additional rules: `catch_unwind` closures must use `AssertUnwindSafe`; fully qualify ambiguous types (e.g., `arbitrary::Result<T>` not bare `Result<T>`); no `2>/dev/null` in shell examples. Run `scripts/check-llm-skills.sh` after modifying `.llm/` files (also enforced in CI via `ci-llm-lint.yml`).
+
 ## Breaking Changes Checklist
 
 - [ ] `CHANGELOG.md` updated with **Breaking:** prefix and migration guidance

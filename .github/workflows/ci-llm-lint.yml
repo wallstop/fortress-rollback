@@ -19,3 +19,5 @@ jobs:
         run: python scripts/hooks/check-llm-line-limit.py
       - name: Verify skills index is up-to-date
         run: python scripts/hooks/regenerate-skills-index.py --check
+      - name: Check skill code example quality
+        run: bash scripts/check-llm-skills.sh

@@ -74,6 +74,7 @@ fn session_with_zero_players_returns_error() { }
 ```rust
 #[test]
 fn add_player_with_invalid_handle_returns_error() {
+    // In tests: .unwrap() is idiomatic -- panics = test failure
     let mut session = Session::new(2).unwrap();
     let result = session.add_player(PlayerHandle::new(999));
     assert!(matches!(result, Err(FortressError::InvalidPlayerHandle { handle: 999, .. })));

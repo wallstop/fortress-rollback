@@ -79,6 +79,7 @@ fn test_concurrent_increment() {
         let c2 = counter.clone();
         let t2 = thread::spawn(move || { c2.fetch_add(1, Ordering::SeqCst); });
 
+        // Loom test: propagate thread panics to fail the test
         t1.join().unwrap();
         t2.join().unwrap();
         assert_eq!(counter.load(Ordering::SeqCst), 2);
@@ -100,6 +101,7 @@ fn test_concurrent_saves() {
         let t1 = thread::spawn(move || { c1.save(Frame::new(1), Some(100), Some(0xAAAA)); });
         let t2 = thread::spawn(move || { c2.save(Frame::new(2), Some(200), Some(0xBBBB)); });
 
+        // Loom test: propagate thread panics to fail the test
         t1.join().unwrap();
         t2.join().unwrap();
 

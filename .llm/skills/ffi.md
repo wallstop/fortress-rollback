@@ -88,7 +88,8 @@ pub extern "C" fn get_last_error() -> *const c_char {
 ```rust
 #[no_mangle]
 pub extern "C" fn safe_function() -> ErrorCode {
-    match std::panic::catch_unwind(|| { /* logic */ }) {
+    // Closure must be UnwindSafe; AssertUnwindSafe opts in when you've verified safety
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { /* logic */ })) {
         Ok(result) => result,
         Err(_) => ErrorCode::Unknown,
     }
@@ -117,7 +118,7 @@ mod ffi {
 
 ### cbindgen (Rust -> C header)
 ```rust
-// build.rs
+// build.rs: panic is appropriate for build failures
 cbindgen::Builder::new()
     .with_crate(&crate_dir)
     .with_language(cbindgen::Language::C)
@@ -127,7 +128,7 @@ cbindgen::Builder::new()
 
 ### bindgen (C header -> Rust)
 ```rust
-// build.rs
+// build.rs: panic is appropriate for build failures
 bindgen::Builder::default()
     .header("wrapper.h")
     .generate().unwrap()

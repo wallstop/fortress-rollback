@@ -149,6 +149,13 @@ repos:
         pass_filenames: false
         files: '^\.llm/skills/.*\.md$'
 
+      - id: check-llm-skills
+        name: check .llm/skills code quality
+        entry: bash scripts/check-llm-skills.sh
+        language: system
+        pass_filenames: false
+        files: '^\.llm/.*\.md$'
+
       # ══════════════════════════════════════════════════════════════════════
       # CI validation (skip gracefully if tools not installed)
       # ══════════════════════════════════════════════════════════════════════

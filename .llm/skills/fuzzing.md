@@ -95,7 +95,7 @@ impl<'a> Arbitrary<'a> for BoundedInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let size = u.int_in_range(1..=1000)?;
         let len = u.int_in_range(0..=64)?;
-        let items = (0..len).map(|_| Item::arbitrary(u)).collect::<Result<Vec<_>>>()?;
+        let items = (0..len).map(|_| Item::arbitrary(u)).collect::<arbitrary::Result<Vec<_>>>()?;
         Ok(BoundedInput { size, items })
     }
 }
@@ -107,6 +107,7 @@ impl<'a> Arbitrary<'a> for BoundedInput {
 ```rust
 fuzz_target!(|input: MyType| {
     let encoded = encode(&input);
+    // Fuzz targets: panic signals a bug to the fuzzer
     let decoded = decode(&encoded).expect("round-trip decode failed");
     assert_eq!(input, decoded);
 });

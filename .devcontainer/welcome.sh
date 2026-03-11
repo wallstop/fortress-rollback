@@ -3,7 +3,7 @@
 
 # Only run once per terminal session
 if [ -n "$FORTRESS_WELCOME_SHOWN" ]; then
-    return 2>/dev/null || exit 0
+    return 2>/dev/null || exit 0  # /dev/null needed: suppress error when executed (not sourced)
 fi
 export FORTRESS_WELCOME_SHOWN=1
 

@@ -31,8 +31,9 @@ Is data accessed from multiple threads?
 
 ### Mutex -- Minimize Hold Time
 ```rust
+// Use parking_lot::Mutex -- no poisoning, so .lock() returns the guard directly
 let value = {
-    let guard = counter.lock().unwrap();
+    let guard = counter.lock();
     *guard // copy value
 }; // lock released
 expensive_operation(); // other threads can proceed
@@ -40,12 +41,13 @@ expensive_operation(); // other threads can proceed
 
 ### RwLock -- Drop Read Before Write
 ```rust
+// Use parking_lot::RwLock -- no poisoning, no .unwrap() needed
 let needs_write = {
-    let guard = self.data.read().unwrap();
+    let guard = self.data.read();
     needs_update(&guard)
 }; // read lock MUST drop here
 if needs_write {
-    let mut guard = self.data.write().unwrap();
+    let mut guard = self.data.write();
     if needs_update(&guard) { update(&mut guard); } // double-check
 }
 ```

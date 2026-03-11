@@ -73,8 +73,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install linux-perf if available (architecture dependent)
-RUN apt-get update && apt-get install -y --no-install-recommends linux-perf 2>/dev/null || true \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    if apt-get install -y --no-install-recommends linux-perf; then \
+        echo "linux-perf: installed"; \
+    else \
+        echo "linux-perf: skipped (not available for this architecture)"; \
+    fi && \
+    rm -rf /var/lib/apt/lists/*
 
 # ============================================================================
 # Layer 2: Direct downloads (TLA+, actionlint, Vale)
@@ -175,19 +180,13 @@ RUN cargo binstall --no-confirm \
 
 # ============================================================================
 # Layer 8: High-performance CLI tools (via binstall)
+# These are optional -- each tool installs independently so one failure
+# does not block the others.
 # ============================================================================
-RUN cargo binstall --no-confirm \
-    eza \
-    git-delta \
-    du-dust \
-    duf \
-    procs \
-    sd \
-    hyperfine \
-    tokei \
-    zoxide \
-    tealdeer \
-    bottom
+RUN for tool in eza git-delta du-dust duf procs sd hyperfine tokei zoxide tealdeer bottom; do \
+        cargo binstall --no-confirm "$tool" \
+            || echo "$tool: skipped (no prebuilt binary)"; \
+    done
 
 # ============================================================================
 # Layer 9: Kani verifier (compiled from source - no pre-built binary available)
@@ -230,7 +229,7 @@ WORKDIR /workspaces/fortress-rollback
 # Note: fd-find installs as 'fdfind' on Debian, bat as 'batcat'
 # eza, delta, dust, duf, procs are installed via binstall and have standard names
 # tealdeer installs as 'tldr'
-RUN echo '\n# High-performance tool aliases\nalias fd="fdfind"\nalias bat="batcat"\nalias ls="eza"\nalias ll="eza -la"\nalias la="eza -la"\nalias tree="eza --tree"\nalias cat="batcat --paging=never"\nalias diff="delta"\nalias du="dust"\nalias df="duf"\nalias ps="procs"\nalias top="htop"\n\n# Initialize zoxide (smart cd)\neval "$(zoxide init bash)"\n\n# Conditionally enable sccache if available\nif command -v sccache &> /dev/null; then\n  export RUSTC_WRAPPER=sccache\nfi\n' >> ~/.bashrc
+RUN echo '\n# High-performance tool aliases\nalias fd="fdfind"\nalias bat="batcat"\nalias ls="eza"\nalias ll="eza -la"\nalias la="eza -la"\nalias tree="eza --tree"\nalias cat="batcat --paging=never"\nalias diff="delta"\nalias du="dust"\nalias df="duf"\nalias ps="procs"\nalias top="htop"\n\n# Initialize zoxide (smart cd)\neval "$(zoxide init bash)"\n\n# Conditionally enable sccache if available\nif command -v sccache >&2; then\n  export RUSTC_WRAPPER=sccache\nfi\n' >> ~/.bashrc
 
 # Print tool versions on first login (via .bashrc)
 RUN echo '\n# Fortress Rollback Development Environment\nif [ -f /workspaces/fortress-rollback/.devcontainer/welcome.sh ]; then\n  source /workspaces/fortress-rollback/.devcontainer/welcome.sh\nfi' >> ~/.bashrc

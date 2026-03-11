@@ -79,6 +79,7 @@ tokio = { version = "1.0", features = ["rt-multi-thread", "net", "time"] }
 
 ```rust
 fn main() {
+    // build.rs: Cargo guarantees these env vars exist
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     println!("cargo::rustc-check-cfg=cfg(is_mobile)");

@@ -18,7 +18,8 @@ proptest! {
     #[test]
     fn prop_roundtrip(data in proptest::collection::vec(any::<u8>(), 0..4096)) {
         let encoded = encode(&data);
-        let decoded = decode(&encoded).expect("decode should succeed");
+        // proptest: use TestCaseError for proper shrinking (or .expect() as assertion)
+        let decoded = decode(&encoded).map_err(|e| TestCaseError::fail(e.to_string()))?;
         prop_assert_eq!(data, decoded);
     }
 }
