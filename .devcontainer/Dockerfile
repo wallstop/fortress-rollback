@@ -92,7 +92,7 @@ RUN mkdir -p /opt/tla && \
 ENV TLA_TOOLS_JAR=/opt/tla/tla2tools.jar
 
 # Install Z3 and yamllint via pip
-RUN pip3 install --break-system-packages z3-solver yamllint
+RUN pip3 install --no-cache-dir --break-system-packages z3-solver yamllint
 
 # Install actionlint (GitHub Actions linter)
 RUN curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 --retry-all-errors --max-time 120 https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
@@ -119,7 +119,7 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 --retry-all-
     rm /tmp/nodesource_setup.sh && \
     apt-get install -y --no-install-recommends nodejs && \
     npm install -g markdownlint-cli markdown-link-check && \
-    pip3 install --break-system-packages pre-commit && \
+    pip3 install --no-cache-dir --break-system-packages pre-commit && \
     rm -rf /var/lib/apt/lists/*
 
 # ============================================================================
@@ -160,23 +160,18 @@ RUN set -e && \
 # Layer 6: Verification & testing tools (via binstall - pre-built binaries)
 # These are the most critical tools, installed first for cache stability
 # ============================================================================
-RUN cargo binstall --no-confirm \
-    cargo-nextest \
-    cargo-audit \
-    cargo-deny \
-    cargo-tarpaulin \
-    cargo-llvm-cov \
-    cargo-mutants \
-    cargo-careful \
-    flamegraph
+RUN for tool in cargo-nextest cargo-audit cargo-deny cargo-tarpaulin cargo-llvm-cov cargo-mutants cargo-careful flamegraph; do \
+        cargo binstall --no-confirm "$tool" \
+            || echo "$tool: failed to install"; \
+    done
 
 # ============================================================================
 # Layer 7: Development workflow tools (via binstall)
 # ============================================================================
-RUN cargo binstall --no-confirm \
-    cargo-watch \
-    sccache \
-    cargo-shear
+RUN for tool in cargo-watch sccache cargo-shear; do \
+        cargo binstall --no-confirm "$tool" \
+            || echo "$tool: failed to install"; \
+    done
 
 # ============================================================================
 # Layer 8: High-performance CLI tools (via binstall)
@@ -229,7 +224,7 @@ WORKDIR /workspaces/fortress-rollback
 # Note: fd-find installs as 'fdfind' on Debian, bat as 'batcat'
 # eza, delta, dust, duf, procs are installed via binstall and have standard names
 # tealdeer installs as 'tldr'
-RUN echo '\n# High-performance tool aliases\nalias fd="fdfind"\nalias bat="batcat"\nalias ls="eza"\nalias ll="eza -la"\nalias la="eza -la"\nalias tree="eza --tree"\nalias cat="batcat --paging=never"\nalias diff="delta"\nalias du="dust"\nalias df="duf"\nalias ps="procs"\nalias top="htop"\n\n# Initialize zoxide (smart cd)\neval "$(zoxide init bash)"\n\n# Conditionally enable sccache if available\nif command -v sccache >&2; then\n  export RUSTC_WRAPPER=sccache\nfi\n' >> ~/.bashrc
+RUN echo '\n# High-performance tool aliases\nalias fd="fdfind"\nalias bat="batcat"\nalias ls="eza"\nalias ll="eza -la"\nalias la="eza -la"\nalias tree="eza --tree"\nalias cat="batcat --paging=never"\nalias diff="delta"\nalias du="dust"\nalias df="duf"\nalias ps="procs"\nalias top="htop"\n\n# Initialize zoxide (smart cd)\neval "$(zoxide init bash)"\n\n# Conditionally enable sccache if available\nif command -v sccache >/dev/null 2>&1; then\n  export RUSTC_WRAPPER=sccache\nfi\n' >> ~/.bashrc
 
 # Print tool versions on first login (via .bashrc)
 RUN echo '\n# Fortress Rollback Development Environment\nif [ -f /workspaces/fortress-rollback/.devcontainer/welcome.sh ]; then\n  source /workspaces/fortress-rollback/.devcontainer/welcome.sh\nfi' >> ~/.bashrc

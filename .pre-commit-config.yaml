@@ -157,6 +157,16 @@ repos:
         files: '^\.llm/.*\.md$'
 
       # ══════════════════════════════════════════════════════════════════════
+      # Container & infrastructure checks
+      # ══════════════════════════════════════════════════════════════════════
+      - id: check-dockerfile
+        name: check Dockerfile best practices
+        entry: python scripts/hooks/check-dockerfile.py
+        language: python
+        files: '(Dockerfile|devcontainer\.json)$'
+        pass_filenames: true
+
+      # ══════════════════════════════════════════════════════════════════════
       # CI validation (skip gracefully if tools not installed)
       # ══════════════════════════════════════════════════════════════════════
       - id: actionlint

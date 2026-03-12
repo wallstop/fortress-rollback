@@ -181,3 +181,72 @@ esac
     set -euo pipefail
     ./scripts/my-script.sh
 ```
+
+---
+
+## Dockerfile Best Practices
+
+### Quick Reference
+
+| Task | Wrong | Right |
+|------|-------|-------|
+| pip install | `pip install pkg` | `pip install --no-cache-dir pkg` |
+| Silent detection | `command -v tool >&2` | `command -v tool >/dev/null 2>&1` |
+| Multi-tool install | `pip install a b c` | Install individually with fallback |
+| Layer cleanup | Separate `RUN rm ...` | Clean up in the same `RUN` layer |
+
+### pip Cache
+
+Always pass `--no-cache-dir` to avoid storing wheel/sdist caches in the image:
+
+```dockerfile
+# WRONG: leaves pip cache in the layer
+RUN pip install requests
+
+# CORRECT: no cache stored
+RUN pip install --no-cache-dir requests
+```
+
+### Output Suppression
+
+Use `>/dev/null 2>&1` for silent command detection, not `>&2`:
+
+```bash
+# WRONG: sends stdout to stderr (still visible)
+command -v tool >&2
+
+# CORRECT: suppresses all output
+command -v tool >/dev/null 2>&1
+```
+
+### Resilient Multi-Tool Installs
+
+Install optional tools individually so one failure does not block the rest:
+
+```dockerfile
+# WRONG: one bad package fails the entire install
+RUN pip install --no-cache-dir tool-a tool-b tool-c
+
+# CORRECT: each tool installed independently with fallback
+RUN for tool in tool-a tool-b tool-c; do \
+        pip install --no-cache-dir "$tool" \
+            || echo "$tool: failed to install"; \
+    done
+```
+
+### Layer Hygiene
+
+Clean up caches, temp files, and package lists in the **same** `RUN` layer
+that creates them -- otherwise the deleted bytes still occupy space in
+earlier layers:
+
+```dockerfile
+# WRONG: cleanup in a separate layer does not reclaim space
+RUN apt-get update && apt-get install -y curl
+RUN rm -rf /var/lib/apt/lists/*
+
+# CORRECT: single layer, cleanup at the end
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/*
+```
