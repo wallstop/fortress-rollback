@@ -8,6 +8,8 @@ on:
       - 'docker/docker-compose.yml'
       - '.pre-commit-config.yaml'
       - '.github/workflows/ci-lint.yml'
+      - '**/Dockerfile*'
+      - '.devcontainer/devcontainer.json'
   pull_request:
     branches: [main]
     paths:
@@ -15,6 +17,8 @@ on:
       - 'docker/docker-compose.yml'
       - '.pre-commit-config.yaml'
       - '.github/workflows/ci-lint.yml'
+      - '**/Dockerfile*'
+      - '.devcontainer/devcontainer.json'
   workflow_dispatch:
 
 jobs:
@@ -27,7 +31,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install yamllint
-        run: pip install yamllint
+        run: pip install --no-cache-dir yamllint
 
       - name: Validate YAML files
         run: |
@@ -43,3 +47,6 @@ jobs:
 
       - name: Validate GitHub Actions workflows
         run: actionlint
+
+      - name: Check Dockerfile best practices
+        run: python scripts/hooks/check-dockerfile.py

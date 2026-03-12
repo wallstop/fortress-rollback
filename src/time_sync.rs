@@ -894,28 +894,37 @@ mod kani_proofs {
     /// Proof: advance_frame with valid frame doesn't panic.
     ///
     /// For any valid (non-negative) frame, advance_frame should not panic.
+    /// Uses a small window_size (4) since proof_default_valid already covers
+    /// window_size=30 with unwind(32). This proof focuses on advance_frame
+    /// correctness, not window size handling.
+    ///
+    /// Note: frame_val is bounded to [0, 16) for verification tractability.
+    /// Modulo wrapping correctness is separately verified by
+    /// `proof_index_wrapping_consistent`, which uses symbolic values up to
+    /// 10,000 with window sizes up to 100.
     ///
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: advance_frame safety with valid inputs
-    /// - Related: proof_negative_frame_safe, proof_window_index_in_bounds
+    /// - Related: proof_negative_frame_safe, proof_window_index_in_bounds, proof_index_wrapping_consistent
     #[kani::proof]
+    #[kani::unwind(6)]
     fn proof_advance_frame_safe() {
         let frame_val: i32 = kani::any();
-        kani::assume(frame_val >= 0 && frame_val < 10000);
+        kani::assume(frame_val >= 0 && frame_val < 16);
 
         let local_adv: i32 = kani::any();
         let remote_adv: i32 = kani::any();
-        kani::assume(local_adv >= -1000 && local_adv <= 1000);
-        kani::assume(remote_adv >= -1000 && remote_adv <= 1000);
+        kani::assume(local_adv >= -5 && local_adv <= 5);
+        kani::assume(remote_adv >= -5 && remote_adv <= 5);
 
-        let config = TimeSyncConfig { window_size: 30 };
+        let config = TimeSyncConfig { window_size: 4 };
         let mut ts = TimeSync::with_config(config);
 
         // This should not panic
         ts.advance_frame(Frame::new(frame_val), local_adv, remote_adv);
 
         // Verify the value was stored correctly
-        let idx = (frame_val as usize) % 30;
+        let idx = (frame_val as usize) % 4;
         kani::assert(ts.local[idx] == local_adv, "Local value should be stored");
         kani::assert(
             ts.remote[idx] == remote_adv,
@@ -1059,6 +1068,7 @@ mod kani_proofs {
     /// - Verifies: Modulo index determinism and bounds
     /// - Related: proof_window_index_in_bounds, proof_advance_frame_safe
     #[kani::proof]
+    #[kani::unwind(3)]
     fn proof_index_wrapping_consistent() {
         let frame_val: i32 = kani::any();
         // Bound to representative range - the math property is universal
@@ -1083,23 +1093,25 @@ mod kani_proofs {
     /// Proof: Negative frame values are correctly rejected.
     ///
     /// Verifies that advance_frame with negative frames doesn't modify state.
-    /// Note: We can't directly test this in Kani without state comparison,
-    /// so we verify the safety property that it doesn't panic.
+    /// Uses a small window (4) and tight symbolic ranges to keep CBMC tractable
+    /// within the 300s CI timeout. The `report_violation!` macro with `format!`
+    /// args is expensive for CBMC, so minimal bounds are essential.
     ///
     /// - Tier: 1 (Fast, <30s)
     /// - Verifies: Negative frame rejection safety
     /// - Related: proof_advance_frame_safe, proof_window_index_in_bounds
     #[kani::proof]
+    #[kani::unwind(6)]
     fn proof_negative_frame_safe() {
         let frame_val: i32 = kani::any();
-        kani::assume(frame_val < 0);
+        kani::assume(frame_val >= -10 && frame_val < 0);
 
         let local_adv: i32 = kani::any();
         let remote_adv: i32 = kani::any();
-        kani::assume(local_adv >= -1000 && local_adv <= 1000);
-        kani::assume(remote_adv >= -1000 && remote_adv <= 1000);
+        kani::assume(local_adv >= -10 && local_adv <= 10);
+        kani::assume(remote_adv >= -10 && remote_adv <= 10);
 
-        let config = TimeSyncConfig { window_size: 10 };
+        let config = TimeSyncConfig { window_size: 4 };
         let mut ts = TimeSync::with_config(config);
 
         // This should not panic even with negative frame

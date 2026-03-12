@@ -71,6 +71,26 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m' # No Color
 
+# Portable regex replace: uses sd if available, falls back to sed -E
+# Usage: portable_replace PATTERN REPLACEMENT FILE
+# Note: sd uses $1/$2 for backreferences; sed uses \1/\2. This function
+# automatically converts sd-style ${N} and $N to sed-style \N in the
+# replacement string when falling back to sed.
+portable_replace() {
+    local pattern="$1"
+    local replacement="$2"
+    local file="$3"
+
+    if command -v sd &>/dev/null; then
+        sd "$pattern" "$replacement" "$file"
+    else
+        # Convert sd-style backreferences ($1, ${1}) to sed-style (\1)
+        local sed_replacement
+        sed_replacement=$(printf '%s' "$replacement" | sed 's/\${\([0-9][0-9]*\)}/\\\1/g; s/\$\([0-9][0-9]*\)/\\\1/g')
+        sed -i.bak -E "s|${pattern}|${sed_replacement}|g" "$file" && rm -f "$file.bak"
+    fi
+}
+
 # Flags
 CHECK_ONLY=false
 DRY_RUN=false
@@ -312,7 +332,7 @@ main() {
                     else
                         # Replace the version, keeping the simple format
                         # Use sd (modern sed replacement) for portable cross-platform compatibility
-                        sd 'fortress-rollback = "[0-9]+\.[0-9]+(\.[0-9]+)?"' "fortress-rollback = \"$MAJOR_MINOR\"" "$file"
+                        portable_replace 'fortress-rollback = "[0-9]+\.[0-9]+(\.[0-9]+)?"' "fortress-rollback = \"$MAJOR_MINOR\"" "$file"
                         file_changed=true
                         local diff_count=$((matches - current_matches))
                         TOTAL_REPLACEMENTS=$((TOTAL_REPLACEMENTS + diff_count))
@@ -349,7 +369,7 @@ main() {
                     else
                         # Replace the version in the complex format
                         # Use sd (modern sed replacement) for portable cross-platform compatibility
-                        sd '(fortress-rollback = \{ version = ")[0-9]+\.[0-9]+(\.[0-9]+)?(")' "\${1}$MAJOR_MINOR\${3}" "$file"
+                        portable_replace '(fortress-rollback = \{ version = ")[0-9]+\.[0-9]+(\.[0-9]+)?(")' "\${1}$MAJOR_MINOR\${3}" "$file"
                         file_changed=true
                         local diff_count=$((matches - current_matches))
                         TOTAL_REPLACEMENTS=$((TOTAL_REPLACEMENTS + diff_count))
@@ -392,7 +412,7 @@ main() {
                     if [[ "$DRY_RUN" == "true" ]]; then
                         echo -e "${YELLOW}Would update:${NC} CHANGELOG.md [Unreleased] link footer"
                     else
-                        sd "(\\[Unreleased\\]: https://github\\.com/.*/compare/v)[0-9]+\\.[0-9]+\\.[0-9]+(\\.\\.\\.HEAD)" "\${1}$VERSION\${2}" "$CHANGELOG"
+                        portable_replace "(\\[Unreleased\\]: https://github\\.com/.*/compare/v)[0-9]+\\.[0-9]+\\.[0-9]+(\\.\\.\\.HEAD)" "\${1}$VERSION\${2}" "$CHANGELOG"
                         echo -e "${GREEN}✓ Updated:${NC} CHANGELOG.md [Unreleased] link → v$VERSION"
                         ((FILES_CHANGED++)) || true
                         ((TOTAL_REPLACEMENTS++)) || true

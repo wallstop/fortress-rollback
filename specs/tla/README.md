@@ -269,7 +269,7 @@ These specifications model the key algorithms from:
 
 ## Best Practices for TLA+ Development
 
-> **See also:** [/.llm/skills/tla-plus-modeling.md](../../.llm/skills/tla-plus-modeling.md) — Complete guide to TLA+ patterns
+> **See also:** [/.llm/skills/verification.md](../../.llm/skills/verification.md) — TLA+ and Z3 verification guide
 
 ### Specification Design
 

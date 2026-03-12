@@ -6,17 +6,26 @@ Runs `cargo clippy --all-targets` with warnings as errors.
 Works on Windows (PowerShell/cmd), macOS, and Linux.
 """
 
+from __future__ import annotations
+
+import os
 import subprocess
 import sys
+
+from cargo_linker import get_cargo_env
 
 
 def main() -> int:
     """Run cargo clippy and return exit code."""
     try:
+        # Apply linker overrides if lld is not available
+        env = os.environ.copy()
+        env.update(get_cargo_env())
+
         # Run cargo clippy with warnings as errors
         result = subprocess.run(
             ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"],
-            capture_output=False,
+            env=env,
         )
 
         if result.returncode != 0:

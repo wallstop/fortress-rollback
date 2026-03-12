@@ -1,0 +1,23 @@
+name: LLM Context Lint
+
+on:
+  push:
+    paths: ['.llm/**']
+  pull_request:
+    paths: ['.llm/**']
+
+jobs:
+  llm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Both scripts use stdlib only (pathlib, re, sys) — no pip install needed
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Check .llm file line limit (300 max)
+        run: python scripts/hooks/check-llm-line-limit.py
+      - name: Verify skills index is up-to-date
+        run: python scripts/hooks/regenerate-skills-index.py --check
+      - name: Check skill code example quality
+        run: bash scripts/check-llm-skills.sh

@@ -42,6 +42,23 @@ PASSED=0
 FAILED=0
 TOTAL=0
 
+# Cross-platform timeout wrapper
+# Uses GNU timeout if available, gtimeout on macOS, or runs without timeout as fallback
+run_with_timeout() {
+    local timeout_seconds="$1"
+    shift
+
+    if [[ "${OSTYPE:-}" == msys* ]] || [[ "${OSTYPE:-}" == cygwin* ]] || [[ -n "${WINDIR:-}" ]]; then
+        "$@"
+    elif command -v timeout &>/dev/null; then
+        timeout "$timeout_seconds" "$@"
+    elif command -v gtimeout &>/dev/null; then
+        gtimeout "$timeout_seconds" "$@"
+    else
+        "$@"
+    fi
+}
+
 # Tier definitions - proofs grouped by approximate runtime
 # Tier 1: Fast proofs (<30s each) - simple property checks
 TIER1_PROOFS=(
@@ -303,8 +320,8 @@ list_harnesses() {
     # Also show any proofs not in tiers (discovered from source)
     cd "$PROJECT_ROOT"
     local all_proofs
-    all_proofs=$(grep -rh '#\[kani::proof\]' --include='*.rs' -A 1 src/ 2>/dev/null | \
-                grep -oP 'fn \K[a-zA-Z_][a-zA-Z0-9_]*' | sort -u || echo "")
+    all_proofs=$(find src/ -name '*.rs' -exec grep -h '#\[kani::proof\]' -A 1 {} + 2>/dev/null | \
+                grep -o 'fn [a-zA-Z_][a-zA-Z0-9_]*' | sed 's/^fn //' | sort -u || echo "")
 
     local uncategorized=()
     while IFS= read -r proof; do
@@ -376,9 +393,17 @@ run_kani() {
     export NO_COLOR=1
     export TERM=dumb
     if [[ "$verbose" == "true" ]]; then
-        "${kani_cmd[@]}" 2>&1 | tee "$output_file" || exit_code=$?
+        run_with_timeout "$KANI_TIMEOUT" "${kani_cmd[@]}" 2>&1 | tee "$output_file" || exit_code=$?
     else
-        "${kani_cmd[@]}" > "$output_file" 2>&1 || exit_code=$?
+        run_with_timeout "$KANI_TIMEOUT" "${kani_cmd[@]}" > "$output_file" 2>&1 || exit_code=$?
+    fi
+
+    # Check for timeout (exit code 124 from GNU timeout/gtimeout).
+    # When neither is available, run_with_timeout runs without a timeout
+    # and this check simply won't trigger.
+    if [[ $exit_code -eq 124 ]]; then
+        local timed_out_harness="${harness:-all}"
+        echo -e "${RED}TIMEOUT: proof '$timed_out_harness' timed out after ${KANI_TIMEOUT}s. Consider adding/increasing #[kani::unwind(N)].${NC}"
     fi
 
     local end_time
@@ -543,6 +568,9 @@ run_tier_proofs() {
         else
             any_failed=true
             ((tier_failed++))
+            if [[ "$quick" == "true" ]]; then
+                echo -e "${YELLOW}Note: Running in --quick mode (--default-unwind 8). Proofs iterating over structures with >8 elements need explicit #[kani::unwind(N)].${NC}"
+            fi
             if [[ "$fail_fast" == "true" ]]; then
                 echo -e "${RED}Stopping early due to --fail-fast${NC}"
                 echo ""
@@ -688,6 +716,9 @@ main() {
             echo -e "${BLUE}Verifying harness: $harness${NC}"
             if ! run_kani "$harness" "$quick" "$verbose" "$jobs"; then
                 any_failed=true
+                if [[ "$quick" == "true" ]]; then
+                    echo -e "${YELLOW}Note: Running in --quick mode (--default-unwind 8). Proofs iterating over structures with >8 elements need explicit #[kani::unwind(N)].${NC}"
+                fi
                 if [[ "$fail_fast" == "true" ]]; then
                     echo -e "${RED}Stopping early due to --fail-fast${NC}"
                     break

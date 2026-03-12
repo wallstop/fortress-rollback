@@ -807,9 +807,13 @@ def main() -> int:
 
     # 6. Validate table pipe escaping in key markdown files
     print(f"\n{bold('6. Validating table pipe escaping...')}")
-    # Check wiki files and LLM skill files (where tables with code spans are common)
-    llm_skills_dir = project_root / ".llm" / "skills"
+    # Check wiki files, LLM context, and LLM skill files (where tables with code spans are common)
+    llm_dir = project_root / ".llm"
+    llm_skills_dir = llm_dir / "skills"
     md_files_to_check = list(wiki_dir.glob("*.md"))
+    llm_context = llm_dir / "context.md"
+    if llm_context.exists():
+        md_files_to_check.append(llm_context)
     if llm_skills_dir.exists():
         md_files_to_check.extend(llm_skills_dir.glob("*.md"))
     result = validate_table_pipe_escaping(md_files_to_check, verbose)

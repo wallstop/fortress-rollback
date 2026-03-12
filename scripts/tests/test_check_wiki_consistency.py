@@ -122,40 +122,30 @@ class TestValidateWikiLinkDisplayText:
         assert result.errors == 0
         assert result.warnings == 0
 
-    def test_plus_sign_in_display_text(self, tmp_path: Path) -> None:
-        """Plus sign in display text is detected as error."""
+    @pytest.mark.parametrize(
+        "char, page_name, display_text",
+        [
+            ("+", "TLAplus-Tooling", "TLA+ Tooling"),
+            ("%", "Page", "100% Complete"),
+            ("#", "Page", "Issue #123"),
+            ("?", "FAQ", "Questions?"),
+            ("&", "Page", "Q&A"),
+            ("=", "Page", "Key=Value"),
+        ],
+        ids=["plus", "percent", "hash", "question_mark", "ampersand", "equals"],
+    )
+    def test_problematic_char_in_display_text(
+        self, tmp_path: Path, char: str, page_name: str, display_text: str
+    ) -> None:
+        """Problematic character in display text is detected as error."""
         sidebar = tmp_path / "_Sidebar.md"
-        sidebar.write_text("[[TLAplus-Tooling|TLA+ Tooling]]", encoding="utf-8")
+        sidebar.write_text(
+            f"[[{page_name}|{display_text}]]", encoding="utf-8"
+        )
         result = validate_wiki_link_display_text(sidebar)
-        assert result.errors == 1
-
-    def test_percent_sign_in_display_text(self, tmp_path: Path) -> None:
-        """Percent sign in display text is detected as error."""
-        sidebar = tmp_path / "_Sidebar.md"
-        sidebar.write_text("[[Page|100% Complete]]", encoding="utf-8")
-        result = validate_wiki_link_display_text(sidebar)
-        assert result.errors == 1
-
-    def test_hash_in_display_text(self, tmp_path: Path) -> None:
-        """Hash in display text is detected as error."""
-        sidebar = tmp_path / "_Sidebar.md"
-        sidebar.write_text("[[Page|Issue #123]]", encoding="utf-8")
-        result = validate_wiki_link_display_text(sidebar)
-        assert result.errors == 1
-
-    def test_question_mark_in_display_text(self, tmp_path: Path) -> None:
-        """Question mark in display text is detected as error."""
-        sidebar = tmp_path / "_Sidebar.md"
-        sidebar.write_text("[[FAQ|Questions?]]", encoding="utf-8")
-        result = validate_wiki_link_display_text(sidebar)
-        assert result.errors == 1
-
-    def test_ampersand_in_display_text(self, tmp_path: Path) -> None:
-        """Ampersand in display text is detected as error."""
-        sidebar = tmp_path / "_Sidebar.md"
-        sidebar.write_text("[[Page|Q&A]]", encoding="utf-8")
-        result = validate_wiki_link_display_text(sidebar)
-        assert result.errors == 1
+        assert result.errors == 1, (
+            f"Expected 1 error for '{char}' in display text '{display_text}'"
+        )
 
     def test_multiple_problematic_links(self, tmp_path: Path) -> None:
         """Multiple links with problematic characters are all detected."""
@@ -180,13 +170,6 @@ class TestValidateWikiLinkDisplayText:
         sidebar.write_text("[[FAQ|Q&A + More?]]", encoding="utf-8")
         result = validate_wiki_link_display_text(sidebar)
         # Only 1 error reported per link (first problematic char found)
-        assert result.errors == 1
-
-    def test_equals_sign_in_display_text(self, tmp_path: Path) -> None:
-        """Equals sign in display text is detected as error."""
-        sidebar = tmp_path / "_Sidebar.md"
-        sidebar.write_text("[[Page|Key=Value]]", encoding="utf-8")
-        result = validate_wiki_link_display_text(sidebar)
         assert result.errors == 1
 
     def test_page_name_can_have_special_chars(self, tmp_path: Path) -> None:

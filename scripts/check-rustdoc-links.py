@@ -9,9 +9,13 @@ non-zero exit code.
 Works on Windows, macOS, and Linux.
 """
 
+from __future__ import annotations
+
 import os
 import subprocess
 import sys
+
+from cargo_linker import get_cargo_env
 
 
 # RUSTDOCFLAGS that match CI configuration - treats warnings as errors
@@ -28,8 +32,9 @@ RUSTDOCFLAGS = (
 def main() -> int:
     """Run cargo doc with CI-matching RUSTDOCFLAGS and check exit code."""
     try:
-        # Set up environment with RUSTDOCFLAGS matching CI
+        # Set up environment with linker overrides and RUSTDOCFLAGS matching CI
         env = os.environ.copy()
+        env.update(get_cargo_env())
         existing_rustdocflags = env.get("RUSTDOCFLAGS", "").strip()
 
         # In CI, enforce exact CI RUSTDOCFLAGS; locally, append to any existing flags

@@ -135,6 +135,37 @@ repos:
         pass_filenames: false
         files: '^(docs/.*\.md|wiki/.*\.md|scripts/sync-wiki\.py)$'
 
+      - id: llm-line-limit
+        name: check .llm file line limit (300)
+        entry: python scripts/hooks/check-llm-line-limit.py
+        language: python
+        pass_filenames: false
+        files: '^\.llm/.*\.md$'
+
+      - id: regenerate-skills-index
+        name: regenerate skills index
+        entry: python scripts/hooks/regenerate-skills-index.py
+        language: python
+        pass_filenames: false
+        files: '^\.llm/skills/.*\.md$'
+
+      - id: check-llm-skills
+        name: check .llm/skills code quality
+        entry: bash scripts/check-llm-skills.sh
+        language: system
+        pass_filenames: false
+        files: '^\.llm/.*\.md$'
+
+      # ══════════════════════════════════════════════════════════════════════
+      # Container & infrastructure checks
+      # ══════════════════════════════════════════════════════════════════════
+      - id: check-dockerfile
+        name: check Dockerfile best practices
+        entry: python scripts/hooks/check-dockerfile.py
+        language: python
+        files: '(Dockerfile|devcontainer\.json)$'
+        pass_filenames: true
+
       # ══════════════════════════════════════════════════════════════════════
       # CI validation (skip gracefully if tools not installed)
       # ══════════════════════════════════════════════════════════════════════
