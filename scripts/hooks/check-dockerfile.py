@@ -4,6 +4,7 @@
 Detects issues such as:
 - pip install without --no-cache-dir (leaves cache in image)
 - command -v output redirected to stderr instead of /dev/null
+- eval "$(..." shell init without command -v guard (breaks if tool missing)
 
 Cross-platform: Works on Linux, macOS, and Windows.
 """
@@ -48,6 +49,15 @@ def check_file(filepath: Path) -> list[str]:
             issues.append(
                 f"{filepath}:{line_num}: command -v output redirected to stderr "
                 f"instead of /dev/null (use >/dev/null 2>&1)"
+            )
+
+        # Check 3: eval "$(..." without command -v guard
+        if re.search(r'\beval\s+\\?["\']?\$\(', stripped) and not re.search(
+            r"\bcommand\s+-v\b", stripped
+        ):
+            issues.append(
+                f"{filepath}:{line_num}: eval \"$(...)\" without command -v guard "
+                f"(use: command -v tool >/dev/null 2>&1 && eval \"$(tool init ...)\")"
             )
 
     return issues

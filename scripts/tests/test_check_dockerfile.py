@@ -3,7 +3,8 @@
 Unit tests for check-dockerfile.py hook.
 
 Verifies that the Dockerfile anti-pattern checker correctly detects
-pip install without --no-cache-dir and command -v with >&2 redirect.
+pip install without --no-cache-dir, command -v with >&2 redirect,
+and eval "$(..." without command -v guard.
 """
 
 from __future__ import annotations
@@ -123,6 +124,120 @@ class TestCommandVRedirect:
         f = _write(tmp_path, "Dockerfile", "# command -v sccache >&2\n")
         issues = check_file(f)
         assert issues == []
+
+
+class TestUnguardedEval:
+    """Tests for unguarded eval "$(..." detection."""
+
+    def test_unguarded_eval_detected(self, tmp_path: Path) -> None:
+        """eval "$(tool init bash)" without command -v guard is flagged."""
+        f = _write(
+            tmp_path,
+            "Dockerfile",
+            'RUN echo \'eval "$(zoxide init bash)"\' >> ~/.bashrc\n',
+        )
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert 'eval "$(...)"' in issues[0]
+        assert "command -v" in issues[0]
+
+    def test_guarded_eval_passes(self, tmp_path: Path) -> None:
+        """eval "$(..." with command -v guard on the same line passes."""
+        f = _write(
+            tmp_path,
+            "Dockerfile",
+            'RUN echo \'command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init bash)"\' >> ~/.bashrc\n',
+        )
+        issues = check_file(f)
+        assert issues == []
+
+    def test_unguarded_eval_single_quotes(self, tmp_path: Path) -> None:
+        """eval '$(tool init bash)' without guard is flagged."""
+        f = _write(
+            tmp_path,
+            "Dockerfile",
+            "RUN echo \"eval '$(starship init bash)'\" >> ~/.bashrc\n",
+        )
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert 'eval "$(...)"' in issues[0]
+
+    def test_unguarded_eval_no_quotes(self, tmp_path: Path) -> None:
+        """eval $(tool init bash) without guard is flagged."""
+        f = _write(
+            tmp_path,
+            "Dockerfile",
+            "RUN echo 'eval $(atuin init bash)' >> ~/.bashrc\n",
+        )
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert 'eval "$(...)"' in issues[0]
+
+    def test_unguarded_eval_in_devcontainer_json(self, tmp_path: Path) -> None:
+        """eval "$(..." in devcontainer.json without guard is flagged."""
+        f = _write(
+            tmp_path,
+            "devcontainer.json",
+            '{"postCreateCommand": "eval \\"$(zoxide init bash)\\"" }\n',
+        )
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert 'eval "$(...)"' in issues[0]
+
+    def test_guarded_eval_in_devcontainer_json_passes(self, tmp_path: Path) -> None:
+        """eval "$(..." with command -v in devcontainer.json passes."""
+        f = _write(
+            tmp_path,
+            "devcontainer.json",
+            '{"postCreateCommand": "command -v zoxide >/dev/null 2>&1 && eval \\"$(zoxide init bash)\\"" }\n',
+        )
+        issues = check_file(f)
+        assert issues == []
+
+    def test_comment_line_skipped(self, tmp_path: Path) -> None:
+        """Commented-out eval is not flagged in Dockerfiles."""
+        f = _write(
+            tmp_path,
+            "Dockerfile",
+            '# eval "$(zoxide init bash)"\n',
+        )
+        issues = check_file(f)
+        assert issues == []
+
+    def test_multiple_unguarded_evals(self, tmp_path: Path) -> None:
+        """Multiple unguarded eval lines each produce a separate issue."""
+        content = (
+            "FROM ubuntu:22.04\n"
+            'RUN echo \'eval "$(zoxide init bash)"\' >> ~/.bashrc\n'
+            'RUN echo \'eval "$(starship init bash)"\' >> ~/.bashrc\n'
+        )
+        f = _write(tmp_path, "Dockerfile", content)
+        issues = check_file(f)
+        assert len(issues) == 2
+
+    def test_mixed_guarded_and_unguarded(self, tmp_path: Path) -> None:
+        """Only unguarded evals are flagged when mixed with guarded ones."""
+        content = (
+            "FROM ubuntu:22.04\n"
+            'RUN echo \'eval "$(zoxide init bash)"\' >> ~/.bashrc\n'
+            'RUN echo \'command -v starship >/dev/null 2>&1 && eval "$(starship init bash)"\' >> ~/.bashrc\n'
+        )
+        f = _write(tmp_path, "Dockerfile", content)
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert ":2:" in issues[0]
+
+    def test_eval_on_continuation_line(self, tmp_path: Path) -> None:
+        """eval on a continuation line is flagged."""
+        content = (
+            "FROM ubuntu:22.04\n"
+            "RUN echo 'first line \\\n"
+            '  eval "$(zoxide init bash)"\' >> ~/.bashrc\n'
+        )
+        f = _write(tmp_path, "Dockerfile", content)
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert ":3:" in issues[0]
 
 
 class TestFileHandling:

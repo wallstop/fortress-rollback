@@ -234,11 +234,32 @@ RUN for tool in tool-a tool-b tool-c; do \
     done
 ```
 
+### Guard Optional Tool Aliases in Shell Init
+
+When tools are installed with fallback (`|| echo "skipped"`), any
+aliases or `eval` init in `.bashrc` **must** be guarded with
+`command -v`. Unguarded aliases break the shell if the tool is missing:
+
+```bash
+# WRONG: breaks ls if eza was not installed
+alias ls="eza"
+eval "$(zoxide init bash)"
+
+# CORRECT: only alias if tool exists
+command -v eza >/dev/null 2>&1 && alias ls="eza"
+command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init bash)"
+```
+
+The pre-commit hook `check-dockerfile` enforces unguarded `eval "$("`
+detection. Unguarded aliases are caught by code review. Mandatory
+apt-installed tools (e.g., `batcat`, `htop`) do not need guards
+since `apt-get install` would fail the build.
+
 ### Layer Hygiene
 
-Clean up caches, temp files, and package lists in the **same** `RUN` layer
-that creates them -- otherwise the deleted bytes still occupy space in
-earlier layers:
+Clean up caches, temp files, and package lists in the **same** `RUN`
+layer that creates them -- otherwise deleted bytes still occupy space
+in earlier layers:
 
 ```dockerfile
 # WRONG: cleanup in a separate layer does not reclaim space
