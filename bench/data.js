@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773409471917,
+  "lastUpdate": 1773415590560,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "0c8e43684bbf9019783dd3325da5fe4ef2f8b313",
-          "message": "Eliminate non-determinism for cross-platform consistency (#32)\n\nThis change addresses non-determinism in the network protocol by:\n\n1. Replacing DefaultHasher with DeterministicHasher in\ntiming_entropy_seed()\n   - DefaultHasher uses a random seed which varies between runs\n- DeterministicHasher (FNV-1a) provides consistent hashing across\nplatforms\n\n2. Adding optional protocol_rng_seed to ProtocolConfig\n   - When set, provides fully deterministic protocol behavior\n   - Useful for replay systems, deterministic testing, and debugging\n   - New ProtocolConfig::deterministic(seed) preset for convenience\n\n3. Updating UdpProtocol to use seeded RNG for:\n   - Magic number generation (session identifiers)\n   - Sync request validation tokens\n\nThis enables fully reproducible network sessions when configured,\nessential for cross-platform determinism in rollback networking.\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
-          "timestamp": "2025-12-26T12:25:08-08:00",
-          "tree_id": "ebd87eaa42fc0bc9ae6972a7b3ae33efe6f8aa56",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/0c8e43684bbf9019783dd3325da5fe4ef2f8b313"
-        },
-        "date": 1766781004367,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 103,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 153,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 490,
-            "range": "± 32",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 723,
-            "range": "± 49",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1034,
-            "range": "± 71",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 104576,
-            "range": "± 509",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27587,
-            "range": "± 1021",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1242,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1554,
-            "range": "± 64",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 869,
             "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1144cca59d23c36fbf17a919cd95e63e41535aa5",
+          "message": "chore(deps): bump z3 from 0.19.10 to 0.19.13 (#108)\n\nBumps [z3](https://github.com/prove-rs/z3.rs) from 0.19.10 to 0.19.13.\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/a189139b14228005cfe78cc4ca66f5bb95762cc7\"><code>a189139</code></a>\nchore: release (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/514\">#514</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/e2e07018fb38a229c370ed6dcbb31ae40771b728\"><code>e2e0701</code></a>\nfix(z3-sys): raise GitHub download timeout for gh-release (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/513\">#513</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/65c7a6fbbb017c5e875645641ea7a487b14a72b8\"><code>65c7a6f</code></a>\nchore(z3): release v0.19.12 (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/512\">#512</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/aa5557bfa09ef2886b1c861d1e719c8e99400e66\"><code>aa5557b</code></a>\nfeat: add <code>with</code> method to Tactic (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/511\">#511</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/b532c1305836c800374d682fe19562d9d3f3f4e9\"><code>b532c13</code></a>\nchore(z3): release v0.19.11 (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/507\">#507</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/026cd51597890b23ecaf80711470fbdd8090e491\"><code>026cd51</code></a>\nadded: FusedIterator and ExactSizeIterator for model/SortIter (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/509\">#509</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/582e1938e370492e16e489e8c6f40c3469fa3188\"><code>582e193</code></a>\nfix: standardize AstVector display/debug impl (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/508\">#508</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/b18d4a6834f765278065ebace8c6b6743b1ab2de\"><code>b18d4a6</code></a>\nfeat: add high-level API for model sorts/sort universes (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/506\">#506</a>)</li>\n<li>See full diff in <a\nhref=\"https://github.com/prove-rs/z3.rs/compare/z3-v0.19.10...z3-v0.19.13\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=z3&package-manager=cargo&previous-version=0.19.10&new-version=0.19.13)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-03-13T08:22:01-07:00",
+          "tree_id": "fe7aae6efca8fa40aa07602abae4ce73ca38d86c",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/1144cca59d23c36fbf17a919cd95e63e41535aa5"
+        },
+        "date": 1773415589490,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 115,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 166,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 439,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 697,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1019,
+            "range": "± 21",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 102576,
+            "range": "± 486",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 27502,
+            "range": "± 1171",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 112",
             "unit": "ns/iter"
           },
           {
