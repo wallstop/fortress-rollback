@@ -5,6 +5,13 @@ Pre-commit hook: detect #[track_caller] on async fn.
 Rust does not support #[track_caller] on async functions (it is a no-op
 or a compile error depending on the Rust version and lint configuration).
 This fast grep-based check catches the mistake before a full compile.
+
+Known limitations (acceptable for a fast grep-based hook):
+  - ``#[cfg_attr(test, track_caller)]`` is not detected (rare in practice).
+  - ``#[track_caller]`` inside string literals may produce a false positive.
+  - Multi-line block comments are not tracked; a single-line block comment
+    containing the attribute (``/* #[track_caller] */``) is skipped, but
+    multi-line block comments are not fully parsed.
 """
 
 from __future__ import annotations
@@ -33,11 +40,24 @@ def check_file(path: Path) -> list[str]:
         # Skip comments and doc comments
         if stripped.startswith("//"):
             continue
+        # Skip single-line block comments
+        if stripped.startswith("/*") and stripped.endswith("*/"):
+            continue
         if _TRACK_CALLER_RE.search(stripped):
+            # Check if async fn is on the same line as #[track_caller]
+            if _ASYNC_FN_RE.search(stripped):
+                errors.append(
+                    f"{path}:{i + 1}: #[track_caller] on async fn "
+                    f"(line {i + 1}) is not supported by Rust"
+                )
+                continue
             # Look ahead up to 5 lines for an async fn
             for j in range(i + 1, min(i + 6, len(lines))):
                 next_line = lines[j].strip()
                 if next_line.startswith("//"):
+                    continue
+                # Skip single-line block comments in lookahead
+                if next_line.startswith("/*") and next_line.endswith("*/"):
                     continue
                 if _ASYNC_FN_RE.search(next_line):
                     errors.append(
