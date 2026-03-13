@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773331990145,
+  "lastUpdate": 1773409471917,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "0c8e43684bbf9019783dd3325da5fe4ef2f8b313",
-          "message": "Eliminate non-determinism for cross-platform consistency (#32)\n\nThis change addresses non-determinism in the network protocol by:\n\n1. Replacing DefaultHasher with DeterministicHasher in\ntiming_entropy_seed()\n   - DefaultHasher uses a random seed which varies between runs\n- DeterministicHasher (FNV-1a) provides consistent hashing across\nplatforms\n\n2. Adding optional protocol_rng_seed to ProtocolConfig\n   - When set, provides fully deterministic protocol behavior\n   - Useful for replay systems, deterministic testing, and debugging\n   - New ProtocolConfig::deterministic(seed) preset for convenience\n\n3. Updating UdpProtocol to use seeded RNG for:\n   - Magic number generation (session identifiers)\n   - Sync request validation tokens\n\nThis enables fully reproducible network sessions when configured,\nessential for cross-platform determinism in rollback networking.\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
-          "timestamp": "2025-12-26T12:25:08-08:00",
-          "tree_id": "ebd87eaa42fc0bc9ae6972a7b3ae33efe6f8aa56",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/0c8e43684bbf9019783dd3325da5fe4ef2f8b313"
-        },
-        "date": 1766781001084,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 100,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 151,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 490,
-            "range": "± 21",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 730,
-            "range": "± 20",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1043,
-            "range": "± 29",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 104087,
-            "range": "± 406",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27547,
-            "range": "± 951",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1242,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1554,
-            "range": "± 107",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1555,
             "range": "± 93",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ff0f8b975bc0f1f46c40fd3c051db002f9d3643f",
+          "message": "chore(deps): bump clap from 4.5.60 to 4.6.0 (#111)\n\nBumps [clap](https://github.com/clap-rs/clap) from 4.5.60 to 4.6.0.\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/blob/master/CHANGELOG.md\">clap's\nchangelog</a>.</em></p>\n<blockquote>\n<h2>[4.6.0] - 2026-03-12</h2>\n<h3>Compatibility</h3>\n<ul>\n<li>Update MSRV to 1.85</li>\n</ul>\n<h2>[4.5.61] - 2026-03-12</h2>\n<h3>Internal</h3>\n<ul>\n<li>Update dependencies</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/9ab6dee710aa384e02ec5e9e2cfeadb2f35abf2a\"><code>9ab6dee</code></a>\nchore: Release</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/374a30dac685d492cbdae124e757afdb52dd47b6\"><code>374a30d</code></a>\ndocs: Update changelog</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/d0c8aabc000adc54fc39efa721e6caad035fc3da\"><code>d0c8aab</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6306\">#6306</a>\nfrom epage/update</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/686ce2f665f43f927c1dbd5ad63a2f989e503bb9\"><code>686ce2f</code></a>\nchore: Upgrade compatible</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/8203238de61f89b60ce1ca1672cfe20997d20a1e\"><code>8203238</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6305\">#6305</a>\nfrom epage/msrv</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/c774a892ba8bb703a9e77a16e6ebc6ff1c551868\"><code>c774a89</code></a>\ndocs: Reduce main's in doctests</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/73534f6ed3697b834743d283cedc7f529778d8a7\"><code>73534f6</code></a>\nchore: Upgrade to 2025 edition</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/dfe05a9bfe5bf49ec560e484c1abf50bcb55cd96\"><code>dfe05a9</code></a>\nchore: Bump MSRV to 1.85</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/8b41d0b8497ccaa0fb0d1d8a51f91ea2f62b3aa8\"><code>8b41d0b</code></a>\nchore: Release</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/518220f102cc34b2cf39c64efa35975a22341e36\"><code>518220f</code></a>\ndocs: Update changelog</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/clap-rs/clap/compare/clap_complete-v4.5.60...clap_complete-v4.6.0\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=clap&package-manager=cargo&previous-version=4.5.60&new-version=4.6.0)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-03-13T06:39:30-07:00",
+          "tree_id": "02d53bb70efbb25b79caaddedcf260f1bb9b2336",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/ff0f8b975bc0f1f46c40fd3c051db002f9d3643f"
+        },
+        "date": 1773409471358,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 103,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 141,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 546,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 886,
+            "range": "± 28",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1322,
+            "range": "± 30",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 105622,
+            "range": "± 411",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 24363,
+            "range": "± 302",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 867,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 869,
+            "range": "± 4",
             "unit": "ns/iter"
           },
           {
