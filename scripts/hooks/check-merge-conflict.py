@@ -20,11 +20,11 @@ def check_file(filepath: str) -> bool:
         for i, line in enumerate(content.splitlines(), 1):
             for pattern in CONFLICT_PATTERNS:
                 if pattern.match(line):
-                    print(f"Merge conflict in {filepath}:{i}", file=sys.stderr)
+                    print(f"{filepath}:{i}: merge conflict marker found", file=sys.stderr)
                     return False
         return True
     except OSError as exc:
-        print(f"Warning: cannot read {filepath}: {exc}", file=sys.stderr)
+        print(f"{filepath}:0: cannot read file: {exc}", file=sys.stderr)
         return False  # Fail if we can't read — don't let conflicts slip through
 
 

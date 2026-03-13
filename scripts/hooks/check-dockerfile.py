@@ -25,7 +25,7 @@ def check_file(filepath: Path) -> list[str]:
     try:
         lines = filepath.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as exc:
-        print(f"Warning: skipping {filepath}: {exc}", file=sys.stderr)
+        print(f"{filepath}:0: cannot read file: {exc}", file=sys.stderr)
         return []
 
     is_dockerfile = filepath.name.startswith("Dockerfile")
@@ -96,7 +96,7 @@ def main() -> int:
     if all_issues:
         print("Dockerfile anti-patterns detected:", file=sys.stderr)
         for issue in all_issues:
-            print(f"  {issue}", file=sys.stderr)
+            print(issue, file=sys.stderr)
         print(f"\n{len(all_issues)} issue(s) found.", file=sys.stderr)
         return 1
 

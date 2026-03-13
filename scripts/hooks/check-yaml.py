@@ -23,10 +23,11 @@ def check_file(filepath: str) -> bool:
         yaml.safe_load(content)
         return True
     except yaml.YAMLError as e:
-        print(f"YAML error in {filepath}: {e}", file=sys.stderr)
+        line = (e.problem_mark.line + 1) if hasattr(e, 'problem_mark') and e.problem_mark else 1
+        print(f"{filepath}:{line}: YAML error: {e}", file=sys.stderr)
         return False
     except OSError as e:
-        print(f"Cannot read {filepath}: {e}", file=sys.stderr)
+        print(f"{filepath}:0: cannot read file: {e}", file=sys.stderr)
         return False
 
 

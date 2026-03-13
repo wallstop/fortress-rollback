@@ -11,6 +11,7 @@ usage does not produce false positives.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -509,6 +510,39 @@ class TestMain:
             ["check-track-caller-async.py", str(good), str(bad)],
         )
         assert main() == 1
+
+
+class TestOutputFormat:
+    """Tests that output follows {path}:{line_number}: {message} format."""
+
+    def test_issues_start_with_path_colon_line(self, tmp_path: Path) -> None:
+        """Each issue must start with path:line: (no leading whitespace)."""
+        f = _write(tmp_path, "lib.rs", "#[track_caller]\nasync fn foo() {}\n")
+        errors = check_file(f)
+        assert len(errors) == 1
+        assert re.match(r'^.+:\d+: ', errors[0]), f"Bad format: {errors[0]}"
+        assert not errors[0].startswith(" "), f"Leading whitespace: {errors[0]}"
+
+    def test_read_error_includes_line_number(self, tmp_path: Path) -> None:
+        """Read error message must include :0: synthetic line number."""
+        path = tmp_path / "nonexistent.rs"
+        errors = check_file(path)
+        assert len(errors) == 1
+        assert ":0:" in errors[0], f"Missing :0: in read error: {errors[0]}"
+        assert re.match(r'^.+:\d+: ', errors[0]), f"Bad format: {errors[0]}"
+
+    def test_main_output_no_leading_whitespace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """main() prints issue lines without leading whitespace."""
+        f = _write(tmp_path, "bad.rs", "#[track_caller]\nasync fn foo() {}\n")
+        monkeypatch.setattr(sys, "argv", ["check-track-caller-async.py", str(f)])
+        main()
+        captured = capsys.readouterr()
+        for line in captured.err.splitlines():
+            if line and not line.startswith(("ERROR:", "Rust", "Remove")):
+                assert not line.startswith("  "), f"Leading indent: {line!r}"
 
 
 if __name__ == "__main__":

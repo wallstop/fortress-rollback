@@ -8,6 +8,7 @@ maximum on .md files under the .llm/ directory.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -145,9 +146,8 @@ class TestCheckFile:
 
         assert result is False
         captured = capsys.readouterr()
-        assert "FAIL" in captured.err
+        assert "big.md:0:" in captured.err
         assert "305" in captured.err
-        assert "big.md" in captured.err
 
     def test_pass_prints_nothing(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """Passing file produces no output."""
@@ -165,7 +165,7 @@ class TestCheckFile:
 
         assert result is False
         captured = capsys.readouterr()
-        assert "Cannot read" in captured.err
+        assert "cannot read file" in captured.err
 
 
 class TestMain:
@@ -279,6 +279,47 @@ class TestIntegration:
         md_files = find_llm_md_files(tmp_path)
         assert len(md_files) == 1
         assert check_file(md_files[0], tmp_path) is False
+
+
+class TestOutputFormat:
+    """Tests that output follows {path}:{line_number}: {message} format."""
+
+    def test_fail_output_starts_with_path_colon_line(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Failure message must start with path:line: (no leading whitespace)."""
+        filepath = _make_md_file(tmp_path, "big.md", 305)
+        check_file(filepath, tmp_path)
+        captured = capsys.readouterr()
+        for line in captured.err.splitlines():
+            if line:
+                assert re.match(r'^.+:\d+: ', line), f"Bad format: {line}"
+                assert not line.startswith(" "), f"Leading whitespace: {line}"
+
+    def test_oserror_output_includes_line_number(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Read error message must include :0: synthetic line number."""
+        nonexistent = tmp_path / "does_not_exist.md"
+        check_file(nonexistent, tmp_path)
+        captured = capsys.readouterr()
+        for line in captured.err.splitlines():
+            if line:
+                assert ":0:" in line, f"Missing :0: in read error: {line}"
+                assert re.match(r'^.+:\d+: ', line), f"Bad format: {line}"
+
+    def test_main_output_no_leading_whitespace(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """main()-equivalent prints issue lines without leading whitespace."""
+        llm_dir = tmp_path / ".llm"
+        _make_md_file(llm_dir, "bad.md", 301)
+        rc = _run_main_with_root(tmp_path, print_summary=True)
+        assert rc == 1
+        captured = capsys.readouterr()
+        for line in captured.err.splitlines():
+            if line:
+                assert not line.startswith("  "), f"Leading indent: {line!r}"
 
 
 if __name__ == "__main__":

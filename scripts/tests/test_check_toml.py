@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""
+Unit tests for check-toml.py hook.
+
+Verifies that the TOML validator correctly detects invalid TOML files
+and that output follows the {path}:{line}: {message} format.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+# Import the hook module (hyphenated filename requires importlib)
+scripts_dir = Path(__file__).parent.parent
+spec = importlib.util.spec_from_file_location(
+    "check_toml", scripts_dir / "hooks" / "check-toml.py"
+)
+check_toml = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(check_toml)
+
+check_file = check_toml.check_file
+main = check_toml.main
+HAS_TOML = check_toml.HAS_TOML
+
+
+def _write(directory: Path, name: str, content: str) -> Path:
+    """Helper to create a file with given content."""
+    filepath = directory / name
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    filepath.write_text(content, encoding="utf-8")
+    return filepath
+
+
+@pytest.mark.skipif(not HAS_TOML, reason="tomllib/tomli not available")
+class TestTomlValidation:
+    """Tests for TOML validation."""
+
+    def test_valid_toml_passes(self, tmp_path: Path) -> None:
+        """A valid TOML file passes."""
+        content = '[section]\nkey = "value"\nnumber = 42\n'
+        f = _write(tmp_path, "config.toml", content)
+        assert check_file(str(f)) is True
+
+    def test_empty_toml_passes(self, tmp_path: Path) -> None:
+        """An empty TOML file passes."""
+        f = _write(tmp_path, "empty.toml", "")
+        assert check_file(str(f)) is True
+
+    def test_invalid_toml_fails(self, tmp_path: Path) -> None:
+        """An invalid TOML file fails."""
+        f = _write(tmp_path, "bad.toml", "[section\nkey = value without quotes\n")
+        assert check_file(str(f)) is False
+
+    def test_valid_toml_with_arrays(self, tmp_path: Path) -> None:
+        """TOML with arrays passes."""
+        content = 'list = [1, 2, 3]\n\n[[items]]\nname = "a"\n\n[[items]]\nname = "b"\n'
+        f = _write(tmp_path, "arrays.toml", content)
+        assert check_file(str(f)) is True
+
+    def test_duplicate_keys_fails(self, tmp_path: Path) -> None:
+        """TOML with duplicate keys fails."""
+        content = 'key = "first"\nkey = "second"\n'
+        f = _write(tmp_path, "dup.toml", content)
+        assert check_file(str(f)) is False
+
+
+@pytest.mark.skipif(not HAS_TOML, reason="tomllib/tomli not available")
+class TestOutputFormat:
+    """Tests that output follows {path}:{line_number}: {message} format."""
+
+    def test_output_starts_with_path_colon_line(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Error output must start with path:line: (no leading whitespace)."""
+        f = _write(tmp_path, "bad.toml", "[section\nbroken\n")
+        check_file(str(f))
+        captured = capsys.readouterr()
+        for line in captured.err.splitlines():
+            if line:
+                assert re.match(r'^.+:\d+: ', line), f"Bad format: {line}"
+                assert not line.startswith(" "), f"Leading whitespace: {line}"
+
+    def test_output_contains_toml_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Error output contains 'TOML error'."""
+        f = _write(tmp_path, "bad.toml", "[section\nbroken\n")
+        check_file(str(f))
+        captured = capsys.readouterr()
+        assert "TOML error" in captured.err
+
+    def test_read_error_uses_zero_line_number(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Read error message must include :0: synthetic line number."""
+        path = tmp_path / "nonexistent.toml"
+        check_file(str(path))
+        captured = capsys.readouterr()
+        for line in captured.err.splitlines():
+            if line:
+                assert ":0:" in line, f"Missing :0: in read error: {line}"
+                assert re.match(r'^.+:\d+: ', line), f"Bad format: {line}"
+
+
+@pytest.mark.skipif(not HAS_TOML, reason="tomllib/tomli not available")
+class TestMain:
+    """Tests for the main() entry point."""
+
+    def test_main_no_args_returns_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["check-toml.py"])
+        assert main() == 0
+
+    def test_main_valid_file_returns_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        f = _write(tmp_path, "good.toml", 'key = "value"\n')
+        monkeypatch.setattr(sys, "argv", ["check-toml.py", str(f)])
+        assert main() == 0
+
+    def test_main_invalid_file_returns_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        f = _write(tmp_path, "bad.toml", "[section\nbroken\n")
+        monkeypatch.setattr(sys, "argv", ["check-toml.py", str(f)])
+        assert main() == 1
+
+    def test_main_multiple_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Returns 1 if any file is invalid."""
+        good = _write(tmp_path, "good.toml", 'key = "value"\n')
+        bad = _write(tmp_path, "bad.toml", "[section\nbroken\n")
+        monkeypatch.setattr(
+            sys, "argv", ["check-toml.py", str(good), str(bad)]
+        )
+        assert main() == 1
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -28,14 +28,14 @@ def check_file(filepath: Path, repo_root: Path) -> bool:
             rel = filepath.relative_to(repo_root)
             over = line_count - MAX_LINES
             print(
-                f"FAIL: {rel} has {line_count} lines "
+                f"{rel}:0: has {line_count} lines "
                 f"({over} over the {MAX_LINES}-line limit)",
                 file=sys.stderr,
             )
             return False
         return True
     except OSError as e:
-        print(f"Cannot read {filepath}: {e}", file=sys.stderr)
+        print(f"{filepath}:0: cannot read file: {e}", file=sys.stderr)
         return False
 
 

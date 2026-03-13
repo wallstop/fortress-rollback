@@ -173,6 +173,16 @@ repos:
         pass_filenames: true
 
       # ══════════════════════════════════════════════════════════════════════
+      # Hook quality
+      # ══════════════════════════════════════════════════════════════════════
+      - id: check-hook-output-format
+        name: check hook output format
+        entry: python scripts/hooks/check-hook-output-format.py
+        language: python
+        files: '^scripts/hooks/check-.*\.py$'
+        pass_filenames: true
+
+      # ══════════════════════════════════════════════════════════════════════
       # CI validation (skip gracefully if tools not installed)
       # ══════════════════════════════════════════════════════════════════════
       - id: actionlint

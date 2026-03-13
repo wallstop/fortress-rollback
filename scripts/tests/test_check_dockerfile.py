@@ -10,6 +10,7 @@ and eval "$(..." without command -v guard.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -275,6 +276,35 @@ class TestFileHandling:
         f = _write(tmp_path, "Dockerfile.dev", "RUN pip install foo\n")
         issues = check_file(f)
         assert len(issues) == 1
+
+
+class TestOutputFormat:
+    """Tests that output follows {path}:{line_number}: {message} format."""
+
+    def test_issues_start_with_path_colon_line(self, tmp_path: Path) -> None:
+        """Each issue must start with path:line: (no leading whitespace)."""
+        f = _write(tmp_path, "Dockerfile", "RUN pip install requests\n")
+        issues = check_file(f)
+        assert len(issues) == 1
+        # Must match path:line_number: pattern
+        assert re.match(r'^.+:\d+: ', issues[0]), f"Bad format: {issues[0]}"
+        # Must not start with whitespace
+        assert not issues[0].startswith(" "), f"Leading whitespace: {issues[0]}"
+
+    def test_main_output_no_leading_whitespace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """main() prints issue lines without leading whitespace."""
+        f = _write(tmp_path, "Dockerfile", "RUN pip install requests\n")
+        monkeypatch.setattr(sys, "argv", ["check-dockerfile.py", str(f)])
+        # Import main from the module
+        check_dockerfile.main()
+        captured = capsys.readouterr()
+        # Each non-header, non-summary line should not start with spaces
+        for line in captured.err.splitlines():
+            if line and not line.startswith(("Dockerfile anti-patterns", "\n")) and "issue(s) found" not in line:
+                assert not line.startswith("  "), f"Leading indent: {line!r}"
 
 
 if __name__ == "__main__":

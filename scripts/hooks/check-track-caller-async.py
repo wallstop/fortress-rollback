@@ -34,7 +34,7 @@ def check_file(path: Path) -> list[str]:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
         print(f"Warning: cannot read {path}: {exc}", file=sys.stderr)
-        return [f"{path}: cannot read file: {exc}"]
+        return [f"{path}:0: cannot read file: {exc}"]
 
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -84,7 +84,7 @@ def main() -> int:
     if errors:
         print("ERROR: #[track_caller] cannot be used on async fn:", file=sys.stderr)
         for err in errors:
-            print(f"  {err}", file=sys.stderr)
+            print(err, file=sys.stderr)
         print(
             "\nRust ignores or errors on #[track_caller] for async functions.",
             file=sys.stderr,

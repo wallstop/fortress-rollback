@@ -2,7 +2,6 @@
 """Validate JSON files. Cross-platform. Supports JSONC (JSON with Comments)."""
 
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -83,10 +82,10 @@ def check_file(filepath: str) -> bool:
         json.loads(content)
         return True
     except json.JSONDecodeError as e:
-        print(f"JSON error in {filepath}: {e}", file=sys.stderr)
+        print(f"{filepath}:{e.lineno}: JSON error: {e}", file=sys.stderr)
         return False
     except OSError as e:
-        print(f"Cannot read {filepath}: {e}", file=sys.stderr)
+        print(f"{filepath}:0: cannot read file: {e}", file=sys.stderr)
         return False
 
 

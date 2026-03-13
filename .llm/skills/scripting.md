@@ -28,6 +28,18 @@ trigger/detection line. Mention the trigger line in the message body:
 f"{path}:{fn_line}: #[track_caller] (line {attr_line}) on async fn ..."
 ```
 
+Never prefix issue lines with leading whitespace (e.g., `"  {issue}"`) in
+`main()` summary output -- leading spaces break the `path:line:` prefix
+that editors rely on for hyperlinking.
+
+For file-level errors where no specific line number exists (e.g., cannot
+read file), use a synthetic line number `:0:` to maintain the format:
+
+```python
+# File-level error: use :0: as synthetic line number
+f"{path}:0: cannot read file: {exc}"
+```
+
 ### Exception Handling
 
 ```python

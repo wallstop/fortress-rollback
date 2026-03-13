@@ -63,7 +63,7 @@ def check_file(filepath: Path) -> list[str]:
         return []
     except (OSError, UnicodeDecodeError) as exc:
         print(f"Warning: cannot read {filepath}: {exc}", file=sys.stderr)
-        return [f"{filepath}: cannot read file: {exc}"]
+        return [f"{filepath}:0: cannot read file: {exc}"]
 
     # Collect all functions that are inside classes (methods)
     methods_in_classes: set[int] = set()
@@ -115,7 +115,7 @@ def main() -> int:
     if all_errors:
         print("Empty test methods detected:", file=sys.stderr)
         for error in all_errors:
-            print(f"  {error}", file=sys.stderr)
+            print(error, file=sys.stderr)
         print("\nTest methods must have at least one assertion or meaningful code.", file=sys.stderr)
         return 1
 
