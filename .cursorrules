@@ -5,7 +5,7 @@
 ## Quick Commands
 
 ```bash
-cargo fmt && cargo clippy --all-targets && cargo nextest run
+cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run
 
 # Or use the convenient aliases defined in .cargo/config.toml
 cargo c && cargo t

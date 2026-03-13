@@ -17,7 +17,7 @@
 ## Quick Commands
 
 ```bash
-cargo fmt && cargo clippy --all-targets && cargo nextest run --no-capture  # Pre-commit
+cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run --no-capture  # Pre-commit
 cargo c && cargo t                        # Aliases from .cargo/config.toml
 typos                                     # Spell check (CI enforced)
 cargo test --features z3-verification -- --nocapture  # Z3 proofs (slow)
@@ -197,7 +197,7 @@ Consolidate integration tests into a single crate (`tests/it/main.rs`). Anti-pat
 
 ## Mandatory Linting
 
-- **After Rust changes:** `cargo fmt && cargo clippy --all-targets` (or `cargo c`)
+- **After Rust changes:** `cargo fmt && cargo clippy --all-targets --features tokio,json` (or `cargo c`)
 - **After workflow changes:** `actionlint` (no exceptions)
 - **After doc changes:** `cargo doc --no-deps`
 - **After markdown changes:** `npx markdownlint 'file.md' --config .markdownlint.json --fix`
@@ -205,7 +205,7 @@ Consolidate integration tests into a single crate (`tests/it/main.rs`). Anti-pat
 - **Link validation:** `./scripts/check-links.sh`
 - **Spell check:** `typos`
 - **Vale (advisory):** `vale docs/` -- checks prose quality, non-blocking in CI
-- **Full pre-commit:** `cargo fmt && cargo clippy --all-targets && cargo nextest run --no-capture`
+- **Full pre-commit:** `cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run --no-capture`
 
 ## Skill Code Examples
 
@@ -236,7 +236,7 @@ When changing public APIs, update: rustdoc comments (source of truth), README.md
 ## Quality Checklist
 
 - [ ] `cargo fmt` run
-- [ ] `cargo clippy --all-targets` passes
+- [ ] `cargo clippy --all-targets --features tokio,json` passes
 - [ ] All tests pass (`cargo nextest run`)
 - [ ] Tests for new functionality included
 - [ ] Rustdoc comments with examples
@@ -248,7 +248,7 @@ When changing public APIs, update: rustdoc comments (source of truth), README.md
 
 ## For Agents
 
-When spawning sub-agents or using Task tools: the sub-agent MUST run `cargo fmt` and verify `cargo clippy --all-targets` passes on any modified files. If the sub-agent cannot run these, the parent agent must run them after receiving changes.
+When spawning sub-agents or using Task tools: the sub-agent MUST run `cargo fmt` and verify `cargo clippy --all-targets --features tokio,json` passes on any modified files. If the sub-agent cannot run these, the parent agent must run them after receiving changes.
 
 ---
 
