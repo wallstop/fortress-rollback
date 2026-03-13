@@ -45,7 +45,7 @@ class TestSameLineDetection:
         f = _write(tmp_path, "lib.rs", "#[track_caller] async fn foo() {}\n")
         errors = check_file(f)
         assert len(errors) == 1
-        assert "line 1" in errors[0]
+        assert f"{f}:1:" in errors[0]
         assert "#[track_caller] on async fn" in errors[0]
 
     def test_track_caller_pub_async_fn_same_line(self, tmp_path: Path) -> None:
@@ -55,7 +55,7 @@ class TestSameLineDetection:
         )
         errors = check_file(f)
         assert len(errors) == 1
-        assert "line 1" in errors[0]
+        assert f"{f}:1:" in errors[0]
 
     def test_track_caller_pub_crate_async_fn_same_line(
         self, tmp_path: Path
@@ -68,7 +68,7 @@ class TestSameLineDetection:
         )
         errors = check_file(f)
         assert len(errors) == 1
-        assert "line 1" in errors[0]
+        assert f"{f}:1:" in errors[0]
 
     def test_inline_attribute_before_track_caller_async(
         self, tmp_path: Path
@@ -81,7 +81,7 @@ class TestSameLineDetection:
         )
         errors = check_file(f)
         assert len(errors) == 1
-        assert "line 1" in errors[0]
+        assert f"{f}:1:" in errors[0]
 
     def test_track_caller_unsafe_async_fn_same_line(
         self, tmp_path: Path
@@ -94,7 +94,7 @@ class TestSameLineDetection:
         )
         errors = check_file(f)
         assert len(errors) == 1
-        assert "line 1" in errors[0]
+        assert f"{f}:1:" in errors[0]
 
 
 class TestMultiLineDetection:
@@ -106,7 +106,10 @@ class TestMultiLineDetection:
         f = _write(tmp_path, "lib.rs", content)
         errors = check_file(f)
         assert len(errors) == 1
-        assert "line 2" in errors[0]
+        # path:line prefix points to the async fn (line 2)
+        assert f"{f}:2:" in errors[0]
+        # message body mentions the #[track_caller] attribute (line 1)
+        assert "(line 1)" in errors[0]
 
     def test_track_caller_with_other_attrs_then_async(
         self, tmp_path: Path
@@ -116,7 +119,10 @@ class TestMultiLineDetection:
         f = _write(tmp_path, "lib.rs", content)
         errors = check_file(f)
         assert len(errors) == 1
-        assert "line 3" in errors[0]
+        # path:line prefix points to the async fn (line 3)
+        assert f"{f}:3:" in errors[0]
+        # message body mentions the #[track_caller] attribute (line 1)
+        assert "(line 1)" in errors[0]
 
     def test_track_caller_with_comment_between(self, tmp_path: Path) -> None:
         """Comment between #[track_caller] and async fn doesn't break detection."""
@@ -124,7 +130,10 @@ class TestMultiLineDetection:
         f = _write(tmp_path, "lib.rs", content)
         errors = check_file(f)
         assert len(errors) == 1
-        assert "line 3" in errors[0]
+        # path:line prefix points to the async fn (line 3)
+        assert f"{f}:3:" in errors[0]
+        # message body mentions the #[track_caller] attribute (line 1)
+        assert "(line 1)" in errors[0]
 
     def test_track_caller_with_block_comment_between(
         self, tmp_path: Path
@@ -134,7 +143,10 @@ class TestMultiLineDetection:
         f = _write(tmp_path, "lib.rs", content)
         errors = check_file(f)
         assert len(errors) == 1
-        assert "line 3" in errors[0]
+        # path:line prefix points to the async fn (line 3)
+        assert f"{f}:3:" in errors[0]
+        # message body mentions the #[track_caller] attribute (line 1)
+        assert "(line 1)" in errors[0]
 
     def test_track_caller_stops_at_non_attr_line(
         self, tmp_path: Path
@@ -176,7 +188,10 @@ class TestMultiLineDetection:
         f = _write(tmp_path, "lib.rs", content)
         errors = check_file(f)
         assert len(errors) == 1
-        assert "line 2" in errors[0]
+        # path:line prefix points to the async fn (line 2)
+        assert f"{f}:2:" in errors[0]
+        # message body mentions the #[track_caller] attribute (line 1)
+        assert "(line 1)" in errors[0]
 
     def test_track_caller_exactly_five_lines_detected(
         self, tmp_path: Path
@@ -195,7 +210,10 @@ class TestMultiLineDetection:
         f = _write(tmp_path, "lib.rs", content)
         errors = check_file(f)
         assert len(errors) == 1
-        assert "line 6" in errors[0]
+        # path:line prefix points to the async fn (line 6)
+        assert f"{f}:6:" in errors[0]
+        # message body mentions the #[track_caller] attribute (line 1)
+        assert "(line 1)" in errors[0]
 
 
 class TestValidUsage:
@@ -276,6 +294,12 @@ class TestMultipleViolations:
         f = _write(tmp_path, "lib.rs", content)
         errors = check_file(f)
         assert len(errors) == 2
+        # First: async fn on line 2, #[track_caller] on line 1
+        assert f"{f}:2:" in errors[0]
+        assert "(line 1)" in errors[0]
+        # Second: async fn on line 5, #[track_caller] on line 4
+        assert f"{f}:5:" in errors[1]
+        assert "(line 4)" in errors[1]
 
     def test_mix_valid_and_invalid(self, tmp_path: Path) -> None:
         """Only invalid usage is flagged when mixed with valid usage."""
@@ -291,7 +315,10 @@ class TestMultipleViolations:
         f = _write(tmp_path, "lib.rs", content)
         errors = check_file(f)
         assert len(errors) == 1
-        assert "line 5" in errors[0]
+        # path:line prefix points to the async fn (line 5)
+        assert f"{f}:5:" in errors[0]
+        # message body mentions the #[track_caller] attribute (line 4)
+        assert "(line 4)" in errors[0]
 
     def test_same_line_and_multi_line_violations(
         self, tmp_path: Path
@@ -307,9 +334,11 @@ class TestMultipleViolations:
         errors = check_file(f)
         assert len(errors) == 2
         # First error: same-line on line 1
-        assert "line 1" in errors[0]
-        # Second error: multi-line, #[track_caller] on line 3, async fn on line 4
-        assert "line 4" in errors[1]
+        assert f"{f}:1:" in errors[0]
+        assert "#[track_caller] on async fn" in errors[0]
+        # Second error: multi-line, async fn on line 4, #[track_caller] on line 3
+        assert f"{f}:4:" in errors[1]
+        assert "(line 3)" in errors[1]
 
 
 class TestEdgeCases:
@@ -338,7 +367,10 @@ class TestEdgeCases:
         f = _write(tmp_path, "lib.rs", content)
         errors = check_file(f)
         assert len(errors) == 1
-        assert "line 3" in errors[0]
+        # path:line prefix points to the async fn (line 3)
+        assert f"{f}:3:" in errors[0]
+        # message body mentions the #[track_caller] attribute (line 1)
+        assert "(line 1)" in errors[0]
 
     def test_indented_track_caller_on_async_fn_detected(
         self, tmp_path: Path
@@ -353,7 +385,10 @@ class TestEdgeCases:
         f = _write(tmp_path, "lib.rs", content)
         errors = check_file(f)
         assert len(errors) == 1
-        assert "line 3" in errors[0]
+        # path:line prefix points to the async fn (line 3)
+        assert f"{f}:3:" in errors[0]
+        # message body mentions the #[track_caller] attribute (line 2)
+        assert "(line 2)" in errors[0]
 
     def test_track_caller_with_blank_lines(self, tmp_path: Path) -> None:
         """Blank lines between #[track_caller] and async fn are skipped."""
@@ -366,7 +401,10 @@ class TestEdgeCases:
         f = _write(tmp_path, "lib.rs", content)
         errors = check_file(f)
         assert len(errors) == 1
-        assert "line 4" in errors[0]
+        # path:line prefix points to the async fn (line 4)
+        assert f"{f}:4:" in errors[0]
+        # message body mentions the #[track_caller] attribute (line 1)
+        assert "(line 1)" in errors[0]
 
 
 class TestMain:
@@ -415,7 +453,8 @@ class TestMain:
         main()
         captured = capsys.readouterr()
         assert "ERROR: #[track_caller] cannot be used on async fn:" in captured.out
-        assert "#[track_caller] on async fn" in captured.out
+        assert "#[track_caller]" in captured.out
+        assert "on async fn" in captured.out
         assert "not supported by Rust" in captured.out
 
     def test_main_skips_non_rs_files(

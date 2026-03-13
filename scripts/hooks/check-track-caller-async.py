@@ -48,7 +48,7 @@ def check_file(path: Path) -> list[str]:
             if _ASYNC_FN_RE.search(stripped):
                 errors.append(
                     f"{path}:{i + 1}: #[track_caller] on async fn "
-                    f"(line {i + 1}) is not supported by Rust"
+                    f"is not supported by Rust"
                 )
                 continue
             # Look ahead up to 5 lines for an async fn
@@ -61,8 +61,8 @@ def check_file(path: Path) -> list[str]:
                     continue
                 if _ASYNC_FN_RE.search(next_line):
                     errors.append(
-                        f"{path}:{i + 1}: #[track_caller] on async fn "
-                        f"(line {j + 1}) is not supported by Rust"
+                        f"{path}:{j + 1}: #[track_caller] (line {i + 1}) "
+                        f"on async fn is not supported by Rust"
                     )
                     break
                 # Stop lookahead if we hit a non-attribute, non-blank line

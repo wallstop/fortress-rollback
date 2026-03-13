@@ -15,6 +15,19 @@
 - **Errors to stderr**: `print("ERROR: ...", file=sys.stderr)`
 - **No `shell=True`** in subprocess calls
 
+### Error Reporting in Lint Scripts
+
+Lint hooks must use `{path}:{line_number}: {message}` format so editors
+hyperlink to the correct location. When a violation spans multiple lines
+(e.g., attribute on line A, target on line B), the `path:line` prefix
+must point to the **violation site** (where the fix is needed), not the
+trigger/detection line. Mention the trigger line in the message body:
+
+```python
+# Multi-line: prefix → async fn line, body → attribute line
+f"{path}:{fn_line}: #[track_caller] (line {attr_line}) on async fn ..."
+```
+
 ### Exception Handling
 
 ```python
