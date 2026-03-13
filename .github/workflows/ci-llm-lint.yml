@@ -10,7 +10,7 @@ jobs:
   llm-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Both scripts use stdlib only (pathlib, re, sys) — no pip install needed
       - uses: actions/setup-python@v6
         with:
