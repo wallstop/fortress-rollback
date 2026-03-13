@@ -167,6 +167,18 @@ class TestCheckFile:
         captured = capsys.readouterr()
         assert "cannot read file" in captured.err
 
+    def test_unicode_decode_error_returns_false(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Invalid UTF-8 file triggers UnicodeDecodeError and returns False."""
+        filepath = tmp_path / "bad_encoding.md"
+        filepath.write_bytes(b"\x80\x81\x82 invalid utf8")
+        result = check_file(filepath, tmp_path)
+
+        assert result is False
+        captured = capsys.readouterr()
+        assert "cannot read file" in captured.err
+
 
 class TestMain:
     """Tests for the main() entry point and return codes.

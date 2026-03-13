@@ -42,6 +42,45 @@ f"{path}:0: cannot read file: {exc}"
 
 ### Exception Handling
 
+#### read\_text() Exceptions
+
+`path.read_text(encoding="utf-8")` can raise both `OSError` (missing/locked file)
+and `UnicodeDecodeError` (non-UTF-8 bytes). Always catch both:
+
+```python
+# WRONG                              # CORRECT
+except OSError as e:                  except (OSError, UnicodeDecodeError) as e:
+    ...                                   ...
+```
+
+Alternative: `errors="replace"` for best-effort reading (grep-like hooks).
+
+#### Read Error Propagation
+
+Hooks that cannot read a file must **fail**, not silently pass. Return the error
+in the issues list so `main()` sees it:
+
+```python
+except (OSError, UnicodeDecodeError) as exc:
+    msg = f"{path}:0: cannot read file: {exc}"
+    print(msg, file=sys.stderr)
+    return [msg]  # NOT return [] -- that silently passes
+```
+
+#### Parse Error Line Numbers
+
+Extract the real line number from parse exceptions instead of hard-coding `:1:`:
+
+```python
+line = getattr(e, "lineno", 1) or 1  # fallback to 1
+print(f"{path}:{line}: TOML error: {e}", file=sys.stderr)
+```
+
+Line number attributes: `tomllib.TOMLDecodeError.lineno`,
+`json.JSONDecodeError.lineno`, `yaml.YAMLError.problem_mark.line` (0-based).
+
+#### General Pattern
+
 ```python
 # WRONG: silent swallowing
 try:
@@ -121,18 +160,7 @@ Methods: `test_empty_input_returns_empty_string`, `test_unclosed_div_is_handled_
 
 ### sed -i (Critical)
 
-The #1 cross-platform `sed` failure:
-
-```bash
-# WRONG on macOS:
-sed -i 's/old/new/g' file.txt
-
-# PORTABLE: use backup extension, then remove
-sed -i.bak 's/old/new/g' file.txt && rm file.txt.bak
-
-# ALTERNATIVE: temp file pattern
-sed 's/old/new/g' file.txt > file.txt.tmp && mv file.txt.tmp file.txt
-```
+The #1 cross-platform `sed` failure. Portable: `sed -i.bak 's/.../g' f && rm f.bak`
 
 ### Portable Patterns Quick Reference
 
@@ -164,48 +192,12 @@ sed 's/old/new/g' file.txt > file.txt.tmp && mv file.txt.tmp file.txt
 
 ### Best Practices
 
-```bash
-#!/bin/bash
-set -euo pipefail        # Strict mode
-
-# Check dependencies
-command -v jq >/dev/null 2>&1 || { echo "Error: jq required" >&2; exit 1; }
-
-# Always quote variables
-rm "$file"
-
-# Use $() not backticks
-result=$(command)
-
-# Tool availability with fallback
-if command -v sd &>/dev/null; then
-    sd 'pattern' 'replacement' file
-else
-    sed -i.bak -E 's|pattern|replacement|g' file && rm -f file.bak
-fi
-```
-
-### Platform Detection
-
-```bash
-case "$(uname -s)" in
-    Linux*)  OS=linux ;;
-    Darwin*) OS=macos ;;
-    MINGW*|CYGWIN*) OS=windows ;;
-    *)       OS=unknown ;;
-esac
-```
-
-### CI-Specific
-
-```yaml
-# GitHub Actions: use bash explicitly
-- name: Run script
-  shell: bash
-  run: |
-    set -euo pipefail
-    ./scripts/my-script.sh
-```
+- `set -euo pipefail` at the top of every script
+- `command -v tool >/dev/null 2>&1 || { echo "Error" >&2; exit 1; }` for deps
+- Always quote variables: `rm "$file"`
+- Use `$()` not backticks
+- Platform detection: `case "$(uname -s)" in Linux*) ... ;; Darwin*) ... ;; esac`
+- GitHub Actions: always set `shell: bash` and `set -euo pipefail`
 
 ---
 

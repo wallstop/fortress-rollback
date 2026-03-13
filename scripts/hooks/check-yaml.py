@@ -26,7 +26,7 @@ def check_file(filepath: str) -> bool:
         line = (e.problem_mark.line + 1) if hasattr(e, 'problem_mark') and e.problem_mark else 1
         print(f"{filepath}:{line}: YAML error: {e}", file=sys.stderr)
         return False
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         print(f"{filepath}:0: cannot read file: {e}", file=sys.stderr)
         return False
 

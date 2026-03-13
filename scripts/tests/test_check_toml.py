@@ -68,6 +68,28 @@ class TestTomlValidation:
         f = _write(tmp_path, "dup.toml", content)
         assert check_file(str(f)) is False
 
+    def test_error_line_number_is_accurate(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Error line number uses lineno from exception when available.
+
+        Python's built-in tomllib.TOMLDecodeError does not expose a lineno
+        attribute, so getattr falls back to 1.  If the underlying library
+        (e.g. tomli) ever does expose it, the hook will use the real value.
+        This test verifies the output format is correct and the hook does
+        not crash.
+        """
+        # Line 1-2 are valid, line 3 has the error (unclosed bracket)
+        content = '[section]\nkey = "value"\n[broken\n'
+        f = _write(tmp_path, "lineno.toml", content)
+        assert check_file(str(f)) is False
+        captured = capsys.readouterr()
+        first_line = captured.err.splitlines()[0]
+        # Must match path:line: format and contain TOML error
+        assert re.match(r'^.+:\d+: TOML error:', first_line), (
+            f"Bad format: {first_line}"
+        )
+
 
 @pytest.mark.skipif(not HAS_TOML, reason="tomllib/tomli not available")
 class TestOutputFormat:

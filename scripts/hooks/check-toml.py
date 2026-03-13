@@ -27,7 +27,8 @@ def check_file(filepath: str) -> bool:
         tomllib.loads(content.decode("utf-8"))
         return True
     except (ValueError, UnicodeDecodeError) as e:
-        print(f"{filepath}:1: TOML error: {e}", file=sys.stderr)
+        line = getattr(e, "lineno", 1) or 1
+        print(f"{filepath}:{line}: TOML error: {e}", file=sys.stderr)
         return False
     except OSError as e:
         print(f"{filepath}:0: cannot read file: {e}", file=sys.stderr)

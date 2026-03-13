@@ -34,7 +34,7 @@ def extract_metadata(filepath: Path) -> tuple[str, str]:
     """
     try:
         content = filepath.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         print(f"Warning: cannot read {filepath}: {exc}", file=sys.stderr)
         return DEFAULT_CATEGORY, filepath.stem
 
@@ -122,7 +122,7 @@ def main() -> int:
     if index_path.is_file():
         try:
             existing = index_path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             pass
 
     if new_content == existing:

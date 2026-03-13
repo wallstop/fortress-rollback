@@ -97,6 +97,32 @@ class TestSameLineDetection:
         assert len(errors) == 1
         assert f"{f}:1:" in errors[0]
 
+    def test_track_caller_async_unsafe_fn_same_line(
+        self, tmp_path: Path
+    ) -> None:
+        """#[track_caller] async unsafe fn on same line is detected."""
+        f = _write(
+            tmp_path,
+            "lib.rs",
+            "#[track_caller] async unsafe fn foo() {}\n",
+        )
+        errors = check_file(f)
+        assert len(errors) == 1
+        assert f"{f}:1:" in errors[0]
+
+    def test_track_caller_pub_async_unsafe_fn(
+        self, tmp_path: Path
+    ) -> None:
+        """#[track_caller] pub async unsafe fn on same line is detected."""
+        f = _write(
+            tmp_path,
+            "lib.rs",
+            "#[track_caller] pub async unsafe fn foo() {}\n",
+        )
+        errors = check_file(f)
+        assert len(errors) == 1
+        assert f"{f}:1:" in errors[0]
+
 
 class TestMultiLineDetection:
     """Tests for existing lookahead behavior across multiple lines."""
@@ -186,6 +212,19 @@ class TestMultiLineDetection:
     ) -> None:
         """#[track_caller] then unsafe async fn on next line is detected."""
         content = "#[track_caller]\nunsafe async fn foo() {}\n"
+        f = _write(tmp_path, "lib.rs", content)
+        errors = check_file(f)
+        assert len(errors) == 1
+        # path:line prefix points to the async fn (line 2)
+        assert f"{f}:2:" in errors[0]
+        # message body mentions the #[track_caller] attribute (line 1)
+        assert "(line 1)" in errors[0]
+
+    def test_track_caller_async_unsafe_fn_multi_line(
+        self, tmp_path: Path
+    ) -> None:
+        """#[track_caller] then async unsafe fn on next line is detected."""
+        content = "#[track_caller]\nasync unsafe fn foo() {}\n"
         f = _write(tmp_path, "lib.rs", content)
         errors = check_file(f)
         assert len(errors) == 1

@@ -254,10 +254,24 @@ class TestFileHandling:
         issues = check_file(f)
         assert issues == []
 
-    def test_nonexistent_file_returns_empty(self, tmp_path: Path) -> None:
-        """Nonexistent file returns empty list with stderr warning."""
+    def test_nonexistent_file_returns_error(self, tmp_path: Path) -> None:
+        """Nonexistent file returns a non-empty issues list."""
         issues = check_file(tmp_path / "nonexistent")
-        assert issues == []
+        assert len(issues) == 1
+        assert "cannot read file" in issues[0]
+
+    def test_unreadable_file_causes_main_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """main() returns 1 when a file cannot be read."""
+        nonexistent = tmp_path / "Dockerfile"
+        # Don't create the file -- it won't exist
+        monkeypatch.setattr(
+            sys, "argv", ["check-dockerfile.py", str(nonexistent)]
+        )
+        assert check_dockerfile.main() == 1
 
     def test_multiple_issues_in_one_file(self, tmp_path: Path) -> None:
         """Multiple anti-patterns in one file are all detected."""

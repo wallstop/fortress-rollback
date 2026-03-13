@@ -24,7 +24,7 @@ from pathlib import Path
 # Matches #[track_caller] (possibly with leading whitespace or other attrs on
 # the same line) followed by an async fn within a few lines.
 _TRACK_CALLER_RE = re.compile(r"#\[track_caller\]")
-_ASYNC_FN_RE = re.compile(r"\basync\s+fn\b")
+_ASYNC_FN_RE = re.compile(r"\basync\s+(?:unsafe\s+)?fn\b")
 
 
 def check_file(path: Path) -> list[str]:

@@ -169,6 +169,16 @@ class TestOutputFormat:
                 assert ":0:" in line, f"Missing :0: in read error: {line}"
                 assert re.match(r'^.+:\d+: ', line), f"Bad format: {line}"
 
+    def test_unicode_decode_error_handled(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Invalid UTF-8 file returns False and outputs :0: format."""
+        path = tmp_path / "bad_encoding.json"
+        path.write_bytes(b"\x80\x81\x82 invalid utf8")
+        assert check_file(str(path)) is False
+        captured = capsys.readouterr()
+        assert ":0:" in captured.err
+
 
 class TestMain:
     """Tests for the main() entry point."""

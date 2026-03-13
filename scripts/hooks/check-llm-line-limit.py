@@ -34,7 +34,7 @@ def check_file(filepath: Path, repo_root: Path) -> bool:
             )
             return False
         return True
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         print(f"{filepath}:0: cannot read file: {e}", file=sys.stderr)
         return False
 

@@ -84,7 +84,7 @@ def check_file(filepath: str) -> bool:
     except json.JSONDecodeError as e:
         print(f"{filepath}:{e.lineno}: JSON error: {e}", file=sys.stderr)
         return False
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         print(f"{filepath}:0: cannot read file: {e}", file=sys.stderr)
         return False
 
