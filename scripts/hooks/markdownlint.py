@@ -26,8 +26,8 @@ def main() -> int:
     # Find markdownlint executable
     markdownlint = shutil.which("markdownlint")
     if markdownlint is None:
-        print("markdownlint not found. Install with: npm install -g markdownlint-cli")
-        print("Skipping markdown lint check.")
+        print("markdownlint not found. Install with: npm install -g markdownlint-cli", file=sys.stderr)
+        print("Skipping markdown lint check.", file=sys.stderr)
         return 0  # Don't fail if tool not available (Windows compatibility)
 
     # Build command with project configuration

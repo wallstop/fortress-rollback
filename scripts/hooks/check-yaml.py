@@ -23,10 +23,10 @@ def check_file(filepath: str) -> bool:
         yaml.safe_load(content)
         return True
     except yaml.YAMLError as e:
-        print(f"YAML error in {filepath}: {e}")
+        print(f"YAML error in {filepath}: {e}", file=sys.stderr)
         return False
     except OSError as e:
-        print(f"Cannot read {filepath}: {e}")
+        print(f"Cannot read {filepath}: {e}", file=sys.stderr)
         return False
 
 
@@ -35,7 +35,7 @@ def main() -> int:
         return 0
 
     if not HAS_YAML:
-        print("Warning: PyYAML not installed, skipping YAML validation")
+        print("Warning: PyYAML not installed, skipping YAML validation", file=sys.stderr)
         return 0
 
     all_valid = True

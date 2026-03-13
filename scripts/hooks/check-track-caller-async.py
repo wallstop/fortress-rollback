@@ -32,8 +32,9 @@ def check_file(path: Path) -> list[str]:
     errors: list[str] = []
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return errors
+    except OSError as exc:
+        print(f"Warning: cannot read {path}: {exc}", file=sys.stderr)
+        return [f"{path}: cannot read file: {exc}"]
 
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -81,13 +82,14 @@ def main() -> int:
             errors.extend(check_file(path))
 
     if errors:
-        print("ERROR: #[track_caller] cannot be used on async fn:")
+        print("ERROR: #[track_caller] cannot be used on async fn:", file=sys.stderr)
         for err in errors:
-            print(f"  {err}")
+            print(f"  {err}", file=sys.stderr)
         print(
-            "\nRust ignores or errors on #[track_caller] for async functions."
+            "\nRust ignores or errors on #[track_caller] for async functions.",
+            file=sys.stderr,
         )
-        print("Remove the attribute or convert to a sync helper function.")
+        print("Remove the attribute or convert to a sync helper function.", file=sys.stderr)
         return 1
     return 0
 

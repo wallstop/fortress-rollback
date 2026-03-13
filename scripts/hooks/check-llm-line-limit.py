@@ -29,12 +29,13 @@ def check_file(filepath: Path, repo_root: Path) -> bool:
             over = line_count - MAX_LINES
             print(
                 f"FAIL: {rel} has {line_count} lines "
-                f"({over} over the {MAX_LINES}-line limit)"
+                f"({over} over the {MAX_LINES}-line limit)",
+                file=sys.stderr,
             )
             return False
         return True
     except OSError as e:
-        print(f"Cannot read {filepath}: {e}")
+        print(f"Cannot read {filepath}: {e}", file=sys.stderr)
         return False
 
 
@@ -52,7 +53,8 @@ def main() -> int:
 
     if not all_ok:
         print(
-            f"\nAll .md files under .llm/ must be {MAX_LINES} lines or fewer."
+            f"\nAll .md files under .llm/ must be {MAX_LINES} lines or fewer.",
+            file=sys.stderr,
         )
         return 1
 

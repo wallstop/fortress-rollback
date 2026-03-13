@@ -83,10 +83,10 @@ def check_file(filepath: str) -> bool:
         json.loads(content)
         return True
     except json.JSONDecodeError as e:
-        print(f"JSON error in {filepath}: {e}")
+        print(f"JSON error in {filepath}: {e}", file=sys.stderr)
         return False
     except OSError as e:
-        print(f"Cannot read {filepath}: {e}")
+        print(f"Cannot read {filepath}: {e}", file=sys.stderr)
         return False
 
 

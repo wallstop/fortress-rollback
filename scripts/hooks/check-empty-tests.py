@@ -58,11 +58,12 @@ def check_file(filepath: Path) -> list[str]:
     try:
         content = filepath.read_text(encoding="utf-8")
         tree = ast.parse(content, filename=str(filepath))
-    except (SyntaxError, OSError, UnicodeDecodeError):
-        # SyntaxError: Let other tools catch syntax errors
-        # OSError: File not readable (permissions, deleted, etc.)
-        # UnicodeDecodeError: Non-UTF-8 files (rare for Python tests)
+    except SyntaxError:
+        # Let other tools catch syntax errors
         return []
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"Warning: cannot read {filepath}: {exc}", file=sys.stderr)
+        return [f"{filepath}: cannot read file: {exc}"]
 
     # Collect all functions that are inside classes (methods)
     methods_in_classes: set[int] = set()
@@ -112,10 +113,10 @@ def main() -> int:
         all_errors.extend(errors)
 
     if all_errors:
-        print("Empty test methods detected:")
+        print("Empty test methods detected:", file=sys.stderr)
         for error in all_errors:
-            print(f"  {error}")
-        print("\nTest methods must have at least one assertion or meaningful code.")
+            print(f"  {error}", file=sys.stderr)
+        print("\nTest methods must have at least one assertion or meaningful code.", file=sys.stderr)
         return 1
 
     return 0

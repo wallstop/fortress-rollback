@@ -145,9 +145,9 @@ class TestCheckFile:
 
         assert result is False
         captured = capsys.readouterr()
-        assert "FAIL" in captured.out
-        assert "305" in captured.out
-        assert "big.md" in captured.out
+        assert "FAIL" in captured.err
+        assert "305" in captured.err
+        assert "big.md" in captured.err
 
     def test_pass_prints_nothing(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """Passing file produces no output."""
@@ -165,7 +165,7 @@ class TestCheckFile:
 
         assert result is False
         captured = capsys.readouterr()
-        assert "Cannot read" in captured.out
+        assert "Cannot read" in captured.err
 
 
 class TestMain:
@@ -202,7 +202,7 @@ class TestMain:
 
         _run_main_with_root(tmp_path, print_summary=True)
         captured = capsys.readouterr()
-        assert "must be 300 lines or fewer" in captured.out
+        assert "must be 300 lines or fewer" in captured.err
 
 
 def _run_main_with_root(repo_root: Path, *, print_summary: bool = False) -> int:
@@ -220,7 +220,7 @@ def _run_main_with_root(repo_root: Path, *, print_summary: bool = False) -> int:
             all_ok = False
     if not all_ok:
         if print_summary:
-            print(f"\nAll .md files under .llm/ must be {MAX_LINES} lines or fewer.")
+            print(f"\nAll .md files under .llm/ must be {MAX_LINES} lines or fewer.", file=sys.stderr)
         return 1
     return 0
 

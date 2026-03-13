@@ -94,10 +94,10 @@ def main() -> int:
         all_issues.extend(issues)
 
     if all_issues:
-        print("Dockerfile anti-patterns detected:")
+        print("Dockerfile anti-patterns detected:", file=sys.stderr)
         for issue in all_issues:
-            print(f"  {issue}")
-        print(f"\n{len(all_issues)} issue(s) found.")
+            print(f"  {issue}", file=sys.stderr)
+        print(f"\n{len(all_issues)} issue(s) found.", file=sys.stderr)
         return 1
 
     return 0

@@ -344,10 +344,32 @@ class TestMultipleViolations:
 class TestEdgeCases:
     """Tests for edge cases and boundary conditions."""
 
-    def test_nonexistent_file_returns_empty(self, tmp_path: Path) -> None:
-        """Nonexistent file returns an empty error list."""
-        errors = check_file(tmp_path / "nonexistent.rs")
-        assert errors == []
+    def test_nonexistent_file_reports_error(self, tmp_path: Path) -> None:
+        """Nonexistent file returns an error about read failure."""
+        path = tmp_path / "nonexistent.rs"
+        errors = check_file(path)
+        assert len(errors) == 1
+        assert "nonexistent.rs" in errors[0]
+
+    def test_nonexistent_file_prints_warning_to_stderr(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Nonexistent file prints a warning to stderr."""
+        path = tmp_path / "nonexistent.rs"
+        check_file(path)
+        captured = capsys.readouterr()
+        assert "nonexistent.rs" in captured.err
+
+    def test_unreadable_file_reports_error(self, tmp_path: Path) -> None:
+        """Unreadable file returns an error about read failure."""
+        f = _write(tmp_path, "lib.rs", "#[track_caller]\nasync fn foo() {}\n")
+        f.chmod(0o000)
+        try:
+            errors = check_file(f)
+            assert len(errors) == 1
+            assert str(f) in errors[0]
+        finally:
+            f.chmod(0o644)  # Restore permissions for cleanup
 
     def test_track_caller_at_end_of_file(self, tmp_path: Path) -> None:
         """#[track_caller] on last line with no async fn after is fine."""
@@ -443,7 +465,7 @@ class TestMain:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """Verify the output format includes error details."""
+        """Verify the output format includes error details on stderr."""
         f = _write(
             tmp_path, "bad.rs", "#[track_caller]\nasync fn foo() {}\n"
         )
@@ -452,10 +474,10 @@ class TestMain:
         )
         main()
         captured = capsys.readouterr()
-        assert "ERROR: #[track_caller] cannot be used on async fn:" in captured.out
-        assert "#[track_caller]" in captured.out
-        assert "on async fn" in captured.out
-        assert "not supported by Rust" in captured.out
+        assert "ERROR: #[track_caller] cannot be used on async fn:" in captured.err
+        assert "#[track_caller]" in captured.err
+        assert "on async fn" in captured.err
+        assert "not supported by Rust" in captured.err
 
     def test_main_skips_non_rs_files(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

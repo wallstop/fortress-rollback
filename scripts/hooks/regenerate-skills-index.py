@@ -34,7 +34,8 @@ def extract_metadata(filepath: Path) -> tuple[str, str]:
     """
     try:
         content = filepath.read_text(encoding="utf-8")
-    except OSError:
+    except OSError as exc:
+        print(f"Warning: cannot read {filepath}: {exc}", file=sys.stderr)
         return DEFAULT_CATEGORY, filepath.stem
 
     category = DEFAULT_CATEGORY
@@ -129,16 +130,17 @@ def main() -> int:
 
     if check_only:
         print(
-            f"Skills index is out-of-date: {index_path.relative_to(repo_root)}"
+            f"Skills index is out-of-date: {index_path.relative_to(repo_root)}",
+            file=sys.stderr,
         )
-        print("Run 'python scripts/hooks/regenerate-skills-index.py' to fix.")
+        print("Run 'python scripts/hooks/regenerate-skills-index.py' to fix.", file=sys.stderr)
         return 1
 
     # Write updated index
     try:
         index_path.write_text(new_content, encoding="utf-8")
     except OSError as e:
-        print(f"Cannot write {index_path}: {e}")
+        print(f"Cannot write {index_path}: {e}", file=sys.stderr)
         return 1
 
     print(f"Updated {index_path.relative_to(repo_root)}")

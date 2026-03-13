@@ -27,7 +27,7 @@ def check_file(filepath: str) -> bool:
         tomllib.loads(content.decode("utf-8"))
         return True
     except Exception as e:
-        print(f"TOML error in {filepath}: {e}")
+        print(f"TOML error in {filepath}: {e}", file=sys.stderr)
         return False
 
 
@@ -36,7 +36,7 @@ def main() -> int:
         return 0
 
     if not HAS_TOML:
-        print("Warning: tomllib/tomli not available, skipping TOML validation")
+        print("Warning: tomllib/tomli not available, skipping TOML validation", file=sys.stderr)
         return 0
 
     all_valid = True
