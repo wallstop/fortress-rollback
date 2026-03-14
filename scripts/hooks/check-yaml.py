@@ -11,6 +11,18 @@ except ImportError:
     HAS_YAML = False
 
 
+def _display_path(filepath: str | Path) -> str:
+    """Convert a file path to a relative display path.
+
+    Pre-commit sets CWD to the repo root, so paths relative to CWD
+    are also relative to the project root.
+    """
+    try:
+        return str(Path(filepath).resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(filepath)
+
+
 def check_file(filepath: str) -> bool:
     """Check if YAML file is valid. Returns True if valid."""
     if not HAS_YAML:
@@ -24,10 +36,10 @@ def check_file(filepath: str) -> bool:
         return True
     except yaml.YAMLError as e:
         line = (e.problem_mark.line + 1) if hasattr(e, 'problem_mark') and e.problem_mark else 1
-        print(f"{filepath}:{line}: YAML error: {e}", file=sys.stderr)
+        print(f"{_display_path(filepath)}:{line}: YAML error: {e}", file=sys.stderr)
         return False
     except (OSError, UnicodeDecodeError) as e:
-        print(f"{filepath}:0: cannot read file: {e}", file=sys.stderr)
+        print(f"{_display_path(filepath)}:0: cannot read file: {e}", file=sys.stderr)
         return False
 
 

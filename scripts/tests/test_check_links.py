@@ -346,5 +346,29 @@ class TestFailClosedAnchorValidation:
             target.chmod(0o644)
 
 
+class TestRelativePaths:
+    """Tests that _rel() converts absolute paths to relative."""
+
+    def test_rel_converts_absolute_to_relative(self, tmp_path: Path) -> None:
+        """Absolute path under root is converted to relative."""
+        sub = tmp_path / "docs"
+        sub.mkdir()
+        f = sub / "guide.md"
+        f.write_text("# Guide\n", encoding="utf-8")
+        result = check_links._rel(f, tmp_path)
+        assert result == Path("docs") / "guide.md"
+
+    def test_rel_fallback_when_outside_root(self, tmp_path: Path) -> None:
+        """Path outside root falls back to original path."""
+        other = tmp_path / "other"
+        other.mkdir()
+        root = tmp_path / "root"
+        root.mkdir()
+        target = other / "file.md"
+        target.write_text("# File\n", encoding="utf-8")
+        result = check_links._rel(target, root)
+        assert result == target
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -16,6 +16,18 @@ except ImportError:
         HAS_TOML = False
 
 
+def _display_path(filepath: str | Path) -> str:
+    """Convert a file path to a relative display path.
+
+    Pre-commit sets CWD to the repo root, so paths relative to CWD
+    are also relative to the project root.
+    """
+    try:
+        return str(Path(filepath).resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(filepath)
+
+
 def check_file(filepath: str) -> bool:
     """Check if TOML file is valid. Returns True if valid."""
     if not HAS_TOML:
@@ -27,14 +39,14 @@ def check_file(filepath: str) -> bool:
         tomllib.loads(content.decode("utf-8"))
         return True
     except UnicodeDecodeError as e:
-        print(f"{filepath}:0: cannot read file: {e}", file=sys.stderr)
+        print(f"{_display_path(filepath)}:0: cannot read file: {e}", file=sys.stderr)
         return False
     except ValueError as e:
         line = getattr(e, "lineno", 1) or 1
-        print(f"{filepath}:{line}: TOML error: {e}", file=sys.stderr)
+        print(f"{_display_path(filepath)}:{line}: TOML error: {e}", file=sys.stderr)
         return False
     except OSError as e:
-        print(f"{filepath}:0: cannot read file: {e}", file=sys.stderr)
+        print(f"{_display_path(filepath)}:0: cannot read file: {e}", file=sys.stderr)
         return False
 
 

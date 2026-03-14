@@ -5,6 +5,18 @@ import sys
 from pathlib import Path
 
 
+def _display_path(filepath: str | Path) -> str:
+    """Convert a file path to a relative display path.
+
+    Pre-commit sets CWD to the repo root, so paths relative to CWD
+    are also relative to the project root.
+    """
+    try:
+        return str(Path(filepath).resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(filepath)
+
+
 def fix_file(filepath: str) -> bool | None:
     """Remove trailing whitespace from a file.
 
@@ -37,11 +49,11 @@ def fix_file(filepath: str) -> bool | None:
 
         if modified:
             path.write_text("".join(fixed_lines), encoding="utf-8")
-            print(f"Fixed: {filepath}")
+            print(f"Fixed: {_display_path(filepath)}")
 
         return modified
     except (OSError, UnicodeDecodeError) as exc:
-        print(f"{filepath}:0: cannot read file: {exc}", file=sys.stderr)
+        print(f"{_display_path(filepath)}:0: cannot read file: {exc}", file=sys.stderr)
         return None
 
 

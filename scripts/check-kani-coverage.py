@@ -26,6 +26,19 @@ def get_project_root() -> Path:
     return get_script_dir().parent
 
 
+def _display_path(path: Path, project_root: Path) -> Path:
+    """Convert an absolute path to a project-relative display path.
+
+    Unlike the CWD-based ``_display_path`` in argv-receiving hook scripts,
+    this variant takes an explicit *project_root* because the script discovers
+    files via ``rglob()`` and always knows its own root.
+    """
+    try:
+        return path.relative_to(project_root)
+    except ValueError:
+        return path
+
+
 def find_source_proofs(project_root: Path) -> set[str]:
     """Find all proof function names in source code."""
     proofs = set()
@@ -54,7 +67,7 @@ def find_source_proofs(project_root: Path) -> set[str]:
                             break
 
         except (OSError, UnicodeDecodeError) as e:
-            print(f"{rs_file}:0: cannot read file: {e}", file=sys.stderr)
+            print(f"{_display_path(rs_file, project_root)}:0: cannot read file: {e}", file=sys.stderr)
 
     return proofs
 
@@ -65,7 +78,7 @@ def find_script_proofs(project_root: Path) -> set[str]:
     verify_script = project_root / "scripts" / "verify-kani.sh"
 
     if not verify_script.exists():
-        print(f"{verify_script}:0: file not found", file=sys.stderr)
+        print(f"{_display_path(verify_script, project_root)}:0: file not found", file=sys.stderr)
         return proofs
 
     try:
@@ -79,7 +92,7 @@ def find_script_proofs(project_root: Path) -> set[str]:
             proofs.add(match.group(1))
 
     except (OSError, UnicodeDecodeError) as e:
-        print(f"{verify_script}:0: cannot read file: {e}", file=sys.stderr)
+        print(f"{_display_path(verify_script, project_root)}:0: cannot read file: {e}", file=sys.stderr)
 
     return proofs
 
@@ -113,7 +126,7 @@ def find_script_proof_tiers(project_root: Path) -> dict[str, int]:
                     proof_tiers[proof_match.group(1)] = tier
 
     except (OSError, UnicodeDecodeError) as e:
-        print(f"{verify_script}:0: cannot read file: {e}", file=sys.stderr)
+        print(f"{_display_path(verify_script, project_root)}:0: cannot read file: {e}", file=sys.stderr)
 
     return proof_tiers
 
@@ -201,7 +214,7 @@ def check_unwind_attributes(
                         advisories.append((fn_name, str(rel_path)))
 
         except (OSError, UnicodeDecodeError) as e:
-            print(f"{rs_file}:0: cannot read file: {e}", file=sys.stderr)
+            print(f"{_display_path(rs_file, project_root)}:0: cannot read file: {e}", file=sys.stderr)
 
     has_errors = False
 

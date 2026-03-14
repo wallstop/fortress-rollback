@@ -21,6 +21,18 @@ import sys
 from pathlib import Path
 
 
+def _display_path(filepath: str | Path) -> str:
+    """Convert a file path to a relative display path.
+
+    Pre-commit sets CWD to the repo root, so paths relative to CWD
+    are also relative to the project root.
+    """
+    try:
+        return str(Path(filepath).resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(filepath)
+
+
 # Matches #[track_caller] (possibly with leading whitespace or other attrs on
 # the same line) followed by an async fn within a few lines.
 _TRACK_CALLER_RE = re.compile(r"#\[track_caller\]")
@@ -33,7 +45,7 @@ def check_file(path: Path) -> list[str]:
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
-        return [f"{path}:0: cannot read file: {exc}"]
+        return [f"{_display_path(path)}:0: cannot read file: {exc}"]
 
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -47,7 +59,7 @@ def check_file(path: Path) -> list[str]:
             # Check if async fn is on the same line as #[track_caller]
             if _ASYNC_FN_RE.search(stripped):
                 errors.append(
-                    f"{path}:{i + 1}: #[track_caller] on async fn "
+                    f"{_display_path(path)}:{i + 1}: #[track_caller] on async fn "
                     f"is not supported by Rust"
                 )
                 continue
@@ -61,7 +73,7 @@ def check_file(path: Path) -> list[str]:
                     continue
                 if _ASYNC_FN_RE.search(next_line):
                     errors.append(
-                        f"{path}:{j + 1}: #[track_caller] (line {i + 1}) "
+                        f"{_display_path(path)}:{j + 1}: #[track_caller] (line {i + 1}) "
                         f"on async fn is not supported by Rust"
                     )
                     break

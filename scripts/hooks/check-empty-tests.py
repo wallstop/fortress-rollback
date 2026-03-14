@@ -15,6 +15,18 @@ import sys
 from pathlib import Path
 
 
+def _display_path(filepath: str | Path) -> str:
+    """Convert a file path to a relative display path.
+
+    Pre-commit sets CWD to the repo root, so paths relative to CWD
+    are also relative to the project root.
+    """
+    try:
+        return str(Path(filepath).resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(filepath)
+
+
 def is_empty_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """Check if a function is empty (has only pass, docstring, or ellipsis).
 
@@ -62,7 +74,7 @@ def check_file(filepath: Path) -> list[str]:
         # Let other tools catch syntax errors
         return []
     except (OSError, UnicodeDecodeError) as exc:
-        return [f"{filepath}:0: cannot read file: {exc}"]
+        return [f"{_display_path(filepath)}:0: cannot read file: {exc}"]
 
     # Collect all functions that are inside classes (methods)
     methods_in_classes: set[int] = set()
@@ -73,7 +85,7 @@ def check_file(filepath: Path) -> list[str]:
                     methods_in_classes.add(id(item))
                     if item.name.startswith("test_") and is_empty_function(item):
                         errors.append(
-                            f"{filepath}:{item.lineno}: Empty test method "
+                            f"{_display_path(filepath)}:{item.lineno}: Empty test method "
                             f"'{node.name}.{item.name}'"
                         )
 
@@ -84,7 +96,7 @@ def check_file(filepath: Path) -> list[str]:
                 continue  # Already checked as a class method
             if node.name.startswith("test_") and is_empty_function(node):
                 errors.append(
-                    f"{filepath}:{node.lineno}: Empty test function '{node.name}'"
+                    f"{_display_path(filepath)}:{node.lineno}: Empty test function '{node.name}'"
                 )
 
     return errors

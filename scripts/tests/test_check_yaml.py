@@ -151,5 +151,31 @@ class TestMain:
         assert main() == 1
 
 
+class TestRelativePaths:
+    """Tests that _display_path() converts absolute paths to relative."""
+
+    def test_display_path_converts_absolute_to_relative(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Absolute path under CWD is converted to relative."""
+        monkeypatch.chdir(tmp_path)
+        f = tmp_path / "config.yaml"
+        f.write_text("key: value\n", encoding="utf-8")
+        result = check_yaml._display_path(str(f))
+        assert result == "config.yaml"
+
+    def test_display_path_fallback_when_outside_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Path outside CWD falls back to original string."""
+        other = tmp_path / "other"
+        other.mkdir()
+        cwd_dir = tmp_path / "cwd_dir"
+        cwd_dir.mkdir()
+        monkeypatch.chdir(cwd_dir)
+        result = check_yaml._display_path(str(other / "config.yaml"))
+        assert result == str(other / "config.yaml")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

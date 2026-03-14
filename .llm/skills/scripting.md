@@ -40,6 +40,38 @@ read file), use a synthetic line number `:0:` to maintain the format:
 f"{path}:0: cannot read file: {exc}"
 ```
 
+### Path Handling in Lint Output
+
+**Rule**: All user-facing path output must use **relative paths** (relative to
+project root). Absolute paths break `{path}:{line}:` parsing on Windows
+(drive letter colon `C:\...:0:`).
+
+**glob/rglob/iterdir scripts** produce absolute `Path` objects -- convert first:
+
+```python
+try:
+    rel = filepath.relative_to(project_root)
+except ValueError:
+    rel = filepath
+```
+
+**argv-based scripts** receive string paths -- use a `_display_path()` helper:
+
+```python
+def _display_path(filepath: str | Path) -> str:
+    """Convert a file path to a relative display path."""
+    try:
+        return str(Path(filepath).resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(filepath)
+```
+
+**Check 6** in `check-hook-output-format.py` flags raw path variables (like
+`{filepath}`) in f-string error output when the file uses glob/rglob/iterdir.
+Safe variable names that pass Check 6: `rel`, `display_path`, `rel_path`,
+`relative`, `rel_index`. Function calls like `{_display_path(filepath)}`
+also pass because the regex only matches simple `{var_name}:` patterns.
+
 ### Exception Handling
 
 #### read\_text() Exceptions
@@ -117,33 +149,9 @@ def main() -> int:
     return 1 if modified or had_error else 0
 ```
 
-#### General Pattern
-
-```python
-# WRONG: silent swallowing (fail-open -- hook exits 0 on unreadable file)
-try:
-    content = file.read_text()
-except OSError:
-    pass
-
-# STILL WRONG: comment does not fix the behavior -- hook still exits 0
-try:
-    content = file.read_text()
-except OSError:
-    pass  # File read errors are non-fatal; treat link as valid
-
-# CORRECT: fail closed -- propagate error so hook exits non-zero
-try:
-    content = file.read_text(encoding="utf-8")
-except (OSError, UnicodeDecodeError) as exc:
-    return False, f"Cannot read file: {exc}"
-```
-
 ### Regex Patterns for f-string Detection
 
-When writing regex to detect f-string patterns in Python source code (e.g., in
-lint hooks), handle **both quote styles** and the `r` prefix (the only prefix
-that combines with `f`):
+Handle both quote styles and the `r` prefix (the only prefix that combines with `f`):
 
 ```python
 # WRONG: only matches double-quoted f-strings
@@ -236,15 +244,6 @@ The #1 cross-platform `sed` failure. Portable: `sed -i.bak 's/.../g' f && rm f.b
 | Timeout | `timeout 300 cmd` | Wrapper with `timeout`/`gtimeout` fallback |
 | Canonical path | `readlink -f path` | `realpath path` |
 | Binary path | `/bin/sed 's/.../g'` | `sed 's/.../g'` (rely on PATH) |
-
-### Backtick Escaping
-
-| Context | Backtick Handling |
-|---------|-------------------|
-| Single quotes `'...'` | Literal, no escaping needed |
-| Double quotes `"..."` | Must escape: `\`cmd\`` |
-| Heredoc `<< 'EOF'` | Literal, no escaping needed |
-| Heredoc `<< EOF` | Executes -- avoid or escape |
 
 ### GNU grep Extensions (Avoid)
 

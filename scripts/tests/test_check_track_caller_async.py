@@ -603,5 +603,33 @@ class TestOutputFormat:
                 assert not line.startswith("  "), f"Leading indent: {line!r}"
 
 
+class TestRelativePaths:
+    """Tests that _display_path() converts absolute paths to relative."""
+
+    def test_display_path_converts_absolute_to_relative(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Absolute path under CWD is converted to relative."""
+        monkeypatch.chdir(tmp_path)
+        sub = tmp_path / "src"
+        sub.mkdir()
+        f = sub / "lib.rs"
+        f.write_text("fn main() {}\n", encoding="utf-8")
+        result = check_track_caller_async._display_path(f)
+        assert result == str(Path("src") / "lib.rs")
+
+    def test_display_path_fallback_when_outside_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Path outside CWD falls back to original string."""
+        other = tmp_path / "other"
+        other.mkdir()
+        cwd_dir = tmp_path / "cwd_dir"
+        cwd_dir.mkdir()
+        monkeypatch.chdir(cwd_dir)
+        result = check_track_caller_async._display_path(str(other / "lib.rs"))
+        assert result == str(other / "lib.rs")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
