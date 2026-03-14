@@ -25,9 +25,7 @@ def check_file(filepath: Path) -> list[str]:
     try:
         lines = filepath.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as exc:
-        msg = f"{filepath}:0: cannot read file: {exc}"
-        print(msg, file=sys.stderr)
-        return [msg]
+        return [f"{filepath}:0: cannot read file: {exc}"]
 
     is_dockerfile = filepath.name.startswith("Dockerfile")
 

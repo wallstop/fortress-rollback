@@ -6,11 +6,13 @@ Verifies that the hook output format checker correctly detects:
 - Leading whitespace in print() f-strings (breaks editor hyperlinking)
 - Error messages missing line numbers (should use :0: for file-level errors)
 - Warning: prints that bypass {path}:{line}: format convention
+- print() followed by return-in-list (causes duplicate output)
 """
 
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -263,6 +265,125 @@ class TestWarningPrefix:
         )
         issues = check_file(f)
         assert issues == []
+
+
+class TestDualOutputDetection:
+    """Tests for Check 4: print() followed by return-in-list detection."""
+
+    def test_print_then_return_list_detected(self, tmp_path: Path) -> None:
+        """print(file=sys.stderr) followed by return [...] is flagged."""
+        content = (
+            "def check_file(filepath):\n"
+            "    except OSError as exc:\n"
+            "        print(f'{filepath}:0: error: {exc}', file=sys.stderr)\n"
+            "        return [f'{filepath}:0: error: {exc}']\n"
+        )
+        f = _write(tmp_path, "check-bad.py", content)
+        issues = check_file(f)
+        assert any("duplicate output" in i for i in issues), f"Expected dual-output warning, got: {issues}"
+
+    def test_print_then_return_list_with_gap_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """print(file=sys.stderr) with 1-2 blank lines before return [...] is flagged."""
+        content = (
+            "def check_file(filepath):\n"
+            "    except OSError as exc:\n"
+            "        msg = f'{filepath}:0: error'\n"
+            "        print(msg, file=sys.stderr)\n"
+            "\n"
+            "        return [msg]\n"
+        )
+        f = _write(tmp_path, "check-bad.py", content)
+        issues = check_file(f)
+        assert any("duplicate output" in i for i in issues), f"Expected dual-output warning, got: {issues}"
+
+    def test_print_then_return_bool_passes(self, tmp_path: Path) -> None:
+        """print(file=sys.stderr) followed by return False passes (no list)."""
+        content = (
+            "def check_file(filepath):\n"
+            "    except OSError as exc:\n"
+            "        print(f'{filepath}:0: error: {exc}', file=sys.stderr)\n"
+            "        return False\n"
+        )
+        f = _write(tmp_path, "check-good.py", content)
+        issues = check_file(f)
+        assert not any("duplicate output" in i for i in issues)
+
+    def test_print_in_main_loop_passes(self, tmp_path: Path) -> None:
+        """print() in main() loop that iterates issues passes (no return-list nearby)."""
+        content = (
+            "def main():\n"
+            "    for issue in issues:\n"
+            "        print(issue, file=sys.stderr)\n"
+            "    return 1\n"
+        )
+        f = _write(tmp_path, "check-good.py", content)
+        issues = check_file(f)
+        assert not any("duplicate output" in i for i in issues)
+
+    def test_print_then_return_empty_list_passes(self, tmp_path: Path) -> None:
+        """print(file=sys.stderr) followed by return [] passes (empty list is not dual-output)."""
+        content = (
+            "def check_file(filepath):\n"
+            "    except OSError as exc:\n"
+            "        print(f'{filepath}:0: error: {exc}', file=sys.stderr)\n"
+            "        return []\n"
+        )
+        f = _write(tmp_path, "check-good.py", content)
+        issues = check_file(f)
+        assert not any("duplicate output" in i for i in issues)
+
+    def test_print_far_from_return_list_passes(self, tmp_path: Path) -> None:
+        """print(file=sys.stderr) more than 3 lines before return [...] passes."""
+        content = (
+            "def check_file(filepath):\n"
+            "    print(f'{filepath}:0: error', file=sys.stderr)\n"
+            "    do_something()\n"
+            "    do_more()\n"
+            "    yet_more()\n"
+            "    even_more()\n"
+            "    return [f'{filepath}:0: error']\n"
+        )
+        f = _write(tmp_path, "check-good.py", content)
+        issues = check_file(f)
+        assert not any("duplicate output" in i for i in issues)
+
+
+class TestNoDuplicateOutput:
+    """Tests that check_file() read errors don't produce duplicate stderr output."""
+
+    def test_nonexistent_file_no_stderr_from_check_file(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """check_file() on a nonexistent file does not print to stderr itself."""
+        issues = check_file(tmp_path / "nonexistent.py")
+        captured = capsys.readouterr()
+        assert len(issues) == 1
+        assert "cannot read file" in issues[0]
+        # check_file must NOT print -- the caller (main) prints
+        assert captured.err == ""
+
+    def test_main_prints_read_error_exactly_once(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """main() prints the read-error message exactly once (no duplicates)."""
+        nonexistent = tmp_path / "check-missing.py"
+        monkeypatch.setattr(
+            sys, "argv", ["check-hook-output-format.py", str(nonexistent)]
+        )
+        check_hook_output_format.main()
+        captured = capsys.readouterr()
+        error_lines = [
+            line for line in captured.err.splitlines()
+            if "cannot read file" in line
+        ]
+        assert len(error_lines) == 1
 
 
 class TestFileHandling:

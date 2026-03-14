@@ -5,6 +5,7 @@ Validates:
 - No leading whitespace on issue output lines (breaks editor hyperlinking)
 - Error messages include line numbers in {path}:{line}: {message} format
 - No Warning: prints that bypass the {path}:{line}: format convention
+- No print() followed by return-in-list (causes duplicate output)
 
 Cross-platform: Works on Linux, macOS, and Windows.
 """
@@ -25,7 +26,6 @@ def check_file(filepath: Path) -> list[str]:
     try:
         content = filepath.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        print(f"{filepath}:0: cannot read file: {exc}", file=sys.stderr)
         return [f"{filepath}:0: cannot read file: {exc}"]
 
     lines = content.splitlines()
@@ -75,6 +75,23 @@ def check_file(filepath: Path) -> list[str]:
                 f"bypasses {{path}}:{{line}}: format -- return a "
                 f"formatted error instead"
             )
+
+        # Check 4: Dual-output anti-pattern (print + return in list)
+        # Detect print(..., file=sys.stderr) followed by return [...] within
+        # 3 lines. This causes duplicate output: check_file() prints AND
+        # returns the message, then main() prints it again from the list.
+        if re.search(r"print\(.*file=sys\.stderr\)", stripped):
+            # Look ahead up to 3 lines for a return-list
+            for ahead in range(1, 4):
+                if line_num - 1 + ahead < len(lines):
+                    next_line = lines[line_num - 1 + ahead].strip()
+                    if re.search(r"return\s+\[(?!\])", next_line):
+                        issues.append(
+                            f"{filepath}:{line_num}: print() followed by "
+                            f"return-in-list causes duplicate output -- "
+                            f"remove the print() and let the caller print"
+                        )
+                        break
 
     return issues
 

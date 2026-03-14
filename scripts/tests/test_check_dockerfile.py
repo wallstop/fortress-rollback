@@ -309,6 +309,62 @@ class TestFileHandling:
         assert len(issues) == 1
 
 
+class TestNoDuplicateOutput:
+    """Tests that read errors produce exactly one output line, not duplicates."""
+
+    def test_nonexistent_file_no_stderr_from_check_file(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """check_file() on a nonexistent file does not print to stderr itself.
+
+        It only returns the issue in the list; main() is responsible for printing.
+        """
+        issues = check_file(tmp_path / "Dockerfile")
+        captured = capsys.readouterr()
+        assert len(issues) == 1
+        assert "cannot read file" in issues[0]
+        # check_file must NOT print -- the caller (main) prints
+        assert captured.err == ""
+
+    def test_unreadable_file_no_stderr_from_check_file(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """check_file() on an unreadable file does not print to stderr itself."""
+        f = _write(tmp_path, "Dockerfile", "FROM ubuntu\n")
+        f.chmod(0o000)
+        try:
+            issues = check_file(f)
+            captured = capsys.readouterr()
+            assert len(issues) == 1
+            assert "cannot read file" in issues[0]
+            assert captured.err == ""
+        finally:
+            f.chmod(0o644)
+
+    def test_main_prints_read_error_exactly_once(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """main() prints the read-error message exactly once (no duplicates)."""
+        nonexistent = tmp_path / "Dockerfile"
+        monkeypatch.setattr(
+            sys, "argv", ["check-dockerfile.py", str(nonexistent)]
+        )
+        check_dockerfile.main()
+        captured = capsys.readouterr()
+        error_lines = [
+            line for line in captured.err.splitlines()
+            if "cannot read file" in line
+        ]
+        assert len(error_lines) == 1
+
+
 class TestOutputFormat:
     """Tests that output follows {path}:{line_number}: {message} format."""
 
