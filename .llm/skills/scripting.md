@@ -57,14 +57,24 @@ Alternative: `errors="replace"` for best-effort reading (grep-like hooks).
 
 #### Read Error Propagation
 
-Hooks that cannot read a file must **fail**, not silently pass. Return the error
-in the issues list so `main()` sees it:
+Hooks that cannot read a file must **fail**, not silently pass.
+
+For **list-returning** hooks (`check_file() -> list[str]`), return the error
+in the issues list so `main()` sees it. Do **not** also print -- `main()`
+prints returned issues, so printing here causes duplicate output:
 
 ```python
 except (OSError, UnicodeDecodeError) as exc:
-    msg = f"{path}:0: cannot read file: {exc}"
-    print(msg, file=sys.stderr)
-    return [msg]  # NOT return [] -- that silently passes
+    return [f"{path}:0: cannot read file: {exc}"]  # NOT return [] -- that silently passes
+```
+
+For **fixer hooks** (`fix_file() -> bool | None`), print to stderr and return
+`None` to signal an error (distinct from `False` = no change needed):
+
+```python
+except (OSError, UnicodeDecodeError) as exc:
+    print(f"{path}:0: cannot read file: {exc}", file=sys.stderr)
+    return None  # NOT return False -- that silently passes
 ```
 
 #### Parse Error Line Numbers
@@ -78,6 +88,34 @@ print(f"{path}:{line}: TOML error: {e}", file=sys.stderr)
 
 Line number attributes: `tomllib.TOMLDecodeError.lineno`,
 `json.JSONDecodeError.lineno`, `yaml.YAMLError.problem_mark.line` (0-based).
+
+#### Fixer Hook Pattern
+
+Fixer hooks modify files in-place. They must use `bool | None` return type
+so `main()` can distinguish "unchanged" from "error":
+
+```python
+def fix_file(filepath: str) -> bool | None:
+    """Fix something. Returns True if modified, False if unchanged, None on error."""
+    try:
+        content = Path(filepath).read_bytes()
+        # ... fix logic ...
+        return True  # or False
+    except OSError as exc:  # Use (OSError, UnicodeDecodeError) for read_text()
+        print(f"{filepath}:0: cannot read file: {exc}", file=sys.stderr)
+        return None  # NOT False -- False means "no change", None means "error"
+
+def main() -> int:
+    had_error = False
+    modified = False
+    for filepath in sys.argv[1:]:
+        result = fix_file(filepath)
+        if result is True:
+            modified = True
+        elif result is None:
+            had_error = True
+    return 1 if modified or had_error else 0
+```
 
 #### General Pattern
 
