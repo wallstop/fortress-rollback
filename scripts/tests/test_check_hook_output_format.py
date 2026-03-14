@@ -467,5 +467,226 @@ class TestFileHandling:
         assert parts[1].strip().isdigit()
 
 
+class TestFailOpenDetection:
+    """Tests for Check 5: except-pass/return-fallback fail-open detection."""
+
+    def test_except_oserror_pass_detected(self, tmp_path: Path) -> None:
+        """except OSError followed by pass is flagged."""
+        content = (
+            "def check_file(filepath):\n"
+            "    try:\n"
+            "        content = filepath.read_text()\n"
+            "    except OSError:\n"
+            "        pass\n"
+        )
+        f = _write(tmp_path, "check-bad.py", content)
+        issues = check_file(f)
+        assert any("swallows" in i and "pass" in i for i in issues), (
+            f"Expected fail-open warning, got: {issues}"
+        )
+
+    def test_except_unicode_error_pass_detected(self, tmp_path: Path) -> None:
+        """except UnicodeDecodeError followed by pass is flagged."""
+        content = (
+            "def check_file(filepath):\n"
+            "    try:\n"
+            "        content = filepath.read_text()\n"
+            "    except UnicodeDecodeError:\n"
+            "        pass\n"
+        )
+        f = _write(tmp_path, "check-bad.py", content)
+        issues = check_file(f)
+        assert any("swallows" in i and "pass" in i for i in issues)
+
+    def test_except_combined_errors_pass_detected(self, tmp_path: Path) -> None:
+        """except (OSError, UnicodeDecodeError) followed by pass is flagged."""
+        content = (
+            "def check_file(filepath):\n"
+            "    try:\n"
+            "        content = filepath.read_text()\n"
+            "    except (OSError, UnicodeDecodeError):\n"
+            "        pass\n"
+        )
+        f = _write(tmp_path, "check-bad.py", content)
+        issues = check_file(f)
+        assert any("swallows" in i for i in issues)
+
+    def test_except_oserror_return_true_detected(self, tmp_path: Path) -> None:
+        """except OSError followed by return True is flagged."""
+        content = (
+            "def check_file(filepath):\n"
+            "    try:\n"
+            "        content = filepath.read_text()\n"
+            "    except OSError:\n"
+            "        return True\n"
+        )
+        f = _write(tmp_path, "check-bad.py", content)
+        issues = check_file(f)
+        assert any("returns True" in i for i in issues), (
+            f"Expected fail-open warning, got: {issues}"
+        )
+
+    def test_except_oserror_return_false_passes(self, tmp_path: Path) -> None:
+        """except OSError followed by return False passes (fail-closed)."""
+        content = (
+            "def check_file(filepath):\n"
+            "    try:\n"
+            "        content = filepath.read_text()\n"
+            "    except OSError:\n"
+            "        return False\n"
+        )
+        f = _write(tmp_path, "check-good.py", content)
+        issues = check_file(f)
+        assert not any("swallows" in i or "returns True" in i for i in issues)
+
+    def test_except_oserror_return_none_passes(self, tmp_path: Path) -> None:
+        """except OSError followed by return None passes (fail-closed fixer)."""
+        content = (
+            "def fix_file(filepath):\n"
+            "    try:\n"
+            "        content = filepath.read_text()\n"
+            "    except OSError as exc:\n"
+            '        print(f"{filepath}:0: cannot read file: {exc}", file=sys.stderr)\n'
+            "        return None\n"
+        )
+        f = _write(tmp_path, "check-good.py", content)
+        issues = check_file(f)
+        assert not any("swallows" in i or "returns True" in i for i in issues)
+
+    def test_except_with_print_and_return_false_passes(
+        self, tmp_path: Path
+    ) -> None:
+        """except with print then return False passes (proper error handling)."""
+        content = (
+            "def check_file(filepath):\n"
+            "    try:\n"
+            "        content = filepath.read_text()\n"
+            "    except (OSError, UnicodeDecodeError) as e:\n"
+            '        print(f"{filepath}:0: cannot read file: {e}", file=sys.stderr)\n'
+            "        return False\n"
+        )
+        f = _write(tmp_path, "check-good.py", content)
+        issues = check_file(f)
+        assert not any("swallows" in i or "returns True" in i for i in issues)
+
+    def test_except_with_named_var_pass_detected(self, tmp_path: Path) -> None:
+        """except OSError as exc followed by pass is flagged."""
+        content = (
+            "def check_file(filepath):\n"
+            "    try:\n"
+            "        content = filepath.read_text()\n"
+            "    except OSError as exc:\n"
+            "        pass\n"
+        )
+        f = _write(tmp_path, "check-bad.py", content)
+        issues = check_file(f)
+        assert any("swallows" in i for i in issues)
+
+    def test_except_valueerror_not_detected(self, tmp_path: Path) -> None:
+        """except ValueError with pass is not flagged (not an I/O error)."""
+        content = (
+            "def check_file(filepath):\n"
+            "    try:\n"
+            "        int(value)\n"
+            "    except ValueError:\n"
+            "        pass\n"
+        )
+        f = _write(tmp_path, "check-ok.py", content)
+        issues = check_file(f)
+        assert not any("swallows" in i or "returns True" in i for i in issues)
+
+    def test_pass_with_comment_still_detected(self, tmp_path: Path) -> None:
+        """pass with an explanatory comment is still flagged."""
+        content = (
+            "def check_file(filepath):\n"
+            "    try:\n"
+            "        content = filepath.read_text()\n"
+            "    except (OSError, UnicodeDecodeError):\n"
+            "        pass  # File read errors are non-fatal\n"
+        )
+        f = _write(tmp_path, "check-bad.py", content)
+        issues = check_file(f)
+        assert any("swallows" in i for i in issues)
+
+    def test_except_ioerror_pass_detected(self, tmp_path: Path) -> None:
+        """except IOError followed by pass is flagged."""
+        content = (
+            "def check_file(filepath):\n"
+            "    try:\n"
+            "        content = filepath.read_text()\n"
+            "    except IOError:\n"
+            "        pass\n"
+        )
+        f = _write(tmp_path, "check-bad.py", content)
+        issues = check_file(f)
+        assert any("swallows" in i for i in issues)
+
+    def test_except_oserror_return_empty_list_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """except OSError followed by return [] is flagged (fail-open)."""
+        content = (
+            "def check_file(filepath):\n"
+            "    try:\n"
+            "        content = filepath.read_text()\n"
+            "    except OSError:\n"
+            "        return []\n"
+        )
+        f = _write(tmp_path, "check-bad.py", content)
+        issues = check_file(f)
+        assert any("empty value" in i for i in issues), (
+            f"Expected empty-value warning, got: {issues}"
+        )
+
+    def test_except_oserror_return_empty_string_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """except OSError followed by return '' is flagged (fail-open)."""
+        content = (
+            "def check_file(filepath):\n"
+            "    try:\n"
+            "        content = filepath.read_text()\n"
+            "    except OSError:\n"
+            "        return ''\n"
+        )
+        f = _write(tmp_path, "check-bad.py", content)
+        issues = check_file(f)
+        assert any("empty value" in i for i in issues)
+
+    def test_except_oserror_return_empty_dquote_string_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """except OSError followed by return "" is flagged (fail-open)."""
+        content = (
+            "def check_file(filepath):\n"
+            "    try:\n"
+            "        content = filepath.read_text()\n"
+            "    except OSError:\n"
+            '        return ""\n'
+        )
+        f = _write(tmp_path, "check-bad.py", content)
+        issues = check_file(f)
+        assert any("empty value" in i for i in issues)
+
+    def test_except_oserror_return_nonempty_list_passes(
+        self, tmp_path: Path
+    ) -> None:
+        """except OSError followed by return [error_msg] passes (fail-closed)."""
+        content = (
+            "def check_file(filepath):\n"
+            "    try:\n"
+            "        content = filepath.read_text()\n"
+            "    except OSError as exc:\n"
+            '        return [f"{filepath}:0: cannot read: {exc}"]\n'
+        )
+        f = _write(tmp_path, "check-good.py", content)
+        issues = check_file(f)
+        fail_open_issues = [
+            i for i in issues
+            if "swallows" in i or "returns True" in i or "empty value" in i
+        ]
+        assert not fail_open_issues
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

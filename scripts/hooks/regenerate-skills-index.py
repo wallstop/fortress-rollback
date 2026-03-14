@@ -26,17 +26,18 @@ WHEN_RE = re.compile(r"<!--\s*WHEN:\s*(.+?)\s*-->")
 CATEGORY_RE = re.compile(r"<!--\s*CATEGORY:\s*(.+?)\s*-->")
 
 
-def extract_metadata(filepath: Path) -> tuple[str, str]:
+def extract_metadata(filepath: Path) -> tuple[str, str] | None:
     """Extract WHEN trigger and CATEGORY from a skill file.
 
-    Returns (category, when_trigger).  Falls back to DEFAULT_CATEGORY
-    and the first heading line (or filename) when comments are absent.
+    Returns (category, when_trigger), or None on read error.
+    Falls back to DEFAULT_CATEGORY and the first heading line (or
+    filename) when metadata comments are absent.
     """
     try:
         content = filepath.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         print(f"{filepath}:0: cannot read file: {exc}", file=sys.stderr)
-        return DEFAULT_CATEGORY, filepath.stem
+        return None
 
     category = DEFAULT_CATEGORY
     when = ""
@@ -63,8 +64,12 @@ def extract_metadata(filepath: Path) -> tuple[str, str]:
     return category, when
 
 
-def build_index(skills_dir: Path) -> str:
-    """Build the index content from skill files."""
+def build_index(skills_dir: Path) -> tuple[str, bool]:
+    """Build the index content from skill files.
+
+    Returns (index_content, had_error).  had_error is True if any skill
+    file could not be read.
+    """
     skill_files = sorted(
         f
         for f in skills_dir.glob("*.md")
@@ -72,9 +77,14 @@ def build_index(skills_dir: Path) -> str:
     )
 
     # Collect entries grouped by category
+    had_error = False
     categories: dict[str, list[tuple[str, str]]] = {}
     for filepath in skill_files:
-        category, when = extract_metadata(filepath)
+        result = extract_metadata(filepath)
+        if result is None:
+            had_error = True
+            continue
+        category, when = result
         categories.setdefault(category, []).append((filepath.name, when))
 
     # Sort categories alphabetically, but put Uncategorized last
@@ -101,7 +111,7 @@ def build_index(skills_dir: Path) -> str:
 
     # Ensure trailing newline
     lines.append("")
-    return "\n".join(lines)
+    return "\n".join(lines), had_error
 
 
 def main() -> int:
@@ -115,15 +125,20 @@ def main() -> int:
         # Nothing to index
         return 0
 
-    new_content = build_index(skills_dir)
+    new_content, had_error = build_index(skills_dir)
+
+    if had_error:
+        print("Aborting: one or more skill files could not be read.", file=sys.stderr)
+        return 1
 
     # Compare with existing index
     existing = ""
     if index_path.is_file():
         try:
             existing = index_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            pass
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"{index_path}:0: cannot read file: {exc}", file=sys.stderr)
+            return 1
 
     if new_content == existing:
         return 0  # Already up-to-date

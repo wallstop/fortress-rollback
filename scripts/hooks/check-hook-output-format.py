@@ -6,6 +6,7 @@ Validates:
 - Error messages include line numbers in {path}:{line}: {message} format
 - No Warning: prints that bypass the {path}:{line}: format convention
 - No print() followed by return-in-list (causes duplicate output)
+- No except-pass/except-return-fallback that swallows I/O errors (fail-open)
 
 Cross-platform: Works on Linux, macOS, and Windows.
 """
@@ -92,6 +93,52 @@ def check_file(filepath: Path) -> list[str]:
                             f"remove the print() and let the caller print"
                         )
                         break
+
+        # Check 5: Fail-open anti-pattern (except + pass/return fallback)
+        # Detect except blocks for I/O errors that silently swallow the
+        # error via `pass` or by returning a fallback/default value.
+        # This allows hooks to exit 0 on unreadable files.
+        if re.search(
+            r"except\s+\(?\s*(?:OSError|UnicodeDecodeError|IOError)"
+            r"[\w\s,]*\)?\s*:",
+            stripped,
+        ):
+            # Look ahead up to 2 lines for `pass` or `return <default>`
+            for ahead in range(1, 3):
+                idx = line_num - 1 + ahead
+                if idx < len(lines):
+                    next_line = lines[idx].strip()
+                    # Skip blank lines
+                    if not next_line:
+                        continue
+                    # Bare `pass` swallows the error entirely
+                    if next_line == "pass" or next_line.startswith(("pass ", "pass\t")):
+                        issues.append(
+                            f"{filepath}:{line_num}: except block swallows "
+                            f"I/O error with pass -- fail closed by "
+                            f"returning an error or re-raising"
+                        )
+                        break
+                    # `return True` treats an unreadable file as valid
+                    if re.search(r"return\s+True\b", next_line):
+                        issues.append(
+                            f"{filepath}:{line_num}: except block returns "
+                            f"True on I/O error -- fail closed by "
+                            f"returning False or raising"
+                        )
+                        break
+                    # `return []` or `return ""` or `return ''` treats
+                    # an unreadable file as having no issues/content
+                    if re.search(r"return\s+(\[\]|\"\"|\'\')(\s|$)", next_line):
+                        issues.append(
+                            f"{filepath}:{line_num}: except block returns "
+                            f"empty value on I/O error -- fail closed by "
+                            f"returning an error indicator"
+                        )
+                        break
+                    # Any other statement means the except block has real
+                    # logic -- stop looking
+                    break
 
     return issues
 

@@ -120,17 +120,23 @@ def main() -> int:
 #### General Pattern
 
 ```python
-# WRONG: silent swallowing
+# WRONG: silent swallowing (fail-open -- hook exits 0 on unreadable file)
 try:
     content = file.read_text()
 except OSError:
     pass
 
-# CORRECT: comment explains why
+# STILL WRONG: comment does not fix the behavior -- hook still exits 0
 try:
     content = file.read_text()
 except OSError:
     pass  # File read errors are non-fatal; treat link as valid
+
+# CORRECT: fail closed -- propagate error so hook exits non-zero
+try:
+    content = file.read_text(encoding="utf-8")
+except (OSError, UnicodeDecodeError) as exc:
+    return False, f"Cannot read file: {exc}"
 ```
 
 ### Regex Patterns for f-string Detection

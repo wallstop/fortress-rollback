@@ -230,8 +230,8 @@ def check_markdown_link(
             anchors = extract_markdown_anchors(content)
             if anchor.lower() not in {a.lower() for a in anchors}:
                 return False, f"Anchor '{anchor}' not found in {source_file}"
-        except (OSError, UnicodeDecodeError):
-            pass  # File read errors are non-fatal; treat link as valid
+        except (OSError, UnicodeDecodeError) as exc:
+            return False, f"Cannot read file to validate anchor '{anchor}': {exc}"
         return True, ""
 
     # Handle anchor in link: file.md#anchor
@@ -265,8 +265,11 @@ def check_markdown_link(
                     False,
                     f"Anchor '{anchor}' not found in {target_path.relative_to(project_root)}",
                 )
-        except (OSError, UnicodeDecodeError):
-            pass  # File read errors are non-fatal; treat anchor as valid
+        except (OSError, UnicodeDecodeError) as exc:
+            return (
+                False,
+                f"Cannot read {target_path.relative_to(project_root)} to validate anchor '{anchor}': {exc}",
+            )
 
     return True, ""
 
