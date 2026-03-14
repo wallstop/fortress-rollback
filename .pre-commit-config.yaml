@@ -179,7 +179,7 @@ repos:
         name: check hook output format
         entry: python scripts/hooks/check-hook-output-format.py
         language: python
-        files: '^scripts/hooks/check-.*\.py$'
+        files: '^scripts/(hooks/)?[a-z][^/]*\.py$'
         pass_filenames: true
 
       # ══════════════════════════════════════════════════════════════════════

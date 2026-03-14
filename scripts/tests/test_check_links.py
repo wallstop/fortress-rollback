@@ -370,5 +370,35 @@ class TestRelativePaths:
         assert result == target
 
 
+class TestErrorsGoToStderr:
+    """Tests that ERROR messages go to stderr, not stdout."""
+
+    def test_file_read_error_prints_to_stderr(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """File read errors produce ERROR on stderr, not stdout."""
+        f = tmp_path / "unreadable.md"
+        f.write_text("# Heading\n", encoding="utf-8")
+        f.chmod(0o000)
+        try:
+            check_markdown_file(f, tmp_path)
+            captured = capsys.readouterr()
+            assert "ERROR:" in captured.err
+            assert "ERROR:" not in captured.out
+        finally:
+            f.chmod(0o644)
+
+    def test_broken_link_error_prints_to_stderr(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """Broken link errors produce ERROR on stderr, not stdout."""
+        f = tmp_path / "broken.md"
+        f.write_text("[text](nonexistent.md)\n", encoding="utf-8")
+        check_markdown_file(f, tmp_path)
+        captured = capsys.readouterr()
+        assert "ERROR:" in captured.err
+        assert "ERROR:" not in captured.out
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

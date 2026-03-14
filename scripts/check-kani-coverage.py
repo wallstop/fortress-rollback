@@ -222,13 +222,15 @@ def check_unwind_attributes(
         has_errors = True
         print(
             f"\nERROR: {len(errors)} Tier 2/3 proof(s) missing required "
-            f"#[kani::unwind(N)]:"
+            f"#[kani::unwind(N)]:",
+            file=sys.stderr,
         )
         for fn_name, file_path, tier in sorted(errors):
             print(
                 f"  ERROR: Tier {tier} proof '{fn_name}' in file '{file_path}' "
                 f"has no #[kani::unwind(N)]. Tier 2/3 proofs MUST have explicit "
-                f"unwind bounds to prevent CI timeouts."
+                f"unwind bounds to prevent CI timeouts.",
+                file=sys.stderr,
             )
 
     if advisories:
@@ -241,7 +243,8 @@ def check_unwind_attributes(
                 print(
                     f"  WARNING: proof '{fn_name}' in file '{file_path}' has no explicit "
                     f"#[kani::unwind(N)]. CI uses --default-unwind 8; larger data "
-                    f"structures may cause timeouts."
+                    f"structures may cause timeouts.",
+                    file=sys.stderr,
                 )
         else:
             print(
@@ -273,16 +276,16 @@ def main() -> int:
 
     if missing_proofs:
         has_errors = True
-        print("ERROR: The following Kani proofs are NOT in verify-kani.sh:")
+        print("ERROR: The following Kani proofs are NOT in verify-kani.sh:", file=sys.stderr)
         for proof in sorted(missing_proofs):
-            print(f"  - {proof}")
-        print("\nAdd them to one of the TIER*_PROOFS arrays in scripts/verify-kani.sh")
+            print(f"  - {proof}", file=sys.stderr)
+        print("\nAdd them to one of the TIER*_PROOFS arrays in scripts/verify-kani.sh", file=sys.stderr)
 
     if extra_proofs:
         # This is a warning, not an error (could be commented out proofs)
-        print("\nWARNING: The following proofs are in verify-kani.sh but not in source:")
+        print("\nWARNING: The following proofs are in verify-kani.sh but not in source:", file=sys.stderr)
         for proof in sorted(extra_proofs):
-            print(f"  - {proof}")
+            print(f"  - {proof}", file=sys.stderr)
 
     if not has_errors:
         print(f"[OK] All {len(source_proofs)} Kani proofs are covered in verify-kani.sh")

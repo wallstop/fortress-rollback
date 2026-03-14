@@ -71,7 +71,7 @@ def stage_modified_files(files_to_stage: list[str]) -> bool:
         capture_output=False,
     )
     if stage_result.returncode != 0:
-        print("WARNING: Could not stage formatted files")
+        print("WARNING: Could not stage formatted files", file=sys.stderr)
         return False
 
     for f in files_to_stage:
@@ -89,7 +89,7 @@ def main() -> int:
 
         # Run cargo fmt to fix formatting
         if not run_cargo_fmt():
-            print("\nERROR: cargo fmt failed.")
+            print("\nERROR: cargo fmt failed.", file=sys.stderr)
             return 1
 
         # Compare hashes to find files that cargo fmt actually modified
@@ -101,7 +101,7 @@ def main() -> int:
 
         # Stage only the files that cargo fmt modified
         if not stage_modified_files(files_modified):
-            print("\nERROR: Failed to stage formatted files.")
+            print("\nERROR: Failed to stage formatted files.", file=sys.stderr)
             return 1
 
         return 0
@@ -109,15 +109,15 @@ def main() -> int:
     except FileNotFoundError as e:
         cmd = str(e).split("'")[1] if "'" in str(e) else "command"
         if "cargo" in cmd.lower():
-            print("ERROR: cargo not found. Is Rust installed?")
-            print("  Install from: https://rustup.rs/")
+            print("ERROR: cargo not found. Is Rust installed?", file=sys.stderr)
+            print("  Install from: https://rustup.rs/", file=sys.stderr)
         elif "git" in cmd.lower():
-            print("ERROR: git not found. Is Git installed?")
+            print("ERROR: git not found. Is Git installed?", file=sys.stderr)
         else:
-            print(f"ERROR: {cmd} not found.")
+            print(f"ERROR: {cmd} not found.", file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"ERROR: Failed to run cargo fmt: {e}")
+        print(f"ERROR: Failed to run cargo fmt: {e}", file=sys.stderr)
         return 1
 
 

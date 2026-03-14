@@ -10,6 +10,7 @@ Validates:
 - No raw path variables in error output when file uses glob/rglob/iterdir
   (absolute paths break {path}:{line}: parsing on Windows due to drive letter
   colons -- use relative_to() or a display_path variable instead)
+- No ERROR:/WARNING: diagnostic prints going to stdout (must use file=sys.stderr)
 
 Cross-platform: Works on Linux, macOS, and Windows.
 """
@@ -151,6 +152,65 @@ def check_file(filepath: Path, repo_root: Path | None = None) -> list[str]:
                     # Any other statement means the except block has real
                     # logic -- stop looking
                     break
+
+        # Check 7: ERROR/WARNING prints going to stdout instead of stderr
+        # Detect print() calls containing ERROR: or WARNING: diagnostic
+        # prefixes that do not include file=sys.stderr.  These messages
+        # must go to stderr per project conventions.
+        #
+        # Handles both single-line and multi-line cases:
+        #   Single-line:  print("ERROR: something")
+        #   Multi-line:   print(
+        #                     f"  WARNING: proof ..."
+        #                 )
+        # For multi-line, we check if we're inside an open print() call
+        # (tracked by in_print_call) and look for ERROR:/WARNING: on
+        # continuation lines.
+        if re.search(
+            r"""print\(.*(?:ERROR|WARNING)\s*:""", stripped
+        ) and "file=sys.stderr" not in stripped:
+            issues.append(
+                f"{display_path}:{line_num}: print() with ERROR:/WARNING: diagnostic goes to stdout -- add file=sys.stderr"
+            )
+
+    # Check 7b: Multi-line print() calls with ERROR:/WARNING: on
+    # continuation lines.  Walk the file a second time, tracking open
+    # print( calls and scanning their bodies for diagnostic prefixes.
+    in_print = False
+    print_start_line = 0
+    print_lines: list[str] = []
+    paren_depth = 0
+    for line_num, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if stripped.startswith("#") or not stripped:
+            if in_print:
+                # accumulate even blank/comment lines inside a print call
+                print_lines.append(stripped)
+            continue
+
+        if not in_print:
+            # Detect start of a print( call
+            if re.match(r"print\(", stripped):
+                in_print = True
+                print_start_line = line_num
+                print_lines = [stripped]
+                paren_depth = stripped.count("(") - stripped.count(")")
+                if paren_depth <= 0:
+                    # Single-line — already handled by Check 7 above
+                    in_print = False
+        else:
+            print_lines.append(stripped)
+            paren_depth += stripped.count("(") - stripped.count(")")
+            if paren_depth <= 0:
+                # End of multi-line print call — analyse the joined body
+                joined = " ".join(print_lines)
+                has_diag = re.search(r"(?:ERROR|WARNING)\s*:", joined)
+                has_stderr = "file=sys.stderr" in joined
+                if has_diag and not has_stderr:
+                    issues.append(
+                        f"{display_path}:{print_start_line}: multi-line print() with ERROR:/WARNING: diagnostic goes to stdout -- add file=sys.stderr"
+                    )
+                in_print = False
 
     # Check 6: Raw path variables in error output when file uses glob/rglob
     # When a script discovers files via glob(), rglob(), or iterdir(), the

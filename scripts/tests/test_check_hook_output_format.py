@@ -7,6 +7,7 @@ Verifies that the hook output format checker correctly detects:
 - Error messages missing line numbers (should use :0: for file-level errors)
 - Warning: prints that bypass {path}:{line}: format convention
 - print() followed by return-in-list (causes duplicate output)
+- ERROR:/WARNING: diagnostic prints going to stdout (must use file=sys.stderr)
 """
 
 from __future__ import annotations
@@ -808,6 +809,188 @@ class TestRawPathInGlobScript:
         f = _write(tmp_path, "check-good.py", content)
         issues = check_file(f)
         assert not any("may be absolute" in i for i in issues)
+
+
+class TestStderrErrorPrints:
+    """Tests for Check 7: ERROR/WARNING prints going to stdout instead of stderr."""
+
+    def test_error_print_without_stderr_flagged(self, tmp_path: Path) -> None:
+        """print("ERROR: something") without file=sys.stderr is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            'def main():\n    print("ERROR: something went wrong")\n',
+        )
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert "stdout" in issues[0]
+        assert ":2:" in issues[0]
+
+    def test_error_print_with_stderr_ok(self, tmp_path: Path) -> None:
+        """print("ERROR: something", file=sys.stderr) is not flagged."""
+        f = _write(
+            tmp_path,
+            "check-good.py",
+            'def main():\n    print("ERROR: something went wrong", file=sys.stderr)\n',
+        )
+        issues = check_file(f)
+        assert not any("stdout" in i for i in issues)
+
+    def test_fstring_error_without_stderr_flagged(self, tmp_path: Path) -> None:
+        """print(f"ERROR: {var}") without file=sys.stderr is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            'def main():\n    print(f"ERROR: {detail}")\n',
+        )
+        issues = check_file(f)
+        assert any("stdout" in i for i in issues), (
+            f"Expected stdout warning, got: {issues}"
+        )
+
+    def test_red_error_without_stderr_flagged(self, tmp_path: Path) -> None:
+        """print(red("ERROR:") + " msg") without file=sys.stderr is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            'def main():\n    print(red("ERROR:") + " something failed")\n',
+        )
+        issues = check_file(f)
+        assert any("stdout" in i for i in issues), (
+            f"Expected stdout warning, got: {issues}"
+        )
+
+    def test_red_error_with_stderr_ok(self, tmp_path: Path) -> None:
+        """print(red("ERROR:") + " msg", file=sys.stderr) is not flagged."""
+        f = _write(
+            tmp_path,
+            "check-good.py",
+            'def main():\n    print(red("ERROR:") + " something failed", file=sys.stderr)\n',
+        )
+        issues = check_file(f)
+        assert not any("stdout" in i for i in issues)
+
+    def test_warning_print_without_stderr_flagged(self, tmp_path: Path) -> None:
+        """print("WARNING: something") without file=sys.stderr is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            'def main():\n    print("WARNING: check skipped")\n',
+        )
+        issues = check_file(f)
+        assert any("stdout" in i for i in issues), (
+            f"Expected stdout warning, got: {issues}"
+        )
+
+    def test_warning_print_with_stderr_ok(self, tmp_path: Path) -> None:
+        """print("WARNING: something", file=sys.stderr) is not flagged."""
+        f = _write(
+            tmp_path,
+            "check-good.py",
+            'def main():\n    print("WARNING: check skipped", file=sys.stderr)\n',
+        )
+        issues = check_file(f)
+        assert not any("stdout" in i for i in issues)
+
+    def test_comment_line_not_flagged(self, tmp_path: Path) -> None:
+        """# print("ERROR: something") is not flagged (comment line)."""
+        f = _write(
+            tmp_path,
+            "check-good.py",
+            '# print("ERROR: something went wrong")\n',
+        )
+        issues = check_file(f)
+        assert issues == []
+
+    def test_ok_summary_print_not_flagged(self, tmp_path: Path) -> None:
+        """print("[OK] All good") is not flagged (not an error print)."""
+        f = _write(
+            tmp_path,
+            "check-good.py",
+            'def main():\n    print("[OK] All good")\n',
+        )
+        issues = check_file(f)
+        assert not any("stdout" in i for i in issues)
+
+    def test_informational_print_not_flagged(self, tmp_path: Path) -> None:
+        """print("Running cargo fmt...") is not flagged (informational)."""
+        f = _write(
+            tmp_path,
+            "check-good.py",
+            'def main():\n    print("Running cargo fmt...")\n',
+        )
+        issues = check_file(f)
+        assert not any("stdout" in i for i in issues)
+
+
+class TestMultiLineStderrPrints:
+    """Tests for Check 7b: multi-line print() with ERROR:/WARNING: on continuation lines."""
+
+    def test_multiline_warning_without_stderr_flagged(self, tmp_path: Path) -> None:
+        """Multi-line print with WARNING: on a continuation line is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            (
+                "def main():\n"
+                "    print(\n"
+                '        f"  WARNING: proof missing unwind"\n'
+                "    )\n"
+            ),
+        )
+        issues = check_file(f)
+        assert any("multi-line" in i and "stdout" in i for i in issues), (
+            f"Expected multi-line stdout warning, got: {issues}"
+        )
+
+    def test_multiline_error_without_stderr_flagged(self, tmp_path: Path) -> None:
+        """Multi-line print with ERROR: on a continuation line is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            (
+                "def main():\n"
+                "    print(\n"
+                '        red("ERROR:")\n'
+                '        + f" something failed"\n'
+                "    )\n"
+            ),
+        )
+        issues = check_file(f)
+        assert any("multi-line" in i and "stdout" in i for i in issues), (
+            f"Expected multi-line stdout warning, got: {issues}"
+        )
+
+    def test_multiline_with_stderr_ok(self, tmp_path: Path) -> None:
+        """Multi-line print with file=sys.stderr is not flagged."""
+        f = _write(
+            tmp_path,
+            "check-good.py",
+            (
+                "def main():\n"
+                "    print(\n"
+                '        f"  WARNING: proof missing unwind",\n'
+                "        file=sys.stderr,\n"
+                "    )\n"
+            ),
+        )
+        issues = check_file(f)
+        assert not any("multi-line" in i for i in issues)
+
+    def test_multiline_informational_not_flagged(self, tmp_path: Path) -> None:
+        """Multi-line informational print is not flagged."""
+        f = _write(
+            tmp_path,
+            "check-good.py",
+            (
+                "def main():\n"
+                "    print(\n"
+                '        f"Found {count} proofs"\n'
+                "    )\n"
+            ),
+        )
+        issues = check_file(f)
+        assert not any("multi-line" in i for i in issues)
 
 
 class TestSelfCompliance:

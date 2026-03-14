@@ -34,16 +34,16 @@ def main() -> int:
         )
 
         if result.returncode != 0:
-            print("\nERROR: Clippy found issues. Fix the warnings above.")
+            print("\nERROR: Clippy found issues. Fix the warnings above.", file=sys.stderr)
 
         return result.returncode
 
     except FileNotFoundError:
-        print("ERROR: cargo not found. Is Rust installed?")
-        print("  Install from: https://rustup.rs/")
+        print("ERROR: cargo not found. Is Rust installed?", file=sys.stderr)
+        print("  Install from: https://rustup.rs/", file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"ERROR: Failed to run cargo clippy: {e}")
+        print(f"ERROR: Failed to run cargo clippy: {e}", file=sys.stderr)
         return 1
 
 

@@ -297,7 +297,7 @@ def check_markdown_file(
             rel_path = file_path.relative_to(project_root)
         except ValueError:
             rel_path = file_path
-        print(f"ERROR: Could not read {rel_path}: {e}")
+        print(f"ERROR: Could not read {rel_path}: {e}", file=sys.stderr)
         return LinkCheckResult(errors=1, warnings=0, checked=0)
 
     # Find code fence ranges to skip
@@ -331,7 +331,7 @@ def check_markdown_file(
         if not is_valid:
             errors += 1
             rel_path = _rel(file_path, project_root)
-            print(f"ERROR: {rel_path}: {error_msg}")
+            print(f"ERROR: {rel_path}: {error_msg}", file=sys.stderr)
 
     return LinkCheckResult(errors=errors, warnings=warnings, checked=checked)
 
