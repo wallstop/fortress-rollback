@@ -391,14 +391,20 @@ class TestEdgeCases:
         assert len(errors) == 1
         assert "nonexistent.rs" in errors[0]
 
-    def test_nonexistent_file_prints_warning_to_stderr(
+    def test_nonexistent_file_no_warning_prefix_on_stderr(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """Nonexistent file prints a warning to stderr."""
+        """Nonexistent file does not print a Warning: line to stderr.
+
+        check_file returns the error in {path}:0: format; it should not
+        also print a separate Warning: line.
+        """
         path = tmp_path / "nonexistent.rs"
-        check_file(path)
+        errors = check_file(path)
         captured = capsys.readouterr()
-        assert "nonexistent.rs" in captured.err
+        assert len(errors) == 1
+        assert ":0: cannot read file" in errors[0]
+        assert "Warning:" not in captured.err
 
     def test_unreadable_file_reports_error(self, tmp_path: Path) -> None:
         """Unreadable file returns an error about read failure."""
@@ -532,6 +538,19 @@ class TestMain:
             sys, "argv", ["check-track-caller-async.py", str(f)]
         )
         assert main() == 0
+
+    def test_main_nonexistent_rs_file_returns_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """main() returns 1 when given a non-existent .rs file.
+
+        Missing .rs files must not be silently skipped.
+        """
+        missing = tmp_path / "missing.rs"
+        monkeypatch.setattr(
+            sys, "argv", ["check-track-caller-async.py", str(missing)]
+        )
+        assert main() == 1
 
     def test_main_multiple_files(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

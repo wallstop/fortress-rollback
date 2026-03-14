@@ -38,7 +38,7 @@ def fix_file(filepath: str) -> bool:
 
         return modified
     except (OSError, UnicodeDecodeError) as exc:
-        print(f"Warning: cannot read {filepath}: {exc}", file=sys.stderr)
+        print(f"{filepath}:0: cannot read file: {exc}", file=sys.stderr)
         return False
 
 

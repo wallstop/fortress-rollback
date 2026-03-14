@@ -35,7 +35,7 @@ def extract_metadata(filepath: Path) -> tuple[str, str]:
     try:
         content = filepath.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        print(f"Warning: cannot read {filepath}: {exc}", file=sys.stderr)
+        print(f"{filepath}:0: cannot read file: {exc}", file=sys.stderr)
         return DEFAULT_CATEGORY, filepath.stem
 
     category = DEFAULT_CATEGORY
@@ -140,7 +140,7 @@ def main() -> int:
     try:
         index_path.write_text(new_content, encoding="utf-8")
     except OSError as e:
-        print(f"Cannot write {index_path}: {e}", file=sys.stderr)
+        print(f"{index_path}:0: cannot write file: {e}", file=sys.stderr)
         return 1
 
     print(f"Updated {index_path.relative_to(repo_root)}")

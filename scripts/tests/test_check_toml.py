@@ -92,6 +92,28 @@ class TestTomlValidation:
 
 
 @pytest.mark.skipif(not HAS_TOML, reason="tomllib/tomli not available")
+class TestUnicodeError:
+    """Tests that UnicodeDecodeError is treated as a read error, not TOML error."""
+
+    def test_binary_file_treated_as_read_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A binary/non-UTF-8 file is reported as a read error with :0:."""
+        binary_file = tmp_path / "binary.toml"
+        binary_file.write_bytes(b"\x80\x81\x82\xff\xfe")
+        assert check_file(str(binary_file)) is False
+        captured = capsys.readouterr()
+        first_line = captured.err.splitlines()[0]
+        assert ":0:" in first_line, f"Expected :0: in read error: {first_line}"
+        assert "cannot read file" in first_line, (
+            f"Expected 'cannot read file' in: {first_line}"
+        )
+        assert "TOML error" not in first_line, (
+            f"Should not say 'TOML error' for encoding issue: {first_line}"
+        )
+
+
+@pytest.mark.skipif(not HAS_TOML, reason="tomllib/tomli not available")
 class TestOutputFormat:
     """Tests that output follows {path}:{line_number}: {message} format."""
 

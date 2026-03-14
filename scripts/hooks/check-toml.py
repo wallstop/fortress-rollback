@@ -26,7 +26,10 @@ def check_file(filepath: str) -> bool:
         content = path.read_bytes()
         tomllib.loads(content.decode("utf-8"))
         return True
-    except (ValueError, UnicodeDecodeError) as e:
+    except UnicodeDecodeError as e:
+        print(f"{filepath}:0: cannot read file: {e}", file=sys.stderr)
+        return False
+    except ValueError as e:
         line = getattr(e, "lineno", 1) or 1
         print(f"{filepath}:{line}: TOML error: {e}", file=sys.stderr)
         return False
@@ -40,7 +43,7 @@ def main() -> int:
         return 0
 
     if not HAS_TOML:
-        print("Warning: tomllib/tomli not available, skipping TOML validation", file=sys.stderr)
+        print("Skipping TOML validation: tomllib/tomli not available", file=sys.stderr)
         return 0
 
     all_valid = True

@@ -62,7 +62,6 @@ def check_file(filepath: Path) -> list[str]:
         # Let other tools catch syntax errors
         return []
     except (OSError, UnicodeDecodeError) as exc:
-        print(f"Warning: cannot read {filepath}: {exc}", file=sys.stderr)
         return [f"{filepath}:0: cannot read file: {exc}"]
 
     # Collect all functions that are inside classes (methods)

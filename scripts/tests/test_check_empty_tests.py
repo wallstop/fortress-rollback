@@ -121,6 +121,25 @@ class TestOutputFormat:
                 assert not line.startswith("  "), f"Leading indent: {line!r}"
 
 
+class TestFileErrors:
+    """Tests for file read error handling."""
+
+    def test_nonexistent_file_no_warning_prefix(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """check_file on a non-existent file does not print a Warning: line.
+
+        Only the formatted {path}:0: message should appear (via main's loop),
+        not a duplicate Warning: line from check_file itself.
+        """
+        path = tmp_path / "test_nonexistent.py"
+        errors = check_file(path)
+        captured = capsys.readouterr()
+        assert len(errors) == 1
+        assert ":0:" in errors[0]
+        assert "Warning:" not in captured.err
+
+
 class TestMain:
     """Tests for the main() entry point."""
 

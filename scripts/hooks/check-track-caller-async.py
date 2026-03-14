@@ -33,7 +33,6 @@ def check_file(path: Path) -> list[str]:
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
-        print(f"Warning: cannot read {path}: {exc}", file=sys.stderr)
         return [f"{path}:0: cannot read file: {exc}"]
 
     for i, line in enumerate(lines):
@@ -78,7 +77,7 @@ def main() -> int:
     errors: list[str] = []
     for arg in sys.argv[1:]:
         path = Path(arg)
-        if path.suffix == ".rs" and path.is_file():
+        if path.suffix == ".rs":
             errors.extend(check_file(path))
 
     if errors:

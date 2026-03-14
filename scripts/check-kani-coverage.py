@@ -54,7 +54,7 @@ def find_source_proofs(project_root: Path) -> set[str]:
                             break
 
         except (OSError, UnicodeDecodeError) as e:
-            print(f"Warning: Could not read {rs_file}: {e}", file=sys.stderr)
+            print(f"{rs_file}:0: cannot read file: {e}", file=sys.stderr)
 
     return proofs
 
@@ -65,7 +65,7 @@ def find_script_proofs(project_root: Path) -> set[str]:
     verify_script = project_root / "scripts" / "verify-kani.sh"
 
     if not verify_script.exists():
-        print(f"Warning: {verify_script} not found", file=sys.stderr)
+        print(f"{verify_script}:0: file not found", file=sys.stderr)
         return proofs
 
     try:
@@ -79,7 +79,7 @@ def find_script_proofs(project_root: Path) -> set[str]:
             proofs.add(match.group(1))
 
     except (OSError, UnicodeDecodeError) as e:
-        print(f"Warning: Could not read {verify_script}: {e}", file=sys.stderr)
+        print(f"{verify_script}:0: cannot read file: {e}", file=sys.stderr)
 
     return proofs
 
@@ -113,7 +113,7 @@ def find_script_proof_tiers(project_root: Path) -> dict[str, int]:
                     proof_tiers[proof_match.group(1)] = tier
 
     except (OSError, UnicodeDecodeError) as e:
-        print(f"Warning: Could not read {verify_script}: {e}", file=sys.stderr)
+        print(f"{verify_script}:0: cannot read file: {e}", file=sys.stderr)
 
     return proof_tiers
 
@@ -201,7 +201,7 @@ def check_unwind_attributes(
                         advisories.append((fn_name, str(rel_path)))
 
         except (OSError, UnicodeDecodeError) as e:
-            print(f"Warning: Could not read {rs_file}: {e}", file=sys.stderr)
+            print(f"{rs_file}:0: cannot read file: {e}", file=sys.stderr)
 
     has_errors = False
 

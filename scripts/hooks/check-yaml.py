@@ -36,7 +36,7 @@ def main() -> int:
         return 0
 
     if not HAS_YAML:
-        print("Warning: PyYAML not installed, skipping YAML validation", file=sys.stderr)
+        print("Skipping YAML validation: PyYAML not installed", file=sys.stderr)
         return 0
 
     all_valid = True

@@ -4,6 +4,7 @@
 Validates:
 - No leading whitespace on issue output lines (breaks editor hyperlinking)
 - Error messages include line numbers in {path}:{line}: {message} format
+- No Warning: prints that bypass the {path}:{line}: format convention
 
 Cross-platform: Works on Linux, macOS, and Windows.
 """
@@ -63,6 +64,17 @@ def check_file(filepath: Path) -> list[str]:
                     f"{filepath}:{line_num}: error message missing line "
                     f"number -- use {{path}}:0: for file-level errors"
                 )
+
+        # Check 3: Warning: prints that bypass lint format
+        # Detect print(f"Warning: ...") which produces output that doesn't
+        # follow {path}:{line}: {message} format and is often duplicative
+        # when check_file() also returns a formatted error.
+        if re.search(r'''print\(r?fr?["']Warning:\s''', stripped):
+            issues.append(
+                f"{filepath}:{line_num}: print() with Warning: prefix "
+                f"bypasses {{path}}:{{line}}: format -- return a "
+                f"formatted error instead"
+            )
 
     return issues
 

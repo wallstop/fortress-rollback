@@ -24,7 +24,7 @@ def fix_file(filepath: str) -> bool:
 
         return False
     except OSError as exc:
-        print(f"Warning: cannot read {filepath}: {exc}", file=sys.stderr)
+        print(f"{filepath}:0: cannot read file: {exc}", file=sys.stderr)
         return False
 
 

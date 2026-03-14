@@ -5,6 +5,7 @@ Unit tests for check-hook-output-format.py hook.
 Verifies that the hook output format checker correctly detects:
 - Leading whitespace in print() f-strings (breaks editor hyperlinking)
 - Error messages missing line numbers (should use :0: for file-level errors)
+- Warning: prints that bypass {path}:{line}: format convention
 """
 
 from __future__ import annotations
@@ -202,6 +203,63 @@ class TestMissingLineNumber:
             tmp_path,
             "check-good.py",
             '# f"{path}: cannot read"\n',
+        )
+        issues = check_file(f)
+        assert issues == []
+
+
+class TestWarningPrefix:
+    """Tests for Warning: print detection."""
+
+    def test_warning_print_double_quote_detected(self, tmp_path: Path) -> None:
+        """print(f"Warning: ...") is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            'def check_file(path):\n    print(f"Warning: cannot read {path}")\n',
+        )
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert "Warning:" in issues[0]
+        assert ":2:" in issues[0]
+
+    def test_warning_print_single_quote_detected(self, tmp_path: Path) -> None:
+        """print(f'Warning: ...') is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            "def check_file(path):\n    print(f'Warning: cannot read {path}')\n",
+        )
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert "Warning:" in issues[0]
+
+    def test_warning_without_f_prefix_passes(self, tmp_path: Path) -> None:
+        """print("Warning: ...") without f-prefix passes (static text is OK)."""
+        f = _write(
+            tmp_path,
+            "check-good.py",
+            'def main():\n    print("Warning: tomllib not available")\n',
+        )
+        issues = check_file(f)
+        assert issues == []
+
+    def test_formatted_error_passes(self, tmp_path: Path) -> None:
+        """print(f"{path}:0: cannot read") passes (correct format)."""
+        f = _write(
+            tmp_path,
+            "check-good.py",
+            'def check_file(path):\n    print(f"{path}:0: cannot read file")\n',
+        )
+        issues = check_file(f)
+        assert issues == []
+
+    def test_comment_with_warning_pattern_skipped(self, tmp_path: Path) -> None:
+        """Comment lines are not checked."""
+        f = _write(
+            tmp_path,
+            "check-good.py",
+            '# print(f"Warning: cannot read {path}")\n',
         )
         issues = check_file(f)
         assert issues == []

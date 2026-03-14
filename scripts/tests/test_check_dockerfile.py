@@ -260,18 +260,35 @@ class TestFileHandling:
         assert len(issues) == 1
         assert "cannot read file" in issues[0]
 
-    def test_unreadable_file_causes_main_failure(
+    def test_nonexistent_file_causes_main_failure(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """main() returns 1 when a file cannot be read."""
+        """main() returns 1 when a file does not exist."""
         nonexistent = tmp_path / "Dockerfile"
         # Don't create the file -- it won't exist
         monkeypatch.setattr(
             sys, "argv", ["check-dockerfile.py", str(nonexistent)]
         )
         assert check_dockerfile.main() == 1
+
+    def test_unreadable_file_causes_main_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """main() returns 1 when a file exists but cannot be read."""
+        unreadable = tmp_path / "Dockerfile"
+        unreadable.write_text("FROM ubuntu:22.04\n", encoding="utf-8")
+        unreadable.chmod(0o000)
+        try:
+            monkeypatch.setattr(
+                sys, "argv", ["check-dockerfile.py", str(unreadable)]
+            )
+            assert check_dockerfile.main() == 1
+        finally:
+            unreadable.chmod(0o644)
 
     def test_multiple_issues_in_one_file(self, tmp_path: Path) -> None:
         """Multiple anti-patterns in one file are all detected."""
