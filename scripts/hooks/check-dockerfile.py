@@ -15,17 +15,26 @@ import sys
 from pathlib import Path
 
 
-def check_file(filepath: Path) -> list[str]:
+def check_file(filepath: Path, repo_root: Path | None = None) -> list[str]:
     """Check a single file for Dockerfile anti-patterns.
 
     Returns a list of issue descriptions (empty if no issues).
+    When repo_root is provided, paths in output are relative to it.
     """
     issues: list[str] = []
+
+    if repo_root is not None:
+        try:
+            display_path = filepath.relative_to(repo_root)
+        except ValueError:
+            display_path = filepath
+    else:
+        display_path = filepath
 
     try:
         lines = filepath.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as exc:
-        return [f"{filepath}:0: cannot read file: {exc}"]
+        return [f"{display_path}:0: cannot read file: {exc}"]
 
     is_dockerfile = filepath.name.startswith("Dockerfile")
 
@@ -39,14 +48,14 @@ def check_file(filepath: Path) -> list[str]:
         # Check 1: pip install without --no-cache-dir
         if re.search(r"\bpip3?\s+install\b", stripped) and "--no-cache-dir" not in stripped:
             issues.append(
-                f"{filepath}:{line_num}: pip install without --no-cache-dir "
+                f"{display_path}:{line_num}: pip install without --no-cache-dir "
                 f"(leaves pip cache in the image)"
             )
 
         # Check 2: command -v with stderr redirect instead of /dev/null
         if re.search(r"\bcommand\s+-v\b", stripped) and re.search(r">&2", stripped):
             issues.append(
-                f"{filepath}:{line_num}: command -v output redirected to stderr "
+                f"{display_path}:{line_num}: command -v output redirected to stderr "
                 f"instead of /dev/null (use >/dev/null 2>&1)"
             )
 
@@ -55,7 +64,7 @@ def check_file(filepath: Path) -> list[str]:
             r"\bcommand\s+-v\b", stripped
         ):
             issues.append(
-                f"{filepath}:{line_num}: eval \"$(...)\" without command -v guard "
+                f"{display_path}:{line_num}: eval \"$(...)\" without command -v guard "
                 f"(use: command -v tool >/dev/null 2>&1 && eval \"$(tool init ...)\")"
             )
 
@@ -66,9 +75,10 @@ def main() -> int:
     """Check Dockerfiles and devcontainer.json for anti-patterns."""
     files = sys.argv[1:] if len(sys.argv) > 1 else []
 
+    repo_root = Path(__file__).resolve().parent.parent.parent
+
     if not files:
         # No files provided, scan for all Dockerfiles and devcontainer.json
-        repo_root = Path(__file__).parent.parent.parent
         for path in repo_root.rglob("Dockerfile*"):
             files.append(str(path))
         for path in repo_root.rglob("devcontainer.json"):
@@ -89,7 +99,7 @@ def main() -> int:
         ):
             continue
 
-        issues = check_file(filepath)
+        issues = check_file(filepath, repo_root)
         all_issues.extend(issues)
 
     if all_issues:

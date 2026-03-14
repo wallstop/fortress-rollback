@@ -26,17 +26,27 @@ WHEN_RE = re.compile(r"<!--\s*WHEN:\s*(.+?)\s*-->")
 CATEGORY_RE = re.compile(r"<!--\s*CATEGORY:\s*(.+?)\s*-->")
 
 
-def extract_metadata(filepath: Path) -> tuple[str, str] | None:
+def extract_metadata(
+    filepath: Path, repo_root: Path | None = None
+) -> tuple[str, str] | None:
     """Extract WHEN trigger and CATEGORY from a skill file.
 
     Returns (category, when_trigger), or None on read error.
     Falls back to DEFAULT_CATEGORY and the first heading line (or
     filename) when metadata comments are absent.
     """
+    if repo_root is not None:
+        try:
+            display_path = filepath.relative_to(repo_root)
+        except ValueError:
+            display_path = filepath
+    else:
+        display_path = filepath
+
     try:
         content = filepath.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        print(f"{filepath}:0: cannot read file: {exc}", file=sys.stderr)
+        print(f"{display_path}:0: cannot read file: {exc}", file=sys.stderr)
         return None
 
     category = DEFAULT_CATEGORY
@@ -64,7 +74,9 @@ def extract_metadata(filepath: Path) -> tuple[str, str] | None:
     return category, when
 
 
-def build_index(skills_dir: Path) -> tuple[str, bool]:
+def build_index(
+    skills_dir: Path, repo_root: Path | None = None
+) -> tuple[str, bool]:
     """Build the index content from skill files.
 
     Returns (index_content, had_error).  had_error is True if any skill
@@ -80,7 +92,7 @@ def build_index(skills_dir: Path) -> tuple[str, bool]:
     had_error = False
     categories: dict[str, list[tuple[str, str]]] = {}
     for filepath in skill_files:
-        result = extract_metadata(filepath)
+        result = extract_metadata(filepath, repo_root)
         if result is None:
             had_error = True
             continue
@@ -125,19 +137,23 @@ def main() -> int:
         # Nothing to index
         return 0
 
-    new_content, had_error = build_index(skills_dir)
+    new_content, had_error = build_index(skills_dir, repo_root)
 
     if had_error:
         print("Aborting: one or more skill files could not be read.", file=sys.stderr)
         return 1
 
     # Compare with existing index
+    try:
+        rel_index = index_path.relative_to(repo_root)
+    except ValueError:
+        rel_index = index_path
     existing = ""
     if index_path.is_file():
         try:
             existing = index_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
-            print(f"{index_path}:0: cannot read file: {exc}", file=sys.stderr)
+            print(f"{rel_index}:0: cannot read file: {exc}", file=sys.stderr)
             return 1
 
     if new_content == existing:
@@ -145,7 +161,7 @@ def main() -> int:
 
     if check_only:
         print(
-            f"Skills index is out-of-date: {index_path.relative_to(repo_root)}",
+            f"Skills index is out-of-date: {rel_index}",
             file=sys.stderr,
         )
         print("Run 'python scripts/hooks/regenerate-skills-index.py' to fix.", file=sys.stderr)
@@ -155,10 +171,10 @@ def main() -> int:
     try:
         index_path.write_text(new_content, encoding="utf-8")
     except OSError as e:
-        print(f"{index_path}:0: cannot write file: {e}", file=sys.stderr)
+        print(f"{rel_index}:0: cannot write file: {e}", file=sys.stderr)
         return 1
 
-    print(f"Updated {index_path.relative_to(repo_root)}")
+    print(f"Updated {rel_index}")
     return 1  # Exit 1 so pre-commit shows the auto-fix
 
 

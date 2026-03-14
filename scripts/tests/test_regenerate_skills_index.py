@@ -182,6 +182,46 @@ class TestBuildIndex:
         assert "_index.md" not in content
 
 
+class TestRelativePaths:
+    """Tests for relative-path error output when repo_root is provided."""
+
+    def test_extract_metadata_error_uses_relative_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Error output uses relative path when repo_root is provided."""
+        nonexistent = tmp_path / "nonexistent.md"
+        extract_metadata(nonexistent, repo_root=tmp_path)
+        captured = capsys.readouterr()
+        assert captured.err.startswith("nonexistent.md:")
+        assert not captured.err.startswith(str(tmp_path))
+
+    def test_extract_metadata_error_uses_absolute_when_no_repo_root(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Error output uses full path when repo_root is not provided."""
+        nonexistent = tmp_path / "nonexistent.md"
+        extract_metadata(nonexistent)
+        captured = capsys.readouterr()
+        assert str(tmp_path) in captured.err
+
+    def test_build_index_unreadable_uses_relative_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """build_index() error output uses relative path when repo_root is provided."""
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        bad = _write(skills_dir, "bad.md", "# Bad\n")
+        bad.chmod(0o000)
+        try:
+            _content, had_error = build_index(skills_dir, repo_root=tmp_path)
+            assert had_error
+            captured = capsys.readouterr()
+            assert "skills/bad.md" in captured.err
+            assert not captured.err.startswith(str(tmp_path))
+        finally:
+            bad.chmod(0o644)
+
+
 class TestMain:
     """Tests for main() entry point fail-closed behavior."""
 

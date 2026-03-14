@@ -320,6 +320,53 @@ class TestOutputFormat:
                 assert ":0:" in line, f"Missing :0: in read error: {line}"
                 assert re.match(r'^.+:\d+: ', line), f"Bad format: {line}"
 
+    def test_oserror_output_uses_relative_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """OSError output must use a relative path, not an absolute path."""
+        nonexistent = tmp_path / "does_not_exist.md"
+        check_file(nonexistent, tmp_path)
+        captured = capsys.readouterr()
+        err = captured.err.strip()
+        assert not err.startswith(str(tmp_path)), (
+            f"Error output should not start with absolute path: {err}"
+        )
+        assert err.startswith("does_not_exist.md"), (
+            f"Error output should start with relative filename: {err}"
+        )
+
+    def test_over_limit_output_uses_relative_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Over-limit output must use a relative path, not an absolute path."""
+        llm_dir = tmp_path / ".llm"
+        filepath = _make_md_file(llm_dir, "big.md", 305)
+        check_file(filepath, tmp_path)
+        captured = capsys.readouterr()
+        err = captured.err.strip()
+        assert str(tmp_path) not in err, (
+            f"Error output should not contain absolute path: {err}"
+        )
+        assert err.startswith(".llm/"), (
+            f"Error output should start with relative .llm/ path: {err}"
+        )
+
+    def test_unicode_error_output_uses_relative_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """UnicodeDecodeError output must use a relative path, not absolute."""
+        filepath = tmp_path / "bad_encoding.md"
+        filepath.write_bytes(b"\x80\x81\x82 invalid utf8")
+        check_file(filepath, tmp_path)
+        captured = capsys.readouterr()
+        err = captured.err.strip()
+        assert not err.startswith(str(tmp_path)), (
+            f"Error output should not start with absolute path: {err}"
+        )
+        assert err.startswith("bad_encoding.md"), (
+            f"Error output should start with relative filename: {err}"
+        )
+
     def test_main_output_no_leading_whitespace(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

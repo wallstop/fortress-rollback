@@ -688,5 +688,140 @@ class TestFailOpenDetection:
         assert not fail_open_issues
 
 
+class TestRelativePaths:
+    """Tests that check_file() uses relative paths when repo_root is provided."""
+
+    def test_issues_use_relative_path_when_repo_root_provided(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue paths are relative to repo_root, not absolute."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            'def main():\n    print(f"  {err}")\n',
+        )
+        issues = check_file(f, repo_root=tmp_path)
+        assert len(issues) == 1
+        assert str(tmp_path) not in issues[0]
+        assert "check-bad.py:2:" in issues[0]
+
+    def test_read_error_uses_relative_path(self, tmp_path: Path) -> None:
+        """Read error path prefix is relative to repo_root."""
+        nonexistent = tmp_path / "check-missing.py"
+        issues = check_file(nonexistent, repo_root=tmp_path)
+        assert len(issues) == 1
+        assert "check-missing.py:0:" in issues[0]
+        # The path prefix (before ": cannot read") should be relative;
+        # the exception message itself may still contain the absolute path.
+        prefix = issues[0].split(": cannot read")[0]
+        assert str(tmp_path) not in prefix
+
+
+class TestRawPathInGlobScript:
+    """Tests for Check 6: raw path variables in error output when file uses glob/rglob/iterdir."""
+
+    def test_raw_filepath_with_glob_detected(self, tmp_path: Path) -> None:
+        """f"{filepath}:0:" in a script using .glob( is flagged."""
+        content = (
+            "def check_all():\n"
+            "    for p in path.glob('*.py'):\n"
+            '        issues.append(f"{filepath}:0: error")\n'
+        )
+        f = _write(tmp_path, "check-bad.py", content)
+        issues = check_file(f)
+        assert any("may be absolute" in i for i in issues), (
+            f"Expected raw-path warning, got: {issues}"
+        )
+        assert any("{filepath}" in i for i in issues)
+
+    def test_raw_filepath_with_rglob_detected(self, tmp_path: Path) -> None:
+        """f"{filepath}:0:" in a script using .rglob( is flagged."""
+        content = (
+            "def check_all():\n"
+            "    for p in path.rglob('*.py'):\n"
+            '        issues.append(f"{filepath}:0: error")\n'
+        )
+        f = _write(tmp_path, "check-bad.py", content)
+        issues = check_file(f)
+        assert any("may be absolute" in i for i in issues), (
+            f"Expected raw-path warning, got: {issues}"
+        )
+
+    def test_raw_path_with_iterdir_detected(self, tmp_path: Path) -> None:
+        """f"{filepath}:0:" in a script using .iterdir() is flagged."""
+        content = (
+            "def check_all():\n"
+            "    for p in path.iterdir():\n"
+            '        issues.append(f"{filepath}:0: error")\n'
+        )
+        f = _write(tmp_path, "check-bad.py", content)
+        issues = check_file(f)
+        assert any("may be absolute" in i for i in issues), (
+            f"Expected raw-path warning, got: {issues}"
+        )
+
+    def test_display_path_with_glob_passes(self, tmp_path: Path) -> None:
+        """f"{display_path}:0:" in a script using .glob( passes (safe variable)."""
+        content = (
+            "def check_all():\n"
+            "    for p in path.glob('*.py'):\n"
+            "        display_path = p.relative_to(root)\n"
+            '        issues.append(f"{display_path}:0: error")\n'
+        )
+        f = _write(tmp_path, "check-good.py", content)
+        issues = check_file(f)
+        assert not any("may be absolute" in i for i in issues)
+
+    def test_rel_var_with_glob_passes(self, tmp_path: Path) -> None:
+        """f"{rel}:0:" in a script using .glob( passes (safe variable)."""
+        content = (
+            "def check_all():\n"
+            "    for p in path.glob('*.py'):\n"
+            "        rel = p.relative_to(root)\n"
+            '        issues.append(f"{rel}:0: error")\n'
+        )
+        f = _write(tmp_path, "check-good.py", content)
+        issues = check_file(f)
+        assert not any("may be absolute" in i for i in issues)
+
+    def test_raw_filepath_without_glob_passes(self, tmp_path: Path) -> None:
+        """f"{filepath}:0:" without glob/rglob/iterdir passes (argv paths are relative)."""
+        content = (
+            "def check_file(filepath):\n"
+            '    issues.append(f"{filepath}:0: error")\n'
+        )
+        f = _write(tmp_path, "check-good.py", content)
+        issues = check_file(f)
+        assert not any("may be absolute" in i for i in issues)
+
+    def test_comment_glob_not_detected(self, tmp_path: Path) -> None:
+        """A commented-out .glob( line does not trigger Check 6.
+
+        The hook skips comment lines when scanning for .glob(/.rglob(/.iterdir(
+        to avoid false positives on scripts that only mention glob in comments.
+        """
+        content = (
+            "def check_file(filepath):\n"
+            "    # for p in path.glob('*.py'):\n"
+            '    issues.append(f"{filepath}:0: error")\n'
+        )
+        f = _write(tmp_path, "check-good.py", content)
+        issues = check_file(f)
+        assert not any("may be absolute" in i for i in issues)
+
+
+class TestSelfCompliance:
+    """Verify that check-hook-output-format.py passes its own checks."""
+
+    def test_self_passes_check6(self) -> None:
+        """check-hook-output-format.py itself passes Check 6 (uses display_path, not filepath)."""
+        hook_path = scripts_dir / "hooks" / "check-hook-output-format.py"
+        issues = check_file(hook_path)
+        check6_issues = [i for i in issues if "may be absolute" in i]
+        assert not check6_issues, (
+            f"check-hook-output-format.py fails its own Check 6: {check6_issues}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

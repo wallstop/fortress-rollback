@@ -394,5 +394,40 @@ class TestOutputFormat:
                 assert not line.startswith("  "), f"Leading indent: {line!r}"
 
 
+class TestRelativePaths:
+    """Tests that output paths are relative when repo_root is provided."""
+
+    def test_issues_use_relative_path_when_repo_root_provided(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue output uses relative path when repo_root is given."""
+        f = _write(tmp_path, "Dockerfile", "RUN pip install requests\n")
+        issues = check_file(f, repo_root=tmp_path)
+        assert len(issues) == 1
+        assert str(tmp_path) not in issues[0]
+        assert issues[0].startswith("Dockerfile:")
+
+    def test_read_error_uses_relative_path_when_repo_root_provided(
+        self, tmp_path: Path
+    ) -> None:
+        """Read-error output uses relative path when repo_root is given."""
+        issues = check_file(tmp_path / "Dockerfile", repo_root=tmp_path)
+        assert len(issues) == 1
+        # The display_path prefix must be relative (just the filename)
+        assert issues[0].startswith("Dockerfile:")
+        # The prefix before the line number must not contain the repo root
+        prefix = issues[0].split(":")[0]
+        assert str(tmp_path) not in prefix
+
+    def test_issues_use_absolute_path_when_no_repo_root(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue output uses full absolute path when repo_root is not given."""
+        f = _write(tmp_path, "Dockerfile", "RUN pip install requests\n")
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert str(tmp_path) in issues[0]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
