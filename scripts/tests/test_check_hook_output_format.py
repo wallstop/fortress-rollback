@@ -80,6 +80,28 @@ class TestIndentedPrinting:
         issues = check_file(f)
         assert issues == []
 
+    def test_indented_print_rf_prefix_detected(self, tmp_path: Path) -> None:
+        """print(rf"  {err}") with rf prefix is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            'def main():\n    print(rf"  {err}")\n',
+        )
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert "leading whitespace" in issues[0]
+
+    def test_indented_print_fr_prefix_detected(self, tmp_path: Path) -> None:
+        """print(fr"  {err}") with fr prefix is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            "def main():\n    print(fr\"  {err}\")\n",
+        )
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert "leading whitespace" in issues[0]
+
     def test_comment_with_pattern_skipped(self, tmp_path: Path) -> None:
         """Comment lines are not checked."""
         f = _write(
@@ -141,6 +163,39 @@ class TestMissingLineNumber:
         assert len(issues) == 1
         assert "missing line number" in issues[0]
 
+    def test_cannot_read_single_quote_detected(self, tmp_path: Path) -> None:
+        """f'{filepath}: cannot read' with single quotes is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            "def check_file(filepath):\n    return [f'{filepath}: cannot read']\n",
+        )
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert "missing line number" in issues[0]
+
+    def test_cannot_read_rf_prefix_detected(self, tmp_path: Path) -> None:
+        """rf"{filepath}: cannot read" with rf prefix is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            'def check_file(filepath):\n    return [rf"{filepath}: cannot read"]\n',
+        )
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert "missing line number" in issues[0]
+
+    def test_cannot_read_fr_prefix_detected(self, tmp_path: Path) -> None:
+        """fr"{filepath}: cannot read" with fr prefix is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            'def check_file(filepath):\n    return [fr"{filepath}: cannot read"]\n',
+        )
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert "missing line number" in issues[0]
+
     def test_comment_with_pattern_skipped(self, tmp_path: Path) -> None:
         """Comment lines are not checked."""
         f = _write(
@@ -173,10 +228,33 @@ class TestFileHandling:
         issues = check_file(f)
         assert issues == []
 
-    def test_nonexistent_file_returns_empty(self, tmp_path: Path) -> None:
-        """Nonexistent file returns empty list with stderr warning."""
+    def test_nonexistent_file_fails_closed(self, tmp_path: Path) -> None:
+        """Nonexistent file returns error issue (fail-closed)."""
         issues = check_file(tmp_path / "nonexistent.py")
-        assert issues == []
+        assert len(issues) == 1
+        assert "cannot read file" in issues[0]
+        assert ":0:" in issues[0]
+
+    def test_unreadable_file_fails_closed(self, tmp_path: Path) -> None:
+        """Unreadable file returns error issue (fail-closed)."""
+        f = _write(tmp_path, "check-unreadable.py", "content")
+        f.chmod(0o000)
+        try:
+            issues = check_file(f)
+            assert len(issues) == 1
+            assert "cannot read file" in issues[0]
+            assert ":0:" in issues[0]
+        finally:
+            f.chmod(0o644)  # Restore for cleanup
+
+    def test_binary_file_fails_closed(self, tmp_path: Path) -> None:
+        """Binary (non-UTF-8) file returns error issue (fail-closed)."""
+        f = tmp_path / "check-binary.py"
+        f.write_bytes(b"\xff\xfe\x00\x01")
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert "cannot read file" in issues[0]
+        assert ":0:" in issues[0]
 
     def test_multiple_violations_detected(self, tmp_path: Path) -> None:
         """Multiple violations in one file are all reported."""

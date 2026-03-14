@@ -24,8 +24,8 @@ def check_file(filepath: Path) -> list[str]:
     try:
         content = filepath.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        print(f"Warning: skipping {filepath}: {exc}", file=sys.stderr)
-        return []
+        print(f"{filepath}:0: cannot read file: {exc}", file=sys.stderr)
+        return [f"{filepath}:0: cannot read file: {exc}"]
 
     lines = content.splitlines()
 
@@ -39,9 +39,7 @@ def check_file(filepath: Path) -> list[str]:
         # Check 1: Indented issue printing in f-strings
         # Detect print(f"  {variable}") which adds leading whitespace to
         # lint output, breaking editor hyperlinking on the path:line: prefix.
-        if re.search(r'print\(f"\s+\{', stripped) or re.search(
-            r"print\(f'\s+\{", stripped
-        ):
+        if re.search(r"""print\(r?fr?["']\s+\{""", stripped):
             issues.append(
                 f"{filepath}:{line_num}: print() with leading whitespace "
                 f"in f-string breaks editor hyperlinking -- remove the "
@@ -50,7 +48,7 @@ def check_file(filepath: Path) -> list[str]:
 
         # Check 2: Error messages missing line numbers
         # Detect f"{path_var}: cannot read" that should be f"{path_var}:0: cannot read"
-        match = re.search(r'f"?\{(\w+)\}:\s+cannot\s+read', stripped)
+        match = re.search(r'''r?fr?["']\{(\w+)\}:\s+cannot\s+read''', stripped)
         if match:
             var_name = match.group(1)
             # Not already in {path}:{num}: or {path}:{var}: format

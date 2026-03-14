@@ -95,6 +95,22 @@ except OSError:
     pass  # File read errors are non-fatal; treat link as valid
 ```
 
+### Regex Patterns for f-string Detection
+
+When writing regex to detect f-string patterns in Python source code (e.g., in
+lint hooks), handle **both quote styles** and the `r` prefix (the only prefix
+that combines with `f`):
+
+```python
+# WRONG: only matches double-quoted f-strings
+re.search(r'f"\{(\w+)\}: cannot read', line)
+
+# CORRECT: both quotes + optional r prefix (rf/fr)
+re.search(r'''r?fr?["']\{(\w+)\}:\s+cannot\s+read''', line)
+```
+
+The `check-hook-output-format.py` pre-commit hook enforces these patterns.
+
 ### Subprocess Best Practices
 
 ```python
@@ -212,79 +228,26 @@ The #1 cross-platform `sed` failure. Portable: `sed -i.bak 's/.../g' f && rm f.b
 | Multi-tool install | `pip install a b c` | Install individually with fallback |
 | Layer cleanup | Separate `RUN rm ...` | Clean up in the same `RUN` layer |
 
-### pip Cache
+### Key Rules
 
-Always pass `--no-cache-dir` to avoid storing wheel/sdist caches in the image:
-
-```dockerfile
-# WRONG: leaves pip cache in the layer
-RUN pip install requests
-
-# CORRECT: no cache stored
-RUN pip install --no-cache-dir requests
-```
-
-### Output Suppression
-
-Use `>/dev/null 2>&1` for silent command detection, not `>&2`:
-
-```bash
-# WRONG: sends stdout to stderr (still visible)
-command -v tool >&2
-
-# CORRECT: suppresses all output
-command -v tool >/dev/null 2>&1
-```
-
-### Resilient Multi-Tool Installs
-
-Install optional tools individually so one failure does not block the rest:
+- `pip install --no-cache-dir` always (no wheel cache in image layers)
+- `command -v tool >/dev/null 2>&1` for silent detection (not `>&2`)
+- Install optional tools individually with `|| echo "failed"` fallback
+- Guard `.bashrc` aliases/`eval` with `command -v` when tools are optional
+- Clean up caches in the **same** `RUN` layer (otherwise bytes persist)
 
 ```dockerfile
-# WRONG: one bad package fails the entire install
-RUN pip install --no-cache-dir tool-a tool-b tool-c
-
-# CORRECT: each tool installed independently with fallback
-RUN for tool in tool-a tool-b tool-c; do \
-        pip install --no-cache-dir "$tool" \
-            || echo "$tool: failed to install"; \
-    done
-```
-
-### Guard Optional Tool Aliases in Shell Init
-
-When tools are installed with fallback (`|| echo "skipped"`), any
-aliases or `eval` init in `.bashrc` **must** be guarded with
-`command -v`. Unguarded aliases break the shell if the tool is missing:
-
-```bash
-# WRONG: breaks ls if eza was not installed
-alias ls="eza"
-eval "$(zoxide init bash)"
-
-# CORRECT: only alias if tool exists
-command -v eza >/dev/null 2>&1 && alias ls="eza"
-command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init bash)"
-```
-
-The pre-commit hook `check-dockerfile` enforces unguarded `eval "$("`
-detection. Unguarded aliases are caught by code review. Mandatory
-apt-installed tools (e.g., `batcat`, `htop`) do not need guards
-since `apt-get install` would fail the build.
-
-### Layer Hygiene
-
-Clean up caches, temp files, and package lists in the **same** `RUN`
-layer that creates them -- otherwise deleted bytes still occupy space
-in earlier layers:
-
-```dockerfile
-# WRONG: cleanup in a separate layer does not reclaim space
-RUN apt-get update && apt-get install -y curl
-RUN rm -rf /var/lib/apt/lists/*
-
 # CORRECT: single layer, cleanup at the end
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/*
 ```
+
+```bash
+# Guard optional tool aliases
+command -v eza >/dev/null 2>&1 && alias ls="eza"
+command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init bash)"
+```
+
+The pre-commit hook `check-dockerfile` enforces unguarded `eval "$("`
+detection. Mandatory apt-installed tools do not need guards.
