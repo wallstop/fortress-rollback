@@ -363,7 +363,7 @@ def validate_wiki(wiki_dir: Path, strict: bool = False) -> int:
             else:
                 prefix = yellow("WARNING")
 
-            print("  " + f"{prefix} {issue.file}:{issue.line}: {issue.message}", file=sys.stderr)
+            print(f"{issue.file}:{issue.line}: {prefix}: {issue.message}", file=sys.stderr)
 
         print()
 

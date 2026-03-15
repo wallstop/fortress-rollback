@@ -28,9 +28,12 @@ trigger/detection line. Mention the trigger line in the message body:
 f"{path}:{fn_line}: #[track_caller] (line {attr_line}) on async fn ..."
 ```
 
-Never prefix issue lines with leading whitespace (e.g., `"  {issue}"`) in
-`main()` summary output -- leading spaces break the `path:line:` prefix
-that editors rely on for hyperlinking.
+Never prefix issue lines with leading whitespace in `main()` summary
+output -- leading spaces break the `path:line:` prefix that editors rely
+on for hyperlinking.  This includes both f-string whitespace (e.g.,
+`print(f"  {issue}")`) and string concatenation (e.g.,
+`print("  " + f"{prefix} {issue}")`).  **Check 1b** in
+`check-hook-output-format.py` detects the concatenation variant.
 
 For file-level errors where no specific line number exists (e.g., cannot
 read file), use a synthetic line number `:0:` to maintain the format:

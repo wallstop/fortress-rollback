@@ -106,6 +106,45 @@ class TestIndentedPrinting:
         assert len(issues) == 1
         assert "leading whitespace" in issues[0]
 
+    def test_concat_leading_whitespace_double_quote_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """print("  " + f"...") is flagged (Check 1b)."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            'def main():\n    print("  " + f"{prefix} {issue}")\n',
+        )
+        issues = check_file(f)
+        assert any("leading" in i and "whitespace" in i for i in issues), (
+            f"Expected leading-whitespace warning, got: {issues}"
+        )
+
+    def test_concat_leading_whitespace_single_quote_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """print('  ' + ...) is flagged (Check 1b)."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            "def main():\n    print('  ' + f'{prefix} {issue}')\n",
+        )
+        issues = check_file(f)
+        assert any("leading" in i and "whitespace" in i for i in issues), (
+            f"Expected leading-whitespace warning, got: {issues}"
+        )
+
+    def test_concat_no_leading_whitespace_passes(self, tmp_path: Path) -> None:
+        """print("prefix" + ...) without leading spaces passes (Check 1b)."""
+        f = _write(
+            tmp_path,
+            "check-good.py",
+            'def main():\n    print("prefix" + f" {issue}")\n',
+        )
+        issues = check_file(f)
+        concat_issues = [i for i in issues if "concatenated" in i and "leading" in i]
+        assert not concat_issues
+
     def test_comment_with_pattern_skipped(self, tmp_path: Path) -> None:
         """Comment lines are not checked."""
         f = _write(
@@ -911,6 +950,62 @@ class TestStderrErrorPrints:
         )
         issues = check_file(f)
         assert not any("stdout" in i for i in issues)
+
+    def test_single_quoted_error_without_stderr_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        """print('ERROR: something') with single quotes is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            "def main():\n    print('ERROR: something went wrong')\n",
+        )
+        issues = check_file(f)
+        assert any("stdout" in i for i in issues), (
+            f"Expected stdout warning, got: {issues}"
+        )
+
+    def test_single_quoted_fstring_error_without_stderr_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        """print(f'ERROR: {var}') with single-quoted f-string is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            "def main():\n    print(f'ERROR: {detail}')\n",
+        )
+        issues = check_file(f)
+        assert any("stdout" in i for i in issues), (
+            f"Expected stdout warning, got: {issues}"
+        )
+
+    def test_single_quoted_warning_without_stderr_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        """print('WARNING: something') with single quotes is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            "def main():\n    print('WARNING: check skipped')\n",
+        )
+        issues = check_file(f)
+        assert any("stdout" in i for i in issues), (
+            f"Expected stdout warning, got: {issues}"
+        )
+
+    def test_single_quoted_fstring_warning_without_stderr_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        """print(f'WARNING: {var}') with single-quoted f-string is flagged."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            "def main():\n    print(f'WARNING: {detail}')\n",
+        )
+        issues = check_file(f)
+        assert any("stdout" in i for i in issues), (
+            f"Expected stdout warning, got: {issues}"
+        )
 
     def test_informational_print_not_flagged(self, tmp_path: Path) -> None:
         """print("Running cargo fmt...") is not flagged (informational)."""

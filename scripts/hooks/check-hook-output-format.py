@@ -61,6 +61,16 @@ def check_file(filepath: Path, repo_root: Path | None = None) -> list[str]:
                 f"leading spaces"
             )
 
+        # Check 1b: Leading whitespace via string concatenation
+        # Detect print("  " + ...) or print('  ' + ...) which adds leading
+        # whitespace via concatenation, breaking editor hyperlinking.
+        if re.search(r"""print\(["']\s+["']\s*\+""", stripped):
+            issues.append(
+                f"{display_path}:{line_num}: print() with concatenated "
+                f"leading-whitespace string breaks editor hyperlinking "
+                f"-- remove the leading-space string"
+            )
+
         # Check 2: Error messages missing line numbers
         # Detect f"{path_var}: cannot read" that should be f"{path_var}:0: cannot read"
         match = re.search(r'''r?fr?["']\{(\w+)\}:\s+cannot\s+read''', stripped)
