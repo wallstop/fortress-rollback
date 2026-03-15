@@ -11,6 +11,8 @@ Validates:
   (absolute paths break {path}:{line}: parsing on Windows due to drive letter
   colons -- use relative_to() or a display_path variable instead)
 - No ERROR:/WARNING: diagnostic prints going to stdout (must use file=sys.stderr)
+- sys.stdout wrapped with UTF-8 encoding but sys.stderr not wrapped (both
+  must be wrapped for cross-platform Unicode support)
 
 Cross-platform: Works on Linux, macOS, and Windows.
 """
@@ -253,6 +255,34 @@ def check_file(filepath: Path, repo_root: Path | None = None) -> list[str]:
                         f"glob/rglob/iterdir) -- use relative_to() or a "
                         f"display_path variable"
                     )
+
+    # Check 8: sys.stdout wrapped with UTF-8 but sys.stderr not wrapped
+    # When a script wraps sys.stdout with io.TextIOWrapper for UTF-8 encoding
+    # (common for cross-platform Unicode support), sys.stderr must also be
+    # wrapped to avoid encoding errors when printing diagnostics that contain
+    # non-ASCII characters.
+    stdout_wrap_line = None
+    has_stderr_wrap = False
+    for line_num, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if stripped.startswith("#") or not stripped:
+            continue
+        if re.search(
+            r"sys\.stdout\s*=\s*io\.TextIOWrapper\s*\(\s*sys\.stdout\.buffer",
+            stripped,
+        ):
+            stdout_wrap_line = line_num
+        if re.search(
+            r"sys\.stderr\s*=\s*io\.TextIOWrapper\s*\(\s*sys\.stderr\.buffer",
+            stripped,
+        ):
+            has_stderr_wrap = True
+    if stdout_wrap_line is not None and not has_stderr_wrap:
+        issues.append(
+            f"{display_path}:{stdout_wrap_line}: sys.stdout wrapped with "
+            f"UTF-8 encoding but sys.stderr is not -- add matching "
+            f"sys.stderr wrapper for cross-platform Unicode support"
+        )
 
     return issues
 

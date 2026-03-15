@@ -26,9 +26,11 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-# Ensure stdout uses UTF-8 encoding for Unicode symbols
+# Ensure stdout/stderr use UTF-8 encoding for Unicode symbols (cross-platform)
 if sys.stdout.encoding != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if sys.stderr.encoding != "utf-8":
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 
 class Issue(NamedTuple):

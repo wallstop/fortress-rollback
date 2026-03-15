@@ -1101,5 +1101,67 @@ class TestSelfCompliance:
         )
 
 
+class TestCheck8StderrEncoding:
+    """Check 8: sys.stdout wrapped with UTF-8 but sys.stderr not wrapped."""
+
+    def test_stdout_wrapped_stderr_not_wrapped(self, tmp_path: Path) -> None:
+        """Script wraps stdout but not stderr -- should flag."""
+        f = _write(
+            tmp_path,
+            "check-bad.py",
+            (
+                "import io\n"
+                "import sys\n"
+                'sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")\n'
+            ),
+        )
+        issues = check_file(f)
+        assert any("sys.stdout wrapped" in i and "sys.stderr" in i for i in issues), (
+            f"Expected stderr-wrapping warning, got: {issues}"
+        )
+
+    def test_both_wrapped(self, tmp_path: Path) -> None:
+        """Script wraps both stdout and stderr -- should pass."""
+        f = _write(
+            tmp_path,
+            "check-good.py",
+            (
+                "import io\n"
+                "import sys\n"
+                'sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")\n'
+                'sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")\n'
+            ),
+        )
+        issues = check_file(f)
+        assert not any("sys.stdout wrapped" in i for i in issues)
+
+    def test_neither_wrapped(self, tmp_path: Path) -> None:
+        """Script wraps neither -- should pass."""
+        f = _write(
+            tmp_path,
+            "check-good.py",
+            (
+                "import sys\n"
+                'print("hello")\n'
+            ),
+        )
+        issues = check_file(f)
+        assert not any("sys.stdout wrapped" in i for i in issues)
+
+    def test_only_stderr_wrapped(self, tmp_path: Path) -> None:
+        """Script wraps only stderr -- should pass."""
+        f = _write(
+            tmp_path,
+            "check-good.py",
+            (
+                "import io\n"
+                "import sys\n"
+                'sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")\n'
+            ),
+        )
+        issues = check_file(f)
+        assert not any("sys.stdout wrapped" in i for i in issues)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

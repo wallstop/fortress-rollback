@@ -14,6 +14,7 @@
 - **Meaningful exit codes** via `sys.exit(main())`
 - **Errors to stderr**: `print("ERROR: ...", file=sys.stderr)`
 - **No `shell=True`** in subprocess calls
+- **UTF-8 for both stdout and stderr** -- When wrapping `sys.stdout` with `io.TextIOWrapper` for UTF-8, always wrap `sys.stderr` too (Check 8 enforces this)
 
 ### Error Reporting in Lint Scripts
 
@@ -190,8 +191,13 @@ Do NOT catch `FileNotFoundError` after `shutil.which()` already validated existe
 ```python
 #!/usr/bin/env python3
 """Brief description. Works on Windows, macOS, and Linux."""
+import io
 import sys
 from pathlib import Path
+
+# Wrap BOTH streams for cross-platform Unicode (CP1252 safety)
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 def get_project_root() -> Path:
     return Path(__file__).parent.parent.resolve()
@@ -228,10 +234,6 @@ Methods: `test_empty_input_returns_empty_string`, `test_unclosed_div_is_handled_
 ---
 
 ## Shell Script Portability
-
-### sed -i (Critical)
-
-The #1 cross-platform `sed` failure. Portable: `sed -i.bak 's/.../g' f && rm f.bak`
 
 ### Portable Patterns Quick Reference
 
@@ -290,10 +292,9 @@ RUN apt-get update \
 ```
 
 ```bash
-# Guard optional tool aliases
+# Guard optional tool aliases (check-dockerfile enforces unguarded eval)
 command -v eza >/dev/null 2>&1 && alias ls="eza"
 command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init bash)"
 ```
 
-The pre-commit hook `check-dockerfile` enforces unguarded `eval "$("`
-detection. Mandatory apt-installed tools do not need guards.
+Mandatory apt-installed tools do not need guards.
