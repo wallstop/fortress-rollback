@@ -219,7 +219,7 @@ jobs:
           # Run clippy with nursery lints enabled
           # These are experimental but useful for catching additional issues
           # Lints from Cargo.toml are already applied; here we add nursery
-          cargo clippy --all-targets -- \
+          cargo clippy --all-targets --features tokio,json -- \
             -D warnings \
             -W clippy::nursery \
             -A clippy::significant_drop_tightening \
@@ -462,7 +462,7 @@ jobs:
           # - clippy::unimplemented: unimplemented!() macros
           # - clippy::unreachable: unreachable!() macros
           # - clippy::indexing_slicing: unchecked array/slice indexing
-          if cargo clippy --lib -- \
+          if cargo clippy --lib --features tokio,json -- \
               -D clippy::panic \
               -D clippy::unwrap_used \
               -D clippy::expect_used \
@@ -552,7 +552,7 @@ jobs:
             echo "- Review any warnings in the individual job logs"
             echo "- Replace \`.unwrap()\` with proper error handling where possible"
             echo "- Ensure all \`panic!\` calls are intentional and documented"
-            echo "- Run \`cargo clippy --all-targets\` locally before pushing"
+            echo "- Run \`cargo clippy --all-targets --features tokio,json\` locally before pushing"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check for critical failures

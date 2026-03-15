@@ -26,9 +26,11 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-# Ensure stdout uses UTF-8 encoding for Unicode symbols
+# Ensure stdout/stderr use UTF-8 encoding for Unicode symbols (cross-platform)
 if sys.stdout.encoding != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if sys.stderr.encoding != "utf-8":
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 
 class Issue(NamedTuple):
@@ -321,7 +323,7 @@ def check_broken_wiki_links(content: str, filename: str, wiki_pages: set[str]) -
 def validate_wiki(wiki_dir: Path, strict: bool = False) -> int:
     """Validate all wiki files and return exit code."""
     if not wiki_dir.exists():
-        print(red(f"ERROR: Wiki directory not found: {wiki_dir}"))
+        print(red(f"ERROR: Wiki directory not found: {wiki_dir}"), file=sys.stderr)
         return 1
 
     # Get all wiki pages
@@ -363,15 +365,15 @@ def validate_wiki(wiki_dir: Path, strict: bool = False) -> int:
             else:
                 prefix = yellow("WARNING")
 
-            print(f"  {prefix} {issue.file}:{issue.line}: {issue.message}")
+            print(f"{issue.file}:{issue.line}: {prefix}: {issue.message}", file=sys.stderr)
 
         print()
 
     # Summary
     if errors:
-        print(red(f"✗ Found {len(errors)} error(s) and {len(warnings)} warning(s)"))
+        print(red(f"✗ Found {len(errors)} error(s) and {len(warnings)} warning(s)"), file=sys.stderr)
     elif warnings:
-        print(yellow(f"⚠ Found {len(warnings)} warning(s)"))
+        print(yellow(f"⚠ Found {len(warnings)} warning(s)"), file=sys.stderr)
     else:
         print(green("✓ Wiki validation passed"))
 

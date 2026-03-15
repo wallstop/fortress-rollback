@@ -14,22 +14,158 @@
 - **Meaningful exit codes** via `sys.exit(main())`
 - **Errors to stderr**: `print("ERROR: ...", file=sys.stderr)`
 - **No `shell=True`** in subprocess calls
+- **UTF-8 for both stdout and stderr** -- When wrapping `sys.stdout` with `io.TextIOWrapper` for UTF-8, always wrap `sys.stderr` too (Check 8 enforces this)
+
+### Error Reporting in Lint Scripts
+
+Lint hooks must use `{path}:{line_number}: {message}` format so editors
+hyperlink to the correct location. When a violation spans multiple lines
+(e.g., attribute on line A, target on line B), the `path:line` prefix
+must point to the **violation site** (where the fix is needed), not the
+trigger/detection line. Mention the trigger line in the message body:
+
+```python
+# Multi-line: prefix → async fn line, body → attribute line
+f"{path}:{fn_line}: #[track_caller] (line {attr_line}) on async fn ..."
+```
+
+Never prefix issue lines with leading whitespace in `main()` summary
+output -- leading spaces break the `path:line:` prefix that editors rely
+on for hyperlinking.  This includes both f-string whitespace (e.g.,
+`print(f"  {issue}")`) and string concatenation (e.g.,
+`print("  " + f"{prefix} {issue}")`).  **Check 1b** in
+`check-hook-output-format.py` detects the concatenation variant.
+
+For file-level errors where no specific line number exists (e.g., cannot
+read file), use a synthetic line number `:0:` to maintain the format:
+
+```python
+# File-level error: use :0: as synthetic line number
+f"{path}:0: cannot read file: {exc}"
+```
+
+### Path Handling in Lint Output
+
+**Rule**: All user-facing path output must use **relative paths** (relative to
+project root). Absolute paths break `{path}:{line}:` parsing on Windows
+(drive letter colon `C:\...:0:`).
+
+**glob/rglob/iterdir scripts** produce absolute `Path` objects -- convert first:
+
+```python
+try:
+    rel = filepath.relative_to(project_root)
+except ValueError:
+    rel = filepath
+```
+
+**argv-based scripts** receive string paths -- use a `_display_path()` helper:
+
+```python
+def _display_path(filepath: str | Path) -> str:
+    """Convert a file path to a relative display path."""
+    try:
+        return str(Path(filepath).resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(filepath)
+```
+
+**Check 6** in `check-hook-output-format.py` flags raw path variables (like
+`{filepath}`) in f-string error output when the file uses glob/rglob/iterdir.
+Safe variable names that pass Check 6: `rel`, `display_path`, `rel_path`,
+`relative`, `rel_index`. Function calls like `{_display_path(filepath)}`
+also pass because the regex only matches simple `{var_name}:` patterns.
 
 ### Exception Handling
 
-```python
-# WRONG: silent swallowing
-try:
-    content = file.read_text()
-except OSError:
-    pass
+#### read\_text() Exceptions
 
-# CORRECT: comment explains why
-try:
-    content = file.read_text()
-except OSError:
-    pass  # File read errors are non-fatal; treat link as valid
+`path.read_text(encoding="utf-8")` can raise both `OSError` (missing/locked file)
+and `UnicodeDecodeError` (non-UTF-8 bytes). Always catch both:
+
+```python
+# WRONG                              # CORRECT
+except OSError as e:                  except (OSError, UnicodeDecodeError) as e:
+    ...                                   ...
 ```
+
+Alternative: `errors="replace"` for best-effort reading (grep-like hooks).
+
+#### Read Error Propagation
+
+Hooks that cannot read a file must **fail**, not silently pass.
+
+For **list-returning** hooks (`check_file() -> list[str]`), return the error
+in the issues list so `main()` sees it. Do **not** also print -- `main()`
+prints returned issues, so printing here causes duplicate output:
+
+```python
+except (OSError, UnicodeDecodeError) as exc:
+    return [f"{path}:0: cannot read file: {exc}"]  # NOT return [] -- that silently passes
+```
+
+For **fixer hooks** (`fix_file() -> bool | None`), print to stderr and return
+`None` to signal an error (distinct from `False` = no change needed):
+
+```python
+except (OSError, UnicodeDecodeError) as exc:
+    print(f"{path}:0: cannot read file: {exc}", file=sys.stderr)
+    return None  # NOT return False -- that silently passes
+```
+
+#### Parse Error Line Numbers
+
+Extract the real line number from parse exceptions instead of hard-coding `:1:`:
+
+```python
+line = getattr(e, "lineno", 1) or 1  # fallback to 1
+print(f"{path}:{line}: TOML error: {e}", file=sys.stderr)
+```
+
+Line number attributes: `tomllib.TOMLDecodeError.lineno`,
+`json.JSONDecodeError.lineno`, `yaml.YAMLError.problem_mark.line` (0-based).
+
+#### Fixer Hook Pattern
+
+Fixer hooks modify files in-place. They must use `bool | None` return type
+so `main()` can distinguish "unchanged" from "error":
+
+```python
+def fix_file(filepath: str) -> bool | None:
+    """Fix something. Returns True if modified, False if unchanged, None on error."""
+    try:
+        content = Path(filepath).read_bytes()
+        # ... fix logic ...
+        return True  # or False
+    except OSError as exc:  # Use (OSError, UnicodeDecodeError) for read_text()
+        print(f"{filepath}:0: cannot read file: {exc}", file=sys.stderr)
+        return None  # NOT False -- False means "no change", None means "error"
+
+def main() -> int:
+    had_error = False
+    modified = False
+    for filepath in sys.argv[1:]:
+        result = fix_file(filepath)
+        if result is True:
+            modified = True
+        elif result is None:
+            had_error = True
+    return 1 if modified or had_error else 0
+```
+
+### Regex Patterns for f-string Detection
+
+Handle both quote styles and the `r` prefix (the only prefix that combines with `f`):
+
+```python
+# WRONG: only matches double-quoted f-strings
+re.search(r'f"\{(\w+)\}: cannot read', line)
+
+# CORRECT: both quotes + optional r prefix (rf/fr)
+re.search(r'''r?fr?["']\{(\w+)\}:\s+cannot\s+read''', line)
+```
+
+The `check-hook-output-format.py` pre-commit hook enforces these patterns.
 
 ### Subprocess Best Practices
 
@@ -55,8 +191,13 @@ Do NOT catch `FileNotFoundError` after `shutil.which()` already validated existe
 ```python
 #!/usr/bin/env python3
 """Brief description. Works on Windows, macOS, and Linux."""
+import io
 import sys
 from pathlib import Path
+
+# Wrap BOTH streams for cross-platform Unicode (CP1252 safety)
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 def get_project_root() -> Path:
     return Path(__file__).parent.parent.resolve()
@@ -94,21 +235,6 @@ Methods: `test_empty_input_returns_empty_string`, `test_unclosed_div_is_handled_
 
 ## Shell Script Portability
 
-### sed -i (Critical)
-
-The #1 cross-platform `sed` failure:
-
-```bash
-# WRONG on macOS:
-sed -i 's/old/new/g' file.txt
-
-# PORTABLE: use backup extension, then remove
-sed -i.bak 's/old/new/g' file.txt && rm file.txt.bak
-
-# ALTERNATIVE: temp file pattern
-sed 's/old/new/g' file.txt > file.txt.tmp && mv file.txt.tmp file.txt
-```
-
 ### Portable Patterns Quick Reference
 
 | Task | Non-Portable | Portable |
@@ -124,63 +250,18 @@ sed 's/old/new/g' file.txt > file.txt.tmp && mv file.txt.tmp file.txt
 | Canonical path | `readlink -f path` | `realpath path` |
 | Binary path | `/bin/sed 's/.../g'` | `sed 's/.../g'` (rely on PATH) |
 
-### Backtick Escaping
-
-| Context | Backtick Handling |
-|---------|-------------------|
-| Single quotes `'...'` | Literal, no escaping needed |
-| Double quotes `"..."` | Must escape: `\`cmd\`` |
-| Heredoc `<< 'EOF'` | Literal, no escaping needed |
-| Heredoc `<< EOF` | Executes -- avoid or escape |
-
 ### GNU grep Extensions (Avoid)
 
 `--include`, `--exclude`, `-P` (Perl regex) are GNU-only. Use `find` + `grep` and `sed` instead.
 
 ### Best Practices
 
-```bash
-#!/bin/bash
-set -euo pipefail        # Strict mode
-
-# Check dependencies
-command -v jq >/dev/null 2>&1 || { echo "Error: jq required" >&2; exit 1; }
-
-# Always quote variables
-rm "$file"
-
-# Use $() not backticks
-result=$(command)
-
-# Tool availability with fallback
-if command -v sd &>/dev/null; then
-    sd 'pattern' 'replacement' file
-else
-    sed -i.bak -E 's|pattern|replacement|g' file && rm -f file.bak
-fi
-```
-
-### Platform Detection
-
-```bash
-case "$(uname -s)" in
-    Linux*)  OS=linux ;;
-    Darwin*) OS=macos ;;
-    MINGW*|CYGWIN*) OS=windows ;;
-    *)       OS=unknown ;;
-esac
-```
-
-### CI-Specific
-
-```yaml
-# GitHub Actions: use bash explicitly
-- name: Run script
-  shell: bash
-  run: |
-    set -euo pipefail
-    ./scripts/my-script.sh
-```
+- `set -euo pipefail` at the top of every script
+- `command -v tool >/dev/null 2>&1 || { echo "Error" >&2; exit 1; }` for deps
+- Always quote variables: `rm "$file"`
+- Use `$()` not backticks
+- Platform detection: `case "$(uname -s)" in Linux*) ... ;; Darwin*) ... ;; esac`
+- GitHub Actions: always set `shell: bash` and `set -euo pipefail`
 
 ---
 
@@ -195,79 +276,25 @@ esac
 | Multi-tool install | `pip install a b c` | Install individually with fallback |
 | Layer cleanup | Separate `RUN rm ...` | Clean up in the same `RUN` layer |
 
-### pip Cache
+### Key Rules
 
-Always pass `--no-cache-dir` to avoid storing wheel/sdist caches in the image:
-
-```dockerfile
-# WRONG: leaves pip cache in the layer
-RUN pip install requests
-
-# CORRECT: no cache stored
-RUN pip install --no-cache-dir requests
-```
-
-### Output Suppression
-
-Use `>/dev/null 2>&1` for silent command detection, not `>&2`:
-
-```bash
-# WRONG: sends stdout to stderr (still visible)
-command -v tool >&2
-
-# CORRECT: suppresses all output
-command -v tool >/dev/null 2>&1
-```
-
-### Resilient Multi-Tool Installs
-
-Install optional tools individually so one failure does not block the rest:
+- `pip install --no-cache-dir` always (no wheel cache in image layers)
+- `command -v tool >/dev/null 2>&1` for silent detection (not `>&2`)
+- Install optional tools individually with `|| echo "failed"` fallback
+- Guard `.bashrc` aliases/`eval` with `command -v` when tools are optional
+- Clean up caches in the **same** `RUN` layer (otherwise bytes persist)
 
 ```dockerfile
-# WRONG: one bad package fails the entire install
-RUN pip install --no-cache-dir tool-a tool-b tool-c
-
-# CORRECT: each tool installed independently with fallback
-RUN for tool in tool-a tool-b tool-c; do \
-        pip install --no-cache-dir "$tool" \
-            || echo "$tool: failed to install"; \
-    done
-```
-
-### Guard Optional Tool Aliases in Shell Init
-
-When tools are installed with fallback (`|| echo "skipped"`), any
-aliases or `eval` init in `.bashrc` **must** be guarded with
-`command -v`. Unguarded aliases break the shell if the tool is missing:
-
-```bash
-# WRONG: breaks ls if eza was not installed
-alias ls="eza"
-eval "$(zoxide init bash)"
-
-# CORRECT: only alias if tool exists
-command -v eza >/dev/null 2>&1 && alias ls="eza"
-command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init bash)"
-```
-
-The pre-commit hook `check-dockerfile` enforces unguarded `eval "$("`
-detection. Unguarded aliases are caught by code review. Mandatory
-apt-installed tools (e.g., `batcat`, `htop`) do not need guards
-since `apt-get install` would fail the build.
-
-### Layer Hygiene
-
-Clean up caches, temp files, and package lists in the **same** `RUN`
-layer that creates them -- otherwise deleted bytes still occupy space
-in earlier layers:
-
-```dockerfile
-# WRONG: cleanup in a separate layer does not reclaim space
-RUN apt-get update && apt-get install -y curl
-RUN rm -rf /var/lib/apt/lists/*
-
 # CORRECT: single layer, cleanup at the end
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/*
 ```
+
+```bash
+# Guard optional tool aliases (check-dockerfile enforces unguarded eval)
+command -v eza >/dev/null 2>&1 && alias ls="eza"
+command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init bash)"
+```
+
+Mandatory apt-installed tools do not need guards.

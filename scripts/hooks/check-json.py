@@ -2,7 +2,6 @@
 """Validate JSON files. Cross-platform. Supports JSONC (JSON with Comments)."""
 
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -67,6 +66,18 @@ def strip_jsonc_comments(content: str) -> str:
     return "".join(result)
 
 
+def _display_path(filepath: str | Path) -> str:
+    """Convert a file path to a relative display path.
+
+    Pre-commit sets CWD to the repo root, so paths relative to CWD
+    are also relative to the project root.
+    """
+    try:
+        return str(Path(filepath).resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(filepath)
+
+
 def check_file(filepath: str) -> bool:
     """Check if JSON/JSONC file is valid. Returns True if valid."""
     path = Path(filepath)
@@ -83,10 +94,10 @@ def check_file(filepath: str) -> bool:
         json.loads(content)
         return True
     except json.JSONDecodeError as e:
-        print(f"JSON error in {filepath}: {e}")
+        print(f"{_display_path(filepath)}:{e.lineno}: JSON error: {e}", file=sys.stderr)
         return False
-    except OSError as e:
-        print(f"Cannot read {filepath}: {e}")
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"{_display_path(filepath)}:0: cannot read file: {e}", file=sys.stderr)
         return False
 
 

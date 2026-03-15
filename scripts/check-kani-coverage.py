@@ -26,6 +26,19 @@ def get_project_root() -> Path:
     return get_script_dir().parent
 
 
+def _display_path(path: Path, project_root: Path) -> Path:
+    """Convert an absolute path to a project-relative display path.
+
+    Unlike the CWD-based ``_display_path`` in argv-receiving hook scripts,
+    this variant takes an explicit *project_root* because the script discovers
+    files via ``rglob()`` and always knows its own root.
+    """
+    try:
+        return path.relative_to(project_root)
+    except ValueError:
+        return path
+
+
 def find_source_proofs(project_root: Path) -> set[str]:
     """Find all proof function names in source code."""
     proofs = set()
@@ -54,7 +67,7 @@ def find_source_proofs(project_root: Path) -> set[str]:
                             break
 
         except (OSError, UnicodeDecodeError) as e:
-            print(f"Warning: Could not read {rs_file}: {e}", file=sys.stderr)
+            print(f"{_display_path(rs_file, project_root)}:0: cannot read file: {e}", file=sys.stderr)
 
     return proofs
 
@@ -65,7 +78,7 @@ def find_script_proofs(project_root: Path) -> set[str]:
     verify_script = project_root / "scripts" / "verify-kani.sh"
 
     if not verify_script.exists():
-        print(f"Warning: {verify_script} not found", file=sys.stderr)
+        print(f"{_display_path(verify_script, project_root)}:0: file not found", file=sys.stderr)
         return proofs
 
     try:
@@ -79,7 +92,7 @@ def find_script_proofs(project_root: Path) -> set[str]:
             proofs.add(match.group(1))
 
     except (OSError, UnicodeDecodeError) as e:
-        print(f"Warning: Could not read {verify_script}: {e}", file=sys.stderr)
+        print(f"{_display_path(verify_script, project_root)}:0: cannot read file: {e}", file=sys.stderr)
 
     return proofs
 
@@ -113,7 +126,7 @@ def find_script_proof_tiers(project_root: Path) -> dict[str, int]:
                     proof_tiers[proof_match.group(1)] = tier
 
     except (OSError, UnicodeDecodeError) as e:
-        print(f"Warning: Could not read {verify_script}: {e}", file=sys.stderr)
+        print(f"{_display_path(verify_script, project_root)}:0: cannot read file: {e}", file=sys.stderr)
 
     return proof_tiers
 
@@ -201,7 +214,7 @@ def check_unwind_attributes(
                         advisories.append((fn_name, str(rel_path)))
 
         except (OSError, UnicodeDecodeError) as e:
-            print(f"Warning: Could not read {rs_file}: {e}", file=sys.stderr)
+            print(f"{_display_path(rs_file, project_root)}:0: cannot read file: {e}", file=sys.stderr)
 
     has_errors = False
 
@@ -209,13 +222,15 @@ def check_unwind_attributes(
         has_errors = True
         print(
             f"\nERROR: {len(errors)} Tier 2/3 proof(s) missing required "
-            f"#[kani::unwind(N)]:"
+            f"#[kani::unwind(N)]:",
+            file=sys.stderr,
         )
         for fn_name, file_path, tier in sorted(errors):
             print(
                 f"  ERROR: Tier {tier} proof '{fn_name}' in file '{file_path}' "
                 f"has no #[kani::unwind(N)]. Tier 2/3 proofs MUST have explicit "
-                f"unwind bounds to prevent CI timeouts."
+                f"unwind bounds to prevent CI timeouts.",
+                file=sys.stderr,
             )
 
     if advisories:
@@ -228,7 +243,8 @@ def check_unwind_attributes(
                 print(
                     f"  WARNING: proof '{fn_name}' in file '{file_path}' has no explicit "
                     f"#[kani::unwind(N)]. CI uses --default-unwind 8; larger data "
-                    f"structures may cause timeouts."
+                    f"structures may cause timeouts.",
+                    file=sys.stderr,
                 )
         else:
             print(
@@ -260,16 +276,16 @@ def main() -> int:
 
     if missing_proofs:
         has_errors = True
-        print("ERROR: The following Kani proofs are NOT in verify-kani.sh:")
+        print("ERROR: The following Kani proofs are NOT in verify-kani.sh:", file=sys.stderr)
         for proof in sorted(missing_proofs):
-            print(f"  - {proof}")
-        print("\nAdd them to one of the TIER*_PROOFS arrays in scripts/verify-kani.sh")
+            print(f"  - {proof}", file=sys.stderr)
+        print("\nAdd them to one of the TIER*_PROOFS arrays in scripts/verify-kani.sh", file=sys.stderr)
 
     if extra_proofs:
         # This is a warning, not an error (could be commented out proofs)
-        print("\nWARNING: The following proofs are in verify-kani.sh but not in source:")
+        print("\nWARNING: The following proofs are in verify-kani.sh but not in source:", file=sys.stderr)
         for proof in sorted(extra_proofs):
-            print(f"  - {proof}")
+            print(f"  - {proof}", file=sys.stderr)
 
     if not has_errors:
         print(f"[OK] All {len(source_proofs)} Kani proofs are covered in verify-kani.sh")

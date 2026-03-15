@@ -7,7 +7,7 @@
 | Error Pattern | Category | Quick Fix |
 |---------------|----------|-----------|
 | `cargo fmt --check` fails | Formatting | `cargo fmt` |
-| Clippy warnings | Linting | `cargo clippy --fix --allow-dirty` |
+| Clippy warnings | Linting | `cargo clippy --all-targets --features tokio,json --fix --allow-dirty` |
 | Test assertion failures | Test logic | `RUST_BACKTRACE=1 cargo test name -- --nocapture` |
 | `VERIFICATION RESULT: FAILURE` | Kani | Verify assertion matches impl; add `#[kani::unwind(N)]` |
 | `linker cc not found` | Cross-compilation | Check Cross.toml, avoid unstable image tags |
@@ -34,7 +34,7 @@ cat .github/workflows/ci-*.yml | grep "run:"
 
 # Common reproductions
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --features tokio,json -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 cargo nextest run test_name --no-capture
 cargo kani --harness proof_function_name

@@ -19,22 +19,33 @@ def find_llm_md_files(repo_root: Path) -> list[Path]:
     return sorted(llm_dir.rglob("*.md"))
 
 
-def check_file(filepath: Path, repo_root: Path) -> bool:
-    """Check if file exceeds the line limit. Returns True if within limit."""
+def check_file(filepath: Path, repo_root: Path | None = None) -> bool:
+    """Check if file exceeds the line limit. Returns True if within limit.
+
+    When repo_root is provided, paths in output are relative to it.
+    """
+    if repo_root is not None:
+        try:
+            display_path = filepath.relative_to(repo_root)
+        except ValueError:
+            display_path = filepath
+    else:
+        display_path = filepath
+
     try:
         content = filepath.read_text(encoding="utf-8")
         line_count = len(content.splitlines())
         if line_count > MAX_LINES:
-            rel = filepath.relative_to(repo_root)
             over = line_count - MAX_LINES
             print(
-                f"FAIL: {rel} has {line_count} lines "
-                f"({over} over the {MAX_LINES}-line limit)"
+                f"{display_path}:0: has {line_count} lines "
+                f"({over} over the {MAX_LINES}-line limit)",
+                file=sys.stderr,
             )
             return False
         return True
-    except OSError as e:
-        print(f"Cannot read {filepath}: {e}")
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"{display_path}:0: cannot read file: {e}", file=sys.stderr)
         return False
 
 
@@ -52,7 +63,8 @@ def main() -> int:
 
     if not all_ok:
         print(
-            f"\nAll .md files under .llm/ must be {MAX_LINES} lines or fewer."
+            f"\nAll .md files under .llm/ must be {MAX_LINES} lines or fewer.",
+            file=sys.stderr,
         )
         return 1
 

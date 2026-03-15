@@ -24,10 +24,12 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-# Ensure stdout uses UTF-8 encoding for Unicode symbols (✓, ✗, ⚠)
+# Ensure stdout/stderr use UTF-8 encoding for Unicode symbols (✓, ✗, ⚠)
 # This fixes UnicodeEncodeError on Windows with CP1252 default encoding
 if sys.stdout.encoding != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if sys.stderr.encoding != "utf-8":
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 
 class ValidationResult(NamedTuple):
@@ -116,7 +118,7 @@ def parse_wiki_structure_from_sync_script(sync_script_path: Path) -> dict[str, s
                                     result[str(key.value)] = str(value.value)
                             return result
     except (OSError, SyntaxError) as e:
-        print(red(f"ERROR: Could not parse {sync_script_path}: {e}"))
+        print(red(f"ERROR: Could not parse {sync_script_path}: {e}"), file=sys.stderr)
 
     return {}
 
@@ -156,7 +158,7 @@ def parse_hardcoded_sidebar_from_sync_script(sync_script_path: Path) -> str | No
                                 if isinstance(stmt.value, ast.Constant):
                                     return str(stmt.value.value)
     except (OSError, SyntaxError) as e:
-        print(red(f"ERROR: Could not parse {sync_script_path}: {e}"))
+        print(red(f"ERROR: Could not parse {sync_script_path}: {e}"), file=sys.stderr)
 
     return None
 
@@ -272,7 +274,8 @@ def validate_sync_script_sidebar_template(
         errors += 1
         print(
             red("ERROR:")
-            + f" Could not extract hardcoded sidebar template from {sync_script_path}"
+            + f" Could not extract hardcoded sidebar template from {sync_script_path}",
+            file=sys.stderr,
         )
         return ValidationResult(errors=errors, warnings=warnings)
 
@@ -302,7 +305,8 @@ def validate_sync_script_sidebar_template(
                     + f" {sync_script_path.name}:generate_sidebar(): "
                     + f"Wiki-link [[{page_name}|{display_text}]] "
                     + f"contains '{char}' in display text ({reason}). "
-                    + f"Use standard markdown [Display](Page) syntax instead."
+                    + f"Use standard markdown [Display](Page) syntax instead.",
+                    file=sys.stderr,
                 )
                 break  # Only report first problematic character per link
 
@@ -367,7 +371,7 @@ def parse_sidebar_wiki_links(
         content = sidebar_path.read_text(encoding="utf-8")
         return parse_wiki_links_from_string(content)
     except (OSError, UnicodeDecodeError) as e:
-        print(red(f"ERROR: Could not read {sidebar_path}: {e}"))
+        print(red(f"ERROR: Could not read {sidebar_path}: {e}"), file=sys.stderr)
         return []
 
 
@@ -433,7 +437,8 @@ def validate_wiki_link_display_text(
                     red("ERROR:")
                     + f" _Sidebar.md:{line_num}: Wiki-link [[{page_name}|{display_text}]] "
                     + f"contains '{char}' in display text ({reason}). "
-                    + f"Use standard markdown [Display](Page) syntax instead."
+                    + f"Use standard markdown [Display](Page) syntax instead.",
+                    file=sys.stderr,
                 )
                 break  # Only report first problematic character per link
 
@@ -463,7 +468,8 @@ def validate_sidebar_links(
             print(
                 red("ERROR:")
                 + f" _Sidebar.md:{line_num}: Link to '{page_name}' "
-                + f"points to non-existent page '{page_name}.md'"
+                + f"points to non-existent page '{page_name}.md'",
+                file=sys.stderr,
             )
         elif verbose:
             syntax_label = "wiki" if syntax_type == "wiki" else "md"
@@ -495,7 +501,8 @@ def validate_wiki_structure_completeness(
             print(
                 yellow("WARNING:")
                 + f" docs/{unmapped} has no mapping in WIKI_STRUCTURE "
-                + "(scripts/sync-wiki.py)"
+                + "(scripts/sync-wiki.py)",
+                file=sys.stderr,
             )
 
     # Also check for stale mappings (mapped files that no longer exist)
@@ -506,7 +513,8 @@ def validate_wiki_structure_completeness(
         print(
             yellow("WARNING:")
             + f" WIKI_STRUCTURE contains mapping for '{stale}' "
-            + "which does not exist in docs/"
+            + "which does not exist in docs/",
+            file=sys.stderr,
         )
 
     return ValidationResult(errors=errors, warnings=warnings)
@@ -546,7 +554,8 @@ def validate_sidebar_completeness(
             warnings += 1
             print(
                 yellow("WARNING:")
-                + f" Wiki page '{missing}.md' has no entry in _Sidebar.md"
+                + f" Wiki page '{missing}.md' has no entry in _Sidebar.md",
+                file=sys.stderr,
             )
 
     return ValidationResult(errors=errors, warnings=warnings)
@@ -632,17 +641,19 @@ def validate_table_pipe_escaping(
                         print(
                             red("ERROR:")
                             + f" {md_file.name}:{line_num}: Table cell contains "
-                            + f"unescaped pipe in code span: `{code_content}`"
+                            + f"unescaped pipe in code span: `{code_content}`",
+                            file=sys.stderr,
                         )
                         print(
                             "       "
                             + yellow("Tip:")
                             + " Escape the pipe with backslash: "
-                            + f"`{code_content.replace('|', chr(92) + '|')}`"
+                            + f"`{code_content.replace('|', chr(92) + '|')}`",
+                            file=sys.stderr,
                         )
 
         except (OSError, UnicodeDecodeError) as e:
-            print(red(f"ERROR: Could not read {md_file}: {e}"))
+            print(red(f"ERROR: Could not read {md_file}: {e}"), file=sys.stderr)
             errors += 1
 
     return ValidationResult(errors=errors, warnings=warnings)
@@ -682,7 +693,8 @@ def validate_markdown_link_syntax(wiki_dir: Path, verbose: bool = False) -> Vali
                     print(
                         red("ERROR:")
                         + f" {md_file.name}:{line_num}: Malformed link with space "
-                        + f"after '[': {match.group()}"
+                        + f"after '[': {match.group()}",
+                        file=sys.stderr,
                     )
 
                 # Check for space before closing bracket
@@ -691,7 +703,8 @@ def validate_markdown_link_syntax(wiki_dir: Path, verbose: bool = False) -> Vali
                     print(
                         yellow("WARNING:")
                         + f" {md_file.name}:{line_num}: Link has trailing space "
-                        + f"before ']': {match.group()}"
+                        + f"before ']': {match.group()}",
+                        file=sys.stderr,
                     )
 
                 # Check for empty link text
@@ -700,11 +713,12 @@ def validate_markdown_link_syntax(wiki_dir: Path, verbose: bool = False) -> Vali
                     print(
                         yellow("WARNING:")
                         + f" {md_file.name}:{line_num}: Empty link text: "
-                        + f"{match.group()}"
+                        + f"{match.group()}",
+                        file=sys.stderr,
                     )
 
         except (OSError, UnicodeDecodeError) as e:
-            print(red(f"ERROR: Could not read {md_file}: {e}"))
+            print(red(f"ERROR: Could not read {md_file}: {e}"), file=sys.stderr)
             errors += 1
 
     return ValidationResult(errors=errors, warnings=warnings)
@@ -730,15 +744,15 @@ def main() -> int:
 
     # Check required files/directories exist
     if not wiki_dir.exists():
-        print(red("ERROR:") + f" Wiki directory not found: {wiki_dir}")
+        print(red("ERROR:") + f" Wiki directory not found: {wiki_dir}", file=sys.stderr)
         return 1
 
     if not sidebar_path.exists():
-        print(red("ERROR:") + f" Sidebar not found: {sidebar_path}")
+        print(red("ERROR:") + f" Sidebar not found: {sidebar_path}", file=sys.stderr)
         return 1
 
     if not sync_script_path.exists():
-        print(red("ERROR:") + f" Sync script not found: {sync_script_path}")
+        print(red("ERROR:") + f" Sync script not found: {sync_script_path}", file=sys.stderr)
         return 1
 
     # Get wiki pages and parse WIKI_STRUCTURE
@@ -747,7 +761,7 @@ def main() -> int:
     docs_files = get_docs_source_files(docs_dir)
 
     if not wiki_structure:
-        print(red("ERROR:") + " Could not parse WIKI_STRUCTURE from sync-wiki.py")
+        print(red("ERROR:") + " Could not parse WIKI_STRUCTURE from sync-wiki.py", file=sys.stderr)
         return 1
 
     if verbose:

@@ -8,19 +8,12 @@ on:
       - '**.rs'
       - 'docs/**'
       - 'wiki/**'
-      - 'scripts/sync-wiki.py'
-      - 'scripts/check-wiki-consistency.py'
-      - 'scripts/validate-wiki-output.py'
-      - 'scripts/tests/test_sync_wiki.py'
-      - 'scripts/tests/test_check_wiki_consistency.py'
+      - 'scripts/**'
       - '.markdownlint.json'
       - '.markdown-link-check.json'
       - '.lychee.toml'
       - '.vale.ini'
       - '.vale/**'
-      - 'scripts/check-links.sh'
-      - 'scripts/verify-markdown-code.sh'
-      - 'scripts/check-code-fence-syntax.sh'
       - '.github/workflows/ci-docs.yml'
   pull_request:
     branches: [main]
@@ -29,19 +22,12 @@ on:
       - '**.rs'
       - 'docs/**'
       - 'wiki/**'
-      - 'scripts/sync-wiki.py'
-      - 'scripts/check-wiki-consistency.py'
-      - 'scripts/validate-wiki-output.py'
-      - 'scripts/tests/test_sync_wiki.py'
-      - 'scripts/tests/test_check_wiki_consistency.py'
+      - 'scripts/**'
       - '.markdownlint.json'
       - '.markdown-link-check.json'
       - '.lychee.toml'
       - '.vale.ini'
       - '.vale/**'
-      - 'scripts/check-links.sh'
-      - 'scripts/verify-markdown-code.sh'
-      - 'scripts/check-code-fence-syntax.sh'
       - '.github/workflows/ci-docs.yml'
   workflow_dispatch:
 
@@ -174,10 +160,10 @@ jobs:
         run: python scripts/check-wiki-consistency.py
 
   # ============================================================================
-  # WIKI SYNC DRY-RUN - Validate wiki generation on PRs
+  # SCRIPT TESTS & WIKI DRY-RUN - Run all script tests and validate wiki generation
   # ============================================================================
   wiki-sync-dry-run:
-    name: Wiki Sync Dry-Run
+    name: Script Tests & Wiki Dry-Run
     runs-on: ubuntu-latest
 
     steps:
@@ -188,17 +174,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install pytest
-        run: pip install pytest
+      - name: Install test dependencies
+        run: pip install pytest pyyaml
 
-      - name: Run wiki sync tests
-        run: python -m pytest scripts/tests/test_sync_wiki.py -v
-
-      - name: Run wiki validation tests
-        run: python -m pytest scripts/tests/test_validate_wiki_output.py -v
-
-      - name: Run wiki consistency tests
-        run: python -m pytest scripts/tests/test_check_wiki_consistency.py -v
+      - name: Run script tests
+        run: python -m pytest scripts/tests/ -v
 
       - name: Generate wiki (dry-run)
         run: python scripts/sync-wiki.py --dest wiki-test-output

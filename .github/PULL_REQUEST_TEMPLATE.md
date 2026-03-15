@@ -28,7 +28,7 @@
   - No `panic!()` or `todo!()`
   - All fallible operations return `Result`
 - [ ] I have added tests that prove my fix is effective or my feature works
-- [ ] I have run `cargo fmt && cargo clippy --all-targets` with no warnings
+- [ ] I have run `cargo fmt && cargo clippy --all-targets --features tokio,json` with no warnings
 - [ ] I have run `cargo nextest run` and all tests pass
 
 ### If Applicable

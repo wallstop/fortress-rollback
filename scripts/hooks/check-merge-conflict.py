@@ -5,6 +5,19 @@ import re
 import sys
 from pathlib import Path
 
+
+def _display_path(filepath: str | Path) -> str:
+    """Convert a file path to a relative display path.
+
+    Pre-commit sets CWD to the repo root, so paths relative to CWD
+    are also relative to the project root.
+    """
+    try:
+        return str(Path(filepath).resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(filepath)
+
+
 CONFLICT_PATTERNS = [
     re.compile(rb"^<<<<<<<\s"),
     re.compile(rb"^>>>>>>>\s"),
@@ -20,11 +33,12 @@ def check_file(filepath: str) -> bool:
         for i, line in enumerate(content.splitlines(), 1):
             for pattern in CONFLICT_PATTERNS:
                 if pattern.match(line):
-                    print(f"Merge conflict in {filepath}:{i}")
+                    print(f"{_display_path(filepath)}:{i}: merge conflict marker found", file=sys.stderr)
                     return False
         return True
-    except OSError:
-        return True  # Skip files we can't read
+    except OSError as exc:
+        print(f"{_display_path(filepath)}:0: cannot read file: {exc}", file=sys.stderr)
+        return False  # Fail if we can't read — don't let conflicts slip through
 
 
 def main() -> int:
