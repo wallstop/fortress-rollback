@@ -54,20 +54,20 @@ def main() -> int:
 
         # If cargo doc failed (non-zero exit code), print stderr and fail
         if result.returncode != 0:
-            print("ERROR: cargo doc failed with rustdoc warnings/errors:")
+            print("ERROR: cargo doc failed with rustdoc warnings/errors:", file=sys.stderr)
             if result.stderr:
-                print(result.stderr)
+                print(result.stderr, file=sys.stderr)
             if result.stdout:
-                print(result.stdout)
+                print(result.stdout, file=sys.stderr)
             return 1
 
         return 0
 
     except FileNotFoundError:
-        print("ERROR: cargo not found. Is Rust installed?")
+        print("ERROR: cargo not found. Is Rust installed?", file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"ERROR: Failed to run cargo doc: {e}")
+        print(f"ERROR: Failed to run cargo doc: {e}", file=sys.stderr)
         return 1
 
 

@@ -593,7 +593,7 @@ mod tests {
 
     // Helper function to wait for messages with retry logic using the async recv_all method.
     // This is necessary because UDP packet delivery timing can vary across platforms.
-    #[track_caller]
+    // Note: #[track_caller] is a no-op on async fn, so it is intentionally omitted here.
     async fn wait_for_messages(
         socket: &mut TokioUdpSocket,
         expected_count: usize,

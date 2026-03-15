@@ -43,14 +43,17 @@ def main() -> int:
 
     if not files:
         # No files provided, check all workflows
-        repo_root = Path(__file__).parent.parent.parent
+        # Use relative paths so actionlint output follows {path}:{line}: convention
+        repo_root = Path(__file__).resolve().parent.parent.parent
         workflows_dir = repo_root / ".github" / "workflows"
         if workflows_dir.exists():
-            files = [
-                str(f)
-                for f in workflows_dir.iterdir()
-                if f.suffix in (".yml", ".yaml")
-            ]
+            files = []
+            for f in workflows_dir.iterdir():
+                if f.suffix in (".yml", ".yaml"):
+                    try:
+                        files.append(str(f.relative_to(repo_root)))
+                    except ValueError:
+                        files.append(str(f))
 
     if not files:
         return 0  # No workflow files to check

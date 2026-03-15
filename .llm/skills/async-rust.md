@@ -83,6 +83,7 @@ Use bounded channels (`mpsc::channel(100)`) to prevent memory exhaustion. Never 
 
 | Pitfall | Fix |
 |---------|-----|
+| `#[track_caller]` on `async fn` | Not supported; extract a sync helper or remove the attribute |
 | `std::thread::sleep` in async | `tokio::time::sleep().await` |
 | Forgetting to `.await` futures | Futures are lazy -- nothing happens without await |
 | `std::sync::Mutex` held across `.await` | Use `tokio::sync::Mutex` or release before await |

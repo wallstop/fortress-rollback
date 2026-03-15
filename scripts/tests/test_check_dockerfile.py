@@ -10,6 +10,7 @@ and eval "$(..." without command -v guard.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -253,10 +254,41 @@ class TestFileHandling:
         issues = check_file(f)
         assert issues == []
 
-    def test_nonexistent_file_returns_empty(self, tmp_path: Path) -> None:
-        """Nonexistent file returns empty list with stderr warning."""
+    def test_nonexistent_file_returns_error(self, tmp_path: Path) -> None:
+        """Nonexistent file returns a non-empty issues list."""
         issues = check_file(tmp_path / "nonexistent")
-        assert issues == []
+        assert len(issues) == 1
+        assert "cannot read file" in issues[0]
+
+    def test_nonexistent_file_causes_main_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """main() returns 1 when a file does not exist."""
+        nonexistent = tmp_path / "Dockerfile"
+        # Don't create the file -- it won't exist
+        monkeypatch.setattr(
+            sys, "argv", ["check-dockerfile.py", str(nonexistent)]
+        )
+        assert check_dockerfile.main() == 1
+
+    def test_unreadable_file_causes_main_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """main() returns 1 when a file exists but cannot be read."""
+        unreadable = tmp_path / "Dockerfile"
+        unreadable.write_text("FROM ubuntu:22.04\n", encoding="utf-8")
+        unreadable.chmod(0o000)
+        try:
+            monkeypatch.setattr(
+                sys, "argv", ["check-dockerfile.py", str(unreadable)]
+            )
+            assert check_dockerfile.main() == 1
+        finally:
+            unreadable.chmod(0o644)
 
     def test_multiple_issues_in_one_file(self, tmp_path: Path) -> None:
         """Multiple anti-patterns in one file are all detected."""
@@ -275,6 +307,126 @@ class TestFileHandling:
         f = _write(tmp_path, "Dockerfile.dev", "RUN pip install foo\n")
         issues = check_file(f)
         assert len(issues) == 1
+
+
+class TestNoDuplicateOutput:
+    """Tests that read errors produce exactly one output line, not duplicates."""
+
+    def test_nonexistent_file_no_stderr_from_check_file(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """check_file() on a nonexistent file does not print to stderr itself.
+
+        It only returns the issue in the list; main() is responsible for printing.
+        """
+        issues = check_file(tmp_path / "Dockerfile")
+        captured = capsys.readouterr()
+        assert len(issues) == 1
+        assert "cannot read file" in issues[0]
+        # check_file must NOT print -- the caller (main) prints
+        assert captured.err == ""
+
+    def test_unreadable_file_no_stderr_from_check_file(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """check_file() on an unreadable file does not print to stderr itself."""
+        f = _write(tmp_path, "Dockerfile", "FROM ubuntu\n")
+        f.chmod(0o000)
+        try:
+            issues = check_file(f)
+            captured = capsys.readouterr()
+            assert len(issues) == 1
+            assert "cannot read file" in issues[0]
+            assert captured.err == ""
+        finally:
+            f.chmod(0o644)
+
+    def test_main_prints_read_error_exactly_once(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """main() prints the read-error message exactly once (no duplicates)."""
+        nonexistent = tmp_path / "Dockerfile"
+        monkeypatch.setattr(
+            sys, "argv", ["check-dockerfile.py", str(nonexistent)]
+        )
+        check_dockerfile.main()
+        captured = capsys.readouterr()
+        error_lines = [
+            line for line in captured.err.splitlines()
+            if "cannot read file" in line
+        ]
+        assert len(error_lines) == 1
+
+
+class TestOutputFormat:
+    """Tests that output follows {path}:{line_number}: {message} format."""
+
+    def test_issues_start_with_path_colon_line(self, tmp_path: Path) -> None:
+        """Each issue must start with path:line: (no leading whitespace)."""
+        f = _write(tmp_path, "Dockerfile", "RUN pip install requests\n")
+        issues = check_file(f)
+        assert len(issues) == 1
+        # Must match path:line_number: pattern
+        assert re.match(r'^.+:\d+: ', issues[0]), f"Bad format: {issues[0]}"
+        # Must not start with whitespace
+        assert not issues[0].startswith(" "), f"Leading whitespace: {issues[0]}"
+
+    def test_main_output_no_leading_whitespace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """main() prints issue lines without leading whitespace."""
+        f = _write(tmp_path, "Dockerfile", "RUN pip install requests\n")
+        monkeypatch.setattr(sys, "argv", ["check-dockerfile.py", str(f)])
+        # Import main from the module
+        check_dockerfile.main()
+        captured = capsys.readouterr()
+        # Each non-header, non-summary line should not start with spaces
+        for line in captured.err.splitlines():
+            if line and not line.startswith(("Dockerfile anti-patterns", "\n")) and "issue(s) found" not in line:
+                assert not line.startswith("  "), f"Leading indent: {line!r}"
+
+
+class TestRelativePaths:
+    """Tests that output paths are relative when repo_root is provided."""
+
+    def test_issues_use_relative_path_when_repo_root_provided(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue output uses relative path when repo_root is given."""
+        f = _write(tmp_path, "Dockerfile", "RUN pip install requests\n")
+        issues = check_file(f, repo_root=tmp_path)
+        assert len(issues) == 1
+        assert str(tmp_path) not in issues[0]
+        assert issues[0].startswith("Dockerfile:")
+
+    def test_read_error_uses_relative_path_when_repo_root_provided(
+        self, tmp_path: Path
+    ) -> None:
+        """Read-error output uses relative path when repo_root is given."""
+        issues = check_file(tmp_path / "Dockerfile", repo_root=tmp_path)
+        assert len(issues) == 1
+        # The display_path prefix must be relative (just the filename)
+        assert issues[0].startswith("Dockerfile:")
+        # The prefix before the line number must not contain the repo root
+        prefix = issues[0].split(":")[0]
+        assert str(tmp_path) not in prefix
+
+    def test_issues_use_absolute_path_when_no_repo_root(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue output uses full absolute path when repo_root is not given."""
+        f = _write(tmp_path, "Dockerfile", "RUN pip install requests\n")
+        issues = check_file(f)
+        assert len(issues) == 1
+        assert str(tmp_path) in issues[0]
 
 
 if __name__ == "__main__":

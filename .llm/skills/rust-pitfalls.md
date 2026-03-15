@@ -98,6 +98,10 @@ Use `ok_or_else(|| ...)` when error construction allocates or is expensive. Use 
 - **`#[serde(default)]` on required fields:** Silently accepts missing data.
 - **Enum representation:** Default serializes as `{"Active": null}`. Use `#[serde(rename_all = "snake_case")]`.
 
+## Async Pitfalls
+
+- **`#[track_caller]` on `async fn`:** Not supported by Rust. The attribute is silently ignored or triggers a clippy warning/error. Extract a sync helper that carries `#[track_caller]` and call it from the async fn, or remove the attribute entirely. A pre-commit grep hook catches this.
+
 ## Testing Pitfalls
 
 - **Tests pass on panic:** Function panics before assertion is reached. Use `#[should_panic]` or `catch_unwind`.
@@ -135,3 +139,4 @@ Proofs must verify what they claim. If name says "independent", actually test mo
 - [ ] `std::` types in loom tests
 - [ ] `ok_or` vs `ok_or_else` for allocating errors
 - [ ] Pattern matching: `match` not `if let` when fallback needs value
+- [ ] `#[track_caller]` on async fn (not supported)

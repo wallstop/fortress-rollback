@@ -82,6 +82,12 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: check-track-caller-async
+        name: check track_caller on async fn
+        entry: python scripts/hooks/check-track-caller-async.py
+        language: python
+        types: [rust]
+
       - id: cargo-clippy
         name: cargo clippy
         entry: python scripts/run-cargo-clippy.py
@@ -164,6 +170,16 @@ repos:
         entry: python scripts/hooks/check-dockerfile.py
         language: python
         files: '(Dockerfile|devcontainer\.json)$'
+        pass_filenames: true
+
+      # ══════════════════════════════════════════════════════════════════════
+      # Hook quality
+      # ══════════════════════════════════════════════════════════════════════
+      - id: check-hook-output-format
+        name: check hook output format
+        entry: python scripts/hooks/check-hook-output-format.py
+        language: python
+        files: '^scripts/(hooks/)?[a-z][^/]*\.py$'
         pass_filenames: true
 
       # ══════════════════════════════════════════════════════════════════════

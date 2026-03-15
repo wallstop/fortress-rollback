@@ -8,6 +8,7 @@ maximum on .md files under the .llm/ directory.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -145,9 +146,8 @@ class TestCheckFile:
 
         assert result is False
         captured = capsys.readouterr()
-        assert "FAIL" in captured.out
-        assert "305" in captured.out
-        assert "big.md" in captured.out
+        assert "big.md:0:" in captured.err
+        assert "305" in captured.err
 
     def test_pass_prints_nothing(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """Passing file produces no output."""
@@ -165,7 +165,19 @@ class TestCheckFile:
 
         assert result is False
         captured = capsys.readouterr()
-        assert "Cannot read" in captured.out
+        assert "cannot read file" in captured.err
+
+    def test_unicode_decode_error_returns_false(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Invalid UTF-8 file triggers UnicodeDecodeError and returns False."""
+        filepath = tmp_path / "bad_encoding.md"
+        filepath.write_bytes(b"\x80\x81\x82 invalid utf8")
+        result = check_file(filepath, tmp_path)
+
+        assert result is False
+        captured = capsys.readouterr()
+        assert "cannot read file" in captured.err
 
 
 class TestMain:
@@ -202,7 +214,7 @@ class TestMain:
 
         _run_main_with_root(tmp_path, print_summary=True)
         captured = capsys.readouterr()
-        assert "must be 300 lines or fewer" in captured.out
+        assert "must be 300 lines or fewer" in captured.err
 
 
 def _run_main_with_root(repo_root: Path, *, print_summary: bool = False) -> int:
@@ -220,7 +232,7 @@ def _run_main_with_root(repo_root: Path, *, print_summary: bool = False) -> int:
             all_ok = False
     if not all_ok:
         if print_summary:
-            print(f"\nAll .md files under .llm/ must be {MAX_LINES} lines or fewer.")
+            print(f"\nAll .md files under .llm/ must be {MAX_LINES} lines or fewer.", file=sys.stderr)
         return 1
     return 0
 
@@ -279,6 +291,94 @@ class TestIntegration:
         md_files = find_llm_md_files(tmp_path)
         assert len(md_files) == 1
         assert check_file(md_files[0], tmp_path) is False
+
+
+class TestOutputFormat:
+    """Tests that output follows {path}:{line_number}: {message} format."""
+
+    def test_fail_output_starts_with_path_colon_line(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Failure message must start with path:line: (no leading whitespace)."""
+        filepath = _make_md_file(tmp_path, "big.md", 305)
+        check_file(filepath, tmp_path)
+        captured = capsys.readouterr()
+        for line in captured.err.splitlines():
+            if line:
+                assert re.match(r'^.+:\d+: ', line), f"Bad format: {line}"
+                assert not line.startswith(" "), f"Leading whitespace: {line}"
+
+    def test_oserror_output_includes_line_number(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Read error message must include :0: synthetic line number."""
+        nonexistent = tmp_path / "does_not_exist.md"
+        check_file(nonexistent, tmp_path)
+        captured = capsys.readouterr()
+        for line in captured.err.splitlines():
+            if line:
+                assert ":0:" in line, f"Missing :0: in read error: {line}"
+                assert re.match(r'^.+:\d+: ', line), f"Bad format: {line}"
+
+    def test_oserror_output_uses_relative_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """OSError output must use a relative path, not an absolute path."""
+        nonexistent = tmp_path / "does_not_exist.md"
+        check_file(nonexistent, tmp_path)
+        captured = capsys.readouterr()
+        err = captured.err.strip()
+        assert not err.startswith(str(tmp_path)), (
+            f"Error output should not start with absolute path: {err}"
+        )
+        assert err.startswith("does_not_exist.md"), (
+            f"Error output should start with relative filename: {err}"
+        )
+
+    def test_over_limit_output_uses_relative_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Over-limit output must use a relative path, not an absolute path."""
+        llm_dir = tmp_path / ".llm"
+        filepath = _make_md_file(llm_dir, "big.md", 305)
+        check_file(filepath, tmp_path)
+        captured = capsys.readouterr()
+        err = captured.err.strip()
+        assert str(tmp_path) not in err, (
+            f"Error output should not contain absolute path: {err}"
+        )
+        assert err.startswith(".llm/"), (
+            f"Error output should start with relative .llm/ path: {err}"
+        )
+
+    def test_unicode_error_output_uses_relative_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """UnicodeDecodeError output must use a relative path, not absolute."""
+        filepath = tmp_path / "bad_encoding.md"
+        filepath.write_bytes(b"\x80\x81\x82 invalid utf8")
+        check_file(filepath, tmp_path)
+        captured = capsys.readouterr()
+        err = captured.err.strip()
+        assert not err.startswith(str(tmp_path)), (
+            f"Error output should not start with absolute path: {err}"
+        )
+        assert err.startswith("bad_encoding.md"), (
+            f"Error output should start with relative filename: {err}"
+        )
+
+    def test_main_output_no_leading_whitespace(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """main()-equivalent prints issue lines without leading whitespace."""
+        llm_dir = tmp_path / ".llm"
+        _make_md_file(llm_dir, "bad.md", 301)
+        rc = _run_main_with_root(tmp_path, print_summary=True)
+        assert rc == 1
+        captured = capsys.readouterr()
+        for line in captured.err.splitlines():
+            if line:
+                assert not line.startswith("  "), f"Leading indent: {line!r}"
 
 
 if __name__ == "__main__":

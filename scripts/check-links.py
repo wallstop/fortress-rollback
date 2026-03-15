@@ -209,6 +209,14 @@ def is_wiki_file(source_file: Path, project_root: Path) -> bool:
         return False
 
 
+def _rel(path: Path, root: Path) -> Path:
+    """Return *path* relative to *root*, falling back to *path* on ValueError."""
+    try:
+        return path.relative_to(root)
+    except ValueError:
+        return path
+
+
 def check_markdown_link(
     source_file: Path, link_target: str, project_root: Path, verbose: bool = False
 ) -> tuple[bool, str]:
@@ -229,9 +237,9 @@ def check_markdown_link(
             content = source_file.read_text(encoding="utf-8")
             anchors = extract_markdown_anchors(content)
             if anchor.lower() not in {a.lower() for a in anchors}:
-                return False, f"Anchor '{anchor}' not found in {source_file}"
-        except (OSError, UnicodeDecodeError):
-            pass  # File read errors are non-fatal; treat link as valid
+                return False, f"Anchor '{anchor}' not found in {_rel(source_file, project_root)}"
+        except (OSError, UnicodeDecodeError) as exc:
+            return False, f"Cannot read file to validate anchor '{anchor}': {exc}"
         return True, ""
 
     # Handle anchor in link: file.md#anchor
@@ -251,9 +259,9 @@ def check_markdown_link(
             if wiki_target_path.exists():
                 target_path = wiki_target_path
             else:
-                return False, f"Link target not found: {link_target} (from {source_file.relative_to(project_root)})"
+                return False, f"Link target not found: {link_target} (from {_rel(source_file, project_root)})"
         else:
-            return False, f"Link target not found: {link_target} (from {source_file.relative_to(project_root)})"
+            return False, f"Link target not found: {link_target} (from {_rel(source_file, project_root)})"
 
     # If there's an anchor, check it exists in target file
     if anchor and target_path.suffix.lower() == ".md":
@@ -263,10 +271,13 @@ def check_markdown_link(
             if anchor.lower() not in {a.lower() for a in anchors}:
                 return (
                     False,
-                    f"Anchor '{anchor}' not found in {target_path.relative_to(project_root)}",
+                    f"Anchor '{anchor}' not found in {_rel(target_path, project_root)}",
                 )
-        except (OSError, UnicodeDecodeError):
-            pass  # File read errors are non-fatal; treat anchor as valid
+        except (OSError, UnicodeDecodeError) as exc:
+            return (
+                False,
+                f"Cannot read {_rel(target_path, project_root)} to validate anchor '{anchor}': {exc}",
+            )
 
     return True, ""
 
@@ -282,7 +293,11 @@ def check_markdown_file(
     try:
         content = file_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
-        print(f"ERROR: Could not read {file_path}: {e}")
+        try:
+            rel_path = file_path.relative_to(project_root)
+        except ValueError:
+            rel_path = file_path
+        print(f"ERROR: Could not read {rel_path}: {e}", file=sys.stderr)
         return LinkCheckResult(errors=1, warnings=0, checked=0)
 
     # Find code fence ranges to skip
@@ -315,8 +330,8 @@ def check_markdown_file(
         )
         if not is_valid:
             errors += 1
-            rel_path = file_path.relative_to(project_root)
-            print(f"ERROR: {rel_path}: {error_msg}")
+            rel_path = _rel(file_path, project_root)
+            print(f"ERROR: {rel_path}: {error_msg}", file=sys.stderr)
 
     return LinkCheckResult(errors=errors, warnings=warnings, checked=checked)
 

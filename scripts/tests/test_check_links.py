@@ -259,5 +259,146 @@ class TestFindCodeFenceRanges:
         assert ranges[0][1] == len(content)
 
 
+check_markdown_link = check_links.check_markdown_link
+check_markdown_file = check_links.check_markdown_file
+
+
+class TestFailClosedAnchorValidation:
+    """Tests that file read errors during anchor validation fail closed."""
+
+    def test_same_file_anchor_unreadable_returns_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Anchor validation on an unreadable file returns an error, not True."""
+        f = tmp_path / "test.md"
+        f.write_text("# Heading\n[link](#anchor)\n", encoding="utf-8")
+        f.chmod(0o000)
+        try:
+            is_valid, error_msg = check_markdown_link(
+                f, "#anchor", tmp_path
+            )
+            assert not is_valid
+            assert "Cannot read file" in error_msg
+        finally:
+            f.chmod(0o644)
+
+    def test_same_file_anchor_binary_returns_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Anchor validation on a binary file returns an error, not True."""
+        f = tmp_path / "test.md"
+        f.write_bytes(b"\xff\xfe\x00\x01")
+        is_valid, error_msg = check_markdown_link(
+            f, "#heading", tmp_path
+        )
+        assert not is_valid
+        assert "Cannot read file" in error_msg
+
+    def test_cross_file_anchor_unreadable_returns_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Cross-file anchor validation on unreadable target returns error."""
+        source = tmp_path / "source.md"
+        source.write_text("[link](target.md#heading)\n", encoding="utf-8")
+        target = tmp_path / "target.md"
+        target.write_text("# Heading\n", encoding="utf-8")
+        target.chmod(0o000)
+        try:
+            is_valid, error_msg = check_markdown_link(
+                source, "target.md#heading", tmp_path
+            )
+            assert not is_valid
+            assert "Cannot read" in error_msg
+            assert "anchor" in error_msg
+        finally:
+            target.chmod(0o644)
+
+    def test_cross_file_anchor_binary_target_returns_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Cross-file anchor validation on binary target returns error."""
+        source = tmp_path / "source.md"
+        source.write_text("[link](target.md#heading)\n", encoding="utf-8")
+        target = tmp_path / "target.md"
+        target.write_bytes(b"\xff\xfe\x00\x01")
+        is_valid, error_msg = check_markdown_link(
+            source, "target.md#heading", tmp_path
+        )
+        assert not is_valid
+        assert "Cannot read" in error_msg
+
+    def test_check_markdown_file_counts_anchor_read_errors(
+        self, tmp_path: Path
+    ) -> None:
+        """check_markdown_file counts anchor read errors as errors."""
+        # Create a source file that links to an unreadable target
+        target = tmp_path / "target.md"
+        target.write_text("# Heading\n", encoding="utf-8")
+        target.chmod(0o000)
+        try:
+            source = tmp_path / "source.md"
+            source.write_text(
+                "[link](target.md#heading)\n", encoding="utf-8"
+            )
+            result = check_markdown_file(source, tmp_path)
+            assert result.errors > 0
+        finally:
+            target.chmod(0o644)
+
+
+class TestRelativePaths:
+    """Tests that _rel() converts absolute paths to relative."""
+
+    def test_rel_converts_absolute_to_relative(self, tmp_path: Path) -> None:
+        """Absolute path under root is converted to relative."""
+        sub = tmp_path / "docs"
+        sub.mkdir()
+        f = sub / "guide.md"
+        f.write_text("# Guide\n", encoding="utf-8")
+        result = check_links._rel(f, tmp_path)
+        assert result == Path("docs") / "guide.md"
+
+    def test_rel_fallback_when_outside_root(self, tmp_path: Path) -> None:
+        """Path outside root falls back to original path."""
+        other = tmp_path / "other"
+        other.mkdir()
+        root = tmp_path / "root"
+        root.mkdir()
+        target = other / "file.md"
+        target.write_text("# File\n", encoding="utf-8")
+        result = check_links._rel(target, root)
+        assert result == target
+
+
+class TestErrorsGoToStderr:
+    """Tests that ERROR messages go to stderr, not stdout."""
+
+    def test_file_read_error_prints_to_stderr(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """File read errors produce ERROR on stderr, not stdout."""
+        f = tmp_path / "unreadable.md"
+        f.write_text("# Heading\n", encoding="utf-8")
+        f.chmod(0o000)
+        try:
+            check_markdown_file(f, tmp_path)
+            captured = capsys.readouterr()
+            assert "ERROR:" in captured.err
+            assert "ERROR:" not in captured.out
+        finally:
+            f.chmod(0o644)
+
+    def test_broken_link_error_prints_to_stderr(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """Broken link errors produce ERROR on stderr, not stdout."""
+        f = tmp_path / "broken.md"
+        f.write_text("[text](nonexistent.md)\n", encoding="utf-8")
+        check_markdown_file(f, tmp_path)
+        captured = capsys.readouterr()
+        assert "ERROR:" in captured.err
+        assert "ERROR:" not in captured.out
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
