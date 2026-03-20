@@ -146,7 +146,7 @@ jobs:
           key: kani-0.66.0-${{ runner.os }}
 
       - name: Install Kani with retry
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@v4
         with:
           timeout_minutes: 15
           max_attempts: 3
@@ -197,7 +197,7 @@ jobs:
           key: kani-0.66.0-${{ runner.os }}
 
       - name: Install Kani with retry
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@v4
         with:
           timeout_minutes: 15
           max_attempts: 3
@@ -248,7 +248,7 @@ jobs:
           key: kani-0.66.0-${{ runner.os }}
 
       - name: Install Kani with retry
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@v4
         with:
           timeout_minutes: 15
           max_attempts: 3
