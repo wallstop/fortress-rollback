@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774056508835,
+  "lastUpdate": 1774057584906,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "8e8b8eed2aab5e55efafb10e5363ad21ec809d70",
-          "message": "Investigate and fix test failures (#35)\n\nThe test was failing on macOS CI due to insufficient polling between\nframes. On macOS, tight loops don't give the network stack enough time\nto process messages, causing WaitRecommendation events to arrive before\nDesyncDetected.\n\nChanges:\n- Use triple polling with sleep intervals (matching other p2p tests)\n- Add comprehensive diagnostic output for test failures\n- Add three additional edge case test scenarios:\n  - Corruption from frame 0 (immediate detection)\n  - Large interval with proportional prediction window\n  - Corruption exactly at first checksum boundary\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
-          "timestamp": "2025-12-26T16:23:32-08:00",
-          "tree_id": "93580d83e2edc989f7cc4a7b98e5784bed2ba1bc",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/8e8b8eed2aab5e55efafb10e5363ad21ec809d70"
-        },
-        "date": 1766795282777,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 99,
-            "range": "± 19",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 157,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 485,
-            "range": "± 14",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 693,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1065,
-            "range": "± 31",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 103821,
-            "range": "± 584",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27593,
-            "range": "± 1467",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1242,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1554,
-            "range": "± 87",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1554,
             "range": "± 85",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c5930e1a4004f212b6bb63591f15c3ac9532cbd3",
+          "message": "chore(deps): bump z3 from 0.19.13 to 0.19.15 (#118)\n\nBumps [z3](https://github.com/prove-rs/z3.rs) from 0.19.13 to 0.19.15.\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/6d0853207b64aee8efd66c3e297b59f53ccbd5bc\"><code>6d08532</code></a>\nchore(z3): release v0.19.15 (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/521\">#521</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/e7f183c1b4588b74ee5f8ec7161b42bd75dc8b12\"><code>e7f183c</code></a>\ndoc: add missing docs for Boolean operators and pseudo-boolean\nconstraints (#...</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/2e0fd81faa59bc3da0550ff9c8c37af70725d26d\"><code>2e0fd81</code></a>\ndoc: add missing doc comments for Solver::eval() and several Ast impls\n(<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/526\">#526</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/cb655ca82388e3e45fce57a712914453c8b4149e\"><code>cb655ca</code></a>\nadded: Optimize::get_assertions (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/523\">#523</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/b83917b076f18125cadb909d92110eb1d8fe7dfb\"><code>b83917b</code></a>\nfix: {Solver, Optimize}::check_and_get_model no longer take ownership\n(<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/522\">#522</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/0b330e361db8aa78fc3933a2ecda979735e5c40a\"><code>0b330e3</code></a>\nfeat: Implement Optimize Convenience Methods (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/520\">#520</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/c7244999a25ac3178f2d8c2e0abb046574d9a7a8\"><code>c724499</code></a>\nchore: release (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/516\">#516</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/7b22690d42a994601fc43492335316d4a600802d\"><code>7b22690</code></a>\nchore: internal refactoring of datatype builder (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/517\">#517</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/70e5dd396f55de899ddd9f4b0dc6786fc312804a\"><code>70e5dd3</code></a>\nUpdate zip dependency to latest (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/515\">#515</a>)</li>\n<li>See full diff in <a\nhref=\"https://github.com/prove-rs/z3.rs/compare/z3-v0.19.13...z3-v0.19.15\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=z3&package-manager=cargo&previous-version=0.19.13&new-version=0.19.15)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-03-20T18:41:57-07:00",
+          "tree_id": "ec1f0a0052117a05c75c4922338655d64e24d36d",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/c5930e1a4004f212b6bb63591f15c3ac9532cbd3"
+        },
+        "date": 1774057584476,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 115,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 162,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 431,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 682,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 992,
+            "range": "± 23",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 104112,
+            "range": "± 522",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 27495,
+            "range": "± 968",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 105",
             "unit": "ns/iter"
           },
           {
