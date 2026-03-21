@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0]
+
 ### Added
 
 - `ClockFn` type alias (`Arc<dyn Fn() -> Instant + Send + Sync>`) for injectable time sources, enabling deterministic time control in tests and simulations
@@ -373,11 +375,11 @@ use fortress_rollback::{SessionBuilder, P2PSession, FortressError};
 
 ### Type Renames
 
-| Old Name           | New Name             |
-|--------------------|----------------------|
-| `GgrsError`        | `FortressError`      |
-| `GgrsEvent<T>`     | `FortressEvent<T>`   |
-| `GgrsRequest<T>`   | `FortressRequest<T>` |
+| Old Name         | New Name             |
+| ---------------- | -------------------- |
+| `GgrsError`      | `FortressError`      |
+| `GgrsEvent<T>`   | `FortressEvent<T>`   |
+| `GgrsRequest<T>` | `FortressRequest<T>` |
 
 ### Address Trait Bounds
 
