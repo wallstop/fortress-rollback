@@ -1058,7 +1058,7 @@ impl<T: Config> SessionBuilder<T> {
             self.fps,
             self.desync_detection,
             self.sync_config,
-            self.protocol_config,
+            self.protocol_config.clone(),
         )?;
         // start the synchronization
         endpoint.synchronize().ok()?;

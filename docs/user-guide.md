@@ -32,6 +32,7 @@ This guide walks you through integrating Fortress Rollback into your game. By th
     - [ChaosSocket for Testing](#chaossocket-for-testing)
     - [ChaosConfig Presets](#chaosconfig-presets)
     - [ChaosStats](#chaosstats)
+    - [Custom Clock (Time Control)](#custom-clock-time-control)
     - [SessionState](#sessionstate)
     - [Prediction Strategies](#prediction-strategies)
 11. [Feature Flags](#feature-flags)
@@ -1615,6 +1616,162 @@ socket.reset_stats();
 | `burst_loss_events` | Number of burst loss events triggered |
 | `packets_dropped_burst` | Packets dropped due to burst loss |
 
+### Custom Clock (Time Control)
+
+Protocol timers -- sync retries, keepalives, disconnect timeouts, quality reports -- all depend on wall-clock time via `Instant::now()`. In automated tests, especially on slow or loaded CI runners, this causes flakiness: a thread that doesn't get scheduled quickly enough can trigger a spurious disconnect, and tests that rely on `thread::sleep()` to advance timers are slow and non-deterministic.
+
+The **clock abstraction** solves this by letting you inject a custom time source into the protocol. Instead of reading the real system clock, the protocol calls your function, and you control when time advances.
+
+**Key types:**
+
+| Type / Field | Description |
+|---|---|
+| `ClockFn` | `Arc<dyn Fn() -> Instant + Send + Sync>` -- an injectable time source |
+| `ProtocolConfig::clock` | `Option<ClockFn>` -- when `Some`, the protocol uses this clock for all timing |
+| `ChaosSocket::with_clock()` | Injects a custom clock into ChaosSocket for deterministic latency simulation |
+
+When `clock` is `None` (the default), the protocol uses `Instant::now()` directly. This is the correct setting for production.
+
+#### Creating a Controllable Clock
+
+A test clock is a shared `Instant` behind a `Mutex` that only advances when you tell it to:
+
+```rust
+use std::sync::{Arc, Mutex};
+use web_time::{Duration, Instant};
+use fortress_rollback::ClockFn;
+
+// Shared mutable time source
+let current_time = Arc::new(Mutex::new(Instant::now()));
+
+// Build a ClockFn that reads from the shared state
+let clock_state = Arc::clone(&current_time);
+let clock: ClockFn = Arc::new(move || {
+    *clock_state.lock().unwrap() // test: panics are acceptable in tests
+});
+
+// Advance time by 200ms (replaces thread::sleep)
+{
+    let mut t = current_time.lock().unwrap(); // test: panics are acceptable in tests
+    *t += Duration::from_millis(200);
+}
+```
+
+#### Injecting into ProtocolConfig
+
+Pass the clock when constructing your `ProtocolConfig`. For full determinism in tests, combine the clock with a fixed RNG seed via `deterministic()`:
+
+```rust
+use std::sync::{Arc, Mutex};
+use web_time::Instant;
+use fortress_rollback::{ClockFn, ProtocolConfig};
+
+let current_time = Arc::new(Mutex::new(Instant::now()));
+let clock_state = Arc::clone(&current_time);
+let clock: ClockFn = Arc::new(move || {
+    *clock_state.lock().unwrap() // test: panics are acceptable in tests
+});
+
+let protocol_config = ProtocolConfig {
+    clock: Some(clock),
+    ..ProtocolConfig::deterministic(42) // fixed RNG seed; clock set above
+};
+// Alternative: use ..ProtocolConfig::default() if you don't need a fixed RNG seed
+```
+
+#### Injecting into ChaosSocket
+
+`ChaosSocket` has its own clock for timing latency simulation. Use `with_clock()` to inject a shared time source so that both the protocol and the socket see the same virtual time:
+
+```rust
+use std::sync::{Arc, Mutex};
+use web_time::{Duration, Instant};
+use fortress_rollback::{ChaosSocket, ChaosConfig, UdpNonBlockingSocket};
+
+let current_time = Arc::new(Mutex::new(Instant::now()));
+
+// Build ChaosSocket with the same clock
+let clock_state = Arc::clone(&current_time);
+let inner = UdpNonBlockingSocket::bind_to_port(7000)?;
+let socket = ChaosSocket::new(inner, ChaosConfig::poor_network())
+    .with_clock(Arc::new(move || {
+        *clock_state.lock().unwrap() // test: panics are acceptable in tests
+    }));
+```
+
+> **Note:** `ChaosSocket::with_clock()` uses `std::time::Instant` internally. On native platforms, this is the same type as `web_time::Instant`, so the same clock function works for both. On WASM targets, these types may differ.
+
+#### Complete Test Example
+
+The following example shows a realistic test pattern that uses a manual clock to advance time deterministically instead of calling `thread::sleep()`:
+
+```rust
+use std::sync::{Arc, Mutex};
+use web_time::{Duration, Instant};
+use fortress_rollback::{
+    ClockFn, ProtocolConfig, ChaosSocket, ChaosConfig,
+    SessionBuilder, UdpNonBlockingSocket,
+};
+
+// 1. Create a shared time source
+let current_time = Arc::new(Mutex::new(Instant::now()));
+
+// 2. Build clock functions from the same shared state
+let protocol_clock_state = Arc::clone(&current_time);
+let protocol_clock: ClockFn = Arc::new(move || {
+    *protocol_clock_state.lock().unwrap() // test: panics are acceptable in tests
+});
+
+let chaos_clock_state = Arc::clone(&current_time);
+let chaos_clock = Arc::new(move || {
+    *chaos_clock_state.lock().unwrap() // test: panics are acceptable in tests
+});
+
+// 3. Configure the protocol with the virtual clock
+let protocol_config = ProtocolConfig {
+    clock: Some(protocol_clock),
+    ..ProtocolConfig::deterministic(42) // fixed RNG seed; clock set above
+};
+
+// 4. Configure ChaosSocket with the same virtual clock
+let inner = UdpNonBlockingSocket::bind_to_port(7000)?;
+let socket = ChaosSocket::new(inner, ChaosConfig::poor_network())
+    .with_clock(chaos_clock);
+
+// 5. Build the session with the clock-aware config and socket
+let session = SessionBuilder::<MyConfig>::new()
+    .with_num_players(2)?
+    .with_protocol_config(protocol_config)
+    .start_p2p_session(socket)?;
+
+// 6. Run test logic -- advance time explicitly instead of sleeping
+// This is instant and deterministic, regardless of CI load:
+fn advance(current_time: &Mutex<Instant>, duration: Duration) {
+    let mut t = current_time.lock().unwrap(); // test: panics are acceptable in tests
+    *t += duration;
+}
+
+// 200ms matches ProtocolConfig's default keepalive/quality_report interval.
+// Advancing by this amount triggers timer-driven protocol behavior.
+advance(&current_time, Duration::from_millis(200));
+
+// Simulate 5 seconds passing (might trigger disconnect timeout)
+advance(&current_time, Duration::from_secs(5));
+```
+
+#### Production Usage
+
+In production, leave the `clock` field as `None` (the default). The protocol will use `Instant::now()` for all timing, which is the correct behavior for real-time gameplay:
+
+```rust
+use fortress_rollback::ProtocolConfig;
+
+// Default config uses the system clock -- correct for production
+let config = ProtocolConfig::default();
+```
+
+The clock abstraction is purely additive and non-breaking. Existing code that does not set the `clock` field continues to work exactly as before.
+
 ### SessionState
 
 `SessionState` indicates the current state of a P2P or Spectator session:
@@ -2856,9 +3013,12 @@ let config = ProtocolConfig {
     pending_output_limit: 128,                           // Warning threshold for output queue
     sync_retry_warning_threshold: 10,                    // Warn after N sync retries
     sync_duration_warning_ms: 3000,                      // Warn if sync takes longer
+    clock: None,                                         // None = system clock (see below)
     ..Default::default()
 };
 ```
+
+The `clock` field accepts an `Option<ClockFn>` for injecting a custom time source. When `None` (the default), the protocol uses `Instant::now()`. See [Custom Clock (Time Control)](#custom-clock-time-control) for details and test examples.
 
 **Presets:**
 
@@ -2867,7 +3027,7 @@ let config = ProtocolConfig {
 - `ProtocolConfig::high_latency()` - Tolerant thresholds, longer timeouts
 - `ProtocolConfig::debug()` - Low thresholds to observe telemetry easily
 - `ProtocolConfig::mobile()` - Tolerant for mobile/cellular networks (350ms reports, large buffers)
-- `ProtocolConfig::deterministic(seed)` - Fixed RNG seed for reproducible sessions
+- `ProtocolConfig::deterministic(seed)` - Fixed RNG seed for reproducible sessions; combine with `clock: Some(clock_fn)` for full determinism (controlled time + fixed RNG)
 
 ### TimeSyncConfig (Time Synchronization)
 

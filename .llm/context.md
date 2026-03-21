@@ -25,6 +25,13 @@ cargo test --features z3-verification -- --nocapture  # Z3 proofs (slow)
 
 Always use `--no-capture` (nextest) or `-- --nocapture` (cargo test) so test output is visible on failure.
 
+**Test output rule:** NEVER pipe test output through `tail`/`head`. Redirect to a temp file instead:
+
+```bash
+cargo nextest run --no-capture > /tmp/test-results.txt 2>&1  # Then read the file
+for i in $(seq 1 10); do cargo nextest run --no-capture >> /tmp/flaky-check.txt 2>&1; done  # Repeated runs
+```
+
 ## CLI Tools (Dev Container)
 
 | Use | Instead of | Key flags |
@@ -56,7 +63,7 @@ Rules: always `bat --paging=never` (bare `bat` blocks); never redirect to `/dev/
 //            if !valid { return Err(FortressError::InvalidState); }
 ```
 
-Zero-panic key principles: never swallow errors (use `?`), validate all inputs, prefer `.get()` over indexing, exhaustive `match` (no `_ =>` on enums), enums over booleans, doc examples must use `?` and `Result`. See [defensive-programming.md](skills/defensive-programming.md) for the complete guide.
+Zero-panic key principles: never swallow errors (use `?`), validate all inputs, prefer `.get()` over indexing, exhaustive `match` (no `_ =>` on enums), enums over booleans, doc examples must use `?` and `Result`. See [defensive-programming.md](skills/rust-language/defensive-programming.md) for the complete guide.
 
 ## Code Design Principles
 
@@ -122,16 +129,16 @@ src/
 
 **The #2 cause:** Proofs that assert the wrong thing (e.g., wrong enum variant).
 
-**The #3 cause:** `format!()` inside macros (e.g., `report_violation!`) creating explosive CBMC state space. The `report_violation!` macro handles `cfg(kani)` internally (uses `let _ = (args...)` to suppress unused warnings without `format!()`). No additional gating needed when calling it. See [kani.md](skills/kani.md#common-timeout-causes) for details.
+**The #3 cause:** `format!()` inside macros (e.g., `report_violation!`) creating explosive CBMC state space. The `report_violation!` macro handles `cfg(kani)` internally (uses `let _ = (args...)` to suppress unused warnings without `format!()`). No additional gating needed when calling it. See [kani.md](skills/formal-verification/kani.md#common-timeout-causes) for details.
 
 ```bash
 cargo kani --harness proof_function_name    # Run specific proof
-./scripts/verify-kani.sh --tier 1 --quick   # Fast proofs (~15 min)
-./scripts/verify-kani.sh --list             # List all proofs and tiers
-./scripts/check-kani-coverage.sh            # Validate proof registration
+./scripts/verification/verify-kani.sh --tier 1 --quick   # Fast proofs (~15 min)
+./scripts/verification/verify-kani.sh --list             # List all proofs and tiers
+./scripts/verification/check-kani-coverage.sh            # Validate proof registration
 ```
 
-New proofs must be registered in `scripts/verify-kani.sh`:
+New proofs must be registered in `scripts/verification/verify-kani.sh`:
 
 - **Tier 1:** Fast (<30s) -- simple property checks
 - **Tier 2:** Medium (30s-2min) -- moderate complexity
@@ -170,6 +177,18 @@ Also: `ci-rust.yml` (Miri), `ci-security.yml` (cargo-geiger, cargo-deny).
 3. Fix at the right level (production bug vs test bug)
 4. Add regression tests; check for similar issues elsewhere
 
+### Asking Clarifying Questions
+
+When clarification is required before proceeding, use [`.llm/templates/ask-user-question.md`](templates/ask-user-question.md) to keep questions focused, actionable, and forward-moving.
+
+### Design Entrance Gate
+
+Before implementation, run the design entrance checks in [dev-pipeline.md](skills/workflows/dev-pipeline.md#design-review-entrance-gate) to confirm determinism, zero-panic handling, session impact, and broad test coverage.
+
+### Review and Hardening Gates
+
+Before opening PRs, run [review-readiness.md](skills/workflows/review-readiness.md). For high-risk changes or post-incident hardening, use [adversarial-handoff.md](skills/workflows/adversarial-handoff.md) with [adversarial-review.md](skills/workflows/adversarial-review.md).
+
 ## Test Writing
 
 Use **Arrange-Act-Assert** pattern. Name tests: `what_condition_expected_behavior` (e.g., `parse_empty_input_returns_none`).
@@ -202,7 +221,7 @@ Consolidate integration tests into a single crate (`tests/it/main.rs`). Anti-pat
 - **After doc changes:** `cargo doc --no-deps`
 - **After markdown changes:** `npx markdownlint 'file.md' --config .markdownlint.json --fix`
 - **After `.llm/` changes:** All `.md` files under `.llm/` must be **300 lines or fewer** (enforced by pre-commit hook `llm-line-limit`)
-- **Link validation:** `./scripts/check-links.sh`
+- **Link validation:** `./scripts/docs/check-links.sh`
 - **Spell check:** `typos`
 - **Vale (advisory):** `vale docs/` -- checks prose quality, non-blocking in CI
 - **Full pre-commit:** `cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run --no-capture`
@@ -218,7 +237,7 @@ Code examples in `.llm/skills/` must follow zero-panic rules with these exceptio
 - **`#[allow]` examples:** showing lint suppression is the point
 - Also accepted: `// proptest:`, `// allowed:`, `// SAFETY:`, `#[test]`, `#[fixture]`, `#[cfg(test)]` attributes
 
-Additional rules: `catch_unwind` closures must use `AssertUnwindSafe`; fully qualify ambiguous types (e.g., `arbitrary::Result<T>` not bare `Result<T>`); no `2>/dev/null` in shell examples. Run `scripts/check-llm-skills.sh` after modifying `.llm/` files (also enforced in CI via `ci-llm-lint.yml`).
+Additional rules: `catch_unwind` closures must use `AssertUnwindSafe`; fully qualify ambiguous types (e.g., `arbitrary::Result<T>` not bare `Result<T>`); no `2>/dev/null` in shell examples. Run `scripts/docs/check-llm-skills.sh` after modifying `.llm/` files (also enforced in CI via `ci-llm-lint.yml`).
 
 ## Breaking Changes Checklist
 

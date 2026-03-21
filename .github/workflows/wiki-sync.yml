@@ -103,13 +103,13 @@ jobs:
           echo "Using wiki branch: $WIKI_BRANCH"
 
       - name: Validate wiki consistency
-        run: python scripts/check-wiki-consistency.py
+        run: python scripts/docs/check-wiki-consistency.py
 
       - name: Sync documentation to wiki
-        run: python scripts/sync-wiki.py --dest github-wiki
+        run: python scripts/docs/sync-wiki.py --dest github-wiki
 
       - name: Validate wiki output format
-        run: python scripts/validate-wiki-output.py --wiki-dir github-wiki
+        run: python scripts/docs/validate-wiki-output.py --wiki-dir github-wiki
 
       - name: Push changes to wiki
         env:

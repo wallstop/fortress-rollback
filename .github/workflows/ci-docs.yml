@@ -157,7 +157,7 @@ jobs:
           python-version: '3.12'
 
       - name: Validate wiki consistency
-        run: python scripts/check-wiki-consistency.py
+        run: python scripts/docs/check-wiki-consistency.py
 
   # ============================================================================
   # SCRIPT TESTS & WIKI DRY-RUN - Run all script tests and validate wiki generation
@@ -181,10 +181,10 @@ jobs:
         run: python -m pytest scripts/tests/ -v
 
       - name: Generate wiki (dry-run)
-        run: python scripts/sync-wiki.py --dest wiki-test-output
+        run: python scripts/docs/sync-wiki.py --dest wiki-test-output
 
       - name: Validate generated wiki format
-        run: python scripts/validate-wiki-output.py --wiki-dir wiki-test-output
+        run: python scripts/docs/validate-wiki-output.py --wiki-dir wiki-test-output
 
   markdown-lint:
     name: Markdown Lint
@@ -223,7 +223,7 @@ jobs:
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if ./scripts/check-code-fence-syntax.sh docs/ 2>&1 | tee code-fence-output.txt; then
+          if ./scripts/docs/check-code-fence-syntax.sh docs/ 2>&1 | tee code-fence-output.txt; then
             echo "✅ No rustdoc-style code fence attributes found" >> "$GITHUB_STEP_SUMMARY"
           else
             {
@@ -272,7 +272,7 @@ jobs:
         continue-on-error: true  # External links may have rate limits
 
       - name: Check local file links
-        run: ./scripts/check-links.sh
+        run: ./scripts/docs/check-links.sh
 
   # ============================================================================
   # LYCHEE LINK CHECK - Fast link checking with caching
@@ -571,7 +571,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           # Run verification on docs/ directory with fail-fast for CI
-          if ./scripts/verify-markdown-code.sh --fail-fast docs/ 2>&1 | tee markdown-code-output.txt; then
+          if ./scripts/docs/verify-markdown-code.sh --fail-fast docs/ 2>&1 | tee markdown-code-output.txt; then
             echo "✅ All markdown code samples compile successfully" >> "$GITHUB_STEP_SUMMARY"
           else
             {

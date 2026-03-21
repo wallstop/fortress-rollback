@@ -31,10 +31,36 @@
 //!     .with_protocol_config(ProtocolConfig::mobile());
 //! ```
 
-use web_time::Duration;
+use std::sync::Arc;
+
+use web_time::{Duration, Instant};
 
 use crate::input_queue::INPUT_QUEUE_LENGTH;
 use crate::{FortressError, InvalidRequestKind};
+
+/// A clock function that returns the current [`Instant`].
+///
+/// This type alias is used for clock injection in [`ProtocolConfig`], enabling
+/// deterministic time control in tests and simulations. When set, the protocol
+/// uses this function instead of [`Instant::now()`] for all timing decisions.
+///
+/// # Example
+///
+/// ```
+/// use std::sync::Arc;
+/// use std::sync::atomic::{AtomicU64, Ordering};
+/// use fortress_rollback::ClockFn;
+/// use web_time::{Duration, Instant};
+///
+/// // Create a controllable clock for testing
+/// let base = Instant::now();
+/// let offset_ms = Arc::new(AtomicU64::new(0));
+/// let offset_clone = Arc::clone(&offset_ms);
+/// let clock: ClockFn = Arc::new(move || {
+///     base + Duration::from_millis(offset_clone.load(Ordering::Relaxed))
+/// });
+/// ```
+pub type ClockFn = Arc<dyn Fn() -> Instant + Send + Sync>;
 
 /// Configuration for the synchronization protocol.
 ///
@@ -370,7 +396,7 @@ impl SyncConfig {
 ///     ..ProtocolConfig::default()
 /// };
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone)]
 #[must_use = "ProtocolConfig has no effect unless passed to SessionBuilder::with_protocol_config()"]
 pub struct ProtocolConfig {
     /// Interval between network quality reports.
@@ -468,6 +494,125 @@ pub struct ProtocolConfig {
     ///
     /// Default: `None` (non-deterministic)
     pub protocol_rng_seed: Option<u64>,
+
+    /// Optional custom clock function for time injection.
+    ///
+    /// When set to `Some(clock_fn)`, the protocol will call this function instead
+    /// of [`Instant::now()`] for all timing decisions (quality reports, keepalives,
+    /// disconnect detection, etc.). This enables:
+    /// - Deterministic simulation testing (DST)
+    /// - Controlled time progression in tests
+    /// - Virtual time for replay systems
+    ///
+    /// When `None` (the default), the protocol uses [`Instant::now()`] directly.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicU64, Ordering};
+    /// use fortress_rollback::ProtocolConfig;
+    /// use web_time::{Duration, Instant};
+    ///
+    /// let base = Instant::now();
+    /// let offset_ms = Arc::new(AtomicU64::new(0));
+    /// let offset_clone = Arc::clone(&offset_ms);
+    /// let config = ProtocolConfig {
+    ///     clock: Some(Arc::new(move || {
+    ///         base + Duration::from_millis(offset_clone.load(Ordering::Relaxed))
+    ///     })),
+    ///     ..ProtocolConfig::default()
+    /// };
+    /// ```
+    ///
+    /// Default: `None` (uses system clock)
+    pub clock: Option<ClockFn>,
+}
+
+/// Compares all configuration fields, using clock presence (Some vs None) as a
+/// discriminator since [`ClockFn`] (`Arc<dyn Fn>`) does not implement `PartialEq`.
+///
+/// Two configs are equal if all settings match and both have the same clock presence
+/// (both `Some` or both `None`). Different clock function instances are considered
+/// equal as long as both are `Some` or both are `None`.
+impl PartialEq for ProtocolConfig {
+    fn eq(&self, other: &Self) -> bool {
+        // Destructure to ensure all fields are included when new fields are added.
+        let Self {
+            quality_report_interval,
+            shutdown_delay,
+            max_checksum_history,
+            pending_output_limit,
+            sync_retry_warning_threshold,
+            sync_duration_warning_ms,
+            input_history_multiplier,
+            protocol_rng_seed,
+            clock,
+        } = self;
+        *quality_report_interval == other.quality_report_interval
+            && *shutdown_delay == other.shutdown_delay
+            && *max_checksum_history == other.max_checksum_history
+            && *pending_output_limit == other.pending_output_limit
+            && *sync_retry_warning_threshold == other.sync_retry_warning_threshold
+            && *sync_duration_warning_ms == other.sync_duration_warning_ms
+            && *input_history_multiplier == other.input_history_multiplier
+            && *protocol_rng_seed == other.protocol_rng_seed
+            && clock.is_some() == other.clock.is_some()
+    }
+}
+
+impl Eq for ProtocolConfig {}
+
+impl std::hash::Hash for ProtocolConfig {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Destructure to ensure all fields are included when new fields are added.
+        let Self {
+            quality_report_interval,
+            shutdown_delay,
+            max_checksum_history,
+            pending_output_limit,
+            sync_retry_warning_threshold,
+            sync_duration_warning_ms,
+            input_history_multiplier,
+            protocol_rng_seed,
+            clock,
+        } = self;
+        quality_report_interval.hash(state);
+        shutdown_delay.hash(state);
+        max_checksum_history.hash(state);
+        pending_output_limit.hash(state);
+        sync_retry_warning_threshold.hash(state);
+        sync_duration_warning_ms.hash(state);
+        input_history_multiplier.hash(state);
+        protocol_rng_seed.hash(state);
+        clock.is_some().hash(state);
+    }
+}
+
+impl std::fmt::Debug for ProtocolConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProtocolConfig")
+            .field("quality_report_interval", &self.quality_report_interval)
+            .field("shutdown_delay", &self.shutdown_delay)
+            .field("max_checksum_history", &self.max_checksum_history)
+            .field("pending_output_limit", &self.pending_output_limit)
+            .field(
+                "sync_retry_warning_threshold",
+                &self.sync_retry_warning_threshold,
+            )
+            .field("sync_duration_warning_ms", &self.sync_duration_warning_ms)
+            .field("input_history_multiplier", &self.input_history_multiplier)
+            .field("protocol_rng_seed", &self.protocol_rng_seed)
+            .field(
+                "clock",
+                if self.clock.is_some() {
+                    &"Some(<clock_fn>)"
+                } else {
+                    &"None"
+                },
+            )
+            .finish()
+    }
 }
 
 impl Default for ProtocolConfig {
@@ -481,6 +626,7 @@ impl Default for ProtocolConfig {
             sync_duration_warning_ms: 3000,
             input_history_multiplier: 2,
             protocol_rng_seed: None,
+            clock: None,
         }
     }
 }
@@ -497,11 +643,12 @@ impl std::fmt::Display for ProtocolConfig {
             sync_duration_warning_ms,
             input_history_multiplier,
             protocol_rng_seed,
+            clock,
         } = self;
 
         write!(
             f,
-            "ProtocolConfig {{ quality_report: {:?}, shutdown: {:?}, checksum_history: {}, pending_limit: {}, retry_warn: {}, duration_warn_ms: {}, history_mult: {}, seed: {} }}",
+            "ProtocolConfig {{ quality_report: {:?}, shutdown: {:?}, checksum_history: {}, pending_limit: {}, retry_warn: {}, duration_warn_ms: {}, history_mult: {}, seed: {}, clock: {} }}",
             quality_report_interval,
             shutdown_delay,
             max_checksum_history,
@@ -510,6 +657,7 @@ impl std::fmt::Display for ProtocolConfig {
             sync_duration_warning_ms,
             input_history_multiplier,
             protocol_rng_seed.map_or_else(|| "None".to_string(), |s| s.to_string()),
+            if clock.is_some() { "custom" } else { "system" },
         )
     }
 }
@@ -534,6 +682,7 @@ impl ProtocolConfig {
             sync_duration_warning_ms: 2000,
             input_history_multiplier: 2,
             protocol_rng_seed: None,
+            clock: None,
         }
     }
 
@@ -551,6 +700,7 @@ impl ProtocolConfig {
             sync_duration_warning_ms: 10000,
             input_history_multiplier: 3,
             protocol_rng_seed: None,
+            clock: None,
         }
     }
 
@@ -568,6 +718,7 @@ impl ProtocolConfig {
             sync_duration_warning_ms: 1000,
             input_history_multiplier: 4,
             protocol_rng_seed: None,
+            clock: None,
         }
     }
 
@@ -598,6 +749,7 @@ impl ProtocolConfig {
             // More history for packet reordering on mobile
             input_history_multiplier: 3,
             protocol_rng_seed: None,
+            clock: None,
         }
     }
 
@@ -609,6 +761,9 @@ impl ProtocolConfig {
     /// - Deterministic testing
     /// - Debugging network issues
     /// - Cross-platform consistency
+    ///
+    /// For full determinism including time, also set the [`clock`](Self::clock)
+    /// field to inject a controlled clock function.
     ///
     /// # Arguments
     ///
@@ -1552,7 +1707,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::clone_on_copy)] // Testing Clone trait implementation explicitly
     fn protocol_config_clone() {
         let config = ProtocolConfig::high_latency();
         let cloned = config.clone();
@@ -1560,10 +1714,18 @@ mod tests {
     }
 
     #[test]
-    fn protocol_config_copy() {
-        let config = ProtocolConfig::mobile();
-        let copied: ProtocolConfig = config; // Copy trait
-        assert_eq!(config, copied);
+    fn protocol_config_default_has_no_clock() {
+        let config = ProtocolConfig::default();
+        assert!(config.clock.is_none());
+    }
+
+    #[test]
+    fn protocol_config_with_clock() {
+        let config = ProtocolConfig {
+            clock: Some(Arc::new(Instant::now)),
+            ..ProtocolConfig::default()
+        };
+        assert!(config.clock.is_some());
     }
 
     #[test]
@@ -1577,19 +1739,29 @@ mod tests {
 
     #[test]
     fn protocol_config_display() {
-        // Test default (no seed)
+        // Test default (no seed, system clock)
         let config = ProtocolConfig::default();
         let display_str = config.to_string();
         assert!(display_str.contains("ProtocolConfig"));
         assert!(display_str.contains("checksum_history: 32"));
         assert!(display_str.contains("pending_limit: 128"));
         assert!(display_str.contains("seed: None"));
+        assert!(display_str.contains("clock: system"));
 
         // Test with seed
         let config = ProtocolConfig::deterministic(42);
         let display_str = config.to_string();
         assert!(display_str.contains("ProtocolConfig"));
         assert!(display_str.contains("seed: 42"));
+        assert!(display_str.contains("clock: system"));
+
+        // Test with custom clock
+        let config = ProtocolConfig {
+            clock: Some(Arc::new(Instant::now)),
+            ..ProtocolConfig::default()
+        };
+        let display_str = config.to_string();
+        assert!(display_str.contains("clock: custom"));
     }
 
     #[test]
@@ -2173,6 +2345,7 @@ mod tests {
             sync_duration_warning_ms: 1,
             input_history_multiplier: 1,
             protocol_rng_seed: None,
+            clock: None,
         };
         config.validate().unwrap();
 
@@ -2186,6 +2359,7 @@ mod tests {
             sync_duration_warning_ms: 300000,
             input_history_multiplier: 16,
             protocol_rng_seed: None,
+            clock: None,
         };
         config.validate().unwrap();
     }

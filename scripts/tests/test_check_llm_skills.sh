@@ -15,7 +15,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CHECK_SCRIPT="$SCRIPT_DIR/../check-llm-skills.sh"
+CHECK_SCRIPT="$SCRIPT_DIR/../docs/check-llm-skills.sh"
 TESTS_PASSED=0
 TESTS_FAILED=0
 TESTS_TOTAL=0

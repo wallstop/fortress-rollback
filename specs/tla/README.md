@@ -10,16 +10,16 @@ This directory contains TLA+ specifications for formally verifying the correctne
 
 ```bash
 # Run all TLA+ verification (from project root)
-./scripts/verify-tla.sh
+./scripts/verification/verify-tla.sh
 
 # List available specs
-./scripts/verify-tla.sh --list
+./scripts/verification/verify-tla.sh --list
 
 # Verify specific spec
-./scripts/verify-tla.sh NetworkProtocol
+./scripts/verification/verify-tla.sh NetworkProtocol
 
 # Quick verification (smaller bounds)
-./scripts/verify-tla.sh --quick
+./scripts/verification/verify-tla.sh --quick
 ```
 
 ## Files
@@ -118,16 +118,16 @@ Use the verification scripts from the project root:
 
 ```bash
 # Run all enabled TLA+ specs in CI
-./scripts/verify-tla.sh
+./scripts/verification/verify-tla.sh
 
 # Run specific spec
-./scripts/verify-tla.sh InputQueue
+./scripts/verification/verify-tla.sh InputQueue
 
 # Run quick verification (smaller state bounds)
-./scripts/verify-tla.sh --quick
+./scripts/verification/verify-tla.sh --quick
 
 # List available specs
-./scripts/verify-tla.sh --list
+./scripts/verification/verify-tla.sh --list
 ```
 
 The script automatically downloads TLC tools if needed.
@@ -269,7 +269,7 @@ These specifications model the key algorithms from:
 
 ## Best Practices for TLA+ Development
 
-> **See also:** [/.llm/skills/verification.md](../../.llm/skills/verification.md) — TLA+ and Z3 verification guide
+> **See also:** [/.llm/skills/formal-verification/verification.md](../../.llm/skills/formal-verification/verification.md) — TLA+ and Z3 verification guide
 
 ### Specification Design
 

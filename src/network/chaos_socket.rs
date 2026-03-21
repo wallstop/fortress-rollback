@@ -37,6 +37,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::hash::Hash;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::network::messages::Message;
@@ -432,6 +433,13 @@ where
 
     /// Statistics tracking
     stats: ChaosStats,
+
+    /// Optional custom clock function for deterministic time control.
+    ///
+    /// When set, `now()` returns the result of calling this function instead
+    /// of `Instant::now()`. This enables deterministic testing of latency
+    /// and packet delivery timing.
+    clock_fn: Option<Arc<dyn Fn() -> Instant + Send + Sync>>,
 }
 
 /// Statistics about chaos socket behavior.
@@ -503,6 +511,7 @@ where
             reorder_buffer: Vec::new(),
             burst_loss_remaining: 0,
             stats: ChaosStats::default(),
+            clock_fn: None,
         }
     }
 
@@ -546,8 +555,54 @@ where
         self.in_flight.len()
     }
 
+    /// Sets a custom clock function for deterministic time control.
+    ///
+    /// When set, the chaos socket uses this function instead of
+    /// [`Instant::now()`] for all timing decisions (latency calculation,
+    /// packet delivery). This enables deterministic testing of network
+    /// chaos behavior.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicU64, Ordering};
+    /// use std::time::{Duration, Instant};
+    /// use fortress_rollback::{ChaosSocket, ChaosConfig, NonBlockingSocket};
+    /// use fortress_rollback::Message;
+    /// use std::net::SocketAddr;
+    ///
+    /// # struct TestSocket;
+    /// # impl NonBlockingSocket<SocketAddr> for TestSocket {
+    /// #     fn send_to(&mut self, _msg: &Message, _addr: &SocketAddr) {}
+    /// #     fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> { vec![] }
+    /// # }
+    /// let base = Instant::now();
+    /// let offset = Arc::new(AtomicU64::new(0));
+    /// let offset_clone = Arc::clone(&offset);
+    /// let socket = ChaosSocket::new(TestSocket, ChaosConfig::passthrough())
+    ///     .with_clock(Arc::new(move || {
+    ///         base + Duration::from_millis(offset_clone.load(Ordering::Relaxed))
+    ///     }));
+    /// ```
+    #[must_use]
+    pub fn with_clock(mut self, clock_fn: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
+        self.clock_fn = Some(clock_fn);
+        self
+    }
+
+    /// Returns the current time, using the custom clock if configured, or
+    /// [`Instant::now()`] otherwise.
+    fn now(&self) -> Instant {
+        match &self.clock_fn {
+            Some(clock_fn) => clock_fn(),
+            None => Instant::now(),
+        }
+    }
+
     /// Calculates the delivery time for a packet with latency and jitter.
     fn calculate_delivery_time(&mut self) -> Instant {
+        let now = self.now();
         let base_latency = self.config.latency;
         let jitter = if self.config.jitter > Duration::ZERO {
             let jitter_range = self.config.jitter.as_nanos() as i64;
@@ -560,13 +615,13 @@ where
                 // Negative jitter reduces latency but not below zero
                 let reduction = Duration::from_nanos((-jitter_offset) as u64);
                 // saturating_sub ensures we never get a negative duration
-                return Instant::now() + base_latency.saturating_sub(reduction);
+                return now + base_latency.saturating_sub(reduction);
             }
         } else {
             Duration::ZERO
         };
 
-        Instant::now() + base_latency + jitter
+        now + base_latency + jitter
     }
 
     /// Determines if a packet should be dropped based on the given rate.
@@ -610,7 +665,7 @@ where
 
     /// Delivers packets that have reached their delivery time.
     fn deliver_ready_packets(&mut self) -> Vec<(A, Message)> {
-        let now = Instant::now();
+        let now = self.now();
         let mut ready = Vec::new();
 
         while let Some(packet) = self.in_flight.front() {
@@ -833,6 +888,7 @@ where
             .field("stats", &self.stats)
             .field("packets_in_flight", &self.in_flight.len())
             .field("burst_loss_remaining", &self.burst_loss_remaining)
+            .field("has_custom_clock", &self.clock_fn.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -848,6 +904,7 @@ where
 mod tests {
     use super::*;
     use std::net::SocketAddr;
+    use std::sync::Mutex;
 
     /// A simple in-memory socket for testing.
     #[derive(Default)]
@@ -863,6 +920,36 @@ mod tests {
 
         fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
             std::mem::take(&mut self.to_receive)
+        }
+    }
+
+    /// A manually-advanceable clock for deterministic testing.
+    ///
+    /// Replaces `thread::sleep()` in tests by providing a virtual time source
+    /// that only advances when explicitly told to. This makes test execution
+    /// fully deterministic regardless of system load, platform, or CI environment.
+    struct TestClock {
+        current: Arc<Mutex<Instant>>,
+    }
+
+    impl TestClock {
+        /// Creates a new `TestClock` starting at the current wall-clock time.
+        fn new() -> Self {
+            Self {
+                current: Arc::new(Mutex::new(Instant::now())),
+            }
+        }
+
+        /// Advances the clock by the given duration.
+        fn advance(&self, duration: Duration) {
+            let mut t = self.current.lock().unwrap();
+            *t += duration;
+        }
+
+        /// Creates a clock function for [`ChaosSocket::with_clock()`].
+        fn as_clock_fn(&self) -> Arc<dyn Fn() -> Instant + Send + Sync> {
+            let current = Arc::clone(&self.current);
+            Arc::new(move || *current.lock().unwrap())
         }
     }
 
@@ -1139,7 +1226,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // Miri doesn't advance Instant::now() through thread::sleep() reliably
     fn test_latency_delays_delivery() {
         let mut inner = TestSocket::default();
         let addr = test_addr();
@@ -1148,69 +1234,50 @@ mod tests {
         // Queue a message to receive
         inner.to_receive.push((addr, msg));
 
-        // Set up high latency (500ms) - use a large value to ensure timing reliability on CI
-        // On loaded CI systems (especially macOS), thread::sleep can overshoot significantly
         const LATENCY_MS: u64 = 500;
         const EARLY_CHECK_MS: u64 = 100; // Check well before delivery time
         const LATE_CHECK_MS: u64 = 600; // Check well after delivery time
 
+        let clock = TestClock::new();
         let config = ChaosConfig::builder()
             .latency_ms(LATENCY_MS)
             .seed(42)
             .build();
-        let mut socket = ChaosSocket::new(inner, config);
-        let start = Instant::now();
+        let mut socket = ChaosSocket::new(inner, config).with_clock(clock.as_clock_fn());
 
         // First receive - packet goes into in-flight queue
         let received = socket.receive_all_messages();
         assert_eq!(
             received.len(),
             0,
-            "Packet should be delayed immediately after receive (elapsed: {:?})",
-            start.elapsed()
+            "Packet should be delayed immediately after receive"
         );
-        assert_eq!(
-            socket.packets_in_flight(),
-            1,
-            "Packet should be in flight (elapsed: {:?})",
-            start.elapsed()
-        );
+        assert_eq!(socket.packets_in_flight(), 1, "Packet should be in flight");
 
-        // Wait much less than latency - should still be delayed
-        std::thread::sleep(Duration::from_millis(EARLY_CHECK_MS));
-        let elapsed_at_check = start.elapsed();
+        // Advance clock less than latency - should still be delayed
+        clock.advance(Duration::from_millis(EARLY_CHECK_MS));
         let received = socket.receive_all_messages();
         assert_eq!(
             received.len(),
             0,
-            "Packet should still be delayed after {}ms sleep \
-             (actual elapsed: {:?}, latency: {}ms, in_flight: {})",
+            "Packet should still be delayed after {}ms (latency: {}ms, in_flight: {})",
             EARLY_CHECK_MS,
-            elapsed_at_check,
             LATENCY_MS,
             socket.packets_in_flight()
         );
 
-        // Wait for well past the latency - now delivered
-        std::thread::sleep(Duration::from_millis(LATE_CHECK_MS - EARLY_CHECK_MS));
-        let elapsed_at_delivery = start.elapsed();
+        // Advance clock well past the latency - now delivered
+        clock.advance(Duration::from_millis(LATE_CHECK_MS - EARLY_CHECK_MS));
         let received = socket.receive_all_messages();
         assert_eq!(
             received.len(),
             1,
-            "Packet should be delivered after {}ms total sleep \
-             (actual elapsed: {:?}, latency: {}ms, in_flight: {})",
+            "Packet should be delivered after {}ms total (latency: {}ms, in_flight: {})",
             LATE_CHECK_MS,
-            elapsed_at_delivery,
             LATENCY_MS,
             socket.packets_in_flight()
         );
-        assert_eq!(
-            socket.packets_in_flight(),
-            0,
-            "No more packets in flight (elapsed: {:?})",
-            start.elapsed()
-        );
+        assert_eq!(socket.packets_in_flight(), 0, "No more packets in flight");
     }
 
     #[test]
@@ -1237,7 +1304,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // Miri doesn't advance Instant::now() through thread::sleep() reliably
     fn test_in_flight_count() {
         let mut inner = TestSocket::default();
         let addr = test_addr();
@@ -1248,42 +1314,36 @@ mod tests {
             inner.to_receive.push((addr, msg.clone()));
         }
 
-        // Use larger latency with generous margin for CI reliability
         const LATENCY_MS: u64 = 300;
         const WAIT_MS: u64 = 500; // Well past latency
 
+        let clock = TestClock::new();
         let config = ChaosConfig::builder().latency_ms(LATENCY_MS).build();
-        let mut socket = ChaosSocket::new(inner, config);
-        let start = Instant::now();
+        let mut socket = ChaosSocket::new(inner, config).with_clock(clock.as_clock_fn());
 
         // Queues packets in flight; return value discarded, testing in_flight count
         let _ = socket.receive_all_messages();
         assert_eq!(
             socket.packets_in_flight(),
             5,
-            "All 5 packets should be in flight (elapsed: {:?})",
-            start.elapsed()
+            "All 5 packets should be in flight"
         );
 
-        // Wait well past latency and check they're delivered
-        std::thread::sleep(Duration::from_millis(WAIT_MS));
-        let elapsed = start.elapsed();
+        // Advance clock well past latency and check they're delivered
+        clock.advance(Duration::from_millis(WAIT_MS));
         let received = socket.receive_all_messages();
         assert_eq!(
             received.len(),
             5,
-            "All 5 packets should be delivered after {}ms sleep \
-             (actual elapsed: {:?}, latency: {}ms, in_flight: {})",
+            "All 5 packets should be delivered after {}ms (latency: {}ms, in_flight: {})",
             WAIT_MS,
-            elapsed,
             LATENCY_MS,
             socket.packets_in_flight()
         );
         assert_eq!(
             socket.packets_in_flight(),
             0,
-            "No packets should remain in flight (elapsed: {:?})",
-            start.elapsed()
+            "No packets should remain in flight"
         );
     }
 
@@ -1668,7 +1728,6 @@ mod tests {
 
     /// Data-driven test: packets should always be delivered after maximum delivery time
     #[test]
-    #[cfg_attr(miri, ignore)] // Miri doesn't advance Instant::now() through thread::sleep() reliably
     fn test_latency_maximum_delivery_time_data_driven() {
         const TEST_CASES: &[LatencyTestCase] = &[
             LatencyTestCase::new("small_latency", 100, 0, 1),
@@ -1685,25 +1744,23 @@ mod tests {
                 inner.to_receive.push((addr, msg.clone()));
             }
 
+            let clock = TestClock::new();
             let config = ChaosConfig::builder()
                 .latency_ms(case.latency_ms)
                 .jitter_ms(case.jitter_ms)
                 .seed(42)
                 .build();
-            let mut socket = ChaosSocket::new(inner, config);
-            let start = Instant::now();
+            let mut socket = ChaosSocket::new(inner, config).with_clock(clock.as_clock_fn());
 
             // First receive - packets go into in-flight queue; return value discarded, testing timing
             let _ = socket.receive_all_messages();
             let in_flight_initial = socket.packets_in_flight();
 
-            // Calculate maximum time before all packets must be delivered:
-            // max_delivery_time = latency + jitter + generous CI margin (200ms)
-            let max_delivery_ms = case.latency_ms + case.jitter_ms + 200;
+            // Advance clock past maximum delivery time:
+            // max_delivery_time = latency + jitter
+            let max_delivery_ms = case.latency_ms + case.jitter_ms + 1;
 
-            // Wait for maximum delivery time
-            std::thread::sleep(Duration::from_millis(max_delivery_ms));
-            let elapsed = start.elapsed();
+            clock.advance(Duration::from_millis(max_delivery_ms));
 
             let received = socket.receive_all_messages();
             assert_eq!(
@@ -1711,7 +1768,7 @@ mod tests {
                 case.packet_count,
                 "[{}] Not all packets delivered! \
                  expected={}, received={}, in_flight_before={}, in_flight_after={}, \
-                 latency={}ms, jitter={}ms, wait={}ms, elapsed={:?}",
+                 latency={}ms, jitter={}ms, advance={}ms",
                 case.name,
                 case.packet_count,
                 received.len(),
@@ -1719,15 +1776,13 @@ mod tests {
                 socket.packets_in_flight(),
                 case.latency_ms,
                 case.jitter_ms,
-                max_delivery_ms,
-                elapsed
+                max_delivery_ms
             );
         }
     }
 
     /// Test that multiple packets with same latency maintain FIFO order (no jitter)
     #[test]
-    #[cfg_attr(miri, ignore)] // Miri doesn't advance Instant::now() through thread::sleep() reliably
     fn test_latency_fifo_ordering_without_jitter() {
         let mut inner = TestSocket::default();
         let addr = test_addr();
@@ -1748,18 +1803,19 @@ mod tests {
         }
 
         // No jitter - packets should maintain FIFO order
+        let clock = TestClock::new();
         let config = ChaosConfig::builder()
             .latency_ms(100)
             .jitter_ms(0)
             .seed(42)
             .build();
-        let mut socket = ChaosSocket::new(inner, config);
+        let mut socket = ChaosSocket::new(inner, config).with_clock(clock.as_clock_fn());
 
-        // First receive; return value discarded, verifying FIFO order after sleep
+        // First receive; return value discarded, verifying FIFO order after advance
         let _ = socket.receive_all_messages();
 
-        // Wait for delivery
-        std::thread::sleep(Duration::from_millis(300));
+        // Advance clock past delivery time
+        clock.advance(Duration::from_millis(300));
         let received = socket.receive_all_messages();
 
         assert_eq!(received.len(), 5, "All packets should be delivered");
@@ -1832,21 +1888,20 @@ mod tests {
 
     /// Test that in_flight tracking is accurate across multiple receive cycles
     #[test]
-    #[cfg_attr(miri, ignore)] // Miri doesn't advance Instant::now() through thread::sleep() reliably
     fn test_in_flight_accuracy_multiple_cycles() {
         let inner = TestSocket::default();
         let addr = test_addr();
         let msg = test_message();
 
-        // Use moderate latency with good margin
         const LATENCY_MS: u64 = 150;
         const WAIT_MS: u64 = 250;
 
+        let clock = TestClock::new();
         let config = ChaosConfig::builder()
             .latency_ms(LATENCY_MS)
             .seed(42)
             .build();
-        let mut socket = ChaosSocket::new(inner, config);
+        let mut socket = ChaosSocket::new(inner, config).with_clock(clock.as_clock_fn());
 
         // Cycle 1: Add 3 packets
         socket.inner_mut().to_receive.push((addr, msg.clone()));
@@ -1861,8 +1916,8 @@ mod tests {
             "Cycle 1: 3 packets in flight"
         );
 
-        // Wait and verify delivery
-        std::thread::sleep(Duration::from_millis(WAIT_MS));
+        // Advance clock and verify delivery
+        clock.advance(Duration::from_millis(WAIT_MS));
         let received1 = socket.receive_all_messages();
         assert_eq!(received1.len(), 3, "Cycle 1: 3 packets delivered");
         assert_eq!(
@@ -1883,8 +1938,8 @@ mod tests {
             "Cycle 2: 2 packets in flight"
         );
 
-        // Wait and verify delivery
-        std::thread::sleep(Duration::from_millis(WAIT_MS));
+        // Advance clock and verify delivery
+        clock.advance(Duration::from_millis(WAIT_MS));
         let received2 = socket.receive_all_messages();
         assert_eq!(received2.len(), 2, "Cycle 2: 2 packets delivered");
         assert_eq!(

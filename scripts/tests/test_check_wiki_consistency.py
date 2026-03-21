@@ -11,9 +11,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Add scripts directory to path for imports
+# Add scripts/docs directory to path for imports
 scripts_dir = Path(__file__).parent.parent
-sys.path.insert(0, str(scripts_dir))
+sys.path.insert(0, str(scripts_dir / "docs"))
 
 # Import with proper module name using importlib
 # We use dynamic import because the filename contains a hyphen (check-wiki-consistency.py)
@@ -21,7 +21,7 @@ sys.path.insert(0, str(scripts_dir))
 # This approach loads the module with a valid Python identifier.
 import importlib.util
 spec = importlib.util.spec_from_file_location(
-    "check_wiki_consistency", scripts_dir / "check-wiki-consistency.py"
+    "check_wiki_consistency", scripts_dir / "docs" / "check-wiki-consistency.py"
 )
 check_wiki_consistency = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check_wiki_consistency)
@@ -679,10 +679,10 @@ class TestActualSyncWikiScript:
         """
         # Get the real sync-wiki.py path
         scripts_dir = Path(__file__).parent.parent
-        sync_script_path = scripts_dir / "sync-wiki.py"
+        sync_script_path = scripts_dir / "docs" / "sync-wiki.py"
 
         if not sync_script_path.exists():
-            pytest.skip("sync-wiki.py not found in scripts directory")
+            pytest.skip("sync-wiki.py not found in scripts/docs directory")
 
         result = validate_sync_script_sidebar_template(sync_script_path)
         assert result.errors == 0, (

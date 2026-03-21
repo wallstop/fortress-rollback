@@ -84,7 +84,7 @@ def build_index(
     """
     skill_files = sorted(
         f
-        for f in skills_dir.glob("*.md")
+        for f in skills_dir.rglob("*.md")
         if f.name != INDEX_FILENAME
     )
 
@@ -97,7 +97,8 @@ def build_index(
             had_error = True
             continue
         category, when = result
-        categories.setdefault(category, []).append((filepath.name, when))
+        rel_path = filepath.relative_to(skills_dir).as_posix()
+        categories.setdefault(category, []).append((rel_path, when))
 
     # Sort categories alphabetically, but put Uncategorized last
     sorted_cats = sorted(
@@ -118,8 +119,9 @@ def build_index(
         lines.append("")
         lines.append("| Skill | When to Use |")
         lines.append("|-------|-------------|")
-        for filename, when in sorted(categories[cat]):
-            lines.append(f"| [{filename}]({filename}) | {when} |")
+        for rel_path, when in sorted(categories[cat]):
+            display_name = Path(rel_path).name
+            lines.append(f"| [{display_name}]({rel_path}) | {when} |")
 
     # Ensure trailing newline
     lines.append("")

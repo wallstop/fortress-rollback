@@ -7,6 +7,13 @@
 //! - Jitter (variable latency)
 //! - Combined conditions
 //!
+//! # Deterministic Testing Infrastructure
+//!
+//! This test file uses `ChannelSocket` (in-memory sockets) and `TestClock`
+//! (virtual time) for fully deterministic testing. No real UDP I/O or
+//! `thread::sleep` calls are needed, eliminating port conflicts and
+//! timing-related flakiness across all platforms.
+//!
 //! # Seed Correlation Warning
 //!
 //! When using ChaosSocket with packet loss or burst loss, **always use different
@@ -30,11 +37,6 @@
 //! let socket1 = create_chaos_socket(port1, config.clone())?;
 //! let socket2 = create_chaos_socket(port2, config)?; // Same seed!
 //! ```
-//!
-//! # Port Allocation
-//!
-//! This test file uses `PortAllocator` for thread-safe port allocation.
-//! All ports are dynamically allocated to avoid conflicts with other tests.
 
 // Allow test-specific patterns that are appropriate for test code
 #![allow(
@@ -49,23 +51,29 @@
 )]
 
 use crate::common::stubs::{GameStub, StubConfig, StubInput};
-use crate::common::test_utils::{bind_socket_with_retry, create_chaos_socket_ephemeral};
+use crate::common::{create_channel_pair, create_chaos_channel_pair, TestClock};
 use fortress_rollback::{
     ChaosConfig, FortressError, FortressEvent, PlayerHandle, PlayerType, ProtocolConfig, SaveMode,
-    SessionBuilder, SessionState, SocketErrorKind, SyncConfig, TimeSyncConfig,
+    SessionBuilder, SessionState, SyncConfig, TimeSyncConfig,
 };
-use serial_test::serial;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-// Use the shared create_chaos_socket helper from test_utils
+/// Helper: creates a `ProtocolConfig` with the given test clock.
+fn protocol_config(clock: &TestClock) -> ProtocolConfig {
+    ProtocolConfig {
+        clock: Some(clock.as_protocol_clock()),
+        ..ProtocolConfig::default()
+    }
+}
+
+// Uses create_chaos_channel_pair for deterministic in-memory sockets
 
 /// Test that sessions can synchronize with moderate packet loss.
 /// 10% packet loss should still allow synchronization to complete.
 #[test]
-#[serial]
 fn test_synchronize_with_packet_loss() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Use different seeds to avoid correlated packet drops
     let config1 = ChaosConfig::builder()
         .packet_loss_rate(0.10) // 10% loss
@@ -77,14 +85,15 @@ fn test_synchronize_with_packet_loss() -> Result<(), FortressError> {
         .seed(43) // Different seed!
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(config2)?;
+    let (socket1, socket2, addr1, addr2) = create_chaos_channel_pair(config1, config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -93,10 +102,9 @@ fn test_synchronize_with_packet_loss() -> Result<(), FortressError> {
     assert_eq!(sess1.current_state(), SessionState::Synchronizing);
     assert_eq!(sess2.current_state(), SessionState::Synchronizing);
 
-    // Synchronize - with sleep to allow retry timers to fire (200ms retry interval)
+    // Synchronize - advance clock to allow retry timers to fire (200ms retry interval)
     // With 10% loss on each side, ~19% of roundtrips fail.
-    // Need 5 successful roundtrips, so expect ~6-8 attempts (1.2-1.6s minimum).
-    // Allow 10 seconds total for reliability.
+    // Need 5 successful roundtrips, so expect ~6-8 attempts.
     for _ in 0..100 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
@@ -107,8 +115,8 @@ fn test_synchronize_with_packet_loss() -> Result<(), FortressError> {
             break;
         }
 
-        // Sleep to allow retry timer (200ms) to fire
-        std::thread::sleep(Duration::from_millis(100));
+        // Advance clock to allow retry timer (200ms) to fire
+        clock.advance(Duration::from_millis(100));
     }
 
     // Should eventually synchronize despite packet loss
@@ -128,9 +136,9 @@ fn test_synchronize_with_packet_loss() -> Result<(), FortressError> {
 
 /// Test that sessions can advance frames with moderate packet loss.
 #[test]
-#[serial]
 fn test_advance_frames_with_packet_loss() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     let chaos_config1 = ChaosConfig::builder()
         .packet_loss_rate(0.05) // 5% loss
         .seed(123)
@@ -141,20 +149,21 @@ fn test_advance_frames_with_packet_loss() -> Result<(), FortressError> {
         .seed(124)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    // Synchronize first - need sleep for protocol retry timers (200ms interval)
-    // With packet loss, synchronization may take longer, so we increase iterations
+    // Synchronize first
     for _ in 0..200 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
@@ -164,7 +173,7 @@ fn test_advance_frames_with_packet_loss() -> Result<(), FortressError> {
         {
             break;
         }
-        std::thread::sleep(Duration::from_millis(40));
+        clock.advance(Duration::from_millis(40));
     }
 
     assert_eq!(
@@ -215,38 +224,40 @@ fn test_advance_frames_with_packet_loss() -> Result<(), FortressError> {
 /// Note: With receive-side latency simulation, initial messages are delayed
 /// before being available to the session.
 #[test]
-#[serial]
 fn test_synchronize_with_latency() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // 20ms simulated latency
     let chaos_config1 = ChaosConfig::builder().latency_ms(20).seed(42).build();
     let chaos_config2 = ChaosConfig::builder().latency_ms(20).seed(43).build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    // Synchronize - with latency, need to wait between polls
+    // Synchronize - advance clock to allow latency simulation to deliver packets
     for _ in 0..100 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-
-        // Small delay to allow latency simulation to deliver packets
-        std::thread::sleep(Duration::from_millis(5));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        // Advance clock past latency window
+        clock.advance(Duration::from_millis(50));
     }
 
     assert_eq!(
@@ -265,10 +276,10 @@ fn test_synchronize_with_latency() -> Result<(), FortressError> {
 
 /// Test sessions with combined latency and jitter.
 #[test]
-#[serial]
 fn test_synchronize_with_jitter() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
-    // 30ms latency with ±15ms jitter
+    let clock = TestClock::new();
+
+    // 30ms latency with +/-15ms jitter
     let chaos_config1 = ChaosConfig::builder()
         .latency_ms(30)
         .jitter_ms(15)
@@ -281,14 +292,16 @@ fn test_synchronize_with_jitter() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -297,13 +310,14 @@ fn test_synchronize_with_jitter() -> Result<(), FortressError> {
     for _ in 0..150 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(5));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(50));
     }
 
     assert_eq!(
@@ -322,9 +336,9 @@ fn test_synchronize_with_jitter() -> Result<(), FortressError> {
 
 /// Test sessions with combined packet loss and latency (poor network simulation).
 #[test]
-#[serial]
 fn test_poor_network_conditions() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Use the "poor network" preset with deterministic seeds
     let mut chaos_config1 = ChaosConfig::poor_network();
     chaos_config1.seed = Some(42);
@@ -332,14 +346,16 @@ fn test_poor_network_conditions() -> Result<(), FortressError> {
     let mut chaos_config2 = ChaosConfig::poor_network();
     chaos_config2.seed = Some(43);
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -349,13 +365,14 @@ fn test_poor_network_conditions() -> Result<(), FortressError> {
     for _ in 0..200 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(50));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(50));
     }
 
     assert_eq!(
@@ -378,7 +395,7 @@ fn test_poor_network_conditions() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(15));
+        clock.advance(Duration::from_millis(15));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -408,9 +425,9 @@ fn test_poor_network_conditions() -> Result<(), FortressError> {
 
 /// Test asymmetric network conditions (one direction worse than other).
 #[test]
-#[serial]
 fn test_asymmetric_packet_loss() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Player 1 has high send loss (simulates bad upload)
     let config1 = ChaosConfig::builder()
         .send_loss_rate(0.15)
@@ -425,21 +442,20 @@ fn test_asymmetric_packet_loss() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(config2)?;
+    let (socket1, socket2, addr1, addr2) = create_chaos_channel_pair(config1, config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    // Synchronize with asymmetric loss - need sleep for protocol retry timers
-    // Player 1 has 15% send loss, which compounds with player 2's receive
-    // Use more iterations with shorter sleep to allow more sync attempts
+    // Synchronize with asymmetric loss
     for _ in 0..300 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
@@ -449,7 +465,7 @@ fn test_asymmetric_packet_loss() -> Result<(), FortressError> {
         {
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        clock.advance(Duration::from_millis(50));
     }
 
     assert_eq!(
@@ -468,9 +484,9 @@ fn test_asymmetric_packet_loss() -> Result<(), FortressError> {
 
 /// Test with high packet loss (25%) - tests robustness.
 #[test]
-#[serial]
 fn test_high_packet_loss() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     let chaos_config1 = ChaosConfig::builder()
         .packet_loss_rate(0.25) // 25% loss - very aggressive
         .seed(42)
@@ -481,22 +497,22 @@ fn test_high_packet_loss() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
     // May need many iterations due to high loss
-    // With 25% loss per side, P(roundtrip) ≈ 0.56, need many retries
-    // 200ms retry interval means we need real time to pass
     for _ in 0..200 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
@@ -506,7 +522,7 @@ fn test_high_packet_loss() -> Result<(), FortressError> {
         {
             break;
         }
-        std::thread::sleep(Duration::from_millis(80));
+        clock.advance(Duration::from_millis(80));
     }
 
     assert_eq!(
@@ -525,20 +541,22 @@ fn test_high_packet_loss() -> Result<(), FortressError> {
 
 /// Test sessions with high constant latency (100ms).
 #[test]
-#[serial]
 fn test_high_latency_100ms() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     let chaos_config1 = ChaosConfig::builder().latency_ms(100).seed(42).build();
     let chaos_config2 = ChaosConfig::builder().latency_ms(100).seed(43).build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -547,13 +565,14 @@ fn test_high_latency_100ms() -> Result<(), FortressError> {
     for _ in 0..150 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(20));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(50));
     }
 
     assert_eq!(
@@ -576,7 +595,7 @@ fn test_high_latency_100ms() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(25));
+        clock.advance(Duration::from_millis(25));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -606,20 +625,22 @@ fn test_high_latency_100ms() -> Result<(), FortressError> {
 
 /// Test sessions with very high constant latency (250ms).
 #[test]
-#[serial]
 fn test_high_latency_250ms() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     let chaos_config1 = ChaosConfig::builder().latency_ms(250).seed(42).build();
     let chaos_config2 = ChaosConfig::builder().latency_ms(250).seed(43).build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -628,13 +649,14 @@ fn test_high_latency_250ms() -> Result<(), FortressError> {
     for _ in 0..200 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(50));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(50));
     }
 
     assert_eq!(
@@ -654,20 +676,22 @@ fn test_high_latency_250ms() -> Result<(), FortressError> {
 /// Test sessions with extreme latency (500ms).
 /// This tests the library's tolerance for very slow connections.
 #[test]
-#[serial]
 fn test_extreme_latency_500ms() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     let chaos_config1 = ChaosConfig::builder().latency_ms(500).seed(42).build();
     let chaos_config2 = ChaosConfig::builder().latency_ms(500).seed(43).build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -676,13 +700,14 @@ fn test_extreme_latency_500ms() -> Result<(), FortressError> {
     for _ in 0..100 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(100));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(100));
     }
 
     assert_eq!(
@@ -702,9 +727,9 @@ fn test_extreme_latency_500ms() -> Result<(), FortressError> {
 /// Test out-of-order packet delivery.
 /// Uses reordering to shuffle packet order.
 #[test]
-#[serial]
 fn test_out_of_order_delivery() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Configure aggressive reordering
     let chaos_config1 = ChaosConfig::builder()
         .reorder_buffer_size(5)
@@ -718,19 +743,21 @@ fn test_out_of_order_delivery() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    // Synchronize - need sleep for reorder buffer timing to work
+    // Synchronize
     for _ in 0..200 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
@@ -740,7 +767,7 @@ fn test_out_of_order_delivery() -> Result<(), FortressError> {
         {
             break;
         }
-        std::thread::sleep(Duration::from_millis(30));
+        clock.advance(Duration::from_millis(30));
     }
 
     assert_eq!(
@@ -763,9 +790,7 @@ fn test_out_of_order_delivery() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        // Small sleep to allow UDP packets to be delivered between polls.
-        // Without this, tight loops can cause failures on some platforms (macOS CI).
-        std::thread::sleep(Duration::from_millis(5));
+        clock.advance(Duration::from_millis(5));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -799,9 +824,9 @@ fn test_out_of_order_delivery() -> Result<(), FortressError> {
 
 /// Test combined jitter and packet loss.
 #[test]
-#[serial]
 fn test_jitter_with_packet_loss() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Moderate jitter with packet loss
     let chaos_config1 = ChaosConfig::builder()
         .latency_ms(40)
@@ -817,32 +842,33 @@ fn test_jitter_with_packet_loss() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    // Synchronize - latency (40ms) + jitter (30ms) + 8% loss needs time
-    // Worst case latency ~70ms per hop = 140ms roundtrip
-    // Plus retry interval of 200ms on loss
+    // Synchronize
     for _ in 0..200 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(50));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(50));
     }
 
     assert_eq!(
@@ -865,7 +891,7 @@ fn test_jitter_with_packet_loss() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(15));
+        clock.advance(Duration::from_millis(15));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -895,9 +921,9 @@ fn test_jitter_with_packet_loss() -> Result<(), FortressError> {
 
 /// Test packet duplication handling.
 #[test]
-#[serial]
 fn test_packet_duplication() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // High duplication rate to test duplicate handling
     let chaos_config1 = ChaosConfig::builder()
         .duplication_rate(0.30) // 30% of packets duplicated
@@ -909,19 +935,21 @@ fn test_packet_duplication() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    // Synchronize - need time for protocol messages
+    // Synchronize
     for _ in 0..100 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
@@ -931,7 +959,7 @@ fn test_packet_duplication() -> Result<(), FortressError> {
         {
             break;
         }
-        std::thread::sleep(Duration::from_millis(30));
+        clock.advance(Duration::from_millis(30));
     }
 
     assert_eq!(sess1.current_state(), SessionState::Running);
@@ -944,9 +972,7 @@ fn test_packet_duplication() -> Result<(), FortressError> {
     for i in 0..20 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        // Small sleep to allow UDP packets to be delivered between polls.
-        // Without this, tight loops can cause failures on some platforms (macOS CI).
-        std::thread::sleep(Duration::from_millis(5));
+        clock.advance(Duration::from_millis(5));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -983,9 +1009,9 @@ fn test_packet_duplication() -> Result<(), FortressError> {
 /// state after network conditions normalize, even after adverse conditions.
 /// This is a longer stress test that validates eventual consistency.
 #[test]
-#[serial]
 fn test_determinism_under_stress() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Use "terrible network" conditions for stress testing
     let mut chaos_config1 = ChaosConfig::terrible_network();
     chaos_config1.seed = Some(42);
@@ -993,14 +1019,16 @@ fn test_determinism_under_stress() -> Result<(), FortressError> {
     let mut chaos_config2 = ChaosConfig::terrible_network();
     chaos_config2.seed = Some(43);
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -1009,13 +1037,14 @@ fn test_determinism_under_stress() -> Result<(), FortressError> {
     for _ in 0..400 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(25));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(25));
     }
 
     assert_eq!(sess1.current_state(), SessionState::Running);
@@ -1032,7 +1061,7 @@ fn test_determinism_under_stress() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(30));
+        clock.advance(Duration::from_millis(30));
 
         // Use deterministic inputs based on frame number
         let input1 = StubInput { inp: i * 3 };
@@ -1064,12 +1093,10 @@ fn test_determinism_under_stress() -> Result<(), FortressError> {
     for _ in 0..50 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(50));
+        clock.advance(Duration::from_millis(50));
     }
 
     // No panics should have occurred (verified implicitly by reaching here)
-    // Note: Full determinism (exact same state) requires waiting for all
-    // rollbacks to complete, which may take additional frames
 
     Ok(())
 }
@@ -1077,9 +1104,9 @@ fn test_determinism_under_stress() -> Result<(), FortressError> {
 /// Test that no panics occur even under worst-case network conditions.
 /// This test validates graceful degradation.
 #[test]
-#[serial]
 fn test_no_panics_under_worst_case() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Very aggressive network chaos
     let chaos_config1 = ChaosConfig::builder()
         .latency_ms(200)
@@ -1101,15 +1128,17 @@ fn test_no_panics_under_worst_case() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -1119,7 +1148,6 @@ fn test_no_panics_under_worst_case() -> Result<(), FortressError> {
     for _ in 0..500 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(20));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
@@ -1127,6 +1155,8 @@ fn test_no_panics_under_worst_case() -> Result<(), FortressError> {
             synchronized = true;
             break;
         }
+
+        clock.advance(Duration::from_millis(20));
     }
 
     // If we synchronized, try to advance some frames
@@ -1139,7 +1169,7 @@ fn test_no_panics_under_worst_case() -> Result<(), FortressError> {
                 sess1.poll_remote_clients();
                 sess2.poll_remote_clients();
             }
-            std::thread::sleep(Duration::from_millis(30));
+            clock.advance(Duration::from_millis(30));
 
             let _ = sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i });
             let _ = sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: i });
@@ -1160,23 +1190,24 @@ fn test_no_panics_under_worst_case() -> Result<(), FortressError> {
 
 /// Test asymmetric latency (different delay in each direction).
 #[test]
-#[serial]
 fn test_asymmetric_latency() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Player 1 has higher latency (poor download)
     let config1 = ChaosConfig::builder().latency_ms(150).seed(42).build();
 
     // Player 2 has lower latency
     let config2 = ChaosConfig::builder().latency_ms(30).seed(43).build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(config2)?;
+    let (socket1, socket2, addr1, addr2) = create_chaos_channel_pair(config1, config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -1185,13 +1216,14 @@ fn test_asymmetric_latency() -> Result<(), FortressError> {
     for _ in 0..200 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(30));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(30));
     }
 
     assert_eq!(
@@ -1214,7 +1246,7 @@ fn test_asymmetric_latency() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(35));
+        clock.advance(Duration::from_millis(35));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -1247,9 +1279,9 @@ fn test_asymmetric_latency() -> Result<(), FortressError> {
 /// can tolerate burst loss. This is more realistic as burst loss during
 /// initial handshake would typically cause connection failure anyway.
 #[test]
-#[serial]
 fn test_burst_packet_loss() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Use burst loss with latency - this simulates WiFi interference or similar
     // 3% chance of burst, 3 consecutive drops per burst
     let chaos_config1 = ChaosConfig::builder()
@@ -1264,20 +1296,21 @@ fn test_burst_packet_loss() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
     // Synchronize - burst loss with latency needs generous time
-    // Allow plenty of retries for burst to clear
     for _ in 0..300 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
@@ -1287,7 +1320,7 @@ fn test_burst_packet_loss() -> Result<(), FortressError> {
         {
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        clock.advance(Duration::from_millis(50));
     }
 
     assert_eq!(
@@ -1310,7 +1343,7 @@ fn test_burst_packet_loss() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(25));
+        clock.advance(Duration::from_millis(25));
 
         let _ = sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i });
         let _ = sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: i });
@@ -1342,26 +1375,28 @@ fn test_burst_packet_loss() -> Result<(), FortressError> {
 /// Test temporary disconnect and reconnection.
 /// Simulates a brief network outage followed by recovery.
 #[test]
-#[serial]
 fn test_temporary_disconnect_reconnect() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Start with good connection
     let good_config1 = ChaosConfig::passthrough();
     let good_config2 = ChaosConfig::passthrough();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(good_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(good_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(good_config1, good_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    // Synchronize quickly with good connection - still need some time for protocol
+    // Synchronize quickly with good connection
     for _ in 0..100 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
@@ -1371,7 +1406,7 @@ fn test_temporary_disconnect_reconnect() -> Result<(), FortressError> {
         {
             break;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        clock.advance(Duration::from_millis(20));
     }
 
     assert_eq!(sess1.current_state(), SessionState::Running);
@@ -1384,9 +1419,7 @@ fn test_temporary_disconnect_reconnect() -> Result<(), FortressError> {
     for i in 0..20 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        // Small sleep to allow UDP packets to be delivered between polls.
-        // Without this, tight loops can cause failures on some platforms (macOS CI).
-        std::thread::sleep(Duration::from_millis(5));
+        clock.advance(Duration::from_millis(5));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -1415,8 +1448,7 @@ fn test_temporary_disconnect_reconnect() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        // Small sleep to allow UDP packets to be delivered between polls.
-        std::thread::sleep(Duration::from_millis(5));
+        clock.advance(Duration::from_millis(5));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -1449,9 +1481,9 @@ fn test_temporary_disconnect_reconnect() -> Result<(), FortressError> {
 /// Test eventual consistency: verify both peers reach the same final state
 /// after running through the same sequence of inputs.
 #[test]
-#[serial]
 fn test_eventual_consistency() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Use moderate network conditions
     let chaos_config1 = ChaosConfig::builder()
         .latency_ms(30)
@@ -1467,29 +1499,34 @@ fn test_eventual_consistency() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    // Synchronize - needs time for latency + jitter + loss
-    for _ in 0..200 {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(50));
+    // Synchronize
+    for _ in 0..500 {
+        for _ in 0..3 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(20));
     }
 
     assert_eq!(sess1.current_state(), SessionState::Running);
@@ -1505,7 +1542,7 @@ fn test_eventual_consistency() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(10));
+        clock.advance(Duration::from_millis(10));
 
         // Deterministic inputs based on frame number
         let input1 = StubInput { inp: (i * 7) % 100 };
@@ -1527,7 +1564,7 @@ fn test_eventual_consistency() -> Result<(), FortressError> {
     for _ in 0..100 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(10));
+        clock.advance(Duration::from_millis(10));
     }
 
     // Both should have reached the same frame
@@ -1542,18 +1579,14 @@ fn test_eventual_consistency() -> Result<(), FortressError> {
         target_frames
     );
 
-    // Both should have the same final state (determinism check)
-    // Note: This may not always match if there are pending rollbacks,
-    // but with sufficient drain time, states should converge.
-
     Ok(())
 }
 
 /// Test combined burst loss and jitter.
 #[test]
-#[serial]
 fn test_burst_loss_with_jitter() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Combine burst loss with jitter
     let chaos_config1 = ChaosConfig::builder()
         .latency_ms(40)
@@ -1569,29 +1602,32 @@ fn test_burst_loss_with_jitter() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    // Synchronize - burst loss (4 packets at 8%) + jitter (25ms) + latency (40ms)
+    // Synchronize
     for _ in 0..200 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(50));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(50));
     }
 
     assert_eq!(
@@ -1614,7 +1650,7 @@ fn test_burst_loss_with_jitter() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(15));
+        clock.advance(Duration::from_millis(15));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -1651,9 +1687,9 @@ fn test_burst_loss_with_jitter() -> Result<(), FortressError> {
 /// Note: We test with asymmetric loss (one side loses more) but both
 /// sides can still complete synchronization.
 #[test]
-#[serial]
-fn test_one_way_send_only_loss() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+fn test_one_way_receive_only_loss() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+
     // Peer 1 has higher receive loss (simulates bad incoming connection)
     let config1 = ChaosConfig::builder()
         .send_loss_rate(0.02)
@@ -1670,14 +1706,15 @@ fn test_one_way_send_only_loss() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(config2)?;
+    let (socket1, socket2, addr1, addr2) = create_chaos_channel_pair(config1, config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -1686,13 +1723,14 @@ fn test_one_way_send_only_loss() -> Result<(), FortressError> {
     for _ in 0..300 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(50));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(50));
     }
 
     assert_eq!(
@@ -1715,7 +1753,7 @@ fn test_one_way_send_only_loss() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(30));
+        clock.advance(Duration::from_millis(30));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -1744,9 +1782,9 @@ fn test_one_way_send_only_loss() -> Result<(), FortressError> {
 /// Note: We test with asymmetric loss (one side loses more) but both
 /// sides can still complete synchronization.
 #[test]
-#[serial]
-fn test_one_way_receive_only_loss() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+fn test_one_way_send_only_loss() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+
     // Peer 1 has higher send loss (simulates bad outgoing connection)
     let config1 = ChaosConfig::builder()
         .send_loss_rate(0.15) // 15% send loss
@@ -1763,29 +1801,33 @@ fn test_one_way_receive_only_loss() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(config2)?;
+    let (socket1, socket2, addr1, addr2) = create_chaos_channel_pair(config1, config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    // Synchronize with extended time
-    for _ in 0..300 {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(50));
+    // Synchronize with extended time - extra polling to handle delayed packet delivery
+    for _ in 0..500 {
+        for _ in 0..3 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(20));
     }
 
     assert_eq!(
@@ -1808,7 +1850,7 @@ fn test_one_way_receive_only_loss() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(30));
+        clock.advance(Duration::from_millis(30));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -1834,9 +1876,9 @@ fn test_one_way_receive_only_loss() -> Result<(), FortressError> {
 
 /// Test heavy packet duplication - network equipment sometimes duplicates packets.
 #[test]
-#[serial]
 fn test_heavy_packet_duplication() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // 20% packet duplication rate
     let chaos_config1 = ChaosConfig::builder()
         .duplication_rate(0.20)
@@ -1850,14 +1892,16 @@ fn test_heavy_packet_duplication() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -1866,13 +1910,14 @@ fn test_heavy_packet_duplication() -> Result<(), FortressError> {
     for _ in 0..100 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(30));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(30));
     }
 
     assert_eq!(
@@ -1895,7 +1940,7 @@ fn test_heavy_packet_duplication() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(15));
+        clock.advance(Duration::from_millis(15));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -1921,9 +1966,9 @@ fn test_heavy_packet_duplication() -> Result<(), FortressError> {
 
 /// Test packet reordering - packets arrive out of sequence.
 #[test]
-#[serial]
 fn test_packet_reordering() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Buffer 4 packets, 30% chance of reordering within buffer
     let chaos_config1 = ChaosConfig::builder()
         .reorder_buffer_size(4)
@@ -1939,14 +1984,16 @@ fn test_packet_reordering() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -1955,13 +2002,14 @@ fn test_packet_reordering() -> Result<(), FortressError> {
     for _ in 0..150 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(40));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(40));
     }
 
     assert_eq!(
@@ -1984,7 +2032,7 @@ fn test_packet_reordering() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(20));
+        clock.advance(Duration::from_millis(20));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -2010,9 +2058,9 @@ fn test_packet_reordering() -> Result<(), FortressError> {
 
 /// Test extreme combined conditions: all chaos features active.
 #[test]
-#[serial]
 fn test_extreme_chaos_combined() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Everything enabled but at moderate levels
     let chaos_config1 = ChaosConfig::builder()
         .latency_ms(60)
@@ -2036,14 +2084,16 @@ fn test_extreme_chaos_combined() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -2052,13 +2102,14 @@ fn test_extreme_chaos_combined() -> Result<(), FortressError> {
     for _ in 0..400 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(50));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(50));
     }
 
     assert_eq!(
@@ -2081,7 +2132,7 @@ fn test_extreme_chaos_combined() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(35));
+        clock.advance(Duration::from_millis(35));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -2107,9 +2158,9 @@ fn test_extreme_chaos_combined() -> Result<(), FortressError> {
 
 /// Test with varying prediction window sizes under network conditions.
 #[test]
-#[serial]
 fn test_large_prediction_window_with_latency() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     let chaos_config1 = ChaosConfig::builder()
         .latency_ms(80)
         .jitter_ms(20)
@@ -2123,15 +2174,17 @@ fn test_large_prediction_window_with_latency() -> Result<(), FortressError> {
         .build();
 
     // Use larger prediction window (16 frames instead of default 8)
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_max_prediction_window(16)
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_max_prediction_window(16)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2141,13 +2194,14 @@ fn test_large_prediction_window_with_latency() -> Result<(), FortressError> {
     for _ in 0..200 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(40));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(40));
     }
 
     assert_eq!(
@@ -2170,7 +2224,7 @@ fn test_large_prediction_window_with_latency() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(30));
+        clock.advance(Duration::from_millis(30));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -2196,9 +2250,9 @@ fn test_large_prediction_window_with_latency() -> Result<(), FortressError> {
 
 /// Test with higher input delay under packet loss.
 #[test]
-#[serial]
 fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     let chaos_config1 = ChaosConfig::builder()
         .packet_loss_rate(0.10)
         .latency_ms(30)
@@ -2212,16 +2266,18 @@ fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
         .build();
 
     // Use input delay of 3 frames
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_input_delay(3)
         .unwrap()
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_input_delay(3)
         .unwrap()
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
@@ -2232,13 +2288,14 @@ fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
     for _ in 0..150 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(50));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(50));
     }
 
     assert_eq!(
@@ -2261,7 +2318,7 @@ fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(20));
+        clock.advance(Duration::from_millis(20));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -2287,9 +2344,9 @@ fn test_input_delay_with_packet_loss() -> Result<(), FortressError> {
 
 /// Test sparse saving mode under challenging network conditions.
 #[test]
-#[serial]
 fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Reduced latency and packet loss for more reliable synchronization
     let chaos_config1 = ChaosConfig::builder()
         .latency_ms(20)
@@ -2306,31 +2363,34 @@ fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
         .build();
 
     // Enable sparse saving mode
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_save_mode(SaveMode::Sparse)
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_save_mode(SaveMode::Sparse)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    // Synchronize - allow sufficient time for latency + packet loss retries
+    // Synchronize
     for _ in 0..400 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(20));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(20));
     }
 
     assert_eq!(
@@ -2353,7 +2413,7 @@ fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(20));
+        clock.advance(Duration::from_millis(20));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -2382,20 +2442,12 @@ fn test_sparse_saving_with_network_chaos() -> Result<(), FortressError> {
 ///
 /// Note: This test uses harsh network conditions (10% burst loss, 6-packet bursts).
 /// We use an explicit `SyncConfig` with 20 sync roundtrips (reduced from 40) and no
-/// timeout, letting the iteration count (1250 × 40ms = 50s) be the sole limiter.
-/// This avoids flakiness on slower CI runners (macOS ~2.8× slower) where a 60s
-/// sync timeout could fire before 40 roundtrips complete under burst loss.
+/// timeout, letting the iteration count be the sole limiter.
 #[test]
-#[serial]
 fn test_network_flapping_simulation() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Simulate flapping with burst loss
-    // 10% burst probability with 6-packet bursts is aggressive but within
-    // stress_test() documented capabilities ("10%+ probability with 8+ packet bursts")
-    //
-    // IMPORTANT: Use different seeds for each socket to avoid correlated packet drops.
-    // With the same seed, both sockets' RNGs produce identical sequences, causing
-    // synchronized burst loss events that systematically block synchronization.
     let chaos_config1 = ChaosConfig::builder()
         .latency_ms(25)
         .burst_loss(0.10, 6) // 10% chance of dropping 6 consecutive packets
@@ -2408,41 +2460,41 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
         .seed(43) // Different seed to decorrelate burst loss events
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_sync_config(SyncConfig {
             num_sync_packets: 20,
             sync_retry_interval: Duration::from_millis(150),
             sync_timeout: None,
             running_retry_interval: Duration::from_millis(150),
             keepalive_interval: Duration::from_millis(150),
-        }) // 20 roundtrips, no timeout — iteration count is the limiter
+        })
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_sync_config(SyncConfig {
             num_sync_packets: 20,
             sync_retry_interval: Duration::from_millis(150),
             sync_timeout: None,
             running_retry_interval: Duration::from_millis(150),
             keepalive_interval: Duration::from_millis(150),
-        }) // 20 roundtrips, no timeout — iteration count is the limiter
+        })
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
     // Synchronize with extra tolerance for bursts
-    // 20 roundtrips, no timeout — loop budget is 1250 × 40ms = 50s
-    let start_time = std::time::Instant::now();
+    let start_time = clock.now();
     let mut sync_events_1 = 0u32;
     let mut sync_events_2 = 0u32;
     let mut timeout_events_1 = 0u32;
     let mut timeout_events_2 = 0u32;
-    let mut last_progress_report = std::time::Instant::now();
 
     for iteration in 0..1250 {
         sess1.poll_remote_clients();
@@ -2464,31 +2516,16 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
             }
         }
 
-        std::thread::sleep(Duration::from_millis(40));
-
-        // Log progress every 5 seconds for long-running diagnostics
-        if last_progress_report.elapsed() >= Duration::from_secs(5) {
-            eprintln!(
-                "[Flapping Test] iter={}, elapsed={:.1}s, sess1={:?} (sync_events={}, timeouts={}), sess2={:?} (sync_events={}, timeouts={})",
-                iteration,
-                start_time.elapsed().as_secs_f32(),
-                sess1.current_state(),
-                sync_events_1,
-                timeout_events_1,
-                sess2.current_state(),
-                sync_events_2,
-                timeout_events_2
-            );
-            last_progress_report = std::time::Instant::now();
-        }
+        clock.advance(Duration::from_millis(40));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
+            let elapsed = clock.now() - start_time;
             eprintln!(
                 "[Flapping Test] Synchronized at iter={}, elapsed={:.1}s, sync_events=({}, {})",
                 iteration,
-                start_time.elapsed().as_secs_f32(),
+                elapsed.as_secs_f32(),
                 sync_events_1,
                 sync_events_2
             );
@@ -2497,7 +2534,7 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
     }
 
     // Enhanced assertion with diagnostic context
-    let elapsed = start_time.elapsed();
+    let elapsed = clock.now() - start_time;
     assert_eq!(
         sess1.current_state(),
         SessionState::Running,
@@ -2526,7 +2563,7 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(30));
+        clock.advance(Duration::from_millis(30));
 
         let _ = sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i });
         let _ = sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: i });
@@ -2547,29 +2584,33 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
 
 /// Test with extreme jitter (very variable latency).
 #[test]
-#[serial]
 fn test_extreme_jitter() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI.
-    // The OS assigns available ports, eliminating the flaky port allocation issues.
-    //
-    // Base latency 50ms, jitter ±50ms (0-100ms effective)
-    let chaos_config = ChaosConfig::builder()
+    let clock = TestClock::new();
+
+    // Base latency 50ms, jitter +/-50ms (0-100ms effective)
+    let chaos_config1 = ChaosConfig::builder()
         .latency_ms(50)
         .jitter_ms(50)
         .seed(42)
         .build();
 
-    // Create sockets with ephemeral ports
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config.clone())?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config)?;
+    let chaos_config2 = ChaosConfig::builder()
+        .latency_ms(50)
+        .jitter_ms(50)
+        .seed(43)
+        .build();
 
-    // Now create sessions pointing at each other's addresses
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
+
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -2578,13 +2619,14 @@ fn test_extreme_jitter() -> Result<(), FortressError> {
     for _ in 0..200 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(60));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(60));
     }
 
     assert_eq!(
@@ -2607,7 +2649,7 @@ fn test_extreme_jitter() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(30));
+        clock.advance(Duration::from_millis(30));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -2633,9 +2675,9 @@ fn test_extreme_jitter() -> Result<(), FortressError> {
 
 /// Test with "terrible network" preset - validates the preset works.
 #[test]
-#[serial]
 fn test_terrible_network_preset() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Recreate terrible_network preset with different seeds for each socket
     let chaos_config1 = ChaosConfig::builder()
         .latency(Duration::from_millis(250))
@@ -2657,15 +2699,17 @@ fn test_terrible_network_preset() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
 
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -2674,13 +2718,14 @@ fn test_terrible_network_preset() -> Result<(), FortressError> {
     for _ in 0..500 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(60));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(60));
     }
 
     assert_eq!(
@@ -2703,7 +2748,7 @@ fn test_terrible_network_preset() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(50));
+        clock.advance(Duration::from_millis(50));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -2729,9 +2774,9 @@ fn test_terrible_network_preset() -> Result<(), FortressError> {
 
 /// Test with "mobile network" preset - validates mobile network simulation.
 #[test]
-#[serial]
 fn test_mobile_network_preset() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Use the mobile network preset with deterministic seed
     let chaos_config1 = ChaosConfig::builder()
         .latency(Duration::from_millis(60))
@@ -2755,19 +2800,25 @@ fn test_mobile_network_preset() -> Result<(), FortressError> {
         .seed(12346)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::mobile())
-        .with_protocol_config(ProtocolConfig::mobile())
+        .with_protocol_config(ProtocolConfig {
+            clock: Some(clock.as_protocol_clock()),
+            ..ProtocolConfig::mobile()
+        })
         .with_time_sync_config(TimeSyncConfig::mobile())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::mobile())
-        .with_protocol_config(ProtocolConfig::mobile())
+        .with_protocol_config(ProtocolConfig {
+            clock: Some(clock.as_protocol_clock()),
+            ..ProtocolConfig::mobile()
+        })
         .with_time_sync_config(TimeSyncConfig::mobile())
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2777,13 +2828,14 @@ fn test_mobile_network_preset() -> Result<(), FortressError> {
     for _ in 0..600 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(50));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(50));
     }
 
     assert_eq!(
@@ -2806,7 +2858,7 @@ fn test_mobile_network_preset() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(40));
+        clock.advance(Duration::from_millis(40));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -2832,9 +2884,9 @@ fn test_mobile_network_preset() -> Result<(), FortressError> {
 
 /// Test with "wifi interference" preset - validates WiFi interference simulation.
 #[test]
-#[serial]
 fn test_wifi_interference_preset() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Use WiFi interference characteristics with deterministic seed
     let chaos_config1 = ChaosConfig::builder()
         .latency(Duration::from_millis(15))
@@ -2856,14 +2908,16 @@ fn test_wifi_interference_preset() -> Result<(), FortressError> {
         .seed(22223)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
@@ -2872,13 +2926,14 @@ fn test_wifi_interference_preset() -> Result<(), FortressError> {
     for _ in 0..300 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(30));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(30));
     }
 
     assert_eq!(
@@ -2901,7 +2956,7 @@ fn test_wifi_interference_preset() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(20));
+        clock.advance(Duration::from_millis(20));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -2927,9 +2982,9 @@ fn test_wifi_interference_preset() -> Result<(), FortressError> {
 
 /// Test with "intercontinental" preset - validates high-latency stable connections.
 #[test]
-#[serial]
 fn test_intercontinental_preset() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Use intercontinental characteristics with deterministic seed
     let chaos_config1 = ChaosConfig::builder()
         .latency(Duration::from_millis(120))
@@ -2945,12 +3000,15 @@ fn test_intercontinental_preset() -> Result<(), FortressError> {
         .seed(33334)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::high_latency())
-        .with_protocol_config(ProtocolConfig::high_latency())
+        .with_protocol_config(ProtocolConfig {
+            clock: Some(clock.as_protocol_clock()),
+            ..ProtocolConfig::high_latency()
+        })
         .with_time_sync_config(TimeSyncConfig::smooth())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
@@ -2958,7 +3016,10 @@ fn test_intercontinental_preset() -> Result<(), FortressError> {
 
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::high_latency())
-        .with_protocol_config(ProtocolConfig::high_latency())
+        .with_protocol_config(ProtocolConfig {
+            clock: Some(clock.as_protocol_clock()),
+            ..ProtocolConfig::high_latency()
+        })
         .with_time_sync_config(TimeSyncConfig::smooth())
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -2968,13 +3029,14 @@ fn test_intercontinental_preset() -> Result<(), FortressError> {
     for _ in 0..400 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(50));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(50));
     }
 
     assert_eq!(
@@ -2997,7 +3059,7 @@ fn test_intercontinental_preset() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        std::thread::sleep(Duration::from_millis(50));
+        clock.advance(Duration::from_millis(50));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -3023,57 +3085,48 @@ fn test_intercontinental_preset() -> Result<(), FortressError> {
 
 /// Test competitive preset - validates fast sync and strict timeouts.
 #[test]
-#[serial]
 fn test_competitive_preset_fast_sync() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
-    // No chaos - LAN-like conditions for competitive play
-    let socket1 = bind_socket_with_retry(0)?;
-    let bound_addr1 =
-        socket1
-            .local_addr()
-            .map_err(|_io_err| FortressError::SocketErrorStructured {
-                kind: SocketErrorKind::BindFailed { port: 0 },
-            })?;
-    let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound_addr1.port());
+    let clock = TestClock::new();
 
-    let socket2 = bind_socket_with_retry(0)?;
-    let bound_addr2 =
-        socket2
-            .local_addr()
-            .map_err(|_io_err| FortressError::SocketErrorStructured {
-                kind: SocketErrorKind::BindFailed { port: 0 },
-            })?;
-    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound_addr2.port());
+    // No chaos - LAN-like conditions for competitive play
+    let (socket1, socket2, addr1, addr2) = create_channel_pair();
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::competitive())
-        .with_protocol_config(ProtocolConfig::competitive())
+        .with_protocol_config(ProtocolConfig {
+            clock: Some(clock.as_protocol_clock()),
+            ..ProtocolConfig::competitive()
+        })
         .with_time_sync_config(TimeSyncConfig::competitive())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
         .with_sync_config(SyncConfig::competitive())
-        .with_protocol_config(ProtocolConfig::competitive())
+        .with_protocol_config(ProtocolConfig {
+            clock: Some(clock.as_protocol_clock()),
+            ..ProtocolConfig::competitive()
+        })
         .with_time_sync_config(TimeSyncConfig::competitive())
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
     // Competitive should sync very fast
-    let start = std::time::Instant::now();
+    let start = clock.now();
     for _ in 0..100 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(10));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(10));
     }
-    let sync_time = start.elapsed();
+    let sync_time = clock.now() - start;
 
     assert_eq!(
         sess1.current_state(),
@@ -3086,7 +3139,7 @@ fn test_competitive_preset_fast_sync() -> Result<(), FortressError> {
         "Session 2 failed to synchronize with competitive preset"
     );
 
-    // Competitive sync should be fast (< 2 seconds on localhost)
+    // Competitive sync should be fast (< 2 seconds virtual time)
     assert!(
         sync_time < Duration::from_secs(2),
         "Competitive preset should sync quickly, took {:?}",
@@ -3102,11 +3155,7 @@ fn test_competitive_preset_fast_sync() -> Result<(), FortressError> {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
         }
-        // Small sleep for competitive/LAN conditions - allows UDP packets to be
-        // delivered between polls. Without this, tight polling loops can cause
-        // test failures on some platforms (especially macOS CI) where the OS may
-        // not schedule enough time for packet delivery.
-        std::thread::sleep(Duration::from_millis(5));
+        clock.advance(Duration::from_millis(5));
 
         sess1
             .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
@@ -3157,10 +3206,8 @@ struct ChaosTestCase {
 
 impl ChaosTestCase {
     /// Run the test case and return diagnostic information.
-    fn run(&self) -> Result<ChaosTestResult, FortressError> {
+    fn run(&self, clock: &TestClock) -> Result<ChaosTestResult, FortressError> {
         // Build chaos configurations with DIFFERENT seeds for each socket.
-        // Using the same seed causes correlated packet loss patterns that can
-        // systematically block synchronization (see module documentation).
         let build_chaos_config = |seed: u64| {
             let mut builder = ChaosConfig::builder()
                 .latency_ms(self.latency_ms)
@@ -3180,24 +3227,31 @@ impl ChaosTestCase {
         let chaos_config1 = build_chaos_config(42);
         let chaos_config2 = build_chaos_config(43); // Different seed to avoid correlated loss
 
-        // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
-        let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-        let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+        let (socket1, socket2, addr1, addr2) =
+            create_chaos_channel_pair(chaos_config1, chaos_config2, clock);
 
         let mut sess1 = SessionBuilder::<StubConfig>::new()
+            .with_protocol_config(ProtocolConfig {
+                clock: Some(clock.as_protocol_clock()),
+                ..ProtocolConfig::default()
+            })
             .with_sync_config(self.sync_config.clone())
             .add_player(PlayerType::Local, PlayerHandle::new(0))?
             .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
             .start_p2p_session(socket1)?;
 
         let mut sess2 = SessionBuilder::<StubConfig>::new()
+            .with_protocol_config(ProtocolConfig {
+                clock: Some(clock.as_protocol_clock()),
+                ..ProtocolConfig::default()
+            })
             .with_sync_config(self.sync_config.clone())
             .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
             .add_player(PlayerType::Local, PlayerHandle::new(1))?
             .start_p2p_session(socket2)?;
 
         // Track diagnostics
-        let start_time = std::time::Instant::now();
+        let start_time = clock.now();
         let mut sync_events_1 = 0u32;
         let mut sync_events_2 = 0u32;
         let mut timeout_events_1 = 0u32;
@@ -3224,7 +3278,7 @@ impl ChaosTestCase {
                 }
             }
 
-            std::thread::sleep(Duration::from_millis(self.iteration_delay_ms));
+            clock.advance(Duration::from_millis(self.iteration_delay_ms));
 
             if sess1.current_state() == SessionState::Running
                 && sess2.current_state() == SessionState::Running
@@ -3234,8 +3288,10 @@ impl ChaosTestCase {
             }
         }
 
+        let elapsed = clock.now() - start_time;
+
         Ok(ChaosTestResult {
-            elapsed: start_time.elapsed(),
+            elapsed,
             sync_iteration,
             sess1_state: sess1.current_state(),
             sess2_state: sess2.current_state(),
@@ -3261,8 +3317,9 @@ struct ChaosTestResult {
 
 /// Data-driven test: Various network conditions with appropriate SyncConfig.
 #[test]
-#[serial]
 fn test_chaos_conditions_data_driven() {
+    let clock = TestClock::new();
+
     let test_cases = [
         // Light conditions - should sync easily
         ChaosTestCase {
@@ -3291,10 +3348,6 @@ fn test_chaos_conditions_data_driven() {
             expected_to_sync: true,
         },
         // Mobile-like conditions (increased iterations for high latency).
-        // Uses explicit SyncConfig instead of extreme() preset because extreme()
-        // has a 30s sync_timeout that can fire on slow CI runners (2.8× slower)
-        // before max_iterations is reached. With sync_timeout: None, only the
-        // iteration budget controls test duration.
         ChaosTestCase {
             name: "mobile_conditions",
             latency_ms: 60,
@@ -3313,14 +3366,7 @@ fn test_chaos_conditions_data_driven() {
             iteration_delay_ms: 40,
             expected_to_sync: true,
         },
-        // High burst loss - uses a custom SyncConfig instead of stress_test().
-        // Root cause of previous flakiness: stress_test() requires 40 sync
-        // roundtrips with a 60s sync_timeout. On macOS CI (~2.8× slower than
-        // local dev), burst loss patterns could cause session2 to reach 38/40
-        // roundtrips before the 60s timeout fired, emitting SyncTimeout and
-        // halting synchronization. Fix: reduce to 20 roundtrips (still tests
-        // burst resilience) and remove the timeout entirely. Probability of
-        // completing 20 roundtrips is exponentially better than 40.
+        // High burst loss
         ChaosTestCase {
             name: "high_burst_loss",
             latency_ms: 25,
@@ -3340,8 +3386,6 @@ fn test_chaos_conditions_data_driven() {
             expected_to_sync: true,
         },
         // Extreme burst loss - conditions too harsh for reliable sync.
-        // Validates that the system correctly fails to sync under truly
-        // hostile conditions (30% burst probability, 10-packet bursts).
         ChaosTestCase {
             name: "extreme_burst_loss_expected_failure",
             latency_ms: 25,
@@ -3365,7 +3409,7 @@ fn test_chaos_conditions_data_driven() {
     for test_case in &test_cases {
         eprintln!("\n[Data-Driven Test] Running: {}", test_case.name);
 
-        let result = test_case.run().expect("Test setup failed");
+        let result = test_case.run(&clock).expect("Test setup failed");
 
         let budget_pct = result.sync_iteration.map_or(100.0, |i| {
             (i as f64 / test_case.max_iterations as f64) * 100.0
@@ -3414,9 +3458,9 @@ fn test_chaos_conditions_data_driven() {
 
 /// Test: Verify sync timeout is detected and reported correctly.
 #[test]
-#[serial]
 fn test_sync_timeout_detection() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Use very short timeout with heavy packet loss to trigger timeout
     let short_timeout_config = SyncConfig {
         num_sync_packets: 10,
@@ -3439,15 +3483,17 @@ fn test_sync_timeout_detection() -> Result<(), FortressError> {
         .seed(43)
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_sync_config(short_timeout_config.clone())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_sync_config(short_timeout_config)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -3456,9 +3502,9 @@ fn test_sync_timeout_detection() -> Result<(), FortressError> {
     // Track timeout events
     let mut timeout_detected_1 = false;
     let mut timeout_detected_2 = false;
-    let start = std::time::Instant::now();
+    let start = clock.now();
 
-    // Run for 5 seconds (well past the 2 second timeout)
+    // Run for 5 seconds virtual time (well past the 2 second timeout)
     for _ in 0..250 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
@@ -3466,23 +3512,25 @@ fn test_sync_timeout_detection() -> Result<(), FortressError> {
         for event in sess1.events() {
             if matches!(event, FortressEvent::SyncTimeout { .. }) {
                 timeout_detected_1 = true;
+                let elapsed = clock.now() - start;
                 eprintln!(
                     "[Timeout Test] Session 1 timeout detected at {:.2}s",
-                    start.elapsed().as_secs_f32()
+                    elapsed.as_secs_f32()
                 );
             }
         }
         for event in sess2.events() {
             if matches!(event, FortressEvent::SyncTimeout { .. }) {
                 timeout_detected_2 = true;
+                let elapsed = clock.now() - start;
                 eprintln!(
                     "[Timeout Test] Session 2 timeout detected at {:.2}s",
-                    start.elapsed().as_secs_f32()
+                    elapsed.as_secs_f32()
                 );
             }
         }
 
-        std::thread::sleep(Duration::from_millis(20));
+        clock.advance(Duration::from_millis(20));
 
         // Once we've detected timeouts, we can stop
         if timeout_detected_1 && timeout_detected_2 {
@@ -3497,7 +3545,6 @@ fn test_sync_timeout_detection() -> Result<(), FortressError> {
     );
 
     // Sessions should still be in Synchronizing state (timeout doesn't change state)
-    // This verifies that timeout is informational, not a state transition
     assert_eq!(
         sess1.current_state(),
         SessionState::Synchronizing,
@@ -3509,11 +3556,10 @@ fn test_sync_timeout_detection() -> Result<(), FortressError> {
 
 /// Test: Edge case where burst loss exactly matches sync packet count.
 #[test]
-#[serial]
 fn test_burst_loss_matches_sync_packets() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Configure burst loss length equal to default sync packets (5)
-    // This tests the edge case where a burst could wipe out all initial sync attempts
     let chaos_config1 = ChaosConfig::builder()
         .latency_ms(20)
         .burst_loss(0.05, 5) // Burst wipes exactly 5 packets
@@ -3535,15 +3581,17 @@ fn test_burst_loss_matches_sync_packets() -> Result<(), FortressError> {
         keepalive_interval: Duration::from_millis(100),
     };
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_sync_config(resilient_config.clone())
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_sync_config(resilient_config)
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -3553,13 +3601,14 @@ fn test_burst_loss_matches_sync_packets() -> Result<(), FortressError> {
     for _ in 0..300 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
-        std::thread::sleep(Duration::from_millis(30));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
         {
             break;
         }
+
+        clock.advance(Duration::from_millis(30));
     }
 
     assert_eq!(
@@ -3581,16 +3630,10 @@ fn test_burst_loss_matches_sync_packets() -> Result<(), FortressError> {
 // ==========================================
 
 /// Regression test: Validates that different seeds prevent correlated packet loss.
-///
-/// This test uses aggressive burst loss (10% probability, 6 packet bursts) with
-/// different seeds for each socket. Previously, using the same seed caused
-/// correlated loss patterns that systematically blocked synchronization.
-///
-/// See module documentation for details on the seed correlation issue.
 #[test]
-#[serial]
 fn test_different_seeds_prevent_correlated_loss() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
+    let clock = TestClock::new();
+
     // Use aggressive burst loss with DIFFERENT seeds
     let chaos_config1 = ChaosConfig::builder()
         .latency_ms(20)
@@ -3604,37 +3647,38 @@ fn test_different_seeds_prevent_correlated_loss() -> Result<(), FortressError> {
         .seed(101) // Different seed!
         .build();
 
-    let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-    let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
     let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_sync_config(SyncConfig {
             num_sync_packets: 20,
             sync_retry_interval: Duration::from_millis(150),
             sync_timeout: None,
             running_retry_interval: Duration::from_millis(150),
             keepalive_interval: Duration::from_millis(150),
-        }) // 20 roundtrips, no timeout — iteration count is the limiter
+        })
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
         .start_p2p_session(socket1)?;
     let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_sync_config(SyncConfig {
             num_sync_packets: 20,
             sync_retry_interval: Duration::from_millis(150),
             sync_timeout: None,
             running_retry_interval: Duration::from_millis(150),
             keepalive_interval: Duration::from_millis(150),
-        }) // 20 roundtrips, no timeout — iteration count is the limiter
+        })
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    let start_time = std::time::Instant::now();
+    let start_time = clock.now();
     let mut sync_events_1 = 0u32;
     let mut sync_events_2 = 0u32;
 
-    // Allow up to 50 seconds for synchronization (20 roundtrips, no timeout)
     for _ in 0..1250 {
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
@@ -3650,7 +3694,7 @@ fn test_different_seeds_prevent_correlated_loss() -> Result<(), FortressError> {
             }
         }
 
-        std::thread::sleep(Duration::from_millis(40));
+        clock.advance(Duration::from_millis(40));
 
         if sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running
@@ -3659,7 +3703,7 @@ fn test_different_seeds_prevent_correlated_loss() -> Result<(), FortressError> {
         }
     }
 
-    let elapsed = start_time.elapsed();
+    let elapsed = clock.now() - start_time;
 
     // Both sessions should synchronize
     assert_eq!(
@@ -3678,7 +3722,6 @@ fn test_different_seeds_prevent_correlated_loss() -> Result<(), FortressError> {
     );
 
     // Both sessions should make similar progress (not asymmetric)
-    // Allow 20% variance since some asymmetry is natural
     let min_events = sync_events_1.min(sync_events_2);
     let max_events = sync_events_1.max(sync_events_2);
     let asymmetry_ratio = if min_events > 0 {
@@ -3700,29 +3743,7 @@ fn test_different_seeds_prevent_correlated_loss() -> Result<(), FortressError> {
 }
 
 /// Test synchronization with various seed pairs to validate decorrelation.
-///
-/// This data-driven test runs multiple seed pairs to ensure the sync protocol
-/// works correctly with decorrelated random packet loss.
-///
-/// # Note on Decorrelated Loss
-///
-/// With independent 5% loss on each direction, the effective roundtrip success
-/// rate is ~90% (0.95 × 0.95). We use the lossy SyncConfig preset which has:
-/// - 8 sync packets (more retries for reliability)
-/// - 10 second sync timeout
-/// - 200ms retry intervals
-///
-/// The test allows 500 iterations × 35ms = 17.5 seconds, providing generous
-/// margin for CI environments with scheduling jitter.
-///
-/// # Runtime Note
-///
-/// This test runs 4 seed pairs sequentially under simulated packet loss,
-/// resulting in ~38 second total runtime. Nextest may flag this as SLOW,
-/// which is expected - the extended duration ensures reliable sync under
-/// adverse network conditions without flakiness.
 #[test]
-#[serial]
 fn test_seed_pairs_for_decorrelated_sync() -> Result<(), FortressError> {
     let test_cases = [
         (1u64, 2u64),
@@ -3735,6 +3756,8 @@ fn test_seed_pairs_for_decorrelated_sync() -> Result<(), FortressError> {
     let sync_config = SyncConfig::lossy();
 
     for (seed1, seed2) in test_cases {
+        let clock = TestClock::new();
+
         // Use 5% loss for reliable CI behavior while still testing
         // decorrelated loss patterns
         let chaos_config1 = ChaosConfig::builder()
@@ -3749,32 +3772,34 @@ fn test_seed_pairs_for_decorrelated_sync() -> Result<(), FortressError> {
             .seed(seed2)
             .build();
 
-        let (socket1, addr1) = create_chaos_socket_ephemeral(chaos_config1)?;
-        let (socket2, addr2) = create_chaos_socket_ephemeral(chaos_config2)?;
+        let (socket1, socket2, addr1, addr2) =
+            create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
 
         let mut sess1 = SessionBuilder::<StubConfig>::new()
+            .with_protocol_config(protocol_config(&clock))
             .with_sync_config(sync_config.clone())
             .add_player(PlayerType::Local, PlayerHandle::new(0))?
             .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
             .start_p2p_session(socket1)?;
         let mut sess2 = SessionBuilder::<StubConfig>::new()
+            .with_protocol_config(protocol_config(&clock))
             .with_sync_config(sync_config.clone())
             .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
             .add_player(PlayerType::Local, PlayerHandle::new(1))?
             .start_p2p_session(socket2)?;
 
-        // Synchronize with generous margin for CI environments
-        // 500 iterations × 35ms = 17.5 seconds total
+        // Synchronize with generous margin
         for _ in 0..500 {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
-            std::thread::sleep(Duration::from_millis(35));
 
             if sess1.current_state() == SessionState::Running
                 && sess2.current_state() == SessionState::Running
             {
                 break;
             }
+
+            clock.advance(Duration::from_millis(35));
         }
 
         assert_eq!(
@@ -3799,14 +3824,6 @@ fn test_seed_pairs_for_decorrelated_sync() -> Result<(), FortressError> {
 // =============================================================================
 // Data-Driven Preset Configuration Tests
 // =============================================================================
-//
-// These tests systematically validate all SessionConfig presets (competitive,
-// default, LAN, mobile, etc.) under various network conditions.
-//
-// This prevents regression where tests might pass on some platforms but fail
-// on others due to missing timing sleeps or incorrect configuration assumptions.
-//
-// Port allocation: Handled by PortAllocator for dynamic port assignment
 
 /// Parameters for data-driven preset configuration testing.
 #[derive(Clone, Debug)]
@@ -3849,12 +3866,10 @@ struct PresetTestResult {
 
 impl PresetTestCase {
     /// Run the preset test case and return diagnostic results.
-    fn run(&self) -> Result<PresetTestResult, FortressError> {
-        // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
-        // Create sockets - either chaos or plain UDP
+    fn run(&self, clock: &TestClock) -> Result<PresetTestResult, FortressError> {
+        // Create sockets - either chaos or plain channel
         let (socket1, addr1, socket2, addr2) = if let Some(ref chaos) = self.chaos_config {
             // Use different seeds for each socket to avoid correlated packet loss
-            // Access public fields directly from ChaosConfig
             let latency_ms = chaos.latency.as_millis() as u64;
             let loss_rate = chaos.send_loss_rate.max(chaos.receive_loss_rate);
 
@@ -3868,21 +3883,25 @@ impl PresetTestCase {
                 .packet_loss_rate(loss_rate)
                 .seed(43)
                 .build();
-            let (s1, a1) = create_chaos_socket_ephemeral(chaos1)?;
-            let (s2, a2) = create_chaos_socket_ephemeral(chaos2)?;
+            let (s1, s2, a1, a2) = create_chaos_channel_pair(chaos1, chaos2, clock);
             (s1, a1, s2, a2)
         } else {
-            // Perfect network - no chaos
-            let perfect = ChaosConfig::builder().build();
-            let (s1, a1) = create_chaos_socket_ephemeral(perfect.clone())?;
-            let (s2, a2) = create_chaos_socket_ephemeral(perfect)?;
+            // Perfect network - no chaos, use passthrough config
+            let perfect = ChaosConfig::passthrough();
+            let (s1, s2, a1, a2) = create_chaos_channel_pair(perfect.clone(), perfect, clock);
             (s1, a1, s2, a2)
+        };
+
+        // Merge clock into the preset protocol config
+        let proto_config = ProtocolConfig {
+            clock: Some(clock.as_protocol_clock()),
+            ..self.protocol_config
         };
 
         // Build sessions with the preset configurations
         let mut sess1 = SessionBuilder::<StubConfig>::new()
             .with_sync_config(self.sync_config)
-            .with_protocol_config(self.protocol_config)
+            .with_protocol_config(proto_config.clone())
             .with_time_sync_config(self.time_sync_config)
             .add_player(PlayerType::Local, PlayerHandle::new(0))?
             .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
@@ -3890,23 +3909,21 @@ impl PresetTestCase {
 
         let mut sess2 = SessionBuilder::<StubConfig>::new()
             .with_sync_config(self.sync_config)
-            .with_protocol_config(self.protocol_config)
+            .with_protocol_config(proto_config)
             .with_time_sync_config(self.time_sync_config)
             .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
             .add_player(PlayerType::Local, PlayerHandle::new(1))?
             .start_p2p_session(socket2)?;
 
         // ===== Phase 1: Synchronization =====
-        let sync_start = std::time::Instant::now();
+        let sync_start = clock.now();
         let max_sync_iterations = (self.expected_sync_time_ms * 2 / 20) as usize; // 20ms per iteration
 
         for _ in 0..max_sync_iterations {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
 
-            // CRITICAL: Sleep to allow UDP packets to be delivered.
-            // Without this, tight polling loops cause test failures on macOS CI.
-            std::thread::sleep(Duration::from_millis(20));
+            clock.advance(Duration::from_millis(20));
 
             if sess1.current_state() == SessionState::Running
                 && sess2.current_state() == SessionState::Running
@@ -3915,7 +3932,7 @@ impl PresetTestCase {
             }
         }
 
-        let sync_time = sync_start.elapsed();
+        let sync_time = clock.now() - sync_start;
         let synchronized = sess1.current_state() == SessionState::Running
             && sess2.current_state() == SessionState::Running;
 
@@ -3941,11 +3958,7 @@ impl PresetTestCase {
                 sess2.poll_remote_clients();
             }
 
-            // CRITICAL: Sleep between frame advances!
-            // This allows UDP packets to be delivered between polls.
-            // Without this sleep, tests fail on macOS CI where the OS may
-            // not schedule enough time for packet delivery.
-            std::thread::sleep(Duration::from_millis(5));
+            clock.advance(Duration::from_millis(5));
 
             // Add inputs
             sess1
@@ -3975,7 +3988,7 @@ impl PresetTestCase {
 }
 
 /// Run a preset test case with comprehensive validation and diagnostics.
-fn run_preset_test(case: &PresetTestCase) {
+fn run_preset_test(case: &PresetTestCase, clock: &TestClock) {
     eprintln!("\n[Preset Test] Running: {}", case.name);
     eprintln!(
         "  Config: sync={:?}, protocol={:?}, time_sync={:?}",
@@ -3988,7 +4001,7 @@ fn run_preset_test(case: &PresetTestCase) {
             .map_or("perfect".to_string(), |c| format!("{c:?}"))
     );
 
-    let result = case.run().expect("Test setup failed");
+    let result = case.run(clock).expect("Test setup failed");
 
     eprintln!(
         "[Preset Test] {} completed:\n  \
@@ -4015,7 +4028,7 @@ fn run_preset_test(case: &PresetTestCase) {
          sess2 state: {:?}\n  \
          actual sync time: {:.2}s\n  \
          This may indicate:\n  \
-         - Missing sleep() in sync loop\n  \
+         - Clock not advanced enough in sync loop\n  \
          - Sync timeout too short for test conditions\n  \
          - Network simulation too aggressive",
         case.name,
@@ -4045,7 +4058,7 @@ fn run_preset_test(case: &PresetTestCase) {
          sess1 frames: {} (expected >= {})\n  \
          sess2 frames: {} (expected >= {})\n  \
          This may indicate:\n  \
-         - Missing sleep() in frame advancement loop\n  \
+         - Clock not advanced enough in frame loop\n  \
          - Input handling issues\n  \
          - Network conditions causing excessive rollbacks",
         case.name,
@@ -4057,17 +4070,9 @@ fn run_preset_test(case: &PresetTestCase) {
 }
 
 /// Test: Competitive preset under perfect network conditions.
-///
-/// The competitive preset is designed for LAN/esports with:
-/// - Fast sync (4 packets, 100ms retry)
-/// - Quick failure detection
-/// - Strict timeout (3s)
-///
-/// Under perfect conditions, this should sync very quickly and
-/// advance all frames without issues.
 #[test]
-#[serial]
 fn test_preset_competitive_perfect_network() {
+    let clock = TestClock::new();
     let case = PresetTestCase {
         name: "competitive_perfect",
         sync_config: SyncConfig::competitive(),
@@ -4078,21 +4083,13 @@ fn test_preset_competitive_perfect_network() {
         target_frames: 60,
         min_expected_frames: 55, // Allow small margin for rollbacks
     };
-    run_preset_test(&case);
+    run_preset_test(&case, &clock);
 }
 
 /// Test: Default preset under perfect network conditions.
-///
-/// The default preset is balanced for typical internet conditions:
-/// - Standard sync (5 packets, 200ms retry)
-/// - No timeout by default
-/// - Moderate tolerance
-///
-/// Under perfect conditions, this should sync reliably and advance
-/// all frames.
 #[test]
-#[serial]
 fn test_preset_default_perfect_network() {
+    let clock = TestClock::new();
     let case = PresetTestCase {
         name: "default_perfect",
         sync_config: SyncConfig::default(),
@@ -4103,18 +4100,13 @@ fn test_preset_default_perfect_network() {
         target_frames: 60,
         min_expected_frames: 55,
     };
-    run_preset_test(&case);
+    run_preset_test(&case, &clock);
 }
 
 /// Test: LAN preset under perfect network conditions.
-///
-/// The LAN preset is optimized for local network play:
-/// - Fast sync (3 packets, 100ms retry)
-/// - Short timeout (5s)
-/// - Minimal overhead
 #[test]
-#[serial]
 fn test_preset_lan_perfect_network() {
+    let clock = TestClock::new();
     let case = PresetTestCase {
         name: "lan_perfect",
         sync_config: SyncConfig::lan(),
@@ -4125,22 +4117,13 @@ fn test_preset_lan_perfect_network() {
         target_frames: 60,
         min_expected_frames: 55,
     };
-    run_preset_test(&case);
+    run_preset_test(&case, &clock);
 }
 
 /// Test: Mobile preset under simulated mobile conditions.
-///
-/// The mobile preset handles high-latency, lossy connections:
-/// - Many sync packets (10)
-/// - Longer retry intervals (350ms)
-/// - Generous timeout (15s)
-/// - Large time sync window (90 frames)
-///
-/// Note: With 60ms latency and 5% packet loss, frame advancement is slower
-/// due to rollback network operations requiring round trips.
 #[test]
-#[serial]
 fn test_preset_mobile_with_mobile_conditions() {
+    let clock = TestClock::new();
     let case = PresetTestCase {
         name: "mobile_conditions",
         sync_config: SyncConfig::mobile(),
@@ -4156,20 +4139,13 @@ fn test_preset_mobile_with_mobile_conditions() {
         target_frames: 30,            // Fewer frames due to latency
         min_expected_frames: 15,      // Allow for network variance and rollbacks
     };
-    run_preset_test(&case);
+    run_preset_test(&case, &clock);
 }
 
 /// Test: High latency preset under high latency conditions.
-///
-/// The high_latency preset handles 100-200ms RTT:
-/// - Longer retry intervals (400ms)
-/// - Sync timeout (10s)
-///
-/// Note: With 100ms latency, each frame advancement takes longer due to
-/// the round-trip time for input exchange.
 #[test]
-#[serial]
 fn test_preset_high_latency_with_latency() {
+    let clock = TestClock::new();
     let case = PresetTestCase {
         name: "high_latency_conditions",
         sync_config: SyncConfig::high_latency(),
@@ -4180,20 +4156,13 @@ fn test_preset_high_latency_with_latency() {
         target_frames: 25,       // Fewer frames due to high latency
         min_expected_frames: 10, // With 100ms latency, frame advancement is slow
     };
-    run_preset_test(&case);
+    run_preset_test(&case, &clock);
 }
 
 /// Test: Lossy preset under lossy network conditions.
-///
-/// The lossy preset handles 5-15% packet loss:
-/// - More sync packets (8)
-/// - Sync timeout (10s)
-///
-/// Note: 8% bidirectional packet loss compounds to ~15% effective loss.
-/// This requires more sync time and retries.
 #[test]
-#[serial]
 fn test_preset_lossy_with_packet_loss() {
+    let clock = TestClock::new();
     let case = PresetTestCase {
         name: "lossy_conditions",
         sync_config: SyncConfig::lossy(),
@@ -4204,16 +4173,14 @@ fn test_preset_lossy_with_packet_loss() {
         target_frames: 40,
         min_expected_frames: 25, // Some frames may stall due to lost packets
     };
-    run_preset_test(&case);
+    run_preset_test(&case, &clock);
 }
 
 /// Data-driven test for all presets under perfect network conditions.
-///
-/// This test ensures all presets work correctly with no network impairment,
-/// establishing a baseline for expected behavior.
 #[test]
-#[serial]
 fn test_all_presets_perfect_network_data_driven() {
+    let clock = TestClock::new();
+
     let test_cases = [
         PresetTestCase {
             name: "competitive_perfect",
@@ -4278,21 +4245,17 @@ fn test_all_presets_perfect_network_data_driven() {
     ];
 
     for case in &test_cases {
-        run_preset_test(case);
+        run_preset_test(case, &clock);
     }
 }
 
 /// Data-driven test for presets matched to appropriate network conditions.
-///
-/// Each preset is tested with network conditions it's designed to handle,
-/// validating that the preset parameters are appropriate for the scenario.
 #[test]
-#[serial]
 fn test_presets_matched_conditions_data_driven() {
+    let clock = TestClock::new();
+
     let test_cases = [
         // Competitive: LAN-like conditions (minimal latency, no loss)
-        // Note: We use 2000ms expected sync time to accommodate CI variability,
-        // especially on macOS where UDP scheduling can be slower.
         PresetTestCase {
             name: "competitive_lan_conditions",
             sync_config: SyncConfig::competitive(),
@@ -4371,6 +4334,6 @@ fn test_presets_matched_conditions_data_driven() {
     ];
 
     for case in &test_cases {
-        run_preset_test(case);
+        run_preset_test(case, &clock);
     }
 }

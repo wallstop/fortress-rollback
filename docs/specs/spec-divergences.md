@@ -182,7 +182,7 @@ When modifying specs or production code:
 
 1. **Check this document** - Ensure changes don't introduce unintended divergences
 2. **Update linkage comments** - If code moves, update the spec linkage comments
-3. **Run all verification** - `./scripts/verify-all.sh` validates TLA+, Kani, and Z3
+3. **Run all verification** - `./scripts/verification/verify-all.sh` validates TLA+, Kani, and Z3
 
 ---
 

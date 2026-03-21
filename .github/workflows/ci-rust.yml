@@ -12,8 +12,8 @@ on:
       - 'Cross.toml'
       - 'clippy.toml'
       - 'rustfmt.toml'
-      - 'scripts/verify-kani.sh'
-      - 'scripts/check-kani-coverage.sh'
+      - 'scripts/verification/verify-kani.sh'
+      - 'scripts/verification/check-kani-coverage.sh'
       - '.github/workflows/ci-rust.yml'
   pull_request:
     branches: [main]
@@ -26,8 +26,8 @@ on:
       - 'Cross.toml'
       - 'clippy.toml'
       - 'rustfmt.toml'
-      - 'scripts/verify-kani.sh'
-      - 'scripts/check-kani-coverage.sh'
+      - 'scripts/verification/verify-kani.sh'
+      - 'scripts/verification/check-kani-coverage.sh'
       - '.github/workflows/ci-rust.yml'
   workflow_dispatch:
 
@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Validate Kani proof coverage
-        run: ./scripts/check-kani-coverage.sh
+        run: ./scripts/verification/check-kani-coverage.sh
         # Ensures all #[kani::proof] functions are in tier lists in verify-kani.sh
 
   # Primary build and test job (cross-platform matrix)
@@ -79,14 +79,14 @@ jobs:
       - name: Verify sccache is working (Unix)
         id: sccache-check-unix
         if: steps.sccache.outcome == 'success' && runner.os != 'Windows'
-        run: ./scripts/verify-sccache.sh
+        run: ./scripts/ci/verify-sccache.sh
         continue-on-error: true
 
       - name: Verify sccache is working (Windows)
         id: sccache-check-windows
         if: steps.sccache.outcome == 'success' && runner.os == 'Windows'
         shell: bash
-        run: ./scripts/verify-sccache.sh
+        run: ./scripts/ci/verify-sccache.sh
         continue-on-error: true
 
       - name: Set sccache working status
@@ -433,7 +433,7 @@ jobs:
       - name: Verify sccache is working
         id: sccache-check
         if: steps.sccache.outcome == 'success'
-        run: ./scripts/verify-sccache.sh
+        run: ./scripts/ci/verify-sccache.sh
         continue-on-error: true
 
       - name: Clear sccache env on failure
@@ -522,7 +522,7 @@ jobs:
       - name: Verify sccache is working
         id: sccache-check
         if: steps.sccache.outcome == 'success'
-        run: ./scripts/verify-sccache.sh
+        run: ./scripts/ci/verify-sccache.sh
         continue-on-error: true
 
       - name: Clear sccache env on failure

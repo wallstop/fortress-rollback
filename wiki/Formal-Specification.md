@@ -202,7 +202,7 @@ if frame_to_load >= current_frame {
 // Only reach load_frame if frame_to_load < current_frame
 ```
 
-### INV-9: Message Causality
+### INV-9a: Message Causality
 
 ```
 □(∀m1, m2 ∈ Message:
@@ -491,11 +491,11 @@ sync_remaining = 0 → state := Running
 MessageBody =
     | SyncRequest { random_request: u32 }
     | SyncReply { random_reply: u32 }
-    | Input { peer_connect_status, start_frame, inputs, ack_frame, checksum? }
+    | Input { peer_connect_status: Vec<ConnectionStatus>, disconnect_requested: bool, start_frame: Frame, ack_frame: Frame, bytes: Vec<u8> }
     | InputAck { ack_frame: Frame }
-    | QualityReport { frame_advantage: i8, ping: u128 }
+    | QualityReport { frame_advantage: i16, ping: u128 }
     | QualityReply { pong: u128 }
-    | ChecksumReport { frame: Frame, checksum: u128 }
+    | ChecksumReport { checksum: u128 }
 ```
 
 ---
@@ -596,7 +596,7 @@ MessageBody =
 | `INPUT_QUEUE_LENGTH` | 128 | Max inputs per player queue |
 | `NULL_FRAME` | -1 | Invalid/uninitialized frame sentinel |
 | `NUM_SYNC_PACKETS` | 5 | Sync roundtrips before Running |
-| `PENDING_OUTPUT_SIZE` | 128 | Max pending output messages |
+| `pending_output_limit` | 128 (default) | Max pending output messages (configurable via `ProtocolConfig`) |
 | `UDP_SHUTDOWN_TIMER` | 5000ms | Disconnected → Shutdown delay |
 | `SYNC_RETRY_INTERVAL` | 200ms | Sync packet retry interval |
 | `KEEP_ALIVE_INTERVAL` | 200ms | Keep-alive interval |
@@ -613,15 +613,19 @@ MessageBody =
 
 | Property | Tool | Status |
 |----------|------|--------|
-| INV-4, INV-5 (queue bounds) | Kani | Planned |
-| SAFE-1 (no overflow) | Kani | Planned |
-| SAFE-6 (no int overflow) | Kani | Planned |
-| Protocol state machine | TLA+ | Planned |
-| LIVE-1 (sync convergence) | TLA+ | Planned |
-| SAFE-4 (rollback consistency) | TLA+ | Planned |
-| Frame arithmetic | Z3 | Planned |
-| Queue index math | Z3 | Planned |
-| Concurrency (GameStateCell) | Loom | Planned |
+| INV-4, INV-5 (queue bounds) | Kani | ✅ Implemented |
+| SAFE-1 (no overflow) | Kani | ✅ Implemented |
+| SAFE-6 (no int overflow) | Kani | ✅ Implemented |
+| Protocol state machine | TLA+ | ✅ Implemented (`specs/tla/NetworkProtocol.tla`) |
+| LIVE-1 (sync convergence) | TLA+ | ✅ Implemented (`specs/tla/NetworkProtocol.tla`) |
+| SAFE-4 (rollback consistency) | TLA+ | ✅ Implemented (`specs/tla/Rollback.tla`) |
+| Frame arithmetic | Z3 | ✅ Implemented (`tests/test_z3_verification.rs`) |
+| Queue index math | Z3 | ✅ Implemented (`tests/test_z3_verification.rs`) |
+| Concurrency (GameStateCell) | Loom | ✅ Implemented (`loom-tests/`) |
+| Time synchronization | TLA+ | ✅ Implemented (`specs/tla/TimeSync.tla`) |
+| Checksum exchange | TLA+ | ✅ Implemented (`specs/tla/ChecksumExchange.tla`) |
+| Spectator session | TLA+ | ✅ Implemented (`specs/tla/SpectatorSession.tla`) |
+| Concurrency model | TLA+ | ✅ Implemented (`specs/tla/Concurrency.tla`) |
 
 ---
 

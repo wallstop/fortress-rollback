@@ -198,7 +198,7 @@ let builder = SessionBuilder::<MyConfig>::new()
 // After: Rich, preset-based configuration
 let builder = SessionBuilder::<MyConfig>::new()
     .with_fps(60)?
-    .with_input_delay(2)
+    .with_input_delay(2)?
     .with_sync_config(SyncConfig::high_latency())
     .with_protocol_config(ProtocolConfig::competitive())
     .with_time_sync_config(TimeSyncConfig::responsive())
@@ -256,7 +256,9 @@ match session.sync_health(peer_handle) {
     Some(SyncHealth::InSync) => println!("Synchronized"),
     Some(SyncHealth::Pending) => println!("Waiting for checksum data"),
     Some(SyncHealth::DesyncDetected { frame, .. }) => {
-        panic!("Desync detected at frame {}", frame)
+        // Handle desync according to your application's needs
+        eprintln!("ERROR: Desync detected at frame {frame} — investigation required");
+        // Application-specific response: could restart session, alert user, etc.
     }
     None => {} // Not a remote player
 }
@@ -302,13 +304,16 @@ The correct pattern uses the new `SyncHealth` API:
 if session.confirmed_frame() >= target_frames {
     match session.sync_health(peer_handle) {
         Some(SyncHealth::InSync) => break, // Safe to exit
-        Some(SyncHealth::DesyncDetected { .. }) => panic!("Desync!"),
+        Some(SyncHealth::DesyncDetected { frame, .. }) => {
+            eprintln!("Desync detected at frame {frame:?}");
+            break; // Exit with error state for application to handle
+        }
         _ => continue, // Keep polling until verified
     }
 }
 ```
 
-See [Common Pitfalls](User-Guide#common-pitfalls) in the User Guide for full details.
+See the [Session Termination Anti-Pattern](User-Guide#session-termination-the-last_confirmed_frame-anti-pattern) section in the User Guide for comprehensive examples, edge cases, and solutions.
 
 ### Desync Detection Default
 
@@ -342,6 +347,52 @@ let session = SessionBuilder::<GameConfig>::new()
     // ...
     .start_p2p_session(socket)?;
 ```
+
+## Session Trait (New)
+
+Fortress Rollback now provides a unified `Session<T>` trait implemented by all session types (`P2PSession`, `SpectatorSession`, `SyncTestSession`). This lets you write generic code that works with any session.
+
+**This is entirely additive — no migration is required.** Existing code using concrete session types continues to work unchanged.
+
+### Adopting the Session Trait
+
+If you have session-specific game loop code, you can optionally generalize it:
+
+```rust
+// Before: tied to P2PSession
+fn run_frame(session: &mut P2PSession<MyConfig>, input: MyInput) -> FortressResult<()> {
+    let player = session.local_player_handles()[0];
+    session.add_local_input(player, input)?;
+    let requests = session.advance_frame()?;
+    // handle requests...
+    Ok(())
+}
+
+// After: works with any session type
+use fortress_rollback::prelude::*;
+
+fn run_frame<T: Config>(
+    session: &mut impl Session<T>,
+    input: T::Input,
+) -> FortressResult<()> {
+    let player = session.local_player_handle_required()?;
+    session.add_local_input(player, input)?;
+    let requests = session.advance_frame()?;
+    // handle requests...
+    Ok(())
+}
+```
+
+Key differences when using the trait:
+
+- Use `session.local_player_handle_required()` (returns `Result`) instead of indexing into `local_player_handles()`
+- Use `session.events()` to drain events (returns an `EventDrain` iterator)
+- `poll_remote_clients()` and `current_state()` work on all session types (with sensible defaults for `SyncTestSession`)
+- `network_stats()` is **not** on the trait — use it directly on `P2PSession` or `SpectatorSession`
+
+The trait is available in the prelude: `use fortress_rollback::prelude::*;`
+
+For comprehensive examples including a generic game loop, see the [User Guide — Using the Session Trait](User-Guide#using-the-session-trait).
 
 ## More Information
 

@@ -59,7 +59,7 @@ jobs:
       - name: Verify sccache is working
         id: sccache-check
         if: steps.sccache.outcome == 'success'
-        run: ./scripts/verify-sccache.sh
+        run: ./scripts/ci/verify-sccache.sh
         continue-on-error: true
 
       - name: Clear sccache env on failure
@@ -203,7 +203,7 @@ jobs:
       - name: Verify sccache is working
         id: sccache-check
         if: steps.sccache.outcome == 'success'
-        run: ./scripts/verify-sccache.sh
+        run: ./scripts/ci/verify-sccache.sh
         continue-on-error: true
 
       - name: Clear sccache env on failure

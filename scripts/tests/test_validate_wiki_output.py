@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 # Load the module with dashes in its name
-_script_path = Path(__file__).parent.parent / "validate-wiki-output.py"
+_script_path = Path(__file__).parent.parent / "docs" / "validate-wiki-output.py"
 _spec = importlib.util.spec_from_file_location("validate_wiki_output", _script_path)
 _module = importlib.util.module_from_spec(_spec)
 sys.modules["validate_wiki_output"] = _module

@@ -76,22 +76,22 @@ pre-commit run markdownlint --all-files
 pre-commit run check-links --all-files
 
 # Run the link checker script directly
-./scripts/check-links.sh --verbose
+./scripts/docs/check-links.sh --verbose
 
 # Verify markdown code samples compile
-./scripts/verify-markdown-code.sh
+./scripts/docs/verify-markdown-code.sh
 
 # With verbose output for debugging
-./scripts/verify-markdown-code.sh --verbose
+./scripts/docs/verify-markdown-code.sh --verbose
 
 # Check a specific file
-./scripts/verify-markdown-code.sh docs/user-guide.md
+./scripts/docs/verify-markdown-code.sh docs/user-guide.md
 
 # Check for invalid rustdoc-style code fence attributes in markdown
-./scripts/check-code-fence-syntax.sh
+./scripts/docs/check-code-fence-syntax.sh
 
 # Check a specific directory
-./scripts/check-code-fence-syntax.sh docs/
+./scripts/docs/check-code-fence-syntax.sh docs/
 ```
 
 ### Bypassing Hooks (Emergencies Only)

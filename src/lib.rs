@@ -80,7 +80,7 @@ pub use network::udp_socket::UdpNonBlockingSocket;
 use serde::{de::DeserializeOwned, Serialize};
 pub use sessions::builder::SessionBuilder;
 pub use sessions::config::{
-    InputQueueConfig, ProtocolConfig, SaveMode, SpectatorConfig, SyncConfig,
+    ClockFn, InputQueueConfig, ProtocolConfig, SaveMode, SpectatorConfig, SyncConfig,
 };
 pub use sessions::event_drain::EventDrain;
 pub use sessions::p2p_session::P2PSession;

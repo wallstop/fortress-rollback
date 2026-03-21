@@ -8,8 +8,8 @@ on:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
       - 'specs/**'
-      - 'scripts/verify-*.sh'
-      - 'scripts/check-kani-coverage.sh'
+      - 'scripts/verification/verify-*.sh'
+      - 'scripts/verification/check-kani-coverage.sh'
       - '.github/workflows/ci-verification.yml'
   pull_request:
     branches: [main]
@@ -18,8 +18,8 @@ on:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
       - 'specs/**'
-      - 'scripts/verify-*.sh'
-      - 'scripts/check-kani-coverage.sh'
+      - 'scripts/verification/verify-*.sh'
+      - 'scripts/verification/check-kani-coverage.sh'
       - '.github/workflows/ci-verification.yml'
   workflow_dispatch:
 
@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Validate Kani proof coverage
-        run: ./scripts/check-kani-coverage.sh
+        run: ./scripts/verification/check-kani-coverage.sh
         # This ensures all #[kani::proof] functions are in tier lists
 
   # TLA+ Model Checking
@@ -60,7 +60,7 @@ jobs:
           key: tla-tools-v1.8.0
 
       - name: Run TLA+ verification
-        run: ./scripts/verify-tla.sh --fail-fast
+        run: ./scripts/verification/verify-tla.sh --fail-fast
         timeout-minutes: 30
 
   # Z3 SMT Solver Verification
@@ -89,7 +89,7 @@ jobs:
       - name: Verify sccache is working
         id: sccache-check
         if: steps.sccache.outcome == 'success'
-        run: ./scripts/verify-sccache.sh
+        run: ./scripts/ci/verify-sccache.sh
         continue-on-error: true
 
       - name: Clear sccache env on failure
@@ -166,7 +166,7 @@ jobs:
           echo "Kani: $(cargo kani --version)"
 
       - name: Run Kani verification (Tier 1 - Fast)
-        run: ./scripts/verify-kani.sh --quick --tier 1 --fail-fast --verbose
+        run: ./scripts/verification/verify-kani.sh --quick --tier 1 --fail-fast --verbose
         timeout-minutes: 15
 
   # Kani Formal Verification (Tier 2 - Medium proofs, split into 6 parallel jobs)
@@ -217,7 +217,7 @@ jobs:
           echo "Kani: $(cargo kani --version)"
 
       - name: Run Kani verification (Tier 2 - Part ${{ matrix.part }}/6)
-        run: ./scripts/verify-kani.sh --quick --tier 2 --part ${{ matrix.part }} --parts 6 --fail-fast --jobs 2
+        run: ./scripts/verification/verify-kani.sh --quick --tier 2 --part ${{ matrix.part }} --parts 6 --fail-fast --jobs 2
         timeout-minutes: 10
 
   # Kani Formal Verification (Tier 3 - Slow proofs, split into 5 parallel jobs)
@@ -268,7 +268,7 @@ jobs:
           echo "Kani: $(cargo kani --version)"
 
       - name: Run Kani verification (Tier 3 - Part ${{ matrix.part }}/5)
-        run: ./scripts/verify-kani.sh --quick --tier 3 --part ${{ matrix.part }} --parts 5 --fail-fast --jobs 2
+        run: ./scripts/verification/verify-kani.sh --quick --tier 3 --part ${{ matrix.part }} --parts 5 --fail-fast --jobs 2
         timeout-minutes: 20
 
   # Loom Concurrency Testing (cross-platform)

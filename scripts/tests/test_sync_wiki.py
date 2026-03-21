@@ -11,13 +11,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Add scripts directory to path for imports
+# Add scripts/docs directory to path for imports
 scripts_dir = Path(__file__).parent.parent
-sys.path.insert(0, str(scripts_dir))
+sys.path.insert(0, str(scripts_dir / "docs"))
 
 # Import with proper module name (hyphen replaced by underscore for import)
 import importlib.util
-spec = importlib.util.spec_from_file_location("sync_wiki", scripts_dir / "sync-wiki.py")
+spec = importlib.util.spec_from_file_location("sync_wiki", scripts_dir / "docs" / "sync-wiki.py")
 sync_wiki = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sync_wiki)
 

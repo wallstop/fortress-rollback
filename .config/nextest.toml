@@ -6,12 +6,6 @@
 # it's either a production bug or a test bug that must be fixed.
 # Do NOT add retries to mask flakiness.
 
-# Test groups for tests that share UDP ports
-# These tests must run serially to avoid port conflicts
-[test-groups]
-# Tests in sessions::p2p, sessions::p2p_enum, and some spectator tests use ports 7777/8888
-port-7777 = { max-threads = 1 }
-
 [profile.default]
 # Zero retries - tests must pass first time
 retries = 0
@@ -32,16 +26,6 @@ status-level = "pass"
 # This ensures failure output is visible without re-running tests
 failure-output = "immediate-final" # Show failure output immediately AND at end
 success-output = "never"           # Hide output for passing tests (reduce noise)
-
-# Serialize tests that use port 7777 (and 8888)
-[[profile.default.overrides]]
-filter = 'test(sessions::p2p::) | test(sessions::p2p_enum::)'
-test-group = 'port-7777'
-
-# Spectator tests using 7777/8888 (test_start_session and test_synchronize_with_host)
-[[profile.default.overrides]]
-filter = 'test(sessions::spectator::test_start_session) | test(sessions::spectator::test_synchronize_with_host)'
-test-group = 'port-7777'
 
 # Multi-process network tests need longer timeouts because they:
 # 1. Spawn external peer processes

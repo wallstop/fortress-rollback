@@ -4,8 +4,8 @@
 
 # Fortress Rollback API Contracts
 
-**Version:** 1.1
-**Date:** February 5, 2026
+**Version:** 1.0
+**Date:** December 6, 2025
 **Status:** Complete
 
 This document specifies preconditions, postconditions, and invariants for all public APIs. It complements formal-spec.md and serves as a reference for verification and documentation.
@@ -65,17 +65,19 @@ Each API is documented with:
 
 ---
 
-### `with_num_players(self, n: usize) -> Self`
+### `with_num_players(self, n: usize) -> Result<Self, FortressError>`
 
 ```rust
 /// Set the number of active players (not spectators).
 ```
 
-**Pre:** None (any usize accepted)
+**Pre:** `n > 0`
 
 **Post:** `self.num_players = n`
 
-**Errors:** None (validated at session start)
+**Errors:**
+
+- `InvalidRequestStructured { kind: ZeroPlayers }` - if `n = 0`
 
 **Panics:** Never
 
@@ -127,17 +129,19 @@ Each API is documented with:
 
 ---
 
-### `with_input_delay(self, delay: usize) -> Self`
+### `with_input_delay(self, delay: usize) -> Result<Self, FortressError>`
 
 ```rust
 /// Set input delay for local players.
 ```
 
-**Pre:** None
+**Pre:** `delay <= queue_length - 1` (default max: 127)
 
 **Post:** `self.input_delay = delay`
 
-**Errors:** None
+**Errors:**
+
+- `InvalidRequestStructured { kind: FrameDelayTooLarge { delay, max_delay } }` - if `delay` exceeds `input_queue_config.max_frame_delay()`
 
 **Panics:** Never
 
@@ -177,70 +181,24 @@ Each API is documented with:
 
 ---
 
-### `with_sparse_saving_mode(self, sparse: bool) -> Self`
+### `with_sparse_saving_mode(self, sparse_saving: bool) -> Self` *(deprecated)*
 
-> ⚠️ **Deprecated since 0.2.0:** Use `with_save_mode(SaveMode::Sparse)` instead.
+> **Deprecated since 0.2.0:** Use `with_save_mode(SaveMode::Sparse)` instead.
 
 ```rust
 /// Enable sparse saving (fewer saves, longer potential rollbacks).
-#[deprecated(since = "0.2.0", note = "Use with_save_mode(SaveMode::Sparse) instead")]
 ```
 
 **Pre:** None
 
-**Post:** `self.save_mode = if sparse { SaveMode::Sparse } else { SaveMode::EveryFrame }`
+**Post:**
+
+- `sparse_saving = true` → `self.save_mode = SaveMode::Sparse`
+- `sparse_saving = false` → `self.save_mode = SaveMode::EveryFrame`
 
 **Errors:** None
 
 **Panics:** Never
-
-**Migration:** Replace calls to `with_sparse_saving_mode(true)` with `with_save_mode(SaveMode::Sparse)` and `with_sparse_saving_mode(false)` with `with_save_mode(SaveMode::EveryFrame)`.
-
----
-
-### `with_save_mode(self, save_mode: SaveMode) -> Self`
-
-```rust
-/// Configure the game state saving strategy.
-```
-
-**Pre:** None
-
-**Post:** `self.save_mode = save_mode`
-
-**Errors:** None
-
-**Panics:** Never
-
-**Notes:** This method replaces the deprecated `with_sparse_saving_mode`. The `SaveMode` enum provides more explicit control over saving behavior.
-
----
-
-## SaveMode Enum
-
-```rust
-/// Strategy for saving game states during rollback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SaveMode {
-    /// Save game state every frame (default).
-    /// - Pros: Fastest rollbacks, minimal resimulation
-    /// - Cons: Higher memory usage
-    #[default]
-    EveryFrame,
-
-    /// Save game states less frequently.
-    /// - Pros: Lower memory usage
-    /// - Cons: Longer potential rollbacks, more resimulation
-    Sparse,
-}
-```
-
-**Variants:**
-
-| Variant | Description | Use Case |
-|---------|-------------|----------|
-| `EveryFrame` | Saves state every frame (default) | Low-latency games, games with fast state serialization |
-| `Sparse` | Saves state at intervals | Memory-constrained environments, large game states |
 
 ---
 
@@ -260,7 +218,7 @@ pub enum SaveMode {
 
 ---
 
-### `start_p2p_session(self, socket: impl NonBlockingSocket) -> Result<P2PSession, FortressError>`
+### `start_p2p_session(self, socket: impl NonBlockingSocket<T::Address>) -> Result<P2PSession<T>, FortressError>`
 
 ```rust
 /// Consume builder and create a P2P session.
@@ -291,7 +249,7 @@ pub enum SaveMode {
 
 ---
 
-### `start_spectator_session(self, host: Address, socket: impl NonBlockingSocket) -> SpectatorSession`
+### `start_spectator_session(self, host_addr: T::Address, socket: impl NonBlockingSocket<T::Address>) -> Option<SpectatorSession<T>>`
 
 ```rust
 /// Create a spectator session connected to a host.
@@ -301,10 +259,11 @@ pub enum SaveMode {
 
 **Post:**
 
-- Session created in `Synchronizing` state
+- Returns `Some(session)` with session created in `Synchronizing` state
 - Host endpoint begins synchronization
+- Returns `None` if protocol initialization fails (e.g., serialization issues)
 
-**Errors:** None
+**Errors:** None (returns `Option`, not `Result`)
 
 **Panics:** Never
 
@@ -357,7 +316,7 @@ pub enum SaveMode {
 
 **Pre:** None
 
-**Post:** Returns vector of handles where `player_type = Local`
+**Post:** Returns `HandleVec` of handles where `player_type = Local`
 
 **Errors:** None
 
@@ -438,7 +397,7 @@ pub enum SaveMode {
 **Errors:**
 
 - `NotSynchronized` - if `current_state() != Running`
-- `InvalidRequest("Prediction threshold reached")` - exceeded max_prediction
+- `InvalidRequestStructured { kind: MissingLocalInput }` - not all local players provided input
 
 **Panics:** Never
 
@@ -467,7 +426,7 @@ pub enum SaveMode {
 
 ---
 
-### `events(&mut self) -> Drain<FortressEvent>`
+### `events(&mut self) -> EventDrain<'_, T>`
 
 ```rust
 /// Drain all pending events.
@@ -591,7 +550,7 @@ pub enum SaveMode {
 
 ## GameStateCell
 
-### `save(&self, frame: Frame, state: Option<T::State>, checksum: Option<u128>)`
+### `save(&self, frame: Frame, state: Option<T::State>, checksum: Option<u128>) -> bool`
 
 ```rust
 /// Save game state into the cell.
@@ -604,6 +563,8 @@ pub enum SaveMode {
 
 **Post:**
 
+- Returns `true` if the save succeeded
+- Returns `false` if `frame` is `Frame::NULL` (save rejected)
 - State stored and retrievable via `load()`
 - Checksum stored for desync detection (if provided)
 
@@ -708,13 +669,26 @@ FortressRequest::AdvanceFrame { inputs }
 
 ## Error Catalog
 
+### Legacy Variants
+
 | Error | Cause | Recovery |
 |-------|-------|----------|
-| `InvalidRequest { info }` | Invalid operation/parameter | Check info message, fix call |
-| `InvalidPlayerHandle { handle, max }` | Handle out of range or wrong type | Use valid handle |
-| `InvalidFrame { frame, reason }` | Frame out of valid range | Check frame bounds |
+| `InvalidRequest { info }` | Invalid operation/parameter (legacy) | Check info message, fix call |
+| `InvalidPlayerHandle { handle, max_handle }` | Handle out of range or wrong type | Use valid handle |
+| `InvalidFrame { frame, reason }` | Frame out of valid range (legacy) | Check frame bounds |
 | `NotSynchronized` | Operation requires Running state | Wait for sync or call poll |
-| `MissingInput { handle, frame }` | Confirmed input not available | Internal error, report bug |
+| `MissingInput { player_handle, frame }` | Confirmed input not available | Internal error, report bug |
+| `PredictionThreshold` | Prediction window exceeded | Wait before adding more input |
+
+### Structured Variants (Preferred)
+
+| Error | Cause | Recovery |
+|-------|-------|----------|
+| `InvalidRequestStructured { kind }` | Invalid operation with structured reason | Match on `InvalidRequestKind` variants |
+| `InvalidFrameStructured { frame, reason }` | Frame invalid with structured reason | Match on `InvalidFrameReason` variants |
+| `InternalErrorStructured { kind }` | Library bug with structured context | Report bug with error details |
+| `SerializationErrorStructured { kind }` | Serialization failure | Check input data format |
+| `FrameArithmeticOverflow { frame, operand, operation }` | Frame arithmetic overflow | Check frame bounds |
 
 ---
 

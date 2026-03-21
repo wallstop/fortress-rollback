@@ -1,0 +1,1 @@
+2026-01-10 | Use fixed-capacity circular buffer for saved states | None | Keep rollback memory bounded and lookup cost stable | src/sync_layer/saved_states.rs | PR #280

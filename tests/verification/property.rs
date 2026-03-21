@@ -1700,12 +1700,10 @@ mod p2p_checksum_tests {
         }
 
         // Continue polling to ensure checksum messages are exchanged
-        // Use time-based waiting for robustness across platforms
-        let start = std::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_millis(500) {
+        // Iteration-based loop: no thread::sleep needed for localhost UDP
+        for _ in 0..500 {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
-            std::thread::sleep(std::time::Duration::from_millis(1));
         }
 
         // At this point, checksums should have been exchanged and compared

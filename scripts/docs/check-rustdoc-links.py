@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""
+Cross-platform rustdoc warning checker for pre-commit hooks.
+
+Runs `cargo doc --no-deps` with RUSTDOCFLAGS that match CI configuration,
+treating all rustdoc warnings as errors. Fails if cargo doc returns a
+non-zero exit code.
+
+Works on Windows, macOS, and Linux.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "build"))
+
+from cargo_linker import get_cargo_env
+
+
+# RUSTDOCFLAGS that match CI configuration - treats warnings as errors
+RUSTDOCFLAGS = (
+    "-D warnings "
+    "-D rustdoc::broken_intra_doc_links "
+    "-D rustdoc::private_intra_doc_links "
+    "-D rustdoc::invalid_codeblock_attributes "
+    "-D rustdoc::invalid_html_tags "
+    "-D rustdoc::bare_urls"
+)
+
+
+def main() -> int:
+    """Run cargo doc with CI-matching RUSTDOCFLAGS and check exit code."""
+    try:
+        # Set up environment with linker overrides and RUSTDOCFLAGS matching CI
+        env = os.environ.copy()
+        env.update(get_cargo_env())
+        existing_rustdocflags = env.get("RUSTDOCFLAGS", "").strip()
+
+        # In CI, enforce exact CI RUSTDOCFLAGS; locally, append to any existing flags
+        if env.get("CI"):
+            env["RUSTDOCFLAGS"] = RUSTDOCFLAGS
+        elif existing_rustdocflags:
+            env["RUSTDOCFLAGS"] = f"{existing_rustdocflags} {RUSTDOCFLAGS}"
+        else:
+            env["RUSTDOCFLAGS"] = RUSTDOCFLAGS
+        # Run cargo doc and capture output
+        result = subprocess.run(
+            ["cargo", "doc", "--no-deps"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        # If cargo doc failed (non-zero exit code), print stderr and fail
+        if result.returncode != 0:
+            print("ERROR: cargo doc failed with rustdoc warnings/errors:", file=sys.stderr)
+            if result.stderr:
+                print(result.stderr, file=sys.stderr)
+            if result.stdout:
+                print(result.stdout, file=sys.stderr)
+            return 1
+
+        return 0
+
+    except FileNotFoundError:
+        print("ERROR: cargo not found. Is Rust installed?", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"ERROR: Failed to run cargo doc: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

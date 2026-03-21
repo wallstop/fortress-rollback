@@ -20,4 +20,4 @@ jobs:
       - name: Verify skills index is up-to-date
         run: python scripts/hooks/regenerate-skills-index.py --check
       - name: Check skill code example quality
-        run: bash scripts/check-llm-skills.sh
+        run: bash scripts/docs/check-llm-skills.sh

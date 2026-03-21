@@ -6,78 +6,91 @@
 
 | Skill | When to Use |
 |-------|-------------|
-| [ci-debugging.md](ci-debugging.md) | Debugging CI failures, reproducing CI issues locally |
-| [doc-code-sync.md](doc-code-sync.md) | CHANGELOG verification, error variant matching, struct field checks, doc-code consistency |
-| [github-actions.md](github-actions.md) | Writing GitHub Actions workflows, CI debugging, actionlint, caching |
-| [markdown.md](markdown.md) | Markdown formatting, markdownlint configuration |
-| [scripting.md](scripting.md) | Writing build scripts, Python helpers, shell portability |
-| [wiki-sync.md](wiki-sync.md) | Wiki sync, documentation links, markdown anchor validation |
+| [ci-debugging.md](ci-cd-tooling/ci-debugging.md) | Debugging CI failures, reproducing CI issues locally |
+| [doc-code-sync.md](ci-cd-tooling/doc-code-sync.md) | CHANGELOG verification, error variant matching, struct field checks, doc-code consistency |
+| [github-actions.md](ci-cd-tooling/github-actions.md) | Writing GitHub Actions workflows, CI debugging, actionlint, caching |
+| [markdown.md](ci-cd-tooling/markdown.md) | Markdown formatting, markdownlint configuration |
+| [scripting.md](ci-cd-tooling/scripting.md) | Writing build scripts, Python helpers, shell portability |
+| [wiki-sync.md](ci-cd-tooling/wiki-sync.md) | Wiki sync, documentation links, markdown anchor validation |
 
 ## Determinism & Rollback
 
 | Skill | When to Use |
 |-------|-------------|
-| [determinism.md](determinism.md) | Ensuring determinism, replacing HashMap, float handling, cross-platform determinism |
-| [dst.md](dst.md) | Deterministic simulation testing, madsim, turmoil, failure injection |
-| [rollback.md](rollback.md) | Converting games to rollback netcode, engine integration, state management |
+| [determinism.md](determinism-rollback/determinism.md) | Ensuring determinism, replacing HashMap, float handling, cross-platform determinism |
+| [dst.md](determinism-rollback/dst.md) | Deterministic simulation testing, madsim, turmoil, failure injection |
+| [rollback.md](determinism-rollback/rollback.md) | Converting games to rollback netcode, engine integration, state management |
 
 ## Formal Verification
 
 | Skill | When to Use |
 |-------|-------------|
-| [kani.md](kani.md) | Writing Kani proofs, debugging verification failures, unwind configuration |
-| [loom.md](loom.md) | Testing concurrent code with Loom, model checking thread interleavings |
-| [miri.md](miri.md) | Running Miri, debugging undefined behavior, adapting code for Miri |
-| [verification.md](verification.md) | Writing TLA+ specs, Z3 SMT proofs, formal modeling |
+| [kani.md](formal-verification/kani.md) | Writing Kani proofs, debugging verification failures, unwind configuration |
+| [loom.md](formal-verification/loom.md) | Testing concurrent code with Loom, model checking thread interleavings |
+| [miri.md](formal-verification/miri.md) | Running Miri, debugging undefined behavior, adapting code for Miri |
+| [verification.md](formal-verification/verification.md) | Writing TLA+ specs, Z3 SMT proofs, formal modeling |
 
 ## Performance & Quality
 
 | Skill | When to Use |
 |-------|-------------|
-| [binary-size.md](binary-size.md) | Reducing binary size, WASM size optimization, LTO configuration |
-| [clippy.md](clippy.md) | Configuring Clippy, lint levels, fortress-specific lint rules |
-| [performance.md](performance.md) | Optimizing performance, profiling, build configuration, compile times |
+| [binary-size.md](performance-quality/binary-size.md) | Reducing binary size, WASM size optimization, LTO configuration |
+| [clippy.md](performance-quality/clippy.md) | Configuring Clippy, lint levels, fortress-specific lint rules |
+| [performance.md](performance-quality/performance.md) | Optimizing performance, profiling, build configuration, compile times |
 
 ## Platform
 
 | Skill | When to Use |
 |-------|-------------|
-| [cross-platform.md](cross-platform.md) | Cross-platform builds, cfg attributes, platform-specific code, CI matrix |
-| [wasm.md](wasm.md) | WASM compilation, wasm-bindgen, web workers, WASM portability |
+| [cross-platform.md](platform/cross-platform.md) | Cross-platform builds, cfg attributes, platform-specific code, CI matrix |
+| [wasm.md](platform/wasm.md) | WASM compilation, wasm-bindgen, web workers, WASM portability |
 
 ## Publishing & Organization
 
 | Skill | When to Use |
 |-------|-------------|
-| [changelog.md](changelog.md) | Writing CHANGELOG entries, deciding what to document |
-| [dependency-management.md](dependency-management.md) | Evaluating dependencies, supply chain security, cargo-deny |
-| [publishing.md](publishing.md) | Publishing to crates.io, version bumps, release checklist |
-| [workspace.md](workspace.md) | Organizing workspace, splitting crates, module structure decisions |
+| [changelog.md](publishing-organization/changelog.md) | Writing CHANGELOG entries, deciding what to document |
+| [dependency-management.md](publishing-organization/dependency-management.md) | Evaluating dependencies, supply chain security, cargo-deny |
+| [publishing.md](publishing-organization/publishing.md) | Publishing to crates.io, version bumps, release checklist |
+| [workspace.md](publishing-organization/workspace.md) | Organizing workspace, splitting crates, module structure decisions |
 
 ## Rust Language
 
 | Skill | When to Use |
 |-------|-------------|
-| [api-design.md](api-design.md) | Designing public APIs, checking semver compliance, reviewing breaking changes |
-| [async-rust.md](async-rust.md) | Writing async code, debugging futures, Send/Sync issues |
-| [concurrency.md](concurrency.md) | Choosing concurrency primitives, Mutex vs RwLock decisions, channel patterns |
-| [defensive-programming.md](defensive-programming.md) | Implementing error handling, ensuring zero-panic compliance, validating inputs |
-| [ffi.md](ffi.md) | Writing FFI code, C interop, bindgen usage |
-| [no-std.md](no-std.md) | Writing no_std code, embedded targets, core vs alloc decisions |
-| [refactoring.md](refactoring.md) | Refactoring code, planning safe transformations, verification after changes |
-| [rust-design-patterns.md](rust-design-patterns.md) | Choosing design patterns, implementing builders, state machines, or strategy pattern |
-| [rust-idioms.md](rust-idioms.md) | Writing idiomatic Rust, implementing traits, error handling patterns |
-| [rust-pitfalls.md](rust-pitfalls.md) | Reviewing code, debugging common Rust mistakes, avoiding pitfalls |
-| [text-parsing.md](text-parsing.md) | Parsing text, regex patterns, state machine parsers |
-| [type-driven-design.md](type-driven-design.md) | Designing type-safe APIs, using newtypes, encoding state in types |
-| [zero-copy.md](zero-copy.md) | Optimizing memory usage, zero-copy patterns, Cow vs clone decisions |
+| [api-design.md](rust-language/api-design.md) | Designing public APIs, checking semver compliance, reviewing breaking changes |
+| [async-rust.md](rust-language/async-rust.md) | Writing async code, debugging futures, Send/Sync issues |
+| [concurrency.md](rust-language/concurrency.md) | Choosing concurrency primitives, Mutex vs RwLock decisions, channel patterns |
+| [defensive-programming.md](rust-language/defensive-programming.md) | Implementing error handling, ensuring zero-panic compliance, validating inputs |
+| [ffi.md](rust-language/ffi.md) | Writing FFI code, C interop, bindgen usage |
+| [no-std.md](rust-language/no-std.md) | Writing no_std code, embedded targets, core vs alloc decisions |
+| [refactoring.md](rust-language/refactoring.md) | Refactoring code, planning safe transformations, verification after changes |
+| [rust-design-patterns.md](rust-language/rust-design-patterns.md) | Choosing design patterns, implementing builders, state machines, or strategy pattern |
+| [rust-idioms.md](rust-language/rust-idioms.md) | Writing idiomatic Rust, implementing traits, error handling patterns |
+| [rust-pitfalls.md](rust-language/rust-pitfalls.md) | Reviewing code, debugging common Rust mistakes, avoiding pitfalls |
+| [text-parsing.md](rust-language/text-parsing.md) | Parsing text, regex patterns, state machine parsers |
+| [type-driven-design.md](rust-language/type-driven-design.md) | Designing type-safe APIs, using newtypes, encoding state in types |
+| [zero-copy.md](rust-language/zero-copy.md) | Optimizing memory usage, zero-copy patterns, Cow vs clone decisions |
 
 ## Testing
 
 | Skill | When to Use |
 |-------|-------------|
-| [fuzzing.md](fuzzing.md) | Fuzz testing, cargo-fuzz, writing fuzz harnesses, crash analysis |
-| [mutation-testing.md](mutation-testing.md) | Running mutation tests, verifying test quality, cargo-mutants |
-| [network-chaos-testing.md](network-chaos-testing.md) | Testing network resilience, chaos testing, sync failure diagnosis |
-| [property-testing.md](property-testing.md) | Writing property-based tests, proptest strategies, custom generators |
-| [testing.md](testing.md) | Writing tests, choosing testing tools, test organization, nextest usage |
+| [fuzzing.md](testing/fuzzing.md) | Fuzz testing, cargo-fuzz, writing fuzz harnesses, crash analysis |
+| [mutation-testing.md](testing/mutation-testing.md) | Running mutation tests, verifying test quality, cargo-mutants |
+| [network-chaos-testing.md](testing/network-chaos-testing.md) | Testing network resilience, chaos testing, sync failure diagnosis |
+| [property-testing.md](testing/property-testing.md) | Writing property-based tests, proptest strategies, custom generators |
+| [testing.md](testing/testing.md) | Writing tests, choosing testing tools, test organization, nextest usage |
+
+## Workflows
+
+| Skill | When to Use |
+|-------|-------------|
+| [adversarial-handoff.md](workflows/adversarial-handoff.md) | High-risk reviews, post-incident hardening, escalation from code review |
+| [adversarial-review.md](workflows/adversarial-review.md) | Security review, safety audit, adversarial testing, red-team analysis of changes |
+| [code-review.md](workflows/code-review.md) | Reviewing PRs, auditing code changes, verifying zero-panic compliance, checking determinism |
+| [design-decisions.md](workflows/design-decisions.md) | Architectural decisions, design alternatives, superseding prior choices |
+| [dev-pipeline.md](workflows/dev-pipeline.md) | Planning features, structuring development work, end-to-end development process |
+| [investigation.md](workflows/investigation.md) | Debugging failures, diagnosing desyncs, root-cause analysis, systematic troubleshooting |
+| [review-readiness.md](workflows/review-readiness.md) | Before opening PRs, self-review, merge readiness checks |
+| [user-facing-docs.md](workflows/user-facing-docs.md) | New public API, breaking changes, new features, configuration changes, behavioral changes requiring user documentation |
