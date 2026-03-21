@@ -38,7 +38,7 @@
 // - Group related tests into parameterized scenario arrays
 // - Use `with_auto_sync_preset()` to prevent future sync timeout regressions
 //
-// See: `.llm/skills/network-chaos-testing.md` for chaos testing best practices
+// See: `.llm/skills/testing/network-chaos-testing.md` for chaos testing best practices
 // =============================================================================
 
 // Allow test-specific patterns that are appropriate for test code

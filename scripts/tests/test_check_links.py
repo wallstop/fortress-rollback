@@ -11,15 +11,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Add scripts directory to path for imports
+# Add scripts/docs directory to path for imports
 scripts_dir = Path(__file__).parent.parent
-sys.path.insert(0, str(scripts_dir))
+sys.path.insert(0, str(scripts_dir / "docs"))
 
 # Import with proper module name using importlib
 import importlib.util
 
 spec = importlib.util.spec_from_file_location(
-    "check_links", scripts_dir / "check-links.py"
+    "check_links", scripts_dir / "docs" / "check-links.py"
 )
 check_links = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check_links)

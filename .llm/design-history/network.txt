@@ -1,0 +1,2 @@
+2025-12-15 | Validate frame numbers on all peer inputs | None | Prevent desync from malformed or malicious network packets | src/network/protocol | PR #200
+2026-03-01 | Prefer checked frame arithmetic in rollback paths | None | Prevent overflow-triggered desync at extreme frame values | src/sync_layer | PR #312

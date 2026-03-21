@@ -14,6 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0]
+
+### Added
+
+- `ClockFn` type alias (`Arc<dyn Fn() -> Instant + Send + Sync>`) for injectable time sources, enabling deterministic time control in tests and simulations
+- `ProtocolConfig::clock` field for overriding the system clock in the network protocol, allowing deterministic simulation testing (DST) and controlled time progression
+- `ChaosSocket::with_clock()` builder method for injecting a custom clock into the chaos socket, enabling deterministic latency simulation
+
+### Changed
+
+- **Breaking:** `ProtocolConfig` no longer implements `Copy` due to the addition of the `clock` field (`Option<Arc<dyn Fn>>`). Use `.clone()` instead where `Copy` was previously relied upon.
+
 ## [0.6.0]
 
 ### Added
@@ -286,7 +298,7 @@ Initial release of Fortress Rollback, a correctness-first fork of GGRS v0.11.0.
 
 - Pre-commit hooks configuration for code quality automation (markdownlint, link validation, cargo fmt/clippy)
 - `docs.yml` CI workflow for documentation and link validation
-- `scripts/check-links.sh` for local file reference validation
+- `scripts/docs/check-links.sh` for local file reference validation
 - Comprehensive test suite: 1100+ library and integration tests, multi-process network tests passing
 - TLA+ `Concurrency.tla` specification for `GameStateCell` thread safety verification
 
@@ -363,11 +375,11 @@ use fortress_rollback::{SessionBuilder, P2PSession, FortressError};
 
 ### Type Renames
 
-| Old Name           | New Name             |
-|--------------------|----------------------|
-| `GgrsError`        | `FortressError`      |
-| `GgrsEvent<T>`     | `FortressEvent<T>`   |
-| `GgrsRequest<T>`   | `FortressRequest<T>` |
+| Old Name         | New Name             |
+| ---------------- | -------------------- |
+| `GgrsError`      | `FortressError`      |
+| `GgrsEvent<T>`   | `FortressEvent<T>`   |
+| `GgrsRequest<T>` | `FortressRequest<T>` |
 
 ### Address Trait Bounds
 

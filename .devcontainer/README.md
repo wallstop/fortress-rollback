@@ -56,7 +56,7 @@ This devcontainer provides a complete environment for developing, testing, and f
 After the container starts, verify all tools:
 
 ```bash
-./scripts/check-tools.sh
+./scripts/ci/check-tools.sh
 ```
 
 ## Build Performance
@@ -96,19 +96,19 @@ means subsequent rebuilds only reprocess changed layers.
 ### All Verifiers
 
 ```bash
-./scripts/verify-all.sh
+./scripts/verification/verify-all.sh
 ```
 
 ### TLA+ Only
 
 ```bash
-./scripts/verify-tla.sh
+./scripts/verification/verify-tla.sh
 ```
 
 ### Kani Only
 
 ```bash
-./scripts/verify-kani.sh
+./scripts/verification/verify-kani.sh
 # Or directly:
 cargo kani
 ```

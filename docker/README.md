@@ -10,13 +10,13 @@ This directory contains Docker infrastructure for realistic network testing of F
 
 ```bash
 # Run quick tests (basic + latency + loss + combined)
-./scripts/docker-network-tests.sh --quick
+./scripts/ci/docker-network-tests.sh --quick
 
 # Run all tests
-./scripts/docker-network-tests.sh --all
+./scripts/ci/docker-network-tests.sh --all
 
 # Run a specific test
-./scripts/docker-network-tests.sh latency_50ms
+./scripts/ci/docker-network-tests.sh latency_50ms
 ```
 
 ## Prerequisites

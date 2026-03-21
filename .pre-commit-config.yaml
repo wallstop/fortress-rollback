@@ -77,7 +77,7 @@ repos:
       # ══════════════════════════════════════════════════════════════════════
       - id: cargo-fmt
         name: cargo fmt
-        entry: python scripts/run-cargo-fmt.py
+        entry: python scripts/build/run-cargo-fmt.py
         language: python
         types: [rust]
         pass_filenames: false
@@ -90,14 +90,14 @@ repos:
 
       - id: cargo-clippy
         name: cargo clippy
-        entry: python scripts/run-cargo-clippy.py
+        entry: python scripts/build/run-cargo-clippy.py
         language: python
         types: [rust]
         pass_filenames: false
 
       - id: rustdoc-links
         name: rustdoc link check
-        entry: python scripts/check-rustdoc-links.py
+        entry: python scripts/docs/check-rustdoc-links.py
         language: python
         pass_filenames: false
         files: '\.rs$'
@@ -122,24 +122,31 @@ repos:
 
       - id: check-links
         name: check links
-        entry: python scripts/check-links.py
+        entry: python scripts/docs/check-links.py
         language: python
         pass_filenames: false
         files: '\.(md|rs)$'
 
       - id: check-code-fence-syntax
         name: check code fence syntax
-        entry: bash scripts/check-code-fence-syntax.sh docs
+        entry: bash scripts/docs/check-code-fence-syntax.sh docs
         language: system
         pass_filenames: false
         files: '\.md$'
 
       - id: wiki-consistency
         name: wiki consistency check
-        entry: python scripts/check-wiki-consistency.py
+        entry: python scripts/docs/check-wiki-consistency.py
         language: python
         pass_filenames: false
-        files: '^(docs/.*\.md|wiki/.*\.md|scripts/sync-wiki\.py)$'
+        files: '^(docs/.*\.md|wiki/.*\.md|scripts/docs/sync-wiki\.py)$'
+
+      - id: check-sync-headers
+        name: check sync headers
+        entry: python scripts/hooks/check-sync-headers.py
+        language: python
+        files: '^(docs/.*\.md|wiki/.*\.md)$'
+        pass_filenames: false
 
       - id: llm-line-limit
         name: check .llm file line limit (300)
@@ -157,7 +164,7 @@ repos:
 
       - id: check-llm-skills
         name: check .llm/skills code quality
-        entry: bash scripts/check-llm-skills.sh
+        entry: bash scripts/docs/check-llm-skills.sh
         language: system
         pass_filenames: false
         files: '^\.llm/.*\.md$'
@@ -179,7 +186,7 @@ repos:
         name: check hook output format
         entry: python scripts/hooks/check-hook-output-format.py
         language: python
-        files: '^scripts/(hooks/)?[a-z][^/]*\.py$'
+        files: '^scripts/(hooks/|build/|docs/|verification/|ci/)?[a-z][^/]*\.py$'
         pass_filenames: true
 
       # ══════════════════════════════════════════════════════════════════════
@@ -194,14 +201,14 @@ repos:
 
       - id: kani-coverage
         name: kani proof coverage
-        entry: python scripts/check-kani-coverage.py
+        entry: python scripts/verification/check-kani-coverage.py
         language: python
         pass_filenames: false
         files: '\.rs$|verify-kani\.sh$'
 
       - id: cargo-hack-check
         name: cargo hack feature check
-        entry: python scripts/check-cargo-hack.py
+        entry: python scripts/build/check-cargo-hack.py
         language: python
         pass_filenames: false
         files: '\.rs$|Cargo\.toml$'

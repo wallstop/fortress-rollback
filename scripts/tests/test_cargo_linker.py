@@ -12,9 +12,9 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-# Add scripts directory to path for imports
+# Add scripts/build directory to path for imports
 scripts_dir = Path(__file__).parent.parent
-sys.path.insert(0, str(scripts_dir))
+sys.path.insert(0, str(scripts_dir / "build"))
 
 import pytest
 

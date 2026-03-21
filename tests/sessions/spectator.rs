@@ -1,9 +1,8 @@
 //! Spectator session integration tests.
 //!
-//! # Port Allocation
-//!
-//! This test file uses `bind_socket_ephemeral()` for OS-assigned ephemeral ports
-//! to avoid TIME_WAIT conflicts on Windows CI.
+//! Uses `ChannelSocket` (in-memory) + `TestClock` (virtual time) for fully
+//! deterministic, platform-independent test execution. No real UDP sockets,
+//! no `thread::sleep`, no `#[serial]`.
 
 // Allow test-specific patterns that are appropriate for test code
 #![allow(
@@ -11,66 +10,68 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::ip_constant,
-    clippy::needless_collect
+    clippy::ip_constant
 )]
 
 use crate::common::stubs::{GameStub, StubConfig, StubInput};
 use crate::common::{
-    assert_spectator_synchronized, bind_socket_ephemeral, synchronize_spectator, PortAllocator,
-    MAX_SYNC_ITERATIONS, POLL_INTERVAL, SYNC_TIMEOUT,
+    assert_spectator_synchronized, create_channel_pair, create_channel_triple,
+    create_unconnected_socket, synchronize_spectator_deterministic, TestClock, MAX_SYNC_ITERATIONS,
+    POLL_INTERVAL_DETERMINISTIC,
 };
 use fortress_rollback::{
     telemetry::CollectingObserver, FortressError, FortressEvent, InputQueueConfig, PlayerHandle,
-    PlayerType, SessionBuilder, SessionState, SpectatorConfig, SyncConfig,
+    PlayerType, ProtocolConfig, SessionBuilder, SessionState, SpectatorConfig, SyncConfig,
 };
-use serial_test::serial;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+/// Helper: creates a `ProtocolConfig` with the given test clock.
+fn protocol_config(clock: &TestClock) -> ProtocolConfig {
+    ProtocolConfig {
+        clock: Some(clock.as_protocol_clock()),
+        ..ProtocolConfig::default()
+    }
+}
 
 // ============================================================================
 // Basic Session Tests
 // ============================================================================
 
 #[test]
-#[serial]
-fn test_start_session() -> Result<(), FortressError> {
-    // Use PortAllocator for unbound host address, ephemeral for spectator socket
-    let host_port = PortAllocator::next_port();
-    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
-    let (socket, _spec_addr) = bind_socket_ephemeral()?;
+fn test_start_session() {
+    let clock = TestClock::new();
+    let (socket, _spec_addr) = create_unconnected_socket(20001);
+    let host_addr = "127.0.0.1:20002".parse().unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
     assert_eq!(spec_sess.current_state(), SessionState::Synchronizing);
-    Ok(())
 }
 
 #[test]
-#[serial]
 fn test_synchronize_with_host() -> Result<(), FortressError> {
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
-    let (socket1, host_addr) = bind_socket_ephemeral()?;
-    let (socket2, spec_addr) = bind_socket_ephemeral()?;
+    let clock = TestClock::new();
+    let (socket1, socket2, host_addr, spec_addr) = create_channel_pair();
 
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(1)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
         .start_p2p_session(socket1)?;
 
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket2)
         .expect("spectator session should start");
 
     assert_eq!(spec_sess.current_state(), SessionState::Synchronizing);
     assert_eq!(host_sess.current_state(), SessionState::Synchronizing);
 
-    // Use robust synchronization with timeout and diagnostics
-    let result = synchronize_spectator(&mut spec_sess, &mut host_sess);
+    let result = synchronize_spectator_deterministic(&mut spec_sess, &mut host_sess, &clock);
     assert_spectator_synchronized(&spec_sess, &host_sess, &result);
 
     Ok(())
@@ -103,10 +104,9 @@ impl SyncTestCase {
 /// Data-driven test for various synchronization scenarios.
 ///
 /// This test verifies that spectator synchronization works reliably across
-/// different player configurations. It uses timeout-based polling instead
-/// of fixed iterations to be robust across different platforms and timing.
+/// different player configurations using deterministic in-memory sockets
+/// and virtual time.
 #[test]
-#[serial]
 fn test_synchronization_scenarios_data_driven() -> Result<(), FortressError> {
     // Define test cases for different configurations
     let test_cases = [
@@ -116,13 +116,14 @@ fn test_synchronization_scenarios_data_driven() -> Result<(), FortressError> {
     ];
 
     for case in &test_cases {
-        // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
-        let (socket1, host_addr) = bind_socket_ephemeral()?;
-        let (socket2, spec_addr) = bind_socket_ephemeral()?;
+        // Create fresh clock and channel pair for each iteration
+        let clock = TestClock::new();
+        let (socket1, socket2, host_addr, spec_addr) = create_channel_pair();
 
         let mut builder = SessionBuilder::<StubConfig>::new()
             .with_num_players(case.num_players)
-            .unwrap();
+            .unwrap()
+            .with_protocol_config(protocol_config(&clock));
 
         // Add local players
         for i in 0..case.num_local_players {
@@ -142,11 +143,12 @@ fn test_synchronization_scenarios_data_driven() -> Result<(), FortressError> {
         let mut spec_sess = SessionBuilder::<StubConfig>::new()
             .with_num_players(case.num_players)
             .unwrap()
+            .with_protocol_config(protocol_config(&clock))
             .start_spectator_session(host_addr, socket2)
             .expect("Failed to start spectator session");
 
-        // Perform synchronization with timeout
-        let result = synchronize_spectator(&mut spec_sess, &mut host_sess);
+        // Perform synchronization with deterministic polling
+        let result = synchronize_spectator_deterministic(&mut spec_sess, &mut host_sess, &clock);
 
         // Assert with detailed failure message for this specific case
         assert!(
@@ -170,10 +172,8 @@ fn test_synchronization_scenarios_data_driven() -> Result<(), FortressError> {
 /// Data-driven test for synchronization with different SyncConfig presets.
 ///
 /// This test verifies that spectator synchronization works reliably with
-/// various sync configuration presets. Each preset has different timing
-/// characteristics that might interact with platform scheduling.
+/// various sync configuration presets using deterministic infrastructure.
 #[test]
-#[serial]
 fn test_sync_config_presets_data_driven() -> Result<(), FortressError> {
     // Test cases with different sync configurations
     struct SyncConfigTestCase {
@@ -197,13 +197,14 @@ fn test_sync_config_presets_data_driven() -> Result<(), FortressError> {
     ];
 
     for case in &test_cases {
-        // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
-        let (socket1, host_addr) = bind_socket_ephemeral()?;
-        let (socket2, spec_addr) = bind_socket_ephemeral()?;
+        // Create fresh clock and channel pair for each iteration
+        let clock = TestClock::new();
+        let (socket1, socket2, host_addr, spec_addr) = create_channel_pair();
 
         let mut host_sess = SessionBuilder::<StubConfig>::new()
             .with_num_players(2)
             .unwrap()
+            .with_protocol_config(protocol_config(&clock))
             .with_sync_config(case.config)
             .add_player(PlayerType::Local, PlayerHandle::new(0))?
             .add_player(PlayerType::Local, PlayerHandle::new(1))?
@@ -214,12 +215,13 @@ fn test_sync_config_presets_data_driven() -> Result<(), FortressError> {
         let mut spec_sess = SessionBuilder::<StubConfig>::new()
             .with_num_players(2)
             .unwrap()
+            .with_protocol_config(protocol_config(&clock))
             .with_sync_config(case.config)
             .start_spectator_session(host_addr, socket2)
             .expect("Failed to start spectator session");
 
-        // Use robust synchronization with timeout
-        let result = synchronize_spectator(&mut spec_sess, &mut host_sess);
+        // Use deterministic synchronization
+        let result = synchronize_spectator_deterministic(&mut spec_sess, &mut host_sess, &clock);
 
         assert!(
             result.success,
@@ -247,68 +249,60 @@ fn test_sync_config_presets_data_driven() -> Result<(), FortressError> {
 // ============================================================================
 
 #[test]
-#[serial]
-fn test_current_frame_starts_at_null() -> Result<(), FortressError> {
-    // Use PortAllocator for unbound host address, ephemeral for spectator socket
-    let host_port = PortAllocator::next_port();
-    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
-    let (socket, _spec_addr) = bind_socket_ephemeral()?;
+fn test_current_frame_starts_at_null() {
+    let clock = TestClock::new();
+    let (socket, _spec_addr) = create_unconnected_socket(20001);
+    let host_addr = "127.0.0.1:20002".parse().unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
 
     // Before synchronization, current_frame should be NULL (-1)
     assert!(spec_sess.current_frame().is_null());
-    Ok(())
 }
 
 #[test]
-#[serial]
-fn test_frames_behind_host_initially_zero() -> Result<(), FortressError> {
-    // Use PortAllocator for unbound host address, ephemeral for spectator socket
-    let host_port = PortAllocator::next_port();
-    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
-    let (socket, _spec_addr) = bind_socket_ephemeral()?;
+fn test_frames_behind_host_initially_zero() {
+    let clock = TestClock::new();
+    let (socket, _spec_addr) = create_unconnected_socket(20001);
+    let host_addr = "127.0.0.1:20002".parse().unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
 
     // Both current_frame and last_recv_frame are NULL, so difference is 0
     assert_eq!(spec_sess.frames_behind_host(), 0);
-    Ok(())
 }
 
 #[test]
-#[serial]
-fn test_num_players_default() -> Result<(), FortressError> {
-    // Use PortAllocator for unbound host address, ephemeral for spectator socket
-    let host_port = PortAllocator::next_port();
-    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
-    let (socket, _spec_addr) = bind_socket_ephemeral()?;
+fn test_num_players_default() {
+    let clock = TestClock::new();
+    let (socket, _spec_addr) = create_unconnected_socket(20001);
+    let host_addr = "127.0.0.1:20002".parse().unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
 
     // Default number of players is 2
     assert_eq!(spec_sess.num_players(), 2);
-    Ok(())
 }
 
 #[test]
-#[serial]
-fn test_num_players_custom() -> Result<(), FortressError> {
-    // Use PortAllocator for unbound host address, ephemeral for spectator socket
-    let host_port = PortAllocator::next_port();
-    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
-    let (socket, _spec_addr) = bind_socket_ephemeral()?;
+fn test_num_players_custom() {
+    let clock = TestClock::new();
+    let (socket, _spec_addr) = create_unconnected_socket(20001);
+    let host_addr = "127.0.0.1:20002".parse().unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_num_players(4)
         .unwrap()
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
 
     assert_eq!(spec_sess.num_players(), 4);
-    Ok(())
 }
 
 // ============================================================================
@@ -316,13 +310,12 @@ fn test_num_players_custom() -> Result<(), FortressError> {
 // ============================================================================
 
 #[test]
-#[serial]
-fn test_network_stats_not_synchronized() -> Result<(), FortressError> {
-    // Use PortAllocator for unbound host address (no actual host in this test)
-    let host_port = PortAllocator::next_port();
-    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
-    let (socket, _spec_addr) = bind_socket_ephemeral()?;
+fn test_network_stats_not_synchronized() {
+    let clock = TestClock::new();
+    let (socket, _spec_addr) = create_unconnected_socket(20001);
+    let host_addr = "127.0.0.1:20002".parse().unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
 
@@ -330,7 +323,6 @@ fn test_network_stats_not_synchronized() -> Result<(), FortressError> {
     let result = spec_sess.network_stats();
     assert!(result.is_err());
     assert!(matches!(result, Err(FortressError::NotSynchronized)));
-    Ok(())
 }
 
 // ============================================================================
@@ -338,53 +330,49 @@ fn test_network_stats_not_synchronized() -> Result<(), FortressError> {
 // ============================================================================
 
 #[test]
-#[serial]
-fn test_events_empty_initially() -> Result<(), FortressError> {
-    // Use PortAllocator for unbound host address (no actual host in this test)
-    let host_port = PortAllocator::next_port();
-    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
-    let (socket, _spec_addr) = bind_socket_ephemeral()?;
+fn test_events_empty_initially() {
+    let clock = TestClock::new();
+    let (socket, _spec_addr) = create_unconnected_socket(20001);
+    let host_addr = "127.0.0.1:20002".parse().unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
 
     // Initially, there should be no events
-    let events: Vec<_> = spec_sess.events().collect();
-    assert!(events.is_empty());
-    Ok(())
+    assert_eq!(spec_sess.events().count(), 0);
 }
 
 #[test]
-#[serial]
 fn test_events_generated_during_sync() -> Result<(), FortressError> {
-    let (socket1, host_addr) = bind_socket_ephemeral()?;
-    let (socket2, spec_addr) = bind_socket_ephemeral()?;
+    let clock = TestClock::new();
+    let (socket1, socket2, host_addr, spec_addr) = create_channel_pair();
 
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
         .start_p2p_session(socket1)?;
 
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket2)
         .expect("spectator session should start");
 
     // Poll a few times to generate synchronization events
-    // Include small sleeps to allow messages to propagate reliably
     for _ in 0..10 {
         spec_sess.poll_remote_clients();
         host_sess.poll_remote_clients();
-        thread::sleep(POLL_INTERVAL);
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
     }
 
     // We should get some synchronization events
-    let events: Vec<_> = spec_sess.events().collect();
     // At minimum we should have some events (synchronizing progress)
     // The exact count depends on timing, but there should be some activity
-    assert!(!events.is_empty() || spec_sess.current_state() == SessionState::Running);
+    assert!(spec_sess.events().count() > 0 || spec_sess.current_state() == SessionState::Running);
 
     Ok(())
 }
@@ -394,13 +382,12 @@ fn test_events_generated_during_sync() -> Result<(), FortressError> {
 // ============================================================================
 
 #[test]
-#[serial]
-fn test_advance_frame_before_sync_fails() -> Result<(), FortressError> {
-    // Use PortAllocator for unbound host address (no actual host in this test)
-    let host_port = PortAllocator::next_port();
-    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
-    let (socket, _spec_addr) = bind_socket_ephemeral()?;
+fn test_advance_frame_before_sync_fails() {
+    let clock = TestClock::new();
+    let (socket, _spec_addr) = create_unconnected_socket(20001);
+    let host_addr = "127.0.0.1:20002".parse().unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
 
@@ -408,18 +395,17 @@ fn test_advance_frame_before_sync_fails() -> Result<(), FortressError> {
     let result = spec_sess.advance_frame();
     assert!(result.is_err());
     assert!(matches!(result, Err(FortressError::NotSynchronized)));
-    Ok(())
 }
 
 #[test]
-#[serial]
 fn test_advance_frame_after_sync() -> Result<(), FortressError> {
-    let (socket1, host_addr) = bind_socket_ephemeral()?;
-    let (socket2, spec_addr) = bind_socket_ephemeral()?;
+    let clock = TestClock::new();
+    let (socket1, socket2, host_addr, spec_addr) = create_channel_pair();
 
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
@@ -428,13 +414,14 @@ fn test_advance_frame_after_sync() -> Result<(), FortressError> {
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket2)
         .expect("spectator session should start");
 
     let mut host_game = GameStub::new();
 
-    // Use robust synchronization with timeout and diagnostics
-    let result = synchronize_spectator(&mut spec_sess, &mut host_sess);
+    // Use deterministic synchronization
+    let result = synchronize_spectator_deterministic(&mut spec_sess, &mut host_sess, &clock);
     assert_spectator_synchronized(&spec_sess, &host_sess, &result);
 
     // Advance host a few frames and send inputs
@@ -445,15 +432,14 @@ fn test_advance_frame_after_sync() -> Result<(), FortressError> {
         host_game.handle_requests(requests);
         host_sess.poll_remote_clients();
         spec_sess.poll_remote_clients();
-        // Small sleep to allow message propagation
-        thread::sleep(POLL_INTERVAL);
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
     }
 
     // Give time for messages to propagate
     for _ in 0..20 {
         host_sess.poll_remote_clients();
         spec_sess.poll_remote_clients();
-        thread::sleep(POLL_INTERVAL);
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
     }
 
     // Spectator should now be able to advance frames
@@ -472,38 +458,34 @@ fn test_advance_frame_after_sync() -> Result<(), FortressError> {
 // ============================================================================
 
 #[test]
-#[serial]
-fn test_violation_observer_attached() -> Result<(), FortressError> {
-    // Use PortAllocator for unbound host address (no actual host in this test)
-    let host_port = PortAllocator::next_port();
-    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
-    let (socket, _spec_addr) = bind_socket_ephemeral()?;
+fn test_violation_observer_attached() {
+    let clock = TestClock::new();
+    let (socket, _spec_addr) = create_unconnected_socket(20001);
+    let host_addr = "127.0.0.1:20002".parse().unwrap();
     let observer = Arc::new(CollectingObserver::new());
 
     let spec_sess = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .with_violation_observer(observer)
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
 
     // Verify observer is attached
     assert!(spec_sess.violation_observer().is_some());
-    Ok(())
 }
 
 #[test]
-#[serial]
-fn test_no_violation_observer_by_default() -> Result<(), FortressError> {
-    // Use PortAllocator for unbound host address (no actual host in this test)
-    let host_port = PortAllocator::next_port();
-    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
-    let (socket, _spec_addr) = bind_socket_ephemeral()?;
+fn test_no_violation_observer_by_default() {
+    let clock = TestClock::new();
+    let (socket, _spec_addr) = create_unconnected_socket(20001);
+    let host_addr = "127.0.0.1:20002".parse().unwrap();
     let spec_sess = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
 
     // By default, no observer should be attached
     assert!(spec_sess.violation_observer().is_none());
-    Ok(())
 }
 
 // ============================================================================
@@ -511,14 +493,14 @@ fn test_no_violation_observer_by_default() -> Result<(), FortressError> {
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_spectator_config_buffer_size() -> Result<(), FortressError> {
-    let (socket1, host_addr) = bind_socket_ephemeral()?;
-    let (socket2, spec_addr) = bind_socket_ephemeral()?;
+    let clock = TestClock::new();
+    let (socket1, socket2, host_addr, spec_addr) = create_channel_pair();
 
     let _host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
@@ -535,6 +517,7 @@ fn test_spectator_config_buffer_size() -> Result<(), FortressError> {
     let spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .with_spectator_config(spectator_config)
         .start_spectator_session(host_addr, socket2)
         .expect("spectator session should start");
@@ -546,14 +529,14 @@ fn test_spectator_config_buffer_size() -> Result<(), FortressError> {
 }
 
 #[test]
-#[serial]
 fn test_spectator_with_input_queue_config() -> Result<(), FortressError> {
-    let (socket1, host_addr) = bind_socket_ephemeral()?;
-    let (socket2, spec_addr) = bind_socket_ephemeral()?;
+    let clock = TestClock::new();
+    let (socket1, socket2, host_addr, spec_addr) = create_channel_pair();
 
     let _host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
@@ -563,6 +546,7 @@ fn test_spectator_with_input_queue_config() -> Result<(), FortressError> {
     let spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .with_input_queue_config(InputQueueConfig::high_latency())
         .start_spectator_session(host_addr, socket2)
         .expect("spectator session should start");
@@ -577,24 +561,23 @@ fn test_spectator_with_input_queue_config() -> Result<(), FortressError> {
 // ============================================================================
 
 #[test]
-#[serial]
-fn test_poll_remote_clients_no_host() -> Result<(), FortressError> {
-    // Use PortAllocator for unbound host address (no actual host in this test)
-    let host_port = PortAllocator::next_port();
-    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
-    let (socket, _spec_addr) = bind_socket_ephemeral()?;
+fn test_poll_remote_clients_no_host() {
+    let clock = TestClock::new();
+    let (socket, _spec_addr) = create_unconnected_socket(20001);
+    let host_addr = "127.0.0.1:20002".parse().unwrap();
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
 
     // Polling with no host should not panic
     for _ in 0..10 {
         spec_sess.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
     }
 
     // Should still be synchronizing (no host to sync with)
     assert_eq!(spec_sess.current_state(), SessionState::Synchronizing);
-    Ok(())
 }
 
 // ============================================================================
@@ -602,14 +585,14 @@ fn test_poll_remote_clients_no_host() -> Result<(), FortressError> {
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_full_spectator_flow() -> Result<(), FortressError> {
-    let (socket1, host_addr) = bind_socket_ephemeral()?;
-    let (socket2, spec_addr) = bind_socket_ephemeral()?;
+    let clock = TestClock::new();
+    let (socket1, socket2, host_addr, spec_addr) = create_channel_pair();
 
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
@@ -618,13 +601,14 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket2)
         .expect("spectator session should start");
 
     let mut host_game = GameStub::new();
 
-    // Phase 1: Synchronization - use robust helper with timeout and diagnostics
-    let sync_result = synchronize_spectator(&mut spec_sess, &mut host_sess);
+    // Phase 1: Synchronization - use deterministic helper
+    let sync_result = synchronize_spectator_deterministic(&mut spec_sess, &mut host_sess, &clock);
     assert_spectator_synchronized(&spec_sess, &host_sess, &sync_result);
 
     // Phase 2: Host advances frames and spectator follows
@@ -635,11 +619,11 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
         let requests = host_sess.advance_frame()?;
         host_game.handle_requests(requests);
 
-        // Poll to exchange messages with sleep to allow packet delivery
+        // Poll to exchange messages with virtual time advancement
         for _ in 0..5 {
             host_sess.poll_remote_clients();
             spec_sess.poll_remote_clients();
-            thread::sleep(POLL_INTERVAL);
+            clock.advance(POLL_INTERVAL_DETERMINISTIC);
         }
     }
 
@@ -647,13 +631,11 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
     for _ in 0..30 {
         host_sess.poll_remote_clients();
         spec_sess.poll_remote_clients();
-        thread::sleep(POLL_INTERVAL);
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
     }
 
     // Spectator should be able to get inputs now
-    let result = spec_sess.advance_frame();
-    if result.is_ok() {
-        let requests = result.unwrap();
+    if let Ok(requests) = spec_sess.advance_frame() {
         assert!(!requests.is_empty());
     }
 
@@ -665,14 +647,14 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_synchronized_event_generated() -> Result<(), FortressError> {
-    let (socket1, host_addr) = bind_socket_ephemeral()?;
-    let (socket2, spec_addr) = bind_socket_ephemeral()?;
+    let clock = TestClock::new();
+    let (socket1, socket2, host_addr, spec_addr) = create_channel_pair();
 
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
@@ -681,18 +663,19 @@ fn test_synchronized_event_generated() -> Result<(), FortressError> {
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket2)
         .expect("spectator session should start");
 
     let mut found_synchronized = false;
 
     // NOTE: This test intentionally uses an inline sync loop instead of the centralized
-    // `synchronize_spectator()` helper because we need to capture and inspect events
-    // DURING synchronization. The helper only returns success/failure, not the events
+    // `synchronize_spectator_deterministic()` helper because we need to capture and inspect
+    // events DURING synchronization. The helper only returns success/failure, not the events
     // generated during the handshake process. This test verifies that `Synchronized`
     // events are properly emitted.
-    let start = Instant::now();
-    while start.elapsed() < SYNC_TIMEOUT {
+    let mut iterations = 0;
+    while iterations < MAX_SYNC_ITERATIONS {
         spec_sess.poll_remote_clients();
         host_sess.poll_remote_clients();
 
@@ -705,7 +688,8 @@ fn test_synchronized_event_generated() -> Result<(), FortressError> {
         if spec_sess.current_state() == SessionState::Running {
             break;
         }
-        thread::sleep(POLL_INTERVAL);
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        iterations += 1;
     }
 
     // We should have received a Synchronized event
@@ -715,14 +699,14 @@ fn test_synchronized_event_generated() -> Result<(), FortressError> {
 }
 
 #[test]
-#[serial]
 fn test_synchronizing_events_generated() -> Result<(), FortressError> {
-    let (socket1, host_addr) = bind_socket_ephemeral()?;
-    let (socket2, spec_addr) = bind_socket_ephemeral()?;
+    let clock = TestClock::new();
+    let (socket1, socket2, host_addr, spec_addr) = create_channel_pair();
 
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
@@ -731,22 +715,19 @@ fn test_synchronizing_events_generated() -> Result<(), FortressError> {
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket2)
         .expect("spectator session should start");
 
     let mut found_synchronizing = false;
     let mut iterations = 0;
-    let start = Instant::now();
 
     // NOTE: This test intentionally uses an inline sync loop instead of the centralized
-    // `synchronize_spectator()` helper because we need to capture and inspect events
-    // DURING synchronization. The helper only returns success/failure, not the events
+    // `synchronize_spectator_deterministic()` helper because we need to capture and inspect
+    // events DURING synchronization. The helper only returns success/failure, not the events
     // generated during the handshake process. This test verifies that `Synchronizing`
     // progress events are properly emitted.
-    //
-    // The loop also uses both time-based timeout and iteration limits to handle
-    // platform timing variations (especially macOS CI).
-    while start.elapsed() < SYNC_TIMEOUT && iterations < MAX_SYNC_ITERATIONS {
+    while iterations < MAX_SYNC_ITERATIONS {
         spec_sess.poll_remote_clients();
         host_sess.poll_remote_clients();
         iterations += 1;
@@ -762,8 +743,7 @@ fn test_synchronizing_events_generated() -> Result<(), FortressError> {
             break;
         }
 
-        // Small sleep to allow network layer to process messages
-        thread::sleep(POLL_INTERVAL);
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
     }
 
     // We should have received Synchronizing progress events
@@ -771,11 +751,9 @@ fn test_synchronizing_events_generated() -> Result<(), FortressError> {
         found_synchronizing,
         "Expected Synchronizing events during handshake.\n\
          Iterations: {}\n\
-         Elapsed: {:?}\n\
          Spectator state: {:?}\n\
          Host state: {:?}",
         iterations,
-        start.elapsed(),
         spec_sess.current_state(),
         host_sess.current_state()
     );
@@ -788,10 +766,9 @@ fn test_synchronizing_events_generated() -> Result<(), FortressError> {
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_spectator_catchup_speed() -> Result<(), FortressError> {
-    let (socket1, host_addr) = bind_socket_ephemeral()?;
-    let (socket2, spec_addr) = bind_socket_ephemeral()?;
+    let clock = TestClock::new();
+    let (socket1, socket2, host_addr, spec_addr) = create_channel_pair();
 
     // Configure spectator to catch up faster when behind
     let spectator_config = SpectatorConfig {
@@ -804,6 +781,7 @@ fn test_spectator_catchup_speed() -> Result<(), FortressError> {
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
@@ -812,14 +790,15 @@ fn test_spectator_catchup_speed() -> Result<(), FortressError> {
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .with_spectator_config(spectator_config)
         .start_spectator_session(host_addr, socket2)
         .expect("spectator session should start");
 
     let mut host_game = GameStub::new();
 
-    // Synchronize first with proper timeout and sleeps for reliable timing
-    let result = synchronize_spectator(&mut spec_sess, &mut host_sess);
+    // Synchronize first with deterministic helper
+    let result = synchronize_spectator_deterministic(&mut spec_sess, &mut host_sess, &clock);
     assert_spectator_synchronized(&spec_sess, &host_sess, &result);
 
     // Have host advance many frames ahead
@@ -831,12 +810,11 @@ fn test_spectator_catchup_speed() -> Result<(), FortressError> {
         host_sess.poll_remote_clients();
     }
 
-    // Let messages propagate with proper timing
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(1) {
+    // Let messages propagate with virtual time
+    for _ in 0..100 {
         host_sess.poll_remote_clients();
         spec_sess.poll_remote_clients();
-        thread::sleep(POLL_INTERVAL);
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
     }
 
     // Spectator should now be behind and catch up
@@ -848,15 +826,14 @@ fn test_spectator_catchup_speed() -> Result<(), FortressError> {
 }
 
 #[test]
-#[serial]
 fn test_multiple_spectators_same_host() -> Result<(), FortressError> {
-    let (socket1, host_addr) = bind_socket_ephemeral()?;
-    let (socket2, spec_addr1) = bind_socket_ephemeral()?;
-    let (socket3, spec_addr2) = bind_socket_ephemeral()?;
+    let clock = TestClock::new();
+    let (socket1, socket2, socket3, host_addr, spec_addr1, spec_addr2) = create_channel_triple();
 
     let mut host_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .add_player(PlayerType::Spectator(spec_addr1), PlayerHandle::new(2))?
@@ -866,23 +843,25 @@ fn test_multiple_spectators_same_host() -> Result<(), FortressError> {
     let mut spec_sess1 = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket2)
         .expect("spectator session should start");
 
     let mut spec_sess2 = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket3)
         .expect("spectator session should start");
 
     // NOTE: This test intentionally uses an inline sync loop instead of the centralized
-    // `synchronize_spectator()` helper because we need to synchronize THREE sessions
-    // simultaneously (one host and TWO spectators). The helper only supports one
+    // `synchronize_spectator_deterministic()` helper because we need to synchronize THREE
+    // sessions simultaneously (one host and TWO spectators). The helper only supports one
     // spectator + one host pair. Using two sequential calls would not correctly test
     // the scenario where both spectators synchronize concurrently with the same host.
-    let start = Instant::now();
     let mut all_synced = false;
-    while start.elapsed() < SYNC_TIMEOUT && !all_synced {
+    let mut iterations = 0;
+    while iterations < MAX_SYNC_ITERATIONS && !all_synced {
         spec_sess1.poll_remote_clients();
         spec_sess2.poll_remote_clients();
         host_sess.poll_remote_clients();
@@ -892,18 +871,19 @@ fn test_multiple_spectators_same_host() -> Result<(), FortressError> {
             && host_sess.current_state() == SessionState::Running;
 
         if !all_synced {
-            thread::sleep(POLL_INTERVAL);
+            clock.advance(POLL_INTERVAL_DETERMINISTIC);
         }
+        iterations += 1;
     }
 
     // Both spectators should sync with detailed diagnostics on failure
     assert!(
         all_synced,
-        "Failed to synchronize all sessions after {:?}.\n\
+        "Failed to synchronize all sessions after {} iterations.\n\
          Host state: {:?}\n\
          Spectator 1 state: {:?}\n\
          Spectator 2 state: {:?}",
-        start.elapsed(),
+        iterations,
         host_sess.current_state(),
         spec_sess1.current_state(),
         spec_sess2.current_state()
@@ -913,33 +893,29 @@ fn test_multiple_spectators_same_host() -> Result<(), FortressError> {
 }
 
 #[test]
-#[serial]
-fn test_spectator_disconnect_timeout() -> Result<(), FortressError> {
-    // Use PortAllocator for unbound host address (no actual host in this test)
-    let host_port = PortAllocator::next_port();
-    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
+fn test_spectator_disconnect_timeout() {
+    let clock = TestClock::new();
+    let (socket, _spec_addr) = create_unconnected_socket(20001);
+    let host_addr = "127.0.0.1:20002".parse().unwrap();
 
     // Create spectator that expects a connection
-    let (socket, _spec_addr) = bind_socket_ephemeral()?;
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)
         .unwrap()
+        .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket)
         .expect("spectator session should start");
 
-    // Poll for a while without any host
+    // Poll for a while without any host, advancing virtual time
     for _ in 0..20 {
         spec_sess.poll_remote_clients();
-        thread::sleep(Duration::from_millis(10));
+        clock.advance(Duration::from_millis(10));
     }
 
     // Should still be in synchronizing state (waiting for host)
     assert_eq!(spec_sess.current_state(), SessionState::Synchronizing);
 
     // Events may contain sync timeout or still be empty
-    let events: Vec<_> = spec_sess.events().collect();
     // Just verify we don't panic and can collect events
-    drop(events);
-
-    Ok(())
+    let _events: Vec<_> = spec_sess.events().collect();
 }

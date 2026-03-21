@@ -1,3 +1,5 @@
+<!-- SYNC: This wiki page is generated from docs/fortress-vs-ggrs.md. Edit docs source. -->
+
 <p align="center">
   <img src="assets/logo.svg" alt="Fortress Rollback" width="128">
 </p>
@@ -8,21 +10,21 @@ This document summarizes the key differences between **Fortress Rollback** (this
 
 ## Quick Summary
 
-| Category | GGRS | Fortress Rollback |
-|----------|------|-------------------|
-| **Determinism** | `HashMap`/`HashSet` (non-deterministic iteration) | `BTreeMap`/`BTreeSet` (guaranteed order) |
-| **Panic Safety** | Some `assert!` and `panic!` in library code | All converted to recoverable errors |
-| **Test Coverage** | Basic test suite | ~1500 tests (~92% coverage) |
-| **Formal Verification** | None | TLA+, Z3 SMT proofs, Kani proofs |
-| **Hashing** | `DefaultHasher` (random seed per process) | FNV-1a deterministic hashing |
-| **Dependencies** | `bitfield-rle`, `varinteger`, `rand` | Internal implementations (fewer deps) |
-| **Type Safety** | `Config::Address` requires `Hash` | `Config::Address` requires `Hash` + `Ord` |
-| **Desync Detection** | Off by default (opt-in) | On by default (`interval: 60`) |
-| **WASM Support** | Requires `wasm-bindgen` + `getrandom/js` features | Works out of the box, no special features |
-| **Time API** | `std::time::Instant` (not WASM-compatible) | `web_time::Instant` (cross-platform) |
-| **Spectator Handles** | May include local players in spectator lists | Explicit `is_spectator_for()` validation |
-| **Error Types** | String-based allocation on hot paths | Dual-variant pattern (Copy for hot paths) |
-| **Build-time Validation** | Some panics at runtime | Returns `Result` at build time |
+| Category                  | GGRS                                              | Fortress Rollback                         |
+| ------------------------- | ------------------------------------------------- | ----------------------------------------- |
+| **Determinism**           | `HashMap`/`HashSet` (non-deterministic iteration) | `BTreeMap`/`BTreeSet` (guaranteed order)  |
+| **Panic Safety**          | Some `assert!` and `panic!` in library code       | All converted to recoverable errors       |
+| **Test Coverage**         | Basic test suite                                  | ~1600 tests (~92% coverage)               |
+| **Formal Verification**   | None                                              | TLA+, Z3 SMT proofs, Kani proofs          |
+| **Hashing**               | `DefaultHasher` (random seed per process)         | FNV-1a deterministic hashing              |
+| **Dependencies**          | `bitfield-rle`, `varinteger`, `rand`              | Internal implementations (fewer deps)     |
+| **Type Safety**           | `Config::Address` requires `Hash`                 | `Config::Address` requires `Hash` + `Ord` |
+| **Desync Detection**      | Off by default (opt-in)                           | On by default (`interval: 60`)            |
+| **WASM Support**          | Requires `wasm-bindgen` + `getrandom/js` features | Works out of the box, no special features |
+| **Time API**              | `std::time::Instant` (not WASM-compatible)        | `web_time::Instant` (cross-platform)      |
+| **Spectator Handles**     | May include local players in spectator lists      | Explicit `is_spectator_for()` validation  |
+| **Error Types**           | String-based allocation on hot paths              | Dual-variant pattern (Copy for hot paths) |
+| **Build-time Validation** | Some panics at runtime                            | Returns `Result` at build time            |
 
 ---
 
@@ -73,7 +75,7 @@ let session = SessionBuilder::<MyConfig>::new()
     .with_sync_config(SyncConfig::high_latency())
     .with_protocol_config(ProtocolConfig::competitive())
     .with_time_sync_config(TimeSyncConfig::responsive())
-    .start_p2p_session()?;
+    .start_p2p_session(socket)?;
 ```
 
 ---
@@ -259,7 +261,7 @@ This means the same code works across all platforms without feature flags or con
 Fortress implements its own PCG32 (Permuted Congruential Generator) to eliminate external dependencies:
 
 ```rust
-use fortress_rollback::rng::Pcg32;
+use fortress_rollback::rng::{Pcg32, Rng, SeedableRng};
 
 let mut rng = Pcg32::seed_from_u64(12345);
 let value: u32 = rng.next_u32();
@@ -279,7 +281,7 @@ let range_value: u32 = rng.gen_range(1..100);
 ```rust
 use fortress_rollback::hash::{fnv1a_hash, DeterministicHasher};
 
-// Hash any serializable data deterministically
+// Hash any hashable data deterministically
 let checksum = fnv1a_hash(&game_state);
 
 // Or use the hasher directly
@@ -326,6 +328,7 @@ pub enum InvalidFrameReason {
     WrongSavedFrame { saved_frame: Frame },
     NotConfirmed { confirmed_frame: Frame },
     NullOrNegative,
+    MissingState,
     Custom(&'static str),
 }
 ```
@@ -390,9 +393,9 @@ composite.add(tracing_observer.clone());
 composite.add(collecting_observer.clone());
 let composite = Arc::new(composite);
 
-let session = SessionBuilder::new()
+let session = SessionBuilder::<MyConfig>::new()
     .with_violation_observer(composite)
-    .start_p2p_session()?;
+    .start_p2p_session(socket)?;
 
 // After gameplay, check for issues
 if !collecting_observer.is_empty() {
@@ -408,13 +411,13 @@ if !collecting_observer.is_empty() {
 
 **Key configuration areas:**
 
-| Config | Controls | Why It Matters |
-|--------|----------|----------------|
-| `SyncConfig` | Connection handshake timing | Faster sync on LAN, more retries on lossy networks |
-| `ProtocolConfig` | Network quality reporting, timeouts | Affect disconnect detection sensitivity |
-| `TimeSyncConfig` | Frame timing window size | Trade-off between smoothness and responsiveness |
-| `SpectatorConfig` | Spectator buffer and catch-up | Smooth streaming vs low latency viewing |
-| `InputQueueConfig` | Input buffer size | Memory vs max rollback distance |
+| Config             | Controls                            | Why It Matters                                     |
+| ------------------ | ----------------------------------- | -------------------------------------------------- |
+| `SyncConfig`       | Connection handshake timing         | Faster sync on LAN, more retries on lossy networks |
+| `ProtocolConfig`   | Network quality reporting, timeouts | Affect disconnect detection sensitivity            |
+| `TimeSyncConfig`   | Frame timing window size            | Trade-off between smoothness and responsiveness    |
+| `SpectatorConfig`  | Spectator buffer and catch-up       | Smooth streaming vs low latency viewing            |
+| `InputQueueConfig` | Input buffer size                   | Memory vs max rollback distance                    |
 
 Built-in presets for common network scenarios:
 
@@ -472,7 +475,7 @@ ChaosConfig::intercontinental() // High-latency stable connection
 
 ### Testing
 
-- **~1500 tests** (unit + integration + property-based)
+- **~1600 tests** (unit + integration + property-based)
 - **~92% code coverage**
 - Property-based tests with proptest
 - Mutation testing (95% detection rate)
@@ -488,13 +491,13 @@ ChaosConfig::intercontinental() // High-latency stable connection
 
 ### Dependencies Reduced
 
-| Dependency | GGRS | Fortress |
-|------------|------|----------|
-| `bitfield-rle` | Required | Internal RLE implementation |
-| `varinteger` | Required | Internal implementation |
-| `rand` | Required | Internal PCG32 RNG |
-| `getrandom` | Required (transitive) | Not needed |
-| Time handling | `std::time::Instant` | `web_time::Instant` |
+| Dependency     | GGRS                  | Fortress                    |
+| -------------- | --------------------- | --------------------------- |
+| `bitfield-rle` | Required              | Internal RLE implementation |
+| `varinteger`   | Required              | Internal implementation     |
+| `rand`         | Required              | Internal PCG32 RNG          |
+| `getrandom`    | Required (transitive) | Not needed                  |
+| Time handling  | `std::time::Instant`  | `web_time::Instant`         |
 
 ---
 
@@ -518,7 +521,7 @@ Fortress Rollback is a **correctness-first fork** of GGRS. The main benefits are
 
 1. **Determinism guaranteed** - No more subtle desyncs from collection iteration order
 2. **Panic-free** - All library code returns `Result` types
-3. **Battle-tested** - ~1500 tests and formal verification
+3. **Battle-tested** - ~1600 tests and formal verification
 4. **Better debugging** - Violation observers and deterministic hashing
 5. **WASM-ready** - Works on all platforms without special feature flags
 6. **Zero-allocation hot paths** - Structured error types avoid heap allocation

@@ -16,17 +16,28 @@
 //! use common::{synchronize_sessions, test_addr};
 //! ```
 
+pub mod channel_socket;
 pub mod stubs;
 pub mod stubs_enum;
+pub mod test_clock;
 pub mod test_utils;
 
 // Re-export commonly used items for convenience.
 // These are public utilities for integration tests - allow unused until tests adopt them.
 #[allow(unused_imports)]
+pub use channel_socket::{
+    create_channel_pair, create_channel_quad, create_channel_triple, create_chaos_channel_pair,
+    create_unconnected_socket, ChannelSocket,
+};
+#[allow(unused_imports)]
+pub use test_clock::TestClock;
+#[allow(unused_imports)]
 pub use test_utils::{
     assert_spectator_synchronized, bind_socket_ephemeral, bind_socket_with_retry, calculate_hash,
-    create_chaos_socket, drain_sync_events, poll_with_sleep, run_p2p_frame_advancement_test,
-    run_synctest_with_delayed_input, synchronize_sessions, synchronize_spectator, test_addr,
-    GameStubHandler, PortAllocator, SyncConfig, SyncResult, MAX_SYNC_ITERATIONS, POLL_INTERVAL,
-    SYNC_TIMEOUT,
+    create_chaos_socket, drain_sync_events, poll_with_advance, poll_with_sleep,
+    run_p2p_frame_advancement_test, run_p2p_frame_advancement_test_deterministic,
+    run_synctest_with_delayed_input, synchronize_sessions, synchronize_sessions_deterministic,
+    synchronize_spectator, synchronize_spectator_deterministic, test_addr, GameStubHandler,
+    PortAllocator, SyncConfig, SyncResult, MAX_SYNC_ITERATIONS, POLL_INTERVAL,
+    POLL_INTERVAL_DETERMINISTIC, SYNC_TIMEOUT,
 };

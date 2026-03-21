@@ -1,4 +1,4 @@
-<!-- SYNC: This file should be kept in sync with docs/user-guide.md -->
+<!-- SYNC: This wiki page is generated from docs/user-guide.md. Edit docs source. -->
 
 <p align="center">
   <img src="assets/logo.svg" alt="Fortress Rollback" width="128">
@@ -32,6 +32,7 @@ This guide walks you through integrating Fortress Rollback into your game. By th
     - [ChaosSocket for Testing](#chaossocket-for-testing)
     - [ChaosConfig Presets](#chaosconfig-presets)
     - [ChaosStats](#chaosstats)
+    - [Custom Clock (Time Control)](#custom-clock-time-control)
     - [SessionState](#sessionstate)
     - [Prediction Strategies](#prediction-strategies)
 11. [Feature Flags](#feature-flags)
@@ -41,13 +42,14 @@ This guide walks you through integrating Fortress Rollback into your game. By th
     - [Platform-Specific Features](#platform-specific-features)
 12. [Spectator Sessions](#spectator-sessions)
 13. [Testing with SyncTest](#testing-with-synctest)
-14. [Common Patterns](#common-patterns)
-15. [Common Pitfalls](#common-pitfalls)
+14. [Using the Session Trait](#using-the-session-trait)
+15. [Common Patterns](#common-patterns)
+16. [Common Pitfalls](#common-pitfalls)
     - [Session Termination Anti-Pattern](#session-termination-the-last_confirmed_frame-anti-pattern)
     - [Desync Detection Defaults](#understanding-desync-detection-defaults)
     - [NetworkStats Checksum Fields](#networkstats-checksum-fields-for-desync-detection)
-16. [Desync Detection and SyncHealth API](#desync-detection-and-synchealth-api)
-17. [Troubleshooting](#troubleshooting)
+17. [Desync Detection and SyncHealth API](#desync-detection-and-synchealth-api)
+18. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -147,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 > - **[`handle_requests!` macro](#using-the-handle_requests-macro)** — Eliminate match boilerplate with a concise macro
 > - **[`compute_checksum()`](#computing-checksums)** — Enable desync detection with built-in deterministic hashing
 > - **[Config Presets](#syncconfig-presets)** — Use `SyncConfig::lan()`, `ProtocolConfig::competitive()`, etc. for common network conditions
-> - **[Request Handling Example](../examples/request_handling.rs)** — Complete example showing both manual matching and macro usage
+> - **[Request Handling Example](https://github.com/wallstop/fortress-rollback/blob/main/examples/request_handling.rs)** — Complete example showing both manual matching and macro usage
 
 ---
 
@@ -260,11 +262,11 @@ let mut session = SessionBuilder::<GameConfig>::new()
 
 Input delay trades responsiveness for smoothness:
 
-| Delay | Effect |
-|-------|--------|
-| 0 | Immediate response, frequent rollbacks |
-| 2 | Slight delay, fewer rollbacks |
-| 4+ | Noticeable delay, rare rollbacks |
+| Delay | Effect                                 |
+| ----- | -------------------------------------- |
+| 0     | Immediate response, frequent rollbacks |
+| 2     | Slight delay, fewer rollbacks          |
+| 4+    | Noticeable delay, rare rollbacks       |
 
 A delay of 2 frames is a good starting point for most games.
 
@@ -450,22 +452,22 @@ let all_handles = session.local_player_handles();
 
 ### Method Reference
 
-| Method | Returns | Use Case |
-|--------|---------|----------|
-| `local_player_handle()` | `Option<PlayerHandle>` | First local player (if any) |
-| `local_player_handle_required()` | `Result<PlayerHandle>` | Single local player or error |
-| `local_player_handles()` | `HandleVec` | All local players |
-| `remote_player_handle()` | `Option<PlayerHandle>` | First remote player (if any) |
-| `remote_player_handle_required()` | `Result<PlayerHandle>` | Single remote player or error |
-| `remote_player_handles()` | `HandleVec` | All remote players |
-| `is_local_player(handle)` | `bool` | Check if handle is local |
-| `is_remote_player(handle)` | `bool` | Check if handle is remote |
-| `is_spectator_handle(handle)` | `bool` | Check if handle is spectator |
-| `spectator_handles()` | `HandleVec` | All spectator handles |
-| `player_type(handle)` | `Option<PlayerType>` | Full type info for handle |
-| `num_local_players()` | `usize` | Count of local players |
-| `num_remote_players()` | `usize` | Count of remote players |
-| `all_player_handles()` | `HandleVec` | All handles (local + remote + spectators) |
+| Method                            | Returns                | Use Case                                  |
+| --------------------------------- | ---------------------- | ----------------------------------------- |
+| `local_player_handle()`           | `Option<PlayerHandle>` | First local player (if any)               |
+| `local_player_handle_required()`  | `Result<PlayerHandle>` | Single local player or error              |
+| `local_player_handles()`          | `HandleVec`            | All local players                         |
+| `remote_player_handle()`          | `Option<PlayerHandle>` | First remote player (if any)              |
+| `remote_player_handle_required()` | `Result<PlayerHandle>` | Single remote player or error             |
+| `remote_player_handles()`         | `HandleVec`            | All remote players                        |
+| `is_local_player(handle)`         | `bool`                 | Check if handle is local                  |
+| `is_remote_player(handle)`        | `bool`                 | Check if handle is remote                 |
+| `is_spectator_handle(handle)`     | `bool`                 | Check if handle is spectator              |
+| `spectator_handles()`             | `HandleVec`            | All spectator handles                     |
+| `player_type(handle)`             | `Option<PlayerType>`   | Full type info for handle                 |
+| `num_local_players()`             | `usize`                | Count of local players                    |
+| `num_remote_players()`            | `usize`                | Count of remote players                   |
+| `all_player_handles()`            | `HandleVec`            | All handles (local + remote + spectators) |
 
 ---
 
@@ -635,7 +637,7 @@ fn handle_requests_simple(
                 eprintln!("WARNING: LoadGameState for frame {frame:?} but no state found");
             }
         },
-        advance: |inputs: InputVec<Input>| {
+        advance: |inputs: InputVec<GameInput>| {
             for (_input, _status) in inputs.iter() {
                 // Apply input
             }
@@ -652,7 +654,7 @@ handle_requests!(
     requests,
     save: |_, _| { /* Never called in lockstep */ },
     load: |_, _| { /* Never called in lockstep */ },
-    advance: |inputs: InputVec<Input>| {
+    advance: |inputs: InputVec<GameInput>| {
         game_state.frame += 1;
     }
 );
@@ -803,14 +805,14 @@ fn handle_event(event: FortressEvent<GameConfig>) {
 
 ### Common Determinism Issues
 
-| Issue | Solution |
-|-------|----------|
+| Issue                      | Solution                                 |
+| -------------------------- | ---------------------------------------- |
 | Floating-point differences | Use fixed-point math, or be very careful |
-| Random numbers | Use seeded RNG, sync seed across clients |
-| HashMap iteration order | Use `BTreeMap` instead |
-| System time | Only use frame number, not wall clock |
-| Uninitialized memory | Initialize all state |
-| Different library versions | Ensure all clients use same code |
+| Random numbers             | Use seeded RNG, sync seed across clients |
+| HashMap iteration order    | Use `BTreeMap` instead                   |
+| System time                | Only use frame number, not wall clock    |
+| Uninitialized memory       | Initialize all state                     |
+| Different library versions | Ensure all clients use same code         |
 
 ### Testing Determinism
 
@@ -835,12 +837,12 @@ Rollback networking works best under certain network conditions. Understanding t
 
 ### Supported Network Conditions
 
-| Condition | Supported Range | Optimal | Notes |
-|-----------|-----------------|---------|-------|
-| **Round-Trip Time (RTT)** | <200ms | <100ms | Higher RTT = more rollbacks |
-| **Packet Loss** | <15% | <5% | Above 15% causes frequent desyncs |
-| **Jitter** | <50ms | <20ms | High jitter causes prediction failures |
-| **Bandwidth** | >56 kbps | >256 kbps | Per-connection requirement |
+| Condition                 | Supported Range | Optimal   | Notes                                  |
+| ------------------------- | --------------- | --------- | -------------------------------------- |
+| **Round-Trip Time (RTT)** | <200ms          | <100ms    | Higher RTT = more rollbacks            |
+| **Packet Loss**           | <15%            | <5%       | Above 15% causes frequent desyncs      |
+| **Jitter**                | <50ms           | <20ms     | High jitter causes prediction failures |
+| **Bandwidth**             | >56 kbps        | >256 kbps | Per-connection requirement             |
 
 ### Condition Effects
 
@@ -871,13 +873,13 @@ Rollback networking works best under certain network conditions. Understanding t
 
 ### Conditions to Avoid
 
-| Condition | Problem | Mitigation |
-|-----------|---------|------------|
-| Packet loss >15% | Frequent sync failures, desyncs | Use wired connection, improve network |
-| Jitter >50ms | Prediction failures, stuttering | QoS settings, reduce network congestion |
-| Asymmetric routes | One player experiences more rollbacks | Cannot mitigate at application level |
-| NAT traversal issues | Connection failures | Use STUN/TURN, port forwarding |
-| Mobile networks | High variability | WiFi recommended over cellular |
+| Condition            | Problem                               | Mitigation                              |
+| -------------------- | ------------------------------------- | --------------------------------------- |
+| Packet loss >15%     | Frequent sync failures, desyncs       | Use wired connection, improve network   |
+| Jitter >50ms         | Prediction failures, stuttering       | QoS settings, reduce network congestion |
+| Asymmetric routes    | One player experiences more rollbacks | Cannot mitigate at application level    |
+| NAT traversal issues | Connection failures                   | Use STUN/TURN, port forwarding          |
+| Mobile networks      | High variability                      | WiFi recommended over cellular          |
 
 ### SyncConfig Presets
 
@@ -919,14 +921,16 @@ let session = SessionBuilder::<GameConfig>::new()
 
 **Preset Comparison:**
 
-| Preset | Sync Packets | Retry Interval | Timeout | Best For |
-|--------|--------------|----------------|---------|----------|
-| `default()` | 5 | 200ms | None | General internet play |
-| `lan()` | 3 | 100ms | 5s | LAN parties, localhost |
-| `high_latency()` | 5 | 400ms | 10s | Intercontinental, WiFi |
-| `lossy()` | 8 | 200ms | 10s | Unstable connections |
-| `mobile()` | 10 | 350ms | 15s | Mobile/cellular networks |
-| `competitive()` | 4 | 100ms | 3s | Esports, tournaments |
+| Preset           | Sync Packets | Retry Interval | Timeout | Best For                                    |
+| ---------------- | ------------ | -------------- | ------- | ------------------------------------------- |
+| `default()`      | 5            | 200ms          | None    | General internet play                       |
+| `lan()`          | 3            | 100ms          | 5s      | LAN parties, localhost                      |
+| `high_latency()` | 5            | 400ms          | 10s     | Intercontinental, WiFi                      |
+| `lossy()`        | 8            | 200ms          | 10s     | Unstable connections                        |
+| `mobile()`       | 10           | 350ms          | 15s     | Mobile/cellular networks                    |
+| `competitive()`  | 4            | 100ms          | 3s      | Esports, tournaments                        |
+| `extreme()`      | 20           | 250ms          | 30s     | Extreme burst loss, hostile networks        |
+| `stress_test()`  | 40           | 150ms          | 60s     | Automated testing only (not for production) |
 
 ### Network Scenario Configuration Guide
 
@@ -1403,17 +1407,17 @@ for handle in session.remote_player_handles() {
 
 #### NetworkStats Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `ping` | `u128` | Round-trip time in milliseconds |
-| `send_queue_len` | `usize` | Number of unacknowledged packets (connection quality indicator) |
-| `kbps_sent` | `usize` | Estimated bandwidth usage in kilobits per second |
-| `local_frames_behind` | `i32` | How many frames behind the local client is compared to remote |
-| `remote_frames_behind` | `i32` | How many frames behind the remote client is compared to local |
-| `last_compared_frame` | `Option<Frame>` | Most recent frame where checksums were compared |
-| `local_checksum` | `Option<u128>` | Local checksum at `last_compared_frame` |
-| `remote_checksum` | `Option<u128>` | Remote checksum at `last_compared_frame` |
-| `checksums_match` | `Option<bool>` | `true` if synchronized, `false` if desync detected |
+| Field                  | Type            | Description                                                     |
+| ---------------------- | --------------- | --------------------------------------------------------------- |
+| `ping`                 | `u128`          | Round-trip time in milliseconds                                 |
+| `send_queue_len`       | `usize`         | Number of unacknowledged packets (connection quality indicator) |
+| `kbps_sent`            | `usize`         | Estimated bandwidth usage in kilobits per second                |
+| `local_frames_behind`  | `i32`           | How many frames behind the local client is compared to remote   |
+| `remote_frames_behind` | `i32`           | How many frames behind the remote client is compared to local   |
+| `last_compared_frame`  | `Option<Frame>` | Most recent frame where checksums were compared                 |
+| `local_checksum`       | `Option<u128>`  | Local checksum at `last_compared_frame`                         |
+| `remote_checksum`      | `Option<u128>`  | Remote checksum at `last_compared_frame`                        |
+| `checksums_match`      | `Option<bool>`  | `true` if synchronized, `false` if desync detected              |
 
 #### Example: Debug Overlay
 
@@ -1523,14 +1527,14 @@ let socket = ChaosSocket::new(inner_socket, chaos_config);
 
 `ChaosConfig` provides several presets for common network scenarios:
 
-| Preset | Latency | Jitter | Loss | Use Case |
-|--------|---------|--------|------|----------|
-| `passthrough()` | 0ms | 0ms | 0% | No chaos (transparent wrapper) |
-| `poor_network()` | 100ms | 50ms | 5% | Typical poor connection |
-| `terrible_network()` | 250ms | 100ms | 15% | Stress testing, 2% duplication, reordering |
-| `mobile_network()` | 60ms | 40ms | 12% | 4G/LTE with burst loss (handoff simulation) |
-| `wifi_interference()` | 15ms | 25ms | 3% | Congested WiFi with bursty loss |
-| `intercontinental()` | 120ms | 15ms | 2% | Transatlantic/transpacific connections |
+| Preset                | Latency | Jitter | Loss | Use Case                                    |
+| --------------------- | ------- | ------ | ---- | ------------------------------------------- |
+| `passthrough()`       | 0ms     | 0ms    | 0%   | No chaos (transparent wrapper)              |
+| `poor_network()`      | 100ms   | 50ms   | 5%   | Typical poor connection                     |
+| `terrible_network()`  | 250ms   | 100ms  | 15%  | Stress testing, 2% duplication, reordering  |
+| `mobile_network()`    | 60ms    | 40ms   | 12%  | 4G/LTE with burst loss (handoff simulation) |
+| `wifi_interference()` | 15ms    | 25ms   | 3%   | Congested WiFi with bursty loss             |
+| `intercontinental()`  | 120ms   | 15ms   | 2%   | Transatlantic/transpacific connections      |
 
 **Using presets:**
 
@@ -1601,16 +1605,172 @@ println!("Burst loss events: {}", stats.burst_loss_events);
 socket.reset_stats();
 ```
 
-| Field | Description |
-|-------|-------------|
-| `packets_sent` | Total packets sent through the socket |
-| `packets_dropped_send` | Packets dropped on send |
-| `packets_dropped_receive` | Packets dropped on receive |
-| `packets_duplicated` | Packets duplicated on send |
-| `packets_received` | Total packets received |
-| `packets_reordered` | Packets reordered |
-| `burst_loss_events` | Number of burst loss events triggered |
-| `packets_dropped_burst` | Packets dropped due to burst loss |
+| Field                     | Description                           |
+| ------------------------- | ------------------------------------- |
+| `packets_sent`            | Total packets sent through the socket |
+| `packets_dropped_send`    | Packets dropped on send               |
+| `packets_dropped_receive` | Packets dropped on receive            |
+| `packets_duplicated`      | Packets duplicated on send            |
+| `packets_received`        | Total packets received                |
+| `packets_reordered`       | Packets reordered                     |
+| `burst_loss_events`       | Number of burst loss events triggered |
+| `packets_dropped_burst`   | Packets dropped due to burst loss     |
+
+### Custom Clock (Time Control)
+
+Protocol timers -- sync retries, keepalives, disconnect timeouts, quality reports -- all depend on wall-clock time via `Instant::now()`. In automated tests, especially on slow or loaded CI runners, this causes flakiness: a thread that doesn't get scheduled quickly enough can trigger a spurious disconnect, and tests that rely on `thread::sleep()` to advance timers are slow and non-deterministic.
+
+The **clock abstraction** solves this by letting you inject a custom time source into the protocol. Instead of reading the real system clock, the protocol calls your function, and you control when time advances.
+
+**Key types:**
+
+| Type / Field                | Description                                                                   |
+| --------------------------- | ----------------------------------------------------------------------------- |
+| `ClockFn`                   | `Arc<dyn Fn() -> Instant + Send + Sync>` -- an injectable time source         |
+| `ProtocolConfig::clock`     | `Option<ClockFn>` -- when `Some`, the protocol uses this clock for all timing |
+| `ChaosSocket::with_clock()` | Injects a custom clock into ChaosSocket for deterministic latency simulation  |
+
+When `clock` is `None` (the default), the protocol uses `Instant::now()` directly. This is the correct setting for production.
+
+#### Creating a Controllable Clock
+
+A test clock is a shared `Instant` behind a `Mutex` that only advances when you tell it to:
+
+```rust
+use std::sync::{Arc, Mutex};
+use web_time::{Duration, Instant};
+use fortress_rollback::ClockFn;
+
+// Shared mutable time source
+let current_time = Arc::new(Mutex::new(Instant::now()));
+
+// Build a ClockFn that reads from the shared state
+let clock_state = Arc::clone(&current_time);
+let clock: ClockFn = Arc::new(move || {
+    *clock_state.lock().unwrap() // test: panics are acceptable in tests
+});
+
+// Advance time by 200ms (replaces thread::sleep)
+{
+    let mut t = current_time.lock().unwrap(); // test: panics are acceptable in tests
+    *t += Duration::from_millis(200);
+}
+```
+
+#### Injecting into ProtocolConfig
+
+Pass the clock when constructing your `ProtocolConfig`. For full determinism in tests, combine the clock with a fixed RNG seed via `deterministic()`:
+
+```rust
+use std::sync::{Arc, Mutex};
+use web_time::Instant;
+use fortress_rollback::{ClockFn, ProtocolConfig};
+
+let current_time = Arc::new(Mutex::new(Instant::now()));
+let clock_state = Arc::clone(&current_time);
+let clock: ClockFn = Arc::new(move || {
+    *clock_state.lock().unwrap() // test: panics are acceptable in tests
+});
+
+let protocol_config = ProtocolConfig {
+    clock: Some(clock),
+    ..ProtocolConfig::deterministic(42) // fixed RNG seed; clock set above
+};
+// Alternative: use ..ProtocolConfig::default() if you don't need a fixed RNG seed
+```
+
+#### Injecting into ChaosSocket
+
+`ChaosSocket` has its own clock for timing latency simulation. Use `with_clock()` to inject a shared time source so that both the protocol and the socket see the same virtual time:
+
+```rust
+use std::sync::{Arc, Mutex};
+use web_time::{Duration, Instant};
+use fortress_rollback::{ChaosSocket, ChaosConfig, UdpNonBlockingSocket};
+
+let current_time = Arc::new(Mutex::new(Instant::now()));
+
+// Build ChaosSocket with the same clock
+let clock_state = Arc::clone(&current_time);
+let inner = UdpNonBlockingSocket::bind_to_port(7000)?;
+let socket = ChaosSocket::new(inner, ChaosConfig::poor_network())
+    .with_clock(Arc::new(move || {
+        *clock_state.lock().unwrap() // test: panics are acceptable in tests
+    }));
+```
+
+> **Note:** `ChaosSocket::with_clock()` uses `std::time::Instant` internally. On native platforms, this is the same type as `web_time::Instant`, so the same clock function works for both. On WASM targets, these types may differ.
+
+#### Complete Test Example
+
+The following example shows a realistic test pattern that uses a manual clock to advance time deterministically instead of calling `thread::sleep()`:
+
+```rust
+use std::sync::{Arc, Mutex};
+use web_time::{Duration, Instant};
+use fortress_rollback::{
+    ClockFn, ProtocolConfig, ChaosSocket, ChaosConfig,
+    SessionBuilder, UdpNonBlockingSocket,
+};
+
+// 1. Create a shared time source
+let current_time = Arc::new(Mutex::new(Instant::now()));
+
+// 2. Build clock functions from the same shared state
+let protocol_clock_state = Arc::clone(&current_time);
+let protocol_clock: ClockFn = Arc::new(move || {
+    *protocol_clock_state.lock().unwrap() // test: panics are acceptable in tests
+});
+
+let chaos_clock_state = Arc::clone(&current_time);
+let chaos_clock = Arc::new(move || {
+    *chaos_clock_state.lock().unwrap() // test: panics are acceptable in tests
+});
+
+// 3. Configure the protocol with the virtual clock
+let protocol_config = ProtocolConfig {
+    clock: Some(protocol_clock),
+    ..ProtocolConfig::deterministic(42) // fixed RNG seed; clock set above
+};
+
+// 4. Configure ChaosSocket with the same virtual clock
+let inner = UdpNonBlockingSocket::bind_to_port(7000)?;
+let socket = ChaosSocket::new(inner, ChaosConfig::poor_network())
+    .with_clock(chaos_clock);
+
+// 5. Build the session with the clock-aware config and socket
+let session = SessionBuilder::<MyConfig>::new()
+    .with_num_players(2)?
+    .with_protocol_config(protocol_config)
+    .start_p2p_session(socket)?;
+
+// 6. Run test logic -- advance time explicitly instead of sleeping
+// This is instant and deterministic, regardless of CI load:
+fn advance(current_time: &Mutex<Instant>, duration: Duration) {
+    let mut t = current_time.lock().unwrap(); // test: panics are acceptable in tests
+    *t += duration;
+}
+
+// 200ms matches ProtocolConfig's default keepalive/quality_report interval.
+// Advancing by this amount triggers timer-driven protocol behavior.
+advance(&current_time, Duration::from_millis(200));
+
+// Simulate 5 seconds passing (might trigger disconnect timeout)
+advance(&current_time, Duration::from_secs(5));
+```
+
+#### Production Usage
+
+In production, leave the `clock` field as `None` (the default). The protocol will use `Instant::now()` for all timing, which is the correct behavior for real-time gameplay:
+
+```rust
+use fortress_rollback::ProtocolConfig;
+
+// Default config uses the system clock -- correct for production
+let config = ProtocolConfig::default();
+```
+
+The clock abstraction is purely additive and non-breaking. Existing code that does not set the `clock` field continues to work exactly as before.
 
 ### SessionState
 
@@ -1636,10 +1796,10 @@ match session.current_state() {
 }
 ```
 
-| State | Description | Actions Allowed |
-|-------|-------------|------------------|
+| State           | Description                               | Actions Allowed              |
+| --------------- | ----------------------------------------- | ---------------------------- |
 | `Synchronizing` | Establishing connection with remote peers | `poll_remote_clients()` only |
-| `Running` | Fully synchronized, ready for gameplay | All session operations |
+| `Running`       | Fully synchronized, ready for gameplay    | All session operations       |
 
 **Important:** Always check `session.current_state() == SessionState::Running` before calling `add_local_input()` or `advance_frame()`. Attempting these operations while synchronizing will return an error.
 
@@ -1649,10 +1809,10 @@ When a remote player's input hasn't arrived yet, Fortress Rollback uses a *predi
 
 Two built-in strategies are available:
 
-| Strategy | Behavior | Use Case |
-|----------|----------|----------|
-| `RepeatLastConfirmed` | Repeats the player's last confirmed input | Default; good for most games |
-| `BlankPrediction` | Returns the default (blank) input | Games where repeating input is dangerous |
+| Strategy              | Behavior                                  | Use Case                                 |
+| --------------------- | ----------------------------------------- | ---------------------------------------- |
+| `RepeatLastConfirmed` | Repeats the player's last confirmed input | Default; good for most games             |
+| `BlankPrediction`     | Returns the default (blank) input         | Games where repeating input is dangerous |
 
 **`RepeatLastConfirmed`** (default) assumes players tend to hold inputs for multiple frames, which is true for most games:
 
@@ -1689,6 +1849,8 @@ impl<I: Copy + Default> PredictionStrategy<I> for MyPrediction {
 ```
 
 > **⚠️ Determinism Requirement:** Custom prediction strategies MUST be deterministic. All peers must produce the exact same prediction given the same inputs, or desyncs will occur.
+>
+> **Note:** The `PredictionStrategy` trait requires `Send + Sync` supertrait bounds (`pub trait PredictionStrategy<I>: Send + Sync`). Your custom strategy type must be thread-safe.
 
 ---
 
@@ -1698,16 +1860,16 @@ Fortress Rollback provides several Cargo feature flags to customize behavior for
 
 ### Feature Flag Reference
 
-| Feature | Description | Use Case | Dependencies |
-|---------|-------------|----------|--------------|
-| `sync-send` | Adds `Send + Sync` bounds to core traits | Multi-threaded game engines | None |
-| `tokio` | Enables `TokioUdpSocket` for async Tokio applications | Async game servers | `tokio` crate |
-| `json` | Enables JSON serialization for telemetry types | Structured logging/monitoring | `serde_json` crate |
-| `paranoid` | Enables runtime invariant checking in release builds | Debugging production issues | None |
-| `loom` | Enables Loom-compatible synchronization primitives | Concurrency testing | `loom` crate |
-| `z3-verification` | Enables Z3 formal verification tests | Development/CI verification | `z3` crate (system) |
-| `z3-verification-bundled` | Z3 with bundled build (builds from source) | CI environments without system Z3 | `z3` crate |
-| `graphical-examples` | Enables the ex_game graphical examples | Running visual demos | `macroquad` crate |
+| Feature                   | Description                                           | Use Case                          | Dependencies        |
+| ------------------------- | ----------------------------------------------------- | --------------------------------- | ------------------- |
+| `sync-send`               | Adds `Send + Sync` bounds to core traits              | Multi-threaded game engines       | None                |
+| `tokio`                   | Enables `TokioUdpSocket` for async Tokio applications | Async game servers                | `tokio` crate       |
+| `json`                    | Enables JSON serialization for telemetry types        | Structured logging/monitoring     | `serde_json` crate  |
+| `paranoid`                | Enables runtime invariant checking in release builds  | Debugging production issues       | None                |
+| `loom`                    | Enables Loom-compatible synchronization primitives    | Concurrency testing               | `loom` crate        |
+| `z3-verification`         | Enables Z3 formal verification tests                  | Development/CI verification       | `z3` crate (system) |
+| `z3-verification-bundled` | Z3 with bundled build (builds from source)            | CI environments without system Z3 | `z3` crate          |
+| `graphical-examples`      | Enables the ex_game graphical examples                | Running visual demos              | `macroquad` crate   |
 
 > **Note:** WASM support is automatic — no feature flag needed. See [Web / WASM Integration](#web--wasm-integration) below.
 
@@ -1899,14 +2061,14 @@ cargo run --example ex_game_p2p --features graphical-examples -- --local-port 70
 
 Most features are independent and can be combined freely. Here's a matrix showing valid combinations:
 
-| Combination | Valid | Notes |
-|-------------|-------|-------|
-| `sync-send` + `paranoid` | ✅ | Debug multi-threaded issues |
-| `sync-send` + `tokio` | ✅ | Common for async servers |
-| `paranoid` + `z3-verification` | ✅ | Maximum verification |
-| `z3-verification` + `z3-verification-bundled` | ⚠️ | Redundant (bundled implies base) |
-| `loom` + any other | ⚠️ | Loom tests should run in isolation |
-| `graphical-examples` + any | ✅ | Examples are independent |
+| Combination                                   | Valid | Notes                              |
+| --------------------------------------------- | ----- | ---------------------------------- |
+| `sync-send` + `paranoid`                      | ✅     | Debug multi-threaded issues        |
+| `sync-send` + `tokio`                         | ✅     | Common for async servers           |
+| `paranoid` + `z3-verification`                | ✅     | Maximum verification               |
+| `z3-verification` + `z3-verification-bundled` | ⚠️     | Redundant (bundled implies base)   |
+| `loom` + any other                            | ⚠️     | Loom tests should run in isolation |
+| `graphical-examples` + any                    | ✅     | Examples are independent           |
 
 **Recommended combinations:**
 
@@ -1934,12 +2096,12 @@ Fortress Rollback works in the browser with **no feature flags required**. The l
 
 #### What Works Automatically
 
-| Component | Native | WASM |
-|-----------|--------|------|
-| Time (`Instant`) | `std::time` | `web_time` crate |
-| Epoch time | `SystemTime` | `js_sys::Date` |
-| Core rollback logic | ✅ | ✅ |
-| `UdpNonBlockingSocket` | ✅ | ❌ (no UDP in browsers) |
+| Component              | Native       | WASM                   |
+| ---------------------- | ------------ | ---------------------- |
+| Time (`Instant`)       | `std::time`  | `web_time` crate       |
+| Epoch time             | `SystemTime` | `js_sys::Date`         |
+| Core rollback logic    | ✅            | ✅                      |
+| `UdpNonBlockingSocket` | ✅            | ❌ (no UDP in browsers) |
 
 #### Networking in the Browser
 
@@ -2011,7 +2173,7 @@ impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
 }
 ```
 
-See the [custom socket example](../examples/custom_socket.rs) for a complete implementation guide.
+See the [custom socket example](https://github.com/wallstop/fortress-rollback/blob/main/examples/custom_socket.rs) for a complete implementation guide.
 
 #### Building for WASM
 
@@ -2042,11 +2204,11 @@ This trades some runtime performance for smaller binaries. Test both `"s"` and `
 
 Fortress Rollback automatically adapts to different platforms:
 
-| Platform | Time Source | Socket Support | Notes |
-|----------|-------------|----------------|-------|
-| Native (Linux/macOS/Windows) | `std::time::SystemTime` | UDP via `std::net` | Full support |
-| WebAssembly | `js_sys::Date` | Custom via `NonBlockingSocket` | Use Matchbox for WebRTC |
-| No-std | ❌ Not supported | ❌ | Requires allocator |
+| Platform                     | Time Source             | Socket Support                 | Notes                   |
+| ---------------------------- | ----------------------- | ------------------------------ | ----------------------- |
+| Native (Linux/macOS/Windows) | `std::time::SystemTime` | UDP via `std::net`             | Full support            |
+| WebAssembly                  | `js_sys::Date`          | Custom via `NonBlockingSocket` | Use Matchbox for WebRTC |
+| No-std                       | ❌ Not supported         | ❌                              | Requires allocator      |
 
 **WASM considerations:**
 
@@ -2134,6 +2296,137 @@ for frame in 0..1000 {
 ```
 
 If checksums mismatch, you have a determinism bug!
+
+---
+
+## Using the Session Trait
+
+Fortress Rollback provides a unified `Session<T>` trait that all session types implement. This lets you write **generic code** that works identically with `P2PSession`, `SpectatorSession`, and `SyncTestSession` — no code duplication required.
+
+The trait is available in the prelude:
+
+```rust
+use fortress_rollback::prelude::*;
+```
+
+### Why Use the Session Trait?
+
+- **Write once, run anywhere**: A single game loop function works for P2P, spectator, and sync testing
+- **Easier testing**: Swap a `P2PSession` for a `SyncTestSession` without changing game logic
+- **Cleaner architecture**: Decouple your game loop from a specific session type
+
+### Method Overview
+
+The `Session` trait has 2 required methods and 4 provided methods with defaults:
+
+| Method                           | `P2PSession` | `SpectatorSession` |   `SyncTestSession`   |
+| -------------------------------- | :----------: | :----------------: | :-------------------: |
+| `advance_frame()`                |  ✅ Override  |     ✅ Override     |      ✅ Override       |
+| `local_player_handle_required()` |  ✅ Override  | ✅ Override (error) |      ✅ Override       |
+| `add_local_input()`              |  ✅ Override  | ✅ Override (error) |      ✅ Override       |
+| `events()`                       |  ✅ Override  |     ✅ Override     |      ✅ Override       |
+| `current_state()`                |  ✅ Override  |     ✅ Override     | ❌ Default (`Running`) |
+| `poll_remote_clients()`          |  ✅ Override  |     ✅ Override     |   ❌ Default (no-op)   |
+
+Methods marked "Default" return a sensible no-op or constant. For example, `SyncTestSession` has no network, so `poll_remote_clients()` is a no-op.
+
+Note that `network_stats()` is deliberately **not** on the trait — it only makes sense for networked sessions and takes a `PlayerHandle` argument that varies by session type.
+
+### Writing Generic Functions
+
+Use `&mut impl Session<T>` to accept any session type:
+
+```rust
+use fortress_rollback::prelude::*;
+
+fn run_frame<T: Config>(
+    session: &mut impl Session<T>,
+    input: T::Input,
+) -> FortressResult<RequestVec<T>> {
+    let player = session.local_player_handle_required()?;
+    session.add_local_input(player, input)?;
+    let requests = session.advance_frame()?;
+    Ok(requests)
+}
+```
+
+This function works with any session:
+
+```rust
+# use fortress_rollback::prelude::*;
+# fn run_frame<T: Config>(
+#     session: &mut impl Session<T>,
+#     input: T::Input,
+# ) -> FortressResult<RequestVec<T>> {
+#     let player = session.local_player_handle_required()?;
+#     session.add_local_input(player, input)?;
+#     let requests = session.advance_frame()?;
+#     Ok(requests)
+# }
+// Works with P2PSession
+// run_frame(&mut p2p_session, my_input)?;
+
+// Works with SyncTestSession
+// run_frame(&mut sync_test_session, my_input)?;
+```
+
+### Practical Example: Generic Game Loop
+
+Here is a more complete example that handles requests generically:
+
+```rust
+use fortress_rollback::prelude::*;
+
+fn game_loop_step<T: Config>(
+    session: &mut impl Session<T>,
+    input: T::Input,
+    game_state: &mut T::State,
+) -> FortressResult<()>
+where
+    T::State: Clone,
+{
+    // Poll for network data (no-op for SyncTestSession)
+    session.poll_remote_clients();
+
+    // Add input and advance
+    let player = session.local_player_handle_required()?;
+    session.add_local_input(player, input)?;
+
+    for request in session.advance_frame()? {
+        match request {
+            FortressRequest::SaveGameState { cell, frame } => {
+                cell.save(frame, Some(game_state.clone()), None);
+            }
+            FortressRequest::LoadGameState { cell, .. } => {
+                if let Some(loaded) = cell.load() {
+                    *game_state = loaded;
+                }
+            }
+            FortressRequest::AdvanceFrame { inputs } => {
+                // Apply inputs to your game state
+                let _ = &inputs; // placeholder — call your update function
+            }
+        }
+    }
+
+    // Drain events (works for all session types)
+    for event in session.events() {
+        let _ = event; // handle events as needed
+    }
+
+    Ok(())
+}
+```
+
+### Gradual Adoption
+
+The `Session` trait is **additive** — adopting it does not require changing existing code. You can:
+
+1. Continue using concrete session types directly (nothing changes)
+2. Start writing new helper functions as generic over `impl Session<T>`
+3. Gradually move your game loop to trait-based code as needed
+
+For the trait's design rationale, see the [Architecture Guide](Architecture#the-session-trait). If migrating from concrete session types, the [Migration Guide](Migration#session-trait-new) covers adoption.
 
 ---
 
@@ -2348,12 +2641,12 @@ if let Some(last_frame) = stats.last_compared_frame {
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `last_compared_frame` | `Option<Frame>` | Most recent frame where checksums were compared |
-| `local_checksum` | `Option<u128>` | Local checksum at that frame |
-| `remote_checksum` | `Option<u128>` | Remote checksum at that frame |
-| `checksums_match` | `Option<bool>` | `true` if in sync, `false` if desync, `None` if no comparison |
+| Field                 | Type            | Description                                                   |
+| --------------------- | --------------- | ------------------------------------------------------------- |
+| `last_compared_frame` | `Option<Frame>` | Most recent frame where checksums were compared               |
+| `local_checksum`      | `Option<u128>`  | Local checksum at that frame                                  |
+| `remote_checksum`     | `Option<u128>`  | Remote checksum at that frame                                 |
+| `checksums_match`     | `Option<bool>`  | `true` if in sync, `false` if desync, `None` if no comparison |
 
 ---
 
@@ -2569,13 +2862,13 @@ SessionBuilder::<GameConfig>::new()
     // ...
 ```
 
-| Interval | Checks/sec @ 60fps | Latency to Detect | Use Case |
-|----------|-------------------|-------------------|----------|
-| 10 | 6 | ~166ms | Competitive, anti-cheat |
-| 30 | 2 | ~500ms | Responsive detection |
-| 60 | 1 | ~1s | Default, balanced |
-| 120 | 0.5 | ~2s | Low-overhead |
-| 300 | 0.2 | ~5s | Development testing |
+| Interval | Checks/sec @ 60fps | Latency to Detect | Use Case                |
+| -------- | ------------------ | ----------------- | ----------------------- |
+| 10       | 6                  | ~166ms            | Competitive, anti-cheat |
+| 30       | 2                  | ~500ms            | Responsive detection    |
+| 60       | 1                  | ~1s               | Default, balanced       |
+| 120      | 0.5                | ~2s               | Low-overhead            |
+| 300      | 0.2                | ~5s               | Development testing     |
 
 ---
 
@@ -2648,18 +2941,33 @@ This section documents all configuration options available when building a sessi
 
 ### SessionBuilder Methods
 
-| Method | Default | Description |
-|--------|---------|-------------|
-| `with_num_players(n)` | 2 | Number of active players (not spectators) |
-| `with_input_delay(frames)` | 0 | Frames of input delay for local players |
-| `with_max_prediction_window(frames)` | 8 | Max frames ahead without confirmed inputs (0 = lockstep) |
-| `with_fps(fps)` | 60 | Expected frames per second for timing |
-| `with_save_mode(mode)` | `EveryFrame` | How often to save state for rollback |
-| `with_desync_detection_mode(mode)` | `On { interval: 60 }` | Checksum comparison between peers |
-| `with_disconnect_timeout(duration)` | 2000ms | Time before disconnecting unresponsive peer |
-| `with_disconnect_notify_delay(duration)` | 500ms | Time before warning about potential disconnect |
-| `with_check_distance(frames)` | 2 | Frames to resimulate in SyncTestSession |
-| `with_violation_observer(observer)` | None | Custom observer for spec violations |
+| Method                                   | Default                       | Description                                                                                        |
+| ---------------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------- |
+| `with_num_players(n)`                    | 2                             | Number of active players (not spectators)                                                          |
+| `with_input_delay(frames)`               | 0                             | Frames of input delay for local players                                                            |
+| `with_max_prediction_window(frames)`     | 8                             | Max frames ahead without confirmed inputs (0 = lockstep)                                           |
+| `with_fps(fps)`                          | 60                            | Expected frames per second for timing                                                              |
+| `with_save_mode(mode)`                   | `EveryFrame`                  | How often to save state for rollback                                                               |
+| `with_desync_detection_mode(mode)`       | `On { interval: 60 }`         | Checksum comparison between peers                                                                  |
+| `with_disconnect_timeout(duration)`      | 2000ms                        | Time before disconnecting unresponsive peer                                                        |
+| `with_disconnect_notify_delay(duration)` | 500ms                         | Time before warning about potential disconnect                                                     |
+| `with_check_distance(frames)`            | 2                             | Frames to resimulate in SyncTestSession                                                            |
+| `with_violation_observer(observer)`      | None                          | Custom observer for spec violations                                                                |
+| `add_player(type, handle)`               | —                             | Register a player (local, remote, or spectator)                                                    |
+| `add_local_player(handle)`               | —                             | Convenience: add a local player by handle index                                                    |
+| `add_remote_player(handle, addr)`        | —                             | Convenience: add a remote player by handle index and address                                       |
+| `with_sync_config(config)`               | `SyncConfig::default()`       | Synchronization protocol settings                                                                  |
+| `with_protocol_config(config)`           | `ProtocolConfig::default()`   | Network protocol behavior                                                                          |
+| `with_spectator_config(config)`          | `SpectatorConfig::default()`  | Spectator session behavior                                                                         |
+| `with_time_sync_config(config)`          | `TimeSyncConfig::default()`   | Time synchronization averaging                                                                     |
+| `with_input_queue_config(config)`        | `InputQueueConfig::default()` | Input queue buffer sizing                                                                          |
+| `with_event_queue_size(size)`            | 100                           | Maximum buffered events before dropping                                                            |
+| `with_max_frames_behind(frames)`         | 10                            | When spectator starts catching up                                                                  |
+| `with_catchup_speed(speed)`              | 1                             | Frames per step when spectator catches up                                                          |
+| `with_sparse_saving_mode(bool)`          | `false`                       | Deprecated: use `with_save_mode()` instead                                                         |
+| `with_lan_defaults()`                    | —                             | Preset: LAN-optimized config (SyncConfig::lan + ProtocolConfig::competitive + TimeSyncConfig::lan) |
+| `with_internet_defaults()`               | —                             | Preset: Internet-optimized config (defaults + input delay 2)                                       |
+| `with_high_latency_defaults()`           | —                             | Preset: Mobile/high-latency config (mobile presets + input delay 4)                                |
 
 ### SyncConfig (Synchronization Protocol)
 
@@ -2667,6 +2975,7 @@ Configure the initial connection handshake with `with_sync_config()`:
 
 ```rust
 use fortress_rollback::SyncConfig;
+use web_time::Duration;
 
 let config = SyncConfig {
     num_sync_packets: 5,                              // Roundtrips required (default: 5)
@@ -2684,6 +2993,10 @@ let config = SyncConfig {
 - `SyncConfig::lan()` - Fast sync for local networks (3 packets, 100ms intervals)
 - `SyncConfig::high_latency()` - Tolerant for 100-200ms RTT (400ms intervals)
 - `SyncConfig::lossy()` - Reliable for 5-15% packet loss (8 packets)
+- `SyncConfig::mobile()` - High tolerance for variable mobile networks (10 packets, 350ms)
+- `SyncConfig::competitive()` - Fast sync with strict timeouts (4 packets, 100ms, 3s timeout)
+- `SyncConfig::extreme()` - Extreme burst loss survival (20 packets, 250ms, 30s timeout)
+- `SyncConfig::stress_test()` - Automated testing only (40 packets, 150ms, 60s timeout)
 
 ### ProtocolConfig (Network Protocol)
 
@@ -2691,6 +3004,7 @@ Configure network behavior with `with_protocol_config()`:
 
 ```rust
 use fortress_rollback::ProtocolConfig;
+use web_time::Duration;
 
 let config = ProtocolConfig {
     quality_report_interval: Duration::from_millis(200), // RTT measurement interval
@@ -2699,9 +3013,12 @@ let config = ProtocolConfig {
     pending_output_limit: 128,                           // Warning threshold for output queue
     sync_retry_warning_threshold: 10,                    // Warn after N sync retries
     sync_duration_warning_ms: 3000,                      // Warn if sync takes longer
+    clock: None,                                         // None = system clock (see below)
     ..Default::default()
 };
 ```
+
+The `clock` field accepts an `Option<ClockFn>` for injecting a custom time source. When `None` (the default), the protocol uses `Instant::now()`. See [Custom Clock (Time Control)](#custom-clock-time-control) for details and test examples.
 
 **Presets:**
 
@@ -2709,6 +3026,8 @@ let config = ProtocolConfig {
 - `ProtocolConfig::competitive()` - Fast quality reports (100ms), short shutdown
 - `ProtocolConfig::high_latency()` - Tolerant thresholds, longer timeouts
 - `ProtocolConfig::debug()` - Low thresholds to observe telemetry easily
+- `ProtocolConfig::mobile()` - Tolerant for mobile/cellular networks (350ms reports, large buffers)
+- `ProtocolConfig::deterministic(seed)` - Fixed RNG seed for reproducible sessions; combine with `clock: Some(clock_fn)` for full determinism (controlled time + fixed RNG)
 
 ### TimeSyncConfig (Time Synchronization)
 
@@ -2728,6 +3047,8 @@ let config = TimeSyncConfig {
 - `TimeSyncConfig::responsive()` - 15-frame window (faster adaptation)
 - `TimeSyncConfig::smooth()` - 60-frame window (more stable)
 - `TimeSyncConfig::lan()` - 10-frame window (for stable LAN)
+- `TimeSyncConfig::mobile()` - 90-frame window (smooths mobile jitter)
+- `TimeSyncConfig::competitive()` - 20-frame window (fast adaptation, assumes stable network)
 
 ### SpectatorConfig (Spectator Sessions)
 
@@ -2750,6 +3071,8 @@ let config = SpectatorConfig {
 - `SpectatorConfig::fast_paced()` - 90-frame buffer, 2x catchup speed
 - `SpectatorConfig::slow_connection()` - 120-frame buffer, tolerant
 - `SpectatorConfig::local()` - 30-frame buffer, 2x catchup (minimal latency)
+- `SpectatorConfig::broadcast()` - 180-frame buffer, smooth streaming for broadcasts
+- `SpectatorConfig::mobile()` - 120-frame buffer, tolerant for mobile networks
 
 ### InputQueueConfig (Input Buffer)
 
@@ -2768,6 +3091,7 @@ let config = InputQueueConfig {
 - `InputQueueConfig::default()` - 128 frames (~2.1s at 60 FPS)
 - `InputQueueConfig::high_latency()` - 256 frames (~4.3s at 60 FPS)
 - `InputQueueConfig::minimal()` - 32 frames (~0.5s at 60 FPS)
+- `InputQueueConfig::standard()` - Same as default (128 frames)
 
 **Note:** Maximum input delay is `queue_length - 1`. Call `with_input_queue_config()` before `with_input_delay()` to ensure validation uses the correct limit.
 
@@ -2810,19 +3134,19 @@ Fortress Rollback uses `FortressError` for all error conditions. The enum is exh
 
 ### Error Types
 
-| Error | Cause | Recovery |
-|-------|-------|----------|
-| `PredictionThreshold` | Too far ahead without confirmed inputs | Wait for network to catch up; skip this frame's input |
-| `NotSynchronized` | Session not yet synchronized | Keep polling; check `SessionState::Running` before operations |
-| `InvalidRequest { info }` | Invalid API usage | Fix code; this is a programming error |
-| `InvalidPlayerHandle { handle, max_handle }` | Handle out of range | Use handles 0 to num_players-1 |
-| `InvalidFrame { frame, reason }` | Frame number invalid | Check frame is in valid range |
-| `MissingInput { player_handle, frame }` | Required input not available | Ensure inputs are added before advancing |
-| `MismatchedChecksum { current_frame, mismatched_frames }` | Desync in SyncTestSession | Debug non-determinism |
-| `SpectatorTooFarBehind` | Spectator can't catch up | Reconnect spectator |
-| `SerializationError { context }` | Serialization failed | Check input/state serialization |
-| `SocketError { context }` | Network socket error | Check network, retry connection |
-| `InternalError { context }` | Library bug | Please report! |
+| Error                                                     | Cause                                  | Recovery                                                      |
+| --------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------- |
+| `PredictionThreshold`                                     | Too far ahead without confirmed inputs | Wait for network to catch up; skip this frame's input         |
+| `NotSynchronized`                                         | Session not yet synchronized           | Keep polling; check `SessionState::Running` before operations |
+| `InvalidRequest { info }`                                 | Invalid API usage                      | Fix code; this is a programming error                         |
+| `InvalidPlayerHandle { handle, max_handle }`              | Handle out of range                    | Use handles 0 to num_players-1                                |
+| `InvalidFrame { frame, reason }`                          | Frame number invalid                   | Check frame is in valid range                                 |
+| `MissingInput { player_handle, frame }`                   | Required input not available           | Ensure inputs are added before advancing                      |
+| `MismatchedChecksum { current_frame, mismatched_frames }` | Desync in SyncTestSession              | Debug non-determinism                                         |
+| `SpectatorTooFarBehind`                                   | Spectator can't catch up               | Reconnect spectator                                           |
+| `SerializationError { context }`                          | Serialization failed                   | Check input/state serialization                               |
+| `SocketError { context }`                                 | Network socket error                   | Check network, retry connection                               |
+| `InternalError { context }`                               | Library bug                            | Please report!                                                |
 
 ### Error Handling Patterns
 
@@ -2964,25 +3288,25 @@ Fortress Rollback includes a telemetry system for monitoring internal specificat
 
 ### Violation Severity Levels
 
-| Severity | Description | Action |
-|----------|-------------|--------|
-| `Warning` | Unexpected but recoverable | Monitor; may indicate network issues |
-| `Error` | Serious issue, degraded behavior | Investigate; may affect gameplay |
-| `Critical` | Invariant broken, state may be corrupt | Debug immediately |
+| Severity   | Description                            | Action                               |
+| ---------- | -------------------------------------- | ------------------------------------ |
+| `Warning`  | Unexpected but recoverable             | Monitor; may indicate network issues |
+| `Error`    | Serious issue, degraded behavior       | Investigate; may affect gameplay     |
+| `Critical` | Invariant broken, state may be corrupt | Debug immediately                    |
 
 ### Violation Categories (ViolationKind)
 
-| Kind | Description |
-|------|-------------|
-| `FrameSync` | Frame counter mismatch or unexpected frame values |
-| `InputQueue` | Gap in input sequence, double-confirmation |
-| `StateManagement` | Loading non-existent state, checksum issues |
-| `NetworkProtocol` | Unexpected message, protocol state errors |
-| `ChecksumMismatch` | Local/remote checksum difference |
-| `Configuration` | Invalid parameter combinations |
-| `InternalError` | Library bugs (please report) |
-| `Invariant` | Runtime invariant check failed |
-| `Synchronization` | Excessive sync retries, slow sync |
+| Kind               | Description                                       |
+| ------------------ | ------------------------------------------------- |
+| `FrameSync`        | Frame counter mismatch or unexpected frame values |
+| `InputQueue`       | Gap in input sequence, double-confirmation        |
+| `StateManagement`  | Loading non-existent state, checksum issues       |
+| `NetworkProtocol`  | Unexpected message, protocol state errors         |
+| `ChecksumMismatch` | Local/remote checksum difference                  |
+| `Configuration`    | Invalid parameter combinations                    |
+| `InternalError`    | Library bugs (please report)                      |
+| `Invariant`        | Runtime invariant check failed                    |
+| `Synchronization`  | Excessive sync retries, slow sync                 |
 
 ### Setting Up a Violation Observer
 
@@ -3125,9 +3449,9 @@ let violation = SpecViolation::new(
 // Direct JSON serialization
 let json = serde_json::to_string(&violation)?;
 
-// Or use the convenience method
-let json = violation.to_json()?;
-let json_pretty = violation.to_json_pretty()?;
+// Or use the convenience method (returns Option<String>)
+let json = violation.to_json();
+let json_pretty = violation.to_json_pretty();
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 

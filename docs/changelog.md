@@ -1,3 +1,5 @@
+<!-- SYNC: This source doc syncs to wiki/Changelog.md. -->
+
 # Changelog
 
 The changelog has moved to the repository root: **[CHANGELOG.md](../CHANGELOG.md)**

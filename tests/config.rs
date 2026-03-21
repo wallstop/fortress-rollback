@@ -95,13 +95,23 @@ macro_rules! test_copy_clone {
 // Generate new_equals_default tests for all config types
 test_new_equals_default!(SyncConfig, ProtocolConfig, SpectatorConfig, TimeSyncConfig);
 
-// Generate copy_clone tests for all config types
+// Generate copy_clone tests for config types that implement Copy
 test_copy_clone!(
     SyncConfig => SyncConfig::high_latency(),
-    ProtocolConfig => ProtocolConfig::competitive(),
     SpectatorConfig => SpectatorConfig::fast_paced(),
     TimeSyncConfig => TimeSyncConfig::responsive(),
 );
+
+// ProtocolConfig does not implement Copy (due to Option<ClockFn>), test Clone only
+#[test]
+fn test_protocol_config_clone() {
+    let config1 = ProtocolConfig::competitive();
+    let config2 = config1.clone();
+    assert_eq!(
+        config1, config2,
+        "ProtocolConfig should implement Clone correctly"
+    );
+}
 
 // ============================================================================
 // SyncConfig Tests

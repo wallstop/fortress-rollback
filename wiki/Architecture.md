@@ -1,3 +1,5 @@
+<!-- SYNC: This wiki page is generated from docs/architecture.md. Edit docs source. -->
+
 <p align="center">
   <img src="assets/logo.svg" alt="Fortress Rollback" width="128">
 </p>
@@ -322,8 +324,8 @@ The primary session type for peer-to-peer multiplayer:
 
 ```rust
 let mut session = SessionBuilder::<MyConfig>::new()
-    .with_num_players(2)
-    .with_input_delay(2)
+    .with_num_players(2)?
+    .with_input_delay(2)?
     .with_max_prediction_window(8)
     .add_player(PlayerType::Local, PlayerHandle::new(0))?
     .add_player(PlayerType::Remote(addr), PlayerHandle::new(1))?
@@ -344,8 +346,13 @@ For observers who don't contribute inputs:
 
 ```rust
 let session = SessionBuilder::<MyConfig>::new()
-    .with_num_players(2)
-    .start_spectator_session(host_addr, socket);
+    .with_num_players(2)?
+    .start_spectator_session(host_addr, socket)
+    .ok_or(FortressError::InvalidRequest {
+        info: "spectator session initialization failed".into(),
+    })?;
+// Note: start_spectator_session returns Option<SpectatorSession<T>>.
+// Returns None if protocol initialization fails (e.g., serialization issues).
 ```
 
 **Features:**
@@ -360,7 +367,7 @@ For testing determinism locally:
 
 ```rust
 let session = SessionBuilder::<MyConfig>::new()
-    .with_num_players(1)
+    .with_num_players(1)?
     .with_check_distance(2)
     .start_synctest_session()?;
 ```
@@ -370,6 +377,49 @@ let session = SessionBuilder::<MyConfig>::new()
 - Simulates rollback every frame
 - Compares checksums after resimulation
 - Detects non-deterministic behavior
+
+### The `Session` Trait
+
+All three session types implement the unified `Session<T: Config>` trait, enabling generic code that works with any session.
+
+#### Design Rationale
+
+The trait balances **universality** with **practicality**:
+
+- **Required methods** (`advance_frame`, `local_player_handle_required`) represent operations every session must define, since each type implements them differently.
+- **Provided methods with defaults** (`add_local_input`, `events`, `current_state`, `poll_remote_clients`) have sensible no-op or constant defaults. For example, `SyncTestSession` has no network, so it inherits the default no-op `poll_remote_clients()`.
+- **`network_stats()` is deliberately excluded** from the trait. It only applies to networked sessions and takes a `PlayerHandle` argument whose semantics differ between P2P (per-peer stats) and spectator (host stats). Forcing it onto `SyncTestSession` would require a meaningless stub, and making it trait-level would sacrifice type safety.
+
+#### Method Override Table
+
+| Method                           | `P2PSession` | `SpectatorSession` |   `SyncTestSession`   |
+| -------------------------------- | :----------: | :----------------: | :-------------------: |
+| `advance_frame()`                |  ✅ Override  |     ✅ Override     |      ✅ Override       |
+| `local_player_handle_required()` |  ✅ Override  | ✅ Override (error) |      ✅ Override       |
+| `add_local_input()`              |  ✅ Override  | ✅ Override (error) |      ✅ Override       |
+| `events()`                       |  ✅ Override  |     ✅ Override     |      ✅ Override       |
+| `current_state()`                |  ✅ Override  |     ✅ Override     | ❌ Default (`Running`) |
+| `poll_remote_clients()`          |  ✅ Override  |     ✅ Override     |   ❌ Default (no-op)   |
+
+"Default" means the session inherits the trait's provided implementation without overriding it.
+
+#### Usage Pattern
+
+```rust
+use fortress_rollback::prelude::*;
+
+fn run_frame<T: Config>(
+    session: &mut impl Session<T>,
+    input: T::Input,
+) -> FortressResult<RequestVec<T>> {
+    session.poll_remote_clients();
+    let player = session.local_player_handle_required()?;
+    session.add_local_input(player, input)?;
+    session.advance_frame()
+}
+```
+
+For a complete generic game loop example, see the [User Guide — Using the Session Trait](User-Guide#using-the-session-trait).
 
 ---
 
@@ -399,8 +449,8 @@ Sessions are created using `SessionBuilder`:
 
 ```rust
 let session = SessionBuilder::<MyConfig>::new()
-    .with_num_players(2)
-    .with_input_delay(2)
+    .with_num_players(2)?
+    .with_input_delay(2)?
     .with_max_prediction_window(8)
     .with_fps(60)?
     .with_desync_detection_mode(DesyncDetection::On { interval: 60 })
@@ -512,6 +562,8 @@ while game_running {
 
 **⚠️ WARNING: Improper termination is the #1 cause of multiplayer bugs.**
 
+> See the [Session Termination Anti-Pattern](User-Guide#session-termination-the-last_confirmed_frame-anti-pattern) section in the User Guide for detailed examples and solutions.
+
 #### The Anti-Pattern (DON'T DO THIS)
 
 ```rust
@@ -542,8 +594,8 @@ use fortress_rollback::SyncHealth;
 loop {
     session.poll_remote_clients();
 
-    // Check if synchronized
-    let all_synced = session.local_player_handles()
+    // Check if synchronized (sync_health only works for remote players)
+    let all_synced = session.remote_player_handles()
         .into_iter()
         .filter_map(|h| session.sync_health(h))
         .all(|health| matches!(health, SyncHealth::InSync));
@@ -553,10 +605,11 @@ loop {
         break;
     }
 
-    // Check for desync
-    for handle in session.local_player_handles() {
+    // Check for desync (sync_health only works for remote players)
+    for handle in session.remote_player_handles() {
         if let Some(SyncHealth::DesyncDetected { frame, .. }) = session.sync_health(handle) {
-            panic!("Desync detected at frame {}!", frame);
+            eprintln!("Desync detected at frame {}!", frame);
+            break;
         }
     }
 
@@ -607,34 +660,22 @@ stateDiagram-v2
     Synchronizing --> Running: All sync roundtrips complete
     Synchronizing --> Synchronizing: Retry after 200ms
 
-    Running --> Disconnected: Peer timeout (2000ms) or disconnect request
+    Running --> Disconnected: Peer timeout (disconnect_timeout, default 2000ms) or disconnect request
     note right of Running: Emits NetworkInterrupted/NetworkResumed events
 
-    Disconnected --> Shutdown: UDP_SHUTDOWN_TIMER (5000ms)
+    Disconnected --> Shutdown: shutdown_delay (configurable, default 5000ms)
     Shutdown --> [*]
-
-    state Synchronizing {
-        [*] --> ExchangingSyncPkts
-        ExchangingSyncPkts --> MeasuringRTT
-    }
-
-    state Running {
-        [*] --> ProcessingFrames
-        ProcessingFrames --> Rollbacks
-        Rollbacks --> Checksums
-        Checksums --> ProcessingFrames
-    }
 ```
 
 ### FortressRequest Semantics
 
 Each request type has specific implications for game state:
 
-| Request | When Generated | Game State Impact |
-|---------|----------------|-------------------|
-| `SaveGameState` | Before advancing a frame | Clone current state to cell |
-| `LoadGameState` | Rollback triggered | Replace state with saved version |
-| `AdvanceFrame` | Each simulation step | Apply inputs, increment frame |
+| Request         | When Generated           | Game State Impact                |
+| --------------- | ------------------------ | -------------------------------- |
+| `SaveGameState` | Before advancing a frame | Clone current state to cell      |
+| `LoadGameState` | Rollback triggered       | Replace state with saved version |
+| `AdvanceFrame`  | Each simulation step     | Apply inputs, increment frame    |
 
 **Request Ordering Guarantees:**
 
@@ -695,7 +736,6 @@ graph TD
     MSG["Message"]
     HEADER["MessageHeader"]
     MAGIC["magic: u16<br/>(Identifies session)"]
-    SEQ["sequence: u16<br/>(For ordering/ack)"]
     BODY["MessageBody"]
     INPUT["Input { ... }<br/>(Player inputs)"]
     INPUTACK["InputAck { ... }<br/>(Acknowledge input)"]
@@ -706,7 +746,6 @@ graph TD
     MSG --> HEADER
     MSG --> BODY
     HEADER --> MAGIC
-    HEADER --> SEQ
     BODY --> INPUT
     BODY --> INPUTACK
     BODY --> QUALITY
@@ -863,13 +902,13 @@ let len = encode_into(&data, &mut buffer)?;
 
 **Available Functions:**
 
-| Function | Description | Use Case |
-|----------|-------------|----------|
-| `encode()` | Encode to new `Vec<u8>` | Simple/infrequent encoding |
-| `encode_into()` | Encode to existing slice | Hot paths, buffer reuse |
-| `encode_append()` | Append to existing `Vec` | Incremental message building |
-| `decode()` | Decode with bytes consumed | When you need byte count |
-| `decode_value()` | Decode ignoring byte count | Convenience when count not needed |
+| Function          | Description                | Use Case                          |
+| ----------------- | -------------------------- | --------------------------------- |
+| `encode()`        | Encode to new `Vec<u8>`    | Simple/infrequent encoding        |
+| `encode_into()`   | Encode to existing slice   | Hot paths, buffer reuse           |
+| `encode_append()` | Append to existing `Vec`   | Incremental message building      |
+| `decode()`        | Decode with bytes consumed | When you need byte count          |
+| `decode_value()`  | Decode ignoring byte count | Convenience when count not needed |
 
 **Why Fixed-Size Integers:**
 
@@ -939,9 +978,9 @@ The protocol is UDP-based (unreliable) but handles:
 
 Regular packets maintain connection:
 
-- `KEEP_ALIVE_INTERVAL`: 200ms
-- `QualityReport` sent every 200ms
-- Disconnect after `disconnect_timeout` (default 2s)
+- `running_retry_interval` (configurable, default 200ms): interval for resending inputs and quality reports
+- `QualityReport` sent every `running_retry_interval`
+- Disconnect after `disconnect_timeout` (configurable, default 2000ms)
 
 ---
 
@@ -953,6 +992,7 @@ All errors use a single enum (see [User Guide - Error Handling](User-Guide#error
 
 ```rust
 pub enum FortressError {
+    // Legacy string-based variants (still supported):
     PredictionThreshold,
     NotSynchronized,
     InvalidRequest { info: String },
@@ -964,6 +1004,15 @@ pub enum FortressError {
     SerializationError { context: String },
     SocketError { context: String },
     InternalError { context: String },
+
+    // Structured variants (preferred for new code — zero-allocation on hot paths):
+    InvalidRequestStructured { kind: InvalidRequestKind },
+    InvalidFrameStructured { frame: Frame, reason: InvalidFrameReason },
+    InternalErrorStructured { kind: InternalErrorKind },
+    SerializationErrorStructured { kind: SerializationErrorKind },
+    SocketErrorStructured { kind: SocketErrorKind },
+    FrameArithmeticOverflow { frame: Frame, operand: i32, operation: &'static str },
+    FrameValueTooLarge { value: usize },
     // ... (see error.rs for all variants)
 }
 ```
@@ -1015,6 +1064,7 @@ if observer.has_violation(ViolationKind::FrameSync) {
 - `Configuration`: Invalid settings
 - `InternalError`: Library bugs
 - `Invariant`: Runtime check failures
+- `ArithmeticOverflow`: Frame counter overflow detection
 
 ---
 
@@ -1047,11 +1097,20 @@ if handle.is_valid_player_for(num_players) {
 Compile-time parameterization bundles all type requirements:
 
 ```rust
+// Default (without `sync-send` feature):
 pub trait Config: 'static {
     type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned;
     type State;
     type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Debug;
 }
+
+// With `sync-send` feature enabled, Config and all associated types
+// additionally require Send + Sync bounds:
+// pub trait Config: 'static + Send + Sync {
+//     type Input: ... + Send + Sync;
+//     type State: Clone + Send + Sync;
+//     type Address: ... + Send + Sync;
+// }
 ```
 
 This ensures:

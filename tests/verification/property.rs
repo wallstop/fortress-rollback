@@ -1433,9 +1433,10 @@ proptest! {
 #[cfg(test)]
 mod p2p_checksum_tests {
     use super::*;
+    use crate::common::test_clock::TestClock;
     use fortress_rollback::{
-        DesyncDetection, FortressError, PlayerHandle, PlayerType, SessionBuilder, SessionState,
-        SyncHealth,
+        DesyncDetection, FortressError, PlayerHandle, PlayerType, ProtocolConfig, SessionBuilder,
+        SessionState, SyncHealth,
     };
     use serial_test::serial;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -1445,8 +1446,17 @@ mod p2p_checksum_tests {
         17700 + base
     }
 
+    fn protocol_config(clock: &TestClock) -> ProtocolConfig {
+        ProtocolConfig {
+            clock: Some(clock.as_protocol_clock()),
+            ..ProtocolConfig::default()
+        }
+    }
+
     // Use synchronize_sessions from test_utils to avoid duplicating constants
-    use crate::common::test_utils::{bind_socket_with_retry, synchronize_sessions, SyncConfig};
+    use crate::common::test_utils::{
+        bind_socket_with_retry, synchronize_sessions, SyncConfig, POLL_INTERVAL_DETERMINISTIC,
+    };
 
     /// Property: sync_health returns Pending when desync detection is off
     #[test]
@@ -1608,6 +1618,7 @@ mod p2p_checksum_tests {
         let port2 = get_test_port(14);
         let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
+        let clock = TestClock::new();
 
         // Use a small interval for faster testing
         let interval = 5;
@@ -1615,6 +1626,7 @@ mod p2p_checksum_tests {
         let socket1 = bind_socket_with_retry(port1)?;
         let mut sess1 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval })
+            .with_protocol_config(protocol_config(&clock))
             .add_player(PlayerType::Local, PlayerHandle::new(0))?
             .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
             .start_p2p_session(socket1)?;
@@ -1622,6 +1634,7 @@ mod p2p_checksum_tests {
         let socket2 = bind_socket_with_retry(port2)?;
         let mut sess2 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval })
+            .with_protocol_config(protocol_config(&clock))
             .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
             .add_player(PlayerType::Local, PlayerHandle::new(1))?
             .start_p2p_session(socket2)?;
@@ -1650,6 +1663,7 @@ mod p2p_checksum_tests {
             // Poll for messages
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
+            clock.advance(POLL_INTERVAL_DETERMINISTIC);
 
             // Add local inputs
             let input = TestInput {
@@ -1700,12 +1714,12 @@ mod p2p_checksum_tests {
         }
 
         // Continue polling to ensure checksum messages are exchanged
-        // Use time-based waiting for robustness across platforms
-        let start = std::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_millis(500) {
+        // Advance virtual time so interval-gated sends (checksum/quality reports)
+        // can trigger deterministically during polling.
+        for _ in 0..500 {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            clock.advance(POLL_INTERVAL_DETERMINISTIC);
         }
 
         // At this point, checksums should have been exchanged and compared

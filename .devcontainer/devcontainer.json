@@ -2,7 +2,6 @@
 // README at: https://github.com/devcontainers/templates/tree/main/src/rust
 {
 	"name": "Fortress Rollback - Full Verification Environment",
-
 	// ===== BUILD OPTIONS (choose one) =====
 	//
 	// Option A: Build locally from Dockerfile (first build ~3-5 min, rebuilds use cache)
@@ -15,7 +14,6 @@
 	// Local Dockerfile builds remain the default until the registry path is validated across environments.
 	// Uncomment the line below and comment out the "build" block above to use it.
 	// "image": "ghcr.io/wallstop/fortress-rollback/devcontainer:latest",
-
 	// Additional features (on top of what's in Dockerfile)
 	"features": {
 		"ghcr.io/devcontainers/features/powershell:1": {}
@@ -28,7 +26,7 @@
 		}
 	],
 	// Post-create setup: only workspace-specific tasks (tools are pre-installed in image)
-	"postCreateCommand": "bash -c '\n    set -e\n    echo \"=== Setting up Fortress Rollback Development Environment ===\"\n    \n    # Ensure TLA+ tools are in the workspace\n    mkdir -p .tla-tools\n    if [ -f /opt/tla/tla2tools.jar ]; then\n        cp /opt/tla/tla2tools.jar .tla-tools/\n    elif [ ! -f .tla-tools/tla2tools.jar ]; then\n        echo \"Downloading TLA+ tools...\"\n        curl --proto \"=https\" --tlsv1.2 -fsSL --retry 5 --retry-delay 2 --retry-all-errors --max-time 120 https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o .tla-tools/tla2tools.jar\n    fi\n    \n    # Sync Vale styles (prose linter)\n    if command -v vale >/dev/null 2>&1 && [ -f .vale.ini ]; then\n        echo \"Syncing Vale packages...\"\n        vale sync || echo \"Vale sync failed, run vale sync manually\"\n    fi\n    \n    # Build project to warm dependency cache\n    echo \"Warming dependency cache...\"\n    if ! cargo build; then\n        echo \"WARNING: Initial cargo build failed. Run cargo build manually to see errors.\"\n    fi\n    \n    echo \"=== Development environment ready! ===\"\n    echo \"Run ./scripts/check-tools.sh to verify all tools are installed.\"\n'",
+	"postCreateCommand": "bash -c '\n    set -e\n    echo \"=== Setting up Fortress Rollback Development Environment ===\"\n    \n    # Ensure TLA+ tools are in the workspace\n    mkdir -p .tla-tools\n    if [ -f /opt/tla/tla2tools.jar ]; then\n        cp /opt/tla/tla2tools.jar .tla-tools/\n    elif [ ! -f .tla-tools/tla2tools.jar ]; then\n        echo \"Downloading TLA+ tools...\"\n        curl --proto \"=https\" --tlsv1.2 -fsSL --retry 5 --retry-delay 2 --retry-all-errors --max-time 120 https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o .tla-tools/tla2tools.jar\n    fi\n    \n    # Sync Vale styles (prose linter)\n    if command -v vale >/dev/null 2>&1 && [ -f .vale.ini ]; then\n        echo \"Syncing Vale packages...\"\n        vale sync || echo \"Vale sync failed, run vale sync manually\"\n    fi\n    \n    # Build project to warm dependency cache\n    echo \"Warming dependency cache...\"\n    if ! cargo build; then\n        echo \"WARNING: Initial cargo build failed. Run cargo build manually to see errors.\"\n    fi\n    \n    echo \"=== Development environment ready! ===\"\n    echo \"Run ./scripts/ci/check-tools.sh to verify all tools are installed.\"\n'",
 	// Environment variables for tools
 	"containerEnv": {
 		"TLA_TOOLS_JAR": "${containerWorkspaceFolder}/.tla-tools/tla2tools.jar",
@@ -53,11 +51,91 @@
 				"ms-python.vscode-pylance",
 				"ryanluker.vscode-coverage-gutters",
 				"streetsidesoftware.code-spell-checker",
+				"PKief.material-icon-theme",
+				"GitHub.github-vscode-theme",
+				"redhat.vscode-yaml",
+				"markdownlint.markdownlint",
+				"eamodio.gitlens",
+				"serayuzgur.crates",
+				"EditorConfig.EditorConfig",
+				"yzhang.markdown-all-in-one",
+				"ms-vscode.hexeditor",
+				"dracula-theme.theme-dracula",
+				"enkia.tokyo-night",
+				"catppuccin.catppuccin-vsc",
+				"zhuangtongfa.material-theme",
+				"akamud.vscode-theme-onedark",
+				"sdras.night-owl",
+				"teabyii.ayu",
+				"arcticicestudio.nord-visual-studio-code",
+				"jdinhlife.gruvbox",
+				"mvllow.rose-pine",
+				"whizkydee.material-palenight-theme",
+				"alexandernanberg.horizon-theme-vscode",
+				"brittanychiang.halcyon-vscode",
+				"robbowen.synthwave-vscode",
+				"pmndrs.pmndrs",
+				"qufiwefefwoyn.kanagawa",
+				"azemoh.one-monokai",
 				"GitHub.copilot",
 				"GitHub.copilot-chat",
 				"anthropic.claude-code"
 			],
 			"settings": {
+				"workbench.iconTheme": "material-icon-theme",
+				"workbench.colorTheme": "GitHub Dark Default",
+				"workbench.preferredDarkColorTheme": "GitHub Dark Default",
+				"workbench.preferredLightColorTheme": "GitHub Light Default",
+				"explorer.excludeGitIgnore": false,
+				"explorer.compactFolders": false,
+				"explorer.confirmDelete": false,
+				"files.exclude": {
+					"**/.git": true,
+					"**/.claude": true,
+					"**/.ruff_cache": true,
+					"**/.vale": true,
+					"**/.vscode": true,
+					"**/target": true,
+					"**/node_modules": true,
+					"**/__pycache__": true,
+					"**/specs/tla/states*": true,
+					"**/mutants.out": true,
+					"**/.tmp": true,
+					"**/.idea": true,
+					"**/site": true,
+					"**/states": true,
+					"loom-tests/target": true,
+					"progress": true,
+					"fuzz/corpus": true,
+					"fuzz/artifacts": true,
+					"fuzz/coverage": true
+				},
+				"files.watcherExclude": {
+					"**/.git/objects/**": true,
+					"**/target/**": true,
+					"**/node_modules/**": true
+				},
+				"search.exclude": {
+					"**/.git": true,
+					"**/target": true,
+					"**/node_modules": true,
+					"**/__pycache__": true,
+					"**/mutants.out": true
+				},
+				"git.autofetch": true,
+				"scm.diffDecorations": "all",
+				"editor.bracketPairColorization.enabled": true,
+				"editor.guides.bracketPairs": true,
+				"editor.inlineSuggest.enabled": true,
+				"editor.smoothScrolling": true,
+				"editor.stickyScroll.enabled": true,
+				"editor.minimap.enabled": false,
+				"editor.wordWrap": "on",
+				"terminal.integrated.defaultProfile.linux": "bash",
+				"yaml.schemas": {
+					"https://json.schemastore.org/github-workflow.json": ".github/workflows/*.yml"
+				},
+				"markdownlint.run": "onSave",
 				"rust-analyzer.cargo.features": "all",
 				"rust-analyzer.check.command": "clippy",
 				"rust-analyzer.check.allTargets": true,

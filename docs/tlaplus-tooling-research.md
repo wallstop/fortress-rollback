@@ -1,3 +1,5 @@
+<!-- SYNC: This source doc syncs to wiki/TLAplus-Tooling-Research.md. -->
+
 # TLA+ Tooling Ecosystem and Development Workflows
 
 This document provides a comprehensive overview of TLA+ tools, IDE support, CI/CD integration patterns, and best practices for integrating TLA+ into development workflows.
@@ -18,30 +20,30 @@ The TLA+ ecosystem includes several tools bundled in `tla2tools.jar`, plus addit
 
 ### Core Tools (in tla2tools.jar)
 
-| Tool | Purpose | Command |
-|------|---------|---------|
-| **SANY** | Syntactic Analyzer - parses TLA+ specifications | `java -cp tla2tools.jar tla2sany.SANY -help` |
-| **TLC** | Model Checker - exhaustive state space exploration | `java -cp tla2tools.jar tlc2.TLC -help` |
-| **TLC REPL** | Interactive TLA+ expression evaluation | `java -cp tla2tools.jar tlc2.REPL` |
-| **PlusCal Translator** | Converts PlusCal algorithms to TLA+ | `java -cp tla2tools.jar pcal.trans -help` |
-| **TLATeX** | Converts TLA+ specs to LaTeX/PDF | `java -cp tla2tools.jar tla2tex.TLA -help` |
+| Tool                   | Purpose                                            | Command                                      |
+| ---------------------- | -------------------------------------------------- | -------------------------------------------- |
+| **SANY**               | Syntactic Analyzer - parses TLA+ specifications    | `java -cp tla2tools.jar tla2sany.SANY -help` |
+| **TLC**                | Model Checker - exhaustive state space exploration | `java -cp tla2tools.jar tlc2.TLC -help`      |
+| **TLC REPL**           | Interactive TLA+ expression evaluation             | `java -cp tla2tools.jar tlc2.REPL`           |
+| **PlusCal Translator** | Converts PlusCal algorithms to TLA+                | `java -cp tla2tools.jar pcal.trans -help`    |
+| **TLATeX**             | Converts TLA+ specs to LaTeX/PDF                   | `java -cp tla2tools.jar tla2tex.TLA -help`   |
 
 ### Additional Tools
 
-| Tool | Purpose | Source |
-|------|---------|--------|
-| **TLAPS** (TLA+ Proof System) | Formal proof verification | [proofs.tlapl.us](http://proofs.tlapl.us/) |
-| **Apalache** | Symbolic model checker (bounded) | [github.com/apalache-mc/apalache](https://github.com/apalache-mc/apalache) |
-| **TLAUC** | Unicode converter for TLA+ specs | [github.com/tlaplus-community/tlauc](https://github.com/tlaplus-community/tlauc) |
-| **tree-sitter-tlaplus** | TLA+ grammar for syntax analysis | [github.com/tlaplus-community/tree-sitter-tlaplus](https://github.com/tlaplus-community/tree-sitter-tlaplus) |
+| Tool                          | Purpose                          | Source                                                                                                       |
+| ----------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| **TLAPS** (TLA+ Proof System) | Formal proof verification        | [proofs.tlapl.us](http://proofs.tlapl.us/)                                                                   |
+| **Apalache**                  | Symbolic model checker (bounded) | [github.com/apalache-mc/apalache](https://github.com/apalache-mc/apalache)                                   |
+| **TLAUC**                     | Unicode converter for TLA+ specs | [github.com/tlaplus-community/tlauc](https://github.com/tlaplus-community/tlauc)                             |
+| **tree-sitter-tlaplus**       | TLA+ grammar for syntax analysis | [github.com/tlaplus-community/tree-sitter-tlaplus](https://github.com/tlaplus-community/tree-sitter-tlaplus) |
 
 ### Tool Capabilities Summary
 
-| Tool | Safety Properties | Liveness Properties | Bounded Checking | Exhaustive | Proofs |
-|------|-------------------|---------------------|------------------|------------|--------|
-| TLC | ✅ | ✅ | ❌ | ✅ | ❌ |
-| Apalache | ✅ | ❌ | ✅ | ❌ | ❌ |
-| TLAPS | ✅ | ✅ | N/A | N/A | ✅ |
+| Tool     | Safety Properties | Liveness Properties | Bounded Checking | Exhaustive | Proofs |
+| -------- | ----------------- | ------------------- | ---------------- | ---------- | ------ |
+| TLC      | ✅                 | ✅                   | ❌                | ✅          | ❌      |
+| Apalache | ✅                 | ❌                   | ✅                | ❌          | ❌      |
+| TLAPS    | ✅                 | ✅                   | N/A              | N/A        | ✅      |
 
 ---
 
@@ -105,15 +107,15 @@ code --install-extension alygin.vscode-tlaplus
 
 ### IDE Comparison
 
-| Feature | TLA+ Toolbox | VS Code Extension |
-|---------|--------------|-------------------|
-| Syntax highlighting | ✅ | ✅ |
-| TLC integration | ✅ (native) | ✅ |
-| PlusCal translation | ✅ | ✅ |
-| Proof support (TLAPS) | ✅ | Limited |
-| Model visualization | ✅ (advanced) | ✅ (basic) |
-| Cross-platform | ✅ | ✅ |
-| Lightweight | ❌ | ✅ |
+| Feature               | TLA+ Toolbox | VS Code Extension |
+| --------------------- | ------------ | ----------------- |
+| Syntax highlighting   | ✅            | ✅                 |
+| TLC integration       | ✅ (native)   | ✅                 |
+| PlusCal translation   | ✅            | ✅                 |
+| Proof support (TLAPS) | ✅            | Limited           |
+| Model visualization   | ✅ (advanced) | ✅ (basic)         |
+| Cross-platform        | ✅            | ✅                 |
+| Lightweight           | ❌            | ✅                 |
 
 ---
 
@@ -176,14 +178,14 @@ jobs:
 
 The TLA+ Examples repository uses Python scripts for comprehensive CI validation:
 
-| Script | Purpose |
-|--------|---------|
-| `parse_modules.py` | Runs SANY parser on all `.tla` files |
-| `translate_pluscal.py` | Validates PlusCal syntax via translation |
-| `check_small_models.py` | Runs TLC on models expected to complete quickly |
+| Script                       | Purpose                                            |
+| ---------------------------- | -------------------------------------------------- |
+| `parse_modules.py`           | Runs SANY parser on all `.tla` files               |
+| `translate_pluscal.py`       | Validates PlusCal syntax via translation           |
+| `check_small_models.py`      | Runs TLC on models expected to complete quickly    |
 | `smoke_test_large_models.py` | Runs TLC briefly on large models to detect crashes |
-| `check_proofs.py` | Validates TLAPS proofs |
-| `unicode_conversion.py` | Tests Unicode ↔ ASCII equivalence |
+| `check_proofs.py`            | Validates TLAPS proofs                             |
+| `unicode_conversion.py`      | Tests Unicode ↔ ASCII equivalence                  |
 
 ### CI Best Practices
 
@@ -228,18 +230,18 @@ java -cp tla2tools.jar tlc2.TLC -dfid 10 MySpec.tla
 
 ### Common TLC Options
 
-| Option | Description |
-|--------|-------------|
-| `-config <file>` | Specify model configuration file |
-| `-workers <n\|auto>` | Number of worker threads |
-| `-deadlock` | Check for deadlocks |
-| `-simulate` | Random simulation mode |
-| `-depth <n>` | Maximum depth for simulation |
-| `-coverage <n>` | Print coverage info every n minutes |
-| `-checkpoint <n>` | Checkpoint interval in minutes |
-| `-recover <path>` | Recover from checkpoint |
-| `-difftrace` | Show differences between states |
-| `-dump <format> <file>` | Dump state graph (dot, json) |
+| Option                  | Description                         |
+| ----------------------- | ----------------------------------- |
+| `-config <file>`        | Specify model configuration file    |
+| `-workers <n\|auto>`    | Number of worker threads            |
+| `-deadlock`             | Check for deadlocks                 |
+| `-simulate`             | Random simulation mode              |
+| `-depth <n>`            | Maximum depth for simulation        |
+| `-coverage <n>`         | Print coverage info every n minutes |
+| `-checkpoint <n>`       | Checkpoint interval in minutes      |
+| `-recover <path>`       | Recover from checkpoint             |
+| `-difftrace`            | Show differences between states     |
+| `-dump <format> <file>` | Dump state graph (dot, json)        |
 
 ### PlusCal Translation
 
@@ -275,13 +277,13 @@ tlapm --method zenon MyProof.tla
 
 TLC returns meaningful exit codes for CI integration:
 
-| Exit Code | Meaning |
-|-----------|---------|
-| 0 | Success (no errors found) |
-| 10 | Assumption failure |
-| 11 | Deadlock detected |
-| 12 | Safety violation |
-| 13 | Liveness violation |
+| Exit Code | Meaning                   |
+| --------- | ------------------------- |
+| 0         | Success (no errors found) |
+| 10        | Assumption failure        |
+| 11        | Deadlock detected         |
+| 12        | Safety violation          |
+| 13        | Liveness violation        |
 
 ---
 
@@ -428,11 +430,11 @@ clean:
 
 ### Tool Downloads
 
-| Resource | URL |
-|----------|-----|
-| Stable Releases | [github.com/tlaplus/tlaplus/releases](https://github.com/tlaplus/tlaplus/releases) |
-| Nightly Tools | [nightly.tlapl.us/dist/](https://nightly.tlapl.us/dist/) |
-| Nightly Toolbox | [nightly.tlapl.us/products/](https://nightly.tlapl.us/products/) |
+| Resource        | URL                                                                                                              |
+| --------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Stable Releases | [github.com/tlaplus/tlaplus/releases](https://github.com/tlaplus/tlaplus/releases)                               |
+| Nightly Tools   | [nightly.tlapl.us/dist/](https://nightly.tlapl.us/dist/)                                                         |
+| Nightly Toolbox | [nightly.tlapl.us/products/](https://nightly.tlapl.us/products/)                                                 |
 | Maven Artifacts | [oss.sonatype.org/.../tla2tools](https://oss.sonatype.org/content/repositories/snapshots/org/lamport/tla2tools/) |
 
 ---

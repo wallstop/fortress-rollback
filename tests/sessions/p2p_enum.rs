@@ -3,10 +3,10 @@
 //! These tests verify that enum-based input types work correctly with P2P sessions.
 //! The actual test logic is implemented in generic helpers in `test_utils.rs`.
 //!
-//! # Port Allocation
+//! # Deterministic Testing
 //!
-//! This test file uses `bind_socket_ephemeral()` for OS-assigned ephemeral ports
-//! to avoid TIME_WAIT conflicts on Windows CI.
+//! This test file uses `ChannelSocket` (in-memory sockets) and `TestClock`
+//! (virtual time) for fully deterministic execution.
 
 // Allow test-specific patterns that are appropriate for test code
 #![allow(
@@ -17,19 +17,18 @@
     clippy::ip_constant
 )]
 
-use crate::common::run_p2p_frame_advancement_test;
+use crate::common::run_p2p_frame_advancement_test_deterministic;
 use crate::common::stubs_enum::{EnumInput, GameStubEnum, StubEnumConfig};
 use fortress_rollback::FortressError;
-use serial_test::serial;
 
 /// Test P2P frame advancement with enum-based inputs.
 ///
 /// This test verifies that the P2P session correctly handles enum input types
-/// by using the shared generic test helper.
+/// by using the shared generic deterministic test helper with ChannelSocket
+/// and TestClock for fully deterministic execution.
 #[test]
-#[serial]
 fn test_advance_frame_p2p_sessions_enum() -> Result<(), FortressError> {
-    run_p2p_frame_advancement_test::<StubEnumConfig, GameStubEnum>(
+    run_p2p_frame_advancement_test_deterministic::<StubEnumConfig, GameStubEnum>(
         |i| {
             if i % 2 == 0 {
                 EnumInput::Val1

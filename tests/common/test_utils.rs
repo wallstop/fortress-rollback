@@ -3,50 +3,66 @@
 //! This module provides common constants, helper functions, and utilities
 //! that are used across multiple test files to avoid duplication.
 //!
-//! # Port Allocation Strategy
+//! # Recommended: ChannelSocket + TestClock
 //!
-//! This module provides two approaches for socket binding in tests:
+//! Most integration tests should use in-memory [`ChannelSocket`](super::channel_socket::ChannelSocket)
+//! paired with [`TestClock`](super::test_clock::TestClock). This approach is:
 //!
-//! ## Recommended: Ephemeral Ports (for actual socket binding)
+//! - **Deterministic**: No real network I/O, no timing-dependent behavior
+//! - **Fast**: No thread sleeps or real UDP round-trips
+//! - **Portable**: No OS-level port binding, so no Windows CI flakiness
 //!
-//! Use [`bind_socket_ephemeral`] or [`create_chaos_socket_ephemeral`] when you need
-//! to bind actual sockets. This approach uses port 0, letting the OS assign an
-//! available ephemeral port, eliminating TIME_WAIT conflicts on Windows CI:
+//! ```ignore
+//! use common::channel_socket::create_channel_pair;
+//! use common::test_clock::TestClock;
+//! use fortress_rollback::ProtocolConfig;
+//!
+//! let clock = TestClock::new();
+//! let (socket1, socket2, addr1, addr2) = create_channel_pair();
+//! let config = ProtocolConfig {
+//!     clock: Some(clock.as_protocol_clock()),
+//!     ..ProtocolConfig::default()
+//! };
+//! // Pass config to SessionBuilder, use socket1/socket2 as NonBlockingSocket
+//! ```
+//!
+//! See `tests/sessions/p2p.rs`, `tests/sessions/p2p_enum.rs`, and
+//! `tests/sessions/spectator.rs` for examples.
+//!
+//! # Fallback: Real UDP Sockets
+//!
+//! For tests that genuinely need real network I/O (e.g., multi-process tests,
+//! property verification tests), use [`bind_socket_ephemeral`] or
+//! [`create_chaos_socket_ephemeral`] with OS-assigned ephemeral ports:
 //!
 //! ```ignore
 //! use common::test_utils::{bind_socket_ephemeral, create_chaos_socket_ephemeral};
 //!
-//! // For regular UDP sockets
 //! let (socket1, addr1) = bind_socket_ephemeral()?;
 //! let (socket2, addr2) = bind_socket_ephemeral()?;
-//!
-//! // For chaos sockets with network simulation
-//! let config = ChaosConfig::builder().seed(42).build();
-//! let (chaos_socket, addr) = create_chaos_socket_ephemeral(config)?;
 //! ```
 //!
 //! ## Legacy: Port Allocator (for unbound addresses only)
 //!
 //! Use [`PortAllocator`] only for generating remote addresses that will NOT be
-//! bound to actual sockets (e.g., mock remote peers). The allocator uses atomic
-//! operations for thread-safety but can still encounter TIME_WAIT conflicts:
+//! bound to actual sockets (e.g., mock remote peers):
 //!
 //! ```ignore
 //! use common::test_utils::PortAllocator;
-//!
-//! // Only for addresses NOT bound to actual sockets
 //! let mock_remote_port = PortAllocator::next_port();
 //! ```
 //!
-//! # Migration Note (January 2026)
+//! # Migration History
 //!
-//! All network tests have been migrated to use ephemeral ports for actual socket
-//! binding. This resolved persistent Windows CI failures caused by WSAEACCES (10013)
-//! and WSAEADDRINUSE (10048) errors from TIME_WAIT socket states.
-//!
-//! If adding new network tests, always prefer `bind_socket_ephemeral()` or
-//! `create_chaos_socket_ephemeral()` over `PortAllocator` for bound sockets.
+//! - **January 2026**: Migrated real-socket tests from hardcoded ports to ephemeral
+//!   ports, resolving Windows CI failures (WSAEACCES / WSAEADDRINUSE).
+//! - **March 2026**: Migrated session tests (`p2p.rs`, `p2p_enum.rs`, `spectator.rs`)
+//!   and resilience tests (`resilience.rs`) from real UDP sockets + `thread::sleep`
+//!   to `ChannelSocket` + `TestClock`, removing the `port-7777` serial test group
+//!   from nextest configuration. Tests in `session_trait.rs`, `config.rs`, and
+//!   `property.rs` still use real UDP sockets.
 
+use super::test_clock::TestClock;
 use fortress_rollback::{Config, FortressEvent, P2PSession, SessionState};
 use std::hash::Hash;
 use std::net::SocketAddr;
@@ -55,8 +71,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 // ============================================================================
-// Port Allocation System
+// Port Allocation System (for real-socket tests only)
 // ============================================================================
+//
+// NOTE: Most session and resilience tests now use ChannelSocket + TestClock
+// and do not need real UDP sockets or port allocation at all. The helpers
+// below are retained for tests that still require real network I/O
+// (multi-process, config, and property-based verification tests).
 //
 // ## Windows-Specific Considerations
 //
@@ -275,6 +296,16 @@ pub const MAX_SYNC_ITERATIONS: usize = 500;
 /// This prevents tight loops that may not give the network layer enough time
 /// to process messages, especially on systems with different scheduling behavior (e.g., macOS CI).
 pub const POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Virtual time to advance between deterministic poll iterations.
+///
+/// This value (50ms) is chosen to:
+/// - Be large enough to trigger sync retry timers (default 200ms after ~4 iterations)
+/// - Be small enough to avoid triggering disconnect timeouts (default 500ms+ requires 10+ iterations)
+/// - Match the cadence used in the existing `ChannelSocket` integration tests
+///
+/// For fine-grained control, tests can call `clock.advance()` directly with custom durations.
+pub const POLL_INTERVAL_DETERMINISTIC: Duration = Duration::from_millis(50);
 
 /// Maximum time to wait for synchronization to complete.
 pub const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -643,6 +674,68 @@ pub fn synchronize_sessions<C: Config>(
     Ok(iterations)
 }
 
+/// Synchronizes two P2P sessions using virtual time (no `thread::sleep`).
+///
+/// This is the deterministic replacement for [`synchronize_sessions()`].
+/// Instead of sleeping, it advances the test clock to trigger protocol
+/// retry timers, making synchronization fully deterministic regardless
+/// of system load or platform.
+///
+/// # Arguments
+///
+/// * `sess1`, `sess2` - The sessions to synchronize
+/// * `clock` - The shared test clock for virtual time control
+/// * `config` - Synchronization configuration (iteration limits)
+///
+/// # Returns
+///
+/// * `Ok(iterations)` if both sessions reached `Running` state
+/// * `Err(FortressError)` if synchronization timed out
+///
+/// # Example
+///
+/// ```ignore
+/// let clock = TestClock::new();
+/// // ... build sessions with clock.as_protocol_clock() ...
+/// synchronize_sessions_deterministic(&mut sess1, &mut sess2, &clock, &SyncConfig::default())?;
+/// ```
+#[allow(dead_code)]
+#[track_caller]
+pub fn synchronize_sessions_deterministic<C: Config>(
+    sess1: &mut P2PSession<C>,
+    sess2: &mut P2PSession<C>,
+    clock: &TestClock,
+    config: &SyncConfig,
+) -> Result<usize, FortressError> {
+    let mut iterations = 0;
+    for _ in 0..config.max_iterations {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        iterations += 1;
+
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            return Ok(iterations);
+        }
+
+        // Advance virtual time past the sync retry interval (default 200ms).
+        // 50ms per iteration is enough to trigger retries without accidentally
+        // triggering disconnect timeouts (which are typically 500ms+).
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+
+    Err(FortressError::InternalError {
+        context: format!(
+            "Deterministic sync timed out after {} iterations. \
+             sess1: {:?}, sess2: {:?}",
+            config.max_iterations,
+            sess1.current_state(),
+            sess2.current_state()
+        ),
+    })
+}
+
 /// Performs robust polling of two sessions with sleep intervals.
 ///
 /// This helper ensures the network layer has adequate time to process packets,
@@ -663,6 +756,39 @@ pub fn poll_with_sleep<C: Config>(
         sess1.poll_remote_clients();
         sess2.poll_remote_clients();
         thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Polls two sessions and advances virtual time (no `thread::sleep`).
+///
+/// This is the deterministic replacement for [`poll_with_sleep()`].
+/// Instead of sleeping between polls, it advances the test clock by
+/// [`POLL_INTERVAL_DETERMINISTIC`], making poll timing fully deterministic.
+///
+/// # Arguments
+///
+/// * `sess1`, `sess2` - The sessions to poll
+/// * `clock` - The shared test clock for virtual time control
+/// * `iterations` - Number of poll cycles
+///
+/// # Example
+///
+/// ```ignore
+/// let clock = TestClock::new();
+/// // ... build sessions with clock.as_protocol_clock() ...
+/// poll_with_advance(&mut sess1, &mut sess2, &clock, 10);
+/// ```
+#[allow(dead_code)]
+pub fn poll_with_advance<C: Config>(
+    sess1: &mut P2PSession<C>,
+    sess2: &mut P2PSession<C>,
+    clock: &TestClock,
+    iterations: usize,
+) {
+    for _ in 0..iterations {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
     }
 }
 
@@ -758,6 +884,71 @@ pub fn synchronize_spectator<C: Config>(
     SyncResult {
         iterations,
         elapsed: start.elapsed(),
+        success: false,
+    }
+}
+
+/// Synchronizes a spectator session with a host using virtual time (no `thread::sleep`).
+///
+/// This is the deterministic replacement for [`synchronize_spectator()`].
+/// Instead of sleeping, it advances the test clock to trigger protocol
+/// retry timers, making synchronization fully deterministic.
+///
+/// Unlike [`synchronize_spectator()`], this function does not use a wall-clock
+/// timeout. Since virtual time only advances via explicit `clock.advance()` calls,
+/// a wall-clock timeout would be meaningless. Instead, it relies solely on the
+/// iteration limit ([`MAX_SYNC_ITERATIONS`]).
+///
+/// # Arguments
+///
+/// * `spec_sess` - The spectator session to synchronize
+/// * `host_sess` - The host P2P session to synchronize
+/// * `clock` - The shared test clock for virtual time control
+///
+/// # Returns
+///
+/// A [`SyncResult`] with the synchronization outcome and iteration count.
+///
+/// # Example
+///
+/// ```ignore
+/// let clock = TestClock::new();
+/// // ... build sessions with clock.as_protocol_clock() ...
+/// let result = synchronize_spectator_deterministic(&mut spec, &mut host, &clock);
+/// assert!(result.success);
+/// ```
+#[allow(dead_code)]
+#[track_caller]
+pub fn synchronize_spectator_deterministic<C: Config>(
+    spec_sess: &mut SpectatorSession<C>,
+    host_sess: &mut P2PSession<C>,
+    clock: &TestClock,
+) -> SyncResult {
+    let start = clock.now();
+    let mut iterations = 0;
+
+    while iterations < MAX_SYNC_ITERATIONS {
+        spec_sess.poll_remote_clients();
+        host_sess.poll_remote_clients();
+        iterations += 1;
+
+        if spec_sess.current_state() == SessionState::Running
+            && host_sess.current_state() == SessionState::Running
+        {
+            return SyncResult {
+                iterations,
+                elapsed: clock.now() - start,
+                success: true,
+            };
+        }
+
+        // Advance virtual time past sync retry interval
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+
+    SyncResult {
+        iterations,
+        elapsed: clock.now() - start,
         success: false,
     }
 }
@@ -874,6 +1065,81 @@ where
         stub2.handle_requests(requests2);
 
         // Gamestate evolves
+        assert_eq!(stub1.current_frame(), i as i32 + 1);
+        assert_eq!(stub2.current_frame(), i as i32 + 1);
+    }
+
+    Ok(())
+}
+
+/// Generic test for P2P frame advancement using deterministic infrastructure.
+///
+/// This is the deterministic replacement for [`run_p2p_frame_advancement_test()`].
+/// Instead of real UDP sockets and `thread::sleep`, it uses `ChannelSocket`,
+/// `TestClock`, and `poll_with_advance` for fully deterministic execution.
+///
+/// # Type Parameters
+/// * `C` - The Config type to use
+/// * `S` - The game stub type (must implement GameStubHandler<C>)
+///
+/// # Arguments
+/// * `input_gen` - Function that generates input for a given frame number
+/// * `num_frames` - Number of frames to advance
+#[allow(dead_code)]
+#[track_caller]
+pub fn run_p2p_frame_advancement_test_deterministic<C, S>(
+    input_gen: impl Fn(u32) -> C::Input,
+    num_frames: u32,
+) -> Result<(), FortressError>
+where
+    C: Config<Address = SocketAddr>,
+    S: GameStubHandler<C>,
+{
+    use super::channel_socket::create_channel_pair;
+    use fortress_rollback::{ProtocolConfig, SessionBuilder};
+
+    let clock = TestClock::new();
+    let (socket1, socket2, addr1, addr2) = create_channel_pair();
+
+    let protocol_config = ProtocolConfig {
+        clock: Some(clock.as_protocol_clock()),
+        ..ProtocolConfig::default()
+    };
+
+    let mut sess1 = SessionBuilder::<C>::new()
+        .with_protocol_config(protocol_config.clone())
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let mut sess2 = SessionBuilder::<C>::new()
+        .with_protocol_config(protocol_config)
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(socket2)?;
+
+    assert!(sess1.current_state() == SessionState::Synchronizing);
+    assert!(sess2.current_state() == SessionState::Synchronizing);
+
+    synchronize_sessions_deterministic(&mut sess1, &mut sess2, &clock, &SyncConfig::default())?;
+
+    assert!(sess1.current_state() == SessionState::Running);
+    assert!(sess2.current_state() == SessionState::Running);
+
+    let mut stub1 = S::new();
+    let mut stub2 = S::new();
+
+    for i in 0..num_frames {
+        poll_with_advance(&mut sess1, &mut sess2, &clock, 3);
+
+        sess1.add_local_input(PlayerHandle::new(0), input_gen(i))?;
+        let requests1 = sess1.advance_frame()?;
+        stub1.handle_requests(requests1);
+
+        sess2.add_local_input(PlayerHandle::new(1), input_gen(i))?;
+        let requests2 = sess2.advance_frame()?;
+        stub2.handle_requests(requests2);
+
         assert_eq!(stub1.current_frame(), i as i32 + 1);
         assert_eq!(stub2.current_frame(), i as i32 + 1);
     }

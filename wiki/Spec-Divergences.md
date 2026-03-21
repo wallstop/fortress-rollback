@@ -1,4 +1,4 @@
-<!-- SYNC: This file should be kept in sync with docs/specs/spec-divergences.md -->
+<!-- SYNC: This wiki page is generated from docs/specs/spec-divergences.md. Edit docs source. -->
 
 <p align="center">
   <img src="assets/logo-small.svg" alt="Fortress Rollback" width="64">
@@ -18,21 +18,21 @@ This document lists intentional divergences between formal specifications and pr
 
 ### 1. TLA+ Model Checking Constants
 
-| Constant | TLA+ Value | Production Value | Justification |
-|----------|------------|------------------|---------------|
-| `QUEUE_LENGTH` | 3 | 128 | Small values keep state space tractable for exhaustive model checking. The invariants (INV-4, INV-5) hold regardless of queue size. |
-| `MAX_PREDICTION` | 1-3 | 8 (default) | Small values allow TLC to explore all states. The rollback boundedness property (INV-2) is size-independent. |
-| `MAX_FRAME` | 3-4 | ~2 billion | Model checking bounds. Frame arithmetic correctness is verified by Z3 and Kani. |
-| `NULL_FRAME` | 999 | -1 | TLA+ uses natural numbers; 999 serves as sentinel outside valid frame range. Production uses -1 as the standard null sentinel. |
-| `NUM_PLAYERS` | 2 | configurable | Model checking focuses on 2-player case. Properties generalize to N players. |
+| Constant         | TLA+ Value | Production Value | Justification                                                                                                                       |
+| ---------------- | ---------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `QUEUE_LENGTH`   | 3          | 128              | Small values keep state space tractable for exhaustive model checking. The invariants (INV-4, INV-5) hold regardless of queue size. |
+| `MAX_PREDICTION` | 1-3        | 8 (default)      | Small values allow TLC to explore all states. The rollback boundedness property (INV-2) is size-independent.                        |
+| `MAX_FRAME`      | 3-4        | ~2 billion       | Model checking bounds. Frame arithmetic correctness is verified by Z3 and Kani.                                                     |
+| `NULL_FRAME`     | 999        | -1               | TLA+ uses natural numbers; 999 serves as sentinel outside valid frame range. Production uses -1 as the standard null sentinel.      |
+| `NUM_PLAYERS`    | 2          | configurable     | Model checking focuses on 2-player case. Properties generalize to N players.                                                        |
 
 **Verification Strategy:** TLA+ proves invariant structure holds; Z3 and Kani verify with production-scale values where tractable.
 
 ### 2. Kani Verification Constants
 
-| Constant | Kani Value | Production Value | Justification |
-|----------|------------|------------------|---------------|
-| `INPUT_QUEUE_LENGTH` | 8 | 128 | Kani's symbolic execution is exponential in array size. 8 elements is sufficient to prove circular buffer invariants (wrap-around, bounds checking). |
+| Constant             | Kani Value | Production Value | Justification                                                                                                                                        |
+| -------------------- | ---------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `INPUT_QUEUE_LENGTH` | 8          | 128              | Kani's symbolic execution is exponential in array size. 8 elements is sufficient to prove circular buffer invariants (wrap-around, bounds checking). |
 
 **Verification Strategy:** The invariants are size-independent; proving them for 8 elements implies they hold for 128.
 
@@ -48,19 +48,19 @@ The following aspects are verified to be perfectly aligned:
 
 ### State Machine Alignment
 
-| Component | TLA+ Spec | Production Code | Status |
-|-----------|-----------|-----------------|--------|
-| `ProtocolState` enum | `NetworkProtocol.tla` | `src/network/protocol.rs:220` | ✅ Aligned |
-| State transitions | `NetworkProtocol.tla` | `protocol.rs` various methods | ✅ Aligned |
-| `SyncLayer` fields | `Rollback.tla` | `src/sync_layer.rs:263` | ✅ Aligned |
-| `InputQueue` fields | `InputQueue.tla` | `src/input_queue.rs:100` | ✅ Aligned |
+| Component            | TLA+ Spec                       | Production Code                               | Status    |
+| -------------------- | ------------------------------- | --------------------------------------------- | --------- |
+| `ProtocolState` enum | `specs/tla/NetworkProtocol.tla` | `src/network/protocol/state.rs`               | ✅ Aligned |
+| State transitions    | `specs/tla/NetworkProtocol.tla` | `src/network/protocol/mod.rs` various methods | ✅ Aligned |
+| `SyncLayer` fields   | `specs/tla/Rollback.tla`        | `src/sync_layer/mod.rs`                       | ✅ Aligned |
+| `InputQueue` fields  | `specs/tla/InputQueue.tla`      | `src/input_queue/mod.rs`                      | ✅ Aligned |
 
 ### Prediction Strategy Alignment (Fixed Dec 15, 2025)
 
-| Aspect | TLA+ Spec | Production Code | Status |
-|--------|-----------|-----------------|--------|
-| Prediction source | `lastConfirmedInput` | `last_confirmed_input` | ✅ Aligned |
-| Update timing | Updated on every `AddInput`/`AddRemoteInput` | Updated on every `add_input_by_frame` | ✅ Aligned |
+| Aspect            | TLA+ Spec                                    | Production Code                       | Status    |
+| ----------------- | -------------------------------------------- | ------------------------------------- | --------- |
+| Prediction source | `lastConfirmedInput`                         | `last_confirmed_input`                | ✅ Aligned |
+| Update timing     | Updated on every `AddInput`/`AddRemoteInput` | Updated on every `add_input_by_frame` | ✅ Aligned |
 
 **IMPORTANT**: Fortress Rollback uses `last_confirmed_input` (updated when any input is added)
 as the source for predictions, NOT a separate `prediction` variable like original GGPO.
@@ -75,23 +75,23 @@ production naming and document this design decision.
 
 ### Invariant Implementation
 
-| Invariant | Spec Location | Code Location | Status |
-|-----------|---------------|---------------|--------|
-| INV-1 (Frame Monotonicity) | `Rollback.tla:FrameMonotonicity` | `sync_layer.rs:advance_frame`, `load_frame` | ✅ Verified |
-| INV-2 (Rollback Bounds) | `Rollback.tla:RollbackBounded` | `sync_layer.rs:394` | ✅ Verified |
-| INV-4 (Queue Length) | `InputQueue.tla:QueueLengthBounded` | `input_queue.rs:check_invariants` | ✅ Verified |
-| INV-5 (Queue Index) | `InputQueue.tla:QueueIndexValid` | `input_queue.rs:check_invariants` | ✅ Verified |
-| INV-7 (Confirmed Frame) | `Rollback.tla:ConfirmedFrameConsistency` | `sync_layer.rs:check_invariants` | ✅ Verified |
-| INV-8 (Saved Frame) | `Rollback.tla:SavedFrameConsistency` | `sync_layer.rs:check_invariants` | ✅ Verified |
+| Invariant                  | Spec Location                            | Code Location                                   | Status     |
+| -------------------------- | ---------------------------------------- | ----------------------------------------------- | ---------- |
+| INV-1 (Frame Monotonicity) | `Rollback.tla:FrameMonotonicity`         | `sync_layer/mod.rs:advance_frame`, `load_frame` | ✅ Verified |
+| INV-2 (Rollback Bounds)    | `Rollback.tla:RollbackBounded`           | `sync_layer/mod.rs`                             | ✅ Verified |
+| INV-4 (Queue Length)       | `InputQueue.tla:QueueLengthBounded`      | `input_queue/mod.rs:check_invariants`           | ✅ Verified |
+| INV-5 (Queue Index)        | `InputQueue.tla:QueueIndexValid`         | `input_queue/mod.rs:check_invariants`           | ✅ Verified |
+| INV-7 (Confirmed Frame)    | `Rollback.tla:ConfirmedFrameConsistency` | `sync_layer/mod.rs:check_invariants`            | ✅ Verified |
+| INV-8 (Saved Frame)        | `Rollback.tla:SavedFrameConsistency`     | `sync_layer/mod.rs:check_invariants`            | ✅ Verified |
 
 ### Default Values
 
-| Parameter | Spec Value | Production Value | Status |
-|-----------|------------|------------------|--------|
-| `DEFAULT_MAX_PREDICTION` | 8 | 8 | ✅ Aligned |
-| `DEFAULT_DISCONNECT_TIMEOUT` | 2000ms | 2000ms | ✅ Aligned |
-| `DEFAULT_FPS` | 60 | 60 | ✅ Aligned |
-| `NUM_SYNC_PACKETS` | 5 | 5 | ✅ Aligned |
+| Parameter                    | Spec Value | Production Value | Status    |
+| ---------------------------- | ---------- | ---------------- | --------- |
+| `DEFAULT_MAX_PREDICTION`     | 8          | 8                | ✅ Aligned |
+| `DEFAULT_DISCONNECT_TIMEOUT` | 2000ms     | 2000ms           | ✅ Aligned |
+| `DEFAULT_FPS`                | 60         | 60               | ✅ Aligned |
+| `NUM_SYNC_PACKETS`           | 5          | 5                | ✅ Aligned |
 
 ---
 
@@ -111,53 +111,53 @@ how TLA+ constants map to production configuration.
 
 ### TLA+ Constants → Production Config Mapping
 
-| TLA+ Constant | Config Struct | Field | Default | Notes |
-|---------------|---------------|-------|---------|-------|
-| `QUEUE_LENGTH` | `InputQueueConfig` | `queue_length` | 128 | TLA+ uses 3 for tractability |
-| `MAX_PREDICTION` | `SessionBuilder` | `max_prediction` | 8 | TLA+ uses 1-3 for tractability |
-| `NUM_SYNC_PACKETS` | `SyncConfig` | `num_sync_packets` | 5 | Same in TLA+ and production |
-| `NUM_PLAYERS` | `SessionBuilder` | (player count) | 2 | TLA+ focuses on 2-player case |
+| TLA+ Constant      | Config Struct      | Field              | Default | Notes                          |
+| ------------------ | ------------------ | ------------------ | ------- | ------------------------------ |
+| `QUEUE_LENGTH`     | `InputQueueConfig` | `queue_length`     | 128     | TLA+ uses 3 for tractability   |
+| `MAX_PREDICTION`   | `SessionBuilder`   | `max_prediction`   | 8       | TLA+ uses 1-3 for tractability |
+| `NUM_SYNC_PACKETS` | `SyncConfig`       | `num_sync_packets` | 5       | Same in TLA+ and production    |
+| `NUM_PLAYERS`      | `SessionBuilder`   | (player count)     | 2       | TLA+ focuses on 2-player case  |
 
 ### Production Config Structs Not Modeled in TLA+
 
 The following config structs control **timing/thresholds** rather than **protocol behavior**,
 so they don't have TLA+ counterparts:
 
-| Config Struct | Purpose | Why Not in TLA+ |
-|---------------|---------|-----------------|
-| `ProtocolConfig` | Quality reports, shutdown delay, thresholds | Timing details, not state machine behavior |
-| `SpectatorConfig` | Buffer size, catchup speed | Spectator protocol not separately modeled |
-| `TimeSyncConfig` | Averaging window size | Time sync is implementation detail |
+| Config Struct     | Purpose                                     | Why Not in TLA+                            |
+| ----------------- | ------------------------------------------- | ------------------------------------------ |
+| `ProtocolConfig`  | Quality reports, shutdown delay, thresholds | Timing details, not state machine behavior |
+| `SpectatorConfig` | Buffer size, catchup speed                  | Spectator protocol not separately modeled  |
+| `TimeSyncConfig`  | Averaging window size                       | Time sync is implementation detail         |
 
 ### All Configurable Constants
 
-| Constant | Config Struct | Field | Default | Range |
-|----------|---------------|-------|---------|-------|
-| `INPUT_QUEUE_LENGTH` | `InputQueueConfig` | `queue_length` | 128 | 2+ |
-| `MAX_FRAME_DELAY` | (derived) | `queue_length - 1` | 127 | - |
-| `NUM_SYNC_PACKETS` | `SyncConfig` | `num_sync_packets` | 5 | 1+ |
-| `MAX_PREDICTION` | `SessionBuilder` | `max_prediction` | 8 | 1+ |
-| `WINDOW_SIZE` | `TimeSyncConfig` | `window_size` | 30 | 1+ |
-| `SPECTATOR_BUFFER` | `SpectatorConfig` | `buffer_size` | 60 | 1+ |
+| Constant             | Config Struct      | Field              | Default | Range |
+| -------------------- | ------------------ | ------------------ | ------- | ----- |
+| `INPUT_QUEUE_LENGTH` | `InputQueueConfig` | `queue_length`     | 128     | 2+    |
+| `MAX_FRAME_DELAY`    | (derived)          | `queue_length - 1` | 127     | -     |
+| `NUM_SYNC_PACKETS`   | `SyncConfig`       | `num_sync_packets` | 5       | 1+    |
+| `MAX_PREDICTION`     | `SessionBuilder`   | `max_prediction`   | 8       | 1+    |
+| `WINDOW_SIZE`        | `TimeSyncConfig`   | `window_size`      | 30      | 1+    |
+| `SPECTATOR_BUFFER`   | `SpectatorConfig`  | `buffer_size`      | 60      | 1+    |
 
 ### Presets Available
 
 **InputQueueConfig:**
 
-| Preset | Queue Length | Use Case |
-|--------|--------------|----------|
-| `standard()` | 128 | Default, ~2.1s at 60 FPS |
-| `high_latency()` | 256 | High latency networks, ~4.3s at 60 FPS |
-| `minimal()` | 32 | Memory-constrained, ~0.5s at 60 FPS |
+| Preset           | Queue Length | Use Case                               |
+| ---------------- | ------------ | -------------------------------------- |
+| `standard()`     | 128          | Default, ~2.1s at 60 FPS               |
+| `high_latency()` | 256          | High latency networks, ~4.3s at 60 FPS |
+| `minimal()`      | 32           | Memory-constrained, ~0.5s at 60 FPS    |
 
 **SyncConfig:**
 
-| Preset | Sync Packets | Retry Interval | Use Case |
-|--------|--------------|----------------|----------|
-| `default()` | 5 | 200ms | Standard networks |
-| `high_latency()` | 5 | 400ms | High latency (100-200ms RTT) |
-| `lossy()` | 8 | 200ms | Lossy networks (5-15% loss) |
-| `lan()` | 3 | 100ms | LAN play |
+| Preset           | Sync Packets | Retry Interval | Use Case                     |
+| ---------------- | ------------ | -------------- | ---------------------------- |
+| `default()`      | 5            | 200ms          | Standard networks            |
+| `high_latency()` | 5            | 400ms          | High latency (100-200ms RTT) |
+| `lossy()`        | 8            | 200ms          | Lossy networks (5-15% loss)  |
+| `lan()`          | 3            | 100ms          | LAN play                     |
 
 ### Verification Strategy
 
@@ -182,16 +182,16 @@ When modifying specs or production code:
 
 1. **Check this document** - Ensure changes don't introduce unintended divergences
 2. **Update linkage comments** - If code moves, update the spec linkage comments
-3. **Run all verification** - `./scripts/verify-all.sh` validates TLA+, Kani, and Z3
+3. **Run all verification** - `./scripts/verification/verify-all.sh` validates TLA+, Kani, and Z3
 
 ---
 
 ## Revision History
 
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.4 | 2026-02-05 | Synchronized docs/ and wiki/ versions; no content changes |
-| 1.3 | 2025-12-15 | Fixed InputQueue.tla to use `lastConfirmedInput` matching production's `last_confirmed_input` (was incorrectly named `prediction`, which modeled original GGPO behavior) |
-| 1.2 | 2025-12-09 | Comprehensive config struct documentation: SyncConfig, ProtocolConfig, SpectatorConfig, TimeSyncConfig |
-| 1.1 | 2025-12-09 | Phase 10: Documented configurable constants (InputQueueConfig) |
-| 1.0 | 2025-12-09 | Initial audit documenting all divergences and alignments |
+| Version | Date       | Changes                                                                                                                                                                  |
+| ------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1.4     | 2026-02-05 | Synchronized docs/ and wiki/ versions; no content changes                                                                                                                |
+| 1.3     | 2025-12-15 | Fixed InputQueue.tla to use `lastConfirmedInput` matching production's `last_confirmed_input` (was incorrectly named `prediction`, which modeled original GGPO behavior) |
+| 1.2     | 2025-12-09 | Comprehensive config struct documentation: SyncConfig, ProtocolConfig, SpectatorConfig, TimeSyncConfig                                                                   |
+| 1.1     | 2025-12-09 | Phase 10: Documented configurable constants (InputQueueConfig)                                                                                                           |
+| 1.0     | 2025-12-09 | Initial audit documenting all divergences and alignments                                                                                                                 |

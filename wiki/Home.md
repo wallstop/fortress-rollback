@@ -1,3 +1,5 @@
+<!-- SYNC: This wiki page is generated from docs/index.md. Edit docs source. -->
+
 <p align="center">
   <img src="assets/logo.svg" alt="Fortress Rollback" width="160">
 </p>
@@ -71,9 +73,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_player(PlayerType::Remote(remote), PlayerHandle::new(1))?
         .start_p2p_session(socket)?;
 
-    // Tip: For cleaner player handle management, see the
-    // "Player Handle Convenience Methods" section in the User Guide.
-
     // Your game loop handles FortressRequests...
     Ok(())
 }
@@ -104,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 >
 > - All `panic!` and `assert!` converted to recoverable errors
 > - Deterministic `BTreeMap`/`BTreeSet` instead of `HashMap`/`HashSet`
-> - ~1500 tests with ~92% code coverage
+> - ~1600 tests with ~92% code coverage
 > - TLA+, Z3, and Kani formal verification
 >
 > [Full comparison](Fortress-vs-GGRS)

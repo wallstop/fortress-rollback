@@ -203,6 +203,12 @@ impl<T: Config> UdpProtocol<T> {
         sync_config: SyncConfig,
         protocol_config: ProtocolConfig,
     ) -> Option<Self> {
+        // Compute initial time using custom clock if configured, or Instant::now()
+        let now = match &protocol_config.clock {
+            Some(clock_fn) => clock_fn(),
+            None => Instant::now(),
+        };
+
         // Initialize protocol RNG if a deterministic seed is provided
         let mut protocol_rng = protocol_config.protocol_rng_seed.map(Pcg32::seed_from_u64);
 
@@ -247,15 +253,15 @@ impl<T: Config> UdpProtocol<T> {
             sync_retry_warning_sent: false,
             sync_duration_warning_sent: false,
             sync_timeout_event_sent: false,
-            running_last_quality_report: Instant::now(),
-            running_last_input_recv: Instant::now(),
+            running_last_quality_report: now,
+            running_last_input_recv: now,
             disconnect_notify_sent: false,
             disconnect_event_sent: false,
 
             // constants
             disconnect_timeout,
             disconnect_notify_start,
-            shutdown_timeout: Instant::now(),
+            shutdown_timeout: now,
             fps,
             magic,
 
@@ -282,12 +288,12 @@ impl<T: Config> UdpProtocol<T> {
             remote_frame_advantage: 0,
 
             // network
-            stats_start_time: Instant::now(),
+            stats_start_time: now,
             packets_sent: 0,
             bytes_sent: 0,
             round_trip_time: 0,
-            last_send_time: Instant::now(),
-            last_recv_time: Instant::now(),
+            last_send_time: now,
+            last_recv_time: now,
 
             // debug desync
             pending_checksums: BTreeMap::new(),
@@ -296,6 +302,15 @@ impl<T: Config> UdpProtocol<T> {
             // deterministic protocol RNG (if configured)
             protocol_rng,
         })
+    }
+
+    /// Returns the current time, using the custom clock if configured, or
+    /// [`Instant::now()`] otherwise.
+    fn now(&self) -> Instant {
+        match &self.protocol_config.clock {
+            Some(clock_fn) => clock_fn(),
+            None => Instant::now(),
+        }
     }
 
     pub(crate) fn update_local_frame_advantage(&mut self, local_frame: Frame) {
@@ -315,7 +330,7 @@ impl<T: Config> UdpProtocol<T> {
             return Err(FortressError::NotSynchronized);
         }
 
-        let elapsed = self.stats_start_time.elapsed();
+        let elapsed = self.now() - self.stats_start_time;
         let seconds = elapsed.as_secs();
         if seconds == 0 {
             return Err(FortressError::NotSynchronized);
@@ -372,7 +387,7 @@ impl<T: Config> UdpProtocol<T> {
 
         self.state = ProtocolState::Disconnected;
         // schedule the timeout which will lead to shutdown
-        self.shutdown_timeout = Instant::now().add(self.protocol_config.shutdown_delay)
+        self.shutdown_timeout = self.now().add(self.protocol_config.shutdown_delay)
     }
 
     /// Transitions this protocol from `Initializing` to `Synchronizing` state.
@@ -391,7 +406,7 @@ impl<T: Config> UdpProtocol<T> {
         }
         self.state = ProtocolState::Synchronizing;
         self.sync_remaining_roundtrips = self.sync_config.num_sync_packets;
-        self.stats_start_time = Instant::now();
+        self.stats_start_time = self.now();
         self.send_sync_request();
         Ok(())
     }
@@ -405,12 +420,12 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     pub(crate) fn poll(&mut self, connect_status: &[ConnectionStatus]) -> Drain<'_, Event<T>> {
-        let now = Instant::now();
+        let now = self.now();
         match self.state {
             ProtocolState::Synchronizing => {
                 // Check for sync timeout if configured (emit event only once)
                 if let Some(timeout) = self.sync_config.sync_timeout {
-                    let elapsed = self.stats_start_time.elapsed();
+                    let elapsed = now - self.stats_start_time;
                     if elapsed > timeout && !self.sync_timeout_event_sent {
                         self.sync_timeout_event_sent = true;
                         self.event_queue.push_back(Event::SyncTimeout {
@@ -428,7 +443,7 @@ impl<T: Config> UdpProtocol<T> {
                 // resend pending inputs, if some time has passed without sending or receiving inputs
                 if self.running_last_input_recv + self.sync_config.running_retry_interval < now {
                     self.send_pending_output(connect_status);
-                    self.running_last_input_recv = Instant::now();
+                    self.running_last_input_recv = now;
                 }
 
                 // periodically send a quality report
@@ -463,7 +478,7 @@ impl<T: Config> UdpProtocol<T> {
                 }
             },
             ProtocolState::Disconnected => {
-                if self.shutdown_timeout < Instant::now() {
+                if self.shutdown_timeout < now {
                     self.state = ProtocolState::Shutdown;
                 }
             },
@@ -622,7 +637,7 @@ impl<T: Config> UdpProtocol<T> {
         }
 
         // Check for excessive sync duration and emit warning (once)
-        let elapsed_ms = self.stats_start_time.elapsed().as_millis();
+        let elapsed_ms = (self.now() - self.stats_start_time).as_millis();
         if !self.sync_duration_warning_sent
             && elapsed_ms > self.protocol_config.sync_duration_warning_ms
         {
@@ -649,7 +664,7 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     fn send_quality_report(&mut self) {
-        self.running_last_quality_report = Instant::now();
+        self.running_last_quality_report = self.now();
 
         // Get wall-clock time for ping calculation.
         // If the system clock is in an abnormal state, skip sending this quality report.
@@ -681,7 +696,7 @@ impl<T: Config> UdpProtocol<T> {
         let msg = Message { header, body };
 
         self.packets_sent += 1;
-        self.last_send_time = Instant::now();
+        self.last_send_time = self.now();
         self.bytes_sent += std::mem::size_of_val(&msg);
 
         // add the packet to the back of the send queue
@@ -708,7 +723,7 @@ impl<T: Config> UdpProtocol<T> {
         }
 
         // update time when we last received packages
-        self.last_recv_time = Instant::now();
+        self.last_recv_time = self.now();
 
         // if the connection has been marked as interrupted, send an event to signal we are receiving again
         if self.disconnect_notify_sent && self.state == ProtocolState::Running {
@@ -750,7 +765,7 @@ impl<T: Config> UdpProtocol<T> {
         }
         // the sync reply is good, so we send a sync request again until we have finished the required roundtrips. Then, we can conclude the syncing process.
         self.sync_remaining_roundtrips -= 1;
-        let elapsed_ms = self.stats_start_time.elapsed().as_millis();
+        let elapsed_ms = (self.now() - self.stats_start_time).as_millis();
         if self.sync_remaining_roundtrips > 0 {
             // register an event
             let evt = Event::Synchronizing {
@@ -826,7 +841,7 @@ impl<T: Config> UdpProtocol<T> {
 
         // if we have the necessary input saved, we decode
         if let Some(decode_inp) = self.recv_inputs.get(&decode_frame) {
-            self.running_last_input_recv = Instant::now();
+            self.running_last_input_recv = self.now();
 
             let recv_inputs = match decode(&decode_inp.bytes, &body.bytes) {
                 Ok(inputs) => inputs,
@@ -2408,7 +2423,7 @@ mod tests {
     #[test]
     fn protocol_config_clone() {
         let config = ProtocolConfig::high_latency();
-        let cloned = config;
+        let cloned = config.clone();
         assert_eq!(config, cloned);
     }
 
@@ -2615,6 +2630,34 @@ mod tests {
                 seed
             );
         }
+    }
+
+    #[test]
+    fn protocol_uses_custom_clock() {
+        use crate::sessions::config::ClockFn;
+        use std::sync::Arc;
+
+        let fixed_time = Instant::now();
+        let clock: ClockFn = Arc::new(move || fixed_time);
+        let config = ProtocolConfig {
+            clock: Some(clock),
+            ..ProtocolConfig::default()
+        };
+        let protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
+
+        // The protocol's now() should return our fixed time, not the real clock
+        let returned_time = protocol.now();
+        assert_eq!(
+            returned_time, fixed_time,
+            "Protocol should use the injected clock function"
+        );
     }
 }
 

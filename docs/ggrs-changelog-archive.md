@@ -1,3 +1,5 @@
+<!-- SYNC: This source doc syncs to wiki/GGRS-Changelog-Archive.md. -->
+
 # GGRS Historical Changelog Archive
 
 > **Note:** This file contains the historical changelog from the original [GGRS (Good Game Rollback System)](https://github.com/gschup/ggrs) project. Fortress Rollback was forked from GGRS v0.11.0. This archive is preserved for historical context only.
