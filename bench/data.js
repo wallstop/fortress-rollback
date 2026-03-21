@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774009728041,
+  "lastUpdate": 1774056508835,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "75184c461c2830e3872f587787cc5c4ca119b7b8",
-          "message": "Bump version, improved logo (#34)",
-          "timestamp": "2025-12-26T15:13:21-08:00",
-          "tree_id": "2f6960e2aa5aff72b5bec8c2c752f98ee7d733df",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/75184c461c2830e3872f587787cc5c4ca119b7b8"
-        },
-        "date": 1766791095435,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 102,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 151,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 491,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 707,
-            "range": "± 21",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1056,
-            "range": "± 28",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 103535,
-            "range": "± 629",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27770,
-            "range": "± 1611",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1242,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1553,
-            "range": "± 81",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1555,
             "range": "± 65",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9b8b6bd4b4110795cf49fb235b2e4c2b69779b06",
+          "message": "Deterministic test infrastructure with injectable clocks and project reorganization (#119)\n\n## Summary\n\nIntroduce an injectable `ClockFn` abstraction and in-memory\n`ChannelSocket` transport to enable fully deterministic, fast, and\nplatform-independent integration tests — replacing real UDP sockets,\n`thread::sleep()`, and `#[serial]` test ordering throughout the test\nsuite. Also reorganizes scripts and LLM skills into domain-based\nsubdirectories.\n\n### Clock injection & deterministic time control\n- Add `ClockFn` type alias (`Arc<dyn Fn() -> Instant + Send + Sync>`)\nand `ProtocolConfig::clock` field for injectable time sources\n- Add `ChaosSocket::with_clock()` builder method for deterministic\nchaos/network-condition testing\n- Replace all `Instant::now()` calls in `Protocol` and `ChaosSocket`\nwith the injected clock (falling back to system time)\n- **Breaking:** `ProtocolConfig` no longer implements `Copy` (due to\n`Arc`-based clock field)\n\n### New test infrastructure\n- `ChannelSocket`: in-memory `NonBlockingSocket` using `mpsc` channels —\neliminates all real UDP I/O from tests\n- `TestClock`: manually-advanceable virtual clock with\n`advance(duration)`, `as_protocol_clock()`, and `as_chaos_clock()`\nhelpers\n- Deterministic test utilities: `synchronize_sessions_deterministic()`,\n`poll_with_advance()`, `run_p2p_frame_advancement_test_deterministic()`\n\n### Test suite migration\n- Converted all resilience, p2p, p2p_enum, and spectator tests from real\nsockets + `thread::sleep` + `#[serial]` to `ChannelSocket` + `TestClock`\n- Removed `serial_test` dependency and all `#[serial]` attributes from\nmigrated tests\n- Removed `#[cfg_attr(miri, ignore)]` from timing-dependent chaos socket\ntests (now virtual-time-based)\n\n### Scripts & skills reorganization\n- Reorganized `scripts/` into `build/`, `ci/`, `docs/`, `verification/`\nsubdirectories\n- Reorganized `.llm/skills/` into 8 category subdirectories\n(rust-language, testing, formal-verification, etc.)\n- Added 8 new workflow skills (code-review, adversarial-review,\ndev-pipeline, investigation, etc.)\n- Added `.llm/design-history/` and `.llm/templates/ask-user-question.md`\n\n### Documentation & CI\n- Updated user guide with custom clock documentation, new config\npresets, and expanded API reference\n- Updated all wiki pages with corrected examples, API signatures, and\nverification status\n- Updated all CI workflows and pre-commit hooks for new script paths\n- Expanded devcontainer with additional VS Code extensions and editor\nsettings\n- Added logo banner SVG\n\n## Test plan\n- [ ] `cargo nextest run --no-capture` — all tests pass with\ndeterministic infrastructure\n- [ ] `cargo clippy --all-targets --features tokio,json` — no warnings\n- [ ] CI workflows resolve scripts at new paths\n- [ ] Pre-commit hooks work with reorganized script layout\n- [ ] Verify no `#[serial]` tests remain in migrated test files\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+          "timestamp": "2026-03-20T18:23:48-07:00",
+          "tree_id": "0dce9ac3e595e1a3f2fd01090302bb85bc68a6cb",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/9b8b6bd4b4110795cf49fb235b2e4c2b69779b06"
+        },
+        "date": 1774056508166,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 115,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 162,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 456,
+            "range": "± 22",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 679,
+            "range": "± 24",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 996,
+            "range": "± 40",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 106651,
+            "range": "± 3512",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 41134,
+            "range": "± 638",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1243,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1554,
+            "range": "± 85",
             "unit": "ns/iter"
           },
           {
