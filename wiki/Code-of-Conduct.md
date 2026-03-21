@@ -1,3 +1,5 @@
+<!-- SYNC: This wiki page is generated from docs/code-of-conduct.md. Edit docs source. -->
+
 # Contributor Covenant Code of Conduct
 
 ## Our Pledge

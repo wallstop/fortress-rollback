@@ -1,3 +1,5 @@
+<!-- SYNC: This wiki page is generated from docs/architecture.md. Edit docs source. -->
+
 <p align="center">
   <img src="assets/logo.svg" alt="Fortress Rollback" width="128">
 </p>
@@ -390,14 +392,14 @@ The trait balances **universality** with **practicality**:
 
 #### Method Override Table
 
-| Method | `P2PSession` | `SpectatorSession` | `SyncTestSession` |
-|--------|:-:|:-:|:-:|
-| `advance_frame()` | ✅ Override | ✅ Override | ✅ Override |
-| `local_player_handle_required()` | ✅ Override | ✅ Override (error) | ✅ Override |
-| `add_local_input()` | ✅ Override | ✅ Override (error) | ✅ Override |
-| `events()` | ✅ Override | ✅ Override | ✅ Override |
-| `current_state()` | ✅ Override | ✅ Override | ❌ Default (`Running`) |
-| `poll_remote_clients()` | ✅ Override | ✅ Override | ❌ Default (no-op) |
+| Method                           | `P2PSession` | `SpectatorSession` |   `SyncTestSession`   |
+| -------------------------------- | :----------: | :----------------: | :-------------------: |
+| `advance_frame()`                |  ✅ Override  |     ✅ Override     |      ✅ Override       |
+| `local_player_handle_required()` |  ✅ Override  | ✅ Override (error) |      ✅ Override       |
+| `add_local_input()`              |  ✅ Override  | ✅ Override (error) |      ✅ Override       |
+| `events()`                       |  ✅ Override  |     ✅ Override     |      ✅ Override       |
+| `current_state()`                |  ✅ Override  |     ✅ Override     | ❌ Default (`Running`) |
+| `poll_remote_clients()`          |  ✅ Override  |     ✅ Override     |   ❌ Default (no-op)   |
 
 "Default" means the session inherits the trait's provided implementation without overriding it.
 
@@ -669,11 +671,11 @@ stateDiagram-v2
 
 Each request type has specific implications for game state:
 
-| Request | When Generated | Game State Impact |
-|---------|----------------|-------------------|
-| `SaveGameState` | Before advancing a frame | Clone current state to cell |
-| `LoadGameState` | Rollback triggered | Replace state with saved version |
-| `AdvanceFrame` | Each simulation step | Apply inputs, increment frame |
+| Request         | When Generated           | Game State Impact                |
+| --------------- | ------------------------ | -------------------------------- |
+| `SaveGameState` | Before advancing a frame | Clone current state to cell      |
+| `LoadGameState` | Rollback triggered       | Replace state with saved version |
+| `AdvanceFrame`  | Each simulation step     | Apply inputs, increment frame    |
 
 **Request Ordering Guarantees:**
 
@@ -900,13 +902,13 @@ let len = encode_into(&data, &mut buffer)?;
 
 **Available Functions:**
 
-| Function | Description | Use Case |
-|----------|-------------|----------|
-| `encode()` | Encode to new `Vec<u8>` | Simple/infrequent encoding |
-| `encode_into()` | Encode to existing slice | Hot paths, buffer reuse |
-| `encode_append()` | Append to existing `Vec` | Incremental message building |
-| `decode()` | Decode with bytes consumed | When you need byte count |
-| `decode_value()` | Decode ignoring byte count | Convenience when count not needed |
+| Function          | Description                | Use Case                          |
+| ----------------- | -------------------------- | --------------------------------- |
+| `encode()`        | Encode to new `Vec<u8>`    | Simple/infrequent encoding        |
+| `encode_into()`   | Encode to existing slice   | Hot paths, buffer reuse           |
+| `encode_append()` | Append to existing `Vec`   | Incremental message building      |
+| `decode()`        | Decode with bytes consumed | When you need byte count          |
+| `decode_value()`  | Decode ignoring byte count | Convenience when count not needed |
 
 **Why Fixed-Size Integers:**
 

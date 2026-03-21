@@ -3,6 +3,8 @@ title: Fortress Rollback
 description: A correctness-first fork of GGRS providing peer-to-peer rollback networking for deterministic multiplayer games in Rust.
 ---
 
+<!-- SYNC: This source doc syncs to wiki/Home.md. -->
+
 <p align="center">
   <img src="assets/logo.svg" alt="Fortress Rollback" width="160">
 </p>

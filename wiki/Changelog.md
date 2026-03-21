@@ -1,3 +1,5 @@
+<!-- SYNC: This wiki page is generated from docs/changelog.md. Edit docs source. -->
+
 # Changelog
 
 The changelog has moved to the repository root: **[CHANGELOG.md](https://github.com/wallstop/fortress-rollback/blob/main/CHANGELOG.md)**

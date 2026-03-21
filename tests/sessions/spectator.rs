@@ -573,6 +573,7 @@ fn test_poll_remote_clients_no_host() {
     // Polling with no host should not panic
     for _ in 0..10 {
         spec_sess.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
     }
 
     // Should still be synchronizing (no host to sync with)

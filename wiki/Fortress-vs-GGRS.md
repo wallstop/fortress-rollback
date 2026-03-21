@@ -1,3 +1,5 @@
+<!-- SYNC: This wiki page is generated from docs/fortress-vs-ggrs.md. Edit docs source. -->
+
 <p align="center">
   <img src="assets/logo.svg" alt="Fortress Rollback" width="128">
 </p>
@@ -8,21 +10,21 @@ This document summarizes the key differences between **Fortress Rollback** (this
 
 ## Quick Summary
 
-| Category | GGRS | Fortress Rollback |
-|----------|------|-------------------|
-| **Determinism** | `HashMap`/`HashSet` (non-deterministic iteration) | `BTreeMap`/`BTreeSet` (guaranteed order) |
-| **Panic Safety** | Some `assert!` and `panic!` in library code | All converted to recoverable errors |
-| **Test Coverage** | Basic test suite | ~1600 tests (~92% coverage) |
-| **Formal Verification** | None | TLA+, Z3 SMT proofs, Kani proofs |
-| **Hashing** | `DefaultHasher` (random seed per process) | FNV-1a deterministic hashing |
-| **Dependencies** | `bitfield-rle`, `varinteger`, `rand` | Internal implementations (fewer deps) |
-| **Type Safety** | `Config::Address` requires `Hash` | `Config::Address` requires `Hash` + `Ord` |
-| **Desync Detection** | Off by default (opt-in) | On by default (`interval: 60`) |
-| **WASM Support** | Requires `wasm-bindgen` + `getrandom/js` features | Works out of the box, no special features |
-| **Time API** | `std::time::Instant` (not WASM-compatible) | `web_time::Instant` (cross-platform) |
-| **Spectator Handles** | May include local players in spectator lists | Explicit `is_spectator_for()` validation |
-| **Error Types** | String-based allocation on hot paths | Dual-variant pattern (Copy for hot paths) |
-| **Build-time Validation** | Some panics at runtime | Returns `Result` at build time |
+| Category                  | GGRS                                              | Fortress Rollback                         |
+| ------------------------- | ------------------------------------------------- | ----------------------------------------- |
+| **Determinism**           | `HashMap`/`HashSet` (non-deterministic iteration) | `BTreeMap`/`BTreeSet` (guaranteed order)  |
+| **Panic Safety**          | Some `assert!` and `panic!` in library code       | All converted to recoverable errors       |
+| **Test Coverage**         | Basic test suite                                  | ~1600 tests (~92% coverage)               |
+| **Formal Verification**   | None                                              | TLA+, Z3 SMT proofs, Kani proofs          |
+| **Hashing**               | `DefaultHasher` (random seed per process)         | FNV-1a deterministic hashing              |
+| **Dependencies**          | `bitfield-rle`, `varinteger`, `rand`              | Internal implementations (fewer deps)     |
+| **Type Safety**           | `Config::Address` requires `Hash`                 | `Config::Address` requires `Hash` + `Ord` |
+| **Desync Detection**      | Off by default (opt-in)                           | On by default (`interval: 60`)            |
+| **WASM Support**          | Requires `wasm-bindgen` + `getrandom/js` features | Works out of the box, no special features |
+| **Time API**              | `std::time::Instant` (not WASM-compatible)        | `web_time::Instant` (cross-platform)      |
+| **Spectator Handles**     | May include local players in spectator lists      | Explicit `is_spectator_for()` validation  |
+| **Error Types**           | String-based allocation on hot paths              | Dual-variant pattern (Copy for hot paths) |
+| **Build-time Validation** | Some panics at runtime                            | Returns `Result` at build time            |
 
 ---
 
@@ -409,13 +411,13 @@ if !collecting_observer.is_empty() {
 
 **Key configuration areas:**
 
-| Config | Controls | Why It Matters |
-|--------|----------|----------------|
-| `SyncConfig` | Connection handshake timing | Faster sync on LAN, more retries on lossy networks |
-| `ProtocolConfig` | Network quality reporting, timeouts | Affect disconnect detection sensitivity |
-| `TimeSyncConfig` | Frame timing window size | Trade-off between smoothness and responsiveness |
-| `SpectatorConfig` | Spectator buffer and catch-up | Smooth streaming vs low latency viewing |
-| `InputQueueConfig` | Input buffer size | Memory vs max rollback distance |
+| Config             | Controls                            | Why It Matters                                     |
+| ------------------ | ----------------------------------- | -------------------------------------------------- |
+| `SyncConfig`       | Connection handshake timing         | Faster sync on LAN, more retries on lossy networks |
+| `ProtocolConfig`   | Network quality reporting, timeouts | Affect disconnect detection sensitivity            |
+| `TimeSyncConfig`   | Frame timing window size            | Trade-off between smoothness and responsiveness    |
+| `SpectatorConfig`  | Spectator buffer and catch-up       | Smooth streaming vs low latency viewing            |
+| `InputQueueConfig` | Input buffer size                   | Memory vs max rollback distance                    |
 
 Built-in presets for common network scenarios:
 
@@ -489,13 +491,13 @@ ChaosConfig::intercontinental() // High-latency stable connection
 
 ### Dependencies Reduced
 
-| Dependency | GGRS | Fortress |
-|------------|------|----------|
-| `bitfield-rle` | Required | Internal RLE implementation |
-| `varinteger` | Required | Internal implementation |
-| `rand` | Required | Internal PCG32 RNG |
-| `getrandom` | Required (transitive) | Not needed |
-| Time handling | `std::time::Instant` | `web_time::Instant` |
+| Dependency     | GGRS                  | Fortress                    |
+| -------------- | --------------------- | --------------------------- |
+| `bitfield-rle` | Required              | Internal RLE implementation |
+| `varinteger`   | Required              | Internal implementation     |
+| `rand`         | Required              | Internal PCG32 RNG          |
+| `getrandom`    | Required (transitive) | Not needed                  |
+| Time handling  | `std::time::Instant`  | `web_time::Instant`         |
 
 ---
 

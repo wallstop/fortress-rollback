@@ -34,16 +34,16 @@ for i in $(seq 1 10); do cargo nextest run --no-capture >> /tmp/flaky-check.txt 
 
 ## CLI Tools (Dev Container)
 
-| Use | Instead of | Key flags |
-|-----|------------|-----------|
-| `rg` | `grep` | `-l` list files, `-C 3` context, `--type rust` |
-| `fd` | `find` | `-e toml` extension, `--type d` dirs |
-| `bat --paging=never` | `cat` | `-n` line numbers, `-r 10:20` range |
-| `eza` | `ls` | `-la`, `--tree`, `--git` |
-| `sd` | `sed` | `sd 'old' 'new' file`, `-F` literal |
-| `dust` | `du` | `-d 2` depth |
-| `tokei` | `wc -l` | Code stats by language |
-| `hyperfine` | `time` | Statistical benchmarking |
+| Use                  | Instead of | Key flags                                      |
+| -------------------- | ---------- | ---------------------------------------------- |
+| `rg`                 | `grep`     | `-l` list files, `-C 3` context, `--type rust` |
+| `fd`                 | `find`     | `-e toml` extension, `--type d` dirs           |
+| `bat --paging=never` | `cat`      | `-n` line numbers, `-r 10:20` range            |
+| `eza`                | `ls`       | `-la`, `--tree`, `--git`                       |
+| `sd`                 | `sed`      | `sd 'old' 'new' file`, `-F` literal            |
+| `dust`               | `du`       | `-d 2` depth                                   |
+| `tokei`              | `wc -l`    | Code stats by language                         |
+| `hyperfine`          | `time`     | Statistical benchmarking                       |
 
 Rules: always `bat --paging=never` (bare `bat` blocks); never redirect to `/dev/null`; use `rg --no-ignore` for gitignored files.
 
@@ -148,14 +148,14 @@ Pre-commit validates registration only, NOT that proofs pass. Run affected proof
 
 ## Safety CI Checks
 
-| Check | Purpose |
-|-------|---------|
-| **Cargo Careful** | Extra runtime safety checks (nightly) |
-| **Overflow Checks** | Release builds with `-C overflow-checks=on` |
+| Check                | Purpose                                      |
+| -------------------- | -------------------------------------------- |
+| **Cargo Careful**    | Extra runtime safety checks (nightly)        |
+| **Overflow Checks**  | Release builds with `-C overflow-checks=on`  |
 | **Debug Assertions** | Release builds with `-C debug-assertions=on` |
-| **Panic Patterns** | Counts `unwrap`, `expect`, `panic!`, `todo!` |
-| **Strict Clippy** | Nursery lints enabled |
-| **Documentation** | Doc build with `-D warnings` |
+| **Panic Patterns**   | Counts `unwrap`, `expect`, `panic!`, `todo!` |
+| **Strict Clippy**    | Nursery lints enabled                        |
+| **Documentation**    | Doc build with `-D warnings`                 |
 
 Also: `ci-rust.yml` (Miri), `ci-security.yml` (cargo-geiger, cargo-deny).
 
@@ -202,6 +202,8 @@ fn check_parse(input: &str, expected: Option<Ast>) {
 ```
 
 Consolidate integration tests into a single crate (`tests/it/main.rs`). Anti-patterns: `assert!(result.is_ok())` (use `assert_eq!`), sleep-based synchronization, testing implementation details.
+
+For protocol tests that poll in loops (`poll_remote_clients()` / protocol `poll()`), always inject `TestClock` via `ProtocolConfig.clock` and advance it each poll iteration (for example with `POLL_INTERVAL_DETERMINISTIC`). Interval-gated sends (retries, quality reports, keepalives, pending output) will not fire reliably if wall-clock time does not advance.
 
 ## Changelog Policy
 
@@ -251,6 +253,8 @@ Additional rules: `catch_unwind` closures must use `AssertUnwindSafe`; fully qua
 ## Documentation Sync
 
 When changing public APIs, update: rustdoc comments (source of truth), README.md, docs/user-guide.md, examples/, CHANGELOG.md. Search with `rg 'function_name|StructName' --type rust --type md`.
+
+For docs/wiki mirrors, use a first-line `<!-- SYNC: ... -->` header with explicit direction: docs pages point to their wiki mirror (`wiki/...`), wiki pages point to their docs source (`docs/...`). Never self-reference the same file in a SYNC header.
 
 ## Quality Checklist
 

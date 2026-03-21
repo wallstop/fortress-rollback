@@ -1,3 +1,5 @@
+<!-- SYNC: This source doc syncs to wiki/API-Contracts.md. -->
+
 <p align="center">
   <img src="../assets/logo-small.svg" alt="Fortress Rollback" width="64">
 </p>
@@ -671,24 +673,24 @@ FortressRequest::AdvanceFrame { inputs }
 
 ### Legacy Variants
 
-| Error | Cause | Recovery |
-|-------|-------|----------|
-| `InvalidRequest { info }` | Invalid operation/parameter (legacy) | Check info message, fix call |
-| `InvalidPlayerHandle { handle, max_handle }` | Handle out of range or wrong type | Use valid handle |
-| `InvalidFrame { frame, reason }` | Frame out of valid range (legacy) | Check frame bounds |
-| `NotSynchronized` | Operation requires Running state | Wait for sync or call poll |
-| `MissingInput { player_handle, frame }` | Confirmed input not available | Internal error, report bug |
-| `PredictionThreshold` | Prediction window exceeded | Wait before adding more input |
+| Error                                        | Cause                                | Recovery                      |
+| -------------------------------------------- | ------------------------------------ | ----------------------------- |
+| `InvalidRequest { info }`                    | Invalid operation/parameter (legacy) | Check info message, fix call  |
+| `InvalidPlayerHandle { handle, max_handle }` | Handle out of range or wrong type    | Use valid handle              |
+| `InvalidFrame { frame, reason }`             | Frame out of valid range (legacy)    | Check frame bounds            |
+| `NotSynchronized`                            | Operation requires Running state     | Wait for sync or call poll    |
+| `MissingInput { player_handle, frame }`      | Confirmed input not available        | Internal error, report bug    |
+| `PredictionThreshold`                        | Prediction window exceeded           | Wait before adding more input |
 
 ### Structured Variants (Preferred)
 
-| Error | Cause | Recovery |
-|-------|-------|----------|
-| `InvalidRequestStructured { kind }` | Invalid operation with structured reason | Match on `InvalidRequestKind` variants |
-| `InvalidFrameStructured { frame, reason }` | Frame invalid with structured reason | Match on `InvalidFrameReason` variants |
-| `InternalErrorStructured { kind }` | Library bug with structured context | Report bug with error details |
-| `SerializationErrorStructured { kind }` | Serialization failure | Check input data format |
-| `FrameArithmeticOverflow { frame, operand, operation }` | Frame arithmetic overflow | Check frame bounds |
+| Error                                                   | Cause                                    | Recovery                               |
+| ------------------------------------------------------- | ---------------------------------------- | -------------------------------------- |
+| `InvalidRequestStructured { kind }`                     | Invalid operation with structured reason | Match on `InvalidRequestKind` variants |
+| `InvalidFrameStructured { frame, reason }`              | Frame invalid with structured reason     | Match on `InvalidFrameReason` variants |
+| `InternalErrorStructured { kind }`                      | Library bug with structured context      | Report bug with error details          |
+| `SerializationErrorStructured { kind }`                 | Serialization failure                    | Check input data format                |
+| `FrameArithmeticOverflow { frame, operand, operation }` | Frame arithmetic overflow                | Check frame bounds                     |
 
 ---
 
@@ -705,7 +707,7 @@ These invariants are preserved across ALL public API calls:
 
 ## Revision History
 
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.0 | 2025-12-06 | Complete API contracts |
-| 0.1 | 2025-12-06 | Initial draft |
+| Version | Date       | Changes                |
+| ------- | ---------- | ---------------------- |
+| 1.0     | 2025-12-06 | Complete API contracts |
+| 0.1     | 2025-12-06 | Initial draft          |

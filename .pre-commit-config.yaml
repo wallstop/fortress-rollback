@@ -141,6 +141,13 @@ repos:
         pass_filenames: false
         files: '^(docs/.*\.md|wiki/.*\.md|scripts/docs/sync-wiki\.py)$'
 
+      - id: check-sync-headers
+        name: check sync headers
+        entry: python scripts/hooks/check-sync-headers.py
+        language: python
+        files: '^(docs/.*\.md|wiki/.*\.md)$'
+        pass_filenames: false
+
       - id: llm-line-limit
         name: check .llm file line limit (300)
         entry: python scripts/hooks/check-llm-line-limit.py

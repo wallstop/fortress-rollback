@@ -1,3 +1,5 @@
+<!-- SYNC: This wiki page is generated from docs/specs/formal-spec.md. Edit docs source. -->
+
 <p align="center">
   <img src="assets/logo-small.svg" alt="Fortress Rollback" width="64">
 </p>
@@ -34,25 +36,25 @@ This document provides a formal specification of Fortress Rollback's core compon
 
 ## Notation
 
-| Symbol | Meaning |
-|--------|---------|
-| `∀` | For all |
-| `∃` | There exists |
-| `∧` | Logical AND |
-| `∨` | Logical OR |
-| `¬` | Logical NOT |
-| `→` | Implies |
-| `↔` | If and only if |
-| `∈` | Element of |
-| `ℕ` | Natural numbers (0, 1, 2, ...) |
-| `ℤ` | Integers |
-| `[a, b]` | Closed interval from a to b |
-| `[a, b)` | Half-open interval |
-| `⊥` | Undefined/null value |
-| `□` | Always (temporal) |
-| `◇` | Eventually (temporal) |
-| `○` | Next state (temporal) |
-| `X'` | Value of X in next state |
+| Symbol   | Meaning                        |
+| -------- | ------------------------------ |
+| `∀`      | For all                        |
+| `∃`      | There exists                   |
+| `∧`      | Logical AND                    |
+| `∨`      | Logical OR                     |
+| `¬`      | Logical NOT                    |
+| `→`      | Implies                        |
+| `↔`      | If and only if                 |
+| `∈`      | Element of                     |
+| `ℕ`      | Natural numbers (0, 1, 2, ...) |
+| `ℤ`      | Integers                       |
+| `[a, b]` | Closed interval from a to b    |
+| `[a, b)` | Half-open interval             |
+| `⊥`      | Undefined/null value           |
+| `□`      | Always (temporal)              |
+| `◇`      | Eventually (temporal)          |
+| `○`      | Next state (temporal)          |
+| `X'`     | Value of X in next state       |
 
 ---
 
@@ -495,7 +497,7 @@ MessageBody =
     | InputAck { ack_frame: Frame }
     | QualityReport { frame_advantage: i16, ping: u128 }
     | QualityReply { pong: u128 }
-    | ChecksumReport { checksum: u128 }
+    | ChecksumReport { checksum: u128, frame: Frame }
 ```
 
 ---
@@ -591,47 +593,47 @@ MessageBody =
 
 ## Constants
 
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `INPUT_QUEUE_LENGTH` | 128 | Max inputs per player queue |
-| `NULL_FRAME` | -1 | Invalid/uninitialized frame sentinel |
-| `NUM_SYNC_PACKETS` | 5 | Sync roundtrips before Running |
-| `pending_output_limit` | 128 (default) | Max pending output messages (configurable via `ProtocolConfig`) |
-| `UDP_SHUTDOWN_TIMER` | 5000ms | Disconnected → Shutdown delay |
-| `SYNC_RETRY_INTERVAL` | 200ms | Sync packet retry interval |
-| `KEEP_ALIVE_INTERVAL` | 200ms | Keep-alive interval |
-| `QUALITY_REPORT_INTERVAL` | 200ms | Network quality report interval |
-| `MAX_CHECKSUM_HISTORY` | 32 | Checksums for desync detection |
-| `SPECTATOR_BUFFER_SIZE` | 60 | Spectator input buffer |
-| `DEFAULT_MAX_PREDICTION` | 8 | Default prediction window |
-| `DEFAULT_DISCONNECT_TIMEOUT` | 2000ms | Default peer timeout |
-| `DEFAULT_FPS` | 60 | Default frame rate |
+| Constant                     | Value         | Description                                                     |
+| ---------------------------- | ------------- | --------------------------------------------------------------- |
+| `INPUT_QUEUE_LENGTH`         | 128           | Max inputs per player queue                                     |
+| `NULL_FRAME`                 | -1            | Invalid/uninitialized frame sentinel                            |
+| `NUM_SYNC_PACKETS`           | 5             | Sync roundtrips before Running                                  |
+| `pending_output_limit`       | 128 (default) | Max pending output messages (configurable via `ProtocolConfig`) |
+| `UDP_SHUTDOWN_TIMER`         | 5000ms        | Disconnected → Shutdown delay                                   |
+| `SYNC_RETRY_INTERVAL`        | 200ms         | Sync packet retry interval                                      |
+| `KEEP_ALIVE_INTERVAL`        | 200ms         | Keep-alive interval                                             |
+| `QUALITY_REPORT_INTERVAL`    | 200ms         | Network quality report interval                                 |
+| `MAX_CHECKSUM_HISTORY`       | 32            | Checksums for desync detection                                  |
+| `SPECTATOR_BUFFER_SIZE`      | 60            | Spectator input buffer                                          |
+| `DEFAULT_MAX_PREDICTION`     | 8             | Default prediction window                                       |
+| `DEFAULT_DISCONNECT_TIMEOUT` | 2000ms        | Default peer timeout                                            |
+| `DEFAULT_FPS`                | 60            | Default frame rate                                              |
 
 ---
 
 ## Verification Targets
 
-| Property | Tool | Status |
-|----------|------|--------|
-| INV-4, INV-5 (queue bounds) | Kani | ✅ Implemented |
-| SAFE-1 (no overflow) | Kani | ✅ Implemented |
-| SAFE-6 (no int overflow) | Kani | ✅ Implemented |
-| Protocol state machine | TLA+ | ✅ Implemented (`specs/tla/NetworkProtocol.tla`) |
-| LIVE-1 (sync convergence) | TLA+ | ✅ Implemented (`specs/tla/NetworkProtocol.tla`) |
-| SAFE-4 (rollback consistency) | TLA+ | ✅ Implemented (`specs/tla/Rollback.tla`) |
-| Frame arithmetic | Z3 | ✅ Implemented (`tests/test_z3_verification.rs`) |
-| Queue index math | Z3 | ✅ Implemented (`tests/test_z3_verification.rs`) |
-| Concurrency (GameStateCell) | Loom | ✅ Implemented (`loom-tests/`) |
-| Time synchronization | TLA+ | ✅ Implemented (`specs/tla/TimeSync.tla`) |
-| Checksum exchange | TLA+ | ✅ Implemented (`specs/tla/ChecksumExchange.tla`) |
-| Spectator session | TLA+ | ✅ Implemented (`specs/tla/SpectatorSession.tla`) |
-| Concurrency model | TLA+ | ✅ Implemented (`specs/tla/Concurrency.tla`) |
+| Property                      | Tool | Status                                           |
+| ----------------------------- | ---- | ------------------------------------------------ |
+| INV-4, INV-5 (queue bounds)   | Kani | ✅ Implemented                                    |
+| SAFE-1 (no overflow)          | Kani | ✅ Implemented                                    |
+| SAFE-6 (no int overflow)      | Kani | ✅ Implemented                                    |
+| Protocol state machine        | TLA+ | ✅ Implemented (`specs/tla/NetworkProtocol.tla`)  |
+| LIVE-1 (sync convergence)     | TLA+ | ✅ Implemented (`specs/tla/NetworkProtocol.tla`)  |
+| SAFE-4 (rollback consistency) | TLA+ | ✅ Implemented (`specs/tla/Rollback.tla`)         |
+| Frame arithmetic              | Z3   | ✅ Implemented (`tests/test_z3_verification.rs`)  |
+| Queue index math              | Z3   | ✅ Implemented (`tests/test_z3_verification.rs`)  |
+| Concurrency (GameStateCell)   | Loom | ✅ Implemented (`loom-tests/`)                    |
+| Time synchronization          | TLA+ | ✅ Implemented (`specs/tla/TimeSync.tla`)         |
+| Checksum exchange             | TLA+ | ✅ Implemented (`specs/tla/ChecksumExchange.tla`) |
+| Spectator session             | TLA+ | ✅ Implemented (`specs/tla/SpectatorSession.tla`) |
+| Concurrency model             | TLA+ | ✅ Implemented (`specs/tla/Concurrency.tla`)      |
 
 ---
 
 ## Revision History
 
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.0 | 2025-12-06 | Complete specification with invariants, components, protocol |
-| 0.1 | 2025-12-06 | Initial draft |
+| Version | Date       | Changes                                                      |
+| ------- | ---------- | ------------------------------------------------------------ |
+| 1.0     | 2025-12-06 | Complete specification with invariants, components, protocol |
+| 0.1     | 2025-12-06 | Initial draft                                                |

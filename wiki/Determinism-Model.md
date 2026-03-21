@@ -1,3 +1,5 @@
+<!-- SYNC: This wiki page is generated from docs/specs/determinism-model.md. Edit docs source. -->
+
 <p align="center">
   <img src="assets/logo-small.svg" alt="Fortress Rollback" width="64">
 </p>
@@ -432,14 +434,14 @@ proptest! {
 
 ### Supported Platforms
 
-| Platform | Determinism Status | Notes |
-|----------|-------------------|-------|
-| x86_64 Linux | ✅ Verified | Primary development platform |
-| x86_64 Windows | ✅ Expected | Same architecture |
-| x86_64 macOS | ✅ Expected | Same architecture |
-| aarch64 Linux | ⚠️ Test Required | Different float rounding possible |
-| aarch64 macOS | ⚠️ Test Required | M1/M2 chips |
-| WASM | ⚠️ Test Required | Browser differences possible |
+| Platform       | Determinism Status | Notes                             |
+| -------------- | ------------------ | --------------------------------- |
+| x86_64 Linux   | ✅ Verified         | Primary development platform      |
+| x86_64 Windows | ✅ Expected         | Same architecture                 |
+| x86_64 macOS   | ✅ Expected         | Same architecture                 |
+| aarch64 Linux  | ⚠️ Test Required    | Different float rounding possible |
+| aarch64 macOS  | ⚠️ Test Required    | M1/M2 chips                       |
+| WASM           | ⚠️ Test Required    | Browser differences possible      |
 
 ### Cross-Platform Testing
 
@@ -459,12 +461,12 @@ cargo run --example replay -- verify session.inputs checksums.txt
 
 ### Known Platform Differences
 
-| Issue | Affected | Mitigation |
-|-------|----------|------------|
-| Float representation | All | Use fixed-point math |
-| Endianness | Big-endian rare | bincode handles this |
-| Integer sizes | Historic | Rust guarantees sizes |
-| Alignment | Embedded | Not typically an issue |
+| Issue                | Affected        | Mitigation             |
+| -------------------- | --------------- | ---------------------- |
+| Float representation | All             | Use fixed-point math   |
+| Endianness           | Big-endian rare | bincode handles this   |
+| Integer sizes        | Historic        | Rust guarantees sizes  |
+| Alignment            | Embedded        | Not typically an issue |
 
 ---
 
@@ -498,6 +500,6 @@ cargo run --example replay -- verify session.inputs checksums.txt
 
 ## Revision History
 
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.0 | 2025-12-06 | Initial complete specification |
+| Version | Date       | Changes                        |
+| ------- | ---------- | ------------------------------ |
+| 1.0     | 2025-12-06 | Initial complete specification |

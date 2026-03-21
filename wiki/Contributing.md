@@ -1,3 +1,5 @@
+<!-- SYNC: This wiki page is generated from docs/contributing.md. Edit docs source. -->
+
 <p align="center">
   <img src="assets/logo.svg" alt="Fortress Rollback" width="128">
 </p>

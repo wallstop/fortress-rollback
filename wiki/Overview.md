@@ -1,15 +1,17 @@
+<!-- SYNC: This wiki page is generated from docs/specs/README.md. Edit docs source. -->
+
 # Formal Specifications
 
 This directory contains formal specification documents for the Fortress Rollback library.
 
 ## Documents
 
-| Document | Description |
-|----------|-------------|
-| [formal-spec.md](Formal-Specification) | Core formal specifications using TLA+ notation |
-| [api-contracts.md](API-Contracts) | API preconditions, postconditions, and invariants |
-| [determinism-model.md](Determinism-Model) | Determinism requirements and verification |
-| [spec-divergences.md](Spec-Divergences) | Documented differences between spec and implementation |
+| Document                                  | Description                                            |
+| ----------------------------------------- | ------------------------------------------------------ |
+| [formal-spec.md](Formal-Specification)    | Core formal specifications using TLA+ notation         |
+| [api-contracts.md](API-Contracts)         | API preconditions, postconditions, and invariants      |
+| [determinism-model.md](Determinism-Model) | Determinism requirements and verification              |
+| [spec-divergences.md](Spec-Divergences)   | Documented differences between spec and implementation |
 
 ## Related Resources
 
