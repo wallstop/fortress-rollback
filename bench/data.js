@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774057584906,
+  "lastUpdate": 1774529776810,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "8e8b8eed2aab5e55efafb10e5363ad21ec809d70",
-          "message": "Investigate and fix test failures (#35)\n\nThe test was failing on macOS CI due to insufficient polling between\nframes. On macOS, tight loops don't give the network stack enough time\nto process messages, causing WaitRecommendation events to arrive before\nDesyncDetected.\n\nChanges:\n- Use triple polling with sleep intervals (matching other p2p tests)\n- Add comprehensive diagnostic output for test failures\n- Add three additional edge case test scenarios:\n  - Corruption from frame 0 (immediate detection)\n  - Large interval with proportional prediction window\n  - Corruption exactly at first checksum boundary\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
-          "timestamp": "2025-12-26T16:23:32-08:00",
-          "tree_id": "93580d83e2edc989f7cc4a7b98e5784bed2ba1bc",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/8e8b8eed2aab5e55efafb10e5363ad21ec809d70"
-        },
-        "date": 1766795297121,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 100,
-            "range": "± 16",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 152,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 492,
-            "range": "± 15",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 741,
-            "range": "± 29",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1053,
-            "range": "± 25",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 103725,
-            "range": "± 782",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27325,
-            "range": "± 966",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1243,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1553,
-            "range": "± 88",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1556,
             "range": "± 105",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f520cca23a012371e19651e39b2db5718ff876ba",
+          "message": "chore(deps): bump proptest from 1.10.0 to 1.11.0 (#120)\n\nBumps [proptest](https://github.com/proptest-rs/proptest) from 1.10.0 to\n1.11.0.\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/7f1367f9a4dc8440c47b93166a38ed064f63ea8c\"><code>7f1367f</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/proptest-rs/proptest/issues/641\">#641</a>\nfrom proptest-rs/release-1.11</li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/a63bf7eb4e337d76a26a12d3238320acc747551f\"><code>a63bf7e</code></a>\nproptest-state-machine v0.8.0</li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/d86e9ff8655cb9833d5e5772195a2485396656f4\"><code>d86e9ff</code></a>\nadd changelog for <a\nhref=\"https://redirect.github.com/proptest-rs/proptest/issues/640\">#640</a></li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/794031313b4fe42d2c28bad1765a3d22d0b7b8c0\"><code>7940313</code></a>\nproptest v1.11.0</li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/3ec998c4d6d9c3992cff9284487914aaeea258e6\"><code>3ec998c</code></a>\nfix <a\nhref=\"https://redirect.github.com/proptest-rs/proptest/issues/638\">#638</a>\nchangelog</li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/8ceb00cfe53f5cf713cd8c007b1c4b9c7d26f401\"><code>8ceb00c</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/proptest-rs/proptest/issues/639\">#639</a>\nfrom lukoktonos/bits128</li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/9c8df1abb945363924bc216dace9e634f6f11ff9\"><code>9c8df1a</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/proptest-rs/proptest/issues/638\">#638</a>\nfrom folkertdev/f16-support</li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/ca9d8e1458518dc22ba1a1b00c92471ba8e6e746\"><code>ca9d8e1</code></a>\nchangelog <a\nhref=\"https://redirect.github.com/proptest-rs/proptest/issues/638\">#638</a></li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/a39869f5ee5f5aebf43feefd3fd7fec743e230c9\"><code>a39869f</code></a>\nimply f16 feat by unstable</li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/85c5ca02764bebeea2cc6261bdf84f9fb9d3eb4c\"><code>85c5ca0</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/proptest-rs/proptest/issues/637\">#637</a>\nfrom folkertdev/min-max-assoc-constants</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/proptest-rs/proptest/compare/v1.10.0...v1.11.0\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=proptest&package-manager=cargo&previous-version=1.10.0&new-version=1.11.0)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-03-26T05:51:11-07:00",
+          "tree_id": "29dd15896dbc13dfd90222d6fc2073e68c3fec33",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/f520cca23a012371e19651e39b2db5718ff876ba"
+        },
+        "date": 1774529776210,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 104,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 141,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 559,
+            "range": "± 22",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 913,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1334,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 95264,
+            "range": "± 722",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 24315,
+            "range": "± 242",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 681,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 871,
+            "range": "± 14",
             "unit": "ns/iter"
           },
           {
