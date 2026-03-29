@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `ReplaySession::new_with_validation()` constructor that enables checksum validation mode, emitting `SaveGameState` requests and comparing checksums against the replay recording
+- `ReplaySession::new_with_validation()` constructor that enables checksum validation mode, emitting `SaveGameState` requests, comparing checksums against the replay recording, and flushing final-frame validation when `events()` is drained after completion
 - `ReplaySession::is_validating()` accessor to check if checksum validation mode is enabled
 - `SessionBuilder::start_replay_session_with_validation()` builder method for creating a validation-enabled replay session
 - `SessionTelemetry` trait for observing session performance events (rollbacks, prediction misses, frame advances, network stats)

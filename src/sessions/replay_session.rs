@@ -292,6 +292,25 @@ impl<T: Config> ReplaySession<T> {
         }
     }
 
+    /// Returns `true` when a pending validation can be resolved immediately.
+    ///
+    /// This method is used by [`events`](Self::events) to make final-frame
+    /// desyncs observable in the common `while !is_complete()` loop pattern
+    /// without requiring an additional failing [`advance_frame`](Self::advance_frame)
+    /// call.
+    fn pending_validation_ready_to_check(&self) -> bool {
+        let Some((prev_frame, cell)) = self.pending_validation.as_ref() else {
+            return false;
+        };
+
+        let prev_index = prev_frame.try_as_usize().ok();
+        let replay_checksum = prev_index
+            .and_then(|idx| self.replay.checksums.get(idx).copied())
+            .flatten();
+
+        replay_checksum.is_none() || cell.checksum().is_some()
+    }
+
     /// Returns `true` if checksum validation mode is enabled.
     ///
     /// When validating, [`advance_frame`](Session::advance_frame) emits
@@ -550,8 +569,16 @@ impl<T: Config> ReplaySession<T> {
     }
 
     /// Returns all events that happened since last queried for events.
+    ///
+    /// When replay validation is enabled and playback has completed, this method
+    /// also flushes any final pending checksum validation that is ready. This makes
+    /// last-frame desyncs observable for the common `while !is_complete()` loop
+    /// pattern without requiring an additional failing `advance_frame()` call.
     #[must_use = "events should be handled to react to session state changes"]
     pub fn events(&mut self) -> EventDrain<'_, T> {
+        if self.is_complete() && self.pending_validation_ready_to_check() {
+            self.check_pending_validation();
+        }
         EventDrain::from_drain(self.event_queue.drain(..))
     }
 
@@ -612,8 +639,9 @@ impl<T: Config> ReplaySession<T> {
     pub fn advance_frame(&mut self) -> FortressResult<RequestVec<T>> {
         // Always check pending validation from the previous frame first,
         // even if the replay is exhausted. This ensures the last frame's
-        // checksum is validated when the user makes the final advance_frame()
-        // call (which will return an error after validation runs).
+        // checksum is validated when the caller either makes the final
+        // advance_frame() call (which returns an error after validation runs)
+        // or drains events() after completion.
         self.check_pending_validation();
 
         let next_frame = self.current_frame.next()?;
@@ -687,6 +715,14 @@ impl<T: Config> fmt::Debug for ReplaySession<T> {
             .field("is_complete", &self.is_complete())
             .field("num_players", &self.replay.num_players)
             .field("validate_checksums", &self.validate_checksums)
+            .field(
+                "pending_validation_frame",
+                &self.pending_validation.as_ref().map(|(frame, _)| *frame),
+            )
+            .field(
+                "pending_validation_ready",
+                &self.pending_validation_ready_to_check(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -1016,6 +1052,123 @@ mod tests {
 
         // No desync events -- actual checksum is None
         assert!(session.events().next().is_none());
+    }
+
+    #[test]
+    fn validation_mode_naive_completion_loop_surfaces_final_frame_desync_on_events_drain() {
+        let replay = make_replay_with_checksums(2, 1, vec![Some(0xAAAA), Some(0xBBBB)]);
+        let mut session = ReplaySession::<TestConfig>::new_with_validation(replay).unwrap();
+
+        // Common usage pattern: stop when complete, then drain events.
+        while !session.is_complete() {
+            let requests = session.advance_frame().unwrap();
+            if let FortressRequest::SaveGameState { cell, frame } = &requests[0] {
+                let checksum = if *frame == Frame::new(1) {
+                    0xDEAD
+                } else {
+                    0xAAAA
+                };
+                cell.save(*frame, Some(vec![1u8]), Some(checksum));
+            } else {
+                panic!("Expected SaveGameState");
+            }
+        }
+
+        let events: Vec<_> = session.events().collect();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            FortressEvent::ReplayDesync {
+                frame,
+                expected_checksum,
+                actual_checksum,
+            } => {
+                assert_eq!(*frame, Frame::new(1));
+                assert_eq!(*expected_checksum, 0xBBBB);
+                assert_eq!(*actual_checksum, 0xDEAD);
+            },
+            other => panic!("Expected ReplayDesync, got {:?}", other),
+        }
+
+        // No duplicate desync should be emitted on a later exhausted advance.
+        let result = session.advance_frame();
+        assert!(result.is_err());
+        assert!(session.events().next().is_none());
+    }
+
+    #[test]
+    fn validation_mode_naive_completion_loop_flushes_last_frame_across_lengths() {
+        for num_frames in [1usize, 2, 4, 8] {
+            let mut checksums = vec![Some(0x1000); num_frames];
+            checksums[num_frames - 1] = Some(0xCAFE);
+
+            let replay = make_replay_with_checksums(num_frames, 1, checksums);
+            let mut session = ReplaySession::<TestConfig>::new_with_validation(replay).unwrap();
+
+            while !session.is_complete() {
+                let requests = session.advance_frame().unwrap();
+                if let FortressRequest::SaveGameState { cell, frame } = &requests[0] {
+                    let checksum = if *frame == Frame::new((num_frames - 1) as i32) {
+                        0xBAD
+                    } else {
+                        0x1000
+                    };
+                    cell.save(*frame, Some(vec![1u8]), Some(checksum));
+                } else {
+                    panic!("Expected SaveGameState");
+                }
+            }
+
+            let events: Vec<_> = session.events().collect();
+            assert_eq!(events.len(), 1, "num_frames={num_frames}");
+            match &events[0] {
+                FortressEvent::ReplayDesync {
+                    frame,
+                    expected_checksum,
+                    actual_checksum,
+                } => {
+                    assert_eq!(*frame, Frame::new((num_frames - 1) as i32));
+                    assert_eq!(*expected_checksum, 0xCAFE);
+                    assert_eq!(*actual_checksum, 0xBAD);
+                },
+                other => panic!("Expected ReplayDesync, got {:?}", other),
+            }
+
+            // Draining again should not duplicate events.
+            assert!(session.events().next().is_none());
+        }
+    }
+
+    #[test]
+    fn validation_mode_events_before_checksum_write_does_not_drop_pending_validation() {
+        let replay = make_replay_with_checksums(1, 1, vec![Some(0xCAFE)]);
+        let mut session = ReplaySession::<TestConfig>::new_with_validation(replay).unwrap();
+
+        let requests = session.advance_frame().unwrap();
+        assert!(session.is_complete());
+
+        // Calling events before the app writes checksum should not consume pending validation.
+        assert!(session.events().next().is_none());
+
+        if let FortressRequest::SaveGameState { cell, frame } = &requests[0] {
+            cell.save(*frame, Some(vec![1u8]), Some(0xBAD));
+        } else {
+            panic!("Expected SaveGameState");
+        }
+
+        let events: Vec<_> = session.events().collect();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            FortressEvent::ReplayDesync {
+                frame,
+                expected_checksum,
+                actual_checksum,
+            } => {
+                assert_eq!(*frame, Frame::new(0));
+                assert_eq!(*expected_checksum, 0xCAFE);
+                assert_eq!(*actual_checksum, 0xBAD);
+            },
+            other => panic!("Expected ReplayDesync, got {:?}", other),
+        }
     }
 
     #[test]
