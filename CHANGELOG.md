@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0]
+
 ### Changed
 
 - **Breaking:** `FortressEvent::ReplayDesync` — new variant added. Since `FortressEvent` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
