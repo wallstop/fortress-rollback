@@ -78,16 +78,22 @@ println!("Rollbacks: {}, Prediction misses: {}", rollbacks.len(), misses.len());
 ## `SessionTelemetry` Trait
 
 ```rust
+// With `sync-send` feature enabled:
 pub trait SessionTelemetry: Send + Sync {
     fn on_rollback(&self, depth: usize, frame: Frame) { /* no-op */ }
     fn on_prediction_miss(&self, player: PlayerHandle, frame: Frame) { /* no-op */ }
     fn on_network_stats(&self, player: PlayerHandle, stats: &NetworkStats) { /* no-op */ }
     fn on_frame_advance(&self, frame: Frame) { /* no-op */ }
 }
+
+// Without `sync-send` feature:
+pub trait SessionTelemetry {
+    // same methods, no Send + Sync bounds
+}
 ```
 
 !!! note
-    All methods have default no-op implementations. Override only what you need.
+    All methods have default no-op implementations. Override only what you need. The `Send + Sync` supertraits are only required when the `sync-send` feature is enabled.
 
 | Method | Parameters | When Called |
 |--------|-----------|-------------|
@@ -181,8 +187,14 @@ graph TD
 ### `ViolationObserver` Trait
 
 ```rust
+// With `sync-send` feature enabled:
 pub trait ViolationObserver: Send + Sync {
     fn on_violation(&self, violation: &SpecViolation);
+}
+
+// Without `sync-send` feature:
+pub trait ViolationObserver {
+    // same method, no Send + Sync bounds
 }
 ```
 
@@ -314,7 +326,7 @@ sequenceDiagram
     Use `Arc<CollectingTelemetry>` for testing, a custom `SessionTelemetry` impl for production.
 
 !!! safety
-    Both `SessionTelemetry` and `ViolationObserver` require `Send + Sync` (with the default `sync-send` feature). All built-in implementations are thread-safe.
+    Both `SessionTelemetry` and `ViolationObserver` require `Send + Sync` when the `sync-send` feature is enabled. The `sync-send` feature is not a default feature and must be explicitly opted into. All built-in implementations are thread-safe regardless of feature flags.
 
 ---
 

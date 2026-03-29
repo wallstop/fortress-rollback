@@ -35,6 +35,7 @@
 //!         library_version: env!("CARGO_PKG_VERSION").to_string(),
 //!         num_players: 2,
 //!         total_frames: 2,
+//!         skipped_frames: 0,
 //!     },
 //! };
 //!
@@ -108,6 +109,7 @@ use crate::{
 ///         library_version: String::new(),
 ///         num_players: 1,
 ///         total_frames: 1,
+///         skipped_frames: 0,
 ///     },
 /// };
 ///
@@ -174,6 +176,7 @@ impl<T: Config> ReplaySession<T> {
     ///         library_version: String::new(),
     ///         num_players: 1,
     ///         total_frames: 1,
+    ///         skipped_frames: 0,
     ///     },
     /// };
     ///
@@ -235,6 +238,7 @@ impl<T: Config> ReplaySession<T> {
     ///         library_version: String::new(),
     ///         num_players: 1,
     ///         total_frames: 1,
+    ///         skipped_frames: 0,
     ///     },
     /// };
     ///
@@ -319,6 +323,7 @@ impl<T: Config> ReplaySession<T> {
     ///         library_version: String::new(),
     ///         num_players: 1,
     ///         total_frames: 1,
+    ///         skipped_frames: 0,
     ///     },
     /// };
     /// let normal = ReplaySession::<Cfg>::new(replay.clone())?;
@@ -363,6 +368,7 @@ impl<T: Config> ReplaySession<T> {
     ///         library_version: String::new(),
     ///         num_players: 1,
     ///         total_frames: 1,
+    ///         skipped_frames: 0,
     ///     },
     /// };
     /// let mut session = ReplaySession::<Cfg>::new(replay)?;
@@ -403,6 +409,7 @@ impl<T: Config> ReplaySession<T> {
     ///         library_version: String::new(),
     ///         num_players: 1,
     ///         total_frames: 100,
+    ///         skipped_frames: 0,
     ///     },
     /// };
     /// let session = ReplaySession::<Cfg>::new(replay)?;
@@ -441,6 +448,7 @@ impl<T: Config> ReplaySession<T> {
     ///         library_version: String::new(),
     ///         num_players: 1,
     ///         total_frames: 1,
+    ///         skipped_frames: 0,
     ///     },
     /// };
     /// let mut session = ReplaySession::<Cfg>::new(replay)?;
@@ -493,6 +501,7 @@ impl<T: Config> ReplaySession<T> {
     ///         library_version: String::new(),
     ///         num_players: 2,
     ///         total_frames: 0,
+    ///         skipped_frames: 0,
     ///     },
     /// };
     /// let session = ReplaySession::<Cfg>::new(replay)?;
@@ -591,6 +600,7 @@ impl<T: Config> ReplaySession<T> {
     ///         library_version: String::new(),
     ///         num_players: 1,
     ///         total_frames: 1,
+    ///         skipped_frames: 0,
     ///     },
     /// };
     /// let mut session = ReplaySession::<Cfg>::new(replay)?;
@@ -718,6 +728,7 @@ mod tests {
                 library_version: "test".to_string(),
                 num_players,
                 total_frames: num_frames,
+                skipped_frames: 0,
             },
         }
     }
@@ -880,6 +891,7 @@ mod tests {
                 library_version: "test".to_string(),
                 num_players,
                 total_frames: num_frames,
+                skipped_frames: 0,
             },
         }
     }

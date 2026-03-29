@@ -1144,6 +1144,7 @@ impl<T: Config> SessionBuilder<T> {
     ///         library_version: env!("CARGO_PKG_VERSION").to_string(),
     ///         num_players: 2,
     ///         total_frames: 10,
+    ///         skipped_frames: 0,
     ///     },
     /// };
     /// let session = SessionBuilder::<TestConfig>::new()
@@ -1197,6 +1198,7 @@ impl<T: Config> SessionBuilder<T> {
     ///         library_version: env!("CARGO_PKG_VERSION").to_string(),
     ///         num_players: 2,
     ///         total_frames: 10,
+    ///         skipped_frames: 0,
     ///     },
     /// };
     /// let session = SessionBuilder::<TestConfig>::new()
@@ -1719,6 +1721,7 @@ mod tests {
                 library_version: "test".to_string(),
                 num_players: 2,
                 total_frames: 2,
+                skipped_frames: 0,
             },
         };
 

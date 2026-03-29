@@ -216,6 +216,8 @@ For protocol tests that poll in loops (`poll_remote_clients()` / protocol `poll(
 
 **Exclude:** internal refactoring, test improvements, doc-only changes, CI/tooling, lint fixes.
 
+**Unreleased code rule:** Never add separate "Fixed" or "Changed" entries for code that has not yet been released. Fixes to unreleased features should be folded into the existing "Added" entry describing that feature. The changelog should describe the final shipped state, not intermediate development history.
+
 ## Mandatory Linting
 
 - **After Rust changes:** `cargo fmt && cargo clippy --all-targets --features tokio,json` (or `cargo c`)

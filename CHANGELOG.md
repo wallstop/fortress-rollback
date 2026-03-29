@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TelemetryEvent` enum with `Rollback`, `PredictionMiss`, `NetworkStatsUpdate`, and `FrameAdvance` variants
 - `SessionBuilder::with_telemetry()` to attach a telemetry observer to P2P sessions
 - `Replay<I>` type for recorded match data with `to_bytes()` / `from_bytes()` serialization using deterministic bincode codec
-- `ReplayMetadata` type containing library version, player count, and total frame count
+- `ReplayMetadata` type containing library version, player count, total frame count, and skipped frame count
 - `ReplaySession<T>` session type implementing `Session<T>` for deterministic replay playback
 - `SessionBuilder::with_recording(bool)` to enable input recording during P2P sessions
 - `SessionBuilder::start_replay_session(replay)` to create a replay playback session

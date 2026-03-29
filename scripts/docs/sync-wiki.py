@@ -496,17 +496,10 @@ def ensure_wiki_sync_header(content: str, docs_rel_path: str) -> str:
     )
 
     lines = content.splitlines()
-    sync_indices = [
-        idx for idx, line in enumerate(lines) if SYNC_HEADER_RE.match(line.strip())
-    ]
+    # Strip ALL existing SYNC headers so the canonical one is always line 1
+    lines = [line for line in lines if not SYNC_HEADER_RE.match(line.strip())]
 
-    if sync_indices:
-        lines[sync_indices[0]] = header
-        for idx in reversed(sync_indices[1:]):
-            del lines[idx]
-        return "\n".join(lines)
-
-    body = content.lstrip("\r\n")
+    body = "\n".join(lines).lstrip("\r\n")
     if not body:
         return header
 

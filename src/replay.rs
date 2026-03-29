@@ -38,6 +38,7 @@
 //!         library_version: env!("CARGO_PKG_VERSION").to_string(),
 //!         num_players: 2,
 //!         total_frames: 10,
+//!         skipped_frames: 0,
 //!     },
 //! };
 //!
@@ -71,7 +72,8 @@ use crate::FortressResult;
 /// # Type Parameter
 ///
 /// `I` is the input type, which must satisfy the same bounds as
-/// [`Config::Input`]: `Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned + Send + Sync`.
+/// [`Config::Input`]: `Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned`.
+/// When the `sync-send` feature is enabled, `Send + Sync` bounds are additionally required.
 ///
 /// # Example
 ///
@@ -90,6 +92,7 @@ use crate::FortressResult;
 ///         library_version: env!("CARGO_PKG_VERSION").to_string(),
 ///         num_players: 2,
 ///         total_frames: 60,
+///         skipped_frames: 0,
 ///     },
 /// };
 /// assert_eq!(replay.total_frames(), 60);
@@ -139,6 +142,7 @@ where
     ///         library_version: env!("CARGO_PKG_VERSION").to_string(),
     ///         num_players: 2,
     ///         total_frames: 5,
+    ///         skipped_frames: 0,
     ///     },
     /// };
     /// let bytes = replay.to_bytes()?;
@@ -170,6 +174,7 @@ where
     ///         library_version: env!("CARGO_PKG_VERSION").to_string(),
     ///         num_players: 2,
     ///         total_frames: 5,
+    ///         skipped_frames: 0,
     ///     },
     /// };
     /// let bytes = replay.to_bytes()?;
@@ -200,6 +205,7 @@ impl<I> Replay<I> {
     ///         library_version: String::new(),
     ///         num_players: 1,
     ///         total_frames: 42,
+    ///         skipped_frames: 0,
     ///     },
     /// };
     /// assert_eq!(replay.total_frames(), 42);
@@ -234,6 +240,7 @@ impl<I> Replay<I> {
     ///         library_version: String::new(),
     ///         num_players: 2,
     ///         total_frames: 5,
+    ///         skipped_frames: 0,
     ///     },
     /// };
     /// replay.validate()?;
@@ -284,11 +291,19 @@ impl<I> fmt::Display for Replay<I> {
 
 impl fmt::Display for ReplayMetadata {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "ReplayMetadata({} players, {} frames, v{})",
-            self.num_players, self.total_frames, self.library_version,
-        )
+        if self.skipped_frames > 0 {
+            write!(
+                f,
+                "ReplayMetadata({} players, {} frames, {} skipped, v{})",
+                self.num_players, self.total_frames, self.skipped_frames, self.library_version,
+            )
+        } else {
+            write!(
+                f,
+                "ReplayMetadata({} players, {} frames, v{})",
+                self.num_players, self.total_frames, self.library_version,
+            )
+        }
     }
 }
 
@@ -306,6 +321,7 @@ impl fmt::Display for ReplayMetadata {
 ///     library_version: env!("CARGO_PKG_VERSION").to_string(),
 ///     num_players: 2,
 ///     total_frames: 300,
+///     skipped_frames: 0,
 /// };
 /// assert_eq!(meta.num_players, 2);
 /// ```
@@ -325,6 +341,19 @@ pub struct ReplayMetadata {
     /// useful when metadata is serialized independently without loading
     /// all frame data.
     pub total_frames: usize,
+    /// The number of frames that were skipped during recording due to
+    /// input retrieval failures.
+    ///
+    /// When a frame's confirmed inputs cannot be retrieved (e.g., because
+    /// the frame was already discarded from the input queue), default
+    /// placeholder inputs are recorded instead and this counter is
+    /// incremented. A non-zero value indicates the replay has gaps where
+    /// the real inputs were unavailable.
+    ///
+    /// Defaults to `0` when deserializing replays that were recorded before
+    /// this field was added.
+    #[serde(default)]
+    pub skipped_frames: usize,
 }
 
 /// Accumulates confirmed inputs during a P2P session for replay recording.
@@ -339,6 +368,7 @@ pub(crate) struct ReplayRecorder<I> {
     num_players: usize,
     frames: Vec<Vec<I>>,
     checksums: Vec<Option<u128>>,
+    skipped_frames: usize,
 }
 
 impl<I> ReplayRecorder<I> {
@@ -348,6 +378,7 @@ impl<I> ReplayRecorder<I> {
             num_players,
             frames: Vec::new(),
             checksums: Vec::new(),
+            skipped_frames: 0,
         }
     }
 
@@ -357,10 +388,30 @@ impl<I> ReplayRecorder<I> {
         self.checksums.push(checksum);
     }
 
+    /// Records a skipped frame with default placeholder inputs and no checksum.
+    ///
+    /// This maintains frame index alignment in the replay when the real
+    /// inputs for a frame could not be retrieved. The `skipped_frames`
+    /// counter is incremented so consumers can detect recording gaps.
+    pub(crate) fn record_skipped_frame(&mut self)
+    where
+        I: Default + Clone,
+    {
+        self.frames.push(vec![I::default(); self.num_players]);
+        self.checksums.push(None);
+        self.skipped_frames = self.skipped_frames.saturating_add(1);
+    }
+
     /// Returns the number of frames recorded so far.
     #[cfg(test)]
     pub(crate) fn recorded_frames(&self) -> usize {
         self.frames.len()
+    }
+
+    /// Returns the number of skipped frames recorded so far.
+    #[cfg(test)]
+    pub(crate) fn skipped_frames(&self) -> usize {
+        self.skipped_frames
     }
 
     /// Consumes this recorder and produces a [`Replay`].
@@ -374,6 +425,7 @@ impl<I> ReplayRecorder<I> {
                 library_version: env!("CARGO_PKG_VERSION").to_string(),
                 num_players: self.num_players,
                 total_frames,
+                skipped_frames: self.skipped_frames,
             },
         }
     }
@@ -399,6 +451,7 @@ mod tests {
                 library_version: "test".to_string(),
                 num_players: 2,
                 total_frames: 2,
+                skipped_frames: 0,
             },
         };
         assert_eq!(replay.num_players, 2);
@@ -417,6 +470,7 @@ mod tests {
                 library_version: "0.7.0".to_string(),
                 num_players: 2,
                 total_frames: 3,
+                skipped_frames: 0,
             },
         };
 
@@ -443,6 +497,7 @@ mod tests {
                 library_version: "test".to_string(),
                 num_players: 1,
                 total_frames: 0,
+                skipped_frames: 0,
             },
         };
 
@@ -464,6 +519,7 @@ mod tests {
             library_version: "1.2.3".to_string(),
             num_players: 4,
             total_frames: 1000,
+            skipped_frames: 0,
         };
         assert_eq!(meta.library_version, "1.2.3");
         assert_eq!(meta.num_players, 4);
@@ -509,6 +565,7 @@ mod tests {
                 library_version: "test".to_string(),
                 num_players: 2,
                 total_frames: 1,
+                skipped_frames: 0,
             },
         };
         let cloned = replay.clone();
@@ -526,6 +583,7 @@ mod tests {
                 library_version: "0.7.0".to_string(),
                 num_players: 2,
                 total_frames: 2,
+                skipped_frames: 0,
             },
         };
 
@@ -544,6 +602,7 @@ mod tests {
                 library_version: "test".to_string(),
                 num_players: 2,
                 total_frames: 2,
+                skipped_frames: 0,
             },
         };
         replay.validate().unwrap();
@@ -559,6 +618,7 @@ mod tests {
                 library_version: "test".to_string(),
                 num_players: 1,
                 total_frames: 0,
+                skipped_frames: 0,
             },
         };
         replay.validate().unwrap();
@@ -574,6 +634,7 @@ mod tests {
                 library_version: "test".to_string(),
                 num_players: 1,
                 total_frames: 2,
+                skipped_frames: 0,
             },
         };
         assert!(replay.validate().is_err());
@@ -589,6 +650,7 @@ mod tests {
                 library_version: "test".to_string(),
                 num_players: 2,
                 total_frames: 2,
+                skipped_frames: 0,
             },
         };
         assert!(replay.validate().is_err());
@@ -604,6 +666,7 @@ mod tests {
                 library_version: "test".to_string(),
                 num_players: 3, // mismatch
                 total_frames: 1,
+                skipped_frames: 0,
             },
         };
         assert!(replay.validate().is_err());
@@ -619,6 +682,7 @@ mod tests {
                 library_version: "test".to_string(),
                 num_players: 1,
                 total_frames: 99, // mismatch
+                skipped_frames: 0,
             },
         };
         assert!(replay.validate().is_err());
@@ -634,6 +698,7 @@ mod tests {
                 library_version: "test".to_string(),
                 num_players: 2,
                 total_frames: 1,
+                skipped_frames: 0,
             },
         };
         let replay2 = replay1.clone();
@@ -650,6 +715,7 @@ mod tests {
                 library_version: "0.7.0".to_string(),
                 num_players: 2,
                 total_frames: 10,
+                skipped_frames: 0,
             },
         };
         let display = format!("{}", replay);
@@ -664,6 +730,7 @@ mod tests {
             library_version: "1.0.0".to_string(),
             num_players: 4,
             total_frames: 100,
+            skipped_frames: 0,
         };
         let display = format!("{}", meta);
         assert!(display.contains("4 players"));
@@ -677,6 +744,7 @@ mod tests {
             library_version: "test".to_string(),
             num_players: 2,
             total_frames: 10,
+            skipped_frames: 0,
         };
         let meta2 = meta1.clone();
         assert_eq!(meta1, meta2);

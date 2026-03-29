@@ -1891,6 +1891,13 @@ macro_rules! handle_requests {
 /// This trait bundles the generic types needed for a session. Implement this on
 /// a marker struct to configure your session types.
 ///
+/// # Thread Safety
+///
+/// When the `sync-send` feature is enabled, `Config` requires `Send + Sync`
+/// and its associated types gain additional `Send + Sync` bounds. Without the
+/// feature, these bounds are absent, allowing single-threaded or `!Send` usage
+/// (e.g., WASM).
+///
 /// # Example
 ///
 /// ```

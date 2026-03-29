@@ -880,30 +880,38 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// Records confirmed inputs up to the given frame into the replay recorder.
+    ///
+    /// When a frame's inputs cannot be retrieved (e.g., because the frame was
+    /// already discarded from the input queue), default placeholder inputs are
+    /// recorded to maintain frame index alignment, and the recorder's
+    /// `skipped_frames` counter is incremented. Recording continues with
+    /// subsequent frames rather than stopping at the first failure.
     fn record_confirmed_inputs(&mut self, confirmed_frame: Frame) {
         if self.recording.is_none() {
             return;
         }
 
-        // Collect inputs first, then record them, to avoid overlapping borrows
-        let mut frames_to_record = Vec::new();
+        // Collect inputs first, then record them, to avoid overlapping borrows.
+        // Entries are tagged as either real inputs or skipped placeholders.
+        let mut frames_to_record: Vec<(Frame, Option<Vec<T::Input>>)> = Vec::new();
         let mut frame_to_record = self.last_recorded_frame.saturating_next();
         while frame_to_record <= confirmed_frame {
             match self.confirmed_inputs_for_frame(frame_to_record) {
                 Ok(inputs) => {
-                    frames_to_record.push((frame_to_record, inputs));
+                    frames_to_record.push((frame_to_record, Some(inputs)));
                 },
                 Err(err) => {
-                    // If we can't get inputs for this frame, stop recording.
-                    // This can happen if the frame has already been discarded.
+                    // If we can't get inputs for this frame, record a placeholder
+                    // and continue collecting subsequent frames. This maintains
+                    // frame index alignment in the replay.
                     report_violation!(
                         ViolationSeverity::Warning,
                         ViolationKind::InputQueue,
-                        "record_confirmed_inputs: failed to get inputs for frame {}: {}",
+                        "record_confirmed_inputs: failed to get inputs for frame {} (skipping): {}",
                         frame_to_record,
                         err
                     );
-                    break;
+                    frames_to_record.push((frame_to_record, None));
                 },
             }
             frame_to_record = frame_to_record.saturating_next();
@@ -911,12 +919,19 @@ impl<T: Config> P2PSession<T> {
 
         // Now record all collected frames
         if let Some(recorder) = self.recording.as_mut() {
-            for (frame, inputs) in frames_to_record {
-                let checksum = self
-                    .sync_layer
-                    .saved_state_by_frame(frame)
-                    .and_then(|cell| cell.checksum());
-                recorder.record_frame(inputs, checksum);
+            for (frame, maybe_inputs) in frames_to_record {
+                match maybe_inputs {
+                    Some(inputs) => {
+                        let checksum = self
+                            .sync_layer
+                            .saved_state_by_frame(frame)
+                            .and_then(|cell| cell.checksum());
+                        recorder.record_frame(inputs, checksum);
+                    },
+                    None => {
+                        recorder.record_skipped_frame();
+                    },
+                }
                 self.last_recorded_frame = frame;
             }
         }
@@ -3156,5 +3171,69 @@ mod tests {
         let mut session = create_local_only_session();
         let result = session.take_replay();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn record_confirmed_inputs_advances_past_failed_frame() {
+        // A fresh session with recording enabled: confirmed_frame() is Frame::NULL,
+        // so requesting inputs for Frame(0) will fail. The bug was that
+        // last_recorded_frame was never advanced on error, causing infinite retries.
+        let mut session = create_local_only_session_with_recording();
+        assert_eq!(session.last_recorded_frame, Frame::NULL);
+
+        // Attempt to record up to Frame(5). All frames should fail since no inputs
+        // have been confirmed, but last_recorded_frame must advance past ALL
+        // failed frames (continue, not break).
+        let target_frame = Frame::new(5);
+        session.record_confirmed_inputs(target_frame);
+
+        // last_recorded_frame should have advanced to the target frame,
+        // because continue (not break) processes every frame in the range.
+        assert_eq!(
+            session.last_recorded_frame, target_frame,
+            "last_recorded_frame should advance to the target frame, was {:?}",
+            session.last_recorded_frame
+        );
+
+        // The recorder should have placeholder entries for all 6 frames
+        // (Frame(0) through Frame(5)), maintaining frame index alignment.
+        let recorder = session.recording.as_ref().unwrap();
+        assert_eq!(
+            recorder.recorded_frames(),
+            6,
+            "recorder should have placeholder entries for all attempted frames"
+        );
+
+        // All frames should be marked as skipped since none had real inputs.
+        assert_eq!(
+            recorder.skipped_frames(),
+            6,
+            "all 6 frames should be counted as skipped"
+        );
+
+        // Calling again should not re-attempt the same frames (no infinite loop).
+        let previous = session.last_recorded_frame;
+        session.record_confirmed_inputs(target_frame);
+        assert_eq!(
+            session.last_recorded_frame, previous,
+            "last_recorded_frame should not change when called again with the same target"
+        );
+
+        // Verify the replay produced has correct metadata and frame alignment.
+        let replay = session.into_replay().unwrap();
+        assert_eq!(replay.frames.len(), 6);
+        assert_eq!(replay.checksums.len(), 6);
+        assert_eq!(replay.metadata.skipped_frames, 6);
+        // All frames should have default (0) inputs since they were placeholders.
+        for frame_inputs in &replay.frames {
+            assert_eq!(frame_inputs.len(), 1); // 1 player
+            assert_eq!(frame_inputs[0], u8::default());
+        }
+        // All checksums should be None for skipped frames.
+        for checksum in &replay.checksums {
+            assert_eq!(*checksum, None);
+        }
+        // Replay should pass validation since frame alignment is maintained.
+        replay.validate().unwrap();
     }
 }

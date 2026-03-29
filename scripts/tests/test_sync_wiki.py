@@ -1013,7 +1013,7 @@ class TestSyncHeaders:
         )
 
     def test_ensure_wiki_sync_header_replaces_header_beyond_first_lines(self) -> None:
-        """Existing SYNC headers are replaced even when they appear later in the file."""
+        """Existing SYNC headers are moved to line 1 even when they appear later."""
         prelude = "\n".join(f"line {idx}" for idx in range(30))
         content = (
             f"{prelude}\n"
@@ -1029,7 +1029,7 @@ class TestSyncHeaders:
             "Edit docs source. -->"
         )
         assert result.count("<!-- SYNC:") == 1
-        assert expected_header in result
+        assert result.splitlines()[0] == expected_header
         assert "legacy header" not in result
 
     def test_ensure_wiki_sync_header_removes_duplicate_headers(self) -> None:
