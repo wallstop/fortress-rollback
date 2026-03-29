@@ -1758,7 +1758,7 @@ impl<T: Config> std::fmt::Display for FortressRequest<T> {
 /// # use serde::{Deserialize, Serialize};
 /// # use std::net::SocketAddr;
 /// #
-/// # #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+/// # #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 /// # struct MyInput(u8);
 /// #
 /// # #[derive(Clone, Default)]
@@ -1818,7 +1818,7 @@ impl<T: Config> std::fmt::Display for FortressRequest<T> {
 /// # use serde::{Deserialize, Serialize};
 /// # use std::net::SocketAddr;
 /// #
-/// # #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+/// # #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 /// # struct MyInput(u8);
 /// # #[derive(Clone, Default)]
 /// # struct MyState { frame: i32 }
@@ -1906,7 +1906,7 @@ macro_rules! handle_requests {
 /// use std::net::SocketAddr;
 ///
 /// // Your game's input type
-/// #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+/// #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 /// struct GameInput {
 ///     buttons: u8,
 ///     stick_x: i8,
@@ -1942,7 +1942,7 @@ pub trait Config: 'static + Send + Sync {
     ///
     /// The implementation of [Default] is used for representing "no input" for
     /// a player, including when a player is disconnected.
-    type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned + Send + Sync;
+    type Input: Copy + Clone + PartialEq + Eq + Default + Serialize + DeserializeOwned + Send + Sync;
 
     /// The save state type for the session.
     type State: Clone + Send + Sync;
@@ -1976,7 +1976,7 @@ pub trait Config: 'static {
     ///
     /// The implementation of [Default] is used for representing "no input" for
     /// a player, including when a player is disconnected.
-    type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned;
+    type Input: Copy + Clone + PartialEq + Eq + Default + Serialize + DeserializeOwned;
 
     /// The save state type for the session.
     type State;

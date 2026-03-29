@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
 // Define your input and state types
-#[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct MyInput { buttons: u8 }
 
 #[derive(Clone, Serialize, Deserialize)]

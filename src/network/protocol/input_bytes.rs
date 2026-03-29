@@ -182,7 +182,7 @@ mod tests {
 
     // Test configuration
     #[repr(C)]
-    #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize, Debug)]
+    #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
     struct TestInput {
         inp: u32,
     }
@@ -502,7 +502,7 @@ mod tests {
     // ==========================================
 
     #[repr(C)]
-    #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize, Debug)]
+    #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
     struct ComplexInput {
         x: i32,
         y: i32,

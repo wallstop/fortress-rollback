@@ -1263,7 +1263,7 @@ mod tests {
     use std::net::SocketAddr;
 
     #[repr(C)]
-    #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+    #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
     struct TestInput {
         inp: u8,
     }

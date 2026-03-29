@@ -67,7 +67,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
 // 1. Define your input type
-#[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct MyInput {
     buttons: u8,
 }
@@ -164,7 +164,7 @@ use std::net::SocketAddr;
 
 // Your input type - sent over the network
 #[repr(C)]
-#[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct GameInput {
     pub buttons: u8,
     pub stick_x: i8,
@@ -193,7 +193,7 @@ impl Config for GameConfig {
 
 Your input type must:
 
-- Be `Copy + Clone + PartialEq`
+- Be `Copy + Clone + PartialEq + Eq`
 - Implement `Default` (used for disconnected players)
 - Implement `Serialize + Deserialize` (for network transmission)
 
@@ -1888,7 +1888,7 @@ fortress-rollback = { version = "0.6", features = ["sync-send"] }
 
 ```rust
 pub trait Config: 'static {
-    type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned;
+    type Input: Copy + Clone + PartialEq + Eq + Default + Serialize + DeserializeOwned;
     type State;
     type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Debug;
 }
@@ -1898,7 +1898,7 @@ pub trait Config: 'static {
 
 ```rust
 pub trait Config: 'static + Send + Sync {
-    type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned + Send + Sync;
+    type Input: Copy + Clone + PartialEq + Eq + Default + Serialize + DeserializeOwned + Send + Sync;
     type State: Clone + Send + Sync;
     type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Send + Sync + Debug;
 }

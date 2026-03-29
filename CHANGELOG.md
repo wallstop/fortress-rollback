@@ -14,10 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Breaking
+### Changed
 
 - **Breaking:** `FortressEvent::ReplayDesync` — new variant added. Since `FortressEvent` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
 - **Breaking:** `InvalidFrameReason::ReplayExhausted` — new variant added. Since `InvalidFrameReason` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
+- **Breaking:** `Config::Input` now requires `Eq` in addition to `PartialEq`. Types used as `Config::Input` must derive or implement `Eq`. This ensures reflexive equality, which is a correctness requirement for deterministic rollback — non-reflexive types (e.g., floats with `NaN`) would cause phantom prediction misses and unnecessary rollbacks. All integer and struct-of-integer types already implement `Eq`; add `#[derive(Eq)]` to any custom input types that are missing it.
 
 ### Added
 

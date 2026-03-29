@@ -266,7 +266,7 @@ fn compute_confirmed_game_value_with_diagnostics<
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct TestInput {
     value: u32,
 }

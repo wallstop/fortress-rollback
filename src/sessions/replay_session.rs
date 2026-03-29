@@ -13,7 +13,7 @@
 //! use serde::{Deserialize, Serialize};
 //! use std::net::SocketAddr;
 //!
-//! #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+//! #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 //! struct MyInput { buttons: u8 }
 //!
 //! #[derive(Debug)]
@@ -90,7 +90,7 @@ use crate::{
 /// use serde::{Deserialize, Serialize};
 /// use std::net::SocketAddr;
 ///
-/// #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+/// #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 /// struct Input(u8);
 ///
 /// #[derive(Debug)]
@@ -157,7 +157,7 @@ impl<T: Config> ReplaySession<T> {
     /// use serde::{Deserialize, Serialize};
     /// use std::net::SocketAddr;
     ///
-    /// #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+    /// #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
     /// struct Input(u8);
     ///
     /// #[derive(Debug)]
@@ -219,7 +219,7 @@ impl<T: Config> ReplaySession<T> {
     /// use serde::{Deserialize, Serialize};
     /// use std::net::SocketAddr;
     ///
-    /// #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+    /// #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
     /// struct Input(u8);
     ///
     /// #[derive(Debug)]
@@ -306,7 +306,7 @@ impl<T: Config> ReplaySession<T> {
     /// # use fortress_rollback::Config;
     /// # use serde::{Deserialize, Serialize};
     /// # use std::net::SocketAddr;
-    /// # #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+    /// # #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
     /// # struct Input(u8);
     /// # #[derive(Debug)]
     /// # struct Cfg;
@@ -351,7 +351,7 @@ impl<T: Config> ReplaySession<T> {
     /// # use fortress_rollback::{Config, Frame, Session};
     /// # use serde::{Deserialize, Serialize};
     /// # use std::net::SocketAddr;
-    /// # #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+    /// # #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
     /// # struct Input(u8);
     /// # #[derive(Debug)]
     /// # struct Cfg;
@@ -392,7 +392,7 @@ impl<T: Config> ReplaySession<T> {
     /// # use fortress_rollback::Config;
     /// # use serde::{Deserialize, Serialize};
     /// # use std::net::SocketAddr;
-    /// # #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+    /// # #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
     /// # struct Input(u8);
     /// # #[derive(Debug)]
     /// # struct Cfg;
@@ -431,7 +431,7 @@ impl<T: Config> ReplaySession<T> {
     /// # use fortress_rollback::{Config, Session};
     /// # use serde::{Deserialize, Serialize};
     /// # use std::net::SocketAddr;
-    /// # #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+    /// # #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
     /// # struct Input(u8);
     /// # #[derive(Debug)]
     /// # struct Cfg;
@@ -484,7 +484,7 @@ impl<T: Config> ReplaySession<T> {
     /// # use fortress_rollback::Config;
     /// # use serde::{Deserialize, Serialize};
     /// # use std::net::SocketAddr;
-    /// # #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+    /// # #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
     /// # struct Input(u8);
     /// # #[derive(Debug)]
     /// # struct Cfg;
@@ -583,7 +583,7 @@ impl<T: Config> ReplaySession<T> {
     /// # use fortress_rollback::{Config, Session, FortressRequest};
     /// # use serde::{Deserialize, Serialize};
     /// # use std::net::SocketAddr;
-    /// # #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+    /// # #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
     /// # struct Input(u8);
     /// # #[derive(Debug)]
     /// # struct Cfg;

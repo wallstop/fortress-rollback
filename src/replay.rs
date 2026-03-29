@@ -27,7 +27,7 @@
 //! use serde::{Deserialize, Serialize};
 //!
 //! // Replays are parameterized on your Config's Input type
-//! #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+//! #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 //! struct MyInput { buttons: u8 }
 //!
 //! let replay = Replay::<MyInput> {
@@ -72,7 +72,7 @@ use crate::FortressResult;
 /// # Type Parameter
 ///
 /// `I` is the input type, which must satisfy the same bounds as
-/// [`Config::Input`]: `Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned`.
+/// [`Config::Input`]: `Copy + Clone + PartialEq + Eq + Default + Serialize + DeserializeOwned`.
 /// When the `sync-send` feature is enabled, `Send + Sync` bounds are additionally required.
 ///
 /// # Example
@@ -81,7 +81,7 @@ use crate::FortressResult;
 /// use fortress_rollback::replay::{Replay, ReplayMetadata};
 /// use serde::{Deserialize, Serialize};
 ///
-/// #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+/// #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 /// struct GameInput { direction: u8 }
 ///
 /// let replay = Replay::<GameInput> {
@@ -99,7 +99,7 @@ use crate::FortressResult;
 /// ```
 ///
 /// [`Config::Input`]: crate::Config::Input
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)] // derive-bounds:ok(Eq via Config::Input)
 pub struct Replay<I> {
     /// The number of players in this recorded match.
     pub num_players: usize,

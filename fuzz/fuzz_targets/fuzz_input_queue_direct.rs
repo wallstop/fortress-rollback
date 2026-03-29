@@ -26,7 +26,7 @@ use std::net::SocketAddr;
 
 /// Test input configuration
 #[repr(C)]
-#[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
 struct TestInput {
     value: u8,
 }

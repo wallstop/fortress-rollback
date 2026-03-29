@@ -140,7 +140,7 @@ fn spawn_enemy(state: &mut GameState, rng: &mut SeededRng) {
 ```rust
 // Must implement these traits
 pub trait Config: 'static {
-    type Input: Copy + Clone + PartialEq + Default
+    type Input: Copy + Clone + PartialEq + Eq + Default
               + Serialize + DeserializeOwned;
     // ...
 }

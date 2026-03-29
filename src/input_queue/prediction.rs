@@ -133,7 +133,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     #[repr(C)]
-    #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize, Debug)]
+    #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
     struct TestInput {
         inp: u8,
     }
