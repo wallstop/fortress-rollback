@@ -625,8 +625,8 @@ impl<T: Config> ReplaySession<T> {
                 .get(frame_index)
                 .ok_or(FortressError::InvalidFrameStructured {
                     frame: next_frame,
-                    reason: crate::InvalidFrameReason::NotConfirmed {
-                        confirmed_frame: self.current_frame,
+                    reason: crate::InvalidFrameReason::ReplayExhausted {
+                        last_frame: self.current_frame,
                     },
                 })?;
 
@@ -770,13 +770,22 @@ mod tests {
     }
 
     #[test]
-    fn advance_past_end_returns_error() {
+    fn advance_past_end_returns_replay_exhausted() {
         let mut session = ReplaySession::<TestConfig>::new(make_replay(1, 1)).unwrap();
         session.advance_frame().unwrap();
         assert!(session.is_complete());
 
         let result = session.advance_frame();
-        assert!(result.is_err());
+        match result {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
+                assert_eq!(frame, Frame::new(1));
+                assert!(
+                    matches!(reason, crate::InvalidFrameReason::ReplayExhausted { last_frame } if last_frame == Frame::new(0)),
+                    "Expected ReplayExhausted, got {reason:?}"
+                );
+            },
+            other => panic!("Expected InvalidFrameStructured with ReplayExhausted, got {other:?}"),
+        }
     }
 
     #[test]

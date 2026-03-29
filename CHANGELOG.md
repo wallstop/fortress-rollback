@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking
 
 - **Breaking:** `FortressEvent::ReplayDesync` — new variant added. Since `FortressEvent` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
+- **Breaking:** `InvalidFrameReason::ReplayExhausted` — new variant added. Since `InvalidFrameReason` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
 
 ### Added
 
@@ -30,17 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Replay<I>` type for recorded match data with `to_bytes()` / `from_bytes()` serialization using deterministic bincode codec
 - `ReplayMetadata` type containing library version, player count, total frame count, and skipped frame count
 - `ReplaySession<T>` session type implementing `Session<T>` for deterministic replay playback
-- `SessionBuilder::with_recording(bool)` to enable input recording during P2P sessions
+- `SessionBuilder::with_recording(bool)` to enable input recording (including game state checksums) during P2P sessions
 - `SessionBuilder::start_replay_session(replay)` to create a replay playback session
 - `P2PSession::is_recording()` to check if replay recording is active
 - `P2PSession::into_replay()` to extract the recorded `Replay` after a session ends (consumes the session)
 - `P2PSession::take_replay()` to extract the recorded `Replay` without consuming the session (recording stops after extraction)
 - `Replay::validate()` to verify internal consistency of replay data
 - Re-exports `Replay`, `ReplayMetadata`, and `ReplaySession` in prelude
-
-### Changed
-
-- `P2PSession` now captures actual game state checksums during replay recording (previously always recorded `None`)
 
 ## [0.7.0]
 
