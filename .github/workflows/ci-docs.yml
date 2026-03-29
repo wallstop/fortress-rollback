@@ -247,6 +247,19 @@ jobs:
           path: code-fence-output.txt
           retention-days: 7
 
+  # ============================================================================
+  # DOC CLAIMS - Check doc comments for misleading claims
+  # ============================================================================
+  doc-claims:
+    name: Doc Claims Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check doc comment accuracy
+        run: ./scripts/ci/check-doc-claims.sh
+
   link-check:
     name: Link Check
     runs-on: ubuntu-latest

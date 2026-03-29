@@ -102,6 +102,13 @@ repos:
         pass_filenames: false
         files: '\.rs$'
 
+      - id: check-doc-claims
+        name: check doc comment accuracy
+        entry: bash scripts/ci/check-doc-claims.sh
+        language: system
+        pass_filenames: false
+        files: '\.rs$'
+
       # ══════════════════════════════════════════════════════════════════════
       # Documentation checks
       # ══════════════════════════════════════════════════════════════════════

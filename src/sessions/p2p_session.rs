@@ -1309,10 +1309,13 @@ impl<T: Config> P2PSession<T> {
 
     /// Returns a reference to the telemetry observer, if one is attached.
     ///
-    /// This is useful for inspecting the attached telemetry observer in tests,
-    /// e.g., by downcasting to [`CollectingTelemetry`].
+    /// In tests, the typical pattern is to keep a separate
+    /// <code>Arc<[CollectingTelemetry]></code> clone and call methods on it directly,
+    /// rather than going through this accessor. This method is primarily useful
+    /// when you need to confirm that a telemetry observer is attached or to pass
+    /// the trait object to other code.
     ///
-    /// [`CollectingTelemetry`]: crate::telemetry::CollectingTelemetry
+    /// [CollectingTelemetry]: crate::telemetry::CollectingTelemetry
     #[must_use]
     pub fn telemetry(&self) -> Option<&Arc<dyn SessionTelemetry>> {
         self.telemetry.as_ref()

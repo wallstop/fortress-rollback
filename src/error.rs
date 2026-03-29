@@ -245,7 +245,8 @@ pub enum RleDecodeReason {
     /// An unknown or unexpected error occurred during RLE decoding.
     ///
     /// This variant is used as a fallback when the underlying error cannot be
-    /// mapped to a more specific reason (e.g., when downcasting fails).
+    /// mapped to a more specific reason (e.g., when a `FortressError` variant
+    /// does not match the expected structured RLE error kind).
     Unknown,
 }
 
@@ -306,8 +307,8 @@ pub enum DeltaDecodeReason {
     },
     /// An unknown or unexpected error occurred during delta decoding.
     ///
-    /// This variant is used as a fallback when the underlying error cannot be
-    /// mapped to a more specific reason (e.g., when downcasting fails).
+    /// This variant exists for forward compatibility and as a fallback
+    /// if future error-mapping code encounters an unexpected error kind.
     Unknown,
 }
 
