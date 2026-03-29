@@ -6,8 +6,10 @@ use web_time::Duration;
 use crate::{
     error::{InvalidRequestKind, SerializationErrorKind},
     network::protocol::UdpProtocol,
+    replay::Replay,
     sessions::player_registry::PlayerRegistry,
-    telemetry::ViolationObserver,
+    sessions::replay_session::ReplaySession,
+    telemetry::{SessionTelemetry, ViolationObserver},
     time_sync::TimeSyncConfig,
     Config, DesyncDetection, FortressError, NonBlockingSocket, P2PSession, PlayerHandle,
     PlayerType, SpectatorSession, SyncTestSession,
@@ -101,6 +103,10 @@ where
     input_queue_config: InputQueueConfig,
     /// Maximum number of events to queue before oldest are dropped.
     event_queue_size: usize,
+    /// Whether to enable replay recording during P2P sessions.
+    recording: bool,
+    /// Optional telemetry observer for session performance events.
+    telemetry: Option<Arc<dyn SessionTelemetry>>,
 }
 
 impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
@@ -128,6 +134,8 @@ impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
             time_sync_config,
             input_queue_config,
             event_queue_size,
+            recording,
+            telemetry,
         } = self;
 
         f.debug_struct("SessionBuilder")
@@ -145,12 +153,14 @@ impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
             .field("max_frames_behind", max_frames_behind)
             .field("catchup_speed", catchup_speed)
             .field("has_violation_observer", &violation_observer.is_some())
+            .field("has_telemetry", &telemetry.is_some())
             .field("sync_config", sync_config)
             .field("protocol_config", protocol_config)
             .field("spectator_config", spectator_config)
             .field("time_sync_config", time_sync_config)
             .field("input_queue_config", input_queue_config)
             .field("event_queue_size", event_queue_size)
+            .field("recording", recording)
             .finish()
     }
 }
@@ -185,6 +195,8 @@ impl<T: Config> SessionBuilder<T> {
             time_sync_config: TimeSyncConfig::default(),
             input_queue_config: InputQueueConfig::default(),
             event_queue_size: DEFAULT_EVENT_QUEUE_SIZE,
+            recording: false,
+            telemetry: None,
         }
     }
 
@@ -678,6 +690,36 @@ impl<T: Config> SessionBuilder<T> {
         Ok(self)
     }
 
+    /// Enables or disables replay recording during a P2P session.
+    ///
+    /// When recording is enabled, the [`P2PSession`] will capture all confirmed
+    /// inputs as they are processed. After the session ends, call
+    /// [`P2PSession::into_replay`] to extract the recorded [`Replay`].
+    ///
+    /// Recording is disabled by default.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use fortress_rollback::prelude::*;
+    /// # use std::net::SocketAddr;
+    /// # #[derive(Debug)]
+    /// # struct TestConfig;
+    /// # impl Config for TestConfig {
+    /// #     type Input = u8;
+    /// #     type State = u8;
+    /// #     type Address = SocketAddr;
+    /// # }
+    /// let builder = SessionBuilder::<TestConfig>::new()
+    ///     .with_recording(true);
+    /// ```
+    ///
+    /// [`Replay`]: crate::replay::Replay
+    pub fn with_recording(mut self, enabled: bool) -> Self {
+        self.recording = enabled;
+        self
+    }
+
     /// Sets the FPS this session is used with. This influences estimations for frame synchronization between sessions.
     /// # Errors
     /// - Returns a [`FortressError`] if the fps is 0
@@ -761,6 +803,36 @@ impl<T: Config> SessionBuilder<T> {
     /// ```
     pub fn with_violation_observer(mut self, observer: Arc<dyn ViolationObserver>) -> Self {
         self.violation_observer = Some(observer);
+        self
+    }
+
+    /// Attaches a telemetry observer to receive session performance events.
+    ///
+    /// The telemetry observer will receive callbacks for rollbacks, prediction
+    /// misses, frame advances, and network statistics during P2P sessions.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::prelude::*;
+    /// use fortress_rollback::telemetry::{CollectingTelemetry, SessionTelemetry};
+    /// use std::sync::Arc;
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// let telemetry = Arc::new(CollectingTelemetry::new());
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_telemetry(telemetry.clone());
+    ///
+    /// // After session operations, inspect telemetry events
+    /// // assert!(telemetry.events().is_empty());
+    /// ```
+    pub fn with_telemetry(mut self, telemetry: Arc<dyn SessionTelemetry>) -> Self {
+        self.telemetry = Some(telemetry);
         self
     }
 
@@ -965,6 +1037,8 @@ impl<T: Config> SessionBuilder<T> {
             self.protocol_config,
             self.input_queue_config.queue_length,
             self.event_queue_size,
+            self.recording,
+            self.telemetry,
         ))
     }
 
@@ -1038,6 +1112,116 @@ impl<T: Config> SessionBuilder<T> {
             self.violation_observer,
             self.input_queue_config.queue_length,
         ))
+    }
+
+    /// Creates a replay playback session from a recorded [`Replay`].
+    ///
+    /// The returned [`ReplaySession`] will play back the recorded inputs
+    /// frame by frame when [`advance_frame`](crate::Session::advance_frame)
+    /// is called. No network, save/load, or local input is needed.
+    ///
+    /// The builder is consumed but most configuration is ignored since
+    /// replay playback does not require networking or synchronization.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use fortress_rollback::prelude::*;
+    /// # use fortress_rollback::replay::{Replay, ReplayMetadata};
+    /// # use std::net::SocketAddr;
+    /// # #[derive(Debug)]
+    /// # struct TestConfig;
+    /// # impl Config for TestConfig {
+    /// #     type Input = u8;
+    /// #     type State = u8;
+    /// #     type Address = SocketAddr;
+    /// # }
+    /// let replay = Replay::<u8> {
+    ///     num_players: 2,
+    ///     frames: vec![vec![0, 0]; 10],
+    ///     checksums: vec![None; 10],
+    ///     metadata: ReplayMetadata {
+    ///         library_version: env!("CARGO_PKG_VERSION").to_string(),
+    ///         num_players: 2,
+    ///         total_frames: 10,
+    ///         skipped_frames: 0,
+    ///     },
+    /// };
+    /// let session = SessionBuilder::<TestConfig>::new()
+    ///     .start_replay_session(replay)?;
+    /// assert!(!session.is_complete());
+    /// # Ok::<(), fortress_rollback::FortressError>(())
+    /// ```
+    ///
+    /// [`Replay`]: crate::replay::Replay
+    /// [`ReplaySession`]: crate::sessions::replay_session::ReplaySession
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the replay fails internal consistency validation
+    /// (see [`Replay::validate`]).
+    pub fn start_replay_session(
+        self,
+        replay: Replay<T::Input>,
+    ) -> crate::FortressResult<ReplaySession<T>> {
+        ReplaySession::new(replay)
+    }
+
+    /// Creates a replay playback session with checksum validation enabled.
+    ///
+    /// When validation is enabled, the session emits [`FortressRequest::SaveGameState`]
+    /// requests before each [`FortressRequest::AdvanceFrame`], allowing the application
+    /// to compute checksums. These checksums are compared against the checksums stored
+    /// in the replay to detect non-determinism.
+    ///
+    /// If a mismatch is detected, a [`FortressEvent::ReplayDesync`] event is emitted
+    /// with the frame number and both checksums.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use fortress_rollback::prelude::*;
+    /// # use fortress_rollback::replay::{Replay, ReplayMetadata};
+    /// # use std::net::SocketAddr;
+    /// # #[derive(Debug)]
+    /// # struct TestConfig;
+    /// # impl Config for TestConfig {
+    /// #     type Input = u8;
+    /// #     type State = u8;
+    /// #     type Address = SocketAddr;
+    /// # }
+    /// let replay = Replay::<u8> {
+    ///     num_players: 2,
+    ///     frames: vec![vec![0, 0]; 10],
+    ///     checksums: vec![Some(0x1234); 10],
+    ///     metadata: ReplayMetadata {
+    ///         library_version: env!("CARGO_PKG_VERSION").to_string(),
+    ///         num_players: 2,
+    ///         total_frames: 10,
+    ///         skipped_frames: 0,
+    ///     },
+    /// };
+    /// let session = SessionBuilder::<TestConfig>::new()
+    ///     .start_replay_session_with_validation(replay)?;
+    /// assert!(!session.is_complete());
+    /// # Ok::<(), fortress_rollback::FortressError>(())
+    /// ```
+    ///
+    /// [`Replay`]: crate::replay::Replay
+    /// [`ReplaySession`]: crate::sessions::replay_session::ReplaySession
+    /// [`FortressRequest::SaveGameState`]: crate::FortressRequest::SaveGameState
+    /// [`FortressRequest::AdvanceFrame`]: crate::FortressRequest::AdvanceFrame
+    /// [`FortressEvent::ReplayDesync`]: crate::FortressEvent::ReplayDesync
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the replay fails internal consistency validation
+    /// (see [`Replay::validate`]).
+    pub fn start_replay_session_with_validation(
+        self,
+        replay: Replay<T::Input>,
+    ) -> crate::FortressResult<ReplaySession<T>> {
+        ReplaySession::new_with_validation(replay)
     }
 
     fn create_endpoint(
@@ -1520,5 +1704,43 @@ mod tests {
         assert_eq!(builder.sync_config, SyncConfig::lan());
         assert_eq!(builder.max_prediction, 6);
         assert_eq!(builder.desync_detection, DesyncDetection::Off);
+    }
+
+    #[test]
+    fn builder_start_replay_session_with_validation() {
+        use crate::replay::{Replay, ReplayMetadata};
+
+        let replay = Replay::<TestInput> {
+            num_players: 2,
+            frames: vec![
+                vec![TestInput { inp: 0 }, TestInput { inp: 1 }],
+                vec![TestInput { inp: 2 }, TestInput { inp: 3 }],
+            ],
+            checksums: vec![Some(0x1234), Some(0x5678)],
+            metadata: ReplayMetadata {
+                library_version: "test".to_string(),
+                num_players: 2,
+                total_frames: 2,
+                skipped_frames: 0,
+            },
+        };
+
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .start_replay_session_with_validation(replay)
+            .unwrap();
+
+        assert!(!session.is_complete());
+
+        // Validation mode should emit SaveGameState before AdvanceFrame
+        let requests = session.advance_frame().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(matches!(
+            &requests[0],
+            crate::FortressRequest::SaveGameState { .. }
+        ));
+        assert!(matches!(
+            &requests[1],
+            crate::FortressRequest::AdvanceFrame { .. }
+        ));
     }
 }

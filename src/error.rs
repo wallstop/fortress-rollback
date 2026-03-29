@@ -164,6 +164,18 @@ pub enum InvalidFrameReason {
     /// [`LoadGameState`]: crate::FortressRequest::LoadGameState
     /// [`SaveGameState`]: crate::FortressRequest::SaveGameState
     MissingState,
+    /// Replay has no more frames to play back.
+    ///
+    /// Returned by [`ReplaySession::advance_frame()`] when the replay data
+    /// has been fully consumed. Check [`ReplaySession::is_complete()`] before
+    /// calling `advance_frame()` to avoid this error.
+    ///
+    /// [`ReplaySession::advance_frame()`]: crate::ReplaySession::advance_frame
+    /// [`ReplaySession::is_complete()`]: crate::ReplaySession::is_complete
+    ReplayExhausted {
+        /// The last frame available in the replay.
+        last_frame: Frame,
+    },
     /// Custom reason (fallback for API compatibility).
     Custom(&'static str),
 }
@@ -203,6 +215,9 @@ impl Display for InvalidFrameReason {
             },
             Self::NullOrNegative => write!(f, "frame is NULL or negative"),
             Self::MissingState => write!(f, "no saved state exists for this frame"),
+            Self::ReplayExhausted { last_frame } => {
+                write!(f, "replay exhausted (last frame: {})", last_frame)
+            },
             Self::Custom(s) => write!(f, "{}", s),
         }
     }
@@ -230,7 +245,8 @@ pub enum RleDecodeReason {
     /// An unknown or unexpected error occurred during RLE decoding.
     ///
     /// This variant is used as a fallback when the underlying error cannot be
-    /// mapped to a more specific reason (e.g., when downcasting fails).
+    /// mapped to a more specific reason (e.g., when a `FortressError` variant
+    /// does not match the expected structured RLE error kind).
     Unknown,
 }
 
@@ -291,8 +307,8 @@ pub enum DeltaDecodeReason {
     },
     /// An unknown or unexpected error occurred during delta decoding.
     ///
-    /// This variant is used as a fallback when the underlying error cannot be
-    /// mapped to a more specific reason (e.g., when downcasting fails).
+    /// This variant exists for forward compatibility and as a fallback
+    /// if future error-mapping code encounters an unexpected error kind.
     Unknown,
 }
 
@@ -1418,6 +1434,19 @@ mod tests {
             display.contains("saved state"),
             "Expected 'saved state' in: {display}"
         );
+    }
+
+    #[test]
+    fn invalid_frame_reason_replay_exhausted_display() {
+        let reason = InvalidFrameReason::ReplayExhausted {
+            last_frame: Frame::new(99),
+        };
+        let display = format!("{reason}");
+        assert!(
+            display.contains("replay exhausted"),
+            "Expected 'replay exhausted' in: {display}"
+        );
+        assert!(display.contains("99"), "Expected '99' in: {display}");
     }
 
     #[test]

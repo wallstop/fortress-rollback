@@ -329,6 +329,7 @@ pub enum InvalidFrameReason {
     NotConfirmed { confirmed_frame: Frame },
     NullOrNegative,
     MissingState,
+    ReplayExhausted { last_frame: Frame },
     Custom(&'static str),
 }
 ```

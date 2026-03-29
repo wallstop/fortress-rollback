@@ -15,12 +15,12 @@ Fix content in `docs/`, then re-sync.
 
 ## Link Format Rules
 
-| Context | Format | Example |
-|---------|--------|---------|
-| `docs/` files | Lowercase with `.md` | `[Guide](user-guide.md)` |
-| `wiki/` files | PascalCase, no extension | `[Guide](User-Guide)` |
-| `wiki/_Sidebar.md` | PascalCase, no extension | `[User Guide](User-Guide)` |
-| External (non-docs) | Full GitHub URL | `[Code](https://github.com/.../blob/main/src/lib.rs)` |
+| Context             | Format                   | Example                                               |
+| ------------------- | ------------------------ | ----------------------------------------------------- |
+| `docs/` files       | Lowercase with `.md`     | `[Guide](user-guide.md)`                              |
+| `wiki/` files       | PascalCase, no extension | `[Guide](User-Guide)`                                 |
+| `wiki/_Sidebar.md`  | PascalCase, no extension | `[User Guide](User-Guide)`                            |
+| External (non-docs) | Full GitHub URL          | `[Code](https://github.com/.../blob/main/src/lib.rs)` |
 
 Use standard markdown `[Text](Page)` syntax in sidebar -- NOT wiki-link `[[Page|Text]]` syntax (has URL generation bugs).
 
@@ -57,6 +57,14 @@ docs/*.md --> sync-wiki.py
   +-- Add SYNC comment header
   +-- Generate _Sidebar.md
 --> wiki/*.md
+
+Pre-commit enforcement now runs this sequence for docs/wiki changes:
+
+1. `sync-wiki` regenerates `wiki/*.md` from `docs/`
+2. `wiki-consistency` validates links/sidebar/mapping integrity
+3. `check-sync-headers` validates reciprocal `<!-- SYNC: ... -->` headers
+
+This prevents committing stale or manually-edited wiki mirrors.
 ```
 
 ## MkDocs Conversion Patterns
@@ -124,14 +132,25 @@ python3 scripts/docs/validate-wiki-output.py      # Check rendering issues
 3. All wiki pages have sidebar entries
 4. No special characters in wiki-link display text
 
+`sync-wiki.py` also validates that every `WIKI_STRUCTURE` page appears in
+the generated sidebar and fails fast if any mapped page is missing.
+
+`sync-wiki.py` now enforces deterministic writer normalization for generated
+markdown: non-empty outputs end with exactly one LF newline (trailing
+whitespace/newlines are normalized). This prevents churn with
+`end-of-file-fixer` and keeps repeated sync runs idempotent.
+
+Sidebar coverage validation runs before any wiki writes, so an invalid sidebar
+template fails early without leaving partial regenerated output.
+
 ### Common Errors
 
-| Error | Fix |
-|-------|-----|
+| Error                            | Fix                          |
+| -------------------------------- | ---------------------------- |
 | Link points to non-existent page | Add file or fix sidebar link |
-| `docs/file.md` not mapped | Add to `WIKI_STRUCTURE` |
-| Wiki page has no sidebar entry | Add to `generate_sidebar()` |
-| Stale WIKI_STRUCTURE mapping | Remove entry |
+| `docs/file.md` not mapped        | Add to `WIKI_STRUCTURE`      |
+| Wiki page has no sidebar entry   | Add to `generate_sidebar()`  |
+| Stale WIKI_STRUCTURE mapping     | Remove entry                 |
 
 ## Markdown Link Validation
 
@@ -139,11 +158,11 @@ python3 scripts/docs/validate-wiki-output.py      # Check rendering issues
 
 Links resolve from the directory containing the markdown file:
 
-| From | To Root | Example |
-|------|---------|---------|
-| `docs/` | `../` | `[README](../README.md)` |
-| `.github/` | `../` | `[Context](../.llm/context.md)` |
-| `.llm/skills/<category>/` | `../../../` | `[README](../../../README.md)` |
+| From                      | To Root     | Example                         |
+| ------------------------- | ----------- | ------------------------------- |
+| `docs/`                   | `../`       | `[README](../README.md)`        |
+| `.github/`                | `../`       | `[Context](../.llm/context.md)` |
+| `.llm/skills/<category>/` | `../../../` | `[README](../../../README.md)`  |
 
 ### Heading Anchor Generation Rules
 
@@ -153,11 +172,11 @@ Links resolve from the directory containing the markdown file:
 4. ` / ` becomes `--`
 5. `~` removed
 
-| Heading | Anchor |
-|---------|--------|
-| `## Quick Start` | `#quick-start` |
+| Heading                              | Anchor                         |
+| ------------------------------------ | ------------------------------ |
+| `## Quick Start`                     | `#quick-start`                 |
 | `## LAN / Local Network (~20ms RTT)` | `#lan--local-network-20ms-rtt` |
-| `## Web / WASM Integration` | `#web--wasm-integration` |
+| `## Web / WASM Integration`          | `#web--wasm-integration`       |
 
 ### Pipe Escaping in Tables
 

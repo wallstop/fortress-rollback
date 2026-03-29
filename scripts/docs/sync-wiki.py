@@ -86,6 +86,8 @@ WIKI_STRUCTURE = {
     "fortress-vs-ggrs.md": "Fortress-vs-GGRS",
     "ggrs-changelog-archive.md": "GGRS-Changelog-Archive",
     "tlaplus-tooling-research.md": "TLAplus-Tooling-Research",
+    "replay.md": "Replay",
+    "telemetry.md": "Telemetry",
     # Specs directory
     "specs/formal-spec.md": "Formal-Specification",
     "specs/determinism-model.md": "Determinism-Model",
@@ -106,6 +108,7 @@ ROOT_WIKI_NAMES = {
 GITHUB_REPO_URL = "https://github.com/wallstop/fortress-rollback"
 GITHUB_BLOB_URL = f"{GITHUB_REPO_URL}/blob/main"
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/wallstop/fortress-rollback/main"
+SYNC_HEADER_RE = re.compile(r"^<!--\s*SYNC:\s*.*?-->\s*$")
 
 
 class LinkMatch(NamedTuple):
@@ -482,6 +485,25 @@ def strip_mkdocs_frontmatter(content: str) -> str:
             content = content[end + 3 :].lstrip()
 
     return content
+
+
+def ensure_wiki_sync_header(content: str, docs_rel_path: str) -> str:
+    """Ensure wiki output has a reciprocal SYNC header pointing to docs source."""
+    normalized_docs_path = normalize_path(docs_rel_path)
+    header = (
+        "<!-- SYNC: This wiki page is generated from "
+        f"docs/{normalized_docs_path}. Edit docs source. -->"
+    )
+
+    lines = content.splitlines()
+    # Strip ALL existing SYNC headers so the canonical one is always line 1
+    lines = [line for line in lines if not SYNC_HEADER_RE.match(line.strip())]
+
+    body = "\n".join(lines).lstrip("\r\n")
+    if not body:
+        return header
+
+    return f"{header}\n\n{body}"
 
 
 def convert_grid_cards_to_list(content: str) -> str:
@@ -928,14 +950,31 @@ def read_file_safe(path: Path) -> str | None:
         return None
 
 
+def normalize_generated_text(content: str) -> str:
+    """Normalize generated text to a stable EOF format.
+
+    This mirrors end-of-file-fixer behavior for trailing whitespace/newlines,
+    ensuring generated files always end with exactly one LF when non-empty.
+    """
+    if not content:
+        return ""
+    return content.rstrip("\r\n \t") + "\n"
+
+
 def write_file_safe(path: Path, content: str, dry_run: bool = False) -> bool:
     """Safely write a file, returning False on error."""
     if dry_run:
         logger.info(f"  [DRY RUN] Would write: {path}")
         return True
+
+    normalized_content = normalize_generated_text(content)
+
+    if content != normalized_content:
+        logger.debug(f"  Normalized EOF newline: {path}")
+
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        path.write_text(normalized_content, encoding="utf-8")
         return True
     except OSError as e:
         logger.error(f"Error writing {path}: {e}")
@@ -970,6 +1009,7 @@ def process_file(
     content = convert_links(content, relative_path, wiki_structure)
     content = convert_asset_paths(content, relative_path)
     content = strip_mkdocs_features(content)
+    content = ensure_wiki_sync_header(content, relative_path)
 
     # Write to wiki
     dest_path = wiki_dir / f"{wiki_name}.md"
@@ -1056,6 +1096,8 @@ def generate_sidebar(wiki_structure: dict[str, str]) -> str:
 ## Documentation
 
 - [User Guide](User-Guide)
+- [Match Replay](Replay)
+- [Session Telemetry](Telemetry)
 - [Architecture](Architecture)
 - [Migration](Migration)
 
@@ -1086,6 +1128,21 @@ def generate_sidebar(wiki_structure: dict[str, str]) -> str:
     return sidebar
 
 
+def find_sidebar_missing_pages(sidebar: str, wiki_structure: dict[str, str]) -> list[str]:
+    """Return wiki page names that are mapped but absent from the sidebar."""
+    linked_targets: set[str] = set()
+    for match in re.finditer(r"\[[^\]]+\]\(([^)\s]+)\)", sidebar):
+        target = match.group(1).split("#", 1)[0]
+        if target:
+            linked_targets.add(target)
+
+    missing: list[str] = []
+    for wiki_name in wiki_structure.values():
+        if wiki_name not in linked_targets:
+            missing.append(wiki_name)
+    return sorted(missing)
+
+
 def generate_home(docs_dir: Path, wiki_structure: dict[str, str]) -> str:
     """Generate the Home.md landing page from index.md."""
     index_path = docs_dir / "index.md"
@@ -1096,6 +1153,7 @@ def generate_home(docs_dir: Path, wiki_structure: dict[str, str]) -> str:
         content = convert_links(content, "index.md", wiki_structure)
         content = convert_asset_paths(content, "index.md")
         content = strip_mkdocs_features(content)
+        content = ensure_wiki_sync_header(content, "index.md")
         return content
 
     # Fallback content if index.md doesn't exist
@@ -1263,6 +1321,18 @@ Examples:
     wiki_structure = discover_docs(docs_dir)
     logger.info(f"  Found {len(wiki_structure)} files to sync")
 
+    # Validate sidebar coverage before writing any files to avoid partial syncs.
+    logger.info("\nValidating sidebar coverage...")
+    sidebar_content = generate_sidebar(wiki_structure)
+    missing_sidebar_pages = find_sidebar_missing_pages(sidebar_content, wiki_structure)
+    if missing_sidebar_pages:
+        logger.error(
+            "Sidebar is missing mapped pages: "
+            + ", ".join(missing_sidebar_pages)
+            + ". Update generate_sidebar() template."
+        )
+        return 1
+
     # Clean wiki directory
     if args.clean:
         logger.info("\nCleaning wiki directory...")
@@ -1302,7 +1372,6 @@ Examples:
 
     # Generate sidebar
     logger.info("Generating sidebar...")
-    sidebar_content = generate_sidebar(wiki_structure)
     if not write_file_safe(wiki_dir / "_Sidebar.md", sidebar_content, args.dry_run):
         errors += 1
 

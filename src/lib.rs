@@ -77,6 +77,7 @@ pub use network::chaos_socket::{ChaosConfig, ChaosConfigBuilder, ChaosSocket, Ch
 pub use network::messages::Message;
 pub use network::network_stats::NetworkStats;
 pub use network::udp_socket::UdpNonBlockingSocket;
+pub use replay::{Replay, ReplayMetadata};
 use serde::{de::DeserializeOwned, Serialize};
 pub use sessions::builder::SessionBuilder;
 pub use sessions::config::{
@@ -86,6 +87,7 @@ pub use sessions::event_drain::EventDrain;
 pub use sessions::p2p_session::P2PSession;
 pub use sessions::p2p_spectator_session::SpectatorSession;
 pub use sessions::player_registry::PlayerRegistry;
+pub use sessions::replay_session::ReplaySession;
 pub use sessions::session_trait::Session;
 pub use sessions::sync_health::SyncHealth;
 pub use sessions::sync_test_session::SyncTestSession;
@@ -184,6 +186,8 @@ pub mod frame_info;
 pub mod hash;
 #[doc(hidden)]
 pub mod input_queue;
+/// Replay recording and playback for deterministic match replays.
+pub mod replay;
 /// Internal run-length encoding module for network compression.
 ///
 /// Provides RLE encoding/decoding that replaces the `bitfield-rle` crate dependency.
@@ -222,6 +226,8 @@ pub mod sessions {
     pub mod p2p_spectator_session;
     #[doc(hidden)]
     pub mod player_registry;
+    /// Replay playback session for deterministic match replay.
+    pub mod replay_session;
     #[doc(hidden)]
     pub mod session_trait;
     #[doc(hidden)]
@@ -1561,6 +1567,17 @@ where
         /// Milliseconds elapsed since synchronization started.
         elapsed_ms: u128,
     },
+    /// A replay checksum mismatch was detected during validation playback.
+    /// This indicates a non-determinism bug: the same inputs produced different
+    /// game states between the original recording and the current replay.
+    ReplayDesync {
+        /// The frame where the checksum mismatch was detected.
+        frame: Frame,
+        /// The checksum from the original recording.
+        expected_checksum: u128,
+        /// The checksum computed during replay playback.
+        actual_checksum: u128,
+    },
 }
 
 impl<T: Config> std::fmt::Display for FortressEvent<T>
@@ -1610,6 +1627,17 @@ where
             Self::SyncTimeout { addr, elapsed_ms } => {
                 write!(f, "SyncTimeout(addr={}, elapsed={}ms)", addr, elapsed_ms)
             },
+            Self::ReplayDesync {
+                frame,
+                expected_checksum,
+                actual_checksum,
+            } => write!(
+                f,
+                "ReplayDesync(frame={}, expected={:#x}, actual={:#x})",
+                frame.as_i32(),
+                expected_checksum,
+                actual_checksum
+            ),
         }
     }
 }
@@ -1862,6 +1890,13 @@ macro_rules! handle_requests {
 ///
 /// This trait bundles the generic types needed for a session. Implement this on
 /// a marker struct to configure your session types.
+///
+/// # Thread Safety
+///
+/// When the `sync-send` feature is enabled, `Config` requires `Send + Sync`
+/// and its associated types gain additional `Send + Sync` bounds. Without the
+/// feature, these bounds are absent, allowing single-threaded or `!Send` usage
+/// (e.g., WASM).
 ///
 /// # Example
 ///
@@ -2339,6 +2374,41 @@ mod tests {
         assert!(display.starts_with("SyncTimeout("));
         assert!(display.contains("127.0.0.1:8080"));
         assert!(display.contains("elapsed=10000ms"));
+    }
+
+    #[test]
+    fn fortress_event_display_replay_desync() {
+        let event: FortressEvent<TestConfig> = FortressEvent::ReplayDesync {
+            frame: Frame::new(42),
+            expected_checksum: 0xAAAA,
+            actual_checksum: 0xBBBB,
+        };
+        let display = event.to_string();
+        assert!(display.starts_with("ReplayDesync("));
+        assert!(display.contains("frame=42"));
+        assert!(display.contains("expected=0xaaaa"));
+        assert!(display.contains("actual=0xbbbb"));
+    }
+
+    #[test]
+    fn fortress_event_replay_desync_fields() {
+        let event: FortressEvent<TestConfig> = FortressEvent::ReplayDesync {
+            frame: Frame::new(100),
+            expected_checksum: 0x1234_5678,
+            actual_checksum: 0xDEAD_BEEF,
+        };
+        if let FortressEvent::ReplayDesync {
+            frame,
+            expected_checksum,
+            actual_checksum,
+        } = event
+        {
+            assert_eq!(frame, Frame::new(100));
+            assert_eq!(expected_checksum, 0x1234_5678);
+            assert_eq!(actual_checksum, 0xDEAD_BEEF);
+        } else {
+            panic!("Expected ReplayDesync");
+        }
     }
 
     // ==========================================

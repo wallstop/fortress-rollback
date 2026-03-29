@@ -14,6 +14,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **Breaking:** `FortressEvent::ReplayDesync` — new variant added. Since `FortressEvent` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
+- **Breaking:** `InvalidFrameReason::ReplayExhausted` — new variant added. Since `InvalidFrameReason` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
+
+### Added
+
+- `ReplaySession::new_with_validation()` constructor that enables checksum validation mode, emitting `SaveGameState` requests and comparing checksums against the replay recording
+- `ReplaySession::is_validating()` accessor to check if checksum validation mode is enabled
+- `SessionBuilder::start_replay_session_with_validation()` builder method for creating a validation-enabled replay session
+- `SessionTelemetry` trait for observing session performance events (rollbacks, prediction misses, frame advances, network stats)
+- `CollectingTelemetry` test helper that accumulates `TelemetryEvent` values for assertions
+- `TelemetryEvent` enum with `Rollback`, `PredictionMiss`, `NetworkStatsUpdate`, and `FrameAdvance` variants
+- `SessionBuilder::with_telemetry()` to attach a telemetry observer to P2P sessions
+- `Replay<I>` type for recorded match data with `to_bytes()` / `from_bytes()` serialization using deterministic bincode codec
+- `ReplayMetadata` type containing library version, player count, total frame count, and skipped frame count
+- `ReplaySession<T>` session type implementing `Session<T>` for deterministic replay playback
+- `SessionBuilder::with_recording(bool)` to enable input recording (including game state checksums) during P2P sessions
+- `SessionBuilder::start_replay_session(replay)` to create a replay playback session
+- `P2PSession::is_recording()` to check if replay recording is active
+- `P2PSession::into_replay()` to extract the recorded `Replay` after a session ends (consumes the session)
+- `P2PSession::take_replay()` to extract the recorded `Replay` without consuming the session (recording stops after extraction)
+- `Replay::validate()` to verify internal consistency of replay data
+- Re-exports `Replay`, `ReplayMetadata`, and `ReplaySession` in prelude
+
 ## [0.7.0]
 
 ### Added

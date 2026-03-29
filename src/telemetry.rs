@@ -21,6 +21,7 @@
 //! assert!(observer.violations().is_empty(), "unexpected violations");
 //! ```
 
+use crate::network::network_stats::NetworkStats;
 use crate::sync::Mutex;
 use crate::{Frame, PlayerHandle};
 use std::collections::BTreeMap;
@@ -1411,6 +1412,413 @@ macro_rules! try_check_invariants {
     }};
 }
 
+// ==========================================
+// Session Telemetry
+// ==========================================
+
+/// Observer for session performance telemetry.
+///
+/// Follows the same pattern as [`ViolationObserver`] — implement this trait
+/// and pass it via [`SessionBuilder::with_telemetry()`] to receive structured
+/// performance data during a P2P session.
+///
+/// All methods have default no-op implementations. Override only the events
+/// you care about.
+///
+/// # Example
+///
+/// ```
+/// use fortress_rollback::telemetry::SessionTelemetry;
+/// use fortress_rollback::{Frame, PlayerHandle};
+/// use fortress_rollback::NetworkStats;
+///
+/// struct MyTelemetry;
+///
+/// impl SessionTelemetry for MyTelemetry {
+///     fn on_rollback(&self, depth: usize, frame: Frame) {
+///         println!("Rollback of {depth} frames at {frame}");
+///     }
+/// }
+/// ```
+///
+/// [`SessionBuilder::with_telemetry()`]: crate::sessions::builder::SessionBuilder::with_telemetry
+#[cfg(feature = "sync-send")]
+pub trait SessionTelemetry: Send + Sync {
+    /// Called when a rollback occurs.
+    ///
+    /// `depth` is the number of frames rolled back, `frame` is the frame
+    /// that was loaded (the target of the rollback).
+    fn on_rollback(&self, depth: usize, frame: Frame) {
+        let _ = (depth, frame);
+    }
+
+    /// Called when a predicted input turns out to be wrong for a player.
+    fn on_prediction_miss(&self, player: PlayerHandle, frame: Frame) {
+        let _ = (player, frame);
+    }
+
+    /// Called periodically with network statistics for a peer.
+    fn on_network_stats(&self, player: PlayerHandle, stats: &NetworkStats) {
+        let _ = (player, stats);
+    }
+
+    /// Called each time the session advances a frame.
+    fn on_frame_advance(&self, frame: Frame) {
+        let _ = frame;
+    }
+}
+
+/// Observer for session performance telemetry.
+///
+/// Follows the same pattern as [`ViolationObserver`] — implement this trait
+/// and pass it via [`SessionBuilder::with_telemetry()`] to receive structured
+/// performance data during a P2P session.
+///
+/// All methods have default no-op implementations. Override only the events
+/// you care about.
+///
+/// [`SessionBuilder::with_telemetry()`]: crate::sessions::builder::SessionBuilder::with_telemetry
+#[cfg(not(feature = "sync-send"))]
+pub trait SessionTelemetry {
+    /// Called when a rollback occurs.
+    ///
+    /// `depth` is the number of frames rolled back, `frame` is the frame
+    /// that was loaded (the target of the rollback).
+    fn on_rollback(&self, depth: usize, frame: Frame) {
+        let _ = (depth, frame);
+    }
+
+    /// Called when a predicted input turns out to be wrong for a player.
+    fn on_prediction_miss(&self, player: PlayerHandle, frame: Frame) {
+        let _ = (player, frame);
+    }
+
+    /// Called periodically with network statistics for a peer.
+    fn on_network_stats(&self, player: PlayerHandle, stats: &NetworkStats) {
+        let _ = (player, stats);
+    }
+
+    /// Called each time the session advances a frame.
+    fn on_frame_advance(&self, frame: Frame) {
+        let _ = frame;
+    }
+}
+
+/// Structured telemetry event for collecting and inspecting.
+///
+/// Each variant corresponds to a method on [`SessionTelemetry`], capturing
+/// all the arguments for later inspection.
+///
+/// # Example
+///
+/// ```
+/// use fortress_rollback::telemetry::{TelemetryEvent, CollectingTelemetry, SessionTelemetry};
+/// use fortress_rollback::Frame;
+///
+/// let telemetry = CollectingTelemetry::new();
+/// telemetry.on_frame_advance(Frame::new(10));
+///
+/// let events = telemetry.events();
+/// assert_eq!(events.len(), 1);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetryEvent {
+    /// A rollback occurred.
+    Rollback {
+        /// Number of frames rolled back.
+        depth: usize,
+        /// The frame that was loaded.
+        frame: Frame,
+    },
+    /// A predicted input was incorrect.
+    PredictionMiss {
+        /// The player whose prediction was wrong.
+        player: PlayerHandle,
+        /// The frame at which the misprediction occurred.
+        frame: Frame,
+    },
+    /// Network statistics received for a peer.
+    NetworkStatsUpdate {
+        /// The player the stats are for.
+        player: PlayerHandle,
+        /// The network statistics snapshot.
+        stats: NetworkStats,
+    },
+    /// A frame was advanced.
+    FrameAdvance {
+        /// The frame that was just advanced to.
+        frame: Frame,
+    },
+}
+
+impl std::fmt::Display for TelemetryEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rollback { depth, frame } => {
+                write!(f, "Rollback({depth} frames to {frame})")
+            },
+            Self::PredictionMiss { player, frame } => {
+                write!(f, "PredictionMiss(player={player}, frame={frame})")
+            },
+            Self::NetworkStatsUpdate { player, stats } => {
+                write!(f, "NetworkStatsUpdate(player={player}, {stats})")
+            },
+            Self::FrameAdvance { frame } => write!(f, "FrameAdvance({frame})"),
+        }
+    }
+}
+
+/// Built-in telemetry observer that collects events for testing.
+///
+/// This observer stores all telemetry events in a thread-safe vector,
+/// allowing tests to assert on events that occurred during a session.
+///
+/// # Example
+///
+/// ```
+/// use fortress_rollback::telemetry::{CollectingTelemetry, SessionTelemetry};
+/// use fortress_rollback::Frame;
+///
+/// let telemetry = CollectingTelemetry::new();
+///
+/// // Simulate telemetry events
+/// telemetry.on_rollback(3, Frame::new(10));
+/// telemetry.on_frame_advance(Frame::new(13));
+///
+/// assert_eq!(telemetry.len(), 2);
+/// assert_eq!(telemetry.rollbacks().len(), 1);
+/// ```
+#[derive(Debug, Default)]
+pub struct CollectingTelemetry {
+    events: Mutex<Vec<TelemetryEvent>>,
+}
+
+impl CollectingTelemetry {
+    /// Creates a new collecting telemetry observer with an empty event list.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Returns a copy of all collected events.
+    #[cfg(not(loom))]
+    #[must_use]
+    pub fn events(&self) -> Vec<TelemetryEvent> {
+        self.events.lock().clone()
+    }
+
+    /// Returns a copy of all collected events (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn events(&self) -> Vec<TelemetryEvent> {
+        self.events.lock().unwrap().clone()
+    }
+
+    /// Returns the number of collected events.
+    #[cfg(not(loom))]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.events.lock().len()
+    }
+
+    /// Returns the number of collected events (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.events.lock().unwrap().len()
+    }
+
+    /// Returns true if no events have been collected.
+    #[cfg(not(loom))]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.events.lock().is_empty()
+    }
+
+    /// Returns true if no events have been collected (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.events.lock().unwrap().is_empty()
+    }
+
+    /// Returns all rollback events.
+    #[cfg(not(loom))]
+    #[must_use]
+    pub fn rollbacks(&self) -> Vec<TelemetryEvent> {
+        self.events
+            .lock()
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::Rollback { .. }))
+            .copied()
+            .collect()
+    }
+
+    /// Returns all rollback events (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn rollbacks(&self) -> Vec<TelemetryEvent> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::Rollback { .. }))
+            .copied()
+            .collect()
+    }
+
+    /// Returns all prediction miss events.
+    #[cfg(not(loom))]
+    #[must_use]
+    pub fn prediction_misses(&self) -> Vec<TelemetryEvent> {
+        self.events
+            .lock()
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::PredictionMiss { .. }))
+            .copied()
+            .collect()
+    }
+
+    /// Returns all prediction miss events (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn prediction_misses(&self) -> Vec<TelemetryEvent> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::PredictionMiss { .. }))
+            .copied()
+            .collect()
+    }
+
+    /// Returns all network stats update events.
+    #[cfg(not(loom))]
+    #[must_use]
+    pub fn network_stats_updates(&self) -> Vec<TelemetryEvent> {
+        self.events
+            .lock()
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::NetworkStatsUpdate { .. }))
+            .copied()
+            .collect()
+    }
+
+    /// Returns all network stats update events (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn network_stats_updates(&self) -> Vec<TelemetryEvent> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::NetworkStatsUpdate { .. }))
+            .copied()
+            .collect()
+    }
+
+    /// Returns all frame advance events.
+    #[cfg(not(loom))]
+    #[must_use]
+    pub fn frame_advances(&self) -> Vec<TelemetryEvent> {
+        self.events
+            .lock()
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::FrameAdvance { .. }))
+            .copied()
+            .collect()
+    }
+
+    /// Returns all frame advance events (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub fn frame_advances(&self) -> Vec<TelemetryEvent> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::FrameAdvance { .. }))
+            .copied()
+            .collect()
+    }
+
+    /// Clears all collected events.
+    #[cfg(not(loom))]
+    pub fn clear(&self) {
+        self.events.lock().clear();
+    }
+
+    /// Clears all collected events (loom version).
+    #[cfg(loom)]
+    pub fn clear(&self) {
+        self.events.lock().unwrap().clear();
+    }
+}
+
+#[cfg(not(loom))]
+impl SessionTelemetry for CollectingTelemetry {
+    fn on_rollback(&self, depth: usize, frame: Frame) {
+        self.events
+            .lock()
+            .push(TelemetryEvent::Rollback { depth, frame });
+    }
+
+    fn on_prediction_miss(&self, player: PlayerHandle, frame: Frame) {
+        self.events
+            .lock()
+            .push(TelemetryEvent::PredictionMiss { player, frame });
+    }
+
+    fn on_network_stats(&self, player: PlayerHandle, stats: &NetworkStats) {
+        self.events.lock().push(TelemetryEvent::NetworkStatsUpdate {
+            player,
+            stats: *stats,
+        });
+    }
+
+    fn on_frame_advance(&self, frame: Frame) {
+        self.events
+            .lock()
+            .push(TelemetryEvent::FrameAdvance { frame });
+    }
+}
+
+#[cfg(loom)]
+impl SessionTelemetry for CollectingTelemetry {
+    fn on_rollback(&self, depth: usize, frame: Frame) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(TelemetryEvent::Rollback { depth, frame });
+    }
+
+    fn on_prediction_miss(&self, player: PlayerHandle, frame: Frame) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(TelemetryEvent::PredictionMiss { player, frame });
+    }
+
+    fn on_network_stats(&self, player: PlayerHandle, stats: &NetworkStats) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(TelemetryEvent::NetworkStatsUpdate {
+                player,
+                stats: *stats,
+            });
+    }
+
+    fn on_frame_advance(&self, frame: Frame) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(TelemetryEvent::FrameAdvance { frame });
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::panic,
@@ -2423,5 +2831,165 @@ mod tests {
         assert_eq!(TracingObserver::format_frame(Some(Frame::new(0))), "0");
         assert_eq!(TracingObserver::format_frame(Some(Frame::new(100))), "100");
         assert_eq!(TracingObserver::format_frame(Some(Frame::new(-5))), "-5");
+    }
+
+    // ==========================================
+    // SessionTelemetry Tests
+    // ==========================================
+
+    #[test]
+    fn collecting_telemetry_records_events() {
+        let telemetry = CollectingTelemetry::new();
+
+        telemetry.on_rollback(3, Frame::new(10));
+        telemetry.on_prediction_miss(PlayerHandle::new(1), Frame::new(5));
+        telemetry.on_frame_advance(Frame::new(13));
+        telemetry.on_network_stats(PlayerHandle::new(0), &NetworkStats::default());
+
+        let events = telemetry.events();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(
+            events[0],
+            TelemetryEvent::Rollback {
+                depth: 3,
+                frame
+            } if frame == Frame::new(10)
+        ));
+        assert!(matches!(
+            events[1],
+            TelemetryEvent::PredictionMiss { player, frame }
+            if player == PlayerHandle::new(1) && frame == Frame::new(5)
+        ));
+        assert!(
+            matches!(events[2], TelemetryEvent::FrameAdvance { frame } if frame == Frame::new(13))
+        );
+        assert!(matches!(
+            events[3],
+            TelemetryEvent::NetworkStatsUpdate { player, .. }
+            if player == PlayerHandle::new(0)
+        ));
+    }
+
+    #[test]
+    fn collecting_telemetry_rollbacks_filter() {
+        let telemetry = CollectingTelemetry::new();
+
+        telemetry.on_rollback(2, Frame::new(5));
+        telemetry.on_frame_advance(Frame::new(7));
+        telemetry.on_rollback(1, Frame::new(8));
+        telemetry.on_prediction_miss(PlayerHandle::new(0), Frame::new(5));
+
+        let rollbacks = telemetry.rollbacks();
+        assert_eq!(rollbacks.len(), 2);
+        assert!(matches!(
+            rollbacks[0],
+            TelemetryEvent::Rollback { depth: 2, .. }
+        ));
+        assert!(matches!(
+            rollbacks[1],
+            TelemetryEvent::Rollback { depth: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn collecting_telemetry_prediction_misses_filter() {
+        let telemetry = CollectingTelemetry::new();
+
+        telemetry.on_rollback(2, Frame::new(5));
+        telemetry.on_prediction_miss(PlayerHandle::new(0), Frame::new(3));
+        telemetry.on_frame_advance(Frame::new(7));
+        telemetry.on_prediction_miss(PlayerHandle::new(1), Frame::new(4));
+
+        let misses = telemetry.prediction_misses();
+        assert_eq!(misses.len(), 2);
+        assert!(matches!(misses[0], TelemetryEvent::PredictionMiss { .. }));
+        assert!(matches!(misses[1], TelemetryEvent::PredictionMiss { .. }));
+    }
+
+    #[test]
+    fn collecting_telemetry_clear_removes_all() {
+        let telemetry = CollectingTelemetry::new();
+
+        telemetry.on_rollback(1, Frame::new(1));
+        telemetry.on_frame_advance(Frame::new(2));
+        assert_eq!(telemetry.len(), 2);
+        assert!(!telemetry.is_empty());
+
+        telemetry.clear();
+        assert_eq!(telemetry.len(), 0);
+        assert!(telemetry.is_empty());
+        assert!(telemetry.events().is_empty());
+    }
+
+    #[test]
+    fn session_telemetry_default_methods_are_noop() {
+        // A blank implementation should compile and not panic
+        struct NoOpTelemetry;
+        impl SessionTelemetry for NoOpTelemetry {}
+
+        let t = NoOpTelemetry;
+        t.on_rollback(5, Frame::new(10));
+        t.on_prediction_miss(PlayerHandle::new(0), Frame::new(3));
+        t.on_network_stats(PlayerHandle::new(1), &NetworkStats::default());
+        t.on_frame_advance(Frame::new(42));
+        // If we get here without panicking, the test passes
+    }
+
+    #[test]
+    fn collecting_telemetry_new_is_empty() {
+        let telemetry = CollectingTelemetry::new();
+        assert!(telemetry.is_empty());
+        assert_eq!(telemetry.len(), 0);
+        assert!(telemetry.events().is_empty());
+        assert!(telemetry.rollbacks().is_empty());
+        assert!(telemetry.prediction_misses().is_empty());
+    }
+
+    #[test]
+    fn telemetry_event_display_all_variants() {
+        let rollback = TelemetryEvent::Rollback {
+            depth: 5,
+            frame: Frame::new(100),
+        };
+        assert!(format!("{rollback}").contains('5'));
+        assert!(format!("{rollback}").contains("100"));
+
+        let miss = TelemetryEvent::PredictionMiss {
+            player: PlayerHandle::new(1),
+            frame: Frame::new(42),
+        };
+        let miss_str = format!("{miss}");
+        assert!(miss_str.contains("42"));
+
+        let advance = TelemetryEvent::FrameAdvance {
+            frame: Frame::new(200),
+        };
+        assert!(format!("{advance}").contains("200"));
+
+        let stats = TelemetryEvent::NetworkStatsUpdate {
+            player: PlayerHandle::new(0),
+            stats: NetworkStats::default(),
+        };
+        let stats_str = format!("{stats}");
+        assert!(stats_str.contains("NetworkStatsUpdate"));
+    }
+
+    #[test]
+    fn collecting_telemetry_network_stats_and_frame_advance_filters() {
+        let telemetry = CollectingTelemetry::new();
+
+        // Add mixed events
+        telemetry.on_rollback(3, Frame::new(10));
+        telemetry.on_frame_advance(Frame::new(11));
+        telemetry.on_network_stats(PlayerHandle::new(0), &NetworkStats::default());
+        telemetry.on_frame_advance(Frame::new(12));
+        telemetry.on_prediction_miss(PlayerHandle::new(1), Frame::new(5));
+        telemetry.on_network_stats(PlayerHandle::new(1), &NetworkStats::default());
+
+        assert_eq!(telemetry.len(), 6);
+        assert_eq!(telemetry.network_stats_updates().len(), 2);
+        assert_eq!(telemetry.frame_advances().len(), 2);
+        assert_eq!(telemetry.rollbacks().len(), 1);
+        assert_eq!(telemetry.prediction_misses().len(), 1);
     }
 }

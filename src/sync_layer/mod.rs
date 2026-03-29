@@ -544,6 +544,26 @@ impl<T: Config> SyncLayer<T> {
         first_incorrect
     }
 
+    /// Returns the player handles that have incorrect predictions at or before `disconnect_frame`.
+    /// Used by telemetry to identify which players' inputs were mispredicted.
+    pub(crate) fn players_with_incorrect_predictions(
+        &self,
+        disconnect_frame: Frame,
+    ) -> Vec<(PlayerHandle, Frame)> {
+        let mut result = Vec::new();
+        for handle in 0..self.num_players {
+            if let Some(queue) = self.input_queues.get(handle) {
+                let incorrect = queue.first_incorrect_frame();
+                if !incorrect.is_null()
+                    && (disconnect_frame.is_null() || incorrect <= disconnect_frame)
+                {
+                    result.push((PlayerHandle::new(handle), incorrect));
+                }
+            }
+        }
+        result
+    }
+
     /// Returns a gamestate through given frame
     pub(crate) fn saved_state_by_frame(&self, frame: Frame) -> Option<GameStateCell<T::State>> {
         let cell = self.saved_states.get_cell(frame).ok()?;
@@ -1836,6 +1856,78 @@ mod sync_layer_tests {
             sync_layer.advance_frame();
             assert!(sync_layer.current_frame().as_i32() >= 0);
         }
+    }
+
+    #[test]
+    fn test_players_with_incorrect_predictions_includes_boundary_frame() {
+        // Regression test: misprediction exactly at disconnect_frame must be included.
+        // Previously the filter used `<` instead of `<=`, excluding the boundary.
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        let mut connect_status = vec![ConnectionStatus::default(), ConnectionStatus::default()];
+
+        // Add confirmed inputs for both players at frame 0
+        let input0_p0 = PlayerInput::new(Frame::new(0), TestInput { inp: 5 });
+        let input0_p1 = PlayerInput::new(Frame::new(0), TestInput { inp: 5 });
+        sync_layer.add_remote_input(PlayerHandle::new(0), input0_p0);
+        sync_layer.add_remote_input(PlayerHandle::new(1), input0_p1);
+        connect_status[0].last_frame = Frame::new(0);
+        connect_status[1].last_frame = Frame::new(0);
+
+        // Advance to frame 1
+        sync_layer.advance_frame();
+
+        // Request synchronized inputs at frame 1.
+        // Player 0 has no input for frame 1 yet, so it predicts (RepeatLastConfirmed = 5).
+        // Player 1 also predicts.
+        let _inputs = sync_layer
+            .synchronized_inputs(&connect_status)
+            .expect("synchronized inputs should succeed");
+
+        // Now add the ACTUAL input for player 1 at frame 1 with a DIFFERENT value,
+        // triggering a misprediction at frame 1.
+        let actual_p1 = PlayerInput::new(Frame::new(1), TestInput { inp: 99 });
+        sync_layer.add_remote_input(PlayerHandle::new(1), actual_p1);
+
+        // Also add matching input for player 0 (no misprediction)
+        let actual_p0 = PlayerInput::new(Frame::new(1), TestInput { inp: 5 });
+        sync_layer.add_remote_input(PlayerHandle::new(0), actual_p0);
+
+        // Boundary case: disconnect_frame == misprediction frame (frame 1).
+        // The doc says "at or before", so this must be included.
+        let result = sync_layer.players_with_incorrect_predictions(Frame::new(1));
+        assert_eq!(
+            result.len(),
+            1,
+            "misprediction at disconnect_frame must be included"
+        );
+        assert_eq!(result[0].0, PlayerHandle::new(1));
+        assert_eq!(result[0].1, Frame::new(1));
+
+        // disconnect_frame strictly after the misprediction includes it
+        let result_after = sync_layer.players_with_incorrect_predictions(Frame::new(2));
+        assert_eq!(
+            result_after.len(),
+            1,
+            "misprediction before disconnect_frame must be included"
+        );
+        assert_eq!(result_after[0].0, PlayerHandle::new(1));
+        assert_eq!(result_after[0].1, Frame::new(1));
+
+        // Sanity: frame BEFORE the misprediction excludes it
+        let result_before = sync_layer.players_with_incorrect_predictions(Frame::new(0));
+        assert!(
+            result_before.is_empty(),
+            "misprediction after disconnect_frame must be excluded"
+        );
+
+        // Sanity: null disconnect_frame includes everything
+        let result_null = sync_layer.players_with_incorrect_predictions(Frame::NULL);
+        assert_eq!(
+            result_null.len(),
+            1,
+            "null disconnect_frame should include all mispredictions"
+        );
     }
 }
 

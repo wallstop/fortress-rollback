@@ -28,9 +28,16 @@ convert_admonitions = sync_wiki.convert_admonitions
 convert_grid_cards_to_list = sync_wiki.convert_grid_cards_to_list
 convert_links = sync_wiki.convert_links
 dedent_mkdocs_tabs = sync_wiki.dedent_mkdocs_tabs
+ensure_wiki_sync_header = sync_wiki.ensure_wiki_sync_header
 find_code_fence_ranges = sync_wiki.find_code_fence_ranges
 find_inline_code_ranges = sync_wiki.find_inline_code_ranges
+find_sidebar_missing_pages = sync_wiki.find_sidebar_missing_pages
+generate_home = sync_wiki.generate_home
+generate_sidebar = sync_wiki.generate_sidebar
+main = sync_wiki.main
 path_to_wiki_name = sync_wiki.path_to_wiki_name
+process_file = sync_wiki.process_file
+write_file_safe = sync_wiki.write_file_safe
 strip_mkdocs_attributes = sync_wiki.strip_mkdocs_attributes
 strip_mkdocs_features = sync_wiki.strip_mkdocs_features
 strip_mkdocs_icons = sync_wiki.strip_mkdocs_icons
@@ -936,6 +943,271 @@ class TestConvertLinks:
         content = "[Unknown](some-unknown-page.md)"
         result = convert_links(content, "index.md", WIKI_STRUCTURE)
         assert result == "[Unknown](Some-Unknown-Page)"
+
+
+class TestSyncHeaders:
+    """Tests for reciprocal SYNC header generation in wiki output."""
+
+    @pytest.mark.parametrize(
+        ("input_content", "docs_rel", "expected_header"),
+        [
+            (
+                "<!-- SYNC: This source doc syncs to wiki/Replay.md. -->\n\n# Replay\n",
+                "replay.md",
+                "<!-- SYNC: This wiki page is generated from docs/replay.md. Edit docs source. -->",
+            ),
+            (
+                "# No sync header yet\n",
+                "specs/formal-spec.md",
+                "<!-- SYNC: This wiki page is generated from docs/specs/formal-spec.md. Edit docs source. -->",
+            ),
+        ],
+        ids=["replace-existing-sync", "prepend-missing-sync"],
+    )
+    def test_ensure_wiki_sync_header_generates_reciprocal_target(
+        self,
+        input_content: str,
+        docs_rel: str,
+        expected_header: str,
+    ) -> None:
+        """Wiki content always points SYNC metadata back to docs source files."""
+        result = ensure_wiki_sync_header(input_content, docs_rel)
+        first_line = result.splitlines()[0]
+
+        assert first_line == expected_header
+
+    def test_process_file_writes_reciprocal_sync_header(self, tmp_path: Path) -> None:
+        """process_file rewrites docs SYNC headers for wiki output."""
+        docs_dir = tmp_path / "docs"
+        wiki_dir = tmp_path / "wiki"
+        src_path = docs_dir / "replay.md"
+        src_path.parent.mkdir(parents=True, exist_ok=True)
+        src_path.write_text(
+            "<!-- SYNC: This source doc syncs to wiki/Replay.md. -->\n\n# Replay\n",
+            encoding="utf-8",
+        )
+
+        wiki_structure = {"replay.md": "Replay"}
+        assert process_file(src_path, "Replay", docs_dir, wiki_dir, wiki_structure)
+
+        output = (wiki_dir / "Replay.md").read_text(encoding="utf-8")
+        first_line = output.splitlines()[0]
+        assert first_line == (
+            "<!-- SYNC: This wiki page is generated from docs/replay.md. "
+            "Edit docs source. -->"
+        )
+
+    def test_generate_home_writes_reciprocal_sync_header(self, tmp_path: Path) -> None:
+        """generate_home uses docs/index.md as the SYNC source target."""
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        (docs_dir / "index.md").write_text(
+            "<!-- SYNC: This source doc syncs to wiki/Home.md. -->\n\n# Home\n",
+            encoding="utf-8",
+        )
+
+        output = generate_home(docs_dir, {"index.md": "Home"})
+        assert output.splitlines()[0] == (
+            "<!-- SYNC: This wiki page is generated from docs/index.md. "
+            "Edit docs source. -->"
+        )
+
+    def test_ensure_wiki_sync_header_replaces_header_beyond_first_lines(self) -> None:
+        """Existing SYNC headers are moved to line 1 even when they appear later."""
+        prelude = "\n".join(f"line {idx}" for idx in range(30))
+        content = (
+            f"{prelude}\n"
+            "<!-- SYNC: legacy header -->\n"
+            "\n"
+            "# Replay\n"
+        )
+
+        result = ensure_wiki_sync_header(content, "replay.md")
+
+        expected_header = (
+            "<!-- SYNC: This wiki page is generated from docs/replay.md. "
+            "Edit docs source. -->"
+        )
+        assert result.count("<!-- SYNC:") == 1
+        assert result.splitlines()[0] == expected_header
+        assert "legacy header" not in result
+
+    def test_ensure_wiki_sync_header_removes_duplicate_headers(self) -> None:
+        """Duplicate SYNC headers are collapsed to a single canonical header."""
+        content = (
+            "<!-- SYNC: stale one -->\n"
+            "\n"
+            "<!-- SYNC: stale two -->\n"
+            "\n"
+            "# Replay\n"
+        )
+
+        result = ensure_wiki_sync_header(content, "replay.md")
+
+        expected_header = (
+            "<!-- SYNC: This wiki page is generated from docs/replay.md. "
+            "Edit docs source. -->"
+        )
+        assert result.count("<!-- SYNC:") == 1
+        assert result.splitlines()[0] == expected_header
+
+
+class TestSidebar:
+    """Tests for sidebar navigation coverage."""
+
+    @pytest.mark.parametrize(
+        "expected_entry",
+        [
+            "- [Match Replay](Replay)",
+            "- [Session Telemetry](Telemetry)",
+        ],
+        ids=["replay", "telemetry"],
+    )
+    def test_sidebar_includes_replay_and_telemetry(self, expected_entry: str) -> None:
+        """Sidebar keeps replay and telemetry pages discoverable."""
+        sidebar = generate_sidebar(WIKI_STRUCTURE)
+        assert expected_entry in sidebar
+
+    @pytest.mark.parametrize(
+        ("docs_rel", "wiki_name"),
+        list(WIKI_STRUCTURE.items()),
+        ids=[f"mapped-{name}" for name in WIKI_STRUCTURE.values()],
+    )
+    def test_sidebar_covers_all_mapped_pages(
+        self,
+        docs_rel: str,
+        wiki_name: str,
+    ) -> None:
+        """All WIKI_STRUCTURE pages are represented in the generated sidebar."""
+        del docs_rel  # docs path is not needed for sidebar membership checks
+        sidebar = generate_sidebar(WIKI_STRUCTURE)
+        assert f"({wiki_name})" in sidebar
+
+    def test_find_sidebar_missing_pages_detects_missing_entries(self) -> None:
+        """Helper reports unmapped sidebar pages deterministically."""
+        sidebar = "# Wiki\n\n- [Home](Home)\n"
+        missing = find_sidebar_missing_pages(sidebar, {"index.md": "Home", "replay.md": "Replay"})
+        assert missing == ["Replay"]
+
+    def test_find_sidebar_missing_pages_avoids_substring_false_match(self) -> None:
+        """A page name must match a full link target, not a substring."""
+        sidebar = "# Wiki\n\n- [Replay Desync](ReplayDesync)\n"
+        missing = find_sidebar_missing_pages(
+            sidebar,
+            {"replay.md": "Replay", "replay-desync.md": "ReplayDesync"},
+        )
+        assert missing == ["Replay"]
+
+    def test_find_sidebar_missing_pages_accepts_anchor_links(self) -> None:
+        """Sidebar links with anchors still count as covering the base page."""
+        sidebar = "# Wiki\n\n- [Replay](Replay#overview)\n"
+        missing = find_sidebar_missing_pages(sidebar, {"replay.md": "Replay"})
+        assert missing == []
+
+
+class TestGeneratedFileNormalization:
+    """Tests for deterministic output normalization when writing wiki files."""
+
+    @pytest.mark.parametrize(
+        ("content", "expected"),
+        [
+            ("", b""),
+            ("# Heading", b"# Heading\n"),
+            ("# Heading\n", b"# Heading\n"),
+            ("# Heading\n\n", b"# Heading\n"),
+            ("# Heading   \n", b"# Heading\n"),
+            ("line\r\n", b"line\n"),
+        ],
+        ids=[
+            "empty",
+            "missing-eof-newline",
+            "already-normalized",
+            "extra-trailing-newlines",
+            "trailing-whitespace",
+            "crlf",
+        ],
+    )
+    def test_write_file_safe_normalizes_eof(
+        self,
+        tmp_path: Path,
+        content: str,
+        expected: bytes,
+    ) -> None:
+        """write_file_safe outputs deterministic trailing whitespace/newline format."""
+        output_path = tmp_path / "wiki" / "Test.md"
+        assert write_file_safe(output_path, content)
+        assert output_path.read_bytes() == expected
+
+    @pytest.mark.parametrize(
+        "source_content",
+        [
+            "# Replay\n\nExample body",
+            "# Replay\n\nExample body\n",
+            "<!-- SYNC: stale header -->\n\n# Replay\n\nExample body\n",
+            "# Replay\n\nExample body   ",
+        ],
+        ids=[
+            "source-missing-eof-newline",
+            "source-with-eof-newline",
+            "source-with-existing-sync-header",
+            "source-with-trailing-whitespace",
+        ],
+    )
+    def test_process_file_normalizes_and_is_idempotent(
+        self,
+        tmp_path: Path,
+        source_content: str,
+    ) -> None:
+        """process_file should produce stable output across repeated runs."""
+        docs_dir = tmp_path / "docs"
+        wiki_dir = tmp_path / "wiki"
+        src_path = docs_dir / "replay.md"
+        src_path.parent.mkdir(parents=True, exist_ok=True)
+        src_path.write_text(source_content, encoding="utf-8")
+
+        wiki_structure = {"replay.md": "Replay"}
+
+        assert process_file(src_path, "Replay", docs_dir, wiki_dir, wiki_structure)
+        first_output = (wiki_dir / "Replay.md").read_bytes()
+
+        assert first_output.endswith(b"\n")
+        assert not first_output.endswith(b"\n\n")
+
+        assert process_file(src_path, "Replay", docs_dir, wiki_dir, wiki_structure)
+        second_output = (wiki_dir / "Replay.md").read_bytes()
+
+        assert first_output == second_output
+
+
+class TestMainBehavior:
+    """Integration tests for sync-wiki main() control flow."""
+
+    def test_main_fails_before_writing_on_sidebar_coverage_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sidebar coverage failures should abort before mutating wiki output."""
+        docs_dir = tmp_path / "docs"
+        wiki_dir = tmp_path / "wiki"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        wiki_dir.mkdir(parents=True, exist_ok=True)
+        (docs_dir / "index.md").write_text("# Home\n", encoding="utf-8")
+
+        sentinel = "UNCHANGED\n"
+        (wiki_dir / "_Sidebar.md").write_text(sentinel, encoding="utf-8")
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["sync-wiki.py"])
+        monkeypatch.setattr(
+            sync_wiki,
+            "generate_sidebar",
+            lambda _wiki_structure: "# Fortress Rollback\n\n- [Home](Home)\n",
+        )
+
+        assert main() == 1
+        assert (wiki_dir / "_Sidebar.md").read_text(encoding="utf-8") == sentinel
+        assert not (wiki_dir / "Home.md").exists()
 
 
 if __name__ == "__main__":
