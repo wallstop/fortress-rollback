@@ -208,6 +208,8 @@ nav:
   - Home: index.md
   - Getting Started:
       - User Guide: user-guide.md
+      - Match Replay: replay.md
+      - Session Telemetry: telemetry.md
       - Migration Guide: migration.md
   - Architecture:
       - Overview: architecture.md

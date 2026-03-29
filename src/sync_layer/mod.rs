@@ -544,6 +544,26 @@ impl<T: Config> SyncLayer<T> {
         first_incorrect
     }
 
+    /// Returns the player handles that have incorrect predictions at or before `disconnect_frame`.
+    /// Used by telemetry to identify which players' inputs were mispredicted.
+    pub(crate) fn players_with_incorrect_predictions(
+        &self,
+        disconnect_frame: Frame,
+    ) -> Vec<(PlayerHandle, Frame)> {
+        let mut result = Vec::new();
+        for handle in 0..self.num_players {
+            if let Some(queue) = self.input_queues.get(handle) {
+                let incorrect = queue.first_incorrect_frame();
+                if !incorrect.is_null()
+                    && (disconnect_frame.is_null() || incorrect < disconnect_frame)
+                {
+                    result.push((PlayerHandle::new(handle), incorrect));
+                }
+            }
+        }
+        result
+    }
+
     /// Returns a gamestate through given frame
     pub(crate) fn saved_state_by_frame(&self, frame: Frame) -> Option<GameStateCell<T::State>> {
         let cell = self.saved_states.get_cell(frame).ok()?;

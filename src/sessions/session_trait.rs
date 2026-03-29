@@ -5,24 +5,24 @@ use crate::{
 /// A unified interface for all Fortress Rollback session types.
 ///
 /// The `Session` trait provides a common API surface that all session types
-/// ([`P2PSession`], [`SpectatorSession`], [`SyncTestSession`]) implement.
+/// ([`P2PSession`], [`SpectatorSession`], [`SyncTestSession`], [`ReplaySession`]) implement.
 /// This enables writing generic code that works with any session type,
 /// such as a game loop that doesn't care whether it's running a local
-/// sync test or a networked P2P match.
+/// sync test, a networked P2P match, or a replay playback.
 ///
 /// # Method Override Table
 ///
 /// Not all session types override every method. Methods not overridden use
 /// sensible defaults (e.g., returning a "not supported" error or a no-op).
 ///
-/// | Method | [`P2PSession`] | [`SpectatorSession`] | [`SyncTestSession`] |
-/// |--------|:-:|:-:|:-:|
-/// | [`advance_frame`](Session::advance_frame) | ✅ Override | ✅ Override | ✅ Override |
-/// | [`local_player_handle_required`](Session::local_player_handle_required) | ✅ Override | ✅ Override (error) | ✅ Override |
-/// | [`add_local_input`](Session::add_local_input) | ✅ Override | ✅ Override (error) | ✅ Override |
-/// | [`events`](Session::events) | ✅ Override | ✅ Override | ✅ Override |
-/// | [`current_state`](Session::current_state) | ✅ Override | ✅ Override | ❌ Default (`Running`) |
-/// | [`poll_remote_clients`](Session::poll_remote_clients) | ✅ Override | ✅ Override | ❌ Default (no-op) |
+/// | Method | [`P2PSession`] | [`SpectatorSession`] | [`SyncTestSession`] | [`ReplaySession`] |
+/// |--------|:-:|:-:|:-:|:-:|
+/// | [`advance_frame`](Session::advance_frame) | Override | Override | Override | Override (emits `SaveGameState` in validation mode) |
+/// | [`local_player_handle_required`](Session::local_player_handle_required) | Override | Override (error) | Override | Override (error) |
+/// | [`add_local_input`](Session::add_local_input) | Override | Override (error) | Override | Override (error) |
+/// | [`events`](Session::events) | Override | Override | Override | Override |
+/// | [`current_state`](Session::current_state) | Override | Override | Default (`Running`) | Override (`Running`) |
+/// | [`poll_remote_clients`](Session::poll_remote_clients) | Override | Override | Default (no-op) | Default (no-op) |
 ///
 /// # Example
 ///
@@ -43,6 +43,7 @@ use crate::{
 /// [`P2PSession`]: crate::P2PSession
 /// [`SpectatorSession`]: crate::SpectatorSession
 /// [`SyncTestSession`]: crate::SyncTestSession
+/// [`ReplaySession`]: crate::ReplaySession
 pub trait Session<T: Config> {
     /// Advances the session by one frame, returning any requests the
     /// application must fulfill (save state, load state, advance game).

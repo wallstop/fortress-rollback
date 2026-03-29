@@ -134,6 +134,13 @@ repos:
         pass_filenames: false
         files: '\.md$'
 
+      - id: sync-wiki
+        name: sync wiki mirrors
+        entry: python scripts/docs/sync-wiki.py
+        language: python
+        pass_filenames: false
+        files: '^(docs/.*\.md|wiki/.*\.md|scripts/docs/sync-wiki\.py)$'
+
       - id: wiki-consistency
         name: wiki consistency check
         entry: python scripts/docs/check-wiki-consistency.py

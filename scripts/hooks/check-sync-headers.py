@@ -22,6 +22,7 @@ from pathlib import Path
 
 SYNC_RE = re.compile(r"^<!--\s*SYNC:\s*(.*?)\s*-->\s*$")
 TARGET_RE = re.compile(r"\b((?:docs|wiki)/[^\s>]+\.md)\b")
+SYNC_REMEDIATION = "python scripts/docs/sync-wiki.py"
 
 
 def _display_path(path: Path) -> str:
@@ -30,6 +31,23 @@ def _display_path(path: Path) -> str:
         return str(path.resolve().relative_to(Path.cwd().resolve()))
     except ValueError:
         return str(path)
+
+
+def _find_case_insensitive_match(path: Path) -> str | None:
+    """Return a repo-relative filename with different casing, if present."""
+    parent = path.parent
+    if not parent.exists():
+        return None
+
+    expected_name = path.name.lower()
+    for candidate in parent.iterdir():
+        if candidate.name.lower() != expected_name:
+            continue
+        if candidate.name == path.name:
+            continue
+        return _display_path(candidate)
+
+    return None
 
 
 def _extract_sync_target(path: Path) -> tuple[int, str] | None:
@@ -113,9 +131,17 @@ def _check_file(repo_root: Path, rel_path: Path) -> list[str]:
 
     target_abs = repo_root / target
     if not target_abs.exists():
-        issues.append(
-            f"{display_path}:{line_no}: SYNC target does not exist: {target}"
-        )
+        case_match = _find_case_insensitive_match(target_abs)
+        if case_match is not None:
+            issues.append(
+                f"{display_path}:{line_no}: SYNC target does not exist: {target} "
+                f"(case mismatch; found {case_match})"
+            )
+        else:
+            issues.append(
+                f"{display_path}:{line_no}: SYNC target does not exist: {target} "
+                f"(remediation: run {SYNC_REMEDIATION})"
+            )
         return issues
 
     target_sync_data = _extract_sync_target(target_abs)
@@ -147,7 +173,17 @@ def _check_required_pair(repo_root: Path, docs_rel: str, wiki_name: str) -> list
         issues.append(f"docs/{docs_rel}:0: expected docs mirror file is missing")
         return issues
     if not wiki_path.exists():
-        issues.append(f"wiki/{wiki_name}.md:0: expected wiki mirror file is missing")
+        case_match = _find_case_insensitive_match(wiki_path)
+        if case_match is not None:
+            issues.append(
+                f"wiki/{wiki_name}.md:0: expected wiki mirror file is missing "
+                f"(case mismatch; found {case_match})"
+            )
+        else:
+            issues.append(
+                f"wiki/{wiki_name}.md:0: expected wiki mirror file is missing "
+                f"(remediation: run {SYNC_REMEDIATION})"
+            )
         return issues
 
     docs_sync = _extract_sync_target(docs_path)
@@ -209,6 +245,10 @@ def main() -> int:
         print("SYNC header validation failed:", file=sys.stderr)
         for issue in issues:
             print(issue, file=sys.stderr)
+        print(
+            f"hint: regenerate wiki mirrors with `{SYNC_REMEDIATION}` and restage changes",
+            file=sys.stderr,
+        )
         return 1
 
     return 0
