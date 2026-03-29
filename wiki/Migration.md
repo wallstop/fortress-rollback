@@ -151,6 +151,35 @@ struct MyAddress {
 }
 ```
 
+## Input Trait Bounds (Breaking Change)
+
+`Config::Input` now requires `Eq` in addition to `PartialEq`. This ensures reflexive
+equality for deterministic rollback; non-reflexive types (e.g., `f32`, `f64`) would cause
+phantom prediction misses because `NaN != NaN` can make the engine treat identical inputs
+as different, triggering unnecessary rollbacks.
+
+Most custom input types only need an extra derive:
+
+```rust
+// Before
+#[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+struct MyInput {
+    buttons: u8,
+    stick_x: i8,
+}
+
+// After
+#[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+struct MyInput {
+    buttons: u8,
+    stick_x: i8,
+}
+```
+
+> **Note:** All primitive integer types (`u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `u64`,
+> `i64`, `u128`, `i128`, `usize`, `isize`) and `bool` already implement `Eq`, so input
+> structs composed entirely of these types only need the added derive.
+
 ## Features
 
 The `sync-send` feature flag remains compatible. Fortress Rollback adds several new features:

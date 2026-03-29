@@ -106,7 +106,7 @@ impl CounterState {
 /// - `PartialEq` - for prediction comparison
 /// - `Default` - for "no input" / disconnected state
 /// - `Serialize` + `Deserialize` - for network transmission
-#[derive(Copy, Clone, PartialEq, Default, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
 struct CounterInput {
     /// Whether to add to the counter this frame
     increment: bool,

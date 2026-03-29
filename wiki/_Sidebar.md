@@ -5,6 +5,8 @@
 ## Documentation
 
 - [User Guide](User-Guide)
+- [Match Replay](Replay)
+- [Session Telemetry](Telemetry)
 - [Architecture](Architecture)
 - [Migration](Migration)
 

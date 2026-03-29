@@ -38,7 +38,7 @@ impl<S> Default for GameState<S> {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct PlayerInput<I>
 where
-    I: Copy + Clone + PartialEq,
+    I: Copy + Clone + PartialEq + Eq,
 {
     /// The frame to which this info belongs to. [`Frame::NULL`] represents an invalid frame
     pub frame: Frame,
@@ -46,7 +46,7 @@ where
     pub input: I,
 }
 
-impl<I: Copy + Clone + PartialEq + Default> PlayerInput<I> {
+impl<I: Copy + Clone + PartialEq + Eq + Default> PlayerInput<I> {
     /// Creates a new `PlayerInput` with the given frame and input.
     #[inline]
     #[must_use]
@@ -224,7 +224,7 @@ mod player_input_tests {
     use super::*;
 
     #[repr(C)]
-    #[derive(Copy, Clone, PartialEq, Default, Debug)]
+    #[derive(Copy, Clone, PartialEq, Eq, Default, Debug)]
     struct TestInput {
         inp: u8,
     }
@@ -386,7 +386,7 @@ mod player_input_tests {
     // ==========================================
 
     #[repr(C)]
-    #[derive(Copy, Clone, PartialEq, Default, Debug)]
+    #[derive(Copy, Clone, PartialEq, Eq, Default, Debug)]
     struct ComplexInput {
         x: i16,
         y: i16,

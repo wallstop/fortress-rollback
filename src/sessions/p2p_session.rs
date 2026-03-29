@@ -2,13 +2,15 @@ use crate::error::{FortressError, InternalErrorKind, InvalidRequestKind};
 use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::network::network_stats::NetworkStats;
+use crate::replay::{Replay, ReplayRecorder};
 use crate::sessions::config::{ProtocolConfig, SaveMode};
 use crate::sessions::player_registry::PlayerRegistry;
 use crate::sessions::session_trait::Session;
 use crate::sessions::sync_health::SyncHealth;
 use crate::sync_layer::SyncLayer;
 use crate::telemetry::{
-    InvariantChecker, InvariantViolation, ViolationKind, ViolationObserver, ViolationSeverity,
+    InvariantChecker, InvariantViolation, SessionTelemetry, ViolationKind, ViolationObserver,
+    ViolationSeverity,
 };
 use crate::DesyncDetection;
 use crate::HandleVec;
@@ -108,10 +110,16 @@ where
     last_verified_frame: Option<Frame>,
     /// Optional observer for specification violations.
     violation_observer: Option<Arc<dyn ViolationObserver>>,
+    /// Optional telemetry observer for session performance events.
+    telemetry: Option<Arc<dyn SessionTelemetry>>,
     /// Protocol configuration for network behavior.
     protocol_config: ProtocolConfig,
     /// Maximum number of events to queue before oldest are dropped.
     max_event_queue_size: usize,
+    /// Optional replay recorder for capturing confirmed inputs.
+    recording: Option<ReplayRecorder<T::Input>>,
+    /// The last frame recorded to the replay recorder.
+    last_recorded_frame: Frame,
 }
 
 impl<T: Config> P2PSession<T> {
@@ -133,6 +141,8 @@ impl<T: Config> P2PSession<T> {
         protocol_config: ProtocolConfig,
         queue_length: usize,
         event_queue_size: usize,
+        recording: bool,
+        telemetry: Option<Arc<dyn SessionTelemetry>>,
     ) -> Self {
         // local connection status
         let local_connect_status = vec![ConnectionStatus::default(); num_players];
@@ -196,8 +206,11 @@ impl<T: Config> P2PSession<T> {
             last_sent_checksum_frame: Frame::NULL,
             last_verified_frame: None,
             violation_observer,
+            telemetry,
             protocol_config,
             max_event_queue_size: event_queue_size,
+            recording: recording.then(|| ReplayRecorder::new(num_players)),
+            last_recorded_frame: Frame::NULL,
         }
     }
 
@@ -301,6 +314,14 @@ impl<T: Config> P2PSession<T> {
                 .check_simulation_consistency(self.disconnect_frame);
             // if we have an incorrect frame, then we need to rollback
             if first_incorrect != Frame::NULL {
+                if let Some(telemetry) = &self.telemetry {
+                    for (player, frame) in self
+                        .sync_layer
+                        .players_with_incorrect_predictions(self.disconnect_frame)
+                    {
+                        telemetry.on_prediction_miss(player, frame);
+                    }
+                }
                 self.adjust_gamestate(first_incorrect, confirmed_frame, &mut requests)?;
                 self.disconnect_frame = Frame::NULL;
             }
@@ -321,6 +342,9 @@ impl<T: Config> P2PSession<T> {
 
         // send confirmed inputs to spectators before throwing them away
         self.send_confirmed_inputs_to_spectators(confirmed_frame)?;
+
+        // record confirmed inputs to the replay recorder before they are discarded
+        self.record_confirmed_inputs(confirmed_frame);
 
         // set the last confirmed frame and discard all saved inputs before that frame
         self.sync_layer
@@ -416,6 +440,10 @@ impl<T: Config> P2PSession<T> {
             // clear the local inputs after advancing the frame to allow new inputs to be ingested
             self.local_inputs.clear();
             requests.push(FortressRequest::AdvanceFrame { inputs });
+
+            if let Some(telemetry) = &self.telemetry {
+                telemetry.on_frame_advance(self.sync_layer.current_frame());
+            }
         } else {
             debug!(
                 "Prediction Threshold reached. Skipping on frame {}",
@@ -467,6 +495,19 @@ impl<T: Config> P2PSession<T> {
         // handle all events locally
         for (event, handles, addr) in std::mem::take(&mut events) {
             self.handle_event(event, handles, addr);
+        }
+
+        // emit network stats telemetry for each running remote endpoint
+        if let Some(telemetry) = &self.telemetry {
+            for endpoint in self.player_reg.remotes.values() {
+                if endpoint.is_running() {
+                    if let Ok(stats) = endpoint.network_stats() {
+                        for &handle in endpoint.handles().iter() {
+                            telemetry.on_network_stats(handle, &stats);
+                        }
+                    }
+                }
+            }
         }
 
         // send all queued packets
@@ -758,6 +799,142 @@ impl<T: Config> P2PSession<T> {
     #[must_use]
     pub fn num_spectators(&self) -> usize {
         self.player_reg.num_spectators()
+    }
+
+    /// Returns `true` if replay recording is enabled for this session.
+    ///
+    /// Recording is enabled via [`SessionBuilder::with_recording`].
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if session.is_recording() {
+    ///     println!("Recording inputs for replay");
+    /// }
+    /// ```
+    ///
+    /// [`SessionBuilder::with_recording`]: crate::SessionBuilder::with_recording
+    #[must_use]
+    pub fn is_recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
+    /// Consumes this session and returns the recorded [`Replay`], if recording
+    /// was enabled.
+    ///
+    /// Returns `Ok(Replay)` if recording was enabled via
+    /// [`SessionBuilder::with_recording`], or an error if recording was not
+    /// enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRequestKind::NotSupported`] if recording was not enabled.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let replay = session.into_replay()?;
+    /// let bytes = replay.to_bytes()?;
+    /// std::fs::write("match.replay", bytes)?;
+    /// ```
+    ///
+    /// [`SessionBuilder::with_recording`]: crate::SessionBuilder::with_recording
+    pub fn into_replay(self) -> FortressResult<Replay<T::Input>> {
+        self.recording
+            .map(ReplayRecorder::into_replay)
+            .ok_or_else(|| {
+                InvalidRequestKind::NotSupported {
+                    operation: "into_replay (recording not enabled)",
+                }
+                .into()
+            })
+    }
+
+    /// Extracts the recorded [`Replay`] without consuming the session.
+    ///
+    /// After calling this, the session continues but recording is disabled
+    /// (the recorder has been taken).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRequestKind::NotSupported`] if recording was not enabled
+    /// or has already been taken.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let replay = session.take_replay()?;
+    /// let bytes = replay.to_bytes()?;
+    /// // Session continues without recording
+    /// ```
+    pub fn take_replay(&mut self) -> FortressResult<Replay<T::Input>> {
+        self.recording
+            .take()
+            .map(ReplayRecorder::into_replay)
+            .ok_or_else(|| {
+                InvalidRequestKind::NotSupported {
+                    operation: "take_replay (recording not enabled or already taken)",
+                }
+                .into()
+            })
+    }
+
+    /// Records confirmed inputs up to the given frame into the replay recorder.
+    ///
+    /// When a frame's inputs cannot be retrieved (e.g., because the frame was
+    /// already discarded from the input queue), default placeholder inputs are
+    /// recorded to maintain frame index alignment, and the recorder's
+    /// `skipped_frames` counter is incremented. Recording continues with
+    /// subsequent frames rather than stopping at the first failure.
+    fn record_confirmed_inputs(&mut self, confirmed_frame: Frame) {
+        if self.recording.is_none() {
+            return;
+        }
+
+        // Collect inputs first, then record them, to avoid overlapping borrows.
+        // Entries are tagged as either real inputs or skipped placeholders.
+        let mut frames_to_record: Vec<(Frame, Option<Vec<T::Input>>)> = Vec::new();
+        let mut frame_to_record = self.last_recorded_frame.saturating_next();
+        while frame_to_record <= confirmed_frame {
+            match self.confirmed_inputs_for_frame(frame_to_record) {
+                Ok(inputs) => {
+                    frames_to_record.push((frame_to_record, Some(inputs)));
+                },
+                Err(err) => {
+                    // If we can't get inputs for this frame, record a placeholder
+                    // and continue collecting subsequent frames. This maintains
+                    // frame index alignment in the replay.
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::InputQueue,
+                        "record_confirmed_inputs: failed to get inputs for frame {} (skipping): {}",
+                        frame_to_record,
+                        err
+                    );
+                    frames_to_record.push((frame_to_record, None));
+                },
+            }
+            frame_to_record = frame_to_record.saturating_next();
+        }
+
+        // Now record all collected frames
+        if let Some(recorder) = self.recording.as_mut() {
+            for (frame, maybe_inputs) in frames_to_record {
+                match maybe_inputs {
+                    Some(inputs) => {
+                        let checksum = self
+                            .sync_layer
+                            .saved_state_by_frame(frame)
+                            .and_then(|cell| cell.checksum());
+                        recorder.record_frame(inputs, checksum);
+                    },
+                    None => {
+                        recorder.record_skipped_frame();
+                    },
+                }
+                self.last_recorded_frame = frame;
+            }
+        }
     }
 
     /// Returns an iterator over local player handles.
@@ -1130,6 +1307,20 @@ impl<T: Config> P2PSession<T> {
         self.violation_observer.as_ref()
     }
 
+    /// Returns a reference to the telemetry observer, if one is attached.
+    ///
+    /// In tests, the typical pattern is to keep a separate
+    /// <code>Arc<[CollectingTelemetry]></code> clone and call methods on it directly,
+    /// rather than going through this accessor. This method is primarily useful
+    /// when you need to confirm that a telemetry observer is attached or to pass
+    /// the trait object to other code.
+    ///
+    /// [CollectingTelemetry]: crate::telemetry::CollectingTelemetry
+    #[must_use]
+    pub fn telemetry(&self) -> Option<&Arc<dyn SessionTelemetry>> {
+        self.telemetry.as_ref()
+    }
+
     /// Returns the synchronization health status for a specific remote peer.
     ///
     /// This is the **primary API for checking if a session is synchronized** before
@@ -1419,6 +1610,12 @@ impl<T: Config> P2PSession<T> {
         }
 
         let count = current_frame - frame_to_load;
+
+        if let Ok(depth) = usize::try_from(count) {
+            if let Some(telemetry) = &self.telemetry {
+                telemetry.on_rollback(depth, frame_to_load);
+            }
+        }
 
         // request to load that frame
         debug!(
@@ -1914,6 +2111,8 @@ impl<T: Config> fmt::Debug for P2PSession<T> {
             .field("current_frame", &self.sync_layer.current_frame())
             .field("frames_ahead", &self.frames_ahead)
             .field("desync_detection", &self.desync_detection)
+            .field("is_recording", &self.recording.is_some())
+            .field("has_telemetry", &self.telemetry.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -2934,5 +3133,110 @@ mod tests {
         assert_eq!(session.num_players(), 1);
         assert_eq!(session.num_spectators(), 1);
         assert!(!session.spectator_handles().is_empty());
+    }
+
+    // ==========================================
+    // Recording Tests
+    // ==========================================
+
+    fn create_local_only_session_with_recording() -> P2PSession<TestConfig> {
+        SessionBuilder::new()
+            .with_num_players(1)
+            .unwrap()
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("Failed to add player")
+            .with_recording(true)
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session")
+    }
+
+    #[test]
+    fn is_recording_true_when_enabled() {
+        let session = create_local_only_session_with_recording();
+        assert!(session.is_recording());
+    }
+
+    #[test]
+    fn is_recording_false_by_default() {
+        let session = create_local_only_session();
+        assert!(!session.is_recording());
+    }
+
+    #[test]
+    fn into_replay_without_recording_returns_error() {
+        let session = create_local_only_session();
+        let result = session.into_replay();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn take_replay_without_recording_returns_error() {
+        let mut session = create_local_only_session();
+        let result = session.take_replay();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn record_confirmed_inputs_advances_past_failed_frame() {
+        // A fresh session with recording enabled: confirmed_frame() is Frame::NULL,
+        // so requesting inputs for Frame(0) will fail. The bug was that
+        // last_recorded_frame was never advanced on error, causing infinite retries.
+        let mut session = create_local_only_session_with_recording();
+        assert_eq!(session.last_recorded_frame, Frame::NULL);
+
+        // Attempt to record up to Frame(5). All frames should fail since no inputs
+        // have been confirmed, but last_recorded_frame must advance past ALL
+        // failed frames (continue, not break).
+        let target_frame = Frame::new(5);
+        session.record_confirmed_inputs(target_frame);
+
+        // last_recorded_frame should have advanced to the target frame,
+        // because continue (not break) processes every frame in the range.
+        assert_eq!(
+            session.last_recorded_frame, target_frame,
+            "last_recorded_frame should advance to the target frame, was {:?}",
+            session.last_recorded_frame
+        );
+
+        // The recorder should have placeholder entries for all 6 frames
+        // (Frame(0) through Frame(5)), maintaining frame index alignment.
+        let recorder = session.recording.as_ref().unwrap();
+        assert_eq!(
+            recorder.recorded_frames(),
+            6,
+            "recorder should have placeholder entries for all attempted frames"
+        );
+
+        // All frames should be marked as skipped since none had real inputs.
+        assert_eq!(
+            recorder.skipped_frames(),
+            6,
+            "all 6 frames should be counted as skipped"
+        );
+
+        // Calling again should not re-attempt the same frames (no infinite loop).
+        let previous = session.last_recorded_frame;
+        session.record_confirmed_inputs(target_frame);
+        assert_eq!(
+            session.last_recorded_frame, previous,
+            "last_recorded_frame should not change when called again with the same target"
+        );
+
+        // Verify the replay produced has correct metadata and frame alignment.
+        let replay = session.into_replay().unwrap();
+        assert_eq!(replay.frames.len(), 6);
+        assert_eq!(replay.checksums.len(), 6);
+        assert_eq!(replay.metadata.skipped_frames, 6);
+        // All frames should have default (0) inputs since they were placeholders.
+        for frame_inputs in &replay.frames {
+            assert_eq!(frame_inputs.len(), 1); // 1 player
+            assert_eq!(frame_inputs[0], u8::default());
+        }
+        // All checksums should be None for skipped frames.
+        for checksum in &replay.checksums {
+            assert_eq!(*checksum, None);
+        }
+        // Replay should pass validation since frame alignment is maintained.
+        replay.validate().unwrap();
     }
 }

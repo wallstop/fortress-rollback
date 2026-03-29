@@ -20,7 +20,7 @@ use std::net::SocketAddr;
 // Test config for the macro tests
 struct MacroTestConfig;
 
-#[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct MacroTestInput(u8);
 
 #[derive(Clone, Default, Debug, PartialEq)]

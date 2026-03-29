@@ -28,7 +28,7 @@ pub struct GameStubEnum {
 
 #[allow(dead_code)]
 #[repr(u8)]
-#[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum EnumInput {
     #[default]
     Val1,

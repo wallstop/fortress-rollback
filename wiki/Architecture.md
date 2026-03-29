@@ -1099,7 +1099,7 @@ Compile-time parameterization bundles all type requirements:
 ```rust
 // Default (without `sync-send` feature):
 pub trait Config: 'static {
-    type Input: Copy + Clone + PartialEq + Default + Serialize + DeserializeOwned;
+    type Input: Copy + Clone + PartialEq + Eq + Default + Serialize + DeserializeOwned;
     type State;
     type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Debug;
 }

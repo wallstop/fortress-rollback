@@ -216,17 +216,22 @@ For protocol tests that poll in loops (`poll_remote_clients()` / protocol `poll(
 
 **Exclude:** internal refactoring, test improvements, doc-only changes, CI/tooling, lint fixes.
 
+**Unreleased code rule:** Never add separate "Fixed" or "Changed" entries for code that has not yet been released. Fixes to unreleased features should be folded into the existing "Added" entry describing that feature. The changelog should describe the final shipped state, not intermediate development history.
+
 ## Mandatory Linting
 
 - **After Rust changes:** `cargo fmt && cargo clippy --all-targets --features tokio,json` (or `cargo c`)
 - **After workflow changes:** `actionlint` (no exceptions)
 - **After doc changes:** `cargo doc --no-deps`
 - **After markdown changes:** `npx markdownlint 'file.md' --config .markdownlint.json --fix`
+- **After shell-script changes:** `bash scripts/ci/check-shell-portability.sh`
 - **After `.llm/` changes:** All `.md` files under `.llm/` must be **300 lines or fewer** (enforced by pre-commit hook `llm-line-limit`)
 - **Link validation:** `./scripts/docs/check-links.sh`
 - **Spell check:** `typos`
 - **Vale (advisory):** `vale docs/` -- checks prose quality, non-blocking in CI
 - **Full pre-commit:** `cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run --no-capture`
+
+Shell regex portability rule: avoid PCRE-style escapes in `grep -E`/`sed -E` (`\b`, `\s`, `\w`, etc.). Use POSIX-safe classes like `[[:space:]]`, `[[:alnum:]_]`, and token boundaries `(^|[^[:alnum:]_])word([^[:alnum:]_]|$)`.
 
 ## Skill Code Examples
 

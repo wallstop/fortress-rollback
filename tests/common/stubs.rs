@@ -28,7 +28,7 @@ pub struct GameStub {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StubInput {
     pub inp: u32,
 }

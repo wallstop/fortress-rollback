@@ -102,6 +102,20 @@ repos:
         pass_filenames: false
         files: '\.rs$'
 
+      - id: check-doc-claims
+        name: check doc comment accuracy
+        entry: bash scripts/ci/check-doc-claims.sh
+        language: system
+        pass_filenames: false
+        files: '\.rs$'
+
+      - id: check-derive-bounds
+        name: check derive bounds
+        entry: bash scripts/ci/check-derive-bounds.sh
+        language: system
+        pass_filenames: false
+        files: '\.rs$'
+
       # ══════════════════════════════════════════════════════════════════════
       # Documentation checks
       # ══════════════════════════════════════════════════════════════════════
@@ -134,6 +148,13 @@ repos:
         pass_filenames: false
         files: '\.md$'
 
+      - id: sync-wiki
+        name: sync wiki mirrors
+        entry: python scripts/docs/sync-wiki.py
+        language: python
+        pass_filenames: false
+        files: '^(docs/.*\.md|wiki/.*\.md|scripts/docs/sync-wiki\.py)$'
+
       - id: wiki-consistency
         name: wiki consistency check
         entry: python scripts/docs/check-wiki-consistency.py
@@ -147,6 +168,13 @@ repos:
         language: python
         files: '^(docs/.*\.md|wiki/.*\.md)$'
         pass_filenames: false
+
+      - id: changelog-unreleased-rule
+        name: changelog unreleased code rule
+        entry: python scripts/hooks/check-changelog-unreleased.py
+        language: python
+        pass_filenames: false
+        files: '^CHANGELOG\.md$'
 
       - id: llm-line-limit
         name: check .llm file line limit (300)
@@ -188,6 +216,13 @@ repos:
         language: python
         files: '^scripts/(hooks/|build/|docs/|verification/|ci/)?[a-z][^/]*\.py$'
         pass_filenames: true
+
+      - id: check-shell-portability
+        name: check shell portability
+        entry: bash scripts/ci/check-shell-portability.sh
+        language: system
+        files: '\.sh$'
+        pass_filenames: false
 
       # ══════════════════════════════════════════════════════════════════════
       # CI validation (skip gracefully if tools not installed)

@@ -14,7 +14,7 @@ use crate::{Config, PlayerHandle};
 ///
 /// This type is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
 /// It is not part of the stable public API.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event<T>
 where
     T: Config,
@@ -99,7 +99,7 @@ mod tests {
     use std::net::SocketAddr;
 
     /// A minimal test config for testing Event.
-    #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
     struct TestInput(u32);
 
     #[derive(Debug, Clone, Default)]
@@ -557,7 +557,7 @@ mod kani_proofs {
 
     /// Minimal test configuration for Kani proofs.
     #[repr(C)]
-    #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize, Debug)]
+    #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
     struct TestInput {
         value: u8,
     }

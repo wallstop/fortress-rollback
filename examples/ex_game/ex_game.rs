@@ -26,7 +26,7 @@ const MAX_SPEED: f32 = 7.0;
 const FRICTION: f32 = 0.98;
 
 #[repr(C)]
-#[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Input {
     pub inp: u8,
 }

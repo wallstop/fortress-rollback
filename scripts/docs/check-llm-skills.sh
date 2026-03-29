@@ -155,9 +155,9 @@ check_unguarded_unwrap() {
             fi
 
             # Check if the current line is a pure Rust comment
-            if echo "$line" | grep -qE '^\s*//'; then
+            if echo "$line" | grep -qE '^[[:space:]]*//'; then
                 # Track justification comments for nearby code lines
-                if echo "$line" | grep -qE '//\s*(build\.rs:|test:|Loom test:|Fuzz target|proptest:|allowed:|SAFETY:|In tests:)'; then
+                if echo "$line" | grep -qE '//[[:space:]]*(build\.rs:|test:|Loom test:|Fuzz target|proptest:|allowed:|SAFETY:|In tests:)'; then
                     last_justification_at=$line_num
                 fi
                 # Skip -- mentioning .unwrap() in a comment is not executable code
@@ -165,7 +165,7 @@ check_unguarded_unwrap() {
             fi
 
             # Check if the current line is an accepted attribute
-            if echo "$line" | grep -qE '^\s*#\[(allow\(|test|fixture|cfg\(test\))'; then
+            if echo "$line" | grep -qE '^[[:space:]]*#\[(allow\(|test|fixture|cfg\(test\))'; then
                 last_justification_at=$line_num
             fi
 
@@ -174,7 +174,7 @@ check_unguarded_unwrap() {
                 local justified=0
 
                 # Check if there's a justifying comment on the same line
-                if echo "$line" | grep -qE '//\s*(build\.rs:|test:|Loom test:|Fuzz target|proptest:|allowed:|SAFETY:|In tests:)'; then
+                if echo "$line" | grep -qE '//[[:space:]]*(build\.rs:|test:|Loom test:|Fuzz target|proptest:|allowed:|SAFETY:|In tests:)'; then
                     justified=1
                 fi
 

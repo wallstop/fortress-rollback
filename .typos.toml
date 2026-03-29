@@ -18,7 +18,8 @@ resimulates = "resimulates"
 resimulating = "resimulating"
 
 # Mathematical/algorithmic variable names
-ba = "ba" # b minus a
+ba = "ba"  # b minus a
+ser = "ser"  # Mermaid state diagram alias in docs/replay.md and wiki/Replay.md
 
 # Technical terms
 clonable = "clonable"

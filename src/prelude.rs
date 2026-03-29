@@ -13,7 +13,7 @@
 //!
 //! The prelude includes:
 //!
-//! - **Session types**: [`P2PSession`], [`SpectatorSession`], [`SyncTestSession`], [`SessionBuilder`]
+//! - **Session types**: [`P2PSession`], [`SpectatorSession`], [`SyncTestSession`], [`ReplaySession`], [`SessionBuilder`]
 //! - **Core traits**: [`Config`], [`NonBlockingSocket`], [`Session`]
 //! - **Socket implementations**: [`UdpNonBlockingSocket`]
 //! - **Fundamental types**: [`Frame`], [`PlayerHandle`], [`PlayerType`], [`NULL_FRAME`]
@@ -33,7 +33,7 @@
 //! use std::net::SocketAddr;
 //!
 //! // Define your input type
-//! #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize)]
+//! #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 //! struct MyInput {
 //!     buttons: u8,
 //! }
@@ -59,7 +59,11 @@
 pub use crate::sessions::builder::SessionBuilder;
 pub use crate::sessions::p2p_session::P2PSession;
 pub use crate::sessions::p2p_spectator_session::SpectatorSession;
+pub use crate::sessions::replay_session::ReplaySession;
 pub use crate::sessions::sync_test_session::SyncTestSession;
+
+// Replay types
+pub use crate::replay::{Replay, ReplayMetadata};
 
 // Core traits
 pub use crate::{Config, NonBlockingSocket, Session};
@@ -96,6 +100,11 @@ pub use crate::RequestVec;
 
 // Network monitoring
 pub use crate::NetworkStats;
+
+// Replay types are re-exported above with session types
+
+// Session telemetry
+pub use crate::telemetry::{CollectingTelemetry, SessionTelemetry, TelemetryEvent};
 
 // Common configuration types
 pub use crate::sessions::config::{ProtocolConfig, SyncConfig};

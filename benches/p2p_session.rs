@@ -25,7 +25,7 @@ use std::hint::black_box;
 use std::net::SocketAddr;
 
 /// Simple test input type for benchmarking
-#[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
 struct BenchInput {
     buttons: u8,
     stick_x: i8,
