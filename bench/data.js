@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774529776810,
+  "lastUpdate": 1774827619400,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "d5f2d087b6be6f7551317be73e8d060e30cd1613",
-          "message": "Various QoL improvements around documentation, CI/CD, verification (#37)",
-          "timestamp": "2025-12-28T13:37:24-08:00",
-          "tree_id": "b5bf1775621a8f1c2fee4d0d3ad65a7869c71fb2",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/d5f2d087b6be6f7551317be73e8d060e30cd1613"
-        },
-        "date": 1766958132539,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 99,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 151,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 513,
-            "range": "± 22",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 735,
-            "range": "± 20",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1055,
-            "range": "± 27",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 103583,
-            "range": "± 552",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27529,
-            "range": "± 854",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1242,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1553,
-            "range": "± 84",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 871,
             "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e499999ee9e94229caf51bac8441709d1a8a444f",
+          "message": "Replay integration (#123)\n\n## Description\n\nThis PR delivers a full replay + telemetry feature set and hardens\ndocs/wiki synchronization.\n\nIt solves two core gaps:\n1. No first-class way to record, serialize, and replay real P2P matches\nfor deterministic debugging and validation.\n2. Wiki mirror generation and SYNC-header validation were easier to\ndrift or fail with less-actionable diagnostics.\n\n### What changed\n\n- Added replay domain types and serialization:\n  - `Replay<I>` and `ReplayMetadata`\n- `Replay::to_bytes()`, `Replay::from_bytes()`, `Replay::validate()`,\n`Replay::total_frames()`\n- Added replay playback session:\n  - `ReplaySession<T>` implementing `Session<T>`\n  - `ReplaySession::new()` and `ReplaySession::new_with_validation()`\n- Validation mode emits `SaveGameState` before `AdvanceFrame` and\ncompares checksums frame-by-frame\n- Added replay recording support to P2P sessions:\n  - `SessionBuilder::with_recording(bool)`\n- `P2PSession::is_recording()`, `P2PSession::into_replay()`,\n`P2PSession::take_replay()`\n  - Recording now captures confirmed inputs and recorded checksums\n- Added session telemetry API and built-in collector:\n  - `SessionTelemetry` trait\n- `TelemetryEvent` enum (`Rollback`, `PredictionMiss`,\n`NetworkStatsUpdate`, `FrameAdvance`)\n  - `CollectingTelemetry`\n  - `SessionBuilder::with_telemetry(...)`\n- P2P telemetry emission integrated in rollback, prediction miss,\nnetwork stats polling, and frame advance paths\n- Added sync-layer helper used for telemetry:\n  - `players_with_incorrect_predictions(...)`\n- Expanded public exports and docs:\n  - Re-exports for replay/telemetry in `lib.rs` and prelude\n  - New docs: replay and telemetry guides\n  - Added MkDocs nav entries and wiki mirror pages/sidebar links\n- Hardened docs/wiki synchronization pipeline:\n  - Added pre-commit `sync-wiki` hook before wiki consistency checks\n  - `sync-wiki.py` now:\n    - injects/normalizes reciprocal wiki SYNC headers\n    - validates sidebar coverage before writing files\n    - normalizes generated markdown EOF/newline format deterministically\n- `check-sync-headers.py` now reports case-mismatch hints and\nremediation guidance\n  - Added/expanded script tests for sync behavior and diagnostics\n- Added `.gitignore` entries for local pre-commit/pre-push log artifacts\n\n### Breaking change\n\n- Added `FortressEvent::ReplayDesync { frame, expected_checksum,\nactual_checksum }`.\n- Because `FortressEvent` is not `#[non_exhaustive]`, downstream\nexhaustive `match` statements must add a branch for `ReplayDesync`.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] ✨ New feature (non-breaking change that adds functionality)\n- [x] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [x] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --all-targets --features\ntokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- Added replay model tests in `src/replay.rs` (serialization roundtrip,\nvalidation invariants, metadata/display, recorder behavior)\n- Added replay session tests in `src/sessions/replay_session.rs`\n(playback flow, completion behavior, validation mode, checksum mismatch\nevent emission)\n- Added event display coverage for `ReplayDesync` in `src/lib.rs`\n- Added builder/session tests in `src/sessions/builder.rs` and\n`src/sessions/p2p_session.rs` for replay-session creation and recording\nAPI behavior\n- Added new script tests in `scripts/tests/test_check_sync_headers.py`\n- Expanded `scripts/tests/test_sync_wiki.py` coverage for SYNC header\ngeneration, sidebar coverage validation, idempotent output\nnormalization, and fail-before-write behavior\n\n**Manual testing performed:**\n\n- Reviewed API docs and migration impact for new replay + telemetry APIs\n- Verified docs navigation additions and wiki mirror wiring in this\nbranch\n- Full local command status (`cargo fmt`, `cargo clippy`, `cargo\nnextest`) intentionally left unchecked in checklist for final author\nconfirmation\n\n## Related Issues\n\n- N/A (no issue links provided in branch metadata)\n\n---\n\n<!-- Thank you for contributing to Fortress Rollback! -->",
+          "timestamp": "2026-03-29T16:35:11-07:00",
+          "tree_id": "15feb05b7686bdbc232233a67eec695a0138b41b",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/e499999ee9e94229caf51bac8441709d1a8a444f"
+        },
+        "date": 1774827618945,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 122,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 170,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 463,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 757,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1097,
+            "range": "± 59",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 97303,
+            "range": "± 428",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 36703,
+            "range": "± 615",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1406,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1607,
+            "range": "± 8",
             "unit": "ns/iter"
           },
           {
