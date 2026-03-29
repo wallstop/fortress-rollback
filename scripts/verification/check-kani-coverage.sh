@@ -67,7 +67,7 @@ get_source_proofs() {
 # Extract proof names from verify-kani.sh tier arrays
 get_tiered_proofs() {
     # Extract all proof names from TIER1_PROOFS, TIER2_PROOFS, and TIER3_PROOFS arrays
-    grep -E '^\s*"proof_[^"]+"\s*$' "$VERIFY_KANI_SCRIPT" \
+    grep -E '^[[:space:]]*"proof_[^"]+"[[:space:]]*$' "$VERIFY_KANI_SCRIPT" \
         | sed 's/.*"\(proof_[^"]*\)".*/\1/' \
         | sort \
         | uniq

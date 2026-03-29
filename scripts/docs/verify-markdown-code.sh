@@ -249,7 +249,7 @@ is_incomplete_snippet() {
     fi
 
     # Contains // ... comment placeholder
-    if echo "$code" | grep -qE '//\s*\.\.\.|//\s*\.\.\.'; then
+    if echo "$code" | grep -qE '//[[:space:]]*\.\.\.'; then
         echo "contains // ... comment"
         return 0
     fi
@@ -267,7 +267,7 @@ is_incomplete_snippet() {
     fi
 
     # Shell command prefixed with $ (sometimes in markdown)
-    if echo "$code" | grep -qE '^\$\s'; then
+    if echo "$code" | grep -qE '^\$[[:space:]]'; then
         echo "appears to be shell command"
         return 0
     fi
@@ -286,28 +286,28 @@ is_incomplete_snippet() {
     fi
 
     # Before/After style documentation
-    if echo "$code" | grep -qE '//\s*(Before|After)'; then
+    if echo "$code" | grep -qE '//[[:space:]]*(Before|After)'; then
         echo "before/after documentation example"
         return 0
     fi
 
     # References undefined session variable (common in documentation)
     # Only skip if session is used but not defined with "let session" or "let mut session"
-    if echo "$code" | grep -qE '\bsession\b'; then
-        if ! echo "$code" | grep -qE 'let\s+(mut\s+)?session\s*[=:]'; then
+    if echo "$code" | grep -qE '(^|[^[:alnum:]_])session([^[:alnum:]_]|$)'; then
+        if ! echo "$code" | grep -qE 'let[[:space:]]+(mut[[:space:]]+)?session[[:space:]]*[=:]'; then
             echo "references undefined session variable (documentation example)"
             return 0
         fi
     fi
 
     # References undefined game_state variable
-    if echo "$code" | grep -qE '\bgame_state\b' && ! echo "$code" | grep -qE 'let.*game_state'; then
+    if echo "$code" | grep -qE '(^|[^[:alnum:]_])game_state([^[:alnum:]_]|$)' && ! echo "$code" | grep -qE 'let.*game_state'; then
         echo "references undefined game_state variable (documentation example)"
         return 0
     fi
 
     # References functions that are meant to be user-defined
-    if echo "$code" | grep -qE '\b(handle_event|handle_requests|get_local_input|apply_input|compute_checksum|render)\s*\('; then
+    if echo "$code" | grep -qE '(^|[^[:alnum:]_])(handle_event|handle_requests|get_local_input|apply_input|compute_checksum|render)[[:space:]]*\('; then
         echo "references user-defined functions (documentation example)"
         return 0
     fi
@@ -342,7 +342,7 @@ is_incomplete_snippet() {
     fi
 
     # Short snippets referencing config variables that need definition
-    if echo "$code" | grep -qE '\b(sparse_saving|first_incorrect|last_saved|check_distance)\b'; then
+    if echo "$code" | grep -qE '(^|[^[:alnum:]_])(sparse_saving|first_incorrect|last_saved|check_distance)([^[:alnum:]_]|$)'; then
         if ! echo "$code" | grep -qE 'let.*(sparse_saving|first_incorrect|last_saved|check_distance)'; then
             echo "references undefined config variable (documentation example)"
             return 0
@@ -350,7 +350,7 @@ is_incomplete_snippet() {
     fi
 
     # References to types that need to be defined (spectator, player, etc.)
-    if echo "$code" | grep -qE '\bspectator\b|\bplayer\b' && echo "$code" | grep -qE '\.(address|handle|socket)'; then
+    if echo "$code" | grep -qE '(^|[^[:alnum:]_])(spectator|player)([^[:alnum:]_]|$)' && echo "$code" | grep -qE '\.(address|handle|socket)'; then
         if ! echo "$code" | grep -qE 'let.*(spectator|player)'; then
             echo "references undefined spectator/player variables"
             return 0

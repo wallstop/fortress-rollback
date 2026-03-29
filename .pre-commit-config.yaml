@@ -109,6 +109,13 @@ repos:
         pass_filenames: false
         files: '\.rs$'
 
+      - id: check-derive-bounds
+        name: check derive bounds
+        entry: bash scripts/ci/check-derive-bounds.sh
+        language: system
+        pass_filenames: false
+        files: '\.rs$'
+
       # ══════════════════════════════════════════════════════════════════════
       # Documentation checks
       # ══════════════════════════════════════════════════════════════════════
@@ -209,6 +216,13 @@ repos:
         language: python
         files: '^scripts/(hooks/|build/|docs/|verification/|ci/)?[a-z][^/]*\.py$'
         pass_filenames: true
+
+      - id: check-shell-portability
+        name: check shell portability
+        entry: bash scripts/ci/check-shell-portability.sh
+        language: system
+        files: '\.sh$'
+        pass_filenames: false
 
       # ══════════════════════════════════════════════════════════════════════
       # CI validation (skip gracefully if tools not installed)

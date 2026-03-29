@@ -66,9 +66,10 @@ main() {
     echo "=========================================="
     echo ""
 
-    # Patterns that indicate actual downcasting infrastructure
-    # If a file mentions downcasting in docs, it should contain at least one of these
-    local downcast_infra_patterns='(as_any|downcast_ref|downcast_mut|dyn Any|: Any|impl Any|Any \+|Any\+|\.downcast\b)'
+    # Patterns that indicate actual downcasting infrastructure.
+    # Use POSIX ERE-safe token boundaries for portability across GNU/BSD grep.
+    # If a file mentions downcasting in docs, it should contain at least one of these.
+    local downcast_infra_patterns='(as_any|downcast_ref|downcast_mut|dyn Any|: Any|impl Any|Any \+|Any\+|\.downcast([^[:alnum:]_]|$))'
 
     local issues=0
     local files_with_claims=0
@@ -81,7 +82,7 @@ main() {
 
         # Find doc comment lines mentioning "downcast" (case-insensitive)
         local doc_matches
-        doc_matches=$(grep -niE '^\s*///.*downcast|^\s*//!.*downcast' "$file" 2>/dev/null || true)
+        doc_matches=$(grep -niE '^[[:space:]]*///.*downcast|^[[:space:]]*//!.*downcast' "$file" 2>/dev/null || true)
 
         if [[ -z "$doc_matches" ]]; then
             if [[ "$VERBOSE" == "true" ]]; then
@@ -97,9 +98,12 @@ main() {
         fi
 
         # Check if the file has actual downcasting infrastructure
+        local infra_matches
+        infra_matches=$(grep -nE "$downcast_infra_patterns" "$file" 2>/dev/null || true)
+
         local has_infra
-        has_infra=0
-        has_infra=$(grep -cE "$downcast_infra_patterns" "$file" 2>/dev/null) || true
+        has_infra=$(echo "$infra_matches" | grep -cE '^[0-9]+:' || true)
+        has_infra=${has_infra:-0}
 
         if [[ "$has_infra" -eq 0 ]]; then
             issues=$((issues + 1))
@@ -116,6 +120,7 @@ main() {
         else
             if [[ "$VERBOSE" == "true" ]]; then
                 echo -e "    ${GREEN}OK${NC}: downcasting infrastructure found ($has_infra occurrence(s))"
+                echo "$infra_matches" | head -3 | sed 's/^/      match: /'
             fi
         fi
 

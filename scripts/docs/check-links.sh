@@ -231,7 +231,7 @@ check_rust_doc_links() {
 
     # Extract links from doc comments: /// [text](link) or //! [text](link)
     local doc_links
-    doc_links=$(grep -E '^\s*(///|//!)' "$file" 2>/dev/null | grep -oE '\[([^]]*)\]\(([^)]+)\)' | sed 's/\[.*\](\(.*\))/\1/' | sed 's/)$//')
+    doc_links=$(grep -E '^[[:space:]]*(///|//!)' "$file" 2>/dev/null | grep -oE '\[([^]]*)\]\(([^)]+)\)' | sed 's/\[.*\](\(.*\))/\1/' | sed 's/)$//')
 
     for link in $doc_links; do
         # Skip intra-doc links:

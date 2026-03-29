@@ -51,6 +51,29 @@ collect_shell_files() {
         | sort
 }
 
+# Return the first non-portable PCRE-style escape found in a line,
+# or nothing if no such escape appears.
+first_nonportable_escape() {
+    local line="$1"
+    local escape
+    for escape in '\b' '\B' '\s' '\S' '\w' '\W' '\d' '\D' '\<' '\>'; do
+        if [[ "$line" == *"$escape"* ]]; then
+            printf '%s' "$escape"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Match shell variable/array assignments that can store regex patterns,
+# including append assignments like PATTERNS+='...'.
+# Intentionally excludes forms with spaces around '=' because those are not
+# valid shell assignments (they are command invocations in POSIX shells).
+is_regex_assignment_line() {
+    local line="$1"
+    [[ "$line" =~ ^[[:space:]]*[[:alpha:]_][[:alnum:]_]*(\[[^]]+\])?(\+)?= ]]
+}
+
 # Check a single file for portability issues.
 # Appends findings to the ISSUES array (global).
 # Arguments: $1 = file path
@@ -95,6 +118,28 @@ check_file() {
             ISSUES+=("${rel_path}:${line_num}: Perl regex grep flag (-P)")
             DETAILS+=("  ${YELLOW}Line:${NC} $line")
             SUGGESTIONS+=("  ${BLUE}Fix:${NC} Use 'grep -E' with 'sed' for post-processing instead of grep -P")
+        fi
+
+                # (b2) Non-portable PCRE-style escapes with POSIX ERE (-E)
+                # grep -E and sed -E do not portably support escapes like \b, \s, \w.
+                # GNU tools may accept them as extensions, but BSD/macOS often do not.
+                local bad_escape
+                bad_escape=$(first_nonportable_escape "$line" || true)
+                if [[ -n "$bad_escape" ]] && \
+                        echo "$line" | grep -qE '(^|[[:space:];|&])(grep|sed)[[:space:]]+-[a-zA-Z]*E([[:space:]]|$)'; then
+            ISSUES+=("${rel_path}:${line_num}: Non-portable regex escape ${bad_escape} with ERE (-E)")
+            DETAILS+=("  ${YELLOW}Line:${NC} $line")
+            SUGGESTIONS+=("  ${BLUE}Fix:${NC} Use POSIX classes/boundaries: [[:space:]] for \\s, [[:alnum:]_] for \\w, and (^|[^[:alnum:]_])word([^[:alnum:]_]|$) for \\bword\\b")
+        fi
+
+        # (b3) Variable assignments containing non-portable escapes.
+        # This catches indirection patterns like:
+        #   pattern='\\bword\\b'; grep -E "$pattern" file
+        # which can otherwise bypass single-line grep/sed command checks.
+        if [[ -n "$bad_escape" ]] && is_regex_assignment_line "$line"; then
+            ISSUES+=("${rel_path}:${line_num}: Non-portable regex escape ${bad_escape} in pattern assignment")
+            DETAILS+=("  ${YELLOW}Line:${NC} $line")
+            SUGGESTIONS+=("  ${BLUE}Fix:${NC} Keep regex assignments POSIX-safe too: [[:space:]] not \\s, [[:alnum:]_] not \\w, and (^|[^[:alnum:]_])word([^[:alnum:]_]|$) not \\bword\\b")
         fi
 
         # (c) Hardcoded /bin/sed or /usr/bin/sed paths

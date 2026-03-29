@@ -45,6 +45,15 @@ print_usage() {
     echo "don't require Eq."
 }
 
+# Check whether text contains a standalone token using POSIX ERE-safe
+# boundaries (portable across GNU/BSD grep).
+contains_token() {
+    local text="$1"
+    local token="$2"
+    token=$(printf '%s' "$token" | sed 's/[][(){}.^$*+?|\\]/\\&/g')
+    echo "$text" | grep -qE "(^|[^[:alnum:]_])${token}([^[:alnum:]_]|$)"
+}
+
 main() {
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -116,7 +125,7 @@ main() {
             # Check if the full derive text contains standalone Eq (not just PartialEq)
             local without_partial_check
             without_partial_check=$(echo "$full_derive_text" | sed 's/PartialEq//g')
-            if echo "$without_partial_check" | grep -qE '\bEq\b'; then
+            if contains_token "$without_partial_check" 'Eq'; then
                 # Format: start_lineno:end_lineno:full derive text
                 derive_lines+="${start_lineno}:${derive_end_lineno}:${full_derive_text}"$'\n'
             fi
@@ -141,7 +150,7 @@ main() {
             # Remove PartialEq first, then check for Eq
             local without_partial
             without_partial=$(echo "$derive_text" | sed 's/PartialEq//g')
-            if ! echo "$without_partial" | grep -qE '\bEq\b'; then
+            if ! contains_token "$without_partial" 'Eq'; then
                 continue
             fi
 
@@ -167,7 +176,7 @@ main() {
 
             # Check for pub struct/enum with generic parameters <...>
             local type_line
-            type_line=$(echo "$following" | grep -E '^\s*pub\s+(struct|enum)\s+\w+\s*<' | head -1 || true)
+            type_line=$(echo "$following" | grep -E '^[[:space:]]*pub[[:space:]]+(struct|enum)[[:space:]]+[[:alnum:]_]+[[:space:]]*<' | head -1 || true)
 
             if [[ -z "$type_line" ]]; then
                 if [[ "$VERBOSE" == "true" ]]; then
@@ -180,7 +189,7 @@ main() {
 
             # Extract the type name
             local type_name
-            type_name=$(echo "$type_line" | sed -E 's/^\s*pub\s+(struct|enum)\s+(\w+).*/\2/')
+            type_name=$(echo "$type_line" | sed -E 's/^[[:space:]]*pub[[:space:]]+(struct|enum)[[:space:]]+([[:alnum:]_]+).*/\2/')
 
             # Now check if there's a where clause or inline bounds requiring Eq
             # We look at the type definition and any where clause up to the opening brace
@@ -200,27 +209,36 @@ main() {
             # Check if Eq appears in bounds (where clause or inline bounds)
             # Look for patterns like: T: Eq, T: ... + Eq, where ... Eq
             local has_eq_bound=false
+            local eq_bound_reason=""
 
             # Check inline bounds on the generic parameter, e.g. <I: Eq> or <I: Foo + Eq>
-            if echo "$flat_block" | grep -qE '<[^>]*\bEq\b[^>]*>'; then
+            local inline_generics
+            inline_generics=$(echo "$flat_block" | grep -oE '<[^>]*>' || true)
+            if [[ -n "$inline_generics" ]] && contains_token "$inline_generics" 'Eq'; then
                 has_eq_bound=true
+                eq_bound_reason="inline generic bound"
             fi
 
             # Check where clause for Eq bound (flattened, so multi-line where clauses work)
-            if echo "$flat_block" | grep -qE '\bwhere\b.*\bEq\b'; then
+            if [[ "$has_eq_bound" == "false" ]] && \
+                echo "$flat_block" | grep -qE '(^|[[:space:]])where[[:space:]]' && \
+                contains_token "$flat_block" 'Eq'; then
                 has_eq_bound=true
+                eq_bound_reason="where-clause bound"
             fi
 
             # Check if generic parameter is bounded by a trait whose associated types
             # require Eq (e.g., T: Config where Config::Address: Eq). We recognize
             # the Config trait specifically since it's this crate's main trait.
-            if echo "$flat_block" | grep -qE '\b\w+\s*:\s*Config\b'; then
+            if [[ "$has_eq_bound" == "false" ]] && \
+                echo "$flat_block" | grep -qE '(^|[^[:alnum:]_])[[:alnum:]_]+[[:space:]]*:[[:space:]]*Config([^[:alnum:]_]|$)'; then
                 has_eq_bound=true
+                eq_bound_reason="Config trait bound"
             fi
 
             if [[ "$has_eq_bound" == "true" ]]; then
                 if [[ "$VERBOSE" == "true" ]]; then
-                    echo -e "  ${GREEN}OK${NC}: $rel_path:$derive_lineno $type_name (Eq bound present)"
+                    echo -e "  ${GREEN}OK${NC}: $rel_path:$derive_lineno $type_name (Eq bound present via $eq_bound_reason)"
                 fi
             else
                 issues=$((issues + 1))
@@ -228,7 +246,8 @@ main() {
                 echo -e "${RED}ERROR${NC}: $rel_path:$derive_lineno"
                 echo -e "  Type ${YELLOW}${type_name}${NC} derives Eq but its generic bounds don't require Eq."
                 echo -e "  ${BLUE}Derive line:${NC} $derive_text"
-                echo -e "  ${BLUE}Type line:${NC}  $(echo "$type_line" | sed 's/^\s*//')"
+                echo -e "  ${BLUE}Type line:${NC}  $(echo "$type_line" | sed 's/^[[:space:]]*//')"
+                echo -e "  ${BLUE}Analyzed bounds:${NC} $(echo "$flat_block" | tr -s '[:space:]' ' ' | cut -c1-200)"
                 echo -e "  ${BLUE}Fix:${NC} Remove Eq from the derive, or add Eq to the generic bounds."
                 echo -e "       Deriving Eq on a generic type adds an implicit Eq bound on all"
                 echo -e "       type parameters, which may be stricter than necessary."
