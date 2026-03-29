@@ -25,37 +25,42 @@ TARGET_RE = re.compile(r"\b((?:docs|wiki)/[^\s>]+\.md)\b")
 SYNC_REMEDIATION = "python scripts/docs/sync-wiki.py"
 
 
-def _display_path(path: Path) -> str:
+def _display_path(path: Path, repo_root: Path | None = None) -> str:
     """Convert path to a repo-relative path for diagnostics."""
+    base = repo_root if repo_root is not None else Path.cwd()
     try:
-        return str(path.resolve().relative_to(Path.cwd().resolve()))
+        return str(path.resolve().relative_to(base.resolve()))
     except ValueError:
         return str(path)
 
 
-def _find_case_insensitive_match(path: Path) -> str | None:
+def _find_case_insensitive_match(path: Path, repo_root: Path | None = None) -> str | None:
     """Return a repo-relative filename with different casing, if present."""
     parent = path.parent
     if not parent.exists():
         return None
 
     expected_name = path.name.lower()
+    matches = []
     for candidate in parent.iterdir():
         if candidate.name.lower() != expected_name:
             continue
         if candidate.name == path.name:
             continue
-        return _display_path(candidate)
+        matches.append(candidate)
 
-    return None
+    if not matches:
+        return None
+    matches.sort(key=lambda p: p.name)
+    return _display_path(matches[0], repo_root)
 
 
-def _extract_sync_target(path: Path) -> tuple[int, str] | None:
+def _extract_sync_target(path: Path, repo_root: Path | None = None) -> tuple[int, str] | None:
     """Extract sync target from the first few lines of a markdown file."""
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
-        raise OSError(f"{_display_path(path)}:0: cannot read file: {exc}") from exc
+        raise OSError(f"{_display_path(path, repo_root)}:0: cannot read file: {exc}") from exc
 
     for idx, line in enumerate(lines[:20], start=1):
         match = SYNC_RE.match(line.strip())
@@ -68,17 +73,17 @@ def _extract_sync_target(path: Path) -> tuple[int, str] | None:
     return None
 
 
-def _load_wiki_structure(sync_script: Path) -> dict[str, str]:
+def _load_wiki_structure(sync_script: Path, repo_root: Path | None = None) -> dict[str, str]:
     """Load WIKI_STRUCTURE mapping from scripts/docs/sync-wiki.py via AST."""
     try:
         content = sync_script.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        raise OSError(f"{_display_path(sync_script)}:0: cannot read file: {exc}") from exc
+        raise OSError(f"{_display_path(sync_script, repo_root)}:0: cannot read file: {exc}") from exc
 
     try:
         tree = ast.parse(content, filename=str(sync_script))
     except SyntaxError as exc:
-        raise SyntaxError(f"{_display_path(sync_script)}:0: cannot parse file: {exc}") from exc
+        raise SyntaxError(f"{_display_path(sync_script, repo_root)}:0: cannot parse file: {exc}") from exc
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
@@ -91,7 +96,7 @@ def _load_wiki_structure(sync_script: Path) -> dict[str, str]:
                                 mapping[str(key.value)] = str(value.value)
                         return mapping
 
-    raise ValueError(f"{_display_path(sync_script)}:0: WIKI_STRUCTURE not found")
+    raise ValueError(f"{_display_path(sync_script, repo_root)}:0: WIKI_STRUCTURE not found")
 
 
 def _check_file(repo_root: Path, rel_path: Path) -> list[str]:
@@ -103,12 +108,15 @@ def _check_file(repo_root: Path, rel_path: Path) -> list[str]:
         return issues
 
     abs_path = repo_root / rel_path
-    sync_data = _extract_sync_target(abs_path)
+    try:
+        sync_data = _extract_sync_target(abs_path, repo_root)
+    except OSError as exc:
+        return [str(exc)]
     if sync_data is None:
         return issues
 
     line_no, target = sync_data
-    display_path = _display_path(abs_path)
+    display_path = _display_path(abs_path, repo_root)
 
     if not target:
         issues.append(
@@ -131,7 +139,7 @@ def _check_file(repo_root: Path, rel_path: Path) -> list[str]:
 
     target_abs = repo_root / target
     if not target_abs.exists():
-        case_match = _find_case_insensitive_match(target_abs)
+        case_match = _find_case_insensitive_match(target_abs, repo_root)
         if case_match is not None:
             issues.append(
                 f"{display_path}:{line_no}: SYNC target does not exist: {target} "
@@ -144,7 +152,11 @@ def _check_file(repo_root: Path, rel_path: Path) -> list[str]:
             )
         return issues
 
-    target_sync_data = _extract_sync_target(target_abs)
+    try:
+        target_sync_data = _extract_sync_target(target_abs, repo_root)
+    except OSError as exc:
+        issues.append(str(exc))
+        return issues
     if target_sync_data is None:
         issues.append(
             f"{display_path}:{line_no}: SYNC target missing reciprocal SYNC header: {target}"
@@ -154,7 +166,7 @@ def _check_file(repo_root: Path, rel_path: Path) -> list[str]:
     target_line, target_target = target_sync_data
     if target_target != rel_path.as_posix():
         issues.append(
-            f"{_display_path(target_abs)}:{target_line}: reciprocal SYNC header must reference {rel_path.as_posix()}"
+            f"{_display_path(target_abs, repo_root)}:{target_line}: reciprocal SYNC header must reference {rel_path.as_posix()}"
         )
 
     return issues
@@ -173,7 +185,7 @@ def _check_required_pair(repo_root: Path, docs_rel: str, wiki_name: str) -> list
         issues.append(f"docs/{docs_rel}:0: expected docs mirror file is missing")
         return issues
     if not wiki_path.exists():
-        case_match = _find_case_insensitive_match(wiki_path)
+        case_match = _find_case_insensitive_match(wiki_path, repo_root)
         if case_match is not None:
             issues.append(
                 f"wiki/{wiki_name}.md:0: expected wiki mirror file is missing "
@@ -186,12 +198,18 @@ def _check_required_pair(repo_root: Path, docs_rel: str, wiki_name: str) -> list
             )
         return issues
 
-    docs_sync = _extract_sync_target(docs_path)
-    if docs_sync is None:
+    docs_read_ok = True
+    try:
+        docs_sync = _extract_sync_target(docs_path, repo_root)
+    except OSError as exc:
+        issues.append(str(exc))
+        docs_sync = None
+        docs_read_ok = False
+    if docs_sync is None and docs_read_ok:
         issues.append(
             f"docs/{docs_rel}:1: missing SYNC header; expected target {docs_expected}"
         )
-    else:
+    elif docs_sync is not None:
         docs_line, docs_target = docs_sync
         if not docs_target:
             issues.append(
@@ -202,12 +220,18 @@ def _check_required_pair(repo_root: Path, docs_rel: str, wiki_name: str) -> list
                 f"docs/{docs_rel}:{docs_line}: SYNC header must target {docs_expected}, got {docs_target}"
             )
 
-    wiki_sync = _extract_sync_target(wiki_path)
-    if wiki_sync is None:
+    wiki_read_ok = True
+    try:
+        wiki_sync = _extract_sync_target(wiki_path, repo_root)
+    except OSError as exc:
+        issues.append(str(exc))
+        wiki_sync = None
+        wiki_read_ok = False
+    if wiki_sync is None and wiki_read_ok:
         issues.append(
             f"wiki/{wiki_name}.md:1: missing SYNC header; expected target {wiki_expected}"
         )
-    else:
+    elif wiki_sync is not None:
         wiki_line, wiki_target = wiki_sync
         if not wiki_target:
             issues.append(
@@ -228,18 +252,23 @@ def main() -> int:
 
     sync_script = repo_root / "scripts/docs/sync-wiki.py"
     try:
-        wiki_structure = _load_wiki_structure(sync_script)
+        wiki_structure = _load_wiki_structure(sync_script, repo_root)
     except (OSError, SyntaxError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
+    validated: set[str] = set()
     for docs_rel, wiki_name in wiki_structure.items():
         issues.extend(_check_required_pair(repo_root, docs_rel, wiki_name))
+        validated.add(f"docs/{docs_rel}")
+        validated.add(f"wiki/{wiki_name}.md")
 
     # Also validate any SYNC headers that exist outside the required pairs.
     for root in ("docs", "wiki"):
         for path in (repo_root / root).rglob("*.md"):
-            issues.extend(_check_file(repo_root, path.relative_to(repo_root)))
+            rel = path.relative_to(repo_root)
+            if rel.as_posix() not in validated:
+                issues.extend(_check_file(repo_root, rel))
 
     if issues:
         print("SYNC header validation failed:", file=sys.stderr)
