@@ -27,6 +27,8 @@ BEGIN_SENTINEL = "# BEGIN_FORTRESS_VERSIONS"
 END_SENTINEL = "# END_FORTRESS_VERSIONS"
 # 30 s balances slow networks against indefinite hangs in CI.
 REQUEST_TIMEOUT = 30
+# 10 s is generous for a local git subprocess; avoids hanging on network mounts.
+GIT_TIMEOUT = 10
 
 
 def _repo_from_git_remote() -> str | None:
@@ -42,7 +44,7 @@ def _repo_from_git_remote() -> str | None:
             ["git", "remote", "get-url", "origin"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=GIT_TIMEOUT,
         )
         if result.returncode != 0:
             return None
