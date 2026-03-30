@@ -1,0 +1,544 @@
+#!/usr/bin/env python3
+"""Unit tests for sync-issue-template-versions.py transformations."""
+
+from __future__ import annotations
+
+import importlib.util
+import json as _json
+import re
+import sys
+import urllib.error
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+scripts_dir = Path(__file__).parent.parent
+spec = importlib.util.spec_from_file_location(
+    "sync_issue_template_versions",
+    scripts_dir / "ci" / "sync-issue-template-versions.py",
+)
+sync_mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(sync_mod)
+
+build_version_block = sync_mod.build_version_block
+update_template = sync_mod.update_template
+validate_version_tags = sync_mod.validate_version_tags
+BEGIN_SENTINEL = sync_mod.BEGIN_SENTINEL
+END_SENTINEL = sync_mod.END_SENTINEL
+TEMPLATE_PATH = sync_mod.TEMPLATE_PATH
+NetworkError = sync_mod.NetworkError
+_repo_from_git_remote = sync_mod._repo_from_git_remote
+
+
+def _make_template(
+    versions: list[str],
+    indent: str = "        ",
+    post_sentinel: str = "",
+) -> str:
+    """Build a minimal template string with versions between sentinels."""
+    block = "\n".join(
+        [f"{indent}{BEGIN_SENTINEL}"]
+        + [f"{indent}- {v}" for v in versions]
+        + [f"{indent}{END_SENTINEL}"]
+    )
+    body = f"options:\n{block}\n"
+    if post_sentinel:
+        body += post_sentinel
+    return body
+
+
+def _mock_response(data: list[dict]) -> MagicMock:
+    """Create a mock urlopen response that works as a context manager."""
+    mock = MagicMock()
+    mock.__enter__ = MagicMock(return_value=mock)
+    mock.__exit__ = MagicMock(return_value=False)
+    mock.read.return_value = _json.dumps(data).encode()
+    mock.headers = {}
+    return mock
+
+
+class TestBuildVersionBlock:
+    def test_basic(self) -> None:
+        result = build_version_block(["v1.0.0", "v0.9.0"], "  ")
+        assert "  # BEGIN_FORTRESS_VERSIONS" in result
+        assert "  - v1.0.0" in result
+        assert "  - v0.9.0" in result
+        assert "  # END_FORTRESS_VERSIONS" in result
+        assert result.index("v1.0.0") < result.index("v0.9.0")
+
+    def test_empty_versions(self) -> None:
+        result = build_version_block([], "")
+        assert BEGIN_SENTINEL in result
+        assert END_SENTINEL in result
+        lines = result.splitlines()
+        assert lines[0] == BEGIN_SENTINEL
+        assert lines[-1] == END_SENTINEL
+        assert len(lines) == 2
+
+    def test_indent_preserved(self) -> None:
+        result = build_version_block(["v1.0.0"], "        ")
+        assert result.startswith("        " + BEGIN_SENTINEL)
+
+
+class TestUpdateTemplate:
+    def test_happy_path(self) -> None:
+        template = _make_template(["v0.1.0"])
+        new_content, changed = update_template(template, ["v1.0.0", "v0.9.0"])
+        assert changed
+        assert "- v1.0.0" in new_content
+        assert "- v0.9.0" in new_content
+        assert "- v0.1.0" not in new_content
+
+    def test_already_up_to_date(self) -> None:
+        versions = ["v1.0.0", "v0.9.0"]
+        template = _make_template(versions)
+        new_content, changed = update_template(template, versions)
+        assert not changed
+        assert new_content == template
+
+    def test_missing_begin_sentinel_raises(self) -> None:
+        template = f"options:\n        {END_SENTINEL}\n"
+        with pytest.raises(RuntimeError, match="missing.*BEGIN_FORTRESS_VERSIONS"):
+            update_template(template, ["v1.0.0"])
+
+    def test_missing_end_sentinel_raises(self) -> None:
+        template = f"options:\n        {BEGIN_SENTINEL}\n"
+        with pytest.raises(RuntimeError, match="missing.*END_FORTRESS_VERSIONS"):
+            update_template(template, ["v1.0.0"])
+
+    def test_sentinels_wrong_order_raises(self) -> None:
+        template = (
+            f"options:\n"
+            f"        {END_SENTINEL}\n"
+            f"        {BEGIN_SENTINEL}\n"
+        )
+        with pytest.raises(RuntimeError, match="must appear before"):
+            update_template(template, ["v1.0.0"])
+
+    def test_indentation_preserved(self) -> None:
+        indent = "        "
+        template = _make_template(["v0.1.0"], indent=indent)
+        new_content, changed = update_template(template, ["v2.0.0"])
+        assert changed
+        lines = new_content.splitlines()
+        version_lines = [ln for ln in lines if "- v2.0.0" in ln]
+        assert version_lines, "Expected at least one version line"
+        assert version_lines[0].startswith(indent)
+
+    def test_sentinel_lines_use_correct_indent(self) -> None:
+        indent = "    "
+        template = _make_template(["v0.1.0"], indent=indent)
+        new_content, _ = update_template(template, ["v1.0.0"])
+        assert f"{indent}{BEGIN_SENTINEL}" in new_content
+        assert f"{indent}{END_SENTINEL}" in new_content
+
+    def test_post_sentinel_content_preserved(self) -> None:
+        post = "- Other / not listed\n"
+        template = _make_template(["v0.1.0"], post_sentinel=post)
+        new_content, changed = update_template(template, ["v1.0.0"])
+        assert changed
+        assert "Other / not listed" in new_content
+        assert new_content.endswith(post)
+
+    def test_duplicate_begin_sentinel_raises(self) -> None:
+        template = (
+            f"options:\n"
+            f"        {BEGIN_SENTINEL}\n"
+            f"        - v1.0.0\n"
+            f"        {END_SENTINEL}\n"
+            f"        {BEGIN_SENTINEL}\n"
+        )
+        # Verify the error includes a 1-based line number and the sentinel name.
+        with pytest.raises(RuntimeError, match=r":\d+:.*multiple.*BEGIN_FORTRESS_VERSIONS"):
+            update_template(template, ["v1.0.0"])
+
+    def test_duplicate_end_sentinel_raises(self) -> None:
+        template = (
+            f"options:\n"
+            f"        {BEGIN_SENTINEL}\n"
+            f"        - v1.0.0\n"
+            f"        {END_SENTINEL}\n"
+            f"        {END_SENTINEL}\n"
+        )
+        # Verify the error includes a 1-based line number and the sentinel name.
+        with pytest.raises(RuntimeError, match=r":\d+:.*multiple.*END_FORTRESS_VERSIONS"):
+            update_template(template, ["v1.0.0"])
+
+
+class TestFetchVersions:
+    def test_single_page(self) -> None:
+        releases = [
+            {"tag_name": "v1.0.0", "prerelease": False, "draft": False},
+            {"tag_name": "v0.9.0", "prerelease": False, "draft": False},
+        ]
+        with patch("urllib.request.urlopen", return_value=_mock_response(releases)):
+            versions = sync_mod.fetch_versions()
+        assert versions == ["v1.0.0", "v0.9.0"]
+
+    def test_multi_page_pagination(self) -> None:
+        page1 = [
+            {"tag_name": f"v1.{i}.0", "prerelease": False, "draft": False}
+            for i in range(100)
+        ]
+        page2 = [
+            {"tag_name": "v0.1.0", "prerelease": False, "draft": False},
+        ]
+        responses = iter([_mock_response(page1), _mock_response(page2)])
+        with patch("urllib.request.urlopen", side_effect=lambda *_args, **_kw: next(responses)):
+            versions = sync_mod.fetch_versions()
+        assert len(versions) == 101
+        assert "v0.1.0" in versions
+
+    def test_prerelease_filtered(self) -> None:
+        releases = [
+            {"tag_name": "v1.0.0-beta", "prerelease": True, "draft": False},
+            {"tag_name": "v1.0.0", "prerelease": False, "draft": False},
+        ]
+        with patch("urllib.request.urlopen", return_value=_mock_response(releases)):
+            versions = sync_mod.fetch_versions()
+        assert "v1.0.0-beta" not in versions
+        assert "v1.0.0" in versions
+
+    def test_draft_filtered(self) -> None:
+        releases = [
+            {"tag_name": "v2.0.0-draft", "prerelease": False, "draft": True},
+            {"tag_name": "v1.0.0", "prerelease": False, "draft": False},
+        ]
+        with patch("urllib.request.urlopen", return_value=_mock_response(releases)):
+            versions = sync_mod.fetch_versions()
+        assert "v2.0.0-draft" not in versions
+        assert "v1.0.0" in versions
+
+    def test_http_error_raises_network_error(self) -> None:
+        exc = urllib.error.HTTPError(
+            url="http://example.com", code=403, msg="Forbidden", hdrs={}, fp=None
+        )
+        exc.read = lambda: b"not authorized"
+        with patch("urllib.request.urlopen", side_effect=exc):
+            with pytest.raises(NetworkError, match="HTTP 403"):
+                sync_mod.fetch_versions()
+
+    def test_url_error_raises_network_error(self) -> None:
+        exc = urllib.error.URLError(reason="Name or service not known")
+        with patch("urllib.request.urlopen", side_effect=exc):
+            with pytest.raises(NetworkError, match="network error"):
+                sync_mod.fetch_versions()
+
+    def test_network_error_is_runtime_error_subclass(self) -> None:
+        exc = urllib.error.URLError(reason="unreachable")
+        with patch("urllib.request.urlopen", side_effect=exc):
+            with pytest.raises(RuntimeError):
+                sync_mod.fetch_versions()
+
+    def test_empty_response(self) -> None:
+        with patch("urllib.request.urlopen", return_value=_mock_response([])):
+            versions = sync_mod.fetch_versions()
+        assert versions == []
+
+    def test_json_decode_error_raises_network_error(self) -> None:
+        mock = MagicMock()
+        mock.__enter__ = MagicMock(return_value=mock)
+        mock.__exit__ = MagicMock(return_value=False)
+        mock.read.return_value = b"<html>Service Unavailable</html>"
+        with patch("urllib.request.urlopen", return_value=mock):
+            with pytest.raises(NetworkError, match="invalid JSON.*Service Unavailable"):
+                sync_mod.fetch_versions()
+
+    def test_unicode_decode_error_raises_network_error(self) -> None:
+        mock = MagicMock()
+        mock.__enter__ = MagicMock(return_value=mock)
+        mock.__exit__ = MagicMock(return_value=False)
+        mock.read.return_value = b"\xc3"  # truncated 2-byte UTF-8 sequence; always invalid
+        with patch("urllib.request.urlopen", return_value=mock):
+            with pytest.raises(NetworkError, match=r"invalid JSON.*body:"):
+                sync_mod.fetch_versions()
+
+
+class TestMain:
+    def test_already_up_to_date(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        versions = ["v1.0.0", "v0.9.0"]
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(versions))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(sync_mod, "fetch_versions", return_value=versions):
+            result = sync_mod.main()
+        assert result == 0
+        assert template_file.read_text() == _make_template(versions)
+
+    def test_template_updated(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.1.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(sync_mod, "fetch_versions", return_value=["v1.0.0", "v0.1.0"]):
+            result = sync_mod.main()
+        assert result == 0
+        new_text = template_file.read_text()
+        assert "- v1.0.0" in new_text
+        assert "- v0.1.0" in new_text
+
+    def test_dry_run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        original = _make_template(["v0.1.0"])
+        template_file.write_text(original)
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog", "--dry-run"])
+        with patch.object(sync_mod, "fetch_versions", return_value=["v1.0.0", "v0.1.0"]):
+            result = sync_mod.main()
+        assert result == 0
+        assert template_file.read_text() == original
+        out = capsys.readouterr().out
+        assert "Would update version list:" in out
+        assert "- v1.0.0" in out
+        assert "- v0.1.0" in out
+        # Verify version lines in --dry-run output have no leading whitespace before '-'
+        version_line_re = re.compile(r"^\s+-\s+v\d+\.\d+\.\d+")
+        for line in out.splitlines():
+            if version_line_re.match(line):
+                assert line.startswith("- "), f"Unexpected indentation in version line: {line!r}"
+
+    def test_check_mode_out_of_date(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.1.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog", "--check"])
+        with patch.object(sync_mod, "fetch_versions", return_value=["v1.0.0", "v0.1.0"]):
+            result = sync_mod.main()
+        assert result == 1
+
+    def test_check_mode_up_to_date(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        versions = ["v1.0.0", "v0.1.0"]
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(versions))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog", "--check"])
+        with patch.object(sync_mod, "fetch_versions", return_value=versions):
+            result = sync_mod.main()
+        assert result == 0
+
+    def test_file_read_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(tmp_path / "nonexistent.yml"))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        result = sync_mod.main()
+        assert result == 1
+
+    def test_fetch_error_propagates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.1.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(sync_mod, "fetch_versions", side_effect=RuntimeError("unexpected error")):
+            result = sync_mod.main()
+        assert result == 1
+
+    def test_network_error_propagates_without_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.1.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(sync_mod, "fetch_versions", side_effect=NetworkError("network error fetching releases")):
+            result = sync_mod.main()
+        assert result == 1
+
+    def test_check_mode_skips_on_network_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.1.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog", "--check"])
+        with patch.object(sync_mod, "fetch_versions", side_effect=NetworkError("network error fetching releases")):
+            result = sync_mod.main()
+        assert result == 0
+
+    def test_empty_versions_returns_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.1.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(sync_mod, "fetch_versions", return_value=[]):
+            result = sync_mod.main()
+        assert result == 1
+
+    def test_all_invalid_tags_returns_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """All tags from the API fail validation → empty validated list → exit 1."""
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.1.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(sync_mod, "fetch_versions", return_value=["bad-tag", "1.0.0", "nope"]):
+            result = sync_mod.main()
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "no releases found" in err
+
+
+class TestValidateVersionTags:
+    def test_validate_version_tags_passes_valid_tags(self) -> None:
+        # Prefix match: vX.Y.Z plus optional pre-release suffixes are all valid.
+        tags = ["v1.0.0", "v0.9.0", "v1.2.3-hotfix"]
+        result = validate_version_tags(tags)
+        assert result == tags
+
+    def test_validate_version_tags_filters_invalid_tags(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        tags = ["1.0.0", "release-1.0"]
+        result = validate_version_tags(tags)
+        assert result == []
+        err = capsys.readouterr().err
+        assert "1.0.0" in err
+        assert "release-1.0" in err
+
+    def test_validate_version_tags_all_invalid_returns_empty(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        tags = ["bad", "no-v-prefix", "1.2.3"]
+        result = validate_version_tags(tags)
+        assert result == []
+        err = capsys.readouterr().err
+        assert err != ""
+
+    def test_validate_version_tags_mixed(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        tags = ["v1.0.0", "1.0.0", "v0.9.0", "release-0.9"]
+        result = validate_version_tags(tags)
+        assert result == ["v1.0.0", "v0.9.0"]
+        err = capsys.readouterr().err
+        assert "1.0.0" in err
+        assert "release-0.9" in err
+
+    def test_main_warns_on_bad_tag_format(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v1.0.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(
+            sync_mod,
+            "fetch_versions",
+            return_value=["v1.0.0", "bad-tag", "v0.9.0"],
+        ):
+            result = sync_mod.main()
+        assert result == 0
+        err = capsys.readouterr().err
+        assert "bad-tag" in err
+        new_text = template_file.read_text()
+        assert "- v1.0.0" in new_text
+        assert "- v0.9.0" in new_text
+        assert "bad-tag" not in new_text
+
+
+class TestRepoResolution:
+    def _make_run_result(self, stdout: str, returncode: int = 0) -> MagicMock:
+        mock = MagicMock()
+        mock.returncode = returncode
+        mock.stdout = stdout
+        return mock
+
+    def test_repo_from_git_remote_https(self) -> None:
+        result = self._make_run_result("https://github.com/owner/myrepo.git\n")
+        with patch("subprocess.run", return_value=result):
+            assert _repo_from_git_remote() == "owner/myrepo"
+
+    def test_repo_from_git_remote_ssh(self) -> None:
+        result = self._make_run_result("git@github.com:owner/myrepo.git\n")
+        with patch("subprocess.run", return_value=result):
+            assert _repo_from_git_remote() == "owner/myrepo"
+
+    def test_repo_from_git_remote_no_remote(self) -> None:
+        result = self._make_run_result("", returncode=1)
+        with patch("subprocess.run", return_value=result):
+            assert _repo_from_git_remote() is None
+
+    def test_repo_from_git_remote_subprocess_error(self) -> None:
+        with patch("subprocess.run", side_effect=OSError("git not found")):
+            assert _repo_from_git_remote() is None
+
+    def test_repo_from_git_remote_non_github(self) -> None:
+        result = self._make_run_result("https://gitlab.com/owner/repo.git\n")
+        with patch("subprocess.run", return_value=result):
+            assert _repo_from_git_remote() is None
+
+    def test_repo_from_git_remote_https_no_git_suffix(self) -> None:
+        """HTTPS remote without trailing .git is parsed correctly."""
+        result = self._make_run_result("https://github.com/owner/myrepo\n")
+        with patch("subprocess.run", return_value=result):
+            assert _repo_from_git_remote() == "owner/myrepo"
+
+    def test_repo_from_git_remote_ssh_no_git_suffix(self) -> None:
+        """SSH remote without trailing .git is parsed correctly."""
+        result = self._make_run_result("git@github.com:owner/myrepo\n")
+        with patch("subprocess.run", return_value=result):
+            assert _repo_from_git_remote() == "owner/myrepo"
+
+    def test_resolve_github_repo_uses_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+        repo, api_url, is_fallback = sync_mod._resolve_github_repo()
+        assert repo == "owner/repo"
+        assert api_url == "https://api.github.com/repos/owner/repo/releases"
+        assert is_fallback is False
+
+    def test_resolve_github_repo_uses_git_remote(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+        with patch.object(sync_mod, "_repo_from_git_remote", return_value="owner/repo"):
+            repo, api_url, is_fallback = sync_mod._resolve_github_repo()
+        assert repo == "owner/repo"
+        assert api_url == "https://api.github.com/repos/owner/repo/releases"
+        assert is_fallback is False
+
+    def test_resolve_github_repo_uses_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+        with patch.object(sync_mod, "_repo_from_git_remote", return_value=None):
+            repo, api_url, is_fallback = sync_mod._resolve_github_repo()
+        assert repo == "wallstop/fortress-rollback"
+        assert api_url == sync_mod.GITHUB_API
+        assert is_fallback is True
+
+
+class TestCheckModeSilent:
+    def test_check_mode_up_to_date_is_silent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        versions = ["v1.0.0", "v0.9.0"]
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(versions))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog", "--check"])
+        with patch.object(sync_mod, "fetch_versions", return_value=versions):
+            result = sync_mod.main()
+        assert result == 0
+        out = capsys.readouterr().out
+        assert out == ""
+
+
+class TestFallbackWarning:
+    def test_fallback_warning_printed_to_stderr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """When _resolve_github_repo returns is_fallback=True, main() emits a warning to stderr."""
+        versions = ["v1.0.0"]
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(versions))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(
+            sync_mod,
+            "_resolve_github_repo",
+            return_value=("wallstop/fortress-rollback", sync_mod.GITHUB_API, True),
+        ):
+            with patch.object(sync_mod, "fetch_versions", return_value=versions):
+                result = sync_mod.main()
+        assert result == 0
+        err = capsys.readouterr().err
+        assert "warning" in err.lower()
+        assert "GITHUB_REPOSITORY" in err
+        assert "fallback" in err

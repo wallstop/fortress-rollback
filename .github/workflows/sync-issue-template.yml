@@ -1,0 +1,55 @@
+---
+name: Sync Issue Template Versions
+
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-issue-template
+  cancel-in-progress: false
+
+jobs:
+  sync-versions:
+    name: Sync Release Versions Into Issue Template
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Sync versions into bug report template
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python scripts/ci/sync-issue-template-versions.py
+
+      - name: Commit and push changes
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/ISSUE_TEMPLATE/bug_report.yml
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          MSG="chore: sync release versions in bug report template"
+          if [ -n "${RELEASE_TAG}" ]; then
+            MSG="${MSG} [${RELEASE_TAG}]"
+          fi
+          git commit -m "$MSG"
+          git push origin "HEAD:${DEFAULT_BRANCH}"

@@ -248,3 +248,11 @@ repos:
         pass_filenames: false
         files: '\.rs$|Cargo\.toml$'
         stages: [pre-push]
+
+      - id: check-issue-template-versions
+        name: check issue template versions (skips if offline)
+        entry: python scripts/ci/sync-issue-template-versions.py --check
+        language: python
+        pass_filenames: false
+        files: '^(\.github/ISSUE_TEMPLATE/bug_report\.yml|scripts/ci/sync-issue-template-versions\.py)$'
+        stages: [pre-push]
