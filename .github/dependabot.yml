@@ -8,67 +8,88 @@ updates:
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
     assignees:
       - "wallstop"
     reviewers:
       - "wallstop"
     commit-message:
       prefix: "chore(deps)"
-    open-pull-requests-limit: 10
+    # Favor larger, area-grouped PRs over many single-package PRs.
+    groups:
+      cargo-workspace:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 2
 
   # Rust dependencies for fuzz directory (separate workspace)
   - package-ecosystem: "cargo"
     directory: "/fuzz"
     schedule:
-      interval: "daily"
+      interval: "weekly"
     assignees:
       - "wallstop"
     reviewers:
       - "wallstop"
     commit-message:
       prefix: "chore(deps)"
-    open-pull-requests-limit: 5
+    groups:
+      cargo-fuzz:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 1
 
   # Rust dependencies for loom-tests directory (separate workspace,
   # requires special --cfg loom flags that conflict with normal builds)
   - package-ecosystem: "cargo"
     directory: "/loom-tests"
     schedule:
-      interval: "daily"
+      interval: "weekly"
     assignees:
       - "wallstop"
     reviewers:
       - "wallstop"
     commit-message:
       prefix: "chore(deps)"
-    open-pull-requests-limit: 5
+    groups:
+      cargo-loom-tests:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 1
 
   # GitHub Actions dependencies
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
     assignees:
       - "wallstop"
     reviewers:
       - "wallstop"
     commit-message:
       prefix: "chore(ci)"
-    open-pull-requests-limit: 5
+    groups:
+      github-actions-all:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 1
 
   # Docker dependencies
   - package-ecosystem: "docker"
     directory: "/docker"
     schedule:
-      interval: "daily"
+      interval: "weekly"
     assignees:
       - "wallstop"
     reviewers:
       - "wallstop"
     commit-message:
       prefix: "chore(docker)"
-    open-pull-requests-limit: 3
+    groups:
+      docker-all:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 1
     ignore:
       # Rust base image is intentionally pinned to MSRV (Minimum Supported Rust Version)
       # defined in Cargo.toml. The Dockerfile uses MSRV to ensure network tests validate
