@@ -357,7 +357,7 @@ POST:
     RETURNS input_queues[handle].add_input(input)
 ```
 
-#### synchronized_inputs(connect_status) → Vec<(Input, InputStatus)>
+#### synchronized_inputs(connect_status) → Vec&lt;(Input, InputStatus)&gt;
 
 ```
 POST:
