@@ -204,7 +204,7 @@ while !session.is_complete() {
 
 ## API Reference
 
-### Replay\<I\>
+### Replay&lt;I&gt;
 
 | Item | Description |
 |------|-------------|
@@ -217,7 +217,7 @@ while !session.is_complete() {
 | `total_frames()` | Number of recorded frames |
 | `validate()` | Check internal consistency (frames/checksums/metadata) |
 
-### ReplaySession\<T\>
+### ReplaySession&lt;T&gt;
 
 | Method | Description |
 |--------|-------------|
