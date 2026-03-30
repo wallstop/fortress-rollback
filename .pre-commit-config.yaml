@@ -250,7 +250,7 @@ repos:
         stages: [pre-push]
 
       - id: check-issue-template-versions
-        name: check issue template versions (requires network)
+        name: check issue template versions (skips if offline)
         entry: python scripts/ci/sync-issue-template-versions.py --check
         language: python
         pass_filenames: false

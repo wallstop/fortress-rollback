@@ -28,6 +28,7 @@ BEGIN_SENTINEL = sync_mod.BEGIN_SENTINEL
 END_SENTINEL = sync_mod.END_SENTINEL
 TEMPLATE_PATH = sync_mod.TEMPLATE_PATH
 NetworkError = sync_mod.NetworkError
+_repo_from_git_remote = sync_mod._repo_from_git_remote
 
 
 def _make_template(
@@ -139,6 +140,28 @@ class TestUpdateTemplate:
         assert changed
         assert "Other / not listed" in new_content
         assert new_content.endswith(post)
+
+    def test_duplicate_begin_sentinel_raises(self) -> None:
+        template = (
+            f"options:\n"
+            f"        {BEGIN_SENTINEL}\n"
+            f"        - v1.0.0\n"
+            f"        {END_SENTINEL}\n"
+            f"        {BEGIN_SENTINEL}\n"
+        )
+        with pytest.raises(RuntimeError, match="multiple.*BEGIN_FORTRESS_VERSIONS"):
+            update_template(template, ["v1.0.0"])
+
+    def test_duplicate_end_sentinel_raises(self) -> None:
+        template = (
+            f"options:\n"
+            f"        {BEGIN_SENTINEL}\n"
+            f"        - v1.0.0\n"
+            f"        {END_SENTINEL}\n"
+            f"        {END_SENTINEL}\n"
+        )
+        with pytest.raises(RuntimeError, match="multiple.*END_FORTRESS_VERSIONS"):
+            update_template(template, ["v1.0.0"])
 
 
 class TestFetchVersions:
@@ -392,3 +415,52 @@ class TestValidateVersionTags:
         assert "- v1.0.0" in new_text
         assert "- v0.9.0" in new_text
         assert "bad-tag" not in new_text
+
+
+class TestRepoResolution:
+    def _make_run_result(self, stdout: str, returncode: int = 0) -> MagicMock:
+        mock = MagicMock()
+        mock.returncode = returncode
+        mock.stdout = stdout
+        return mock
+
+    def test_repo_from_git_remote_https(self) -> None:
+        result = self._make_run_result("https://github.com/owner/myrepo.git\n")
+        with patch("subprocess.run", return_value=result):
+            assert _repo_from_git_remote() == "owner/myrepo"
+
+    def test_repo_from_git_remote_ssh(self) -> None:
+        result = self._make_run_result("git@github.com:owner/myrepo.git\n")
+        with patch("subprocess.run", return_value=result):
+            assert _repo_from_git_remote() == "owner/myrepo"
+
+    def test_repo_from_git_remote_no_remote(self) -> None:
+        result = self._make_run_result("", returncode=1)
+        with patch("subprocess.run", return_value=result):
+            assert _repo_from_git_remote() is None
+
+    def test_repo_from_git_remote_subprocess_error(self) -> None:
+        with patch("subprocess.run", side_effect=OSError("git not found")):
+            assert _repo_from_git_remote() is None
+
+    def test_repo_from_git_remote_non_github(self) -> None:
+        result = self._make_run_result("https://gitlab.com/owner/repo.git\n")
+        with patch("subprocess.run", return_value=result):
+            assert _repo_from_git_remote() is None
+
+
+class TestCheckModeSilent:
+    def test_check_mode_up_to_date_is_silent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        versions = ["v1.0.0", "v0.9.0"]
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(versions))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sync_mod, "_GITHUB_REPO_IS_FALLBACK", False)
+        monkeypatch.setattr(sys, "argv", ["prog", "--check"])
+        with patch.object(sync_mod, "fetch_versions", return_value=versions):
+            result = sync_mod.main()
+        assert result == 0
+        out = capsys.readouterr().out
+        assert out == ""

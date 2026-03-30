@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -24,10 +25,54 @@ from pathlib import Path
 TEMPLATE_PATH = ".github/ISSUE_TEMPLATE/bug_report.yml"
 BEGIN_SENTINEL = "# BEGIN_FORTRESS_VERSIONS"
 END_SENTINEL = "# END_FORTRESS_VERSIONS"
-GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY", "wallstop/fortress-rollback")
-GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 # 30 s balances slow networks against indefinite hangs in CI.
 REQUEST_TIMEOUT = 30
+
+
+def _repo_from_git_remote() -> str | None:
+    """Try to derive owner/repo from the 'origin' git remote URL.
+
+    Handles both HTTPS and SSH remote formats:
+    - https://github.com/owner/repo.git
+    - git@github.com:owner/repo.git
+    Returns None if git is unavailable or the remote is not a GitHub URL.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        remote_url = result.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    # HTTPS: https://github.com/owner/repo[.git]
+    match = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", remote_url)
+    if match:
+        return match.group(1)
+    return None
+
+
+_GITHUB_REPO_IS_FALLBACK: bool = False
+GITHUB_REPO: str
+_env_repo = os.environ.get("GITHUB_REPOSITORY")
+if _env_repo:
+    GITHUB_REPO = _env_repo
+else:
+    _git_repo = _repo_from_git_remote()
+    if _git_repo:
+        GITHUB_REPO = _git_repo
+    else:
+        # Last resort: use the canonical upstream. A warning is printed at
+        # runtime so the user knows the fallback is active.
+        GITHUB_REPO = "wallstop/fortress-rollback"
+        _GITHUB_REPO_IS_FALLBACK = True
+
+GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 
 
 class NetworkError(RuntimeError):
@@ -126,9 +171,17 @@ def update_template(content: str, versions: list[str]) -> tuple[str, bool]:
     for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped == BEGIN_SENTINEL:
+            if begin_idx is not None:
+                raise RuntimeError(
+                    f"{TEMPLATE_PATH}:{i + 1}: multiple {BEGIN_SENTINEL} sentinels found"
+                )
             begin_idx = i
             sentinel_indent = line[: len(line) - len(line.lstrip())]
         elif stripped == END_SENTINEL:
+            if end_idx is not None:
+                raise RuntimeError(
+                    f"{TEMPLATE_PATH}:{i + 1}: multiple {END_SENTINEL} sentinels found"
+                )
             end_idx = i
 
     if begin_idx is None:
@@ -164,6 +217,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if _GITHUB_REPO_IS_FALLBACK:
+        print(
+            f"warning: GITHUB_REPOSITORY not set and no git remote found; "
+            f"using fallback {GITHUB_REPO!r}",
+            file=sys.stderr,
+        )
+
     template = Path(TEMPLATE_PATH)
     try:
         original = template.read_text(encoding="utf-8")
@@ -194,7 +254,8 @@ def main() -> int:
         return 1
 
     if not changed:
-        print("Template is already up to date.")
+        if not args.check:
+            print("Template is already up to date.")
         return 0
 
     if args.dry_run:
