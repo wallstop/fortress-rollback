@@ -251,7 +251,7 @@ class TestFetchVersions:
         mock.__exit__ = MagicMock(return_value=False)
         mock.read.return_value = b"\xff\xfe"
         with patch("urllib.request.urlopen", return_value=mock):
-            with pytest.raises(NetworkError, match="invalid JSON"):
+            with pytest.raises(NetworkError, match=r"invalid JSON.*body:"):
                 sync_mod.fetch_versions()
 
 
