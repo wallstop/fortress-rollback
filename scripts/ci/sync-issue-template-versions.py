@@ -26,6 +26,7 @@ BEGIN_SENTINEL = "# BEGIN_FORTRESS_VERSIONS"
 END_SENTINEL = "# END_FORTRESS_VERSIONS"
 GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY", "wallstop/fortress-rollback")
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
+REQUEST_TIMEOUT = 30
 
 
 class NetworkError(RuntimeError):
@@ -57,7 +58,7 @@ def fetch_versions() -> list[str]:
         url = f"{GITHUB_API}?per_page=100&page={page}"
         req = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 data = json.loads(resp.read().decode())
         except urllib.error.HTTPError as exc:
             body = exc.read().decode(errors="replace")[:200]

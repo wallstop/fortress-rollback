@@ -159,7 +159,7 @@ class TestFetchVersions:
             {"tag_name": "v0.1.0", "prerelease": False, "draft": False},
         ]
         responses = iter([_mock_response(page1), _mock_response(page2)])
-        with patch("urllib.request.urlopen", side_effect=lambda _req: next(responses)):
+        with patch("urllib.request.urlopen", side_effect=lambda _req, **_kw: next(responses)):
             versions = sync_mod.fetch_versions()
         assert len(versions) == 101
         assert "v0.1.0" in versions
@@ -317,6 +317,20 @@ class TestMain:
         with patch.object(sync_mod, "fetch_versions", return_value=[]):
             result = sync_mod.main()
         assert result == 1
+
+    def test_all_invalid_tags_returns_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """All tags from the API fail validation → empty validated list → exit 1."""
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.1.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(sync_mod, "fetch_versions", return_value=["bad-tag", "1.0.0", "nope"]):
+            result = sync_mod.main()
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "no releases found" in err
 
 
 class TestValidateVersionTags:
