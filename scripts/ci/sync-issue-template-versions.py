@@ -50,7 +50,8 @@ def _repo_from_git_remote() -> str | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
 
-    # HTTPS: https://github.com/owner/repo[.git]
+    # Matches both HTTPS (https://github.com/owner/repo[.git]) and
+    # SSH (git@github.com:owner/repo[.git]) remote URL formats.
     match = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", remote_url)
     if match:
         return match.group(1)
