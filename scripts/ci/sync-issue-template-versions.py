@@ -128,7 +128,7 @@ def fetch_versions(api_url: str | None = None) -> list[str]:
                 try:
                     data = json.loads(raw.decode())
                 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                    snippet = raw[:_ERROR_BODY_SNIPPET_LEN].decode(errors="replace")
+                    snippet = raw.decode(errors="replace")[:_ERROR_BODY_SNIPPET_LEN]
                     raise NetworkError(
                         f"invalid JSON response from {url}: {exc}; body: {snippet!r}"
                     ) from exc

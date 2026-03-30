@@ -249,7 +249,7 @@ class TestFetchVersions:
         mock = MagicMock()
         mock.__enter__ = MagicMock(return_value=mock)
         mock.__exit__ = MagicMock(return_value=False)
-        mock.read.return_value = b"\xff\xfe"
+        mock.read.return_value = b"\xc3"  # truncated 2-byte UTF-8 sequence; always invalid
         with patch("urllib.request.urlopen", return_value=mock):
             with pytest.raises(NetworkError, match=r"invalid JSON.*body:"):
                 sync_mod.fetch_versions()
