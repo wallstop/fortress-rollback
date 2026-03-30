@@ -29,6 +29,8 @@ END_SENTINEL = "# END_FORTRESS_VERSIONS"
 REQUEST_TIMEOUT = 30
 # 10 s is generous for a local git subprocess; avoids hanging on network mounts.
 GIT_TIMEOUT = 10
+# Maximum bytes of a response body included in error messages to aid debugging.
+_ERROR_BODY_SNIPPET_LEN = 200
 
 
 def _repo_from_git_remote() -> str | None:
@@ -60,22 +62,34 @@ def _repo_from_git_remote() -> str | None:
     return None
 
 
-_GITHUB_REPO_IS_FALLBACK: bool = False
-GITHUB_REPO: str
-_env_repo = os.environ.get("GITHUB_REPOSITORY")
-if _env_repo:
-    GITHUB_REPO = _env_repo
-else:
-    _git_repo = _repo_from_git_remote()
-    if _git_repo:
-        GITHUB_REPO = _git_repo
-    else:
-        # Last resort: use the canonical upstream. A warning is printed at
-        # runtime so the user knows the fallback is active.
-        GITHUB_REPO = "wallstop/fortress-rollback"
-        _GITHUB_REPO_IS_FALLBACK = True
-
+# Default constants — used as documentation and fallback; actual runtime resolution
+# happens lazily in _resolve_github_repo() which is called from main() and fetch_versions().
+GITHUB_REPO = "wallstop/fortress-rollback"
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
+
+
+def _resolve_github_repo() -> tuple[str, str, bool]:
+    """Resolve the GitHub owner/repo, API URL, and fallback flag.
+
+    Resolution order:
+    1. GITHUB_REPOSITORY environment variable
+    2. Origin git remote URL (via _repo_from_git_remote)
+    3. Hard-coded fallback (GITHUB_REPO constant)
+
+    Returns (repo, api_url, is_fallback) where is_fallback is True only
+    when the hard-coded constant was used.
+    """
+    env_repo = os.environ.get("GITHUB_REPOSITORY")
+    if env_repo:
+        repo = env_repo
+    else:
+        git_repo = _repo_from_git_remote()
+        if git_repo:
+            repo = git_repo
+        else:
+            return GITHUB_REPO, GITHUB_API, True
+    api_url = f"https://api.github.com/repos/{repo}/releases"
+    return repo, api_url, False
 
 
 class NetworkError(RuntimeError):
@@ -86,13 +100,15 @@ class NetworkError(RuntimeError):
     """
 
 
-def fetch_versions() -> list[str]:
+def fetch_versions(api_url: str | None = None) -> list[str]:
     """Fetch all release tag names from GitHub API, newest first.
 
     Tags are returned exactly as provided by the GitHub API and may not
     conform to the expected ``vX.Y.Z`` format.  Callers should pass the
     result through :func:`validate_version_tags` before use.
     """
+    if api_url is None:
+        _, api_url, _ = _resolve_github_repo()
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -104,16 +120,23 @@ def fetch_versions() -> list[str]:
     versions: list[str] = []
     page = 1
     while True:
-        url = f"{GITHUB_API}?per_page=100&page={page}"
+        url = f"{api_url}?per_page=100&page={page}"
         req = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-                data = json.loads(resp.read().decode())
+                raw = resp.read()
+                try:
+                    data = json.loads(raw.decode())
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    snippet = raw[:_ERROR_BODY_SNIPPET_LEN].decode(errors="replace")
+                    raise NetworkError(
+                        f"invalid JSON response from {url}: {exc}; body: {snippet!r}"
+                    ) from exc
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode(errors="replace")[:200]
-            raise NetworkError(f"HTTP {exc.code} fetching releases from {url}: {body}")
+            body = exc.read().decode(errors="replace")[:_ERROR_BODY_SNIPPET_LEN]
+            raise NetworkError(f"HTTP {exc.code} fetching releases from {url}: {body}") from exc
         except urllib.error.URLError as exc:
-            raise NetworkError(f"network error fetching releases from {url}: {exc}")
+            raise NetworkError(f"network error fetching releases from {url}: {exc}") from exc
 
         if not data:
             break
@@ -220,7 +243,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if _GITHUB_REPO_IS_FALLBACK:
+    _, api_url, is_fallback = _resolve_github_repo()
+    if is_fallback:
         print(
             f"warning: GITHUB_REPOSITORY not set and no git remote found; "
             f"using fallback {GITHUB_REPO!r}",
@@ -236,7 +260,7 @@ def main() -> int:
 
     versions: list[str] = []
     try:
-        versions = validate_version_tags(fetch_versions())
+        versions = validate_version_tags(fetch_versions(api_url))
     except NetworkError as exc:
         if args.check:
             print(f"Skipping issue template version check: {exc}", file=sys.stderr)

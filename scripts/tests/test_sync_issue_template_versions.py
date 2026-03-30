@@ -236,6 +236,24 @@ class TestFetchVersions:
             versions = sync_mod.fetch_versions()
         assert versions == []
 
+    def test_json_decode_error_raises_network_error(self) -> None:
+        mock = MagicMock()
+        mock.__enter__ = MagicMock(return_value=mock)
+        mock.__exit__ = MagicMock(return_value=False)
+        mock.read.return_value = b"<html>Service Unavailable</html>"
+        with patch("urllib.request.urlopen", return_value=mock):
+            with pytest.raises(NetworkError, match="invalid JSON.*Service Unavailable"):
+                sync_mod.fetch_versions()
+
+    def test_unicode_decode_error_raises_network_error(self) -> None:
+        mock = MagicMock()
+        mock.__enter__ = MagicMock(return_value=mock)
+        mock.__exit__ = MagicMock(return_value=False)
+        mock.read.return_value = b"\xff\xfe"
+        with patch("urllib.request.urlopen", return_value=mock):
+            with pytest.raises(NetworkError, match="invalid JSON"):
+                sync_mod.fetch_versions()
+
 
 class TestMain:
     def test_already_up_to_date(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -353,7 +371,6 @@ class TestMain:
         template_file = tmp_path / "bug_report.yml"
         template_file.write_text(_make_template(["v0.1.0"]))
         monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
-        monkeypatch.setattr(sync_mod, "_GITHUB_REPO_IS_FALLBACK", False)
         monkeypatch.setattr(sys, "argv", ["prog"])
         with patch.object(sync_mod, "fetch_versions", return_value=["bad-tag", "1.0.0", "nope"]):
             result = sync_mod.main()
@@ -463,6 +480,29 @@ class TestRepoResolution:
         with patch("subprocess.run", return_value=result):
             assert _repo_from_git_remote() == "owner/myrepo"
 
+    def test_resolve_github_repo_uses_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+        repo, api_url, is_fallback = sync_mod._resolve_github_repo()
+        assert repo == "owner/repo"
+        assert api_url == "https://api.github.com/repos/owner/repo/releases"
+        assert is_fallback is False
+
+    def test_resolve_github_repo_uses_git_remote(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+        with patch.object(sync_mod, "_repo_from_git_remote", return_value="owner/repo"):
+            repo, api_url, is_fallback = sync_mod._resolve_github_repo()
+        assert repo == "owner/repo"
+        assert api_url == "https://api.github.com/repos/owner/repo/releases"
+        assert is_fallback is False
+
+    def test_resolve_github_repo_uses_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+        with patch.object(sync_mod, "_repo_from_git_remote", return_value=None):
+            repo, api_url, is_fallback = sync_mod._resolve_github_repo()
+        assert repo == "wallstop/fortress-rollback"
+        assert api_url == sync_mod.GITHUB_API
+        assert is_fallback is True
+
 
 class TestCheckModeSilent:
     def test_check_mode_up_to_date_is_silent(
@@ -472,7 +512,6 @@ class TestCheckModeSilent:
         template_file = tmp_path / "bug_report.yml"
         template_file.write_text(_make_template(versions))
         monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
-        monkeypatch.setattr(sync_mod, "_GITHUB_REPO_IS_FALLBACK", False)
         monkeypatch.setattr(sys, "argv", ["prog", "--check"])
         with patch.object(sync_mod, "fetch_versions", return_value=versions):
             result = sync_mod.main()
@@ -485,15 +524,19 @@ class TestFallbackWarning:
     def test_fallback_warning_printed_to_stderr(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
     ) -> None:
-        """When _GITHUB_REPO_IS_FALLBACK is True, main() emits a warning to stderr."""
+        """When _resolve_github_repo returns is_fallback=True, main() emits a warning to stderr."""
         versions = ["v1.0.0"]
         template_file = tmp_path / "bug_report.yml"
         template_file.write_text(_make_template(versions))
         monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
-        monkeypatch.setattr(sync_mod, "_GITHUB_REPO_IS_FALLBACK", True)
         monkeypatch.setattr(sys, "argv", ["prog"])
-        with patch.object(sync_mod, "fetch_versions", return_value=versions):
-            result = sync_mod.main()
+        with patch.object(
+            sync_mod,
+            "_resolve_github_repo",
+            return_value=("wallstop/fortress-rollback", sync_mod.GITHUB_API, True),
+        ):
+            with patch.object(sync_mod, "fetch_versions", return_value=versions):
+                result = sync_mod.main()
         assert result == 0
         err = capsys.readouterr().err
         assert "warning" in err.lower()

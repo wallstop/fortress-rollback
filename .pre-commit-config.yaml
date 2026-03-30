@@ -254,4 +254,5 @@ repos:
         entry: python scripts/ci/sync-issue-template-versions.py --check
         language: python
         pass_filenames: false
+        files: '^(\.github/ISSUE_TEMPLATE/bug_report\.yml|scripts/ci/sync-issue-template-versions\.py)$'
         stages: [pre-push]
