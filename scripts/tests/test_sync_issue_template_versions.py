@@ -149,7 +149,8 @@ class TestUpdateTemplate:
             f"        {END_SENTINEL}\n"
             f"        {BEGIN_SENTINEL}\n"
         )
-        with pytest.raises(RuntimeError, match="multiple.*BEGIN_FORTRESS_VERSIONS"):
+        # Verify the error includes a 1-based line number and the sentinel name.
+        with pytest.raises(RuntimeError, match=r":\d+:.*multiple.*BEGIN_FORTRESS_VERSIONS"):
             update_template(template, ["v1.0.0"])
 
     def test_duplicate_end_sentinel_raises(self) -> None:
@@ -160,7 +161,8 @@ class TestUpdateTemplate:
             f"        {END_SENTINEL}\n"
             f"        {END_SENTINEL}\n"
         )
-        with pytest.raises(RuntimeError, match="multiple.*END_FORTRESS_VERSIONS"):
+        # Verify the error includes a 1-based line number and the sentinel name.
+        with pytest.raises(RuntimeError, match=r":\d+:.*multiple.*END_FORTRESS_VERSIONS"):
             update_template(template, ["v1.0.0"])
 
 
@@ -351,6 +353,7 @@ class TestMain:
         template_file = tmp_path / "bug_report.yml"
         template_file.write_text(_make_template(["v0.1.0"]))
         monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sync_mod, "_GITHUB_REPO_IS_FALLBACK", False)
         monkeypatch.setattr(sys, "argv", ["prog"])
         with patch.object(sync_mod, "fetch_versions", return_value=["bad-tag", "1.0.0", "nope"]):
             result = sync_mod.main()
@@ -448,6 +451,18 @@ class TestRepoResolution:
         with patch("subprocess.run", return_value=result):
             assert _repo_from_git_remote() is None
 
+    def test_repo_from_git_remote_https_no_git_suffix(self) -> None:
+        """HTTPS remote without trailing .git is parsed correctly."""
+        result = self._make_run_result("https://github.com/owner/myrepo\n")
+        with patch("subprocess.run", return_value=result):
+            assert _repo_from_git_remote() == "owner/myrepo"
+
+    def test_repo_from_git_remote_ssh_no_git_suffix(self) -> None:
+        """SSH remote without trailing .git is parsed correctly."""
+        result = self._make_run_result("git@github.com:owner/myrepo\n")
+        with patch("subprocess.run", return_value=result):
+            assert _repo_from_git_remote() == "owner/myrepo"
+
 
 class TestCheckModeSilent:
     def test_check_mode_up_to_date_is_silent(
@@ -464,3 +479,22 @@ class TestCheckModeSilent:
         assert result == 0
         out = capsys.readouterr().out
         assert out == ""
+
+
+class TestFallbackWarning:
+    def test_fallback_warning_printed_to_stderr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """When _GITHUB_REPO_IS_FALLBACK is True, main() emits a warning to stderr."""
+        versions = ["v1.0.0"]
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(versions))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sync_mod, "_GITHUB_REPO_IS_FALLBACK", True)
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(sync_mod, "fetch_versions", return_value=versions):
+            result = sync_mod.main()
+        assert result == 0
+        err = capsys.readouterr().err
+        assert "warning" in err.lower()
+        assert "fallback" in err or "GITHUB_REPOSITORY" in err
