@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json as _json
+import re
 import sys
 import urllib.error
 from pathlib import Path
@@ -159,7 +160,7 @@ class TestFetchVersions:
             {"tag_name": "v0.1.0", "prerelease": False, "draft": False},
         ]
         responses = iter([_mock_response(page1), _mock_response(page2)])
-        with patch("urllib.request.urlopen", side_effect=lambda _req, **_kw: next(responses)):
+        with patch("urllib.request.urlopen", side_effect=lambda *_args, **_kw: next(responses)):
             versions = sync_mod.fetch_versions()
         assert len(versions) == 101
         assert "v0.1.0" in versions
@@ -249,9 +250,11 @@ class TestMain:
         assert "Would update version list:" in out
         assert "- v1.0.0" in out
         assert "- v0.1.0" in out
-        # Verify no leading whitespace before '-' in any output line
+        # Verify version lines in --dry-run output have no leading whitespace before '-'
+        version_line_re = re.compile(r"^\s+-\s+v\d+\.\d+\.\d+")
         for line in out.splitlines():
-            assert not line.startswith("  -"), f"Unexpected leading whitespace in: {line!r}"
+            if version_line_re.match(line):
+                assert line.startswith("- "), f"Unexpected indentation in version line: {line!r}"
 
     def test_check_mode_out_of_date(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         template_file = tmp_path / "bug_report.yml"
