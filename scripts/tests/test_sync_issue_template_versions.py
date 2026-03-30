@@ -497,4 +497,5 @@ class TestFallbackWarning:
         assert result == 0
         err = capsys.readouterr().err
         assert "warning" in err.lower()
-        assert "fallback" in err or "GITHUB_REPOSITORY" in err
+        assert "GITHUB_REPOSITORY" in err
+        assert "fallback" in err
