@@ -22,7 +22,8 @@ from pathlib import Path
 TEMPLATE_PATH = ".github/ISSUE_TEMPLATE/bug_report.yml"
 BEGIN_SENTINEL = "# BEGIN_FORTRESS_VERSIONS"
 END_SENTINEL = "# END_FORTRESS_VERSIONS"
-GITHUB_API = "https://api.github.com/repos/wallstop/fortress-rollback/releases"
+GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY", "wallstop/fortress-rollback")
+GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 
 
 def fetch_versions() -> list[str]:
@@ -45,18 +46,15 @@ def fetch_versions() -> list[str]:
                 data = json.loads(resp.read().decode())
         except urllib.error.HTTPError as exc:
             body = exc.read().decode(errors="replace")[:200]
-            print(
-                f"error: HTTP {exc.code} fetching releases from {url}: {body}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            raise RuntimeError(f"HTTP {exc.code} fetching releases from {url}: {body}")
         except urllib.error.URLError as exc:
-            print(f"error: network error fetching releases from {url}: {exc}", file=sys.stderr)
-            sys.exit(1)
+            raise RuntimeError(f"network error fetching releases from {url}: {exc}")
 
         if not data:
             break
         for release in data:
+            if release.get("prerelease") or release.get("draft"):
+                continue
             tag = release.get("tag_name", "")
             if tag:
                 versions.append(tag)
@@ -91,14 +89,15 @@ def update_template(content: str, versions: list[str]) -> tuple[str, bool]:
             sentinel_indent = line[: len(line) - len(line.lstrip())]
         elif stripped == END_SENTINEL:
             end_idx = i
-            break
 
     if begin_idx is None:
-        print(f"{TEMPLATE_PATH}:0: missing {BEGIN_SENTINEL} sentinel", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(f"{TEMPLATE_PATH}:0: missing {BEGIN_SENTINEL} sentinel")
     if end_idx is None:
-        print(f"{TEMPLATE_PATH}:0: missing {END_SENTINEL} sentinel", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(f"{TEMPLATE_PATH}:0: missing {END_SENTINEL} sentinel")
+    if begin_idx >= end_idx:
+        raise RuntimeError(
+            f"{TEMPLATE_PATH}:0: {BEGIN_SENTINEL} must appear before {END_SENTINEL}"
+        )
 
     new_block = build_version_block(versions, sentinel_indent) + "\n"
     # Replace lines from begin to end (inclusive)
@@ -131,12 +130,21 @@ def main() -> int:
         print(f"{TEMPLATE_PATH}:0: cannot read file: {exc}", file=sys.stderr)
         return 1
 
-    versions = fetch_versions()
+    versions: list[str] = []
+    try:
+        versions = fetch_versions()
+    except RuntimeError as exc:
+        print(f"{TEMPLATE_PATH}:0: {exc}", file=sys.stderr)
+        return 1
     if not versions:
         print(f"{TEMPLATE_PATH}:0: no releases found", file=sys.stderr)
         return 1
 
-    updated, changed = update_template(original, versions)
+    try:
+        updated, changed = update_template(original, versions)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
     if not changed:
         print("Template is already up to date.")

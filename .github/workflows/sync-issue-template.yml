@@ -3,7 +3,7 @@ name: Sync Issue Template Versions
 
 on:
   release:
-    types: [published]
+    types: [released]
   workflow_dispatch:
 
 permissions:
@@ -15,11 +15,13 @@ concurrency:
 
 jobs:
   sync-versions:
-    name: Sync release versions into issue template
+    name: Sync Release Versions Into Issue Template
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -29,12 +31,14 @@ jobs:
       - name: Sync versions into bug report template
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: python scripts/ci/sync-issue-template-versions.py
 
       - name: Commit and push changes
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git add .github/ISSUE_TEMPLATE/bug_report.yml
           if git diff --staged --quiet; then
             echo "No changes to commit"

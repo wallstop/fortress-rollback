@@ -93,6 +93,7 @@ body:
         - v0.1.2
         - 0.1.0
         # END_FORTRESS_VERSIONS
+        - Other / not listed
     validations:
       required: true
 
