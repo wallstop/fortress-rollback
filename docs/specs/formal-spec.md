@@ -231,7 +231,7 @@ All public APIs return Result, never panic.
 
 ## Component Specifications
 
-### InputQueue<T>
+### InputQueue&lt;T&gt;
 
 **State:**
 
@@ -293,7 +293,7 @@ POST:
         RETURNS (prediction, Predicted)
 ```
 
-#### confirmed_input(frame) → Result<PlayerInput, Error>
+#### confirmed_input(frame) → Result&lt;PlayerInput, Error&gt;
 
 ```
 PRE:
@@ -313,7 +313,7 @@ ERROR:
 POST: first_incorrect_frame' = NULL_FRAME
 ```
 
-### SyncLayer<T>
+### SyncLayer&lt;T&gt;
 
 **State:**
 
@@ -332,7 +332,7 @@ SyncLayer<T> = {
 
 **Operations:**
 
-#### add_local_input(handle, input) → Result<Frame, Error>
+#### add_local_input(handle, input) → Result&lt;Frame, Error&gt;
 
 ```
 PRE:
@@ -383,7 +383,7 @@ POST:
     RETURNS SaveGameState { frame: current_frame, cell }
 ```
 
-#### load_frame(frame) → Result<LoadRequest, Error>
+#### load_frame(frame) → Result&lt;LoadRequest, Error&gt;
 
 **Updated (Session 47 - FV-GAP-6):** The precondition was strengthened to require
 `frame < current_frame` (strictly less than). The case where `frame >= current_frame`
