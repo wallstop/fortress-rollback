@@ -25,6 +25,7 @@ update_template = sync_mod.update_template
 BEGIN_SENTINEL = sync_mod.BEGIN_SENTINEL
 END_SENTINEL = sync_mod.END_SENTINEL
 TEMPLATE_PATH = sync_mod.TEMPLATE_PATH
+NetworkError = sync_mod.NetworkError
 
 
 def _make_template(
@@ -182,19 +183,25 @@ class TestFetchVersions:
         assert "v2.0.0-draft" not in versions
         assert "v1.0.0" in versions
 
-    def test_http_error_raises_runtime_error(self) -> None:
+    def test_http_error_raises_network_error(self) -> None:
         exc = urllib.error.HTTPError(
             url="http://example.com", code=403, msg="Forbidden", hdrs={}, fp=None
         )
         exc.read = lambda: b"not authorized"
         with patch("urllib.request.urlopen", side_effect=exc):
-            with pytest.raises(RuntimeError, match="HTTP 403"):
+            with pytest.raises(NetworkError, match="HTTP 403"):
                 sync_mod.fetch_versions()
 
-    def test_url_error_raises_runtime_error(self) -> None:
+    def test_url_error_raises_network_error(self) -> None:
         exc = urllib.error.URLError(reason="Name or service not known")
         with patch("urllib.request.urlopen", side_effect=exc):
-            with pytest.raises(RuntimeError, match="network error"):
+            with pytest.raises(NetworkError, match="network error"):
+                sync_mod.fetch_versions()
+
+    def test_network_error_is_runtime_error_subclass(self) -> None:
+        exc = urllib.error.URLError(reason="unreachable")
+        with patch("urllib.request.urlopen", side_effect=exc):
+            with pytest.raises(RuntimeError):
                 sync_mod.fetch_versions()
 
     def test_empty_response(self) -> None:
@@ -276,9 +283,31 @@ class TestMain:
         template_file.write_text(_make_template(["v0.1.0"]))
         monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
         monkeypatch.setattr(sys, "argv", ["prog"])
-        with patch.object(sync_mod, "fetch_versions", side_effect=RuntimeError("network error fetching releases from URL: reason")):
+        with patch.object(sync_mod, "fetch_versions", side_effect=RuntimeError("unexpected error")):
             result = sync_mod.main()
         assert result == 1
+
+    def test_network_error_propagates_without_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.1.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(sync_mod, "fetch_versions", side_effect=NetworkError("network error fetching releases")):
+            result = sync_mod.main()
+        assert result == 1
+
+    def test_check_mode_skips_on_network_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.1.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog", "--check"])
+        with patch.object(sync_mod, "fetch_versions", side_effect=NetworkError("network error fetching releases")):
+            result = sync_mod.main()
+        assert result == 0
 
     def test_empty_versions_returns_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         template_file = tmp_path / "bug_report.yml"

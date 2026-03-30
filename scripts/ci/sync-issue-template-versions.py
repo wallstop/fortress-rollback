@@ -26,6 +26,14 @@ GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY", "wallstop/fortress-rollback")
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 
 
+class NetworkError(RuntimeError):
+    """Raised when a GitHub API network request fails.
+
+    Treated as a non-fatal skip in --check mode so that offline pushes are
+    not blocked by an inability to reach the GitHub API.
+    """
+
+
 def fetch_versions() -> list[str]:
     """Fetch all release tag names from GitHub API, newest first."""
     headers = {
@@ -46,9 +54,9 @@ def fetch_versions() -> list[str]:
                 data = json.loads(resp.read().decode())
         except urllib.error.HTTPError as exc:
             body = exc.read().decode(errors="replace")[:200]
-            raise RuntimeError(f"HTTP {exc.code} fetching releases from {url}: {body}")
+            raise NetworkError(f"HTTP {exc.code} fetching releases from {url}: {body}")
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"network error fetching releases from {url}: {exc}")
+            raise NetworkError(f"network error fetching releases from {url}: {exc}")
 
         if not data:
             break
@@ -133,6 +141,12 @@ def main() -> int:
     versions: list[str] = []
     try:
         versions = fetch_versions()
+    except NetworkError as exc:
+        if args.check:
+            print(f"Skipping issue template version check: {exc}", file=sys.stderr)
+            return 0
+        print(f"{TEMPLATE_PATH}:0: {exc}", file=sys.stderr)
+        return 1
     except RuntimeError as exc:
         print(f"{TEMPLATE_PATH}:0: {exc}", file=sys.stderr)
         return 1
