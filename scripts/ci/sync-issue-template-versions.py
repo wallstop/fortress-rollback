@@ -15,7 +15,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -35,7 +37,12 @@ class NetworkError(RuntimeError):
 
 
 def fetch_versions() -> list[str]:
-    """Fetch all release tag names from GitHub API, newest first."""
+    """Fetch all release tag names from GitHub API, newest first.
+
+    Tags are returned exactly as provided by the GitHub API and may not
+    conform to the expected ``vX.Y.Z`` format.  Callers should pass the
+    result through :func:`validate_version_tags` before use.
+    """
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -71,6 +78,30 @@ def fetch_versions() -> list[str]:
         page += 1
 
     return versions
+
+
+def validate_version_tags(versions: list[str]) -> list[str]:
+    """Filter *versions* to those matching the ``vX.Y.Z`` semver pattern.
+
+    Any tag that does not start with ``v`` followed by three dot-separated
+    integers is logged as a warning to stderr and excluded from the returned
+    list.  The sync can still proceed with the remaining valid tags.
+
+    Tags with pre-release or build-metadata suffixes (e.g. ``v1.2.3-hotfix``)
+    are accepted because the pattern is a prefix match; only the leading
+    ``vMAJOR.MINOR.PATCH`` portion is required.
+    """
+    valid: list[str] = []
+    pattern = re.compile(r"^v\d+\.\d+\.\d+")
+    for tag in versions:
+        if pattern.match(tag):
+            valid.append(tag)
+        else:
+            print(
+                f"warning: skipping tag {tag!r} — does not match vX.Y.Z format",
+                file=sys.stderr,
+            )
+    return valid
 
 
 def build_version_block(versions: list[str], indent: str) -> str:
@@ -140,7 +171,7 @@ def main() -> int:
 
     versions: list[str] = []
     try:
-        versions = fetch_versions()
+        versions = validate_version_tags(fetch_versions())
     except NetworkError as exc:
         if args.check:
             print(f"Skipping issue template version check: {exc}", file=sys.stderr)

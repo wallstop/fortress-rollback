@@ -22,6 +22,7 @@ spec.loader.exec_module(sync_mod)
 
 build_version_block = sync_mod.build_version_block
 update_template = sync_mod.update_template
+validate_version_tags = sync_mod.validate_version_tags
 BEGIN_SENTINEL = sync_mod.BEGIN_SENTINEL
 END_SENTINEL = sync_mod.END_SENTINEL
 TEMPLATE_PATH = sync_mod.TEMPLATE_PATH
@@ -248,10 +249,9 @@ class TestMain:
         assert "Would update version list:" in out
         assert "- v1.0.0" in out
         assert "- v0.1.0" in out
-        # Verify no leading whitespace before '-' in version lines
+        # Verify no leading whitespace before '-' in any output line
         for line in out.splitlines():
-            if line.startswith("-"):
-                assert not line.startswith("  -"), f"Unexpected leading whitespace in: {line!r}"
+            assert not line.startswith("  -"), f"Unexpected leading whitespace in: {line!r}"
 
     def test_check_mode_out_of_date(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         template_file = tmp_path / "bug_report.yml"
@@ -317,3 +317,61 @@ class TestMain:
         with patch.object(sync_mod, "fetch_versions", return_value=[]):
             result = sync_mod.main()
         assert result == 1
+
+
+class TestValidateVersionTags:
+    def test_validate_version_tags_passes_valid_tags(self) -> None:
+        # Prefix match: vX.Y.Z plus optional pre-release suffixes are all valid.
+        tags = ["v1.0.0", "v0.9.0", "v1.2.3-hotfix"]
+        result = validate_version_tags(tags)
+        assert result == tags
+
+    def test_validate_version_tags_filters_invalid_tags(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        tags = ["1.0.0", "release-1.0"]
+        result = validate_version_tags(tags)
+        assert result == []
+        err = capsys.readouterr().err
+        assert "1.0.0" in err
+        assert "release-1.0" in err
+
+    def test_validate_version_tags_all_invalid_returns_empty(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        tags = ["bad", "no-v-prefix", "1.2.3"]
+        result = validate_version_tags(tags)
+        assert result == []
+        err = capsys.readouterr().err
+        assert err != ""
+
+    def test_validate_version_tags_mixed(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        tags = ["v1.0.0", "1.0.0", "v0.9.0", "release-0.9"]
+        result = validate_version_tags(tags)
+        assert result == ["v1.0.0", "v0.9.0"]
+        err = capsys.readouterr().err
+        assert "1.0.0" in err
+        assert "release-0.9" in err
+
+    def test_main_warns_on_bad_tag_format(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v1.0.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(
+            sync_mod,
+            "fetch_versions",
+            return_value=["v1.0.0", "bad-tag", "v0.9.0"],
+        ):
+            result = sync_mod.main()
+        assert result == 0
+        err = capsys.readouterr().err
+        assert "bad-tag" in err
+        new_text = template_file.read_text()
+        assert "- v1.0.0" in new_text
+        assert "- v0.9.0" in new_text
+        assert "bad-tag" not in new_text
