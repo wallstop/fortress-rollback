@@ -153,7 +153,7 @@ def main() -> int:
     if args.dry_run:
         print("Would update version list:")
         for version in versions:
-            print(f"  - {version}")
+            print(f"- {version}")
         return 0
 
     if args.check:

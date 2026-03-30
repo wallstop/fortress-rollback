@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json as _json
 import sys
+import urllib.error
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -24,14 +27,31 @@ END_SENTINEL = sync_mod.END_SENTINEL
 TEMPLATE_PATH = sync_mod.TEMPLATE_PATH
 
 
-def _make_template(versions: list[str], indent: str = "        ") -> str:
+def _make_template(
+    versions: list[str],
+    indent: str = "        ",
+    post_sentinel: str = "",
+) -> str:
     """Build a minimal template string with versions between sentinels."""
     block = "\n".join(
         [f"{indent}{BEGIN_SENTINEL}"]
         + [f"{indent}- {v}" for v in versions]
         + [f"{indent}{END_SENTINEL}"]
     )
-    return f"options:\n{block}\n"
+    body = f"options:\n{block}\n"
+    if post_sentinel:
+        body += post_sentinel
+    return body
+
+
+def _mock_response(data: list[dict]) -> MagicMock:
+    """Create a mock urlopen response that works as a context manager."""
+    mock = MagicMock()
+    mock.__enter__ = MagicMock(return_value=mock)
+    mock.__exit__ = MagicMock(return_value=False)
+    mock.read.return_value = _json.dumps(data).encode()
+    mock.headers = {}
+    return mock
 
 
 class TestBuildVersionBlock:
@@ -41,6 +61,7 @@ class TestBuildVersionBlock:
         assert "  - v1.0.0" in result
         assert "  - v0.9.0" in result
         assert "  # END_FORTRESS_VERSIONS" in result
+        assert result.index("v1.0.0") < result.index("v0.9.0")
 
     def test_empty_versions(self) -> None:
         result = build_version_block([], "")
@@ -107,3 +128,149 @@ class TestUpdateTemplate:
         new_content, _ = update_template(template, ["v1.0.0"])
         assert f"{indent}{BEGIN_SENTINEL}" in new_content
         assert f"{indent}{END_SENTINEL}" in new_content
+
+    def test_post_sentinel_content_preserved(self) -> None:
+        post = "- Other / not listed\n"
+        template = _make_template(["v0.1.0"], post_sentinel=post)
+        new_content, changed = update_template(template, ["v1.0.0"])
+        assert changed
+        assert "Other / not listed" in new_content
+        assert new_content.endswith(post)
+
+
+class TestBuildVersionBlockOrder:
+    def test_order(self) -> None:
+        result = build_version_block(["v1.0.0", "v0.9.0"], "")
+        assert result.index("v1.0.0") < result.index("v0.9.0")
+
+
+class TestFetchVersions:
+    def test_single_page(self) -> None:
+        releases = [
+            {"tag_name": "v1.0.0", "prerelease": False, "draft": False},
+            {"tag_name": "v0.9.0", "prerelease": False, "draft": False},
+        ]
+        with patch("urllib.request.urlopen", return_value=_mock_response(releases)):
+            versions = sync_mod.fetch_versions()
+        assert versions == ["v1.0.0", "v0.9.0"]
+
+    def test_multi_page_pagination(self) -> None:
+        page1 = [
+            {"tag_name": f"v1.{i}.0", "prerelease": False, "draft": False}
+            for i in range(100)
+        ]
+        page2 = [
+            {"tag_name": "v0.1.0", "prerelease": False, "draft": False},
+        ]
+        responses = iter([_mock_response(page1), _mock_response(page2)])
+        with patch("urllib.request.urlopen", side_effect=lambda _req: next(responses)):
+            versions = sync_mod.fetch_versions()
+        assert len(versions) == 101
+        assert "v0.1.0" in versions
+
+    def test_prerelease_filtered(self) -> None:
+        releases = [
+            {"tag_name": "v1.0.0-beta", "prerelease": True, "draft": False},
+            {"tag_name": "v1.0.0", "prerelease": False, "draft": False},
+        ]
+        with patch("urllib.request.urlopen", return_value=_mock_response(releases)):
+            versions = sync_mod.fetch_versions()
+        assert "v1.0.0-beta" not in versions
+        assert "v1.0.0" in versions
+
+    def test_draft_filtered(self) -> None:
+        releases = [
+            {"tag_name": "v2.0.0-draft", "prerelease": False, "draft": True},
+            {"tag_name": "v1.0.0", "prerelease": False, "draft": False},
+        ]
+        with patch("urllib.request.urlopen", return_value=_mock_response(releases)):
+            versions = sync_mod.fetch_versions()
+        assert "v2.0.0-draft" not in versions
+        assert "v1.0.0" in versions
+
+    def test_http_error_raises_runtime_error(self) -> None:
+        exc = urllib.error.HTTPError(
+            url="http://example.com", code=403, msg="Forbidden", hdrs={}, fp=None
+        )
+        exc.read = lambda: b"not authorized"
+        with patch("urllib.request.urlopen", side_effect=exc):
+            with pytest.raises(RuntimeError, match="HTTP 403"):
+                sync_mod.fetch_versions()
+
+    def test_url_error_raises_runtime_error(self) -> None:
+        exc = urllib.error.URLError(reason="Name or service not known")
+        with patch("urllib.request.urlopen", side_effect=exc):
+            with pytest.raises(RuntimeError, match="network error"):
+                sync_mod.fetch_versions()
+
+    def test_empty_response(self) -> None:
+        with patch("urllib.request.urlopen", return_value=_mock_response([])):
+            versions = sync_mod.fetch_versions()
+        assert versions == []
+
+
+class TestMain:
+    def test_already_up_to_date(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        versions = ["v1.0.0", "v0.9.0"]
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(versions))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(sync_mod, "fetch_versions", return_value=versions):
+            result = sync_mod.main()
+        assert result == 0
+        assert template_file.read_text() == _make_template(versions)
+
+    def test_template_updated(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.1.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(sync_mod, "fetch_versions", return_value=["v1.0.0", "v0.1.0"]):
+            result = sync_mod.main()
+        assert result == 0
+        new_text = template_file.read_text()
+        assert "- v1.0.0" in new_text
+        assert "- v0.1.0" in new_text
+
+    def test_dry_run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        original = _make_template(["v0.1.0"])
+        template_file.write_text(original)
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog", "--dry-run"])
+        with patch.object(sync_mod, "fetch_versions", return_value=["v1.0.0", "v0.1.0"]):
+            result = sync_mod.main()
+        assert result == 0
+        assert template_file.read_text() == original
+        out = capsys.readouterr().out
+        assert "Would update version list:" in out
+        assert "- v1.0.0" in out
+        assert out.count("  - ") == 0, "dry-run output must not have leading spaces before '-'"
+        assert out.count("- v") == 2, "expected one dash-prefixed line per version"
+
+    def test_check_mode_out_of_date(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.1.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog", "--check"])
+        with patch.object(sync_mod, "fetch_versions", return_value=["v1.0.0", "v0.1.0"]):
+            result = sync_mod.main()
+        assert result == 1
+
+    def test_check_mode_up_to_date(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        versions = ["v1.0.0", "v0.1.0"]
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(versions))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog", "--check"])
+        with patch.object(sync_mod, "fetch_versions", return_value=versions):
+            result = sync_mod.main()
+        assert result == 0
+
+    def test_file_read_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(tmp_path / "nonexistent.yml"))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(sync_mod, "fetch_versions", return_value=["v1.0.0"]):
+            result = sync_mod.main()
+        assert result == 1
