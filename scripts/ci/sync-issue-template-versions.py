@@ -26,6 +26,7 @@ BEGIN_SENTINEL = "# BEGIN_FORTRESS_VERSIONS"
 END_SENTINEL = "# END_FORTRESS_VERSIONS"
 GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY", "wallstop/fortress-rollback")
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
+# 30 s balances slow networks against indefinite hangs in CI.
 REQUEST_TIMEOUT = 30
 
 
