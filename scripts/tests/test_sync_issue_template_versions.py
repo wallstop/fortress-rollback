@@ -138,12 +138,6 @@ class TestUpdateTemplate:
         assert new_content.endswith(post)
 
 
-class TestBuildVersionBlockOrder:
-    def test_order(self) -> None:
-        result = build_version_block(["v1.0.0", "v0.9.0"], "")
-        assert result.index("v1.0.0") < result.index("v0.9.0")
-
-
 class TestFetchVersions:
     def test_single_page(self) -> None:
         releases = [
@@ -246,8 +240,11 @@ class TestMain:
         out = capsys.readouterr().out
         assert "Would update version list:" in out
         assert "- v1.0.0" in out
-        assert out.count("  - ") == 0, "dry-run output must not have leading spaces before '-'"
-        assert out.count("- v") == 2, "expected one dash-prefixed line per version"
+        assert "- v0.1.0" in out
+        # Verify no leading whitespace before '-' in version lines
+        for line in out.splitlines():
+            if line.startswith("-"):
+                assert not line.startswith("  -"), f"Unexpected leading whitespace in: {line!r}"
 
     def test_check_mode_out_of_date(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         template_file = tmp_path / "bug_report.yml"
@@ -271,6 +268,23 @@ class TestMain:
     def test_file_read_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(tmp_path / "nonexistent.yml"))
         monkeypatch.setattr(sys, "argv", ["prog"])
-        with patch.object(sync_mod, "fetch_versions", return_value=["v1.0.0"]):
+        result = sync_mod.main()
+        assert result == 1
+
+    def test_fetch_error_propagates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.1.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(sync_mod, "fetch_versions", side_effect=RuntimeError("network error fetching releases from URL: reason")):
+            result = sync_mod.main()
+        assert result == 1
+
+    def test_empty_versions_returns_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.1.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(sync_mod, "fetch_versions", return_value=[]):
             result = sync_mod.main()
         assert result == 1

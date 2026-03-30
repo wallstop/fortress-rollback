@@ -37,6 +37,7 @@ jobs:
       - name: Commit and push changes
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
           git config --local user.name "github-actions[bot]"
@@ -46,10 +47,9 @@ jobs:
             echo "No changes to commit"
             exit 0
           fi
-          TAG="${{ github.event.release.tag_name }}"
           MSG="chore: sync release versions in bug report template"
-          if [ -n "$TAG" ]; then
-            MSG="${MSG} [${TAG}]"
+          if [ -n "${RELEASE_TAG}" ]; then
+            MSG="${MSG} [${RELEASE_TAG}]"
           fi
           git commit -m "$MSG"
           git push origin "HEAD:${DEFAULT_BRANCH}"
