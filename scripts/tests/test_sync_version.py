@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -30,9 +29,7 @@ def _create_workspace(tmp_path: Path) -> Path:
 
 def _setup_repo(tmp_path: Path, changelog_content: str, version: str = "0.8.0") -> Path:
     repo = tmp_path / "repo"
-    (repo / "scripts").mkdir(parents=True, exist_ok=True)
-    shutil.copy2(SYNC_SCRIPT_SOURCE, repo / "scripts" / "sync-version.sh")
-    (repo / "scripts" / "sync-version.sh").chmod(0o755)
+    repo.mkdir(parents=True, exist_ok=True)
 
     (repo / "Cargo.toml").write_text(
         f'[package]\nname = "fortress-rollback"\nversion = "{version}"\n',
@@ -79,6 +76,12 @@ def _run_sync(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
     )
+
+
+def _assert_no_manual_link_footer_intervention(result: subprocess.CompletedProcess[str]) -> None:
+    combined = result.stdout + result.stderr
+    assert "require manual intervention" not in combined
+    assert "CHANGELOG.md (link footers)" not in combined
 
 
 def test_updates_markdown_dependency_snippet(tmp_path: Path) -> None:
@@ -321,6 +324,7 @@ def test_sync_version_fixes_older_missing_link_even_if_current_exists(tmp_path: 
     repo = _setup_repo(tmp_path, changelog)
     result = _run_sync(repo, "--changelog-only")
     assert result.returncode == 0, result.stdout + result.stderr
+    _assert_no_manual_link_footer_intervention(result)
 
     updated = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
     assert "[0.7.0]: https://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0" in updated
@@ -373,6 +377,7 @@ def test_sync_version_normalizes_old_style_unreleased_link_when_already_current(
     repo = _setup_repo(tmp_path, changelog)
     result = _run_sync(repo, "--changelog-only")
     assert result.returncode == 0, result.stdout + result.stderr
+    _assert_no_manual_link_footer_intervention(result)
 
     updated = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
     assert (

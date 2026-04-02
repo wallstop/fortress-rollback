@@ -558,6 +558,7 @@ main() {
                     else
                         portable_replace "^\[Unreleased\]:[[:space:]]+https://github\.com/.*/compare/v?[0-9]+\.[0-9]+\.[0-9]+\.\.\.HEAD[[:space:]]*$" "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v$VERSION...HEAD" "$CHANGELOG"
                         echo -e "${GREEN}✓ Updated:${NC} CHANGELOG.md [Unreleased] link → v$VERSION"
+                        remove_inconsistent_file "CHANGELOG.md (link footers)"
                         ((FILES_CHANGED++)) || true
                         ((TOTAL_REPLACEMENTS++)) || true
                     fi
@@ -572,6 +573,7 @@ main() {
                 else
                     portable_replace "^\[Unreleased\]:.*$" "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v$VERSION...HEAD" "$CHANGELOG"
                     echo -e "${GREEN}✓ Updated:${NC} CHANGELOG.md [Unreleased] link → v$VERSION"
+                    remove_inconsistent_file "CHANGELOG.md (link footers)"
                     ((FILES_CHANGED++)) || true
                     ((TOTAL_REPLACEMENTS++)) || true
                 fi
@@ -641,6 +643,7 @@ main() {
                     [[ -z "$message" ]] && continue
                     echo -e "${GREEN}${message}${NC}"
                 done <<< "$deferred_success_messages"
+                remove_inconsistent_file "CHANGELOG.md (link footers)"
                 ((FILES_CHANGED++)) || true
             else
                 log_always "${YELLOW}⚠ Could not insert generated link footers because [Unreleased] footer anchor was not found${NC}"
