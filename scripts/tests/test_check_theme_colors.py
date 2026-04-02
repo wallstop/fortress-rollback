@@ -73,7 +73,7 @@ def test_validate_theme_colors_rejects_orange_header_background(tmp_path: Path) 
     )
 
     result = validate_theme_colors(css_path)
-    assert result.errors >= 1
+    assert result.errors == 2
 
 
 def test_validate_theme_colors_requires_different_light_dark_primary(tmp_path: Path) -> None:
@@ -98,7 +98,7 @@ def test_validate_theme_colors_requires_different_light_dark_primary(tmp_path: P
     )
 
     result = validate_theme_colors(css_path)
-    assert result.errors >= 1
+    assert result.errors == 2
 
 
 def test_validate_theme_colors_rejects_lowercase_orange_hex(tmp_path: Path) -> None:
@@ -118,7 +118,7 @@ def test_validate_theme_colors_rejects_lowercase_orange_hex(tmp_path: Path) -> N
     )
 
     result = validate_theme_colors(css_path)
-    assert result.errors >= 1
+    assert result.errors == 2
 
 
 def test_validate_theme_colors_rejects_rgb_orange(tmp_path: Path) -> None:
@@ -138,7 +138,7 @@ def test_validate_theme_colors_rejects_rgb_orange(tmp_path: Path) -> None:
     )
 
     result = validate_theme_colors(css_path)
-    assert result.errors >= 1
+    assert result.errors == 2
 
 
 def test_validate_theme_colors_requires_minimum_contrast(tmp_path: Path) -> None:
@@ -236,4 +236,4 @@ def test_validate_theme_colors_rejects_resolved_equal_primary_values(
     )
 
     result = validate_theme_colors(css_path)
-    assert result.errors >= 1
+    assert result.errors == 1

@@ -22,6 +22,7 @@ ORANGE_VARIABLES = {
     "--fortress-rust-orange-light",
     "--fortress-rust-orange-dark",
 }
+MAX_VARIABLE_RESOLUTION_DEPTH = 8
 
 
 def get_project_root() -> Path:
@@ -128,7 +129,7 @@ def extract_color_variables(block: str) -> dict[str, str]:
 def resolve_variable_reference(value: str, variables: dict[str, str]) -> str | None:
     """Resolve var(--token) references recursively."""
     current = value.strip()
-    for _ in range(8):
+    for _ in range(MAX_VARIABLE_RESOLUTION_DEPTH):
         match = re.fullmatch(r"var\(\s*(--[a-z0-9-]+)\s*\)", current, re.IGNORECASE)
         if not match:
             return current
