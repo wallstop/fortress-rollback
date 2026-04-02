@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
 # Resolve repository root from scripts/tests/ (two parent levels up).
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SYNC_VERSION_SCRIPT = REPO_ROOT / "scripts" / "sync-version.sh"
+SYNC_SCRIPT_SOURCE = REPO_ROOT / "scripts" / "sync-version.sh"
 
 
 def _write(path: Path, content: str) -> None:
@@ -23,6 +24,18 @@ def _create_workspace(tmp_path: Path) -> Path:
         repo / "Cargo.toml",
         '[package]\nname = "fixture"\nversion = "1.2.3"\nedition = "2021"\n',
     )
+    return repo
+
+
+def _setup_repo(tmp_path: Path, changelog_content: str, version: str = "0.8.0") -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+
+    (repo / "Cargo.toml").write_text(
+        f'[package]\nname = "fortress-rollback"\nversion = "{version}"\n',
+        encoding="utf-8",
+    )
+    (repo / "CHANGELOG.md").write_text(changelog_content, encoding="utf-8")
     return repo
 
 
@@ -56,13 +69,19 @@ def _run_sync(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["FORTRESS_PROJECT_ROOT"] = str(repo)
     return subprocess.run(
-        ["bash", str(SYNC_VERSION_SCRIPT), *args],
+        ["bash", str(SYNC_SCRIPT_SOURCE), *args],
         cwd=REPO_ROOT,
         env=env,
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def _assert_no_manual_link_footer_intervention(result: subprocess.CompletedProcess[str]) -> None:
+    combined = result.stdout + result.stderr
+    assert "require manual intervention" not in combined
+    assert "CHANGELOG.md (link footers)" not in combined
 
 
 def test_updates_markdown_dependency_snippet(tmp_path: Path) -> None:
@@ -146,7 +165,7 @@ def test_dry_run_does_not_modify_files(tmp_path: Path) -> None:
 
 def test_help_documents_fortress_project_root() -> None:
     result = subprocess.run(
-        ["bash", str(SYNC_VERSION_SCRIPT), "--help"],
+        ["bash", str(SYNC_SCRIPT_SOURCE), "--help"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -221,3 +240,210 @@ def test_filesystem_fallback_ignores_site_directory_content(tmp_path: Path) -> N
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Discovery mode: filesystem-fallback" in result.stdout
     assert "site/index.md" not in result.stdout
+
+
+def test_sync_version_updates_unreleased_release_date_and_missing_links(tmp_path: Path) -> None:
+    changelog = """# Changelog
+
+## [Unreleased]
+
+## [0.8.0]
+
+### Added
+- Thing
+
+## [0.7.0] - 2026-01-01
+
+### Added
+- Prior thing
+
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/wallstop/fortress-rollback/compare/v0.5.0...v0.6.0
+"""
+    repo = _setup_repo(tmp_path, changelog)
+    result = _run_sync(repo, "--changelog-only")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    updated = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert re.search(r"^## \[0\.8\.0\] - \d{4}-\d{2}-\d{2}$", updated, re.MULTILINE)
+    assert (
+        "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...HEAD"
+        in updated
+    )
+    assert "[0.8.0]: https://github.com/wallstop/fortress-rollback/compare/v0.7.0...v0.8.0" in updated
+
+
+def test_sync_version_check_mode_detects_missing_release_updates(tmp_path: Path) -> None:
+    changelog = """# Changelog
+
+## [Unreleased]
+
+## [0.8.0]
+
+### Added
+- Thing
+
+## [0.7.0] - 2026-01-01
+
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0
+"""
+    repo = _setup_repo(tmp_path, changelog)
+    result = _run_sync(repo, "--changelog-only", "--check")
+    assert result.returncode == 1
+    combined = result.stdout + result.stderr
+    assert "CHANGELOG.md (release date)" in combined
+    assert "CHANGELOG.md (link footers)" in combined
+
+
+def test_sync_version_fixes_older_missing_link_even_if_current_exists(tmp_path: Path) -> None:
+    changelog = """# Changelog
+
+## [Unreleased]
+
+## [0.8.0] - 2026-02-01
+
+### Added
+- Thing
+
+## [0.7.0] - 2026-01-01
+
+### Added
+- Prior thing
+
+## [0.6.0] - 2025-12-01
+
+### Added
+- Old thing
+
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/wallstop/fortress-rollback/compare/v0.7.0...v0.8.0
+[0.6.0]: https://github.com/wallstop/fortress-rollback/compare/v0.5.0...v0.6.0
+"""
+    repo = _setup_repo(tmp_path, changelog)
+    result = _run_sync(repo, "--changelog-only")
+    assert result.returncode == 0, result.stdout + result.stderr
+    _assert_no_manual_link_footer_intervention(result)
+
+    updated = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "[0.7.0]: https://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0" in updated
+
+
+def test_sync_version_normalizes_old_style_unreleased_compare_link(tmp_path: Path) -> None:
+    changelog = """# Changelog
+
+## [Unreleased]
+
+## [0.8.0]
+
+### Added
+- Thing
+
+## [0.7.0] - 2026-01-01
+
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/0.7.0...HEAD
+[0.7.0]: https://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0
+"""
+    repo = _setup_repo(tmp_path, changelog)
+    result = _run_sync(repo, "--changelog-only")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    updated = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert (
+        "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...HEAD"
+        in updated
+    )
+
+
+def test_sync_version_normalizes_old_style_unreleased_link_when_already_current(
+    tmp_path: Path,
+) -> None:
+    changelog = """# Changelog
+
+## [Unreleased]
+
+## [0.8.0] - 2026-02-01
+
+### Added
+- Thing
+
+## [0.7.0] - 2026-01-01
+
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/0.8.0...HEAD
+[0.8.0]: https://github.com/wallstop/fortress-rollback/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0
+"""
+    repo = _setup_repo(tmp_path, changelog)
+    result = _run_sync(repo, "--changelog-only")
+    assert result.returncode == 0, result.stdout + result.stderr
+    _assert_no_manual_link_footer_intervention(result)
+
+    updated = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert (
+        "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...HEAD"
+        in updated
+    )
+    assert "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/0.8.0...HEAD" not in updated
+
+
+def test_sync_version_normalizes_unreleased_with_extra_whitespace(tmp_path: Path) -> None:
+    changelog = """# Changelog
+
+## [Unreleased]
+
+## [0.8.0]
+
+### Added
+- Thing
+
+## [0.7.0] - 2026-01-01
+
+[Unreleased]:   https://github.com/wallstop/fortress-rollback/compare/v0.7.0...HEAD    
+[0.7.0]:\thttps://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0
+"""
+    repo = _setup_repo(tmp_path, changelog)
+    result = _run_sync(repo, "--changelog-only")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    updated = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert (
+        "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...HEAD"
+        in updated
+    )
+    assert "[0.7.0]:\thttps://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0" in updated
+
+
+def test_sync_version_reports_anchor_missing_when_unreleased_footer_absent(tmp_path: Path) -> None:
+    changelog = """# Changelog
+
+## [Unreleased]
+
+## [0.8.0] - 2026-02-01
+
+### Added
+- Thing
+
+## [0.7.0] - 2026-01-01
+
+### Added
+- Prior thing
+
+## [0.6.0] - 2025-12-01
+
+### Added
+- Old thing
+
+[0.8.0]: https://github.com/wallstop/fortress-rollback/compare/v0.7.0...v0.8.0
+[0.6.0]: https://github.com/wallstop/fortress-rollback/compare/v0.5.0...v0.6.0
+"""
+    repo = _setup_repo(tmp_path, changelog)
+    result = _run_sync(repo, "--changelog-only")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    combined = result.stdout + result.stderr
+    assert "Could not insert generated link footers" in combined
+    assert "✓ Added: CHANGELOG.md [0.7.0] link" not in combined
+
+    updated = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "[0.7.0]: https://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0" not in updated
