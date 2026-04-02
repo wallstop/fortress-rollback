@@ -199,7 +199,7 @@ should_exclude_file() {
 
     # Exclude paths containing these directories
     case "$file" in
-        */target/*|*/.git/*|*/node_modules/*|*/.tla-tools/*|*/proptest-regressions/*|*/mutants.out*/*|*/.venv/*|*/fuzz/target/*)
+        */target/*|*/.git/*|*/node_modules/*|*/.tla-tools/*|*/proptest-regressions/*|*/mutants.out*/*|*/.venv/*|*/fuzz/target/*|*/site/*)
             EXCLUDE_REASON="excluded generated/tooling directory"
             return 0  # true = exclude
             ;;
@@ -286,6 +286,7 @@ main() {
             ! -path "*/mutants.out*/*" \
             ! -path "*/.venv/*" \
             ! -path "*/fuzz/target/*" \
+            ! -path "*/site/*" \
             ! -name "Cargo.toml" \
             ! -name "Cargo.lock" \
             2>/dev/null | sort || true)
@@ -321,6 +322,7 @@ main() {
             ! -path "*/mutants.out*/*" \
             ! -path "*/.venv/*" \
             ! -path "*/fuzz/target/*" \
+            ! -path "*/site/*" \
             ! -name "Cargo.toml" \
             ! -name "Cargo.lock" \
             2>/dev/null | sort || true)

@@ -209,3 +209,15 @@ def test_check_mode_uses_filesystem_fallback_when_not_in_git_repo(tmp_path: Path
 
     assert result.returncode == 1
     assert "Discovery mode: filesystem-fallback" in result.stdout
+
+
+def test_filesystem_fallback_ignores_site_directory_content(tmp_path: Path) -> None:
+    repo = _create_workspace(tmp_path)
+    _write(repo / "docs" / "index.md", 'fortress-rollback = "1.2"\n')
+    _write(repo / "site" / "index.md", 'fortress-rollback = "0.9"\n')
+
+    result = _run_sync(repo, "--check", "--verbose")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Discovery mode: filesystem-fallback" in result.stdout
+    assert "site/index.md" not in result.stdout
