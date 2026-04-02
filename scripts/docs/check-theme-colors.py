@@ -23,6 +23,7 @@ ORANGE_VARIABLES = {
     "--fortress-rust-orange-dark",
 }
 MAX_VARIABLE_RESOLUTION_DEPTH = 8
+CSS_CUSTOM_PROPERTY_PREFIX_LEN = 2
 
 
 def get_project_root() -> Path:
@@ -43,9 +44,10 @@ def _display_path(filepath: str | Path) -> str:
 
 
 def extract_css_block(content: str, selector: str) -> str:
-    """Extract selector block body using brace matching."""
+    """Extract selector block body using brace matching, ignoring comments."""
+    sanitized = _strip_css_comments(content)
     selector_pattern = re.compile(rf"(?m)^\s*{re.escape(selector)}\s*\{{")
-    match = selector_pattern.search(content)
+    match = selector_pattern.search(sanitized)
     if match is None:
         return ""
 
@@ -53,9 +55,9 @@ def extract_css_block(content: str, selector: str) -> str:
     depth = 1
     in_single_quote = False
     in_double_quote = False
-    for index in range(open_index + 1, len(content)):
-        char = content[index]
-        prev_char = content[index - 1]
+    for index in range(open_index + 1, len(sanitized)):
+        char = sanitized[index]
+        prev_char = sanitized[index - 1]
         if char == "'" and not in_double_quote and prev_char != "\\":
             in_single_quote = not in_single_quote
             continue
@@ -69,8 +71,147 @@ def extract_css_block(content: str, selector: str) -> str:
         elif char == "}":
             depth -= 1
             if depth == 0:
-                return content[open_index + 1 : index]
+                return sanitized[open_index + 1 : index]
     return ""
+
+
+def _strip_css_comments(content: str) -> str:
+    """Replace CSS comments with spaces while preserving string literals."""
+    result: list[str] = []
+    in_single_quote = False
+    in_double_quote = False
+    in_block_comment = False
+    index = 0
+
+    while index < len(content):
+        char = content[index]
+        next_char = content[index + 1] if index + 1 < len(content) else ""
+        prev_char = content[index - 1] if index > 0 else ""
+
+        if in_block_comment:
+            if char == "*" and next_char == "/":
+                result.extend([" ", " "])
+                in_block_comment = False
+                index += 2
+                continue
+            result.append("\n" if char == "\n" else " ")
+            index += 1
+            continue
+
+        if char == "'" and not in_double_quote and prev_char != "\\":
+            in_single_quote = not in_single_quote
+            result.append(char)
+            index += 1
+            continue
+        if char == '"' and not in_single_quote and prev_char != "\\":
+            in_double_quote = not in_double_quote
+            result.append(char)
+            index += 1
+            continue
+
+        if in_single_quote or in_double_quote:
+            result.append(char)
+            index += 1
+            continue
+
+        if char == "/" and next_char == "*":
+            result.extend([" ", " "])
+            in_block_comment = True
+            index += 2
+            continue
+
+        result.append(char)
+        index += 1
+
+    return "".join(result)
+
+
+def _extract_css_custom_property_declarations(block: str) -> list[tuple[str, str]]:
+    """Extract CSS custom properties while ignoring comments and strings."""
+    declarations: list[tuple[str, str]] = []
+    sanitized = _strip_css_comments(block)
+    index = 0
+    in_single_quote = False
+    in_double_quote = False
+
+    def _is_valid_char_before_property_prefix(char: str) -> bool:
+        return char.isalnum() or char in {"_", "-"}
+
+    def _is_property_name_char(char: str) -> bool:
+        return char.isalnum() or char in {"_", "-"}
+
+    while index < len(sanitized):
+        char = sanitized[index]
+        prev_char = sanitized[index - 1] if index > 0 else ""
+
+        if char == "'" and not in_double_quote and prev_char != "\\":
+            in_single_quote = not in_single_quote
+            index += 1
+            continue
+        if char == '"' and not in_single_quote and prev_char != "\\":
+            in_double_quote = not in_double_quote
+            index += 1
+            continue
+        if in_single_quote or in_double_quote:
+            index += 1
+            continue
+        if not sanitized.startswith("--", index):
+            index += 1
+            continue
+
+        start = index
+
+        if start > 0 and _is_valid_char_before_property_prefix(sanitized[start - 1]):
+            index = start + CSS_CUSTOM_PROPERTY_PREFIX_LEN
+            continue
+
+        key_end = start + CSS_CUSTOM_PROPERTY_PREFIX_LEN
+        while key_end < len(sanitized) and _is_property_name_char(sanitized[key_end]):
+            key_end += 1
+        key = sanitized[start:key_end].lower()
+        if not key.startswith("--") or len(key) <= CSS_CUSTOM_PROPERTY_PREFIX_LEN:
+            index = start + CSS_CUSTOM_PROPERTY_PREFIX_LEN
+            continue
+
+        cursor = key_end
+        while cursor < len(sanitized) and sanitized[cursor].isspace():
+            cursor += 1
+        if cursor >= len(sanitized) or sanitized[cursor] != ":":
+            index = key_end
+            continue
+        cursor += 1
+
+        value_start = cursor
+        in_value_single_quote = False
+        in_value_double_quote = False
+        paren_depth = 0
+        while cursor < len(sanitized):
+            char = sanitized[cursor]
+            prev_char = sanitized[cursor - 1] if cursor > 0 else ""
+            if char == "'" and not in_value_double_quote and prev_char != "\\":
+                in_value_single_quote = not in_value_single_quote
+                cursor += 1
+                continue
+            if char == '"' and not in_value_single_quote and prev_char != "\\":
+                in_value_double_quote = not in_value_double_quote
+                cursor += 1
+                continue
+            if in_value_single_quote or in_value_double_quote:
+                cursor += 1
+                continue
+            if char == "(":
+                paren_depth += 1
+            elif char == ")" and paren_depth > 0:
+                paren_depth -= 1
+            elif char == ";" and paren_depth == 0:
+                value = sanitized[value_start:cursor].strip()
+                declarations.append((key, value))
+                cursor += 1
+                break
+            cursor += 1
+        index = max(cursor, start + CSS_CUSTOM_PROPERTY_PREFIX_LEN)
+
+    return declarations
 
 
 def normalize_hex_color(value: str) -> str | None:
@@ -132,8 +273,8 @@ def contrast_ratio(color_a: str, color_b: str) -> float:
 def extract_color_variables(block: str) -> dict[str, str]:
     """Extract CSS custom properties in a selector block."""
     properties: dict[str, str] = {}
-    for match in re.finditer(r"(--[a-z0-9-]+)\s*:\s*([^;]+);", block):
-        properties[match.group(1)] = match.group(2).strip()
+    for key, value in _extract_css_custom_property_declarations(block):
+        properties[key] = value
     return properties
 
 
@@ -229,28 +370,28 @@ def validate_theme_colors(css_path: Path) -> ValidationResult:
     dark_variables = {**root_variables, **dark_properties}
     light_variables = {**root_variables, **light_properties}
 
-    dark_primary, errors = parse_required_property(
+    dark_header_bg, errors = parse_required_property(
         properties=dark_properties,
         property_name="--md-primary-fg-color",
         display_path=display_path,
         errors=errors,
         scope="slate",
     )
-    light_primary, errors = parse_required_property(
+    light_header_bg, errors = parse_required_property(
         properties=light_properties,
         property_name="--md-primary-fg-color",
         display_path=display_path,
         errors=errors,
         scope="default",
     )
-    dark_text, errors = parse_required_property(
+    dark_header_fg, errors = parse_required_property(
         properties=dark_properties,
         property_name="--md-primary-bg-color",
         display_path=display_path,
         errors=errors,
         scope="slate",
     )
-    light_text, errors = parse_required_property(
+    light_header_fg, errors = parse_required_property(
         properties=light_properties,
         property_name="--md-primary-bg-color",
         display_path=display_path,
@@ -258,12 +399,18 @@ def validate_theme_colors(css_path: Path) -> ValidationResult:
         scope="default",
     )
 
-    if errors or dark_primary is None or light_primary is None or dark_text is None or light_text is None:
+    if (
+        errors
+        or dark_header_bg is None
+        or light_header_bg is None
+        or dark_header_fg is None
+        or light_header_fg is None
+    ):
         return ValidationResult(errors=errors, warnings=warnings)
 
     for label, value, variables in (
-        ("dark primary header background", dark_primary, dark_variables),
-        ("light primary header background", light_primary, light_variables),
+        ("dark primary header background", dark_header_bg, dark_variables),
+        ("light primary header background", light_header_bg, light_variables),
     ):
         if is_forbidden_orange(value, variables):
             print(
@@ -273,8 +420,8 @@ def validate_theme_colors(css_path: Path) -> ValidationResult:
             errors += 1
 
     for label, background_value, foreground_value, variables in (
-        ("dark header contrast", dark_primary, dark_text, dark_variables),
-        ("light header contrast", light_primary, light_text, light_variables),
+        ("dark header contrast", dark_header_bg, dark_header_fg, dark_variables),
+        ("light header contrast", light_header_bg, light_header_fg, light_variables),
     ):
         resolved_background = resolve_variable_reference(background_value, variables)
         resolved_foreground = resolve_variable_reference(foreground_value, variables)
@@ -304,8 +451,8 @@ def validate_theme_colors(css_path: Path) -> ValidationResult:
             )
             errors += 1
 
-    resolved_dark_primary = resolve_variable_reference(dark_primary, dark_variables)
-    resolved_light_primary = resolve_variable_reference(light_primary, light_variables)
+    resolved_dark_primary = resolve_variable_reference(dark_header_bg, dark_variables)
+    resolved_light_primary = resolve_variable_reference(light_header_bg, light_variables)
     if (
         resolved_dark_primary is not None
         and resolved_light_primary is not None

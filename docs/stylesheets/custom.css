@@ -62,7 +62,7 @@
    ========================================================================== */
 
 [data-md-color-scheme="slate"] {
-    /* Primary accent color */
+    /* Primary header colors */
     --md-primary-fg-color: var(--fortress-bg-dark-secondary);
     --md-primary-fg-color--light: #21262d;
     --md-primary-fg-color--dark: var(--fortress-bg-dark);
@@ -163,7 +163,7 @@
    ========================================================================== */
 
 [data-md-color-scheme="default"] {
-    /* Primary accent color */
+    /* Primary header colors */
     --md-primary-fg-color: var(--fortress-bg-light-secondary);
     --md-primary-fg-color--light: var(--fortress-bg-light);
     --md-primary-fg-color--dark: #e1e4e8;

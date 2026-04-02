@@ -213,6 +213,83 @@ def test_extract_css_block_ignores_selector_inside_comment() -> None:
     assert "#f74c00" not in block
 
 
+def test_extract_css_block_ignores_commented_selector_before_real_block() -> None:
+    content = """
+/* [data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #f74c00;
+  --md-primary-bg-color: #c9d1d9;
+} */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #161b22;
+  --md-primary-bg-color: #c9d1d9;
+}
+"""
+    block = check_theme_colors.extract_css_block(
+        content,
+        '[data-md-color-scheme="slate"]',
+    )
+    assert "--md-primary-fg-color: #161b22;" in block
+    assert "#f74c00" not in block
+
+
+def test_extract_css_block_handles_braces_inside_comments() -> None:
+    content = """
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #161b22;
+  /* comment with braces { } should not affect depth */
+  --md-primary-bg-color: #c9d1d9;
+}
+"""
+    block = check_theme_colors.extract_css_block(
+        content,
+        '[data-md-color-scheme="slate"]',
+    )
+    assert "--md-primary-bg-color: #c9d1d9;" in block
+
+
+def test_extract_color_variables_ignores_commented_properties() -> None:
+    block = """
+--md-primary-fg-color: #161b22;
+/* --md-primary-fg-color: #f74c00; */
+--md-primary-bg-color: #c9d1d9;
+"""
+    properties = check_theme_colors.extract_color_variables(block)
+    assert properties["--md-primary-fg-color"] == "#161b22"
+    assert properties["--md-primary-bg-color"] == "#c9d1d9"
+    assert all("#f74c00" not in value for value in properties.values())
+
+
+def test_extract_color_variables_ignores_comment_like_text_inside_string() -> None:
+    block = """
+--note: "/* keep this text */";
+--md-primary-fg-color: #161b22;
+--md-primary-bg-color: #c9d1d9;
+"""
+    properties = check_theme_colors.extract_color_variables(block)
+    assert properties["--note"] == '"/* keep this text */"'
+    assert properties["--md-primary-fg-color"] == "#161b22"
+
+
+def test_extract_color_variables_preserves_url_with_double_slash() -> None:
+    block = """
+--banner-url: url(https://example.com/assets/icon.svg);
+--md-primary-fg-color: #161b22;
+"""
+    properties = check_theme_colors.extract_color_variables(block)
+    assert properties["--banner-url"] == "url(https://example.com/assets/icon.svg)"
+    assert properties["--md-primary-fg-color"] == "#161b22"
+
+
+def test_extract_color_variables_ignores_double_dash_inside_string_literal() -> None:
+    block = """
+color: "--fake: red;";
+--md-primary-fg-color: #161b22;
+"""
+    properties = check_theme_colors.extract_color_variables(block)
+    assert "--fake" not in properties
+    assert properties["--md-primary-fg-color"] == "#161b22"
+
+
 def test_validate_theme_colors_rejects_resolved_equal_primary_values(
     tmp_path: Path,
 ) -> None:
