@@ -91,10 +91,46 @@ portable_replace() {
     fi
 }
 
+# Insert text immediately after the [Unreleased] link footer in CHANGELOG.md
+# Usage: insert_after_unreleased_link FILE TEXT
+insert_after_unreleased_link() {
+    local file="$1"
+    local text="$2"
+    local tmp_file
+    tmp_file=$(mktemp "${TMPDIR:-/tmp}/fortress-sync-version.XXXXXX")
+
+    awk -v insert_text="$text" '
+        {
+            print
+            if (!inserted && $0 ~ /^\[Unreleased\]: /) {
+                printf "%s", insert_text
+                inserted = 1
+            }
+        }
+    ' "$file" > "$tmp_file"
+
+    mv "$tmp_file" "$file"
+}
+
+# Remove a previously recorded inconsistency entry from INCONSISTENT_FILES
+# (called from main(); accesses main()'s local INCONSISTENT_FILES via shared scope)
+remove_inconsistent_file() {
+    local target="$1"
+    local filtered=()
+    local f
+    for f in "${INCONSISTENT_FILES[@]+"${INCONSISTENT_FILES[@]}"}"; do
+        if [[ "$f" != "$target" && -n "$f" ]]; then
+            filtered+=("$f")
+        fi
+    done
+    INCONSISTENT_FILES=("${filtered[@]}")
+}
+
 # Flags
 CHECK_ONLY=false
 DRY_RUN=false
 VERBOSE=false
+CHANGELOG_ONLY=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -111,6 +147,10 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
+        --changelog-only)
+            CHANGELOG_ONLY=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [options]"
             echo ""
@@ -120,6 +160,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --check     Check only, exit 1 if versions are inconsistent"
             echo "  --dry-run   Show what would be changed without modifying files"
             echo "  --verbose   Show detailed output including all files scanned"
+            echo "  --changelog-only  Only check/update CHANGELOG.md release link footers and date"
             echo "  --help      Show this help message"
             echo ""
             echo "File types scanned:"
@@ -230,160 +271,167 @@ main() {
     local TOTAL_REPLACEMENTS=0
     local INCONSISTENT_FILES=()
     local SCANNED_COUNT=0
+    local TODAY
+    TODAY=$(date -u +"%Y-%m-%d")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # File Discovery - Comprehensive file type coverage
     # ═══════════════════════════════════════════════════════════════════════════
 
-    log "${MAGENTA}Discovering files to scan...${NC}"
+    if [[ "$CHANGELOG_ONLY" == "false" ]]; then
+        log "${MAGENTA}Discovering files to scan...${NC}"
 
-    # Find all relevant files
-    # Extensions: .rs .md .toml .yml .yaml .sh .txt .json
-    local FILES_TO_SCAN
-    FILES_TO_SCAN=$(find "$PROJECT_ROOT" \
-        -type f \( \
-            -name "*.rs" \
-            -o -name "*.md" \
-            -o -name "*.toml" \
-            -o -name "*.yml" \
-            -o -name "*.yaml" \
-            -o -name "*.sh" \
-            -o -name "*.txt" \
-            -o -name "*.json" \
-        \) \
-        ! -path "*/target/*" \
-        ! -path "*/.git/*" \
-        ! -path "*/node_modules/*" \
-        ! -path "*/.tla-tools/*" \
-        ! -path "*/site/*" \
-        ! -path "*/proptest-regressions/*" \
-        ! -path "*/mutants.out*/*" \
-        ! -path "*/.venv/*" \
-        ! -path "*/fuzz/target/*" \
-        ! -name "Cargo.toml" \
-        ! -name "Cargo.lock" \
-        2>/dev/null | sort || true)
+        # Find all relevant files
+        # Extensions: .rs .md .toml .yml .yaml .sh .txt .json
+        local FILES_TO_SCAN
+        FILES_TO_SCAN=$(find "$PROJECT_ROOT" \
+            -type f \( \
+                -name "*.rs" \
+                -o -name "*.md" \
+                -o -name "*.toml" \
+                -o -name "*.yml" \
+                -o -name "*.yaml" \
+                -o -name "*.sh" \
+                -o -name "*.txt" \
+                -o -name "*.json" \
+            \) \
+            ! -path "*/target/*" \
+            ! -path "*/.git/*" \
+            ! -path "*/node_modules/*" \
+            ! -path "*/.tla-tools/*" \
+            ! -path "*/site/*" \
+            ! -path "*/proptest-regressions/*" \
+            ! -path "*/mutants.out*/*" \
+            ! -path "*/.venv/*" \
+            ! -path "*/fuzz/target/*" \
+            ! -name "Cargo.toml" \
+            ! -name "Cargo.lock" \
+            2>/dev/null | sort || true)
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # Pattern Definitions
-    # ═══════════════════════════════════════════════════════════════════════════
+        # ═══════════════════════════════════════════════════════════════════════════
+        # Pattern Definitions
+        # ═══════════════════════════════════════════════════════════════════════════
 
-    # Pattern 1: Simple dependency declaration
-    # Examples:
-    #   fortress-rollback = "0.2"
-    #   fortress-rollback = "0.2.0"
-    local PATTERN1='fortress-rollback = "[0-9]+\.[0-9]+(\.[0-9]+)?"'
+        # Pattern 1: Simple dependency declaration
+        # Examples:
+        #   fortress-rollback = "0.2"
+        #   fortress-rollback = "0.2.0"
+        local PATTERN1='fortress-rollback = "[0-9]+\.[0-9]+(\.[0-9]+)?"'
 
-    # Pattern 2: Dependency with features/options (inline table)
-    # Examples:
-    #   fortress-rollback = { version = "0.2", features = ["tokio"] }
-    #   /// fortress-rollback = { version = "0.2", features = ["tokio"] }
-    #   //! fortress-rollback = { version = "0.2", features = ["tokio"] }
-    local PATTERN2='fortress-rollback = \{ version = "[0-9]+\.[0-9]+(\.[0-9]+)?"'
+        # Pattern 2: Dependency with features/options (inline table)
+        # Examples:
+        #   fortress-rollback = { version = "0.2", features = ["tokio"] }
+        #   /// fortress-rollback = { version = "0.2", features = ["tokio"] }
+        #   //! fortress-rollback = { version = "0.2", features = ["tokio"] }
+        local PATTERN2='fortress-rollback = \{ version = "[0-9]+\.[0-9]+(\.[0-9]+)?"'
 
-    echo -e "${BLUE}Scanning files for version references...${NC}"
-    echo ""
+        echo -e "${BLUE}Scanning files for version references...${NC}"
+        echo ""
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # File Processing
-    # ═══════════════════════════════════════════════════════════════════════════
+        # ═══════════════════════════════════════════════════════════════════════════
+        # File Processing
+        # ═══════════════════════════════════════════════════════════════════════════
 
-    while IFS= read -r file; do
-        [[ -z "$file" ]] && continue
-        [[ ! -f "$file" ]] && continue
+        while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+            [[ ! -f "$file" ]] && continue
 
-        # Skip excluded files
-        if should_exclude_file "$file"; then
-            continue
-        fi
+            # Skip excluded files
+            if should_exclude_file "$file"; then
+                continue
+            fi
 
-        ((SCANNED_COUNT++)) || true
+            ((SCANNED_COUNT++)) || true
 
-        local file_changed=false
-        local relative_path="${file#$PROJECT_ROOT/}"
-        local file_ext="${file##*.}"
+            local file_changed=false
+            local relative_path="${file#$PROJECT_ROOT/}"
+            local file_ext="${file##*.}"
 
-        log "  Scanning: $relative_path"
+            log "  Scanning: $relative_path"
 
-        # ─────────────────────────────────────────────────────────────────────
-        # Check for Pattern 1: fortress-rollback = "X.Y.Z"
-        # ─────────────────────────────────────────────────────────────────────
-        if grep -qE "$PATTERN1" "$file" 2>/dev/null; then
-            local matches
-            matches=$(grep -cE "$PATTERN1" "$file" 2>/dev/null | tr -d '[:space:]' || true)
-            matches=${matches:-0}
+            # ─────────────────────────────────────────────────────────────────────
+            # Check for Pattern 1: fortress-rollback = "X.Y.Z"
+            # ─────────────────────────────────────────────────────────────────────
+            if grep -qE "$PATTERN1" "$file" 2>/dev/null; then
+                local matches
+                matches=$(grep -cE "$PATTERN1" "$file" 2>/dev/null | tr -d '[:space:]' || true)
+                matches=${matches:-0}
 
-            # Check if any don't match the current version
-            local current_matches
-            current_matches=$(grep -E "$PATTERN1" "$file" 2>/dev/null | grep -cF "\"$MAJOR_MINOR\"" | tr -d '[:space:]' || true)
-            current_matches=${current_matches:-0}
+                # Check if any don't match the current version
+                local current_matches
+                current_matches=$(grep -E "$PATTERN1" "$file" 2>/dev/null | grep -cF "\"$MAJOR_MINOR\"" | tr -d '[:space:]' || true)
+                current_matches=${current_matches:-0}
 
-            if [[ "$matches" != "$current_matches" ]]; then
-                log "${YELLOW}  → Found outdated version (pattern 1): $relative_path${NC}"
+                if [[ "$matches" != "$current_matches" ]]; then
+                    log "${YELLOW}  → Found outdated version (pattern 1): $relative_path${NC}"
 
-                add_inconsistent_file "$relative_path"
+                    add_inconsistent_file "$relative_path"
 
-                if [[ "$CHECK_ONLY" == "false" ]]; then
-                    if [[ "$DRY_RUN" == "true" ]]; then
-                        echo -e "${YELLOW}Would update:${NC} $relative_path ${MAGENTA}($file_ext)${NC}"
-                        grep -nE "$PATTERN1" "$file" 2>/dev/null | while read -r line; do
-                            echo -e "  ${CYAN}$line${NC}"
-                        done
-                    else
-                        # Replace the version, keeping the simple format
-                        # Use sd (modern sed replacement) for portable cross-platform compatibility
-                        portable_replace 'fortress-rollback = "[0-9]+\.[0-9]+(\.[0-9]+)?"' "fortress-rollback = \"$MAJOR_MINOR\"" "$file"
-                        file_changed=true
-                        local diff_count=$((matches - current_matches))
-                        TOTAL_REPLACEMENTS=$((TOTAL_REPLACEMENTS + diff_count))
+                    if [[ "$CHECK_ONLY" == "false" ]]; then
+                        if [[ "$DRY_RUN" == "true" ]]; then
+                            echo -e "${YELLOW}Would update:${NC} $relative_path ${MAGENTA}($file_ext)${NC}"
+                            grep -nE "$PATTERN1" "$file" 2>/dev/null | while read -r line; do
+                                echo -e "  ${CYAN}$line${NC}"
+                            done
+                        else
+                            # Replace the version, keeping the simple format
+                            # Use sd (modern sed replacement) for portable cross-platform compatibility
+                            portable_replace 'fortress-rollback = "[0-9]+\.[0-9]+(\.[0-9]+)?"' "fortress-rollback = \"$MAJOR_MINOR\"" "$file"
+                            file_changed=true
+                            local diff_count=$((matches - current_matches))
+                            TOTAL_REPLACEMENTS=$((TOTAL_REPLACEMENTS + diff_count))
+                        fi
                     fi
                 fi
             fi
-        fi
 
-        # ─────────────────────────────────────────────────────────────────────
-        # Check for Pattern 2: fortress-rollback = { version = "X.Y.Z"
-        # This covers both TOML tables and doc comments
-        # ─────────────────────────────────────────────────────────────────────
-        if grep -qE "$PATTERN2" "$file" 2>/dev/null; then
-            local matches
-            matches=$(grep -cE "$PATTERN2" "$file" 2>/dev/null | tr -d '[:space:]' || true)
-            matches=${matches:-0}
+            # ─────────────────────────────────────────────────────────────────────
+            # Check for Pattern 2: fortress-rollback = { version = "X.Y.Z"
+            # This covers both TOML tables and doc comments
+            # ─────────────────────────────────────────────────────────────────────
+            if grep -qE "$PATTERN2" "$file" 2>/dev/null; then
+                local matches
+                matches=$(grep -cE "$PATTERN2" "$file" 2>/dev/null | tr -d '[:space:]' || true)
+                matches=${matches:-0}
 
-            # Check if any don't match the current version
-            local current_matches
-            current_matches=$(grep -E "$PATTERN2" "$file" 2>/dev/null | grep -cF "version = \"$MAJOR_MINOR\"" | tr -d '[:space:]' || true)
-            current_matches=${current_matches:-0}
+                # Check if any don't match the current version
+                local current_matches
+                current_matches=$(grep -E "$PATTERN2" "$file" 2>/dev/null | grep -cF "version = \"$MAJOR_MINOR\"" | tr -d '[:space:]' || true)
+                current_matches=${current_matches:-0}
 
-            if [[ "$matches" != "$current_matches" ]]; then
-                log "${YELLOW}  → Found outdated version (pattern 2): $relative_path${NC}"
+                if [[ "$matches" != "$current_matches" ]]; then
+                    log "${YELLOW}  → Found outdated version (pattern 2): $relative_path${NC}"
 
-                add_inconsistent_file "$relative_path"
+                    add_inconsistent_file "$relative_path"
 
-                if [[ "$CHECK_ONLY" == "false" ]]; then
-                    if [[ "$DRY_RUN" == "true" ]]; then
-                        echo -e "${YELLOW}Would update:${NC} $relative_path ${MAGENTA}($file_ext)${NC}"
-                        grep -nE "$PATTERN2" "$file" 2>/dev/null | while read -r line; do
-                            echo -e "  ${CYAN}$line${NC}"
-                        done
-                    else
-                        # Replace the version in the complex format
-                        # Use sd (modern sed replacement) for portable cross-platform compatibility
-                        portable_replace '(fortress-rollback = \{ version = ")[0-9]+\.[0-9]+(\.[0-9]+)?(")' "\${1}$MAJOR_MINOR\${3}" "$file"
-                        file_changed=true
-                        local diff_count=$((matches - current_matches))
-                        TOTAL_REPLACEMENTS=$((TOTAL_REPLACEMENTS + diff_count))
+                    if [[ "$CHECK_ONLY" == "false" ]]; then
+                        if [[ "$DRY_RUN" == "true" ]]; then
+                            echo -e "${YELLOW}Would update:${NC} $relative_path ${MAGENTA}($file_ext)${NC}"
+                            grep -nE "$PATTERN2" "$file" 2>/dev/null | while read -r line; do
+                                echo -e "  ${CYAN}$line${NC}"
+                            done
+                        else
+                            # Replace the version in the complex format
+                            # Use sd (modern sed replacement) for portable cross-platform compatibility
+                            portable_replace '(fortress-rollback = \{ version = ")[0-9]+\.[0-9]+(\.[0-9]+)?(")' "\${1}$MAJOR_MINOR\${3}" "$file"
+                            file_changed=true
+                            local diff_count=$((matches - current_matches))
+                            TOTAL_REPLACEMENTS=$((TOTAL_REPLACEMENTS + diff_count))
+                        fi
                     fi
                 fi
             fi
-        fi
 
-        if [[ "$file_changed" == "true" ]]; then
-            ((FILES_CHANGED++)) || true
-            echo -e "${GREEN}✓ Updated:${NC} $relative_path ${MAGENTA}($file_ext)${NC}"
-        fi
+            if [[ "$file_changed" == "true" ]]; then
+                ((FILES_CHANGED++)) || true
+                echo -e "${GREEN}✓ Updated:${NC} $relative_path ${MAGENTA}($file_ext)${NC}"
+            fi
 
-    done <<< "$FILES_TO_SCAN"
+        done <<< "$FILES_TO_SCAN"
+    else
+        echo -e "${BLUE}Scanning CHANGELOG.md release metadata only...${NC}"
+        echo ""
+    fi
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Pattern 3: CHANGELOG.md Link Footers
@@ -400,10 +448,10 @@ main() {
         fi
 
         # Check [Unreleased] link points to current version
-        local UNRELEASED_PATTERN='\[Unreleased\]: https://github\.com/.*/compare/v[0-9]+\.[0-9]+\.[0-9]+\.\.\.HEAD'
-        if grep -qE "$UNRELEASED_PATTERN" "$CHANGELOG" 2>/dev/null; then
+        local UNRELEASED_COMPARE_PATTERN='^\[Unreleased\]: https://github\.com/.*/compare/v?[0-9]+\.[0-9]+\.[0-9]+\.\.\.HEAD$'
+        if grep -qE "$UNRELEASED_COMPARE_PATTERN" "$CHANGELOG" 2>/dev/null; then
             local current_unreleased
-            current_unreleased=$(grep -oE 'compare/v[0-9]+\.[0-9]+\.[0-9]+\.\.\.HEAD' "$CHANGELOG" | head -1 | sed -E 's|compare/v([0-9]+\.[0-9]+\.[0-9]+)\.\.\.HEAD|\1|')
+            current_unreleased=$(sed -nE 's|^\[Unreleased\]: https://github\.com/.*/compare/v?([0-9]+\.[0-9]+\.[0-9]+)\.\.\.HEAD$|\1|p' "$CHANGELOG" | head -1)
             if [[ "$current_unreleased" != "$VERSION" ]]; then
                 log "${YELLOW}  → [Unreleased] link points to v$current_unreleased, should be v$VERSION${NC}"
                 add_inconsistent_file "CHANGELOG.md (link footers)"
@@ -412,27 +460,93 @@ main() {
                     if [[ "$DRY_RUN" == "true" ]]; then
                         echo -e "${YELLOW}Would update:${NC} CHANGELOG.md [Unreleased] link footer"
                     else
-                        portable_replace "(\\[Unreleased\\]: https://github\\.com/.*/compare/v)[0-9]+\\.[0-9]+\\.[0-9]+(\\.\\.\\.HEAD)" "\${1}$VERSION\${2}" "$CHANGELOG"
+                        portable_replace "^\[Unreleased\]: https://github\.com/.*/compare/v?[0-9]+\.[0-9]+\.[0-9]+\.\.\.HEAD$" "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v$VERSION...HEAD" "$CHANGELOG"
                         echo -e "${GREEN}✓ Updated:${NC} CHANGELOG.md [Unreleased] link → v$VERSION"
                         ((FILES_CHANGED++)) || true
                         ((TOTAL_REPLACEMENTS++)) || true
                     fi
                 fi
             fi
+        elif grep -qE '^\[Unreleased\]:' "$CHANGELOG" 2>/dev/null; then
+            log "${YELLOW}  → [Unreleased] link format is non-standard, should be compare/v$VERSION...HEAD${NC}"
+            add_inconsistent_file "CHANGELOG.md (link footers)"
+            if [[ "$CHECK_ONLY" == "false" ]]; then
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    echo -e "${YELLOW}Would update:${NC} CHANGELOG.md [Unreleased] link footer"
+                else
+                    portable_replace "^\[Unreleased\]:.*$" "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v$VERSION...HEAD" "$CHANGELOG"
+                    echo -e "${GREEN}✓ Updated:${NC} CHANGELOG.md [Unreleased] link → v$VERSION"
+                    ((FILES_CHANGED++)) || true
+                    ((TOTAL_REPLACEMENTS++)) || true
+                fi
+            fi
+        fi
+
+        # Check current release header has a release date
+        local ESCAPED_VERSION="${VERSION//./\\.}"
+        if grep -qE "^## \[$ESCAPED_VERSION\]$" "$CHANGELOG" 2>/dev/null; then
+            log "${YELLOW}  → ## [$VERSION] is missing release date, should be ## [$VERSION] - $TODAY${NC}"
+            add_inconsistent_file "CHANGELOG.md (release date)"
+
+            if [[ "$CHECK_ONLY" == "false" ]]; then
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    echo -e "${YELLOW}Would update:${NC} CHANGELOG.md release date for [$VERSION]"
+                else
+                    portable_replace "^## \\[$ESCAPED_VERSION\\]$" "## [$VERSION] - $TODAY" "$CHANGELOG"
+                    echo -e "${GREEN}✓ Updated:${NC} CHANGELOG.md release date for [$VERSION] → $TODAY"
+                    remove_inconsistent_file "CHANGELOG.md (release date)"
+                    ((FILES_CHANGED++)) || true
+                    ((TOTAL_REPLACEMENTS++)) || true
+                fi
+            fi
+        fi
+
+        # Auto-fix missing version link footers based on version header ordering
+        # (each version links from the next older header version).
+        local version_headers
+        version_headers=$(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' "$CHANGELOG" | sed -E 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\]/\1/' || true)
+        local missing_link_lines=""
+        if [[ -n "$version_headers" ]]; then
+            local header_version
+            local previous_header_version=""
+            while IFS= read -r header_version; do
+                [[ -z "$header_version" ]] && continue
+                if [[ -n "$previous_header_version" ]]; then
+                    local escaped_previous_version="${previous_header_version//./\\.}"
+                    if ! grep -qE "^\[$escaped_previous_version\]: " "$CHANGELOG" 2>/dev/null; then
+                        local new_line="[$previous_header_version]: https://github.com/wallstop/fortress-rollback/compare/v${header_version}...v${previous_header_version}"
+                        add_inconsistent_file "CHANGELOG.md (link footers)"
+                        if [[ "$CHECK_ONLY" == "false" ]]; then
+                            if [[ "$DRY_RUN" == "true" ]]; then
+                                echo -e "${YELLOW}Would create:${NC} CHANGELOG.md [$previous_header_version] link footer"
+                            else
+                                missing_link_lines+="$new_line"$'\n'
+                                echo -e "${GREEN}✓ Added:${NC} CHANGELOG.md [$previous_header_version] link → v${header_version}...v${previous_header_version}"
+                                ((TOTAL_REPLACEMENTS++)) || true
+                            fi
+                        fi
+                    fi
+                fi
+                previous_header_version="$header_version"
+            done <<< "$version_headers"
+
+            if [[ -n "$previous_header_version" ]]; then
+                local escaped_oldest_version="${previous_header_version//./\\.}"
+                if ! grep -qE "^\[$escaped_oldest_version\]: " "$CHANGELOG" 2>/dev/null; then
+                    log_always "${YELLOW}⚠ CHANGELOG.md is missing [$previous_header_version] link footer and no previous version header was found to build compare URL${NC}"
+                    add_inconsistent_file "CHANGELOG.md (link footers)"
+                fi
+            fi
+        fi
+        if [[ "$CHECK_ONLY" == "false" && "$DRY_RUN" == "false" && -n "$missing_link_lines" ]]; then
+            insert_after_unreleased_link "$CHANGELOG" "$missing_link_lines"
+            ((FILES_CHANGED++)) || true
         fi
 
         # Check that a [$VERSION] link entry exists
-        local ESCAPED_VERSION="${VERSION//./\\.}"
-        if ! grep -qE "^\[$ESCAPED_VERSION\]: https://github\.com/" "$CHANGELOG" 2>/dev/null; then
+        if ! grep -qE "^\[$ESCAPED_VERSION\]: " "$CHANGELOG" 2>/dev/null; then
             log "${YELLOW}  → Missing [$VERSION] link entry in CHANGELOG.md${NC}"
-            # Flag as inconsistent in all modes — adding entries
-            # requires knowledge of the previous version tag
             add_inconsistent_file "CHANGELOG.md (link footers)"
-            if [[ "$DRY_RUN" == "true" ]]; then
-                echo -e "${YELLOW}⚠ CHANGELOG.md is missing a [$VERSION] link footer entry (dry-run)${NC}"
-            else
-                echo -e "${YELLOW}⚠ CHANGELOG.md is missing a [$VERSION] link footer entry${NC}"
-            fi
         else
             log "${GREEN}  ✓ [$VERSION] link entry exists in CHANGELOG.md${NC}"
         fi
@@ -444,7 +558,7 @@ main() {
             while IFS= read -r header_version; do
                 [[ -z "$header_version" ]] && continue
                 local ESCAPED_HEADER_VERSION="${header_version//./\\.}"
-                if ! grep -qE "^\[$ESCAPED_HEADER_VERSION\]: https://" "$CHANGELOG" 2>/dev/null; then
+                if ! grep -qE "^\[$ESCAPED_HEADER_VERSION\]: " "$CHANGELOG" 2>/dev/null; then
                     log "${YELLOW}  → ## [$header_version] header has no matching [$header_version]: link footer${NC}"
                     add_inconsistent_file "CHANGELOG.md (link footers)"
                     echo -e "${YELLOW}⚠ CHANGELOG.md ## [$header_version] header is missing a matching link footer${NC}"

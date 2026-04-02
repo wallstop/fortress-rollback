@@ -66,6 +66,32 @@ jobs:
             exit 1
           fi
 
+      - name: Verify workflow_dispatch version input matches Cargo.toml
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -n1 | cut -d '"' -f2)
+          INPUT_VERSION="${{ github.event.inputs.release_version }}"
+          if [ "$INPUT_VERSION" != "$CARGO_VERSION" ]; then
+            echo "workflow_dispatch input release_version=$INPUT_VERSION does not match Cargo.toml version $CARGO_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Auto-fix CHANGELOG release metadata (must already be committed)
+        run: |
+          bash ./scripts/sync-version.sh --changelog-only
+
+      - name: Verify CHANGELOG release metadata
+        run: |
+          bash ./scripts/sync-version.sh --changelog-only --check
+
+      - name: Fail if CHANGELOG sync produced uncommitted changes
+        run: |
+          if [ -n "$(git status --porcelain -- CHANGELOG.md)" ]; then
+            echo "CHANGELOG.md is not synchronized in the committed source. Run 'bash ./scripts/sync-version.sh --changelog-only' and commit the result before publishing." >&2
+            git --no-pager diff -- CHANGELOG.md
+            exit 1
+          fi
+
       - name: Publish (dry-run)
         run: cargo publish --dry-run
         env:
