@@ -26,6 +26,32 @@ def _create_workspace(tmp_path: Path) -> Path:
     return repo
 
 
+def init_git_repo(repo: Path) -> None:
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "tests@example.com"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Sync Version Tests"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def _run_sync(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["FORTRESS_PROJECT_ROOT"] = str(repo)
@@ -116,3 +142,70 @@ def test_dry_run_does_not_modify_files(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert docs_index.read_text(encoding="utf-8") == original
     assert "Would update:" in result.stdout
+
+
+def test_help_documents_fortress_project_root() -> None:
+    result = subprocess.run(
+        ["bash", str(SYNC_VERSION_SCRIPT), "--help"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "FORTRESS_PROJECT_ROOT" in result.stdout
+    assert "repository root containing" in result.stdout
+
+
+def test_check_mode_ignores_gitignored_untracked_outputs(tmp_path: Path) -> None:
+    repo = _create_workspace(tmp_path)
+    _write(repo / "docs" / "index.md", 'fortress-rollback = "1.2"\n')
+    _write(repo / ".gitignore", "site/\n")
+    _write(repo / "site" / "index.md", 'fortress-rollback = "0.9"\n')
+    init_git_repo(repo)
+
+    result = _run_sync(repo, "--check", "--verbose")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Discovery mode: git-tracked" in result.stdout
+    assert "Skipping untracked and gitignored files via git ls-files." in result.stdout
+    assert "site/index.md" not in result.stdout
+
+
+def test_check_mode_still_fails_for_tracked_stale_files_with_git_discovery(
+    tmp_path: Path,
+) -> None:
+    repo = _create_workspace(tmp_path)
+    _write(repo / "docs" / "index.md", 'fortress-rollback = "0.9"\n')
+    init_git_repo(repo)
+
+    result = _run_sync(repo, "--check")
+
+    assert result.returncode == 1
+
+
+def test_check_mode_skips_deleted_tracked_files_in_git_discovery(tmp_path: Path) -> None:
+    repo = _create_workspace(tmp_path)
+    docs_index = repo / "docs" / "index.md"
+    deleted = repo / "docs" / "deleted.md"
+    _write(docs_index, 'fortress-rollback = "1.2"\n')
+    _write(deleted, 'fortress-rollback = "0.9"\n')
+    init_git_repo(repo)
+    deleted.unlink()
+
+    result = _run_sync(repo, "--check", "--verbose")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Discovery mode: git-tracked" in result.stdout
+    assert "Files skipped (missing):" in result.stdout
+
+
+def test_check_mode_uses_filesystem_fallback_when_not_in_git_repo(tmp_path: Path) -> None:
+    repo = _create_workspace(tmp_path)
+    _write(repo / "docs" / "index.md", 'fortress-rollback = "0.9"\n')
+
+    result = _run_sync(repo, "--check", "--verbose")
+
+    assert result.returncode == 1
+    assert "Discovery mode: filesystem-fallback" in result.stdout

@@ -174,7 +174,7 @@ repos:
         entry: bash scripts/sync-version.sh --check
         language: system
         pass_filenames: false
-        files: '^(Cargo\.toml|README\.md|CHANGELOG\.md|docs/.*\.md|wiki/.*\.md|src/.*\.rs|scripts/sync-version\.sh)$'
+        files: '(\.rs|\.md|\.toml|\.yml|\.yaml|\.sh|\.txt|\.json)$'
 
       - id: changelog-unreleased-rule
         name: changelog unreleased code rule

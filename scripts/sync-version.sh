@@ -10,6 +10,10 @@
 #   ./scripts/sync-version.sh --dry-run # Show what would be changed
 #   ./scripts/sync-version.sh --verbose # Show detailed output
 #
+# Environment:
+#   FORTRESS_PROJECT_ROOT  Optional path to the repository root containing
+#                          Cargo.toml. Defaults to script parent directory.
+#
 # ═══════════════════════════════════════════════════════════════════════════════
 # FILES SCANNED (comprehensive coverage)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -120,6 +124,10 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Synchronize all fortress-rollback version references with Cargo.toml"
             echo ""
+            echo "Environment:"
+            echo "  FORTRESS_PROJECT_ROOT  Optional path to repository root containing"
+            echo "                         Cargo.toml. Defaults to script parent directory."
+            echo ""
             echo "Options:"
             echo "  --check     Check only, exit 1 if versions are inconsistent"
             echo "  --dry-run   Show what would be changed without modifying files"
@@ -173,14 +181,18 @@ log_always() {
 }
 
 # Check if a file should be excluded
+# Sets EXCLUDE_REASON when returning 0 (excluded).
+EXCLUDE_REASON=""
 should_exclude_file() {
     local file="$1"
     local basename
     basename=$(basename "$file")
+    EXCLUDE_REASON=""
 
     # Exclude specific files
     case "$basename" in
         Cargo.toml|Cargo.lock|sync-version.sh)
+            EXCLUDE_REASON="excluded core manifest/script file"
             return 0  # true = exclude
             ;;
     esac
@@ -188,6 +200,7 @@ should_exclude_file() {
     # Exclude paths containing these directories
     case "$file" in
         */target/*|*/.git/*|*/node_modules/*|*/.tla-tools/*|*/proptest-regressions/*|*/mutants.out*/*|*/.venv/*|*/fuzz/target/*)
+            EXCLUDE_REASON="excluded generated/tooling directory"
             return 0  # true = exclude
             ;;
     esac
@@ -234,6 +247,10 @@ main() {
     local TOTAL_REPLACEMENTS=0
     local INCONSISTENT_FILES=()
     local SCANNED_COUNT=0
+    local SKIPPED_COUNT=0
+    local SKIPPED_MISSING=0
+    local DISCOVERY_MODE=""
+    local DISCOVERY_FALLBACK_REASON=""
 
     # ═══════════════════════════════════════════════════════════════════════════
     # File Discovery - Comprehensive file type coverage
@@ -243,29 +260,77 @@ main() {
 
     # Find all relevant files
     # Extensions: .rs .md .toml .yml .yaml .sh .txt .json
-    local FILES_TO_SCAN
-    FILES_TO_SCAN=$(find "$PROJECT_ROOT" \
-        -type f \( \
-            -name "*.rs" \
-            -o -name "*.md" \
-            -o -name "*.toml" \
-            -o -name "*.yml" \
-            -o -name "*.yaml" \
-            -o -name "*.sh" \
-            -o -name "*.txt" \
-            -o -name "*.json" \
-        \) \
-        ! -path "*/target/*" \
-        ! -path "*/.git/*" \
-        ! -path "*/node_modules/*" \
-        ! -path "*/.tla-tools/*" \
-        ! -path "*/proptest-regressions/*" \
-        ! -path "*/mutants.out*/*" \
-        ! -path "*/.venv/*" \
-        ! -path "*/fuzz/target/*" \
-        ! -name "Cargo.toml" \
-        ! -name "Cargo.lock" \
-        2>/dev/null | sort || true)
+    # Prefer git-tracked files to avoid local gitignored/untracked output noise.
+    local -a FILES_TO_SCAN
+    if ! command -v git >/dev/null 2>&1; then
+        DISCOVERY_MODE="filesystem-fallback"
+        DISCOVERY_FALLBACK_REASON="git is not available"
+        while IFS= read -r file; do
+            FILES_TO_SCAN+=("$file")
+        done < <(find "$PROJECT_ROOT" \
+            -type f \( \
+                -name "*.rs" \
+                -o -name "*.md" \
+                -o -name "*.toml" \
+                -o -name "*.yml" \
+                -o -name "*.yaml" \
+                -o -name "*.sh" \
+                -o -name "*.txt" \
+                -o -name "*.json" \
+            \) \
+            ! -path "*/target/*" \
+            ! -path "*/.git/*" \
+            ! -path "*/node_modules/*" \
+            ! -path "*/.tla-tools/*" \
+            ! -path "*/proptest-regressions/*" \
+            ! -path "*/mutants.out*/*" \
+            ! -path "*/.venv/*" \
+            ! -path "*/fuzz/target/*" \
+            ! -name "Cargo.toml" \
+            ! -name "Cargo.lock" \
+            2>/dev/null | sort || true)
+    elif git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        DISCOVERY_MODE="git-tracked"
+        FILES_TO_SCAN=()
+        while IFS= read -r -d '' tracked_file; do
+            FILES_TO_SCAN+=("$PROJECT_ROOT/$tracked_file")
+        done < <(git -C "$PROJECT_ROOT" ls-files -z \
+            '*.rs' '*.md' '*.toml' '*.yml' '*.yaml' '*.sh' '*.txt' '*.json' \
+            2>/dev/null || true)
+    else
+        DISCOVERY_MODE="filesystem-fallback"
+        DISCOVERY_FALLBACK_REASON="git metadata unavailable for project root"
+        while IFS= read -r file; do
+            FILES_TO_SCAN+=("$file")
+        done < <(find "$PROJECT_ROOT" \
+            -type f \( \
+                -name "*.rs" \
+                -o -name "*.md" \
+                -o -name "*.toml" \
+                -o -name "*.yml" \
+                -o -name "*.yaml" \
+                -o -name "*.sh" \
+                -o -name "*.txt" \
+                -o -name "*.json" \
+            \) \
+            ! -path "*/target/*" \
+            ! -path "*/.git/*" \
+            ! -path "*/node_modules/*" \
+            ! -path "*/.tla-tools/*" \
+            ! -path "*/proptest-regressions/*" \
+            ! -path "*/mutants.out*/*" \
+            ! -path "*/.venv/*" \
+            ! -path "*/fuzz/target/*" \
+            ! -name "Cargo.toml" \
+            ! -name "Cargo.lock" \
+            2>/dev/null | sort || true)
+    fi
+    log "  Discovery mode: $DISCOVERY_MODE"
+    if [[ "$DISCOVERY_MODE" == "git-tracked" ]]; then
+        log "  Skipping untracked and gitignored files via git ls-files."
+    else
+        log "  Using filesystem scan with built-in excludes: $DISCOVERY_FALLBACK_REASON"
+    fi
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Pattern Definitions
@@ -291,12 +356,21 @@ main() {
     # File Processing
     # ═══════════════════════════════════════════════════════════════════════════
 
-    while IFS= read -r file; do
+    for file in "${FILES_TO_SCAN[@]+"${FILES_TO_SCAN[@]}"}"; do
         [[ -z "$file" ]] && continue
-        [[ ! -f "$file" ]] && continue
+        if [[ ! -f "$file" ]]; then
+            ((SKIPPED_MISSING++)) || true
+            log "  Skipping missing file entry: $file"
+            continue
+        fi
 
         # Skip excluded files
         if should_exclude_file "$file"; then
+            ((SKIPPED_COUNT++)) || true
+            if [[ "$VERBOSE" == "true" ]]; then
+                local relative_path="${file#$PROJECT_ROOT/}"
+                log "  Skipping: $relative_path ($EXCLUDE_REASON)"
+            fi
             continue
         fi
 
@@ -386,7 +460,7 @@ main() {
             echo -e "${GREEN}✓ Updated:${NC} $relative_path ${MAGENTA}($file_ext)${NC}"
         fi
 
-    done <<< "$FILES_TO_SCAN"
+    done
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Pattern 3: CHANGELOG.md Link Footers
@@ -465,6 +539,8 @@ main() {
     echo ""
     echo -e "${CYAN}════════════════════════════════════════════════════════════════════════${NC}"
     log "${BLUE}Files scanned:${NC} $SCANNED_COUNT"
+    log "${BLUE}Files skipped (excluded):${NC} $SKIPPED_COUNT"
+    log "${BLUE}Files skipped (missing):${NC} $SKIPPED_MISSING"
 
     if [[ "$CHECK_ONLY" == "true" ]]; then
         if [[ ${#INCONSISTENT_FILES[@]} -gt 0 ]]; then
