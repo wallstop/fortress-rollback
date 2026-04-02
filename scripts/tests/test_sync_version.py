@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
-import subprocess
 import os
+import subprocess
 from pathlib import Path
 
+# Resolve repository root from scripts/tests/ (two parent levels up).
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SYNC_VERSION_SCRIPT = REPO_ROOT / "scripts" / "sync-version.sh"
 
@@ -50,7 +51,43 @@ def test_updates_markdown_dependency_snippet(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     # sync-version.sh normalizes dependency references to major.minor.
-    assert 'fortress-rollback = "1.2"' in docs_index.read_text(encoding="utf-8")
+    assert docs_index.read_text(encoding="utf-8") == (
+        "# Example\n\n```toml\n[dependencies]\nfortress-rollback = \"1.2\"\n```\n"
+    )
+
+
+def test_updates_wiki_home_dependency_snippet(tmp_path: Path) -> None:
+    repo = _create_workspace(tmp_path)
+    wiki_home = repo / "wiki" / "Home.md"
+    _write(wiki_home, 'fortress-rollback = "0.9"\n')
+
+    result = _run_sync(repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert wiki_home.read_text(encoding="utf-8") == 'fortress-rollback = "1.2"\n'
+
+
+def test_updates_all_occurrences_in_single_file(tmp_path: Path) -> None:
+    repo = _create_workspace(tmp_path)
+    docs_index = repo / "docs" / "index.md"
+    _write(
+        docs_index,
+        (
+            'fortress-rollback = "0.9"\n'
+            'fortress-rollback = { version = "0.9", features = ["tokio"] }\n'
+            'fortress-rollback = "0.9"\n'
+        ),
+    )
+
+    result = _run_sync(repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    updated = docs_index.read_text(encoding="utf-8")
+    assert updated == (
+        'fortress-rollback = "1.2"\n'
+        'fortress-rollback = { version = "1.2", features = ["tokio"] }\n'
+        'fortress-rollback = "1.2"\n'
+    )
 
 
 def test_check_mode_fails_when_stale_and_passes_when_synced(tmp_path: Path) -> None:
