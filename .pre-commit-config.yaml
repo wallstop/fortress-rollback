@@ -162,12 +162,26 @@ repos:
         pass_filenames: false
         files: '^(docs/.*\.md|wiki/.*\.md|scripts/docs/sync-wiki\.py)$'
 
+      - id: check-theme-colors
+        name: check docs theme colors
+        entry: python scripts/docs/check-theme-colors.py
+        language: python
+        pass_filenames: false
+        files: '^docs/stylesheets/custom\.css$'
+
       - id: check-sync-headers
         name: check sync headers
         entry: python scripts/hooks/check-sync-headers.py
         language: python
         files: '^(docs/.*\.md|wiki/.*\.md)$'
         pass_filenames: false
+
+      - id: sync-version-check
+        name: sync version references (check)
+        entry: bash scripts/sync-version.sh --check
+        language: system
+        pass_filenames: false
+        files: '(\.rs|\.md|\.toml|\.yml|\.yaml|\.sh|\.txt|\.json)$'
 
       - id: changelog-unreleased-rule
         name: changelog unreleased code rule

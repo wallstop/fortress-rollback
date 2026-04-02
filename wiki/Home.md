@@ -33,7 +33,7 @@ Get up and running with Fortress Rollback in minutes.
 
 ```toml
 [dependencies]
-fortress-rollback = "0.6"
+fortress-rollback = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 ```
 
