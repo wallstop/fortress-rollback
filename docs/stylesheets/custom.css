@@ -612,6 +612,13 @@ html {
     transition: transform var(--fortress-transition-normal);
 }
 
+/* Hide sticky left navigation on desktop (GitHub Pages docs) */
+@media screen and (min-width: 76.25em) {
+    .md-sidebar--primary {
+        display: none;
+    }
+}
+
 /* Footer navigation */
 .md-footer__link {
     transition: opacity var(--fortress-transition-fast);
