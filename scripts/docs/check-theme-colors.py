@@ -31,6 +31,17 @@ def get_project_root() -> Path:
     return script_dir.parent.parent
 
 
+def _display_path(filepath: str | Path) -> str:
+    """Convert a file path to a relative display path."""
+    resolved = Path(filepath).resolve()
+    for base_path in (get_project_root().resolve(), Path.cwd().resolve()):
+        try:
+            return resolved.relative_to(base_path).as_posix()
+        except ValueError:
+            continue
+    return resolved.as_posix()
+
+
 def extract_css_block(content: str, selector: str) -> str:
     """Extract selector block body using brace matching."""
     selector_pattern = re.compile(rf"(?m)^\s*{re.escape(selector)}\s*\{{")
@@ -167,7 +178,7 @@ def parse_required_property(
     *,
     properties: dict[str, str],
     property_name: str,
-    css_path: Path,
+    display_path: str,
     errors: int,
     scope: str,
 ) -> tuple[str | None, int]:
@@ -175,7 +186,7 @@ def parse_required_property(
     value = properties.get(property_name)
     if value is None:
         print(
-            f"{css_path}:1: error: missing required property {property_name} ({scope})",
+            f"{display_path}:0: error: missing required property {property_name} ({scope})",
             file=sys.stderr,
         )
         return None, errors + 1
@@ -186,11 +197,12 @@ def validate_theme_colors(css_path: Path) -> ValidationResult:
     """Validate that header color variables are mode-aware and non-orange."""
     errors = 0
     warnings = 0
+    display_path = _display_path(css_path)
 
     try:
         css = css_path.read_text(encoding="utf-8")
     except OSError as error:
-        print(f"{css_path}:1: error: could not read file: {error}", file=sys.stderr)
+        print(f"{display_path}:0: error: could not read file: {error}", file=sys.stderr)
         return ValidationResult(errors=1, warnings=0)
 
     dark_block = extract_css_block(css, '[data-md-color-scheme="slate"]')
@@ -198,13 +210,13 @@ def validate_theme_colors(css_path: Path) -> ValidationResult:
 
     if not dark_block:
         print(
-            f"{css_path}:1: error: missing [data-md-color-scheme=\"slate\"] block",
+            f"{display_path}:0: error: missing [data-md-color-scheme=\"slate\"] block",
             file=sys.stderr,
         )
         errors += 1
     if not light_block:
         print(
-            f"{css_path}:1: error: missing [data-md-color-scheme=\"default\"] block",
+            f"{display_path}:0: error: missing [data-md-color-scheme=\"default\"] block",
             file=sys.stderr,
         )
         errors += 1
@@ -220,28 +232,28 @@ def validate_theme_colors(css_path: Path) -> ValidationResult:
     dark_primary, errors = parse_required_property(
         properties=dark_properties,
         property_name="--md-primary-fg-color",
-        css_path=css_path,
+        display_path=display_path,
         errors=errors,
         scope="slate",
     )
     light_primary, errors = parse_required_property(
         properties=light_properties,
         property_name="--md-primary-fg-color",
-        css_path=css_path,
+        display_path=display_path,
         errors=errors,
         scope="default",
     )
     dark_text, errors = parse_required_property(
         properties=dark_properties,
         property_name="--md-primary-bg-color",
-        css_path=css_path,
+        display_path=display_path,
         errors=errors,
         scope="slate",
     )
     light_text, errors = parse_required_property(
         properties=light_properties,
         property_name="--md-primary-bg-color",
-        css_path=css_path,
+        display_path=display_path,
         errors=errors,
         scope="default",
     )
@@ -255,7 +267,7 @@ def validate_theme_colors(css_path: Path) -> ValidationResult:
     ):
         if is_forbidden_orange(value, variables):
             print(
-                f"{css_path}:1: error: {label} must not use the orange accent palette ({value})",
+                f"{display_path}:0: error: {label} must not use the orange accent palette ({value})",
                 file=sys.stderr,
             )
             errors += 1
@@ -268,7 +280,7 @@ def validate_theme_colors(css_path: Path) -> ValidationResult:
         resolved_foreground = resolve_variable_reference(foreground_value, variables)
         if resolved_background is None or resolved_foreground is None:
             print(
-                f"{css_path}:1: error: {label} must resolve to concrete color values",
+                f"{display_path}:0: error: {label} must resolve to concrete color values",
                 file=sys.stderr,
             )
             errors += 1
@@ -278,7 +290,7 @@ def validate_theme_colors(css_path: Path) -> ValidationResult:
         parsed_foreground = parse_color(resolved_foreground)
         if parsed_background is None or parsed_foreground is None:
             print(
-                f"{css_path}:1: error: {label} must use hex or rgb colors (resolved: {resolved_background} vs {resolved_foreground})",
+                f"{display_path}:0: error: {label} must use hex or rgb colors (resolved: {resolved_background} vs {resolved_foreground})",
                 file=sys.stderr,
             )
             errors += 1
@@ -287,7 +299,7 @@ def validate_theme_colors(css_path: Path) -> ValidationResult:
         ratio = contrast_ratio(parsed_background, parsed_foreground)
         if ratio < 4.5:
             print(
-                f"{css_path}:1: error: {label} contrast ratio {ratio:.2f} is below WCAG AA minimum 4.5",
+                f"{display_path}:0: error: {label} contrast ratio {ratio:.2f} is below WCAG AA minimum 4.5",
                 file=sys.stderr,
             )
             errors += 1
@@ -300,7 +312,7 @@ def validate_theme_colors(css_path: Path) -> ValidationResult:
         and resolved_dark_primary == resolved_light_primary
     ):
         print(
-            f"{css_path}:1: error: light/dark --md-primary-fg-color values resolve to the same color; header backgrounds must differ by mode",
+            f"{display_path}:0: error: light/dark --md-primary-fg-color values resolve to the same color; header backgrounds must differ by mode",
             file=sys.stderr,
         )
         errors += 1
@@ -316,12 +328,12 @@ def main() -> int:
     result = validate_theme_colors(css_path)
     if result.errors:
         print(
-            f"✗ Theme color validation failed with {result.errors} error(s)",
+            f"Theme color validation failed with {result.errors} error(s)",
             file=sys.stderr,
         )
         return 1
 
-    print("✓ Theme color validation passed")
+    print("Theme color validation passed")
     return 0
 
 

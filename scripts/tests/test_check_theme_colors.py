@@ -6,6 +6,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 scripts_dir = Path(__file__).parent.parent
 spec = importlib.util.spec_from_file_location(
     "check_theme_colors",
@@ -237,3 +239,92 @@ def test_validate_theme_colors_rejects_resolved_equal_primary_values(
 
     result = validate_theme_colors(css_path)
     assert result.errors == 1
+
+
+def test_validate_theme_colors_uses_relative_display_path_and_file_level_line_zero(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    css_path = tmp_path / "docs" / "stylesheets" / "custom.css"
+    _write(
+        css_path,
+        """
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #161b22;
+}
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #f6f8fa;
+  --md-primary-bg-color: #24292f;
+}
+""",
+    )
+
+    result = validate_theme_colors(css_path)
+    assert result.errors == 1
+    stderr = capsys.readouterr().err
+    assert "custom.css:0: error:" in stderr
+    assert ":1: error:" not in stderr
+
+
+def test_validate_theme_colors_uses_repo_relative_path_when_cwd_is_subdir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    mock_root = tmp_path / "repo"
+    scripts_dir = mock_root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    monkeypatch.chdir(scripts_dir)
+    monkeypatch.setattr(check_theme_colors, "get_project_root", lambda: mock_root)
+    css_path = mock_root / "docs" / "stylesheets" / "custom.css"
+    _write(
+        css_path,
+        """
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #161b22;
+}
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #f6f8fa;
+  --md-primary-bg-color: #24292f;
+}
+""",
+    )
+
+    result = validate_theme_colors(css_path)
+    assert result.errors == 1
+    stderr = capsys.readouterr().err
+    assert "docs/stylesheets/custom.css:0: error:" in stderr
+
+
+def test_main_outputs_ascii_only_success(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        check_theme_colors,
+        "validate_theme_colors",
+        lambda _: check_theme_colors.ValidationResult(errors=0, warnings=0),
+    )
+
+    assert check_theme_colors.main() == 0
+    output = capsys.readouterr().out
+    assert "Theme color validation passed" in output
+    assert "✓" not in output
+    assert "✗" not in output
+
+
+def test_main_outputs_ascii_only_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        check_theme_colors,
+        "validate_theme_colors",
+        lambda _: check_theme_colors.ValidationResult(errors=2, warnings=0),
+    )
+
+    assert check_theme_colors.main() == 1
+    stderr = capsys.readouterr().err
+    assert "Theme color validation failed with 2 error(s)" in stderr
+    assert "✓" not in stderr
+    assert "✗" not in stderr
