@@ -102,12 +102,18 @@ insert_after_unreleased_link() {
     awk -v insert_text="$text" '
         {
             print
-            if (!inserted && $0 ~ /^\[Unreleased\]: /) {
+            if (!inserted && $0 ~ /^\[Unreleased\]:[[:space:]]+/) {
                 printf "%s", insert_text
                 inserted = 1
             }
         }
-    ' "$file" > "$tmp_file"
+        END {
+            exit inserted ? 0 : 1
+        }
+    ' "$file" > "$tmp_file" || {
+        rm -f "$tmp_file"
+        return 1
+    }
 
     mv "$tmp_file" "$file"
 }
@@ -442,32 +448,42 @@ main() {
         log "${MAGENTA}Checking CHANGELOG.md link footers...${NC}"
 
         # Check that [Unreleased] link footer exists
-        if ! grep -qE '^\[Unreleased\]: https://' "$CHANGELOG" 2>/dev/null; then
+        if ! grep -qE '^\[Unreleased\]:[[:space:]]+https://' "$CHANGELOG" 2>/dev/null; then
             log_always "${YELLOW}  ⚠ CHANGELOG.md is missing [Unreleased] link footer${NC}"
             add_inconsistent_file "CHANGELOG.md (link footers)"
         fi
 
         # Check [Unreleased] link points to current version
-        local UNRELEASED_COMPARE_PATTERN='^\[Unreleased\]: https://github\.com/.*/compare/v?[0-9]+\.[0-9]+\.[0-9]+\.\.\.HEAD$'
+        local UNRELEASED_COMPARE_PATTERN='^\[Unreleased\]:[[:space:]]+https://github\.com/.*/compare/v?[0-9]+\.[0-9]+\.[0-9]+\.\.\.HEAD[[:space:]]*$'
+        local CANONICAL_UNRELEASED_LINE="[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v$VERSION...HEAD"
         if grep -qE "$UNRELEASED_COMPARE_PATTERN" "$CHANGELOG" 2>/dev/null; then
             local current_unreleased
-            current_unreleased=$(sed -nE 's|^\[Unreleased\]: https://github\.com/.*/compare/v?([0-9]+\.[0-9]+\.[0-9]+)\.\.\.HEAD$|\1|p' "$CHANGELOG" | head -1)
+            local unreleased_line
+            local needs_unreleased_normalization=false
+            current_unreleased=$(sed -nE 's|^\[Unreleased\]:[[:space:]]+https://github\.com/.*/compare/v?([0-9]+\.[0-9]+\.[0-9]+)\.\.\.HEAD[[:space:]]*$|\1|p' "$CHANGELOG" | head -1)
+            unreleased_line=$(grep -E '^\[Unreleased\]:' "$CHANGELOG" | head -1 | sed -E 's/[[:space:]]+$//' || true)
             if [[ "$current_unreleased" != "$VERSION" ]]; then
                 log "${YELLOW}  → [Unreleased] link points to v$current_unreleased, should be v$VERSION${NC}"
+                needs_unreleased_normalization=true
+            elif [[ "$unreleased_line" != "$CANONICAL_UNRELEASED_LINE" ]]; then
+                log "${YELLOW}  → [Unreleased] link format is non-canonical, normalizing to compare/v$VERSION...HEAD${NC}"
+                needs_unreleased_normalization=true
+            fi
+            if [[ "$needs_unreleased_normalization" == "true" ]]; then
                 add_inconsistent_file "CHANGELOG.md (link footers)"
 
                 if [[ "$CHECK_ONLY" == "false" ]]; then
                     if [[ "$DRY_RUN" == "true" ]]; then
                         echo -e "${YELLOW}Would update:${NC} CHANGELOG.md [Unreleased] link footer"
                     else
-                        portable_replace "^\[Unreleased\]: https://github\.com/.*/compare/v?[0-9]+\.[0-9]+\.[0-9]+\.\.\.HEAD$" "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v$VERSION...HEAD" "$CHANGELOG"
+                        portable_replace "^\[Unreleased\]:[[:space:]]+https://github\.com/.*/compare/v?[0-9]+\.[0-9]+\.[0-9]+\.\.\.HEAD[[:space:]]*$" "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v$VERSION...HEAD" "$CHANGELOG"
                         echo -e "${GREEN}✓ Updated:${NC} CHANGELOG.md [Unreleased] link → v$VERSION"
                         ((FILES_CHANGED++)) || true
                         ((TOTAL_REPLACEMENTS++)) || true
                     fi
                 fi
             fi
-        elif grep -qE '^\[Unreleased\]:' "$CHANGELOG" 2>/dev/null; then
+        elif grep -qE '^\[Unreleased\]:[[:space:]]+' "$CHANGELOG" 2>/dev/null; then
             log "${YELLOW}  → [Unreleased] link format is non-standard, should be compare/v$VERSION...HEAD${NC}"
             add_inconsistent_file "CHANGELOG.md (link footers)"
             if [[ "$CHECK_ONLY" == "false" ]]; then
@@ -506,6 +522,7 @@ main() {
         local version_headers
         version_headers=$(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' "$CHANGELOG" | sed -E 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\]/\1/' || true)
         local missing_link_lines=""
+        local deferred_success_messages=""
         if [[ -n "$version_headers" ]]; then
             local header_version
             local previous_header_version=""
@@ -513,7 +530,7 @@ main() {
                 [[ -z "$header_version" ]] && continue
                 if [[ -n "$previous_header_version" ]]; then
                     local escaped_previous_version="${previous_header_version//./\\.}"
-                    if ! grep -qE "^\[$escaped_previous_version\]: " "$CHANGELOG" 2>/dev/null; then
+                    if ! grep -qE "^\[$escaped_previous_version\]:[[:space:]]+" "$CHANGELOG" 2>/dev/null; then
                         local new_line="[$previous_header_version]: https://github.com/wallstop/fortress-rollback/compare/v${header_version}...v${previous_header_version}"
                         add_inconsistent_file "CHANGELOG.md (link footers)"
                         if [[ "$CHECK_ONLY" == "false" ]]; then
@@ -521,7 +538,7 @@ main() {
                                 echo -e "${YELLOW}Would create:${NC} CHANGELOG.md [$previous_header_version] link footer"
                             else
                                 missing_link_lines+="$new_line"$'\n'
-                                echo -e "${GREEN}✓ Added:${NC} CHANGELOG.md [$previous_header_version] link → v${header_version}...v${previous_header_version}"
+                                deferred_success_messages+="✓ Added: CHANGELOG.md [$previous_header_version] link → v${header_version}...v${previous_header_version}"$'\n'
                                 ((TOTAL_REPLACEMENTS++)) || true
                             fi
                         fi
@@ -532,19 +549,27 @@ main() {
 
             if [[ -n "$previous_header_version" ]]; then
                 local escaped_oldest_version="${previous_header_version//./\\.}"
-                if ! grep -qE "^\[$escaped_oldest_version\]: " "$CHANGELOG" 2>/dev/null; then
+                if ! grep -qE "^\[$escaped_oldest_version\]:[[:space:]]+" "$CHANGELOG" 2>/dev/null; then
                     log_always "${YELLOW}⚠ CHANGELOG.md is missing [$previous_header_version] link footer and no previous version header was found to build compare URL${NC}"
                     add_inconsistent_file "CHANGELOG.md (link footers)"
                 fi
             fi
         fi
         if [[ "$CHECK_ONLY" == "false" && "$DRY_RUN" == "false" && -n "$missing_link_lines" ]]; then
-            insert_after_unreleased_link "$CHANGELOG" "$missing_link_lines"
-            ((FILES_CHANGED++)) || true
+            if insert_after_unreleased_link "$CHANGELOG" "$missing_link_lines"; then
+                while IFS= read -r message; do
+                    [[ -z "$message" ]] && continue
+                    echo -e "${GREEN}${message}${NC}"
+                done <<< "$deferred_success_messages"
+                ((FILES_CHANGED++)) || true
+            else
+                log_always "${YELLOW}⚠ Could not insert generated link footers because [Unreleased] footer anchor was not found${NC}"
+                add_inconsistent_file "CHANGELOG.md (link footers)"
+            fi
         fi
 
         # Check that a [$VERSION] link entry exists
-        if ! grep -qE "^\[$ESCAPED_VERSION\]: " "$CHANGELOG" 2>/dev/null; then
+        if ! grep -qE "^\[$ESCAPED_VERSION\]:[[:space:]]+" "$CHANGELOG" 2>/dev/null; then
             log "${YELLOW}  → Missing [$VERSION] link entry in CHANGELOG.md${NC}"
             add_inconsistent_file "CHANGELOG.md (link footers)"
         else
@@ -558,7 +583,7 @@ main() {
             while IFS= read -r header_version; do
                 [[ -z "$header_version" ]] && continue
                 local ESCAPED_HEADER_VERSION="${header_version//./\\.}"
-                if ! grep -qE "^\[$ESCAPED_HEADER_VERSION\]: " "$CHANGELOG" 2>/dev/null; then
+                if ! grep -qE "^\[$ESCAPED_HEADER_VERSION\]:[[:space:]]+" "$CHANGELOG" 2>/dev/null; then
                     log "${YELLOW}  → ## [$header_version] header has no matching [$header_version]: link footer${NC}"
                     add_inconsistent_file "CHANGELOG.md (link footers)"
                     echo -e "${YELLOW}⚠ CHANGELOG.md ## [$header_version] header is missing a matching link footer${NC}"

@@ -164,6 +164,108 @@ class TestSyncVersion(unittest.TestCase):
                 updated,
             )
 
+    def test_sync_version_normalizes_old_style_unreleased_link_when_already_current(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            changelog = """# Changelog
+
+## [Unreleased]
+
+## [0.8.0] - 2026-02-01
+
+### Added
+- Thing
+
+## [0.7.0] - 2026-01-01
+
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/0.8.0...HEAD
+[0.8.0]: https://github.com/wallstop/fortress-rollback/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0
+"""
+            repo = _setup_repo(tmp_path, changelog)
+            result = _run_sync(repo, "--changelog-only")
+            self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+
+            updated = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+            self.assertIn(
+                "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...HEAD",
+                updated,
+            )
+            self.assertNotIn(
+                "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/0.8.0...HEAD",
+                updated,
+            )
+
+    def test_sync_version_normalizes_unreleased_with_extra_whitespace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            changelog = """# Changelog
+
+## [Unreleased]
+
+## [0.8.0]
+
+### Added
+- Thing
+
+## [0.7.0] - 2026-01-01
+
+[Unreleased]:   https://github.com/wallstop/fortress-rollback/compare/v0.7.0...HEAD    
+[0.7.0]:\thttps://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0
+"""
+            repo = _setup_repo(tmp_path, changelog)
+            result = _run_sync(repo, "--changelog-only")
+            self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+
+            updated = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+            self.assertIn(
+                "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...HEAD",
+                updated,
+            )
+            self.assertIn(
+                "[0.7.0]:\thttps://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0",
+                updated,
+            )
+
+    def test_sync_version_reports_anchor_missing_when_unreleased_footer_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            changelog = """# Changelog
+
+## [Unreleased]
+
+## [0.8.0] - 2026-02-01
+
+### Added
+- Thing
+
+## [0.7.0] - 2026-01-01
+
+### Added
+- Prior thing
+
+## [0.6.0] - 2025-12-01
+
+### Added
+- Old thing
+
+[0.8.0]: https://github.com/wallstop/fortress-rollback/compare/v0.7.0...v0.8.0
+[0.6.0]: https://github.com/wallstop/fortress-rollback/compare/v0.5.0...v0.6.0
+"""
+            repo = _setup_repo(tmp_path, changelog)
+            result = _run_sync(repo, "--changelog-only")
+            self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+
+            combined = result.stdout + result.stderr
+            self.assertIn("Could not insert generated link footers", combined)
+            self.assertNotIn("✓ Added: CHANGELOG.md [0.7.0] link", combined)
+
+            updated = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+            self.assertNotIn(
+                "[0.7.0]: https://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0",
+                updated,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
