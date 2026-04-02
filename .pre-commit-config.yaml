@@ -167,7 +167,7 @@ repos:
         entry: python scripts/docs/check-theme-colors.py
         language: python
         pass_filenames: false
-        files: '^(mkdocs\.yml|docs/stylesheets/custom\.css)$'
+        files: '^docs/stylesheets/custom\.css$'
 
       - id: check-sync-headers
         name: check sync headers
