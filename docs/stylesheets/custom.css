@@ -62,10 +62,12 @@
    ========================================================================== */
 
 [data-md-color-scheme="slate"] {
-    /* Primary accent color */
-    --md-primary-fg-color: var(--fortress-rust-orange);
-    --md-primary-fg-color--light: var(--fortress-rust-orange-light);
-    --md-primary-fg-color--dark: var(--fortress-rust-orange-dark);
+    /* Primary header colors */
+    --md-primary-fg-color: var(--fortress-bg-dark-secondary);
+    --md-primary-fg-color--light: #21262d;
+    --md-primary-fg-color--dark: var(--fortress-bg-dark);
+    --md-primary-bg-color: var(--fortress-text-dark);
+    --md-primary-bg-color--light: var(--fortress-text-muted);
 
     /* Accent color */
     --md-accent-fg-color: var(--fortress-rust-orange-light);
@@ -161,10 +163,12 @@
    ========================================================================== */
 
 [data-md-color-scheme="default"] {
-    /* Primary accent color */
-    --md-primary-fg-color: var(--fortress-rust-orange);
-    --md-primary-fg-color--light: var(--fortress-rust-orange-light);
-    --md-primary-fg-color--dark: var(--fortress-rust-orange-dark);
+    /* Primary header colors */
+    --md-primary-fg-color: var(--fortress-bg-light-secondary);
+    --md-primary-fg-color--light: var(--fortress-bg-light);
+    --md-primary-fg-color--dark: #e1e4e8;
+    --md-primary-bg-color: var(--fortress-text-light);
+    --md-primary-bg-color--light: #57606a;
 
     /* Accent color */
     --md-accent-fg-color: var(--fortress-rust-orange-dark);

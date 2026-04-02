@@ -162,6 +162,13 @@ repos:
         pass_filenames: false
         files: '^(docs/.*\.md|wiki/.*\.md|scripts/docs/sync-wiki\.py)$'
 
+      - id: check-theme-colors
+        name: check docs theme colors
+        entry: python scripts/docs/check-theme-colors.py
+        language: python
+        pass_filenames: false
+        files: '^docs/stylesheets/custom\.css$'
+
       - id: check-sync-headers
         name: check sync headers
         entry: python scripts/hooks/check-sync-headers.py
