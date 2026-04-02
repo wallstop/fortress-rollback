@@ -60,7 +60,11 @@ set -euo pipefail
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [[ -n "${FORTRESS_PROJECT_ROOT:-}" ]]; then
+    PROJECT_ROOT="$(cd "$FORTRESS_PROJECT_ROOT" && pwd)"
+else
+    PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 
 # Colors
 RED='\033[0;31m'
@@ -183,7 +187,7 @@ should_exclude_file() {
 
     # Exclude paths containing these directories
     case "$file" in
-        */target/*|*/.git/*|*/node_modules/*|*/.tla-tools/*|*/site/*|*/proptest-regressions/*|*/mutants.out*/*|*/.venv/*|*/fuzz/target/*)
+        */target/*|*/.git/*|*/node_modules/*|*/.tla-tools/*|*/proptest-regressions/*|*/mutants.out*/*|*/.venv/*|*/fuzz/target/*)
             return 0  # true = exclude
             ;;
     esac
@@ -255,7 +259,6 @@ main() {
         ! -path "*/.git/*" \
         ! -path "*/node_modules/*" \
         ! -path "*/.tla-tools/*" \
-        ! -path "*/site/*" \
         ! -path "*/proptest-regressions/*" \
         ! -path "*/mutants.out*/*" \
         ! -path "*/.venv/*" \

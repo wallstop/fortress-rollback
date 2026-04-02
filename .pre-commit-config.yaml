@@ -169,6 +169,13 @@ repos:
         files: '^(docs/.*\.md|wiki/.*\.md)$'
         pass_filenames: false
 
+      - id: sync-version-check
+        name: sync version references (check)
+        entry: bash scripts/sync-version.sh --check
+        language: system
+        pass_filenames: false
+        files: '^(Cargo\.toml|scripts/sync-version\.sh)$'
+
       - id: changelog-unreleased-rule
         name: changelog unreleased code rule
         entry: python scripts/hooks/check-changelog-unreleased.py
