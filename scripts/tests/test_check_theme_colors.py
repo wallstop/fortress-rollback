@@ -318,6 +318,62 @@ def test_validate_theme_colors_rejects_resolved_equal_primary_values(
     assert result.errors == 1
 
 
+def test_validate_theme_colors_rejects_equivalent_primary_hex_variants(
+    tmp_path: Path,
+) -> None:
+    css_path = tmp_path / "docs" / "stylesheets" / "custom.css"
+    _write(
+        css_path,
+        """
+:root {
+  --bg1: #fff;
+  --bg2: #ffffff;
+  --text-dark: #161b22;
+  --text-light: #24292f;
+}
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: var(--bg1);
+  --md-primary-bg-color: var(--text-dark);
+}
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: var(--bg2);
+  --md-primary-bg-color: var(--text-light);
+}
+""",
+    )
+
+    result = validate_theme_colors(css_path)
+    assert result.errors == 1
+
+
+def test_validate_theme_colors_rejects_equivalent_primary_rgb_vs_hex(
+    tmp_path: Path,
+) -> None:
+    css_path = tmp_path / "docs" / "stylesheets" / "custom.css"
+    _write(
+        css_path,
+        """
+:root {
+  --bg1: #161b22;
+  --bg2: rgb(22, 27, 34);
+  --text-dark: #c9d1d9;
+  --text-light: #f6f8fa;
+}
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: var(--bg1);
+  --md-primary-bg-color: var(--text-dark);
+}
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: var(--bg2);
+  --md-primary-bg-color: var(--text-light);
+}
+""",
+    )
+
+    result = validate_theme_colors(css_path)
+    assert result.errors == 1
+
+
 def test_validate_theme_colors_uses_relative_display_path_and_file_level_line_zero(
     tmp_path: Path,
     capsys,

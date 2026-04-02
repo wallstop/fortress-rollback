@@ -453,10 +453,12 @@ def validate_theme_colors(css_path: Path) -> ValidationResult:
 
     resolved_dark_primary = resolve_variable_reference(dark_header_bg, dark_variables)
     resolved_light_primary = resolve_variable_reference(light_header_bg, light_variables)
+    parsed_dark_primary = parse_color(resolved_dark_primary) if resolved_dark_primary is not None else None
+    parsed_light_primary = parse_color(resolved_light_primary) if resolved_light_primary is not None else None
     if (
-        resolved_dark_primary is not None
-        and resolved_light_primary is not None
-        and resolved_dark_primary == resolved_light_primary
+        parsed_dark_primary is not None
+        and parsed_light_primary is not None
+        and parsed_dark_primary == parsed_light_primary
     ):
         print(
             f"{display_path}:0: error: light/dark --md-primary-fg-color values resolve to the same color; header backgrounds must differ by mode",
