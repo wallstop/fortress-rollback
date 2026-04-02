@@ -6,7 +6,12 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
-DESKTOP_MEDIA_QUERY = "@media screen and (min-width: 76.25em)"
+DESKTOP_MIN_WIDTH_EM = "76.25em"
+DESKTOP_MEDIA_QUERY = f"@media screen and (min-width: {DESKTOP_MIN_WIDTH_EM})"
+DESKTOP_MEDIA_QUERY_PATTERN = re.compile(
+    rf"@media\s+screen\s+and\s+\(min-width:\s*{re.escape(DESKTOP_MIN_WIDTH_EM)}\)\s*\{{",
+    re.DOTALL,
+)
 
 def _custom_css_path() -> Path:
     return Path(__file__).parent.parent.parent / "docs" / "stylesheets" / "custom.css"
@@ -16,13 +21,9 @@ def _extract_desktop_media_block(content: str) -> str | None:
     """Return the body of the desktop media block, or None if not found/malformed.
 
     This uses explicit brace-depth tracking so nested braces elsewhere in the file
-    don't break extraction of the `@media screen and (min-width: 76.25em)` block.
+    don't break extraction of the `DESKTOP_MEDIA_QUERY` block.
     """
-    media_pattern = re.compile(
-        r"@media\s+screen\s+and\s+\(min-width:\s*76\.25em\)\s*\{",
-        re.DOTALL,
-    )
-    match = media_pattern.search(content)
+    match = DESKTOP_MEDIA_QUERY_PATTERN.search(content)
     if match is None:
         return None
 
@@ -52,7 +53,7 @@ def test_desktop_primary_sidebar_hidden() -> None:
         f"Expected custom.css to contain {DESKTOP_MEDIA_QUERY}. "
         "Diagnostics: has selector="
         f"{'.md-sidebar--primary' in content}, "
-        f"has display none={re.search(r'display\\s*:\\s*none;', content) is not None}."
+        f"has display none={re.search(r'display\s*:\s*none;', content) is not None}."
     )
 
     sidebar_rule_pattern = re.compile(
