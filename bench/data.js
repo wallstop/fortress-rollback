@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775149521238,
+  "lastUpdate": 1775217188240,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "eaecf6aa411de117d5e1d3d6d3e6c156e374c9f5",
-          "message": "chore(deps): bump serde_json from 1.0.147 to 1.0.148 (#44)\n\n[//]: # (dependabot-start)\n⚠️  **Dependabot is rebasing this PR** ⚠️ \n\nRebasing might not happen immediately, so don't worry if this takes some\ntime.\n\nNote: if you make any changes to this PR yourself, they will take\nprecedence over the rebase.\n\n---\n\n[//]: # (dependabot-end)\n\nBumps [serde_json](https://github.com/serde-rs/json) from 1.0.147 to\n1.0.148.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/serde-rs/json/releases\">serde_json's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v1.0.148</h2>\n<ul>\n<li>Update <code>zmij</code> dependency to 1.0</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/serde-rs/json/commit/8b291c4c5620476d6834c69fbfb24d13a24d4596\"><code>8b291c4</code></a>\nRelease 1.0.148</li>\n<li><a\nhref=\"https://github.com/serde-rs/json/commit/1aefe152735f1b11ce7f641f8e86448d227163bf\"><code>1aefe15</code></a>\nUpdate to zmij 1.0</li>\n<li>See full diff in <a\nhref=\"https://github.com/serde-rs/json/compare/v1.0.147...v1.0.148\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=serde_json&package-manager=cargo&previous-version=1.0.147&new-version=1.0.148)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot merge` will merge this PR after your CI passes on it\n- `@dependabot squash and merge` will squash and merge this PR after\nyour CI passes on it\n- `@dependabot cancel merge` will cancel a previously requested merge\nand block automerging\n- `@dependabot reopen` will reopen this PR if it is closed\n- `@dependabot close` will close this PR and stop Dependabot recreating\nit. You can achieve the same result by closing it manually\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2025-12-29T14:41:29-08:00",
-          "tree_id": "503a66a19f02767d8f331179a03596346ecc905e",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/eaecf6aa411de117d5e1d3d6d3e6c156e374c9f5"
-        },
-        "date": 1767048385775,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 98,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 147,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 547,
-            "range": "± 41",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 787,
-            "range": "± 35",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1109,
-            "range": "± 36",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 102805,
-            "range": "± 486",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27856,
-            "range": "± 1616",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1243,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1554,
-            "range": "± 88",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1555,
             "range": "± 68",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f13ec1b589e25f95f1ea2c2d03a139b7ead4dee1",
+          "message": "chore(deps): bump z3 from 0.19.15 to 0.20.0 in the cargo-workspace group (#140)\n\nBumps the cargo-workspace group with 1 update:\n[z3](https://github.com/prove-rs/z3.rs).\n\nUpdates `z3` from 0.19.15 to 0.20.0\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/c19dc55a1af4fd4b0590892f89f8e8f858292a2a\"><code>c19dc55</code></a>\nchore: release (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/528\">#528</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/ced4149506948aaca0728d1abf71c2b53bf6f8a7\"><code>ced4149</code></a>\nchore: document minimum z3 version and feature gate optimize features\n(<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/556\">#556</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/75b88de3c2e9063a40cb62626f74cb9c0c0953ad\"><code>75b88de</code></a>\nchore: allow z3-src publish from branch</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/1aed1a0dba0b49414ea3db3a16346fea6b9abcd7\"><code>1aed1a0</code></a>\nchore: optimize CI and CI caching (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/554\">#554</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/fb844846391d74b0dfd6ca861ab7bd0b42769046\"><code>fb84484</code></a>\nfeat: add Char Ast and Sort (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/553\">#553</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/a4fdb01d705942718f1c9b322e87ebd117f0c88c\"><code>a4fdb01</code></a>\nfeat: make num dependency optional (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/552\">#552</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/426731446684e03639a52c8a4304e5037328c57f\"><code>4267314</code></a>\nchore: fix workflow directory and metadata</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/af6571acd84fd755c35032b410113b5de29bc196\"><code>af6571a</code></a>\nchore: release z3-src 416.0.1 (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/551\">#551</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/e4cea2ceb4ced2b0f0c65b68f22276c221d2d812\"><code>e4cea2c</code></a>\nchore: add xtask command to create z3-src patch PR (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/550\">#550</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/074099e2a66d9d1b17289faece4732e86e037152\"><code>074099e</code></a>\nfeat: Add Optimize::solutions and tweak Optimize::assert (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/530\">#530</a>)</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/prove-rs/z3.rs/compare/z3-v0.19.15...z3-v0.20.0\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=z3&package-manager=cargo&previous-version=0.19.15&new-version=0.20.0)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore <dependency name> major version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's major version (unless you unignore this specific\ndependency's major version or upgrade to it yourself)\n- `@dependabot ignore <dependency name> minor version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's minor version (unless you unignore this specific\ndependency's minor version or upgrade to it yourself)\n- `@dependabot ignore <dependency name>` will close this group update PR\nand stop Dependabot creating any more for the specific dependency\n(unless you unignore this specific dependency or upgrade to it yourself)\n- `@dependabot unignore <dependency name>` will remove all of the ignore\nconditions of the specified dependency\n- `@dependabot unignore <dependency name> <ignore condition>` will\nremove the ignore condition of the specified dependency and ignore\nconditions\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-04-03T04:48:10-07:00",
+          "tree_id": "3d98a421cb795990422b8dc8cbf72b172f1da835",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/f13ec1b589e25f95f1ea2c2d03a139b7ead4dee1"
+        },
+        "date": 1775217187562,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 102,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 141,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 566,
+            "range": "± 22",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 892,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1320,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 95984,
+            "range": "± 339",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 24652,
+            "range": "± 1219",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 676,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 871,
+            "range": "± 1",
             "unit": "ns/iter"
           },
           {
