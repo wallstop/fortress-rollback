@@ -5,13 +5,16 @@ on:
     types: [opened, reopened, synchronize, ready_for_review]
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+  pull-requests: read
 
 jobs:
   dependabot:
     name: Enable auto-merge for Dependabot PRs
-    if: github.event.pull_request.user.login == 'dependabot[bot]' && !github.event.pull_request.draft
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: write
+      pull-requests: write
     runs-on: ubuntu-latest
     steps:
       - name: Enable auto-merge

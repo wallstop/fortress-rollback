@@ -23,21 +23,23 @@ on:
       - '.github/workflows/ci-benchmarks.yml'
   workflow_dispatch:  # Allow manual runs
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
-
-permissions:
-  # Required for github-pages deployment
-  contents: write
-  # Required for posting benchmark comments on commits
-  deployments: write
-  # Required for posting PR comments (benchmark alerts)
-  pull-requests: write
 
 jobs:
   benchmark:
     name: Run Benchmarks
     runs-on: ubuntu-latest
+    permissions:
+      # Required for github-pages deployment
+      contents: write
+      # Required for posting benchmark comments on commits
+      deployments: write
+      # Required for posting PR comments (benchmark alerts)
+      pull-requests: write
     # Skip for Dependabot PRs - it doesn't have write permissions for PR comments
     if: github.actor != 'dependabot[bot]'
     # Use a consistent runner for reproducible results
@@ -183,6 +185,8 @@ jobs:
   benchmark-quick:
     name: Quick Benchmark Smoke Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     # Quick benchmarks run even if full benchmark fails
     # Skip for Dependabot PRs - benchmark results aren't useful for dependency updates
     if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
