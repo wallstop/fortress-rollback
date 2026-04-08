@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775217252547,
+  "lastUpdate": 1775607384066,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "fd74f54215d01e0f11d77ceacaabfc5658c3df6d",
-          "message": "chore(deps): bump clap from 4.5.53 to 4.5.54 (#57)\n\nBumps [clap](https://github.com/clap-rs/clap) from 4.5.53 to 4.5.54.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/releases\">clap's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v4.5.54</h2>\n<h2>[4.5.54] - 2026-01-02</h2>\n<h3>Fixes</h3>\n<ul>\n<li><em>(help)</em> Move <code>[default]</code> to its own paragraph\nwhen <code>PossibleValue::help</code> is present in\n<code>--help</code></li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/blob/master/CHANGELOG.md\">clap's\nchangelog</a>.</em></p>\n<blockquote>\n<h2>[4.5.54] - 2026-01-02</h2>\n<h3>Fixes</h3>\n<ul>\n<li><em>(help)</em> Move <code>[default]</code> to its own paragraph\nwhen <code>PossibleValue::help</code> is present in\n<code>--help</code></li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/194c676f60b916506f94f70decdbf319af5d1ec6\"><code>194c676</code></a>\nchore: Release</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/44838f6606fa015140c65a2d35971c1e9b269e26\"><code>44838f6</code></a>\ndocs: Update changelog</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/0f59d55ff6b132cd59cd252442ce47078494be07\"><code>0f59d55</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6027\">#6027</a>\nfrom Alpha1337k/master</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/e2aa2f07d1cd50412de51b51a7cc897e80e0b92f\"><code>e2aa2f0</code></a>\nFeat: Add catch-all on external subcommands for zsh</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/b9c0aee9f28c5ad72932225bd730260f9bbe1fc6\"><code>b9c0aee</code></a>\nFeat: Add external subcommands test to suite</li>\n<li>See full diff in <a\nhref=\"https://github.com/clap-rs/clap/compare/clap_complete-v4.5.53...clap_complete-v4.5.54\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=clap&package-manager=cargo&previous-version=4.5.53&new-version=4.5.54)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot merge` will merge this PR after your CI passes on it\n- `@dependabot squash and merge` will squash and merge this PR after\nyour CI passes on it\n- `@dependabot cancel merge` will cancel a previously requested merge\nand block automerging\n- `@dependabot reopen` will reopen this PR if it is closed\n- `@dependabot close` will close this PR and stop Dependabot recreating\nit. You can achieve the same result by closing it manually\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-01-05T21:02:27-08:00",
-          "tree_id": "59fa41ad77487efac24d46e7f2e46dc0b1c01ba5",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/fd74f54215d01e0f11d77ceacaabfc5658c3df6d"
-        },
-        "date": 1767676056022,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 89,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 133,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 622,
-            "range": "± 14",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 954,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1344,
-            "range": "± 15",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 96664,
-            "range": "± 859",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 24124,
-            "range": "± 263",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 867,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 868,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1603,
             "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "dae74c392344b41a1ce6efbf5050de7d20c5e9d1",
+          "message": "ci: harden workflow permissions to job scope + add fork guard to dependabot auto-merge (#142)\n\nWrite permissions were declared at the workflow level across multiple\nworkflows, granting every job wider access than needed.\n`dependabot-auto-merge.yml` additionally lacked a fork-origin guard on\nits `pull_request_target` trigger, allowing the write-permissioned job\nto run for PRs from forks.\n\n### `dependabot-auto-merge.yml`\n- Downgrade workflow-level to `contents: read` / `pull-requests: read`\n- Move `contents: write` / `pull-requests: write` to the `dependabot`\njob\n- Add fork guard: `github.event.pull_request.head.repo.full_name ==\ngithub.repository`\n\n```yaml\npermissions:\n  contents: read\n  pull-requests: read\n\njobs:\n  dependabot:\n    if: >-\n      github.event.pull_request.user.login == 'dependabot[bot]' &&\n      !github.event.pull_request.draft &&\n      github.event.pull_request.head.repo.full_name == github.repository\n    permissions:\n      contents: write\n      pull-requests: write\n```\n\n### Sweep of all other workflows\nSame over-permissioned pattern found and fixed in 8 additional workflows\n— write permissions moved from workflow scope to the specific jobs that\nrequire them:\n\n- `ci-benchmarks` — `contents/deployments/pull-requests: write` →\n`benchmark` job only; explicit `contents: read` added to\n`benchmark-quick`\n- `ci-changelog` — `pull-requests: write` → `changelog-check` job only\n- `devcontainer-build` — `packages: write` → `build-and-push` job only\n- `docs-deploy` — `pages: write` / `id-token: write` → `deploy` job only\n- `labeler` — `pull-requests: write` → both label jobs\n- `publish` — `contents: write` → `publish` job only\n- `sync-issue-template` — `contents: write` → `sync-versions` job only\n- `wiki-sync` — `contents: write` → `sync-wiki` job only\n\n`actionlint` is already enforced in `ci-lint.yml` and will catch\npermission misconfigurations in future workflow changes.\n\n---------\n\nCo-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>\nCo-authored-by: wallstop <1045249+wallstop@users.noreply.github.com>\nCo-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>",
+          "timestamp": "2026-04-07T17:11:56-07:00",
+          "tree_id": "baddf058969c5872d6c6ff24d2c83bc0b71f6e12",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/dae74c392344b41a1ce6efbf5050de7d20c5e9d1"
+        },
+        "date": 1775607383468,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 102,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 142,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 549,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 900,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1321,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 96114,
+            "range": "± 377",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 24476,
+            "range": "± 254",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 675,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 871,
+            "range": "± 3",
             "unit": "ns/iter"
           },
           {
