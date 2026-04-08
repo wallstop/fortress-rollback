@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 # Prevent concurrent wiki syncs to avoid git conflicts
 concurrency:
@@ -50,6 +50,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: check-wiki
     if: needs.check-wiki.outputs.wiki_exists == 'true'
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
