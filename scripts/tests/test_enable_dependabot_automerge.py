@@ -76,6 +76,18 @@ if [[ "$cmd" == "pr" && "$subcmd" == "merge" ]]; then
     exit 1
 fi
 
+if [[ "$cmd" == "pr" && "$subcmd" == "checks" ]]; then
+    printf '%s\\n' "pr checks $*" >> "${GH_LOG_PATH:?GH_LOG_PATH is required}"
+    if [[ "$*" == *"--json name --jq length"* ]]; then
+        printf '%s\\n' "${GH_REQUIRED_CHECKS_COUNT:-1}"
+        exit 0
+    fi
+    if [[ "$*" == *"--watch"* ]]; then
+        exit "${GH_CHECKS_WATCH_EXIT_CODE:-0}"
+    fi
+    exit 0
+fi
+
 exit 1
 """,
         encoding="utf-8",
@@ -96,6 +108,9 @@ def _run_script(tmp_path: Path, extra_env: dict[str, str]) -> subprocess.Complet
             "GITHUB_REPOSITORY": "wallstop/fortress-rollback",
             "GH_TOKEN": "fake-token",
             "GH_LOG_PATH": str(log_path),
+            "REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS": "0",
+            "REQUIRED_CHECKS_POLL_INTERVAL_SECONDS": "1",
+            "REQUIRED_CHECKS_WATCH_INTERVAL_SECONDS": "1",
         }
     )
     env.update(extra_env)
@@ -129,10 +144,12 @@ def test_uses_squash_strategy_only(tmp_path: Path) -> None:
     assert result.returncode == 0
 
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
-    assert len(log_lines) == 1
-    assert "--squash" in log_lines[0]
-    assert "--rebase" not in log_lines[0]
-    assert "--merge" not in log_lines[0]
+    assert len(log_lines) == 3
+    assert "--json name --jq length" in log_lines[0]
+    assert "--watch" in log_lines[1]
+    assert "--squash" in log_lines[2]
+    assert "--rebase" not in log_lines[2]
+    assert "--merge" not in log_lines[2]
 
 
 def test_skips_stale_event_without_merging(tmp_path: Path) -> None:
@@ -156,3 +173,43 @@ def test_fails_on_merge_policy_drift(tmp_path: Path) -> None:
     assert "squash-only settings" in result.stderr
     log_path = tmp_path / "gh.log"
     assert not log_path.exists()
+
+
+def test_fails_when_required_checks_are_missing(tmp_path: Path) -> None:
+    result = _run_script(
+        tmp_path,
+        {
+            "GH_REQUIRED_CHECKS_COUNT": "0",
+            "GH_ALLOW_SQUASH": "true",
+            "GH_ALLOW_REBASE": "false",
+            "GH_ALLOW_MERGE": "false",
+        },
+    )
+    assert result.returncode == 1
+    assert "No required checks detected for PR within timeout" in result.stderr
+
+    log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
+    assert len(log_lines) == 1
+    assert "--json name --jq length" in log_lines[0]
+    assert "--watch" not in log_lines[0]
+    assert "pr merge" not in log_lines[0]
+
+
+def test_fails_when_required_checks_fail(tmp_path: Path) -> None:
+    result = _run_script(
+        tmp_path,
+        {
+            "GH_CHECKS_WATCH_EXIT_CODE": "1",
+            "GH_ALLOW_SQUASH": "true",
+            "GH_ALLOW_REBASE": "false",
+            "GH_ALLOW_MERGE": "false",
+        },
+    )
+    assert result.returncode == 1
+    assert "Required checks did not pass" in result.stderr
+
+    log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
+    assert len(log_lines) == 2
+    assert "--json name --jq length" in log_lines[0]
+    assert "--watch" in log_lines[1]
+    assert "pr merge" not in "\n".join(log_lines)
