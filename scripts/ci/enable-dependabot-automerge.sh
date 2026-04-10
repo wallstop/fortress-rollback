@@ -60,6 +60,8 @@ required_checks_count() {
 
 wait_for_required_checks() {
     local elapsed=0
+    local remaining
+    local sleep_for
     local required_count
 
     while ((elapsed <= REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS)); do
@@ -82,12 +84,18 @@ wait_for_required_checks() {
             return 0
         fi
 
-        if ((elapsed == REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS)); then
+        remaining=$((REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS - elapsed))
+        if ((remaining <= 0)); then
             break
         fi
 
-        sleep "$REQUIRED_CHECKS_POLL_INTERVAL_SECONDS"
-        elapsed=$((elapsed + REQUIRED_CHECKS_POLL_INTERVAL_SECONDS))
+        sleep_for="$REQUIRED_CHECKS_POLL_INTERVAL_SECONDS"
+        if ((sleep_for > remaining)); then
+            sleep_for="$remaining"
+        fi
+
+        sleep "$sleep_for"
+        elapsed=$((elapsed + sleep_for))
     done
 
     echo "No required checks detected for PR within timeout; refusing to enable auto-merge." >&2
