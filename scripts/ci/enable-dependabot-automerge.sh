@@ -21,11 +21,20 @@ is_stale_event() {
 attempt_automerge() {
     local strategy="${1:-}"
     local args=(pr merge --auto --match-head-commit "$PR_HEAD_SHA")
+    local output
     if [[ -n "$strategy" ]]; then
         args+=("$strategy")
     fi
     args+=("$PR_URL")
-    gh "${args[@]}"
+    if output="$(gh "${args[@]}" 2>&1)"; then
+        return 0
+    fi
+    if [[ -n "$strategy" ]]; then
+        echo "Auto-merge attempt failed for strategy $strategy: $output" >&2
+    else
+        echo "Auto-merge attempt failed without explicit strategy: $output" >&2
+    fi
+    return 1
 }
 
 if [[ "$(get_pr_field '.state')" != "OPEN" ]]; then

@@ -20,7 +20,7 @@ jobs:
       - name: Checkout trusted base ref
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.base.sha }}
       - name: Enable auto-merge
         run: bash ./scripts/ci/enable-dependabot-automerge.sh
         env:
