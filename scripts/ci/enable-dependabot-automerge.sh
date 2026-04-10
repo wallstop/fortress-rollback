@@ -7,7 +7,12 @@ set -euo pipefail
 
 get_pr_field() {
     local jq_expr="$1"
-    gh pr view "$PR_URL" --json state,isDraft,autoMergeRequest,headRefOid --jq "$jq_expr"
+    local output
+    if ! output="$(gh pr view "$PR_URL" --json state,isDraft,autoMergeRequest,headRefOid --jq "$jq_expr" 2>&1)"; then
+        echo "Failed to read PR field '$jq_expr' from $PR_URL: $output" >&2
+        exit 1
+    fi
+    printf '%s\n' "$output"
 }
 
 is_auto_merge_enabled() {
