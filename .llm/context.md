@@ -159,7 +159,7 @@ Pre-commit validates registration only, NOT that proofs pass. Run affected proof
 
 Also: `ci-rust.yml` (Miri), `ci-security.yml` (cargo-geiger, cargo-deny).
 
-Dependabot auto-merge policy: never hardcode a single merge strategy (`--merge`, `--squash`, or `--rebase`) in workflows. Use `scripts/ci/enable-dependabot-automerge.sh` so strategy selection follows repo settings and branch protection constraints.
+Dependabot auto-merge policy: this repository is squash-only. Use `scripts/ci/enable-dependabot-automerge.sh` (which enforces `--squash` and checks policy drift) instead of inline merge commands in workflows.
 
 **CI fails on:** unformatted code, clippy warnings, broken doc links, markdown lint errors, workflow syntax errors, unregistered Kani proofs.
 

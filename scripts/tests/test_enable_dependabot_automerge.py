@@ -116,27 +116,7 @@ def test_skips_when_auto_merge_already_enabled(tmp_path: Path) -> None:
     assert not log_path.exists()
 
 
-def test_falls_back_to_squash_when_no_strategy_fails(tmp_path: Path) -> None:
-    result = _run_script(tmp_path, {"GH_MERGE_SUCCESS_FLAG": "--squash"})
-    assert result.returncode == 0
-
-    log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
-    assert len(log_lines) >= 2
-    assert "--squash" not in log_lines[0]
-    assert "--rebase" not in log_lines[0]
-    assert "--merge" not in log_lines[0]
-    assert "--squash" in log_lines[1]
-
-
-def test_skips_stale_event_without_merging(tmp_path: Path) -> None:
-    result = _run_script(tmp_path, {"GH_PR_HEAD_OID": "new-head-sha"})
-    assert result.returncode == 0
-    assert "PR head moved since event" in result.stdout
-    log_path = tmp_path / "gh.log"
-    assert not log_path.exists()
-
-
-def test_skips_disabled_fallback_strategies(tmp_path: Path) -> None:
+def test_uses_squash_strategy_only(tmp_path: Path) -> None:
     result = _run_script(
         tmp_path,
         {
@@ -147,7 +127,32 @@ def test_skips_disabled_fallback_strategies(tmp_path: Path) -> None:
         },
     )
     assert result.returncode == 0
+
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
-    assert any("--squash" in line for line in log_lines)
-    assert all("--rebase" not in line for line in log_lines)
-    assert all("--merge" not in line for line in log_lines)
+    assert len(log_lines) == 1
+    assert "--squash" in log_lines[0]
+    assert "--rebase" not in log_lines[0]
+    assert "--merge" not in log_lines[0]
+
+
+def test_skips_stale_event_without_merging(tmp_path: Path) -> None:
+    result = _run_script(tmp_path, {"GH_PR_HEAD_OID": "new-head-sha"})
+    assert result.returncode == 0
+    assert "PR head moved since event" in result.stdout
+    log_path = tmp_path / "gh.log"
+    assert not log_path.exists()
+
+
+def test_fails_on_merge_policy_drift(tmp_path: Path) -> None:
+    result = _run_script(
+        tmp_path,
+        {
+            "GH_ALLOW_SQUASH": "true",
+            "GH_ALLOW_REBASE": "true",
+            "GH_ALLOW_MERGE": "false",
+        },
+    )
+    assert result.returncode == 1
+    assert "squash-only settings" in result.stderr
+    log_path = tmp_path / "gh.log"
+    assert not log_path.exists()
