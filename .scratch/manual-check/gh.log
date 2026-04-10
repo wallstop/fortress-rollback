@@ -1,0 +1,1 @@
+pr merge --auto --squash --match-head-commit head-sha https://github.com/wallstop/fortress-rollback/pull/144
