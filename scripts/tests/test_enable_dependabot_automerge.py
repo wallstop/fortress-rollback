@@ -282,6 +282,7 @@ def test_skips_when_head_becomes_stale_while_waiting(tmp_path: Path) -> None:
     )
     assert result.returncode == 0
     assert "PR head moved while waiting for required checks" in result.stdout
+    assert "after required checks completed" not in result.stdout
 
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
     assert len(log_lines) == 1
@@ -303,6 +304,7 @@ def test_skips_when_head_becomes_stale_after_checks_appear(tmp_path: Path) -> No
     )
     assert result.returncode == 0
     assert "PR head moved after required checks appeared" in result.stdout
+    assert "after required checks completed" not in result.stdout
 
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
     assert len(log_lines) == 1

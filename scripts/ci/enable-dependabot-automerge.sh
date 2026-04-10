@@ -67,14 +67,14 @@ wait_for_required_checks() {
     while ((elapsed <= REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS)); do
         if is_stale_event; then
             echo "PR head moved while waiting for required checks; skipping stale auto-merge attempt."
-            return 0
+            return 2
         fi
 
         required_count="$(required_checks_count)"
         if [[ "$required_count" =~ ^[0-9]+$ ]] && ((required_count > 0)); then
             if is_stale_event; then
                 echo "PR head moved after required checks appeared; skipping stale auto-merge attempt."
-                return 0
+                return 2
             fi
             echo "Waiting for $required_count required checks to pass before enabling auto-merge."
             if ! gh pr checks "$PR_URL" --required --watch --fail-fast --interval "$REQUIRED_CHECKS_WATCH_INTERVAL_SECONDS"; then
@@ -136,7 +136,15 @@ if [[ "$allow_rebase_merge" == "true" || "$allow_merge_commit" == "true" ]]; the
     exit 1
 fi
 
-if ! wait_for_required_checks; then
+if wait_for_required_checks; then
+    wait_status=0
+else
+    wait_status=$?
+fi
+if [[ "$wait_status" -eq 2 ]]; then
+    exit 0
+fi
+if [[ "$wait_status" -ne 0 ]]; then
     exit 1
 fi
 
