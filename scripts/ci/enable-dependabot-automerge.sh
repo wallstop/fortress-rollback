@@ -20,6 +20,7 @@ is_stale_event() {
 
 attempt_automerge() {
     local strategy="${1:-}"
+    # Protect against races: only enable auto-merge if the PR head still matches the triggering SHA.
     local args=(pr merge --auto --match-head-commit "$PR_HEAD_SHA")
     local output
     if [[ -n "$strategy" ]]; then
