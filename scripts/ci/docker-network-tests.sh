@@ -141,6 +141,8 @@ run_test() {
     # Wait for containers to exit (poll their status)
     local elapsed=0
     local poll_interval=2
+    local remaining
+    local sleep_for
     while [ $elapsed -lt $wait_timeout ]; do
         # Check if both containers have exited
         local peer1_running peer2_running
@@ -151,8 +153,14 @@ run_test() {
             break
         fi
 
-        sleep $poll_interval
-        elapsed=$((elapsed + poll_interval))
+        remaining=$((wait_timeout - elapsed))
+        sleep_for=$poll_interval
+        if [ "$sleep_for" -gt "$remaining" ]; then
+            sleep_for=$remaining
+        fi
+
+        sleep "$sleep_for"
+        elapsed=$((elapsed + sleep_for))
     done
 
     # Collect logs from both containers
