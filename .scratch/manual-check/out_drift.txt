@@ -1,1 +1,0 @@
-Repository merge policy drift detected: Dependabot auto-merge expects squash-only settings.
