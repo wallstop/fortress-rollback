@@ -30,7 +30,7 @@ jobs:
     steps:
       - name: Apply size label
         continue-on-error: true
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           retries: 3
