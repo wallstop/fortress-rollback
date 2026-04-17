@@ -218,7 +218,9 @@ def test_fails_on_merge_policy_drift(tmp_path: Path) -> None:
     assert not log_path.exists()
 
 
-def test_falls_back_to_all_checks_when_required_checks_are_missing(tmp_path: Path) -> None:
+def test_falls_back_to_all_checks_when_required_checks_count_is_zero(
+    tmp_path: Path,
+) -> None:
     result = _run_script(
         tmp_path,
         {
@@ -245,7 +247,7 @@ def test_falls_back_to_all_checks_when_required_checks_are_missing(tmp_path: Pat
     assert "--squash" in log_lines[3]
 
 
-def test_falls_back_when_required_checks_query_reports_unavailable(tmp_path: Path) -> None:
+def test_falls_back_when_required_checks_unavailable(tmp_path: Path) -> None:
     result = _run_script(
         tmp_path,
         {

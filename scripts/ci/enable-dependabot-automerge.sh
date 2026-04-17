@@ -8,6 +8,7 @@ set -euo pipefail
 REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS="${REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS:-120}"
 REQUIRED_CHECKS_POLL_INTERVAL_SECONDS="${REQUIRED_CHECKS_POLL_INTERVAL_SECONDS:-10}"
 REQUIRED_CHECKS_WATCH_INTERVAL_SECONDS="${REQUIRED_CHECKS_WATCH_INTERVAL_SECONDS:-10}"
+NO_REQUIRED_CHECKS_REPORTED_MSG="no required checks reported"
 
 if ! [[ "$REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS must be a non-negative integer." >&2
@@ -61,7 +62,8 @@ required_checks_count() {
         return 0
     fi
 
-    if [[ "$output" == *"no required checks reported"* ]]; then
+    # GitHub CLI returns this message when required-check metadata is unavailable for the PR branch.
+    if [[ "$output" == *"$NO_REQUIRED_CHECKS_REPORTED_MSG"* ]]; then
         printf '0\n'
         return 0
     fi
