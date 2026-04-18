@@ -8,6 +8,7 @@ set -euo pipefail
 REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS="${REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS:-120}"
 REQUIRED_CHECKS_POLL_INTERVAL_SECONDS="${REQUIRED_CHECKS_POLL_INTERVAL_SECONDS:-10}"
 REQUIRED_CHECKS_WATCH_INTERVAL_SECONDS="${REQUIRED_CHECKS_WATCH_INTERVAL_SECONDS:-10}"
+NO_REQUIRED_CHECKS_REPORTED_MSG="no required checks reported"
 
 if ! [[ "$REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS must be a non-negative integer." >&2
@@ -55,7 +56,30 @@ attempt_automerge() {
 }
 
 required_checks_count() {
-    gh pr checks "$PR_URL" --required --json name --jq 'length'
+    local output
+    if output="$(gh pr checks "$PR_URL" --required --json name --jq 'length' 2>&1)"; then
+        printf '%s\n' "$output"
+        return 0
+    fi
+
+    # GitHub CLI returns this message when required-check metadata is unavailable for the PR branch.
+    if [[ "$output" == *"$NO_REQUIRED_CHECKS_REPORTED_MSG"* ]]; then
+        printf '0\n'
+        return 0
+    fi
+
+    echo "Failed to query required checks for PR: $output" >&2
+    return 1
+}
+
+all_checks_count() {
+    local output
+    if output="$(gh pr checks "$PR_URL" --json name --jq 'length' 2>&1)"; then
+        printf '%s\n' "$output"
+        return 0
+    fi
+    echo "Failed to query checks for PR: $output" >&2
+    return 1
 }
 
 wait_for_required_checks() {
@@ -63,6 +87,7 @@ wait_for_required_checks() {
     local remaining
     local sleep_for
     local required_count
+    local all_count
 
     while ((elapsed <= REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS)); do
         if is_stale_event; then
@@ -70,7 +95,7 @@ wait_for_required_checks() {
             return 2
         fi
 
-        required_count="$(required_checks_count)"
+        required_count="$(required_checks_count)" || return 1
         if [[ "$required_count" =~ ^[0-9]+$ ]] && ((required_count > 0)); then
             if is_stale_event; then
                 echo "PR head moved after required checks appeared; skipping stale auto-merge attempt."
@@ -79,6 +104,20 @@ wait_for_required_checks() {
             echo "Waiting for $required_count required checks to pass before enabling auto-merge."
             if ! gh pr checks "$PR_URL" --required --watch --fail-fast --interval "$REQUIRED_CHECKS_WATCH_INTERVAL_SECONDS"; then
                 echo "Required checks did not pass; refusing to enable auto-merge." >&2
+                return 1
+            fi
+            return 0
+        fi
+
+        all_count="$(all_checks_count)" || return 1
+        if [[ "$all_count" =~ ^[0-9]+$ ]] && ((all_count > 0)); then
+            if is_stale_event; then
+                echo "PR head moved after checks appeared; skipping stale auto-merge attempt."
+                return 2
+            fi
+            echo "No required checks reported; waiting for $all_count checks to pass before enabling auto-merge."
+            if ! gh pr checks "$PR_URL" --watch --fail-fast --interval "$REQUIRED_CHECKS_WATCH_INTERVAL_SECONDS"; then
+                echo "Checks did not pass; refusing to enable auto-merge." >&2
                 return 1
             fi
             return 0
@@ -98,7 +137,7 @@ wait_for_required_checks() {
         elapsed=$((elapsed + sleep_for))
     done
 
-    echo "No required checks detected for PR within timeout; refusing to enable auto-merge." >&2
+    echo "No checks detected for PR within timeout; refusing to enable auto-merge." >&2
     return 1
 }
 
