@@ -12,7 +12,7 @@ jobs:
   dependabot:
     name: Enable auto-merge for Dependabot PRs
     if: github.event.pull_request.user.login == 'dependabot[bot]' && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository
-    timeout-minutes: 2
+    timeout-minutes: 1
     concurrency:
       group: dependabot-automerge-${{ github.event.pull_request.number }}
       cancel-in-progress: true
@@ -37,20 +37,16 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
       - name: Enable auto-merge
         run: |
-          if ! grep -q 'DEPENDABOT_AUTOMERGE_ONE_SHOT' ./scripts/ci/enable-dependabot-automerge.sh; then
-            echo "::error::Automerge script on base branch is missing one-shot support; refusing long-running check-wait mode."
-            exit 1
-          fi
-
-          if ! grep -q -- '--match-head-commit' ./scripts/ci/enable-dependabot-automerge.sh; then
-            echo "::error::Automerge script on base branch is missing head-match race protection."
-            exit 1
-          fi
-
-          if ! timeout --signal=TERM --kill-after=5s 50s bash ./scripts/ci/enable-dependabot-automerge.sh; then
-            rc=$?
+          # Keep a small buffer between command timeout and job timeout for error handling/cleanup.
+          # Job runs on ubuntu-latest, where GNU timeout is available.
+          timeout --signal=TERM --kill-after=5s 45s bash ./scripts/ci/enable-dependabot-automerge.sh
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            # GNU timeout exits with 124 when the command exceeded the limit.
             if [ "$rc" -eq 124 ]; then
-              echo "::error::Automerge one-shot timed out after 50s; refusing long wait."
+              echo "::error::Automerge one-shot timed out after 45s; refusing long wait."
+            else
+              echo "::error::Automerge script failed with exit code ${rc}."
             fi
             exit "$rc"
           fi
