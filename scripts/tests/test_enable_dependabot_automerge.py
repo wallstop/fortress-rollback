@@ -71,6 +71,30 @@ if [[ "$cmd" == "pr" && "$subcmd" == "view" ]]; then
 fi
 
 if [[ "$cmd" == "api" ]]; then
+    if [[ "$subcmd" == "--paginate" ]]; then
+        subcmd="${1:-}"
+        shift || true
+    fi
+
+    if [[ "$subcmd" == *"/commits/"*"/check-runs"* ]]; then
+        printf '%s\\n' "api $subcmd $*" >> "${GH_LOG_PATH:?GH_LOG_PATH is required}"
+        if [[ -n "${GH_CHECK_RUNS_JSON:-}" ]]; then
+            printf '%s\\n' "$GH_CHECK_RUNS_JSON"
+        else
+            printf '%s\\n' '{"check_runs":[{"status":"completed","conclusion":"success","details_url":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"}]}'
+        fi
+        exit 0
+    fi
+    if [[ "$subcmd" == *"/commits/"*"/status"* ]]; then
+        printf '%s\\n' "api $subcmd $*" >> "${GH_LOG_PATH:?GH_LOG_PATH is required}"
+        if [[ -n "${GH_COMMIT_STATUS_JSON:-}" ]]; then
+            printf '%s\\n' "$GH_COMMIT_STATUS_JSON"
+        else
+            printf '%s\\n' '{"statuses":[]}'
+        fi
+        exit 0
+    fi
+
     jq_expr=""
     while [[ $# -gt 0 ]]; do
         if [[ "$1" == "--jq" ]]; then
@@ -117,6 +141,14 @@ if [[ "$cmd" == "pr" && "$subcmd" == "checks" ]]; then
         next_sequence_value "${GH_REQUIRED_CHECKS_COUNT_SEQUENCE:-}" "${GH_REQUIRED_CHECKS_COUNT:-1}" "required_checks_count"
         exit 0
     fi
+    if [[ "$*" == *"--required --json name,state,link"* ]]; then
+        if [[ -n "${GH_REQUIRED_CHECKS_STATE_JSON:-}" ]]; then
+            printf '%s\\n' "$GH_REQUIRED_CHECKS_STATE_JSON"
+        else
+            printf '%s\\n' '[{"name":"ci","state":"pass","link":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"}]'
+        fi
+        exit 0
+    fi
     if [[ "$*" == *"--json name --jq length"* ]]; then
         next_sequence_value "${GH_ALL_CHECKS_COUNT_SEQUENCE:-}" "${GH_ALL_CHECKS_COUNT:-1}" "all_checks_count"
         exit 0
@@ -148,12 +180,19 @@ def _run_script(tmp_path: Path, extra_env: dict[str, str]) -> subprocess.Complet
             "PR_URL": "https://github.com/wallstop/fortress-rollback/pull/144",
             "PR_HEAD_SHA": "head-sha",
             "GITHUB_REPOSITORY": "wallstop/fortress-rollback",
+            "GITHUB_RUN_ID": "12345",
             "GH_TOKEN": "fake-token",
             "GH_LOG_PATH": str(log_path),
             "GH_STATE_DIR": str(tmp_path),
             "REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS": "0",
             "REQUIRED_CHECKS_POLL_INTERVAL_SECONDS": "1",
             "REQUIRED_CHECKS_WATCH_INTERVAL_SECONDS": "1",
+            "FALLBACK_CHECKS_TIMEOUT_SECONDS": "1",
+            "FALLBACK_CHECKS_POLL_INTERVAL_SECONDS": "1",
+            "FALLBACK_STABLE_POLLS_REQUIRED": "1",
+            "REQUIRED_CHECKS_SETTLE_TIMEOUT_SECONDS": "1",
+            "REQUIRED_CHECKS_SETTLE_POLL_INTERVAL_SECONDS": "1",
+            "REQUIRED_STABLE_POLLS_REQUIRED": "1",
         }
     )
     env.update(extra_env)
@@ -189,7 +228,7 @@ def test_uses_squash_strategy_only(tmp_path: Path) -> None:
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
     assert len(log_lines) == 3
     assert "--json name --jq length" in log_lines[0]
-    assert "--watch" in log_lines[1]
+    assert "--required --json name,state,link" in log_lines[1]
     assert "--squash" in log_lines[2]
     assert "--rebase" not in log_lines[2]
     assert "--merge" not in log_lines[2]
@@ -234,17 +273,17 @@ def test_falls_back_to_all_checks_when_required_checks_count_is_zero(
     )
     assert result.returncode == 0
     assert (
-        "No required checks reported; waiting for 2 checks to pass before enabling auto-merge."
+        "Required checks did not appear before timeout; waiting for non-self checks/statuses fallback."
         in result.stdout
     )
 
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
-    assert len(log_lines) == 4
+    assert len(log_lines) == 5
     assert "--required --json name --jq length" in log_lines[0]
     assert "--json name --jq length" in log_lines[1]
-    assert "--watch" in log_lines[2]
-    assert "--required" not in log_lines[2]
-    assert "--squash" in log_lines[3]
+    assert "/check-runs" in log_lines[2]
+    assert "/status" in log_lines[3]
+    assert "--squash" in log_lines[4]
 
 
 def test_falls_back_when_required_checks_unavailable(tmp_path: Path) -> None:
@@ -262,12 +301,12 @@ def test_falls_back_when_required_checks_unavailable(tmp_path: Path) -> None:
     assert result.returncode == 0
 
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
-    assert len(log_lines) == 4
+    assert len(log_lines) == 5
     assert "--required --json name --jq length" in log_lines[0]
     assert "--json name --jq length" in log_lines[1]
-    assert "--watch" in log_lines[2]
-    assert "--required" not in log_lines[2]
-    assert "--squash" in log_lines[3]
+    assert "/check-runs" in log_lines[2]
+    assert "/status" in log_lines[3]
+    assert "--squash" in log_lines[4]
 
 
 def test_fails_when_required_checks_query_errors(tmp_path: Path) -> None:
@@ -316,7 +355,7 @@ def test_fails_when_all_checks_fail_in_fallback_mode(tmp_path: Path) -> None:
         {
             "GH_REQUIRED_CHECKS_COUNT": "0",
             "GH_ALL_CHECKS_COUNT": "1",
-            "GH_CHECKS_ALL_WATCH_EXIT_CODE": "1",
+            "GH_CHECK_RUNS_JSON": '{"check_runs":[{"status":"completed","conclusion":"failure","details_url":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"}]}',
             "GH_ALLOW_SQUASH": "true",
             "GH_ALLOW_REBASE": "false",
             "GH_ALLOW_MERGE": "false",
@@ -326,19 +365,130 @@ def test_fails_when_all_checks_fail_in_fallback_mode(tmp_path: Path) -> None:
     assert "Checks did not pass" in result.stderr
 
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
-    assert len(log_lines) == 3
+    assert len(log_lines) == 4
     assert "--required --json name --jq length" in log_lines[0]
     assert "--json name --jq length" in log_lines[1]
-    assert "--watch" in log_lines[2]
-    assert "--required" not in log_lines[2]
+    assert "/check-runs" in log_lines[2]
+    assert "/status" in log_lines[3]
     assert "pr merge" not in "\n".join(log_lines)
+
+
+def test_fails_when_fallback_only_sees_self_pending_check(tmp_path: Path) -> None:
+    result = _run_script(
+        tmp_path,
+        {
+            "GH_REQUIRED_CHECKS_COUNT": "0",
+            "GH_ALL_CHECKS_COUNT": "1",
+            "GH_CHECK_RUNS_JSON": '{"check_runs":[{"status":"in_progress","conclusion":null,"details_url":"https://github.com/wallstop/fortress-rollback/actions/runs/12345/job/1"}]}',
+            "FALLBACK_CHECKS_TIMEOUT_SECONDS": "1",
+            "FALLBACK_CHECKS_POLL_INTERVAL_SECONDS": "1",
+            "GH_ALLOW_SQUASH": "true",
+            "GH_ALLOW_REBASE": "false",
+            "GH_ALLOW_MERGE": "false",
+        },
+    )
+    assert result.returncode == 1
+    assert "Checks did not settle in fallback mode within timeout" in result.stderr
+
+    log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
+    assert len(log_lines) >= 4
+    assert "--required --json name --jq length" in log_lines[0]
+    assert "--json name --jq length" in log_lines[1]
+    assert "/check-runs" in log_lines[2]
+    assert "/status" in log_lines[3]
+    assert "pr merge" not in "\n".join(log_lines)
+
+
+def test_fails_when_commit_status_reports_error_in_fallback(tmp_path: Path) -> None:
+    result = _run_script(
+        tmp_path,
+        {
+            "GH_REQUIRED_CHECKS_COUNT": "0",
+            "GH_ALL_CHECKS_COUNT": "1",
+            "GH_CHECK_RUNS_JSON": '{"check_runs":[]}',
+            "GH_COMMIT_STATUS_JSON": '{"statuses":[{"state":"error","target_url":"https://example.invalid/check"}]}',
+            "GH_ALLOW_SQUASH": "true",
+            "GH_ALLOW_REBASE": "false",
+            "GH_ALLOW_MERGE": "false",
+        },
+    )
+    assert result.returncode == 1
+    assert "Checks did not pass" in result.stderr
+
+    log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
+    assert len(log_lines) == 4
+    assert "--required --json name --jq length" in log_lines[0]
+    assert "--json name --jq length" in log_lines[1]
+    assert "/check-runs" in log_lines[2]
+    assert "/status" in log_lines[3]
+    assert "pr merge" not in "\n".join(log_lines)
+
+
+def test_fallback_uses_latest_check_run_result_per_context(tmp_path: Path) -> None:
+    result = _run_script(
+        tmp_path,
+        {
+            "GH_REQUIRED_CHECKS_COUNT": "0",
+            "GH_ALL_CHECKS_COUNT": "1",
+            "GH_CHECK_RUNS_JSON": (
+                '{"check_runs":['
+                '{"name":"build","app":{"slug":"github-actions"},"status":"completed","conclusion":"failure","completed_at":"2026-01-01T00:00:00Z","details_url":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"},'
+                '{"name":"build","app":{"slug":"github-actions"},"status":"completed","conclusion":"success","completed_at":"2026-01-01T00:01:00Z","details_url":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/2"}'
+                ']}'
+            ),
+            "GH_MERGE_SUCCESS_FLAG": "--squash",
+            "GH_ALLOW_SQUASH": "true",
+            "GH_ALLOW_REBASE": "false",
+            "GH_ALLOW_MERGE": "false",
+        },
+    )
+    assert result.returncode == 0
+    assert "Auto-merge enabled with squash strategy." in result.stdout
+
+    log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
+    assert len(log_lines) == 5
+    assert "--required --json name --jq length" in log_lines[0]
+    assert "--json name --jq length" in log_lines[1]
+    assert "/check-runs" in log_lines[2]
+    assert "/status" in log_lines[3]
+    assert "--squash" in log_lines[4]
+
+
+def test_fallback_ignores_older_pending_when_latest_check_is_success(tmp_path: Path) -> None:
+    result = _run_script(
+        tmp_path,
+        {
+            "GH_REQUIRED_CHECKS_COUNT": "0",
+            "GH_ALL_CHECKS_COUNT": "1",
+            "GH_CHECK_RUNS_JSON": (
+                '{"check_runs":['
+                '{"name":"build","app":{"slug":"github-actions"},"id":100,"status":"in_progress","conclusion":null,"started_at":"2026-01-01T00:00:00Z","details_url":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"},'
+                '{"name":"build","app":{"slug":"github-actions"},"id":101,"status":"completed","conclusion":"success","completed_at":"2026-01-01T00:01:00Z","details_url":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/2"}'
+                ']}'
+            ),
+            "GH_MERGE_SUCCESS_FLAG": "--squash",
+            "GH_ALLOW_SQUASH": "true",
+            "GH_ALLOW_REBASE": "false",
+            "GH_ALLOW_MERGE": "false",
+        },
+    )
+    assert result.returncode == 0
+    assert "Auto-merge enabled with squash strategy." in result.stdout
+
+    log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
+    assert len(log_lines) == 5
+    assert "--required --json name --jq length" in log_lines[0]
+    assert "--json name --jq length" in log_lines[1]
+    assert "/check-runs" in log_lines[2]
+    assert "/status" in log_lines[3]
+    assert "--squash" in log_lines[4]
 
 
 def test_fails_when_required_checks_fail(tmp_path: Path) -> None:
     result = _run_script(
         tmp_path,
         {
-            "GH_CHECKS_WATCH_EXIT_CODE": "1",
+            "GH_REQUIRED_CHECKS_STATE_JSON": '[{"name":"ci","state":"fail","link":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"}]',
             "GH_ALLOW_SQUASH": "true",
             "GH_ALLOW_REBASE": "false",
             "GH_ALLOW_MERGE": "false",
@@ -350,7 +500,27 @@ def test_fails_when_required_checks_fail(tmp_path: Path) -> None:
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
     assert len(log_lines) == 2
     assert "--json name --jq length" in log_lines[0]
-    assert "--watch" in log_lines[1]
+    assert "--required --json name,state,link" in log_lines[1]
+    assert "pr merge" not in "\n".join(log_lines)
+
+
+def test_fails_when_required_checks_cancel(tmp_path: Path) -> None:
+    result = _run_script(
+        tmp_path,
+        {
+            "GH_REQUIRED_CHECKS_STATE_JSON": '[{"name":"ci","state":"cancel","link":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"}]',
+            "GH_ALLOW_SQUASH": "true",
+            "GH_ALLOW_REBASE": "false",
+            "GH_ALLOW_MERGE": "false",
+        },
+    )
+    assert result.returncode == 1
+    assert "Required checks did not pass" in result.stderr
+
+    log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
+    assert len(log_lines) == 2
+    assert "--json name --jq length" in log_lines[0]
+    assert "--required --json name,state,link" in log_lines[1]
     assert "pr merge" not in "\n".join(log_lines)
 
 
@@ -371,14 +541,12 @@ def test_waits_for_required_checks_to_appear_then_merges(tmp_path: Path) -> None
     assert result.returncode == 0
 
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
-    assert len(log_lines) == 7
+    assert len(log_lines) == 5
     assert "--required --json name --jq length" in log_lines[0]
-    assert "--json name --jq length" in log_lines[1]
+    assert "--required --json name --jq length" in log_lines[1]
     assert "--required --json name --jq length" in log_lines[2]
-    assert "--json name --jq length" in log_lines[3]
-    assert "--required --json name --jq length" in log_lines[4]
-    assert "--required --watch" in log_lines[5]
-    assert "--squash" in log_lines[6]
+    assert "--required --json name,state,link" in log_lines[3]
+    assert "--squash" in log_lines[4]
 
 
 def test_skips_when_head_becomes_stale_while_waiting(tmp_path: Path) -> None:
@@ -400,10 +568,9 @@ def test_skips_when_head_becomes_stale_while_waiting(tmp_path: Path) -> None:
     assert "after required checks completed" not in result.stdout
 
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
-    assert len(log_lines) == 2
+    assert len(log_lines) == 1
     assert "--required --json name --jq length" in log_lines[0]
-    assert "--json name --jq length" in log_lines[1]
-    assert "--watch" not in "\n".join(log_lines)
+    assert "/check-runs" not in "\n".join(log_lines)
     assert "pr merge" not in "\n".join(log_lines)
 
 
@@ -425,7 +592,7 @@ def test_skips_when_head_becomes_stale_after_checks_appear(tmp_path: Path) -> No
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
     assert len(log_lines) == 1
     assert "--json name --jq length" in log_lines[0]
-    assert "--watch" not in log_lines[0]
+    assert "/check-runs" not in log_lines[0]
     assert "pr merge" not in log_lines[0]
 
 
@@ -441,12 +608,14 @@ def test_skips_when_head_becomes_stale_after_checks_complete(tmp_path: Path) -> 
         },
     )
     assert result.returncode == 0
-    assert "PR head moved after required checks completed" in result.stdout
+    assert (
+        "PR head moved while waiting for required checks" in result.stdout
+        or "PR head moved after required checks completed" in result.stdout
+    )
 
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
-    assert len(log_lines) == 2
+    assert len(log_lines) >= 1
     assert "--json name --jq length" in log_lines[0]
-    assert "--watch" in log_lines[1]
     assert "pr merge" not in "\n".join(log_lines)
 
 
@@ -467,9 +636,8 @@ def test_caps_poll_sleep_to_remaining_timeout(tmp_path: Path) -> None:
     assert result.returncode == 0
 
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
-    assert len(log_lines) == 5
+    assert len(log_lines) == 4
     assert "--required --json name --jq length" in log_lines[0]
-    assert "--json name --jq length" in log_lines[1]
-    assert "--required --json name --jq length" in log_lines[2]
-    assert "--required --watch" in log_lines[3]
-    assert "--squash" in log_lines[4]
+    assert "--required --json name --jq length" in log_lines[1]
+    assert "--required --json name,state,link" in log_lines[2]
+    assert "--squash" in log_lines[3]

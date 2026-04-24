@@ -8,6 +8,12 @@ set -euo pipefail
 REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS="${REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS:-120}"
 REQUIRED_CHECKS_POLL_INTERVAL_SECONDS="${REQUIRED_CHECKS_POLL_INTERVAL_SECONDS:-10}"
 REQUIRED_CHECKS_WATCH_INTERVAL_SECONDS="${REQUIRED_CHECKS_WATCH_INTERVAL_SECONDS:-10}"
+FALLBACK_CHECKS_TIMEOUT_SECONDS="${FALLBACK_CHECKS_TIMEOUT_SECONDS:-1800}"
+FALLBACK_CHECKS_POLL_INTERVAL_SECONDS="${FALLBACK_CHECKS_POLL_INTERVAL_SECONDS:-10}"
+FALLBACK_STABLE_POLLS_REQUIRED="${FALLBACK_STABLE_POLLS_REQUIRED:-2}"
+REQUIRED_CHECKS_SETTLE_TIMEOUT_SECONDS="${REQUIRED_CHECKS_SETTLE_TIMEOUT_SECONDS:-1800}"
+REQUIRED_CHECKS_SETTLE_POLL_INTERVAL_SECONDS="${REQUIRED_CHECKS_SETTLE_POLL_INTERVAL_SECONDS:-10}"
+REQUIRED_STABLE_POLLS_REQUIRED="${REQUIRED_STABLE_POLLS_REQUIRED:-2}"
 NO_REQUIRED_CHECKS_REPORTED_MSG="no required checks reported"
 
 if ! [[ "$REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
@@ -22,6 +28,41 @@ fi
 
 if ! [[ "$REQUIRED_CHECKS_WATCH_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
     echo "REQUIRED_CHECKS_WATCH_INTERVAL_SECONDS must be a positive integer." >&2
+    exit 1
+fi
+
+if ! [[ "$FALLBACK_CHECKS_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "FALLBACK_CHECKS_TIMEOUT_SECONDS must be a positive integer." >&2
+    exit 1
+fi
+
+if ! [[ "$FALLBACK_CHECKS_POLL_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "FALLBACK_CHECKS_POLL_INTERVAL_SECONDS must be a positive integer." >&2
+    exit 1
+fi
+
+if ! [[ "$FALLBACK_STABLE_POLLS_REQUIRED" =~ ^[1-9][0-9]*$ ]]; then
+    echo "FALLBACK_STABLE_POLLS_REQUIRED must be a positive integer." >&2
+    exit 1
+fi
+
+if ! [[ "$REQUIRED_CHECKS_SETTLE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "REQUIRED_CHECKS_SETTLE_TIMEOUT_SECONDS must be a positive integer." >&2
+    exit 1
+fi
+
+if ! [[ "$REQUIRED_CHECKS_SETTLE_POLL_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "REQUIRED_CHECKS_SETTLE_POLL_INTERVAL_SECONDS must be a positive integer." >&2
+    exit 1
+fi
+
+if ! [[ "$REQUIRED_STABLE_POLLS_REQUIRED" =~ ^[1-9][0-9]*$ ]]; then
+    echo "REQUIRED_STABLE_POLLS_REQUIRED must be a positive integer." >&2
+    exit 1
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+    echo "jq is required to evaluate check state in fallback mode." >&2
     exit 1
 fi
 
@@ -64,7 +105,7 @@ required_checks_count() {
 
     # GitHub CLI returns this message when required-check metadata is unavailable for the PR branch.
     if [[ "$output" == *"$NO_REQUIRED_CHECKS_REPORTED_MSG"* ]]; then
-        printf '0\n'
+        printf '%s\n' '-1'
         return 0
     fi
 
@@ -82,6 +123,293 @@ all_checks_count() {
     return 1
 }
 
+count_non_self_checks() {
+    local check_runs_json="$1"
+    jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+        [
+            .check_runs[]?
+            | select(
+                ($run_id | length) == 0
+                or ((.details_url // "") | contains("/actions/runs/\($run_id)/") | not)
+            )
+        ]
+        | sort_by(.name, (.app.slug // ""), (.completed_at // .started_at // ""), (.id // 0))
+        | group_by([.name, (.app.slug // "")])
+        | map(last)
+        | length
+    ' <<<"$check_runs_json"
+}
+
+count_non_self_pending_checks() {
+    local check_runs_json="$1"
+    jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+        [
+            .check_runs[]?
+            | select(
+                ($run_id | length) == 0
+                or ((.details_url // "") | contains("/actions/runs/\($run_id)/") | not)
+            )
+        ]
+        | sort_by(.name, (.app.slug // ""), (.completed_at // .started_at // ""), (.id // 0))
+        | group_by([.name, (.app.slug // "")])
+        | map(last)
+        | map(select(.status != "completed"))
+        | length
+    ' <<<"$check_runs_json"
+}
+
+count_non_self_failed_checks() {
+    local check_runs_json="$1"
+    jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+        [
+            .check_runs[]?
+            | select(
+                ($run_id | length) == 0
+                or ((.details_url // "") | contains("/actions/runs/\($run_id)/") | not)
+            )
+        ]
+        | sort_by(.name, (.app.slug // ""), (.completed_at // .started_at // ""), (.id // 0))
+        | group_by([.name, (.app.slug // "")])
+        | map(last)
+        | map(select(
+            .status == "completed" and (
+                (.conclusion // "") == "failure"
+                or (.conclusion // "") == "timed_out"
+                or (.conclusion // "") == "cancelled"
+                or (.conclusion // "") == "action_required"
+                or (.conclusion // "") == "startup_failure"
+                or (.conclusion // "") == "stale"
+            )
+        ))
+        | length
+    ' <<<"$check_runs_json"
+}
+
+count_non_self_commit_statuses() {
+    local status_json="$1"
+    jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+        [
+            .statuses[]?
+            | select(
+                ($run_id | length) == 0
+                or ((.target_url // "") | contains("/actions/runs/\($run_id)/") | not)
+            )
+        ]
+        | sort_by(.context, (.updated_at // .created_at // ""))
+        | group_by(.context)
+        | map(last)
+        | length
+    ' <<<"$status_json"
+}
+
+count_non_self_pending_statuses() {
+    local status_json="$1"
+    jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+        [
+            .statuses[]?
+            | select(
+                ($run_id | length) == 0
+                or ((.target_url // "") | contains("/actions/runs/\($run_id)/") | not)
+            )
+        ]
+        | sort_by(.context, (.updated_at // .created_at // ""))
+        | group_by(.context)
+        | map(last)
+        | map(select(.state == "pending"))
+        | length
+    ' <<<"$status_json"
+}
+
+count_non_self_failed_statuses() {
+    local status_json="$1"
+    jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+        [
+            .statuses[]?
+            | select(
+                ($run_id | length) == 0
+                or ((.target_url // "") | contains("/actions/runs/\($run_id)/") | not)
+            )
+        ]
+        | sort_by(.context, (.updated_at // .created_at // ""))
+        | group_by(.context)
+        | map(last)
+        | map(select(.state == "failure" or .state == "error"))
+        | length
+    ' <<<"$status_json"
+}
+
+wait_for_all_checks_without_required_metadata() {
+    local elapsed=0
+    local remaining
+    local sleep_for
+    local stable_polls=0
+
+    local check_runs_json
+    local status_json
+    local check_total
+    local check_pending
+    local check_failed
+    local status_total
+    local status_pending
+    local status_failed
+
+    while ((elapsed <= FALLBACK_CHECKS_TIMEOUT_SECONDS)); do
+        if is_stale_event; then
+            echo "PR head moved while waiting for fallback checks; skipping stale auto-merge attempt."
+            return 2
+        fi
+
+        if ! check_runs_json="$(gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$PR_HEAD_SHA/check-runs?per_page=100" 2>&1)"; then
+            echo "Failed to query check runs for PR head: $check_runs_json" >&2
+            return 1
+        fi
+        if ! check_runs_json="$(jq -cs '{check_runs: [.[].check_runs[]?]}' <<<"$check_runs_json" 2>&1)"; then
+            echo "Failed to parse check runs for PR head: $check_runs_json" >&2
+            return 1
+        fi
+        if ! status_json="$(gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$PR_HEAD_SHA/status?per_page=100" 2>&1)"; then
+            echo "Failed to query commit statuses for PR head: $status_json" >&2
+            return 1
+        fi
+        if ! status_json="$(jq -cs '{statuses: [.[].statuses[]?]}' <<<"$status_json" 2>&1)"; then
+            echo "Failed to parse commit statuses for PR head: $status_json" >&2
+            return 1
+        fi
+
+        check_total="$(count_non_self_checks "$check_runs_json")"
+        check_pending="$(count_non_self_pending_checks "$check_runs_json")"
+        check_failed="$(count_non_self_failed_checks "$check_runs_json")"
+        status_total="$(count_non_self_commit_statuses "$status_json")"
+        status_pending="$(count_non_self_pending_statuses "$status_json")"
+        status_failed="$(count_non_self_failed_statuses "$status_json")"
+
+        if ((check_failed > 0 || status_failed > 0)); then
+            echo "Checks did not pass; refusing to enable auto-merge." >&2
+            return 1
+        fi
+
+        if ((check_total + status_total > 0)) && ((check_pending == 0 && status_pending == 0)); then
+            stable_polls=$((stable_polls + 1))
+            if ((stable_polls >= FALLBACK_STABLE_POLLS_REQUIRED)); then
+                return 0
+            fi
+        else
+            stable_polls=0
+        fi
+
+        remaining=$((FALLBACK_CHECKS_TIMEOUT_SECONDS - elapsed))
+        if ((remaining <= 0)); then
+            break
+        fi
+
+        sleep_for="$FALLBACK_CHECKS_POLL_INTERVAL_SECONDS"
+        if ((sleep_for > remaining)); then
+            sleep_for="$remaining"
+        fi
+
+        sleep "$sleep_for"
+        elapsed=$((elapsed + sleep_for))
+    done
+
+    echo "Checks did not settle in fallback mode within timeout; refusing to enable auto-merge." >&2
+    return 1
+}
+
+wait_for_required_checks_without_self() {
+    local elapsed=0
+    local remaining
+    local sleep_for
+    local stable_polls=0
+    local checks_json
+    local required_total
+    local required_pending
+    local required_failed
+
+    while ((elapsed <= REQUIRED_CHECKS_SETTLE_TIMEOUT_SECONDS)); do
+        if is_stale_event; then
+            echo "PR head moved while waiting for required checks; skipping stale auto-merge attempt."
+            return 2
+        fi
+
+        if ! checks_json="$(gh pr checks "$PR_URL" --required --json name,state,link 2>&1)"; then
+            echo "Failed to query required checks state for PR: $checks_json" >&2
+            return 1
+        fi
+
+        required_total="$(jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+            [
+                .[]?
+                | select(
+                    ($run_id | length) == 0
+                    or ((.link // "") | contains("/actions/runs/\($run_id)/") | not)
+                )
+            ] | length
+        ' <<<"$checks_json")"
+        required_pending="$(jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+            [
+                .[]?
+                | select(
+                    (
+                        ($run_id | length) == 0
+                        or ((.link // "") | contains("/actions/runs/\($run_id)/") | not)
+                    )
+                    and ((.state // "" | ascii_downcase) == "pending")
+                )
+            ] | length
+        ' <<<"$checks_json")"
+        required_failed="$(jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+            [
+                .[]?
+                | select(
+                    (
+                        ($run_id | length) == 0
+                        or ((.link // "") | contains("/actions/runs/\($run_id)/") | not)
+                    )
+                    and (
+                        (.state // "" | ascii_downcase) == "fail"
+                        or (.state // "" | ascii_downcase) == "failure"
+                        or (.state // "" | ascii_downcase) == "error"
+                        or (.state // "" | ascii_downcase) == "timed_out"
+                        or (.state // "" | ascii_downcase) == "cancel"
+                        or (.state // "" | ascii_downcase) == "cancelled"
+                        or (.state // "" | ascii_downcase) == "action_required"
+                    )
+                )
+            ] | length
+        ' <<<"$checks_json")"
+
+        if ((required_failed > 0)); then
+            echo "Required checks did not pass; refusing to enable auto-merge." >&2
+            return 1
+        fi
+
+        if ((required_total > 0)) && ((required_pending == 0)); then
+            stable_polls=$((stable_polls + 1))
+            if ((stable_polls >= REQUIRED_STABLE_POLLS_REQUIRED)); then
+                return 0
+            fi
+        else
+            stable_polls=0
+        fi
+
+        remaining=$((REQUIRED_CHECKS_SETTLE_TIMEOUT_SECONDS - elapsed))
+        if ((remaining <= 0)); then
+            break
+        fi
+
+        sleep_for="$REQUIRED_CHECKS_SETTLE_POLL_INTERVAL_SECONDS"
+        if ((sleep_for > remaining)); then
+            sleep_for="$remaining"
+        fi
+
+        sleep "$sleep_for"
+        elapsed=$((elapsed + sleep_for))
+    done
+
+    echo "Required checks did not settle within timeout; refusing to enable auto-merge." >&2
+    return 1
+}
+
 wait_for_required_checks() {
     local elapsed=0
     local remaining
@@ -96,30 +424,24 @@ wait_for_required_checks() {
         fi
 
         required_count="$(required_checks_count)" || return 1
-        if [[ "$required_count" =~ ^[0-9]+$ ]] && ((required_count > 0)); then
-            if is_stale_event; then
-                echo "PR head moved after required checks appeared; skipping stale auto-merge attempt."
-                return 2
-            fi
-            echo "Waiting for $required_count required checks to pass before enabling auto-merge."
-            if ! gh pr checks "$PR_URL" --required --watch --fail-fast --interval "$REQUIRED_CHECKS_WATCH_INTERVAL_SECONDS"; then
-                echo "Required checks did not pass; refusing to enable auto-merge." >&2
-                return 1
-            fi
-            return 0
-        fi
-
-        all_count="$(all_checks_count)" || return 1
-        if [[ "$all_count" =~ ^[0-9]+$ ]] && ((all_count > 0)); then
+        if [[ "$required_count" == "-1" ]]; then
             if is_stale_event; then
                 echo "PR head moved after checks appeared; skipping stale auto-merge attempt."
                 return 2
             fi
-            echo "No required checks reported; waiting for $all_count checks to pass before enabling auto-merge."
-            if ! gh pr checks "$PR_URL" --watch --fail-fast --interval "$REQUIRED_CHECKS_WATCH_INTERVAL_SECONDS"; then
-                echo "Checks did not pass; refusing to enable auto-merge." >&2
-                return 1
+            all_count="$(all_checks_count)" || return 1
+            if [[ "$all_count" =~ ^[0-9]+$ ]] && ((all_count > 0)); then
+                echo "No required checks reported; waiting for non-self checks/statuses to settle before enabling auto-merge."
+                wait_for_all_checks_without_required_metadata || return $?
+                return 0
             fi
+        elif [[ "$required_count" =~ ^[0-9]+$ ]] && ((required_count > 0)); then
+            if is_stale_event; then
+                echo "PR head moved after required checks appeared; skipping stale auto-merge attempt."
+                return 2
+            fi
+            echo "Waiting for $required_count required checks to settle before enabling auto-merge."
+            wait_for_required_checks_without_self || return $?
             return 0
         fi
 
@@ -136,6 +458,17 @@ wait_for_required_checks() {
         sleep "$sleep_for"
         elapsed=$((elapsed + sleep_for))
     done
+
+    all_count="$(all_checks_count)" || return 1
+    if [[ "$all_count" =~ ^[0-9]+$ ]] && ((all_count > 0)); then
+        if is_stale_event; then
+            echo "PR head moved after checks appeared; skipping stale auto-merge attempt."
+            return 2
+        fi
+        echo "Required checks did not appear before timeout; waiting for non-self checks/statuses fallback."
+        wait_for_all_checks_without_required_metadata || return $?
+        return 0
+    fi
 
     echo "No checks detected for PR within timeout; refusing to enable auto-merge." >&2
     return 1
