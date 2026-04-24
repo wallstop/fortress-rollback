@@ -234,6 +234,26 @@ def test_uses_squash_strategy_only(tmp_path: Path) -> None:
     assert "--merge" not in log_lines[2]
 
 
+def test_one_shot_mode_skips_check_waits(tmp_path: Path) -> None:
+    result = _run_script(
+        tmp_path,
+        {
+            "DEPENDABOT_AUTOMERGE_ONE_SHOT": "true",
+            "GH_MERGE_SUCCESS_FLAG": "--squash",
+            "GH_ALLOW_SQUASH": "true",
+            "GH_ALLOW_REBASE": "false",
+            "GH_ALLOW_MERGE": "false",
+        },
+    )
+    assert result.returncode == 0
+    assert "Auto-merge enabled with squash strategy (one-shot)." in result.stdout
+
+    log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
+    assert len(log_lines) == 1
+    assert "--squash" in log_lines[0]
+    assert "pr checks" not in log_lines[0]
+
+
 def test_skips_stale_event_without_merging(tmp_path: Path) -> None:
     result = _run_script(tmp_path, {"GH_PR_HEAD_OID": "new-head-sha"})
     assert result.returncode == 0

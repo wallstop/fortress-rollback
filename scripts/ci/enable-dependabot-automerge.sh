@@ -16,6 +16,7 @@ REQUIRED_CHECKS_SETTLE_POLL_INTERVAL_SECONDS="${REQUIRED_CHECKS_SETTLE_POLL_INTE
 REQUIRED_STABLE_POLLS_REQUIRED="${REQUIRED_STABLE_POLLS_REQUIRED:-2}"
 NO_REQUIRED_CHECKS_REPORTED_MSG="no required checks reported"
 NO_REQUIRED_CHECKS_SENTINEL="-1"
+DEPENDABOT_AUTOMERGE_ONE_SHOT="${DEPENDABOT_AUTOMERGE_ONE_SHOT:-false}"
 
 if ! [[ "$REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS must be a non-negative integer." >&2
@@ -62,7 +63,12 @@ if ! [[ "$REQUIRED_STABLE_POLLS_REQUIRED" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
-if ! command -v jq >/dev/null 2>&1; then
+if [[ "$DEPENDABOT_AUTOMERGE_ONE_SHOT" != "true" && "$DEPENDABOT_AUTOMERGE_ONE_SHOT" != "false" ]]; then
+    echo "DEPENDABOT_AUTOMERGE_ONE_SHOT must be either 'true' or 'false'." >&2
+    exit 1
+fi
+
+if [[ "$DEPENDABOT_AUTOMERGE_ONE_SHOT" != "true" ]] && ! command -v jq >/dev/null 2>&1; then
     echo "jq is required to evaluate check state in fallback mode." >&2
     exit 1
 fi
@@ -509,25 +515,35 @@ if [[ "$allow_rebase_merge" == "true" || "$allow_merge_commit" == "true" ]]; the
     exit 1
 fi
 
-if wait_for_required_checks; then
-    wait_status=0
-else
-    wait_status=$?
-fi
-if [[ "$wait_status" -eq 2 ]]; then
-    exit 0
-fi
-if [[ "$wait_status" -ne 0 ]]; then
-    exit 1
+if [[ "$DEPENDABOT_AUTOMERGE_ONE_SHOT" != "true" ]]; then
+    if wait_for_required_checks; then
+        wait_status=0
+    else
+        wait_status=$?
+    fi
+    if [[ "$wait_status" -eq 2 ]]; then
+        exit 0
+    fi
+    if [[ "$wait_status" -ne 0 ]]; then
+        exit 1
+    fi
 fi
 
 if is_stale_event; then
-    echo "PR head moved after required checks completed; skipping stale auto-merge attempt."
+    if [[ "$DEPENDABOT_AUTOMERGE_ONE_SHOT" == "true" ]]; then
+        echo "PR head moved before one-shot auto-merge attempt; skipping stale auto-merge attempt."
+    else
+        echo "PR head moved after required checks completed; skipping stale auto-merge attempt."
+    fi
     exit 0
 fi
 
 if attempt_automerge; then
-    echo "Auto-merge enabled with squash strategy."
+    if [[ "$DEPENDABOT_AUTOMERGE_ONE_SHOT" == "true" ]]; then
+        echo "Auto-merge enabled with squash strategy (one-shot)."
+    else
+        echo "Auto-merge enabled with squash strategy."
+    fi
     exit 0
 fi
 
