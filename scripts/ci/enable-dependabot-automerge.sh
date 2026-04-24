@@ -132,6 +132,7 @@ all_checks_count() {
 
 count_non_self_checks() {
     local check_runs_json="$1"
+    # Use ASCII Unit Separator (\u001f) as a low-collision key delimiter for jq group_by.
     jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
         [
             .check_runs[]?
@@ -141,7 +142,7 @@ count_non_self_checks() {
             )
         ]
         | sort_by(.name, (.app.slug // ""), (.completed_at // .started_at // ""), (.id // 0))
-        | group_by([.name, (.app.slug // "")])
+        | group_by((.name // "") + "\u001f" + (.app.slug // ""))
         | map(last)
         | length
     ' <<<"$check_runs_json"
@@ -158,7 +159,7 @@ count_non_self_pending_checks() {
             )
         ]
         | sort_by(.name, (.app.slug // ""), (.completed_at // .started_at // ""), (.id // 0))
-        | group_by([.name, (.app.slug // "")])
+        | group_by((.name // "") + "\u001f" + (.app.slug // ""))
         | map(last)
         | map(select(.status != "completed"))
         | length
@@ -176,7 +177,7 @@ count_non_self_failed_checks() {
             )
         ]
         | sort_by(.name, (.app.slug // ""), (.completed_at // .started_at // ""), (.id // 0))
-        | group_by([.name, (.app.slug // "")])
+        | group_by((.name // "") + "\u001f" + (.app.slug // ""))
         | map(last)
         | map(select(
             .status == "completed" and (
@@ -246,6 +247,12 @@ count_non_self_failed_statuses() {
 }
 
 emit_required_checks_diagnostics() {
+    # Emit actionable diagnostics for required checks when auto-merge cannot proceed.
+    # Parameters:
+    #   $1: JSON array from `gh pr checks --required --json name,state,link`
+    # Behavior:
+    #   - Excludes entries associated with the current workflow run to avoid self-noise.
+    #   - Prints failed/cancelled checks and pending checks with names, states, and links.
     local checks_json="$1"
     local failed_checks
     local pending_checks
@@ -302,6 +309,13 @@ emit_required_checks_diagnostics() {
 }
 
 emit_fallback_checks_diagnostics() {
+    # Emit actionable diagnostics for fallback check-run/status evaluation failures.
+    # Parameters:
+    #   $1: JSON object with `.check_runs[]` from commit check-runs API.
+    #   $2: JSON object with `.statuses[]` from commit status API.
+    # Behavior:
+    #   - Excludes entries associated with the current workflow run to avoid self-noise.
+    #   - Prints failed/cancelled and pending entries with context and links.
     local check_runs_json="$1"
     local status_json="$2"
     local failed_checks
@@ -318,7 +332,7 @@ emit_fallback_checks_diagnostics() {
                     )
                 ]
                 | sort_by(.name, (.app.slug // ""), (.completed_at // .started_at // ""), (.id // 0))
-                | group_by([.name, (.app.slug // "")])
+                | group_by((.name // "") + "\u001f" + (.app.slug // ""))
                 | map(last)
                 | map(select(
                     .status == "completed" and (
@@ -330,7 +344,7 @@ emit_fallback_checks_diagnostics() {
                         or (.conclusion // "") == "stale"
                     )
                 ))
-                | map("  - check_run:\(.name // "<unknown>") [\(.conclusion // "unknown")] \(.details_url // "no-link")")
+                | map("  - check_run: \(.name // "<unknown>") [\(.conclusion // "unknown")] \(.details_url // "no-link")")
                 | .[]?
             ' <<<"$check_runs_json"
 
@@ -346,7 +360,7 @@ emit_fallback_checks_diagnostics() {
                 | group_by(.context)
                 | map(last)
                 | map(select(.state == "failure" or .state == "error"))
-                | map("  - status:\(.context // "<unknown>") [\(.state // "unknown")] \(.target_url // "no-link")")
+                | map("  - status: \(.context // "<unknown>") [\(.state // "unknown")] \(.target_url // "no-link")")
                 | .[]?
             ' <<<"$status_json"
         }
@@ -363,10 +377,10 @@ emit_fallback_checks_diagnostics() {
                     )
                 ]
                 | sort_by(.name, (.app.slug // ""), (.completed_at // .started_at // ""), (.id // 0))
-                | group_by([.name, (.app.slug // "")])
+                | group_by((.name // "") + "\u001f" + (.app.slug // ""))
                 | map(last)
                 | map(select(.status != "completed"))
-                | map("  - check_run:\(.name // "<unknown>") [\(.status // "unknown")] \(.details_url // "no-link")")
+                | map("  - check_run: \(.name // "<unknown>") [\(.status // "unknown")] \(.details_url // "no-link")")
                 | .[]?
             ' <<<"$check_runs_json"
 
@@ -382,7 +396,7 @@ emit_fallback_checks_diagnostics() {
                 | group_by(.context)
                 | map(last)
                 | map(select(.state == "pending"))
-                | map("  - status:\(.context // "<unknown>") [pending] \(.target_url // "no-link")")
+                | map("  - status: \(.context // "<unknown>") [pending] \(.target_url // "no-link")")
                 | .[]?
             ' <<<"$status_json"
         }

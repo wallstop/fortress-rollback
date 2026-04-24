@@ -377,12 +377,12 @@ def test_fails_when_no_checks_are_detected(tmp_path: Path) -> None:
         (
             '{"check_runs":[{"name":"strict-build","status":"completed","conclusion":"failure","details_url":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"}]}',
             '{"statuses":[]}',
-            "check_run:strict-build [failure] https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1",
+            "check_run: strict-build [failure] https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1",
         ),
         (
             '{"check_runs":[]}',
             '{"statuses":[{"context":"ci/external","state":"error","target_url":"https://example.invalid/check"}]}',
-            "status:ci/external [error] https://example.invalid/check",
+            "status: ci/external [error] https://example.invalid/check",
         ),
     ],
 )
