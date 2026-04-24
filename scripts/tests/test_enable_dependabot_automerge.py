@@ -8,6 +8,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 SCRIPT_PATH = (
     Path(__file__).resolve().parent.parent / "ci" / "enable-dependabot-automerge.sh"
@@ -369,19 +371,42 @@ def test_fails_when_no_checks_are_detected(tmp_path: Path) -> None:
     assert "pr merge" not in "\n".join(log_lines)
 
 
-def test_fails_when_all_checks_fail_in_fallback_mode(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("check_runs_json", "commit_status_json", "expected_diagnostic"),
+    [
+        (
+            '{"check_runs":[{"name":"strict-build","status":"completed","conclusion":"failure","details_url":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"}]}',
+            '{"statuses":[]}',
+            "check_run:strict-build [failure] https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1",
+        ),
+        (
+            '{"check_runs":[]}',
+            '{"statuses":[{"context":"ci/external","state":"error","target_url":"https://example.invalid/check"}]}',
+            "status:ci/external [error] https://example.invalid/check",
+        ),
+    ],
+)
+def test_fails_when_fallback_checks_report_failures_with_diagnostics(
+    tmp_path: Path,
+    check_runs_json: str,
+    commit_status_json: str,
+    expected_diagnostic: str,
+) -> None:
     result = _run_script(
         tmp_path,
         {
             "GH_REQUIRED_CHECKS_COUNT": "0",
             "GH_ALL_CHECKS_COUNT": "1",
-            "GH_CHECK_RUNS_JSON": '{"check_runs":[{"status":"completed","conclusion":"failure","details_url":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"}]}',
+            "GH_CHECK_RUNS_JSON": check_runs_json,
+            "GH_COMMIT_STATUS_JSON": commit_status_json,
             "GH_ALLOW_SQUASH": "true",
             "GH_ALLOW_REBASE": "false",
             "GH_ALLOW_MERGE": "false",
         },
     )
     assert result.returncode == 1
+    assert "Fallback checks/statuses failing/cancelled" in result.stderr
+    assert expected_diagnostic in result.stderr
     assert "Checks did not pass" in result.stderr
 
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
@@ -412,31 +437,6 @@ def test_fails_when_fallback_only_sees_self_pending_check(tmp_path: Path) -> Non
 
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
     assert len(log_lines) >= 4
-    assert "--required --json name --jq length" in log_lines[0]
-    assert "--json name --jq length" in log_lines[1]
-    assert "/check-runs" in log_lines[2]
-    assert "/status" in log_lines[3]
-    assert "pr merge" not in "\n".join(log_lines)
-
-
-def test_fails_when_commit_status_reports_error_in_fallback(tmp_path: Path) -> None:
-    result = _run_script(
-        tmp_path,
-        {
-            "GH_REQUIRED_CHECKS_COUNT": "0",
-            "GH_ALL_CHECKS_COUNT": "1",
-            "GH_CHECK_RUNS_JSON": '{"check_runs":[]}',
-            "GH_COMMIT_STATUS_JSON": '{"statuses":[{"state":"error","target_url":"https://example.invalid/check"}]}',
-            "GH_ALLOW_SQUASH": "true",
-            "GH_ALLOW_REBASE": "false",
-            "GH_ALLOW_MERGE": "false",
-        },
-    )
-    assert result.returncode == 1
-    assert "Checks did not pass" in result.stderr
-
-    log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
-    assert len(log_lines) == 4
     assert "--required --json name --jq length" in log_lines[0]
     assert "--json name --jq length" in log_lines[1]
     assert "/check-runs" in log_lines[2]
@@ -504,37 +504,36 @@ def test_fallback_ignores_older_pending_when_latest_check_is_success(tmp_path: P
     assert "--squash" in log_lines[4]
 
 
-def test_fails_when_required_checks_fail(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("required_state", "expected_diagnostic"),
+    [
+        (
+            "fail",
+            "  - ci [fail] https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1",
+        ),
+        (
+            "cancel",
+            "  - ci [cancel] https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1",
+        ),
+    ],
+)
+def test_fails_when_required_checks_fail_with_diagnostics(
+    tmp_path: Path,
+    required_state: str,
+    expected_diagnostic: str,
+) -> None:
     result = _run_script(
         tmp_path,
         {
-            "GH_REQUIRED_CHECKS_STATE_JSON": '[{"name":"ci","state":"fail","link":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"}]',
+            "GH_REQUIRED_CHECKS_STATE_JSON": f'[{{"name":"ci","state":"{required_state}","link":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"}}]',
             "GH_ALLOW_SQUASH": "true",
             "GH_ALLOW_REBASE": "false",
             "GH_ALLOW_MERGE": "false",
         },
     )
     assert result.returncode == 1
-    assert "Required checks did not pass" in result.stderr
-
-    log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
-    assert len(log_lines) == 2
-    assert "--json name --jq length" in log_lines[0]
-    assert "--required --json name,state,link" in log_lines[1]
-    assert "pr merge" not in "\n".join(log_lines)
-
-
-def test_fails_when_required_checks_cancel(tmp_path: Path) -> None:
-    result = _run_script(
-        tmp_path,
-        {
-            "GH_REQUIRED_CHECKS_STATE_JSON": '[{"name":"ci","state":"cancel","link":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"}]',
-            "GH_ALLOW_SQUASH": "true",
-            "GH_ALLOW_REBASE": "false",
-            "GH_ALLOW_MERGE": "false",
-        },
-    )
-    assert result.returncode == 1
+    assert "Required checks failing/cancelled" in result.stderr
+    assert expected_diagnostic in result.stderr
     assert "Required checks did not pass" in result.stderr
 
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()

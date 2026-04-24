@@ -245,6 +245,160 @@ count_non_self_failed_statuses() {
     ' <<<"$status_json"
 }
 
+emit_required_checks_diagnostics() {
+    local checks_json="$1"
+    local failed_checks
+    local pending_checks
+
+    failed_checks="$(jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+        [
+            .[]?
+            | select(
+                (
+                    ($run_id | length) == 0
+                    or ((.link // "") | contains("/actions/runs/\($run_id)/") | not)
+                )
+                and (
+                    (.state // "" | ascii_downcase) == "fail"
+                    or (.state // "" | ascii_downcase) == "failure"
+                    or (.state // "" | ascii_downcase) == "error"
+                    or (.state // "" | ascii_downcase) == "timed_out"
+                    or (.state // "" | ascii_downcase) == "cancel"
+                    or (.state // "" | ascii_downcase) == "cancelled"
+                    or (.state // "" | ascii_downcase) == "action_required"
+                )
+            )
+        ]
+        | sort_by((.name // ""), (.link // ""), (.state // ""))
+        | map("  - \(.name // "<unknown>") [\(.state // "unknown")] \(.link // "no-link")")
+        | .[]?
+    ' <<<"$checks_json")"
+
+    pending_checks="$(jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+        [
+            .[]?
+            | select(
+                (
+                    ($run_id | length) == 0
+                    or ((.link // "") | contains("/actions/runs/\($run_id)/") | not)
+                )
+                and ((.state // "" | ascii_downcase) == "pending")
+            )
+        ]
+        | sort_by((.name // ""), (.link // ""))
+        | map("  - \(.name // "<unknown>") [pending] \(.link // "no-link")")
+        | .[]?
+    ' <<<"$checks_json")"
+
+    if [[ -n "$failed_checks" ]]; then
+        echo "Required checks failing/cancelled:" >&2
+        printf '%s\n' "$failed_checks" >&2
+    fi
+
+    if [[ -n "$pending_checks" ]]; then
+        echo "Required checks still pending:" >&2
+        printf '%s\n' "$pending_checks" >&2
+    fi
+}
+
+emit_fallback_checks_diagnostics() {
+    local check_runs_json="$1"
+    local status_json="$2"
+    local failed_checks
+    local pending_checks
+
+    failed_checks="$(
+        {
+            jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+                [
+                    .check_runs[]?
+                    | select(
+                        ($run_id | length) == 0
+                        or ((.details_url // "") | contains("/actions/runs/\($run_id)/") | not)
+                    )
+                ]
+                | sort_by(.name, (.app.slug // ""), (.completed_at // .started_at // ""), (.id // 0))
+                | group_by([.name, (.app.slug // "")])
+                | map(last)
+                | map(select(
+                    .status == "completed" and (
+                        (.conclusion // "") == "failure"
+                        or (.conclusion // "") == "timed_out"
+                        or (.conclusion // "") == "cancelled"
+                        or (.conclusion // "") == "action_required"
+                        or (.conclusion // "") == "startup_failure"
+                        or (.conclusion // "") == "stale"
+                    )
+                ))
+                | map("  - check_run:\(.name // "<unknown>") [\(.conclusion // "unknown")] \(.details_url // "no-link")")
+                | .[]?
+            ' <<<"$check_runs_json"
+
+            jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+                [
+                    .statuses[]?
+                    | select(
+                        ($run_id | length) == 0
+                        or ((.target_url // "") | contains("/actions/runs/\($run_id)/") | not)
+                    )
+                ]
+                | sort_by(.context, (.updated_at // .created_at // ""))
+                | group_by(.context)
+                | map(last)
+                | map(select(.state == "failure" or .state == "error"))
+                | map("  - status:\(.context // "<unknown>") [\(.state // "unknown")] \(.target_url // "no-link")")
+                | .[]?
+            ' <<<"$status_json"
+        }
+    )"
+
+    pending_checks="$(
+        {
+            jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+                [
+                    .check_runs[]?
+                    | select(
+                        ($run_id | length) == 0
+                        or ((.details_url // "") | contains("/actions/runs/\($run_id)/") | not)
+                    )
+                ]
+                | sort_by(.name, (.app.slug // ""), (.completed_at // .started_at // ""), (.id // 0))
+                | group_by([.name, (.app.slug // "")])
+                | map(last)
+                | map(select(.status != "completed"))
+                | map("  - check_run:\(.name // "<unknown>") [\(.status // "unknown")] \(.details_url // "no-link")")
+                | .[]?
+            ' <<<"$check_runs_json"
+
+            jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+                [
+                    .statuses[]?
+                    | select(
+                        ($run_id | length) == 0
+                        or ((.target_url // "") | contains("/actions/runs/\($run_id)/") | not)
+                    )
+                ]
+                | sort_by(.context, (.updated_at // .created_at // ""))
+                | group_by(.context)
+                | map(last)
+                | map(select(.state == "pending"))
+                | map("  - status:\(.context // "<unknown>") [pending] \(.target_url // "no-link")")
+                | .[]?
+            ' <<<"$status_json"
+        }
+    )"
+
+    if [[ -n "$failed_checks" ]]; then
+        echo "Fallback checks/statuses failing/cancelled:" >&2
+        printf '%s\n' "$failed_checks" >&2
+    fi
+
+    if [[ -n "$pending_checks" ]]; then
+        echo "Fallback checks/statuses still pending:" >&2
+        printf '%s\n' "$pending_checks" >&2
+    fi
+}
+
 wait_for_all_checks_without_required_metadata() {
     local elapsed=0
     local remaining
@@ -291,6 +445,7 @@ wait_for_all_checks_without_required_metadata() {
         status_failed="$(count_non_self_failed_statuses "$status_json")"
 
         if ((check_failed > 0 || status_failed > 0)); then
+            emit_fallback_checks_diagnostics "$check_runs_json" "$status_json"
             echo "Checks did not pass; refusing to enable auto-merge." >&2
             return 1
         fi
@@ -318,6 +473,7 @@ wait_for_all_checks_without_required_metadata() {
         elapsed=$((elapsed + sleep_for))
     done
 
+    emit_fallback_checks_diagnostics "$check_runs_json" "$status_json"
     echo "Checks did not settle in fallback mode within timeout; refusing to enable auto-merge." >&2
     return 1
 }
@@ -386,6 +542,7 @@ wait_for_required_checks_without_self() {
         ' <<<"$checks_json")"
 
         if ((required_failed > 0)); then
+            emit_required_checks_diagnostics "$checks_json"
             echo "Required checks did not pass; refusing to enable auto-merge." >&2
             return 1
         fi
@@ -413,6 +570,7 @@ wait_for_required_checks_without_self() {
         elapsed=$((elapsed + sleep_for))
     done
 
+    emit_required_checks_diagnostics "$checks_json"
     echo "Required checks did not settle within timeout; refusing to enable auto-merge." >&2
     return 1
 }
