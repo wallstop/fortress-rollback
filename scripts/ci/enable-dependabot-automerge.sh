@@ -15,6 +15,7 @@ REQUIRED_CHECKS_SETTLE_TIMEOUT_SECONDS="${REQUIRED_CHECKS_SETTLE_TIMEOUT_SECONDS
 REQUIRED_CHECKS_SETTLE_POLL_INTERVAL_SECONDS="${REQUIRED_CHECKS_SETTLE_POLL_INTERVAL_SECONDS:-10}"
 REQUIRED_STABLE_POLLS_REQUIRED="${REQUIRED_STABLE_POLLS_REQUIRED:-2}"
 NO_REQUIRED_CHECKS_REPORTED_MSG="no required checks reported"
+NO_REQUIRED_CHECKS_SENTINEL="-1"
 
 if ! [[ "$REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS must be a non-negative integer." >&2
@@ -105,7 +106,7 @@ required_checks_count() {
 
     # GitHub CLI returns this message when required-check metadata is unavailable for the PR branch.
     if [[ "$output" == *"$NO_REQUIRED_CHECKS_REPORTED_MSG"* ]]; then
-        printf '%s\n' '-1'
+        printf '%s\n' "$NO_REQUIRED_CHECKS_SENTINEL"
         return 0
     fi
 
@@ -424,7 +425,7 @@ wait_for_required_checks() {
         fi
 
         required_count="$(required_checks_count)" || return 1
-        if [[ "$required_count" == "-1" ]]; then
+        if [[ "$required_count" == "$NO_REQUIRED_CHECKS_SENTINEL" ]]; then
             if is_stale_event; then
                 echo "PR head moved after checks appeared; skipping stale auto-merge attempt."
                 return 2
@@ -465,7 +466,7 @@ wait_for_required_checks() {
             echo "PR head moved after checks appeared; skipping stale auto-merge attempt."
             return 2
         fi
-        echo "Required checks did not appear before timeout; waiting for non-self checks/statuses fallback."
+        echo "Required checks did not appear before timeout; waiting for fallback to non-self checks/statuses."
         wait_for_all_checks_without_required_metadata || return $?
         return 0
     fi

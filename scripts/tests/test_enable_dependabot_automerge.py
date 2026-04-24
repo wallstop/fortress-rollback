@@ -273,7 +273,7 @@ def test_falls_back_to_all_checks_when_required_checks_count_is_zero(
     )
     assert result.returncode == 0
     assert (
-        "Required checks did not appear before timeout; waiting for non-self checks/statuses fallback."
+        "Required checks did not appear before timeout; waiting for fallback to non-self checks/statuses."
         in result.stdout
     )
 
