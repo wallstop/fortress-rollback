@@ -12,7 +12,7 @@ jobs:
   dependabot:
     name: Enable auto-merge for Dependabot PRs
     if: github.event.pull_request.user.login == 'dependabot[bot]' && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository
-    timeout-minutes: 5
+    timeout-minutes: 2
     concurrency:
       group: dependabot-automerge-${{ github.event.pull_request.number }}
       cancel-in-progress: true
@@ -36,7 +36,24 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
       - name: Enable auto-merge
-        run: bash ./scripts/ci/enable-dependabot-automerge.sh
+        run: |
+          if ! grep -q 'DEPENDABOT_AUTOMERGE_ONE_SHOT' ./scripts/ci/enable-dependabot-automerge.sh; then
+            echo "::error::Automerge script on base branch is missing one-shot support; refusing long-running check-wait mode."
+            exit 1
+          fi
+
+          if ! grep -q -- '--match-head-commit' ./scripts/ci/enable-dependabot-automerge.sh; then
+            echo "::error::Automerge script on base branch is missing head-match race protection."
+            exit 1
+          fi
+
+          if ! timeout --signal=TERM --kill-after=5s 50s bash ./scripts/ci/enable-dependabot-automerge.sh; then
+            rc=$?
+            if [ "$rc" -eq 124 ]; then
+              echo "::error::Automerge one-shot timed out after 50s; refusing long wait."
+            fi
+            exit "$rc"
+          fi
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
