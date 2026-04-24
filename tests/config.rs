@@ -197,7 +197,7 @@ fn test_protocol_config_default() {
     let config = ProtocolConfig::default();
 
     assert_eq!(config.quality_report_interval, Duration::from_millis(200));
-    assert_eq!(config.shutdown_delay, Duration::from_millis(5000));
+    assert_eq!(config.shutdown_delay, Duration::from_secs(5));
     assert_eq!(config.max_checksum_history, 32);
     assert_eq!(config.pending_output_limit, 128);
     assert_eq!(config.sync_retry_warning_threshold, 10);
@@ -209,7 +209,7 @@ fn test_protocol_config_presets() {
     // Competitive preset should have faster quality reports
     let competitive = ProtocolConfig::competitive();
     assert!(competitive.quality_report_interval < Duration::from_millis(200));
-    assert!(competitive.shutdown_delay < Duration::from_millis(5000));
+    assert!(competitive.shutdown_delay < Duration::from_secs(5));
 
     // High latency preset should have higher limits
     let high_latency = ProtocolConfig::high_latency();
@@ -235,7 +235,7 @@ fn test_protocol_config_mobile_exact_values() {
 
     // Verify exact values for mobile preset
     assert_eq!(mobile.quality_report_interval, Duration::from_millis(350));
-    assert_eq!(mobile.shutdown_delay, Duration::from_millis(15000));
+    assert_eq!(mobile.shutdown_delay, Duration::from_secs(15));
     assert_eq!(mobile.max_checksum_history, 64);
     assert_eq!(mobile.pending_output_limit, 256);
     assert_eq!(mobile.sync_retry_warning_threshold, 25);
@@ -446,7 +446,7 @@ fn test_session_with_custom_protocol_config() -> Result<(), FortressError> {
 
     let custom_protocol_config = ProtocolConfig {
         quality_report_interval: Duration::from_millis(150),
-        shutdown_delay: Duration::from_millis(4000),
+        shutdown_delay: Duration::from_secs(4),
         max_checksum_history: 64,
         pending_output_limit: 200,
         // Leave some fields to default to demonstrate forward-compatible pattern
