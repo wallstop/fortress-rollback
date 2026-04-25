@@ -195,7 +195,7 @@ fn custom_configuration() {
         // More frequent quality reports for better RTT tracking
         quality_report_interval: Duration::from_millis(150),
         // Longer shutdown delay for graceful cleanup
-        shutdown_delay: Duration::from_millis(7000),
+        shutdown_delay: Duration::from_secs(7),
         // More checksum history for debugging desyncs
         max_checksum_history: 64,
         // Warn earlier about output queue buildup
@@ -277,8 +277,8 @@ fn casual_online_setup() {
         // Larger prediction window for variable latency
         .with_max_prediction_window(10)
         // More lenient disconnect handling
-        .with_disconnect_timeout(Duration::from_millis(5000))
-        .with_disconnect_notify_delay(Duration::from_millis(2000))
+        .with_disconnect_timeout(Duration::from_secs(5))
+        .with_disconnect_notify_delay(Duration::from_secs(2))
         // Enable sparse saving for better performance
         .with_save_mode(SaveMode::Sparse)
         // Standard 60 FPS

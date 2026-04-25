@@ -384,13 +384,13 @@ impl SyncConfig {
 /// // For competitive/LAN play, use faster quality reports
 /// let competitive_config = ProtocolConfig {
 ///     quality_report_interval: Duration::from_millis(100),
-///     shutdown_delay: Duration::from_millis(3000),
+///     shutdown_delay: Duration::from_secs(3),
 ///     ..ProtocolConfig::default()
 /// };
 ///
 /// // For debugging, use longer timeouts and lower thresholds
 /// let debug_config = ProtocolConfig {
-///     shutdown_delay: Duration::from_millis(10000),
+///     shutdown_delay: Duration::from_secs(10),
 ///     sync_retry_warning_threshold: 5,
 ///     sync_duration_warning_ms: 1000,
 ///     ..ProtocolConfig::default()
@@ -619,7 +619,7 @@ impl Default for ProtocolConfig {
     fn default() -> Self {
         Self {
             quality_report_interval: Duration::from_millis(200),
-            shutdown_delay: Duration::from_millis(5000),
+            shutdown_delay: Duration::from_secs(5),
             max_checksum_history: 32,
             pending_output_limit: 128,
             sync_retry_warning_threshold: 10,
@@ -675,7 +675,7 @@ impl ProtocolConfig {
     pub fn competitive() -> Self {
         Self {
             quality_report_interval: Duration::from_millis(100),
-            shutdown_delay: Duration::from_millis(3000),
+            shutdown_delay: Duration::from_secs(3),
             max_checksum_history: 32,
             pending_output_limit: 128,
             sync_retry_warning_threshold: 10,
@@ -693,7 +693,7 @@ impl ProtocolConfig {
     pub fn high_latency() -> Self {
         Self {
             quality_report_interval: Duration::from_millis(400),
-            shutdown_delay: Duration::from_millis(10000),
+            shutdown_delay: Duration::from_secs(10),
             max_checksum_history: 64,
             pending_output_limit: 256,
             sync_retry_warning_threshold: 20,
@@ -711,7 +711,7 @@ impl ProtocolConfig {
     pub fn debug() -> Self {
         Self {
             quality_report_interval: Duration::from_millis(500),
-            shutdown_delay: Duration::from_millis(30000),
+            shutdown_delay: Duration::from_secs(30),
             max_checksum_history: 128,
             pending_output_limit: 64,
             sync_retry_warning_threshold: 5,
@@ -737,7 +737,7 @@ impl ProtocolConfig {
             // Slower quality reports to reduce bandwidth on metered connections
             quality_report_interval: Duration::from_millis(350),
             // Very long shutdown delay to handle reconnection attempts
-            shutdown_delay: Duration::from_millis(15000),
+            shutdown_delay: Duration::from_secs(15),
             // Larger checksum history for delayed desync detection
             max_checksum_history: 64,
             // Higher pending output limit for buffering during jitter
@@ -793,7 +793,7 @@ impl ProtocolConfig {
     pub fn validate(&self) -> Result<(), FortressError> {
         // Validate quality_report_interval: 1ms to 10000ms
         if self.quality_report_interval < Duration::from_millis(1)
-            || self.quality_report_interval > Duration::from_millis(10000)
+            || self.quality_report_interval > Duration::from_secs(10)
         {
             return Err(InvalidRequestKind::DurationConfigOutOfRange {
                 field: "quality_report_interval",
@@ -806,7 +806,7 @@ impl ProtocolConfig {
 
         // Validate shutdown_delay: 1ms to 300000ms (5 minutes)
         if self.shutdown_delay < Duration::from_millis(1)
-            || self.shutdown_delay > Duration::from_millis(300000)
+            || self.shutdown_delay > Duration::from_secs(300)
         {
             return Err(InvalidRequestKind::DurationConfigOutOfRange {
                 field: "shutdown_delay",
@@ -1639,7 +1639,7 @@ mod tests {
     fn protocol_config_default_values() {
         let config = ProtocolConfig::default();
         assert_eq!(config.quality_report_interval, Duration::from_millis(200));
-        assert_eq!(config.shutdown_delay, Duration::from_millis(5000));
+        assert_eq!(config.shutdown_delay, Duration::from_secs(5));
         assert_eq!(config.max_checksum_history, 32);
         assert_eq!(config.pending_output_limit, 128);
         assert_eq!(config.sync_retry_warning_threshold, 10);
@@ -1657,7 +1657,7 @@ mod tests {
     fn protocol_config_competitive_preset() {
         let config = ProtocolConfig::competitive();
         assert_eq!(config.quality_report_interval, Duration::from_millis(100));
-        assert_eq!(config.shutdown_delay, Duration::from_millis(3000));
+        assert_eq!(config.shutdown_delay, Duration::from_secs(3));
         assert_eq!(config.max_checksum_history, 32);
         assert_eq!(config.pending_output_limit, 128);
         assert_eq!(config.sync_retry_warning_threshold, 10);
@@ -1668,7 +1668,7 @@ mod tests {
     fn protocol_config_high_latency_preset() {
         let config = ProtocolConfig::high_latency();
         assert_eq!(config.quality_report_interval, Duration::from_millis(400));
-        assert_eq!(config.shutdown_delay, Duration::from_millis(10000));
+        assert_eq!(config.shutdown_delay, Duration::from_secs(10));
         assert_eq!(config.max_checksum_history, 64);
         assert_eq!(config.pending_output_limit, 256);
         assert_eq!(config.sync_retry_warning_threshold, 20);
@@ -1679,7 +1679,7 @@ mod tests {
     fn protocol_config_debug_preset() {
         let config = ProtocolConfig::debug();
         assert_eq!(config.quality_report_interval, Duration::from_millis(500));
-        assert_eq!(config.shutdown_delay, Duration::from_millis(30000));
+        assert_eq!(config.shutdown_delay, Duration::from_secs(30));
         assert_eq!(config.max_checksum_history, 128);
         assert_eq!(config.pending_output_limit, 64);
         assert_eq!(config.sync_retry_warning_threshold, 5);
@@ -1690,7 +1690,7 @@ mod tests {
     fn protocol_config_mobile_preset() {
         let config = ProtocolConfig::mobile();
         assert_eq!(config.quality_report_interval, Duration::from_millis(350));
-        assert_eq!(config.shutdown_delay, Duration::from_millis(15000));
+        assert_eq!(config.shutdown_delay, Duration::from_secs(15));
         assert_eq!(config.max_checksum_history, 64);
         assert_eq!(config.pending_output_limit, 256);
         assert_eq!(config.sync_retry_warning_threshold, 25);
@@ -1829,7 +1829,7 @@ mod tests {
 
         // Valid: maximum boundary (10000ms)
         let config = ProtocolConfig {
-            quality_report_interval: Duration::from_millis(10000),
+            quality_report_interval: Duration::from_secs(10),
             ..ProtocolConfig::default()
         };
         config.validate().unwrap();
@@ -1899,14 +1899,14 @@ mod tests {
 
         // Valid: maximum boundary (300000ms)
         let config = ProtocolConfig {
-            shutdown_delay: Duration::from_millis(300000),
+            shutdown_delay: Duration::from_secs(300),
             ..ProtocolConfig::default()
         };
         config.validate().unwrap();
 
         // Valid: middle value
         let config = ProtocolConfig {
-            shutdown_delay: Duration::from_millis(10000),
+            shutdown_delay: Duration::from_secs(10),
             ..ProtocolConfig::default()
         };
         config.validate().unwrap();
@@ -2351,8 +2351,8 @@ mod tests {
 
         // Test a config with all fields at their maximum valid values
         let config = ProtocolConfig {
-            quality_report_interval: Duration::from_millis(10000),
-            shutdown_delay: Duration::from_millis(300000),
+            quality_report_interval: Duration::from_secs(10),
+            shutdown_delay: Duration::from_secs(300),
             max_checksum_history: 1024,
             pending_output_limit: 4096,
             sync_retry_warning_threshold: 1000,

@@ -40,7 +40,7 @@ const DEFAULT_INPUT_DELAY: usize = 0;
 ///
 /// # Formal Specification Alignment
 /// - **formal-spec.md**: `DEFAULT_DISCONNECT_TIMEOUT = 2000ms`
-const DEFAULT_DISCONNECT_TIMEOUT: Duration = Duration::from_millis(2000);
+const DEFAULT_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_DISCONNECT_NOTIFY_START: Duration = Duration::from_millis(500);
 /// Default frames per second for session timing.
 ///

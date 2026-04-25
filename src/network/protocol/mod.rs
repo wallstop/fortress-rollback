@@ -1034,8 +1034,8 @@ mod tests {
             num_players,
             local_players,
             max_prediction,
-            Duration::from_millis(5000),
-            Duration::from_millis(3000),
+            Duration::from_secs(5),
+            Duration::from_secs(3),
             60,
             DesyncDetection::Off,
             sync_config,
@@ -1456,8 +1456,8 @@ mod tests {
             2,
             1,
             8,
-            Duration::from_millis(5000),
-            Duration::from_millis(3000),
+            Duration::from_secs(5),
+            Duration::from_secs(3),
             60,
             DesyncDetection::On { interval: 1 },
             SyncConfig::default(),
@@ -1588,8 +1588,8 @@ mod tests {
             2,
             1,
             8,
-            Duration::from_millis(5000),
-            Duration::from_millis(3000),
+            Duration::from_secs(5),
+            Duration::from_secs(3),
             60,
             DesyncDetection::Off,
             sync_config,
@@ -1823,8 +1823,8 @@ mod tests {
             2,
             1,
             8,
-            Duration::from_millis(5000),
-            Duration::from_millis(3000),
+            Duration::from_secs(5),
+            Duration::from_secs(3),
             60,
             DesyncDetection::Off,
             SyncConfig::default(),
@@ -2370,7 +2370,7 @@ mod tests {
     fn protocol_config_default_values() {
         let config = ProtocolConfig::default();
         assert_eq!(config.quality_report_interval, Duration::from_millis(200));
-        assert_eq!(config.shutdown_delay, Duration::from_millis(5000));
+        assert_eq!(config.shutdown_delay, Duration::from_secs(5));
         assert_eq!(config.max_checksum_history, 32);
         assert_eq!(config.pending_output_limit, 128);
         assert_eq!(config.sync_retry_warning_threshold, 10);
@@ -2381,7 +2381,7 @@ mod tests {
     fn protocol_config_competitive_preset() {
         let config = ProtocolConfig::competitive();
         assert_eq!(config.quality_report_interval, Duration::from_millis(100));
-        assert_eq!(config.shutdown_delay, Duration::from_millis(3000));
+        assert_eq!(config.shutdown_delay, Duration::from_secs(3));
         assert_eq!(config.max_checksum_history, 32);
         assert_eq!(config.pending_output_limit, 128);
         assert_eq!(config.sync_retry_warning_threshold, 10);
@@ -2392,7 +2392,7 @@ mod tests {
     fn protocol_config_high_latency_preset() {
         let config = ProtocolConfig::high_latency();
         assert_eq!(config.quality_report_interval, Duration::from_millis(400));
-        assert_eq!(config.shutdown_delay, Duration::from_millis(10000));
+        assert_eq!(config.shutdown_delay, Duration::from_secs(10));
         assert_eq!(config.max_checksum_history, 64);
         assert_eq!(config.pending_output_limit, 256);
         assert_eq!(config.sync_retry_warning_threshold, 20);
@@ -2403,7 +2403,7 @@ mod tests {
     fn protocol_config_debug_preset() {
         let config = ProtocolConfig::debug();
         assert_eq!(config.quality_report_interval, Duration::from_millis(500));
-        assert_eq!(config.shutdown_delay, Duration::from_millis(30000));
+        assert_eq!(config.shutdown_delay, Duration::from_secs(30));
         assert_eq!(config.max_checksum_history, 128);
         assert_eq!(config.pending_output_limit, 64);
         assert_eq!(config.sync_retry_warning_threshold, 5);
@@ -2740,8 +2740,8 @@ mod property_tests {
             num_players,
             local_players,
             max_prediction,
-            Duration::from_millis(5000),
-            Duration::from_millis(3000),
+            Duration::from_secs(5),
+            Duration::from_secs(3),
             60,
             DesyncDetection::Off,
             sync_config,
@@ -3304,8 +3304,8 @@ mod property_tests {
                 2,
                 1,
                 8,
-                Duration::from_millis(5000),
-                Duration::from_millis(3000),
+                Duration::from_secs(5),
+                Duration::from_secs(3),
                 60,
                 DesyncDetection::On { interval: 1 },
                 SyncConfig::default(),
@@ -3346,8 +3346,8 @@ mod property_tests {
                 2,
                 1,
                 8,
-                Duration::from_millis(5000),
-                Duration::from_millis(3000),
+                Duration::from_secs(5),
+                Duration::from_secs(3),
                 60,
                 DesyncDetection::On { interval: 1 },
                 SyncConfig::default(),
