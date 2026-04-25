@@ -44,15 +44,15 @@ Structured workflow from planning through shipping for fortress-rollback. Each p
 
 ### Scope Decision Rules
 
-| Change Type | Needs Scope Doc? | Needs CHANGELOG? |
-|-------------|-----------------|-----------------|
-| Bug fix (pub-visible) | Yes | Yes |
-| Bug fix (internal) | Yes | No |
-| New public API | Yes | Yes |
-| Refactoring | Brief | No |
-| Dependency update | No | If user-visible |
-| CI/tooling | No | No |
-| Kani proof | Brief | No |
+| Change Type           | Needs Scope Doc? | Needs CHANGELOG? |
+| --------------------- | ---------------- | ---------------- |
+| Bug fix (pub-visible) | Yes              | Yes              |
+| Bug fix (internal)    | Yes              | No               |
+| New public API        | Yes              | Yes              |
+| Refactoring           | Brief            | No               |
+| Dependency update     | No               | If user-visible  |
+| CI/tooling            | No               | No               |
+| Kani proof            | Brief            | No               |
 
 ---
 
@@ -85,14 +85,14 @@ Before running verification/debugging commands in this workflow, confirm:
 
 ### Design Patterns to Follow
 
-| When You Need | Use This Pattern | Example in Codebase |
-|---------------|-----------------|-------------------|
-| Configurable construction | Builder | `SessionBuilder` |
-| Protocol state machine | Type-state or enum | `SessionState`, protocol states |
-| Input prediction | Strategy | `PredictionStrategy` trait |
-| Bounded collections | Circular buffer | `SavedStates` |
-| Request/response | Request enum | `FortressRequest` |
-| Error context | Structured enum | `InternalErrorKind`, `InvalidRequestKind` |
+| When You Need             | Use This Pattern   | Example in Codebase                       |
+| ------------------------- | ------------------ | ----------------------------------------- |
+| Configurable construction | Builder            | `SessionBuilder`                          |
+| Protocol state machine    | Type-state or enum | `SessionState`, protocol states           |
+| Input prediction          | Strategy           | `PredictionStrategy` trait                |
+| Bounded collections       | Circular buffer    | `SavedStates`                             |
+| Request/response          | Request enum       | `FortressRequest`                         |
+| Error context             | Structured enum    | `InternalErrorKind`, `InvalidRequestKind` |
 
 ---
 
@@ -143,11 +143,11 @@ cargo nextest run module_name --no-capture
 
 ### Commit Granularity
 
-| Good Commit | Bad Commit |
-|-------------|-----------|
-| "Add `InputDelayTooLarge` variant to `InvalidRequestKind`" | "Various changes" |
-| "Validate input delay in `SessionBuilder::with_input_delay`" | "Fix stuff" |
-| "Add regression test for issue #42" | "WIP" |
+| Good Commit                                                  | Bad Commit        |
+| ------------------------------------------------------------ | ----------------- |
+| "Add `InputDelayTooLarge` variant to `InvalidRequestKind`"   | "Various changes" |
+| "Validate input delay in `SessionBuilder::with_input_delay`" | "Fix stuff"       |
+| "Add regression test for issue #42"                          | "WIP"             |
 
 Each commit should pass `cargo c && cargo t` independently.
 
@@ -167,6 +167,9 @@ rg '\.unwrap\(\)|\.expect\(|panic!\(|todo!\(' --type rust src/
 
 # Determinism scan
 rg 'HashMap|HashSet|Instant::now|thread_rng' --type rust src/
+
+# Agent preflight (catches version sync/.llm/workflow issues early)
+python3 scripts/ci/agent-preflight.py --auto-fix
 
 # Full quality gate (see context.md "Mandatory Linting" for details)
 cargo c && cargo t
@@ -260,10 +263,10 @@ For production-blocking bugs, compress the pipeline:
 
 ## Anti-Patterns
 
-| Anti-Pattern | Why It Hurts | Do Instead |
-|-------------|-------------|------------|
-| Code first, think later | Rework, wrong abstraction | Scope and design first |
-| Skip tests | Bugs ship, regression debt | Write tests before code |
-| Mega-PR (>500 lines) | Hard to review, risky merge | Split into stacked PRs |
-| Fix + refactor in one PR | Hard to review, bisect-breaking | Separate commits/PRs |
-| Skip self-review | Obvious issues waste reviewer time | Review your own diff first |
+| Anti-Pattern             | Why It Hurts                       | Do Instead                 |
+| ------------------------ | ---------------------------------- | -------------------------- |
+| Code first, think later  | Rework, wrong abstraction          | Scope and design first     |
+| Skip tests               | Bugs ship, regression debt         | Write tests before code    |
+| Mega-PR (>500 lines)     | Hard to review, risky merge        | Split into stacked PRs     |
+| Fix + refactor in one PR | Hard to review, bisect-breaking    | Separate commits/PRs       |
+| Skip self-review         | Obvious issues waste reviewer time | Review your own diff first |

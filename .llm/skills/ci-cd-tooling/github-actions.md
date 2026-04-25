@@ -230,3 +230,17 @@ env:
 - [ ] Verify `permissions:` block is minimal
 - [ ] Verify `runs-on` uses valid runner labels
 - [ ] Validate matrix combinations
+
+## Dependabot auto-merge gating
+
+Auto-merge polls `gh pr checks --required` for the PR head SHA (the primary path). When required-check metadata is unavailable -- no required checks are configured for the branch, or the only required check is the auto-merge job itself -- it falls back to `repos/{owner}/{repo}/commits/{sha}/check-runs` and `…/status`. Both paths exclude the auto-merge job's own entries by filtering `link`/`details_url`/`target_url` against `GITHUB_RUN_ID`.
+
+Failure classification uses an **allow-list**: only `success`, `skipped`, and `neutral` proceed; everything else (including `failure`, `timed_out`, `cancelled`, `action_required`, `startup_failure`, `stale`, missing/`null`, or future GitHub-added states) blocks the merge. `skipped` is allowed because matrix builds and conditional jobs legitimately produce it; `neutral` is allowed because GitHub-native advisory checks (e.g. `dependency-review-action`) emit it for non-failure findings.
+
+Three regression guardrails in `scripts/tests/test_enable_dependabot_automerge.py` lock in this policy:
+
+1. `test_workflow_does_not_set_one_shot_env` -- fails CI if the bypass env var is reintroduced.
+2. `test_workflow_run_command_is_pure_script_invocation` -- fails CI if the script is wrapped in `timeout`, `xargs`, or any prefix command.
+3. `test_workflow_timeout_is_sufficient_for_polling` -- fails CI if the workflow `timeout-minutes` falls below 32 minutes (the polling settle ceiling + a 2-minute buffer).
+
+Branch protection is a defense layer, not a substitute. Configure `main` to require the relevant CI checks so GitHub's native auto-merge respects them too -- but the script's own gating remains the source of truth.

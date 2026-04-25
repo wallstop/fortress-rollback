@@ -8,6 +8,7 @@ When clarifying questions are needed, follow [`.llm/templates/ask-user-question.
 
 - **Zero-panic:** No `unwrap()`, `expect()`, `panic!()`, `todo!()` in production code
 - **Pre-commit:** `cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run --no-capture` (or `cargo c && cargo t`)
+- **Agent preflight:** Before finalizing changes, run `python3 scripts/ci/agent-preflight.py --auto-fix`. If output includes `Falling back to --all checks.`, resolve the git-state issue and rerun preflight.
 - **Test output:** NEVER pipe test output through `tail`/`head` (e.g., `cargo nextest run 2>&1 | tail -40`). Instead, redirect to a temp file and read it: `cargo nextest run --no-capture > /tmp/test-results.txt 2>&1`. For repeated runs, use a for loop.
 - **Kani:** Always add `#[kani::unwind(N)]` to proofs; CI uses `--default-unwind 8` via `--quick` mode
 - **Changelog:** Ask "Does this affect `pub` items or user-observable behavior?" — if yes, update `CHANGELOG.md`
