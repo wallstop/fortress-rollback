@@ -16,6 +16,7 @@ Concrete gate between implementation and external review. Use this after `dev-pi
 - [ ] Tests cover happy + error paths for changed behavior
 - [ ] Design decision log reviewed for major architecture choices
 - [ ] CHANGELOG decision applied for user-observable/public changes
+- [ ] Agent preflight passes (`python3 scripts/ci/agent-preflight.py --auto-fix`)
 
 If two or more checks fail, return to design and reduce scope before requesting review.
 
@@ -32,6 +33,9 @@ rg '\.unwrap\(\)|\.expect\(|panic!\(|todo!\(|unimplemented!\(' --type rust src/
 
 # Determinism scan
 rg 'HashMap|HashSet|Instant::now|SystemTime|thread_rng|random\(\)' --type rust src/
+
+# Changed-file-aware preflight checks (version sync, .llm quality, workflows)
+python3 scripts/ci/agent-preflight.py --auto-fix
 ```
 
 ---
@@ -45,6 +49,7 @@ Review Readiness
 - Build/tests: PASS|FAIL
 - Zero-panic: PASS|FAIL
 - Determinism: PASS|FAIL
+- Agent preflight: PASS|FAIL
 - Error handling: PASS|FAIL
 - Tests breadth: PASS|FAIL
 - Design log reviewed: YES|NO|N/A

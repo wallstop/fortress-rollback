@@ -159,7 +159,7 @@ Pre-commit validates registration only, NOT that proofs pass. Run affected proof
 
 Also: `ci-rust.yml` (Miri), `ci-security.yml` (cargo-geiger, cargo-deny).
 
-Dependabot auto-merge policy: this repository is squash-only. Use `scripts/ci/enable-dependabot-automerge.sh` (which enforces `--squash`, supports one-shot enable mode for fast auto-merge setup, defaults to waiting for checks with fallback when required-check metadata is unavailable, and checks policy drift) instead of inline merge commands in workflows.
+Dependabot auto-merge policy: this repository is squash-only and the auto-merge job MUST wait for every non-self CI gate on the PR head SHA to reach an explicitly accepted state (`success`, `skipped`, `neutral`) before enabling merge. Anything else -- including `failure`, `timed_out`, `cancelled`, `action_required`, `startup_failure`, `stale`, missing/`null` conclusions, or future GitHub-added states -- refuses the merge (allow-list semantics). Use `scripts/ci/enable-dependabot-automerge.sh` -- never inline `gh pr merge` in workflows, never re-introduce a "one-shot" / bypass path, never wrap the script in a sub-job-level `timeout`. Regression-tested in `scripts/tests/test_enable_dependabot_automerge.py`.
 
 **CI fails on:** unformatted code, clippy warnings, broken doc links, markdown lint errors, workflow syntax errors, unregistered Kani proofs.
 
@@ -220,12 +220,15 @@ For protocol tests that poll in loops (`poll_remote_clients()` / protocol `poll(
 
 **Unreleased code rule:** Never add separate "Fixed" or "Changed" entries for code that has not yet been released. Fixes to unreleased features should be folded into the existing "Added" entry describing that feature. The changelog should describe the final shipped state, not intermediate development history.
 
+**Version sync rule:** If `Cargo.toml` is `X.Y.Z`, the matching changelog header must be `## [X.Y.Z] - YYYY-MM-DD` (ISO date required). Keep `## [Unreleased]` undated. Validate with `bash scripts/sync-version.sh --check`; auto-fix with `bash scripts/sync-version.sh --changelog-only`.
+
 ## Mandatory Linting
 
 - **After Rust changes:** `cargo fmt && cargo clippy --all-targets --features tokio,json` (or `cargo c`)
 - **After workflow changes:** `actionlint` (no exceptions)
 - **After doc changes:** `cargo doc --no-deps`
 - **After markdown changes:** `npx markdownlint 'file.md' --config .markdownlint.json --fix`
+- **Before finalizing agent work:** `python3 scripts/ci/agent-preflight.py --auto-fix` (changed-file-aware early checks; if output includes `Falling back to --all checks.`, resolve git-state issues and rerun)
 - **After shell-script changes:** `bash scripts/ci/check-shell-portability.sh`
 - **After `.llm/` changes:** All `.md` files under `.llm/` must be **300 lines or fewer** (enforced by pre-commit hook `llm-line-limit`)
 - **Link validation:** `./scripts/docs/check-links.sh`

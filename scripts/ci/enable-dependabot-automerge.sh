@@ -16,7 +16,6 @@ REQUIRED_CHECKS_SETTLE_POLL_INTERVAL_SECONDS="${REQUIRED_CHECKS_SETTLE_POLL_INTE
 REQUIRED_STABLE_POLLS_REQUIRED="${REQUIRED_STABLE_POLLS_REQUIRED:-2}"
 NO_REQUIRED_CHECKS_REPORTED_MSG="no required checks reported"
 NO_REQUIRED_CHECKS_SENTINEL="-1"
-DEPENDABOT_AUTOMERGE_ONE_SHOT="${DEPENDABOT_AUTOMERGE_ONE_SHOT:-false}"
 
 if ! [[ "$REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS must be a non-negative integer." >&2
@@ -63,15 +62,18 @@ if ! [[ "$REQUIRED_STABLE_POLLS_REQUIRED" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
-if [[ "$DEPENDABOT_AUTOMERGE_ONE_SHOT" != "true" && "$DEPENDABOT_AUTOMERGE_ONE_SHOT" != "false" ]]; then
-    echo "DEPENDABOT_AUTOMERGE_ONE_SHOT must be either 'true' or 'false'." >&2
+if ! command -v jq >/dev/null 2>&1; then
+    echo "jq is required to evaluate check state." >&2
     exit 1
 fi
 
-if [[ "$DEPENDABOT_AUTOMERGE_ONE_SHOT" != "true" ]] && ! command -v jq >/dev/null 2>&1; then
-    echo "jq is required to evaluate check state in fallback mode." >&2
-    exit 1
-fi
+on_terminate() {
+    # shellcheck disable=SC2317  # Invoked indirectly via `trap ... TERM`.
+    echo "::error::Dependabot auto-merge polling exceeded job timeout; aborting before merge attempt." >&2
+    # shellcheck disable=SC2317  # Invoked indirectly via `trap ... TERM`.
+    exit 124
+}
+trap on_terminate TERM
 
 get_pr_field() {
     local jq_expr="$1"
@@ -181,12 +183,9 @@ count_non_self_failed_checks() {
         | map(last)
         | map(select(
             .status == "completed" and (
-                (.conclusion // "") == "failure"
-                or (.conclusion // "") == "timed_out"
-                or (.conclusion // "") == "cancelled"
-                or (.conclusion // "") == "action_required"
-                or (.conclusion // "") == "startup_failure"
-                or (.conclusion // "") == "stale"
+                (.conclusion // "") != "success"
+                and (.conclusion // "") != "skipped"
+                and (.conclusion // "") != "neutral"
             )
         ))
         | length
@@ -241,7 +240,10 @@ count_non_self_failed_statuses() {
         | sort_by(.context, (.updated_at // .created_at // ""))
         | group_by(.context)
         | map(last)
-        | map(select(.state == "failure" or .state == "error"))
+        | map(select(
+            .state != "success"
+            and .state != "pending"
+        ))
         | length
     ' <<<"$status_json"
 }
@@ -266,13 +268,11 @@ emit_required_checks_diagnostics() {
                     or ((.link // "") | contains("/actions/runs/\($run_id)/") | not)
                 )
                 and (
-                    (.state // "" | ascii_downcase) == "fail"
-                    or (.state // "" | ascii_downcase) == "failure"
-                    or (.state // "" | ascii_downcase) == "error"
-                    or (.state // "" | ascii_downcase) == "timed_out"
-                    or (.state // "" | ascii_downcase) == "cancel"
-                    or (.state // "" | ascii_downcase) == "cancelled"
-                    or (.state // "" | ascii_downcase) == "action_required"
+                    (.state // "" | ascii_downcase) != "success"
+                    and (.state // "" | ascii_downcase) != "pending"
+                    and (.state // "" | ascii_downcase) != "pass"
+                    and (.state // "" | ascii_downcase) != "skipping"
+                    and (.state // "" | ascii_downcase) != "neutral"
                 )
             )
         ]
@@ -336,12 +336,9 @@ emit_fallback_checks_diagnostics() {
                 | map(last)
                 | map(select(
                     .status == "completed" and (
-                        (.conclusion // "") == "failure"
-                        or (.conclusion // "") == "timed_out"
-                        or (.conclusion // "") == "cancelled"
-                        or (.conclusion // "") == "action_required"
-                        or (.conclusion // "") == "startup_failure"
-                        or (.conclusion // "") == "stale"
+                        (.conclusion // "") != "success"
+                        and (.conclusion // "") != "skipped"
+                        and (.conclusion // "") != "neutral"
                     )
                 ))
                 | map("  - check_run: \(.name // "<unknown>") [\(.conclusion // "unknown")] \(.details_url // "no-link")")
@@ -359,7 +356,10 @@ emit_fallback_checks_diagnostics() {
                 | sort_by(.context, (.updated_at // .created_at // ""))
                 | group_by(.context)
                 | map(last)
-                | map(select(.state == "failure" or .state == "error"))
+                | map(select(
+                    .state != "success"
+                    and .state != "pending"
+                ))
                 | map("  - status: \(.context // "<unknown>") [\(.state // "unknown")] \(.target_url // "no-link")")
                 | .[]?
             ' <<<"$status_json"
@@ -543,17 +543,21 @@ wait_for_required_checks_without_self() {
                         or ((.link // "") | contains("/actions/runs/\($run_id)/") | not)
                     )
                     and (
-                        (.state // "" | ascii_downcase) == "fail"
-                        or (.state // "" | ascii_downcase) == "failure"
-                        or (.state // "" | ascii_downcase) == "error"
-                        or (.state // "" | ascii_downcase) == "timed_out"
-                        or (.state // "" | ascii_downcase) == "cancel"
-                        or (.state // "" | ascii_downcase) == "cancelled"
-                        or (.state // "" | ascii_downcase) == "action_required"
+                        (.state // "" | ascii_downcase) != "success"
+                        and (.state // "" | ascii_downcase) != "pending"
+                        and (.state // "" | ascii_downcase) != "pass"
+                        and (.state // "" | ascii_downcase) != "skipping"
+                        and (.state // "" | ascii_downcase) != "neutral"
                     )
                 )
             ] | length
         ' <<<"$checks_json")"
+
+        if ((required_total == 0)); then
+            echo "All required checks are self; falling back to non-self check-runs/statuses for gating."
+            wait_for_all_checks_without_required_metadata
+            return $?
+        fi
 
         if ((required_failed > 0)); then
             emit_required_checks_diagnostics "$checks_json"
@@ -687,35 +691,25 @@ if [[ "$allow_rebase_merge" == "true" || "$allow_merge_commit" == "true" ]]; the
     exit 1
 fi
 
-if [[ "$DEPENDABOT_AUTOMERGE_ONE_SHOT" != "true" ]]; then
-    if wait_for_required_checks; then
-        wait_status=0
-    else
-        wait_status=$?
-    fi
-    if [[ "$wait_status" -eq 2 ]]; then
-        exit 0
-    fi
-    if [[ "$wait_status" -ne 0 ]]; then
-        exit 1
-    fi
+if wait_for_required_checks; then
+    wait_status=0
+else
+    wait_status=$?
+fi
+if [[ "$wait_status" -eq 2 ]]; then
+    exit 0
+fi
+if [[ "$wait_status" -ne 0 ]]; then
+    exit 1
 fi
 
 if is_stale_event; then
-    if [[ "$DEPENDABOT_AUTOMERGE_ONE_SHOT" == "true" ]]; then
-        echo "PR head moved before one-shot auto-merge attempt; skipping stale auto-merge attempt."
-    else
-        echo "PR head moved after required checks completed; skipping stale auto-merge attempt."
-    fi
+    echo "PR head moved after required checks completed; skipping stale auto-merge attempt."
     exit 0
 fi
 
 if attempt_automerge; then
-    if [[ "$DEPENDABOT_AUTOMERGE_ONE_SHOT" == "true" ]]; then
-        echo "Auto-merge enabled with squash strategy (one-shot)."
-    else
-        echo "Auto-merge enabled with squash strategy."
-    fi
+    echo "Auto-merge enabled with squash strategy."
     exit 0
 fi
 

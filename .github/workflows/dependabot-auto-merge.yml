@@ -8,11 +8,16 @@ permissions:
   contents: read
   pull-requests: read
 
+# Dependabot auto-merge policy is defined in .llm/context.md and locked in by
+# scripts/tests/test_enable_dependabot_automerge.py. Do NOT add a one-shot
+# bypass, do NOT wrap the script in a sub-job-level `timeout`, and do NOT
+# lower `timeout-minutes` below 32 — the polling loop needs ~32 minutes
+# to settle plus runner overhead.
 jobs:
   dependabot:
     name: Enable auto-merge for Dependabot PRs
     if: github.event.pull_request.user.login == 'dependabot[bot]' && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository
-    timeout-minutes: 1
+    timeout-minutes: 40
     concurrency:
       group: dependabot-automerge-${{ github.event.pull_request.number }}
       cancel-in-progress: true
@@ -36,22 +41,8 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
       - name: Enable auto-merge
-        run: |
-          # Keep a small buffer between command timeout and job timeout for error handling/cleanup.
-          # Job runs on ubuntu-latest, where GNU timeout is available.
-          timeout --signal=TERM --kill-after=5s 45s bash ./scripts/ci/enable-dependabot-automerge.sh
-          rc=$?
-          if [ "$rc" -ne 0 ]; then
-            # GNU timeout exits with 124 when the command exceeded the limit.
-            if [ "$rc" -eq 124 ]; then
-              echo "::error::Automerge one-shot timed out after 45s; refusing long wait."
-            else
-              echo "::error::Automerge script failed with exit code ${rc}."
-            fi
-            exit "$rc"
-          fi
+        run: bash ./scripts/ci/enable-dependabot-automerge.sh
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          DEPENDABOT_AUTOMERGE_ONE_SHOT: "true"
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

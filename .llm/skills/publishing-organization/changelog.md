@@ -50,6 +50,14 @@
 
 Sections: Added, Changed, Deprecated, Removed, Fixed, Security.
 
+## Release Header and Version Sync
+
+- Keep `## [Unreleased]` undated.
+- Use ISO dates on release headers: `## [X.Y.Z] - YYYY-MM-DD`.
+- If `Cargo.toml` is `X.Y.Z`, the matching changelog header must be dated.
+- Validate: `bash scripts/sync-version.sh --check`
+- Auto-fix link/date metadata: `bash scripts/sync-version.sh --changelog-only`
+
 ## Writing Guidelines
 
 ### Be User-Focused
@@ -122,6 +130,9 @@ Changing `Display`/`Debug` output is **Breaking** if users might depend on forma
 ## Verification Before Committing
 
 ```bash
+# Validate changelog/version synchronization
+bash scripts/sync-version.sh --check
+
 # Verify derives exist before claiming them
 rg '#\[derive.*Hash' src/lib.rs
 
