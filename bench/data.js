@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775607384066,
+  "lastUpdate": 1777131388716,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "5811045b9b1ba4aab8b0cced96b7ebdc8395edbf",
-          "message": "chore(deps): bump serial_test from 3.2.0 to 3.3.1 (#58)\n\nBumps [serial_test](https://github.com/palfrey/serial_test) from 3.2.0\nto 3.3.1.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/palfrey/serial_test/releases\">serial_test's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v3.3.1</h2>\n<p>docs.rs removed a feature we use in <a\nhref=\"https://redirect.github.com/rust-lang/rust/pull/138907\">rust-lang/rust#138907</a>.\n<a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/148\">palfrey/serial_test#148</a>\n(which is the entire content of this release) adds a CI step to check we\ndon't break it in the future, and fixes the issue.</p>\n<p><strong>Full Changelog</strong>: <a\nhref=\"https://github.com/palfrey/serial_test/compare/v3.3.0...v3.3.1\">https://github.com/palfrey/serial_test/compare/v3.3.0...v3.3.1</a></p>\n<h2>v3.3.0</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Explicit testing for tokio multi-thread by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/122\">palfrey/serial_test#122</a></li>\n<li>Remove an unneeded explicit lifetime by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/124\">palfrey/serial_test#124</a></li>\n<li>docs: fixed the link to the shield by <a\nhref=\"https://github.com/operagxoksana\"><code>@​operagxoksana</code></a>\nin <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/125\">palfrey/serial_test#125</a></li>\n<li>Permit non-empty function returns by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/128\">palfrey/serial_test#128</a></li>\n<li>Add support for crate parameter by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/130\">palfrey/serial_test#130</a></li>\n<li>Add use serial_test::serial to Readme.md example by <a\nhref=\"https://github.com/APN-Pucky\"><code>@​APN-Pucky</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/135\">palfrey/serial_test#135</a></li>\n<li>Fix elided lifetime warnings by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/138\">palfrey/serial_test#138</a></li>\n<li>Add docs about &quot;path&quot; for file_serial/parallel by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/137\">palfrey/serial_test#137</a></li>\n<li>Don't depend on the whole futures crate by <a\nhref=\"https://github.com/bilelmoussaoui\"><code>@​bilelmoussaoui</code></a>\nin <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/141\">palfrey/serial_test#141</a></li>\n<li>Add is_locked_file_serially by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/139\">palfrey/serial_test#139</a></li>\n<li>Add relative path and better file_serial testing by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/143\">palfrey/serial_test#143</a></li>\n<li>Add std feature to wasm-bindgen-test to avoid breaking dep updates\nby <a href=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/145\">palfrey/serial_test#145</a></li>\n<li>Add some more logging around relative paths by <a\nhref=\"https://github.com/palfrey\"><code>@​palfrey</code></a> in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/147\">palfrey/serial_test#147</a></li>\n</ul>\n<h2>New Contributors</h2>\n<ul>\n<li><a\nhref=\"https://github.com/operagxoksana\"><code>@​operagxoksana</code></a>\nmade their first contribution in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/125\">palfrey/serial_test#125</a></li>\n<li><a href=\"https://github.com/APN-Pucky\"><code>@​APN-Pucky</code></a>\nmade their first contribution in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/135\">palfrey/serial_test#135</a></li>\n<li><a\nhref=\"https://github.com/bilelmoussaoui\"><code>@​bilelmoussaoui</code></a>\nmade their first contribution in <a\nhref=\"https://redirect.github.com/palfrey/serial_test/pull/141\">palfrey/serial_test#141</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a\nhref=\"https://github.com/palfrey/serial_test/compare/v3.2.0...v3.3.0\">https://github.com/palfrey/serial_test/compare/v3.2.0...v3.3.0</a></p>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/0771eb0e1e1e3fa9147b37536cd339073f0478fe\"><code>0771eb0</code></a>\n3.3.1</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/ace6ebf0eff78d7c3027bce72b9f418a9d352c28\"><code>ace6ebf</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/palfrey/serial_test/issues/148\">#148</a>\nfrom palfrey/docsrs-testing</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/349375d1e2bbbbe4f9eb6426b322f3de8fadd112\"><code>349375d</code></a>\nImprove feature flag docs</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/f9deb97f055ffec1d5aafb4f68c284138a584a63\"><code>f9deb97</code></a>\nRemove doc_auto_cfg</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/d5a4c09043b10dc2c74873686637f8af511475b5\"><code>d5a4c09</code></a>\nReset cargo.lock</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/89253b17d753f9a4b98f2c0b60e5b6f0590b910f\"><code>89253b1</code></a>\nTest docs-rs will work</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/5e84cd48e2078b5a109589f9283647a2f278417e\"><code>5e84cd4</code></a>\n3.3.0</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/abfc053ccb4dc6544c4b47b02ce2545c7183bfab\"><code>abfc053</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/palfrey/serial_test/issues/147\">#147</a>\nfrom palfrey/non-absolute-file-checking</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/38d6b05aa04c490156434fac2c17516cfe51e599\"><code>38d6b05</code></a>\nRefactor feature name for serial_test_test</li>\n<li><a\nhref=\"https://github.com/palfrey/serial_test/commit/2620c791d76b092fa606d358103426a99e4c5f1c\"><code>2620c79</code></a>\ntest-all-features needs more escaping</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/palfrey/serial_test/compare/v3.2.0...v3.3.1\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=serial_test&package-manager=cargo&previous-version=3.2.0&new-version=3.3.1)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot merge` will merge this PR after your CI passes on it\n- `@dependabot squash and merge` will squash and merge this PR after\nyour CI passes on it\n- `@dependabot cancel merge` will cancel a previously requested merge\nand block automerging\n- `@dependabot reopen` will reopen this PR if it is closed\n- `@dependabot close` will close this PR and stop Dependabot recreating\nit. You can achieve the same result by closing it manually\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-01-05T21:02:54-08:00",
-          "tree_id": "3d1071dd7588f81c3510b40dcf05078e68c234c2",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/5811045b9b1ba4aab8b0cced96b7ebdc8395edbf"
-        },
-        "date": 1767676169075,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 91,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 139,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 618,
-            "range": "± 15",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 952,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1344,
-            "range": "± 49",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 97425,
-            "range": "± 1622",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 24504,
-            "range": "± 912",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 867,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 868,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 871,
             "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6cf1c0f12be4abf3e789c478137f81bd685d6f52",
+          "message": "chore(deps): bump the cargo-workspace group with 3 updates (#149)\n\nBumps the cargo-workspace group with 3 updates:\n[tokio](https://github.com/tokio-rs/tokio),\n[clap](https://github.com/clap-rs/clap) and\n[pastey](https://github.com/as1100k/pastey).\n\nUpdates `tokio` from 1.51.1 to 1.52.1\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/tokio-rs/tokio/releases\">tokio's\nreleases</a>.</em></p>\n<blockquote>\n<h2>Tokio v1.52.1</h2>\n<h1>1.52.1 (April 16th, 2026)</h1>\n<h2>Fixed</h2>\n<ul>\n<li>runtime: revert <a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7757\">#7757</a>\nto fix [a regression]<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8056\">#8056</a>\nthat causes <code>spawn_blocking</code> to hang (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8057\">#8057</a>)</li>\n</ul>\n<p><a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7757\">#7757</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7757\">tokio-rs/tokio#7757</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8056\">#8056</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/8056\">tokio-rs/tokio#8056</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8057\">#8057</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/8057\">tokio-rs/tokio#8057</a></p>\n<h2>Tokio v1.52.0</h2>\n<h1>1.52.0 (April 14th, 2026)</h1>\n<h2>Added</h2>\n<ul>\n<li>io: <code>AioSource::register_borrowed</code> for I/O safety support\n(<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7992\">#7992</a>)</li>\n<li>net: add <code>try_io</code> function to <code>unix::pipe</code>\nsender and receiver types (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8030\">#8030</a>)</li>\n</ul>\n<h2>Added (unstable)</h2>\n<ul>\n<li>runtime: <code>Builder::enable_eager_driver_handoff</code> setting\nenable eager hand off of the I/O and time drivers before polling tasks\n(<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8010\">#8010</a>)</li>\n<li>taskdump: add <code>trace_with()</code> for customized task dumps\n(<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8025\">#8025</a>)</li>\n<li>taskdump: allow <code>impl FnMut()</code> in <code>trace_with</code>\ninstead of just <code>fn()</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8040\">#8040</a>)</li>\n<li>fs: support <code>io_uring</code> in <code>AsyncRead</code> for\n<code>File</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7907\">#7907</a>)</li>\n</ul>\n<h2>Changed</h2>\n<ul>\n<li>runtime: improve <code>spawn_blocking</code> scalability with\nsharded queue (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7757\">#7757</a>)</li>\n<li>runtime: use <code>compare_exchange_weak()</code> in worker queue\n(<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8028\">#8028</a>)</li>\n</ul>\n<h2>Fixed</h2>\n<ul>\n<li>runtime: overflow second half of tasks when local queue is filled\ninstead of first half (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8029\">#8029</a>)</li>\n</ul>\n<h2>Documented</h2>\n<ul>\n<li>docs: fix typo in <code>oneshot::Sender::send</code> docs (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8026\">#8026</a>)</li>\n<li>docs: hide #[tokio::main] attribute in the docs of\n<code>sync::watch</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8035\">#8035</a>)</li>\n<li>net: add docs on <code>ConnectionRefused</code> errors with UDP\nsockets (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7870\">#7870</a>)</li>\n</ul>\n<p><a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7757\">#7757</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7757\">tokio-rs/tokio#7757</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7870\">#7870</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7870\">tokio-rs/tokio#7870</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7907\">#7907</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7907\">tokio-rs/tokio#7907</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7992\">#7992</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7992\">tokio-rs/tokio#7992</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8010\">#8010</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/8010\">tokio-rs/tokio#8010</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8025\">#8025</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/8025\">tokio-rs/tokio#8025</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8026\">#8026</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/8026\">tokio-rs/tokio#8026</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8028\">#8028</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/8028\">tokio-rs/tokio#8028</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8029\">#8029</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/8029\">tokio-rs/tokio#8029</a></p>\n<!-- raw HTML omitted -->\n</blockquote>\n<p>... (truncated)</p>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/905c146aeda741ea2202f942a7c3a606dda13da5\"><code>905c146</code></a>\nchore: prepare to release v1.52.1 (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8059\">#8059</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/56aaa43e91c4fbed88f0c2a5b65019ed9a0c3c61\"><code>56aaa43</code></a>\nrt: revert <a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7757\">#7757</a>\nto fix regression in <code>spawn_blocking</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8057\">#8057</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/57ff47ab589bfb4dab6766de78655ffef4fb250b\"><code>57ff47a</code></a>\nci: update <code>trybuild</code> to expect output from rustc 1.95.0 (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8058\">#8058</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/812de3e134888d1d9e7832e4b789d51f6fd2f749\"><code>812de3e</code></a>\nci: bump taiki-e/cache-cargo-install-action from 1 to 3 (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8053\">#8053</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/ba82e73c7b804324c82b6fea6966ca12f55c3826\"><code>ba82e73</code></a>\nci: use Dependabot to keep github actions up to date (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8052\">#8052</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/2e85f9ddf8b47197fa6299cc295f4319fec68e53\"><code>2e85f9d</code></a>\nci: replace cirrus-ci with freebsd-vm (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8041\">#8041</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/a7e1cd8ff8a2012cce500fd7e6ae73400531f46d\"><code>a7e1cd8</code></a>\nci: update GitHub Actions workflows to use latest tool versions (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8047\">#8047</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/5f7be0ac42cb3e1b739da1562f98a797cd55a606\"><code>5f7be0a</code></a>\nchore: perpare 1.52.0 (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8045\">#8045</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/36d12d2686a64b9146c674e02e3cf81d8f87163d\"><code>36d12d2</code></a>\ntaskdump: allow impl FnMut() in taskdumps instead of just fn() (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8040\">#8040</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/f943312865b9d5007f25d2fd5bd8efa3f89d1541\"><code>f943312</code></a>\nfs: support io-uring in <code>AsyncRead</code> for <code>File</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7907\">#7907</a>)</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/tokio-rs/tokio/compare/tokio-1.51.1...tokio-1.52.1\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\nUpdates `clap` from 4.6.0 to 4.6.1\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/releases\">clap's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v4.6.1</h2>\n<h2>[4.6.1] - 2026-04-15</h2>\n<h3>Fixes</h3>\n<ul>\n<li><em>(derive)</em> Ensure rebuilds happen when an read env variable\nis changed</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/blob/master/CHANGELOG.md\">clap's\nchangelog</a>.</em></p>\n<blockquote>\n<h2>[4.6.1] - 2026-04-15</h2>\n<h3>Fixes</h3>\n<ul>\n<li><em>(derive)</em> Ensure rebuilds happen when an read env variable\nis changed</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/14202755e52802a3d294c4ceeadd703d24b21fe6\"><code>1420275</code></a>\nchore: Release</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/d2c817d151db23e0bff70d3df5f9dd9fc311ad5d\"><code>d2c817d</code></a>\ndocs: Update changelog</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/f88c94e53d40c2427450ed65ec025951906eb1d4\"><code>f88c94e</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6341\">#6341</a>\nfrom epage/sep</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/acbb8225054e0a498f6941f278ad0095a893efe8\"><code>acbb822</code></a>\nfix(complete): Reduce risk of conflict with actual subcommands</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/a49fadbf4acf1853f52ae43a445c8f3c81096b01\"><code>a49fadb</code></a>\nrefactor(complete): Pull out subcommand separator</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/ddc008bbbc1924fbda5d6f2c66bcf4d165984977\"><code>ddc008b</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6332\">#6332</a>\nfrom epage/update</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/497dc50aebe9384dc229e1b4e92850306231f9c9\"><code>497dc50</code></a>\nchore: Update compatible dependencies</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/dca2326243615b2375cccb709b19de912910413d\"><code>dca2326</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6331\">#6331</a>\nfrom clap-rs/renovate/j178-prek-action-2.x</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/54bdaa340ed434535bbd2d95a05b69d8abd2eb34\"><code>54bdaa3</code></a>\nchore(deps): Update j178/prek-action action to v2</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/f0d30d961d26f8fb636b33242256fca73a717f77\"><code>f0d30d9</code></a>\nchore: Release</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/clap-rs/clap/compare/clap_complete-v4.6.0...clap_complete-v4.6.1\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\nUpdates `pastey` from 0.2.1 to 0.2.2\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/as1100k/pastey/releases\">pastey's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v0.2.2</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Fix Rust 1.56 compatibility: Handle None-delimited groups in replace\nmodifier in <a\nhref=\"https://redirect.github.com/AS1100K/pastey/pull/25\">AS1100K/pastey#25</a></li>\n<li>increase the code coverage by <a\nhref=\"https://github.com/bharatGoswami8\"><code>@​bharatGoswami8</code></a>\nin <a\nhref=\"https://redirect.github.com/AS1100K/pastey/pull/28\">AS1100K/pastey#28</a></li>\n<li>add coverage on CI by <a\nhref=\"https://github.com/bharatGoswami8\"><code>@​bharatGoswami8</code></a>\nin <a\nhref=\"https://redirect.github.com/AS1100K/pastey/pull/30\">AS1100K/pastey#30</a></li>\n</ul>\n<h2>New Contributors</h2>\n<ul>\n<li><a\nhref=\"https://github.com/bharatGoswami8\"><code>@​bharatGoswami8</code></a>\nmade their first contribution in <a\nhref=\"https://redirect.github.com/AS1100K/pastey/pull/28\">AS1100K/pastey#28</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a\nhref=\"https://github.com/AS1100K/pastey/blob/master/CHANGELOG.md#022---2026-04-23\"><code>CHANGELOG.md</code></a></p>\n</blockquote>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/AS1100K/pastey/blob/master/CHANGELOG.md\">pastey's\nchangelog</a>.</em></p>\n<blockquote>\n<h2>[0.2.2] - 2026-04-23</h2>\n<h3>Improved</h3>\n<ul>\n<li>Improved Code Coverage <a\nhref=\"https://redirect.github.com/AS1100K/pastey/pull/28\">#28</a>, <a\nhref=\"https://redirect.github.com/AS1100K/pastey/pull/30\">#30</a></li>\n</ul>\n<h3>Fixed</h3>\n<ul>\n<li>Rust 1.56 compatibility: Handling None-delimited groups in replace\nmodifier <a\nhref=\"https://redirect.github.com/AS1100K/pastey/pull/25\">#25</a></li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/AS1100K/pastey/commit/f91b0f4b31ab22e665dedffecfc23410da35b981\"><code>f91b0f4</code></a>\nRELEASE v0.2.2</li>\n<li><a\nhref=\"https://github.com/AS1100K/pastey/commit/93387eb67735614250e7ed97e28e929af07cfaae\"><code>93387eb</code></a>\nadd coverage on CI (<a\nhref=\"https://redirect.github.com/as1100k/pastey/issues/30\">#30</a>)</li>\n<li><a\nhref=\"https://github.com/AS1100K/pastey/commit/113fbc18110446e880d57ab6629b670f8ddfc62c\"><code>113fbc1</code></a>\nincrease the code coverage (<a\nhref=\"https://redirect.github.com/as1100k/pastey/issues/28\">#28</a>)</li>\n<li><a\nhref=\"https://github.com/AS1100K/pastey/commit/436923754b9d9137bef557ccb4c63af67fa9aa2b\"><code>4369237</code></a>\nFix CI Rust 1.56 failure: pin dissimilar to 1.0.10</li>\n<li><a\nhref=\"https://github.com/AS1100K/pastey/commit/6e3ef4a67c14081a1ea6d2be941a725f011976f4\"><code>6e3ef4a</code></a>\nFix Rust 1.56 compatibility: Handle None-delimited groups in replace\nmodifier...</li>\n<li>See full diff in <a\nhref=\"https://github.com/as1100k/pastey/compare/v0.2.1...v0.2.2\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore <dependency name> major version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's major version (unless you unignore this specific\ndependency's major version or upgrade to it yourself)\n- `@dependabot ignore <dependency name> minor version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's minor version (unless you unignore this specific\ndependency's minor version or upgrade to it yourself)\n- `@dependabot ignore <dependency name>` will close this group update PR\nand stop Dependabot creating any more for the specific dependency\n(unless you unignore this specific dependency or upgrade to it yourself)\n- `@dependabot unignore <dependency name>` will remove all of the ignore\nconditions of the specified dependency\n- `@dependabot unignore <dependency name> <ignore condition>` will\nremove the ignore condition of the specified dependency and ignore\nconditions\n\n\n</details>\n\n---------\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>\nCo-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>\nCo-authored-by: wallstop <1045249+wallstop@users.noreply.github.com>",
+          "timestamp": "2026-04-25T08:31:26-07:00",
+          "tree_id": "90ebaa1a6175b8aad58dc8dafd963ee198128963",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/6cf1c0f12be4abf3e789c478137f81bd685d6f52"
+        },
+        "date": 1777131387642,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 114,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 162,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 448,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 725,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1022,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 103173,
+            "range": "± 1692",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 27333,
+            "range": "± 863",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 91",
             "unit": "ns/iter"
           },
           {
