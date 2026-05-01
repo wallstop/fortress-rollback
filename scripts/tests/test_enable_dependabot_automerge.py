@@ -124,6 +124,11 @@ fi
 if [[ "$cmd" == "pr" && "$subcmd" == "merge" ]]; then
     printf '%s\\n' "pr merge $*" >> "${GH_LOG_PATH:?GH_LOG_PATH is required}"
     success_flag="${GH_MERGE_SUCCESS_FLAG:-__none__}"
+    error_message="${GH_MERGE_ERROR_MESSAGE:-}"
+    if [[ -n "$error_message" ]]; then
+        printf '%s\\n' "$error_message" >&2
+        exit 1
+    fi
     if [[ "$success_flag" == "__none__" ]]; then
         if [[ "$*" == *"--squash"* || "$*" == *"--rebase"* || "$*" == *"--merge"* ]]; then
             exit 1
@@ -289,6 +294,54 @@ def test_fails_on_merge_policy_drift(tmp_path: Path) -> None:
     assert "squash-only settings" in result.stderr
     log_path = tmp_path / "gh.log"
     assert not log_path.exists()
+
+
+def test_reports_branch_protection_requirement_when_automerge_api_rejects(tmp_path: Path) -> None:
+    result = _run_script(
+        tmp_path,
+        {
+            "GH_MERGE_ERROR_MESSAGE": (
+                "GraphQL: Pull request Branch does not have required protected branch rules "
+                "(enablePullRequestAutoMerge)"
+            ),
+            "GH_ALLOW_SQUASH": "true",
+            "GH_ALLOW_REBASE": "false",
+            "GH_ALLOW_MERGE": "false",
+        },
+    )
+    assert result.returncode == 1
+    assert "required protected branch rules" in result.stderr
+    assert "GitHub auto-merge requires protected branch rules" in result.stderr
+    log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
+    assert len(log_lines) == 3
+    assert "--required --json name --jq length" in log_lines[0]
+    assert "--required --json name,state,link" in log_lines[1]
+    assert "--squash" in log_lines[2]
+
+
+def test_does_not_report_branch_protection_requirement_for_other_automerge_errors(
+    tmp_path: Path,
+) -> None:
+    result = _run_script(
+        tmp_path,
+        {
+            "GH_MERGE_ERROR_MESSAGE": (
+                "GraphQL: Auto-merge is disabled for this pull request "
+                "(enablePullRequestAutoMerge)"
+            ),
+            "GH_ALLOW_SQUASH": "true",
+            "GH_ALLOW_REBASE": "false",
+            "GH_ALLOW_MERGE": "false",
+        },
+    )
+    assert result.returncode == 1
+    assert "enablePullRequestAutoMerge" in result.stderr
+    assert "GitHub auto-merge requires protected branch rules" not in result.stderr
+    log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
+    assert len(log_lines) == 3
+    assert "--required --json name --jq length" in log_lines[0]
+    assert "--required --json name,state,link" in log_lines[1]
+    assert "--squash" in log_lines[2]
 
 
 def test_falls_back_to_all_checks_when_required_checks_count_is_zero(

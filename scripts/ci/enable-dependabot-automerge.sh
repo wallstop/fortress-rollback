@@ -102,6 +102,9 @@ attempt_automerge() {
         return 0
     fi
     echo "Auto-merge attempt failed for squash strategy: $output" >&2
+    if [[ "$output" == *"enablePullRequestAutoMerge"* ]] && [[ "$output" == *"required protected branch rules"* ]]; then
+        echo "GitHub auto-merge requires protected branch rules on the PR base branch (for example, require pull requests before merging)." >&2
+    fi
     return 1
 }
 
