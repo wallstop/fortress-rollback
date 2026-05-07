@@ -1263,6 +1263,73 @@ impl std::fmt::Display for SaveMode {
     }
 }
 
+/// Controls how a [`P2PSession`] reacts when a remote peer is disconnected
+/// (either by a disconnect timeout firing or by an explicit
+/// [`P2PSession::disconnect_player`]/[`P2PSession::remove_player`] call).
+///
+/// Defaults to [`DisconnectBehavior::Halt`] for back-compat with the legacy
+/// GGRS-style behavior. Set [`DisconnectBehavior::ContinueWithout`] via
+/// [`crate::SessionBuilder::with_disconnect_behavior`] to enable graceful
+/// peer drop, where the session continues advancing for the remaining peers
+/// after a drop.
+///
+/// # Example
+///
+/// ```
+/// use fortress_rollback::{Config, DisconnectBehavior, SessionBuilder};
+///
+/// # struct MyConfig;
+/// # impl Config for MyConfig {
+/// #     type Input = u8;
+/// #     type State = ();
+/// #     type Address = std::net::SocketAddr;
+/// # }
+/// // Continue the session for remaining peers after a drop, freezing the
+/// // dropped peer's input at their last confirmed value.
+/// let builder = SessionBuilder::<MyConfig>::new()
+///     .with_disconnect_behavior(DisconnectBehavior::ContinueWithout);
+/// ```
+///
+/// [`P2PSession`]: crate::P2PSession
+/// [`P2PSession::disconnect_player`]: crate::P2PSession::disconnect_player
+/// [`P2PSession::remove_player`]: crate::P2PSession::remove_player
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DisconnectBehavior {
+    /// Halt the session: no further frames advance once any peer drops.
+    ///
+    /// This is the legacy behavior inherited from GGRS. It is the default for
+    /// back-compat: existing applications that do not opt into
+    /// [`Self::ContinueWithout`] continue to observe the same
+    /// session-stops-on-drop semantics.
+    #[default]
+    Halt,
+    /// Continue the session with the remaining peers.
+    ///
+    /// The dropped peer's input queue is frozen (it repeats their last
+    /// confirmed input forever), and a [`crate::FortressEvent::PeerDropped`]
+    /// event is emitted. Remaining peers keep advancing frames using the
+    /// frozen input — the game layer decides how to handle the gameplay
+    /// impact (AI takeover, pause, end the match, etc.).
+    ///
+    /// **Note:** this setting governs only the **automatic** disconnect-timeout
+    /// path. The legacy [`P2PSession::disconnect_player`] retains its original
+    /// non-graceful semantics regardless of this setting; for an explicit
+    /// graceful drop, use [`P2PSession::remove_player`].
+    ///
+    /// [`P2PSession::disconnect_player`]: crate::P2PSession::disconnect_player
+    /// [`P2PSession::remove_player`]: crate::P2PSession::remove_player
+    ContinueWithout,
+}
+
+impl std::fmt::Display for DisconnectBehavior {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Halt => write!(f, "Halt"),
+            Self::ContinueWithout => write!(f, "ContinueWithout"),
+        }
+    }
+}
+
 // =============================================================================
 // Unit Tests
 // =============================================================================

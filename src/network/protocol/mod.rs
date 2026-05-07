@@ -559,6 +559,61 @@ impl<T: Config> UdpProtocol<T> {
         self.send_pending_output(connect_status);
     }
 
+    /// Pushes a replicated input frame onto `pending_output` without advancing
+    /// the time-sync layer or sending. Used to bridge the gap created by a
+    /// mid-session input-delay increase: the input queue back-fills the gap
+    /// with the most recently added input, and the protocol must transmit the
+    /// same replicated frames so the remote peer's input sequence stays
+    /// strictly monotonic.
+    ///
+    /// The caller is expected to pre-validate the available capacity via
+    /// [`pending_output_capacity_remaining`]; once the queue is full, this
+    /// method silently drops the entry rather than triggering the disconnect
+    /// path used by `send_input`.
+    ///
+    /// [`pending_output_capacity_remaining`]: Self::pending_output_capacity_remaining
+    pub(crate) fn enqueue_replicated_input(
+        &mut self,
+        inputs: &BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
+    ) {
+        if self.state != ProtocolState::Running {
+            // Pre-running protocols have no remote yet — there is nothing to
+            // back-fill toward. The input queue's replicated entries will be
+            // sent normally once the protocol enters Running.
+            return;
+        }
+        if self.pending_output.len() >= self.protocol_config.pending_output_limit {
+            // Refuse to overflow. Caller should have pre-validated via
+            // pending_output_capacity_remaining; this branch is defensive only.
+            return;
+        }
+        let endpoint_data = InputBytes::from_inputs::<T>(self.num_players, inputs);
+        self.pending_output.push_back(endpoint_data);
+    }
+
+    /// Returns how many additional entries can be appended to `pending_output`
+    /// before exceeding the configured limit. Returns `usize::MAX` for
+    /// not-yet-running protocols, since back-fill is a no-op in that state.
+    pub(crate) fn pending_output_capacity_remaining(&self) -> usize {
+        if self.state != ProtocolState::Running {
+            return usize::MAX;
+        }
+        self.protocol_config
+            .pending_output_limit
+            .saturating_sub(self.pending_output.len())
+    }
+
+    /// Flushes any queued `pending_output` entries through the wire by
+    /// triggering a `send_pending_output` call. Used in tandem with
+    /// [`enqueue_replicated_input`] when bulk-pushing gap-fill frames after a
+    /// mid-session frame-delay change.
+    pub(crate) fn flush_pending_output(&mut self, connect_status: &[ConnectionStatus]) {
+        if self.state != ProtocolState::Running {
+            return;
+        }
+        self.send_pending_output(connect_status);
+    }
+
     fn send_pending_output(&mut self, connect_status: &[ConnectionStatus]) {
         let mut body = Input::default();
 

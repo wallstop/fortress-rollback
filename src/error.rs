@@ -390,6 +390,13 @@ pub enum InternalErrorKind {
         /// The specific reason for the delta decode failure.
         reason: DeltaDecodeReason,
     },
+    /// Input queue gap-fill failed while replicating a previous input to fill
+    /// the gap created by a mid-session frame-delay increase. This indicates an
+    /// internal invariant violation in the input queue.
+    InputQueueGapFillFailed {
+        /// The frame at which gap-fill replication failed.
+        frame: Frame,
+    },
     /// Custom error (fallback for API compatibility).
     Custom(&'static str),
 }
@@ -436,6 +443,13 @@ impl Display for InternalErrorKind {
             },
             Self::DeltaDecodeError { reason } => {
                 write!(f, "delta decode failed: {}", reason)
+            },
+            Self::InputQueueGapFillFailed { frame } => {
+                write!(
+                    f,
+                    "input queue gap-fill failed for frame {} while replicating previous input",
+                    frame
+                )
             },
             Self::Custom(s) => write!(f, "{}", s),
         }
@@ -551,6 +565,45 @@ pub enum InvalidRequestKind {
         /// The maximum allowed delay.
         max_delay: usize,
     },
+    /// Decreasing input delay mid-session is not supported.
+    ///
+    /// Lowering the delay would require dropping inputs that have already been
+    /// queued (and possibly already sent to remote peers). Mid-session delay
+    /// changes may only increase the delay, not decrease it.
+    InputDelayDecreaseUnsupported {
+        /// The current input delay.
+        current: usize,
+        /// The requested (smaller) input delay.
+        requested: usize,
+    },
+    /// Increasing input delay mid-session is not supported when the peer hosts
+    /// more than one local player.
+    ///
+    /// The protocol bundles all local players' inputs into a single packet per
+    /// frame. Increasing the delay for one local player would require
+    /// synthesizing replicated bytes for the other local players at the gap
+    /// frames before those players have produced inputs for those frames,
+    /// which is not deterministically representable. Set the desired delay
+    /// before adding any inputs (typically via
+    /// [`crate::SessionBuilder::with_input_delay`]) when running with multiple
+    /// local players.
+    InputDelayMidSessionMultiLocalUnsupported {
+        /// The number of local players on the session.
+        local_players: usize,
+    },
+    /// Increasing input delay mid-session would require enqueueing more
+    /// gap-fill frames into a remote peer's pending-output buffer than the
+    /// configured `pending_output_limit` allows.
+    ///
+    /// This is a transient condition that typically resolves once the peer
+    /// acknowledges the queued inputs. Try again after acknowledgements catch
+    /// up, or apply the delay change in smaller increments.
+    InputDelayMidSessionPendingOutputFull {
+        /// The number of gap-fill frames that would be enqueued.
+        delta: usize,
+        /// Available capacity in the pending-output buffer.
+        capacity: usize,
+    },
     /// Input delay exceeds the maximum allowed for the given FPS.
     InputDelayTooLarge {
         /// The requested input delay in frames.
@@ -621,6 +674,14 @@ pub enum InvalidRequestKind {
     /// Player is already disconnected.
     AlreadyDisconnected {
         /// The already disconnected handle.
+        handle: PlayerHandle,
+    },
+    /// Player has already been removed from the session via
+    /// [`crate::P2PSession::remove_player`] (or auto-removed by
+    /// [`crate::DisconnectBehavior::ContinueWithout`]). Removing a player twice
+    /// is invalid.
+    PlayerAlreadyRemoved {
+        /// The handle of the already-removed player.
         handle: PlayerHandle,
     },
 
@@ -749,6 +810,29 @@ impl Display for InvalidRequestKind {
                     delay, max_delay
                 )
             },
+            Self::InputDelayDecreaseUnsupported { current, requested } => {
+                write!(
+                    f,
+                    "cannot decrease input delay mid-session from {} to {}",
+                    current, requested
+                )
+            },
+            Self::InputDelayMidSessionMultiLocalUnsupported { local_players } => {
+                write!(
+                    f,
+                    "cannot increase input delay mid-session when the peer hosts \
+                     more than one local player ({} local players)",
+                    local_players
+                )
+            },
+            Self::InputDelayMidSessionPendingOutputFull { delta, capacity } => {
+                write!(
+                    f,
+                    "cannot increase input delay mid-session: would enqueue {} \
+                     gap-fill frames but only {} pending-output slots are available",
+                    delta, capacity
+                )
+            },
             Self::InputDelayTooLarge {
                 delay_frames,
                 fps,
@@ -825,6 +909,13 @@ impl Display for InvalidRequestKind {
             },
             Self::AlreadyDisconnected { handle } => {
                 write!(f, "player {} is already disconnected", handle.as_usize())
+            },
+            Self::PlayerAlreadyRemoved { handle } => {
+                write!(
+                    f,
+                    "player {} has already been removed from the session",
+                    handle.as_usize()
+                )
             },
             Self::WrongProtocolState {
                 current_state,

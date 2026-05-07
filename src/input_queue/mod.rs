@@ -138,6 +138,15 @@ where
     /// because confirmed inputs are synchronized via the network protocol.
     /// Used as the basis for predictions to ensure determinism.
     last_confirmed_input: Option<T::Input>,
+
+    /// Whether this queue is frozen. A frozen queue silently ignores
+    /// [`Self::add_input`] calls, leaving the most recently added input as the
+    /// final confirmed value forever. Used by the session layer to support
+    /// graceful peer drop: when a remote peer disconnects with the
+    /// `ContinueWithout` policy, the dropped peer's queue is frozen so
+    /// remaining peers can keep simulating using the dropped peer's last
+    /// confirmed input.
+    frozen: bool,
 }
 
 impl<T: Config> InputQueue<T> {
@@ -187,6 +196,7 @@ impl<T: Config> InputQueue<T> {
             player_index,
             queue_length,
             last_confirmed_input: None,
+            frozen: false,
         })
     }
 
@@ -208,16 +218,158 @@ impl<T: Config> InputQueue<T> {
 
     /// Sets the frame delay for this input queue.
     ///
+    /// # Behavior
+    ///
+    /// - **No-op:** If `delay` equals the current frame delay, no change is made.
+    /// - **Initial setup:** If no inputs have been added yet, the delay is updated directly.
+    /// - **Mid-session increase:** If `delay` is larger than the current delay and
+    ///   inputs have already been added, the gap created by the larger delay is filled
+    ///   by replicating the most recent input. This preserves the sequential invariant
+    ///   `input.frame + frame_delay == last_added_frame + 1` for the next user input.
+    /// - **Mid-session decrease:** Decreasing the delay mid-session is **not
+    ///   supported**: it would require dropping already-queued (and potentially
+    ///   already-sent) inputs. Returns
+    ///   [`InvalidRequestKind::InputDelayDecreaseUnsupported`] in that case.
+    ///
+    /// # Mid-session delay change
+    ///
+    /// Increasing the delay replicates the most recently added input across the new
+    /// gap. This matches the strategy used by [`advance_queue_head`] for initial
+    /// delay setup, and is consistent with what the network protocol expects (the
+    /// remote peer must observe the same input sequence on both sides). The
+    /// trade-off is that "held" inputs (e.g., an attack button) will continue for
+    /// the gap frames; applications that need different gap-fill semantics should
+    /// call this method only when no input is held.
+    ///
+    /// Decreasing the delay mid-session is rejected because it would require
+    /// discarding already-queued inputs. Set the desired delay before adding any
+    /// inputs (typically via the session builder).
+    ///
     /// # Errors
-    /// Returns a [`FortressError`] if `delay >= queue_length`.
-    /// This constraint ensures the circular buffer doesn't overflow when advancing the queue head.
+    /// - Returns [`InvalidRequestKind::FrameDelayTooLarge`] if `delay > max_frame_delay()`.
+    /// - Returns [`InvalidRequestKind::InputDelayDecreaseUnsupported`] if `delay` is less
+    ///   than the current delay and inputs have already been added.
+    /// - Returns [`InternalErrorKind::InputQueueGapFillFailed`] if gap-fill replication
+    ///   fails (indicates an internal invariant violation).
+    ///
+    /// [`advance_queue_head`]: Self::advance_queue_head
     pub fn set_frame_delay(&mut self, delay: usize) -> Result<(), FortressError> {
         let max_delay = self.max_frame_delay();
         if delay > max_delay {
             return Err(InvalidRequestKind::FrameDelayTooLarge { delay, max_delay }.into());
         }
+
+        // No-op: nothing to do.
+        if delay == self.frame_delay {
+            return Ok(());
+        }
+
+        // Initial setup before any inputs — safe to just update.
+        if self.last_added_frame.is_null() {
+            self.frame_delay = delay;
+            return Ok(());
+        }
+
+        // Decreasing delay mid-session is unsupported: it would require dropping
+        // already-queued (and potentially already-sent) inputs.
+        if delay < self.frame_delay {
+            return Err(InvalidRequestKind::InputDelayDecreaseUnsupported {
+                current: self.frame_delay,
+                requested: delay,
+            }
+            .into());
+        }
+
+        // Increasing delay mid-session: replicate the most-recent input to fill the
+        // gap created by the larger delay. This preserves the sequential invariant
+        // `input.frame + frame_delay == last_added_frame + 1` for the next user
+        // input. Replicating the last input is the same strategy used by
+        // `advance_queue_head` for initial-delay setup.
+        let delta = delay - self.frame_delay;
+        let prev_position = match self.head {
+            0 => self.queue_length - 1,
+            _ => self.head - 1,
+        };
+        let last_input = match self.inputs.get(prev_position) {
+            Some(input) => *input,
+            None => {
+                return Err(FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                        name: "inputs",
+                        index: prev_position,
+                        length: self.inputs.len(),
+                    }),
+                });
+            },
+        };
+        // The gap-fill loop is not atomic on `add_input_by_frame` failure: a partial
+        // failure leaves the queue with some filler frames written and `frame_delay`
+        // still at the old value. This is acceptable because `add_input_by_frame`
+        // only fails on internal invariant violations (queue overflow, prediction-
+        // frame collision), which themselves indicate the session is already
+        // compromised — at that point the structured error returned here surfaces
+        // the underlying failure rather than masking it. Recovering atomically would
+        // require snapshotting and rewinding the circular buffer, which is more
+        // complex than the failure mode warrants.
+        for _ in 0..delta {
+            let next_frame = safe_frame_add!(
+                self.last_added_frame,
+                1,
+                "InputQueue::set_frame_delay gap fill"
+            );
+            // Replicate the previous input's payload at the new frame.
+            let filler = PlayerInput {
+                frame: next_frame,
+                input: last_input.input,
+            };
+            if !self.add_input_by_frame(filler, next_frame) {
+                return Err(FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::InputQueueGapFillFailed { frame: next_frame },
+                });
+            }
+            // `add_input_by_frame` is the only mutator that updates
+            // `last_added_frame`; this is a debug-only sanity check that the
+            // invariant holds. In release builds it is compiled out — a real
+            // mismatch would have been reported by `add_input_by_frame` via
+            // `report_violation!` and surfaced through the `false` return
+            // above.
+            debug_assert_eq!(
+                self.last_added_frame, next_frame,
+                "add_input_by_frame must advance last_added_frame to next_frame"
+            );
+        }
+
         self.frame_delay = delay;
         Ok(())
+    }
+
+    /// Returns the current frame delay for this input queue.
+    #[must_use]
+    pub fn frame_delay(&self) -> usize {
+        self.frame_delay
+    }
+
+    /// Returns the most recently added input frame, or [`Frame::NULL`] if no
+    /// inputs have been added yet.
+    ///
+    /// # Note
+    /// This accessor is exposed for use by the session/protocol layer to
+    /// coordinate the network-level pending-output queue with the input queue
+    /// after a mid-session frame-delay change.
+    #[must_use]
+    pub(crate) fn last_added_frame(&self) -> Frame {
+        self.last_added_frame
+    }
+
+    /// Returns the most recently confirmed input value for this player, or
+    /// `None` if no inputs have ever been added.
+    ///
+    /// Used by the sync layer to surface the last good input as the dropped
+    /// peer's reported input after a graceful peer drop, paired with status
+    /// [`crate::InputStatus::Disconnected`].
+    #[must_use]
+    pub(crate) fn last_confirmed_input(&self) -> Option<T::Input> {
+        self.last_confirmed_input
     }
 
     /// Resets the prediction state.
@@ -393,8 +545,43 @@ impl<T: Config> InputQueue<T> {
         Some((prediction_to_return.input, InputStatus::Predicted))
     }
 
+    /// Freezes this input queue. After this call, [`Self::add_input`] becomes a
+    /// no-op (silently dropping subsequent inputs without advancing the queue),
+    /// and the most recently added input remains the queue's permanent
+    /// confirmed value.
+    ///
+    /// Used by the session layer to support graceful peer drop. The
+    /// `Disconnected` status reported to game code for a frozen player is
+    /// produced by the `connect_status.disconnected` flag at the
+    /// [`crate::sync_layer::SyncLayer`] level, not by this queue. This method
+    /// only stops further mutations to the queue so remaining peers can keep
+    /// reading the last confirmed value deterministically.
+    pub fn freeze(&mut self) {
+        self.frozen = true;
+    }
+
+    /// Returns whether this queue has been frozen via [`Self::freeze`].
+    #[must_use]
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
+    }
+
     /// Adds an input frame to the queue. Will consider the set frame delay.
+    ///
+    /// If the queue has been frozen via [`Self::freeze`], this method is a
+    /// no-op: it returns the queue's current `last_added_frame` (which may be
+    /// [`Frame::NULL`] if no input was ever added) without modifying any
+    /// queue state. Returning the existing `last_added_frame` rather than
+    /// [`Frame::NULL`] avoids signalling a "drop" to callers that distinguish
+    /// drops from accepted inputs while still indicating no progress was made.
     pub fn add_input(&mut self, input: PlayerInput<T::Input>) -> Frame {
+        if self.frozen {
+            // Silently ignore inputs while frozen. Return the existing
+            // last_added_frame so callers do not interpret this as a "drop"
+            // (Frame::NULL). No queue state is mutated.
+            return self.last_added_frame;
+        }
+
         // Verify that inputs are passed in sequentially by the user, regardless of frame delay.
         let input_with_delay = safe_frame_add!(
             input.frame,
@@ -549,12 +736,21 @@ impl<T: Config> InputQueue<T> {
     /// Returns [`Frame::NULL`] if the input would be out of order (expected > input with delay).
     /// Otherwise, returns the frame number with delay applied.
     ///
-    /// # Note
+    /// # Note on mid-session delay changes
     ///
-    /// The gap-filling logic handles the initial delay setup. If frame delay is changed
-    /// mid-session (not supported via public API), the sequential check in [`add_input`]
-    /// will reject the input before this function is called, so the gap-filling for
-    /// mid-session delay changes will never execute.
+    /// Mid-session **increases** of `frame_delay` are supported (see
+    /// [`set_frame_delay`]); the gap created by the larger delay is back-filled by
+    /// replicating the most recently added input, performed inside `set_frame_delay`
+    /// itself. By the time the next user input reaches `add_input` after such an
+    /// increase, the queue's `last_added_frame` has already been advanced so that the
+    /// sequential invariant `input_frame + frame_delay == last_added_frame + 1` holds
+    /// without needing another gap-fill in this function.
+    ///
+    /// Mid-session **decreases** of `frame_delay` are rejected by `set_frame_delay`
+    /// and therefore do not reach this function.
+    ///
+    /// [`set_frame_delay`]: Self::set_frame_delay
+    /// [`add_input`]: Self::add_input
     fn advance_queue_head(&mut self, mut input_frame: Frame) -> Frame {
         let previous_position = match self.head {
             0 => self.queue_length - 1,
@@ -1308,39 +1504,105 @@ mod input_queue_tests {
         assert_eq!(queue.last_added_frame, Frame::new(3));
     }
 
-    /// Tests that changing frame delay mid-session causes inputs to be dropped.
-    ///
-    /// Frame delay is only set at construction via the builder and the API doesn't
-    /// expose changing it mid-session. Changing it manually (as in this test) causes
-    /// subsequent inputs to be rejected because they fail the sequential check in
-    /// `add_input`: `input.frame + frame_delay != last_added_frame + 1`.
-    ///
-    /// Note: The gap-filling code in `advance_queue_head` exists to handle the initial
-    /// delay setup (when first inputs are added with delay > 0). However, it will never
-    /// execute for mid-session delay changes because `add_input` rejects first.
-    ///
-    /// This test documents that frame delay changes mid-session are not supported.
+    /// Increasing frame delay mid-session replicates the most recently added
+    /// input across the new gap so subsequent sequential inputs continue to be
+    /// accepted at `input.frame + new_delay == last_added_frame + 1`.
     #[test]
-    fn test_frame_delay_change_mid_session_drops_input() {
+    fn test_frame_delay_increase_mid_session_replicates_last_input() {
         let mut queue = test_queue(0);
 
-        // Start with no delay, add first input
-        let input0 = PlayerInput::new(Frame::new(0), TestInput { inp: 1 });
-        assert_eq!(queue.add_input(input0), Frame::new(0)); // Accepted at frame 0
-        assert_eq!(queue.last_added_frame, Frame::new(0));
+        // Add inputs at frames 0..=2 with delay 0.
+        for i in 0..=2i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            assert_eq!(queue.add_input(input), Frame::new(i));
+        }
+        assert_eq!(queue.last_added_frame, Frame::new(2));
 
-        // Change frame delay mid-session (not a supported operation via public API)
-        queue.set_frame_delay(2).expect("valid delay");
+        // Increase delay mid-session to 2. Two filler frames (3 and 4) should be
+        // replicated from the last input (frame 2, inp=2).
+        queue.set_frame_delay(2).expect("increase mid-session ok");
+        assert_eq!(queue.last_added_frame, Frame::new(4));
 
-        // Try to add next sequential input - it gets DROPPED because the sequential
-        // check uses the new delay: (1 + 2) != (0 + 1), so 3 != 1
-        let input1 = PlayerInput::new(Frame::new(1), TestInput { inp: 2 });
-        let result = queue.add_input(input1);
+        // Replicated frames should be confirmable and equal to the previous input.
+        let frame3 = queue
+            .confirmed_input(Frame::new(3))
+            .expect("frame 3 replicated");
+        let frame4 = queue
+            .confirmed_input(Frame::new(4))
+            .expect("frame 4 replicated");
+        assert_eq!(frame3.input.inp, 2);
+        assert_eq!(frame4.input.inp, 2);
 
-        // Input is dropped (returns NULL_FRAME)
-        assert_eq!(result, Frame::NULL);
-        // last_added_frame unchanged
-        assert_eq!(queue.last_added_frame, Frame::new(0));
+        // Adding a new input at frame 3 (with delay 2) should land at frame 5.
+        let new_input = PlayerInput::new(Frame::new(3), TestInput { inp: 99 });
+        assert_eq!(queue.add_input(new_input), Frame::new(5));
+        assert_eq!(queue.last_added_frame, Frame::new(5));
+        let frame5 = queue.confirmed_input(Frame::new(5)).expect("frame 5 added");
+        assert_eq!(frame5.input.inp, 99);
+    }
+
+    /// Decreasing frame delay mid-session is unsupported and must return a
+    /// `InputDelayDecreaseUnsupported` error.
+    #[test]
+    fn test_frame_delay_decrease_mid_session_returns_error() {
+        let mut queue = test_queue(0);
+        queue.set_frame_delay(2).expect("initial delay 2");
+
+        // Add a single input so we are mid-session.
+        let input = PlayerInput::new(Frame::new(0), TestInput { inp: 1 });
+        queue.add_input(input);
+
+        let err = queue
+            .set_frame_delay(1)
+            .expect_err("decrease should be rejected");
+        match err {
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::InputDelayDecreaseUnsupported { current, requested },
+            } => {
+                assert_eq!(current, 2);
+                assert_eq!(requested, 1);
+            },
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+        // Delay is unchanged after the rejected decrease.
+        assert_eq!(queue.frame_delay(), 2);
+    }
+
+    /// Setting the frame delay to its current value is a no-op even mid-session.
+    #[test]
+    fn test_frame_delay_no_op_when_unchanged() {
+        let mut queue = test_queue(0);
+        queue.set_frame_delay(1).expect("initial delay 1");
+
+        let input = PlayerInput::new(Frame::new(0), TestInput { inp: 7 });
+        queue.add_input(input);
+        let last_added_before = queue.last_added_frame;
+
+        // Setting to the same value should be a no-op (no gap fill, no error).
+        queue
+            .set_frame_delay(1)
+            .expect("no-op set should succeed mid-session");
+        assert_eq!(queue.frame_delay(), 1);
+        assert_eq!(queue.last_added_frame, last_added_before);
+    }
+
+    /// Initial-setup case: setting the frame delay before any inputs are added
+    /// should always succeed (including decreases) because there are no queued
+    /// inputs to invalidate.
+    #[test]
+    fn test_frame_delay_initial_setup_no_inputs_yet() {
+        let mut queue = test_queue(0);
+        assert_eq!(queue.frame_delay(), 0);
+
+        queue.set_frame_delay(5).expect("set delay to 5");
+        assert_eq!(queue.frame_delay(), 5);
+
+        // Decreasing before any inputs is allowed because last_added_frame is NULL.
+        queue.set_frame_delay(2).expect("decrease before inputs");
+        assert_eq!(queue.frame_delay(), 2);
+
+        queue.set_frame_delay(0).expect("decrease to zero");
+        assert_eq!(queue.frame_delay(), 0);
     }
 
     #[test]
@@ -1478,6 +1740,23 @@ mod input_queue_tests {
         }
     }
 
+    /// Test: `frame_delay()` getter returns the value set by `set_frame_delay()`
+    #[test]
+    fn test_frame_delay_getter_round_trip() {
+        // In tests: unwrap is allowed
+        let mut queue = test_queue(0);
+        assert_eq!(queue.frame_delay(), 0);
+
+        queue.set_frame_delay(3).unwrap();
+        assert_eq!(queue.frame_delay(), 3);
+
+        queue.set_frame_delay(0).unwrap();
+        assert_eq!(queue.frame_delay(), 0);
+
+        queue.set_frame_delay(MAX_FRAME_DELAY).unwrap();
+        assert_eq!(queue.frame_delay(), MAX_FRAME_DELAY);
+    }
+
     /// Test: After successful delay set, adding inputs works correctly
     #[test]
     fn test_frame_delay_with_inputs_after_set() {
@@ -1492,6 +1771,81 @@ mod input_queue_tests {
         assert_eq!(result, Frame::new(3));
         assert_eq!(queue.last_added_frame, Frame::new(3));
         queue.check_invariants().unwrap();
+    }
+
+    /// Test: Drive the queue for many frames at delay=0, increase the delay
+    /// mid-session, drive many more frames, and verify both the structural
+    /// invariants and the integrity of the gap-fill replication.
+    #[test]
+    fn test_set_frame_delay_increase_after_many_frames() {
+        let mut queue = test_queue(0);
+
+        // Phase 1: 50 frames at delay=0.
+        for i in 0..50i32 {
+            let added = queue.add_input(PlayerInput::new(
+                Frame::new(i),
+                TestInput {
+                    inp: (i & 0xff) as u8,
+                },
+            ));
+            assert_eq!(added, Frame::new(i));
+        }
+        assert_eq!(queue.last_added_frame, Frame::new(49));
+        queue
+            .check_invariants()
+            .expect("invariants hold after phase 1");
+
+        // Mid-session increase: delay 0 -> 3. Replicates the last input
+        // (frame 49, inp=49) across frames 50, 51, 52.
+        queue
+            .set_frame_delay(3)
+            .expect("mid-session increase should succeed");
+        assert_eq!(queue.last_added_frame, Frame::new(52));
+        queue
+            .check_invariants()
+            .expect("invariants hold after delay increase");
+
+        // Replicated frames carry the last pre-change input value.
+        for f in 50..=52i32 {
+            let inp = queue
+                .confirmed_input(Frame::new(f))
+                .expect("replicated frame is confirmed");
+            assert_eq!(
+                inp.input.inp, 49,
+                "replicated frame {f} should hold the last pre-change input value"
+            );
+        }
+
+        // Phase 2: 30 more frames at delay=3. Each user input lands at
+        // current_frame + 3 in queue space.
+        for j in 0..30i32 {
+            let user_frame = Frame::new(50 + j); // user-side frame
+            let expected_queue_frame = Frame::new(50 + j + 3);
+            let added = queue.add_input(PlayerInput::new(
+                user_frame,
+                TestInput {
+                    inp: (100 + j) as u8,
+                },
+            ));
+            assert_eq!(
+                added, expected_queue_frame,
+                "user frame {user_frame:?} with delay 3 should land at {expected_queue_frame:?}"
+            );
+        }
+        // After 30 user frames added at delay 3, last_added_frame = 49 + 3 + 30 = 82.
+        assert_eq!(queue.last_added_frame, Frame::new(82));
+        queue
+            .check_invariants()
+            .expect("invariants hold after phase 2");
+
+        // Spot-check: queue holds the post-change inputs at the right frames.
+        for j in 0..30i32 {
+            let queue_frame = Frame::new(53 + j);
+            let inp = queue
+                .confirmed_input(queue_frame)
+                .expect("post-change frame is confirmed");
+            assert_eq!(inp.input.inp, (100 + j) as u8);
+        }
     }
 
     /// Test: After rejected delay, queue state remains unchanged
@@ -1723,6 +2077,87 @@ mod input_queue_tests {
     fn test_input_queue_length_is_power_of_two() {
         // Power of two is beneficial for modular arithmetic
         assert!(INPUT_QUEUE_LENGTH.is_power_of_two());
+    }
+
+    // ==========================================
+    // Freeze (graceful peer drop) Tests
+    // ==========================================
+
+    #[test]
+    fn test_freeze_no_op_on_add_input() {
+        // In tests: unwrap is allowed
+        let mut queue = test_queue(0);
+        // Add a few inputs to give the queue a known state.
+        for i in 0..3i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            assert_eq!(queue.add_input(input), Frame::new(i));
+        }
+
+        // Snapshot the queue state before freezing.
+        let last_added_before = queue.last_added_frame;
+        let length_before = queue.length;
+        let head_before = queue.head;
+        let tail_before = queue.tail;
+
+        // Freeze the queue and assert the flag observably changed.
+        assert!(!queue.is_frozen());
+        queue.freeze();
+        assert!(queue.is_frozen());
+
+        // Attempting to add an input now must be a no-op and return the
+        // existing last_added_frame (not Frame::NULL — that would signal a
+        // drop, which callers may handle differently from "frozen").
+        let frame_4_input = PlayerInput::new(Frame::new(3), TestInput { inp: 99 });
+        let returned = queue.add_input(frame_4_input);
+        assert_eq!(
+            returned, last_added_before,
+            "frozen add_input must return last_added_frame, not Frame::NULL"
+        );
+
+        // Queue state must be entirely unchanged.
+        assert_eq!(queue.last_added_frame, last_added_before);
+        assert_eq!(queue.length, length_before);
+        assert_eq!(queue.head, head_before);
+        assert_eq!(queue.tail, tail_before);
+
+        // Repeated calls remain no-ops.
+        assert_eq!(queue.add_input(frame_4_input), last_added_before);
+        assert_eq!(queue.length, length_before);
+    }
+
+    #[test]
+    fn test_freeze_prediction_returns_last_confirmed_with_disconnected_status() {
+        // In tests: unwrap is allowed.
+        // Queue-level note: the input() method returns InputStatus::Predicted
+        // when serving a frame past the queue. The Disconnected status is
+        // reported at the SyncLayer level using `connect_status.disconnected`
+        // (see SyncLayer::synchronized_inputs), not by the queue itself.
+        // This test verifies the queue keeps producing the last confirmed
+        // value even after freezing, so the SyncLayer can deterministically
+        // hand it back to the game with Disconnected status.
+        let mut queue = test_queue(0);
+        for i in 0..3i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: (i + 1) as u8 });
+            queue.add_input(input);
+        }
+        // last_confirmed_input is the input added at frame 2 (value 3).
+        queue.freeze();
+
+        // Request a frame past the queue's last_added_frame. The queue is
+        // now in a state where the frame is not in the buffer, so it returns
+        // a prediction based on last_confirmed_input.
+        let (returned_input, status) = queue
+            .input(Frame::new(10))
+            .expect("frozen queue should still serve predictions");
+
+        // Last confirmed input had inp = 3.
+        assert_eq!(
+            returned_input.inp, 3,
+            "frozen queue must keep returning the last confirmed input"
+        );
+        // Status at the queue level is Predicted; SyncLayer reinterprets
+        // this as Disconnected when connect_status[i].disconnected = true.
+        assert_eq!(status, InputStatus::Predicted);
     }
 }
 

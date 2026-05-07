@@ -14,6 +14,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `P2PSession::set_input_delay()` and `P2PSession::input_delay()` for runtime input-delay adjustment, enabling hybrid delay+rollback in response to changing network conditions. Mid-session **increases** are supported on peers with a single local player: the input queue replicates the most recently added input across the new gap, and the same replicated frames are pushed onto every remote endpoint's pending-output buffer so the remote peer's input sequence remains strictly monotonic. Mid-session **decreases** return an `InputDelayDecreaseUnsupported` error; mid-session increases on peers with multiple local players return `InputDelayMidSessionMultiLocalUnsupported`.
+- `DisconnectBehavior` enum (`Halt`, `ContinueWithout`) controlling how a `P2PSession` reacts when a remote peer disconnects (timeout or explicit removal). `Halt` (default) preserves the legacy GGRS-style halt-on-drop semantics; `ContinueWithout` enables graceful peer drop where remaining peers continue advancing while the dropped peer's input queue is frozen at their last confirmed input.
+- `SessionBuilder::with_disconnect_behavior()` to opt in to graceful peer drop on a `P2PSession`.
+- `P2PSession::remove_player()` for explicit graceful removal of a remote peer. Marks the player disconnected, freezes their input queue (so remaining peers see their last confirmed input forever, with `InputStatus::Disconnected`), disconnects the network endpoint, and emits both `FortressEvent::PeerDropped` and `FortressEvent::Disconnected` events. Always opts in to graceful-drop semantics regardless of the configured `DisconnectBehavior` (which only governs the **automatic** disconnect-timeout path). Distinct from the legacy `disconnect_player()`, which preserves the halt-on-drop semantics.
+- `P2PSession::disconnect_behavior()` accessor returning the configured `DisconnectBehavior`.
+
+### Changed
+
+- **Breaking:** `FortressEvent::InputDelayRecommendation { player_handle, current_delay, suggested_delay }` — new variant added; reserved for application-level heuristics or a future automatic emitter (no built-in emitter currently produces it). Since `FortressEvent` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
+- **Breaking:** `FortressEvent::PeerDropped { handle, addr }` — new variant added; emitted when a remote peer is gracefully removed (auto-removal under `DisconnectBehavior::ContinueWithout` after a timeout, or via explicit `P2PSession::remove_player`). Since `FortressEvent` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
+- **Breaking:** `InvalidRequestKind::InputDelayDecreaseUnsupported { current, requested }` — new variant added; returned when `set_input_delay` is called with a smaller delay after inputs have been added. Since `InvalidRequestKind` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
+- **Breaking:** `InvalidRequestKind::InputDelayMidSessionMultiLocalUnsupported { local_players }` — new variant added; returned when attempting to increase input delay mid-session on a peer that hosts more than one local player. Since `InvalidRequestKind` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
+- **Breaking:** `InvalidRequestKind::InputDelayMidSessionPendingOutputFull { delta, capacity }` — new variant added; returned when a mid-session input-delay increase would enqueue more gap-fill frames than the configured `pending_output_limit` allows. Since `InvalidRequestKind` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
+- **Breaking:** `InvalidRequestKind::PlayerAlreadyRemoved { handle }` — new variant added; returned by `P2PSession::remove_player` when called twice for the same handle. Since `InvalidRequestKind` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
+- **Breaking:** `InternalErrorKind::InputQueueGapFillFailed { frame }` — new variant added; reported if mid-session gap-fill replication fails an internal invariant. Since `InternalErrorKind` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
+
+> _Follow-up:_ a session-level telemetry hook for input-delay changes (e.g.,
+> a `TelemetryEvent::InputDelayChanged`) is intentionally deferred to the
+> upcoming frame-advantage-heuristic feature, which will be the primary
+> producer of input-delay adjustments.
+
 ## [0.8.0] - 2026-04-25
 
 ### Changed

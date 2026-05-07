@@ -3,7 +3,7 @@ use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::network::network_stats::NetworkStats;
 use crate::replay::{Replay, ReplayRecorder};
-use crate::sessions::config::{ProtocolConfig, SaveMode};
+use crate::sessions::config::{DisconnectBehavior, ProtocolConfig, SaveMode};
 use crate::sessions::player_registry::PlayerRegistry;
 use crate::sessions::session_trait::Session;
 use crate::sessions::sync_health::SyncHealth;
@@ -120,6 +120,9 @@ where
     recording: Option<ReplayRecorder<T::Input>>,
     /// The last frame recorded to the replay recorder.
     last_recorded_frame: Frame,
+    /// Controls how the session reacts when a peer disconnects.
+    /// See [`DisconnectBehavior`] for options.
+    disconnect_behavior: DisconnectBehavior,
 }
 
 impl<T: Config> P2PSession<T> {
@@ -143,6 +146,7 @@ impl<T: Config> P2PSession<T> {
         event_queue_size: usize,
         recording: bool,
         telemetry: Option<Arc<dyn SessionTelemetry>>,
+        disconnect_behavior: DisconnectBehavior,
     ) -> Self {
         // local connection status
         let local_connect_status = vec![ConnectionStatus::default(); num_players];
@@ -211,6 +215,7 @@ impl<T: Config> P2PSession<T> {
             max_event_queue_size: event_queue_size,
             recording: recording.then(|| ReplayRecorder::new(num_players)),
             last_recorded_frame: Frame::NULL,
+            disconnect_behavior,
         }
     }
 
@@ -517,6 +522,137 @@ impl<T: Config> P2PSession<T> {
         for endpoint in self.player_reg.spectators.values_mut() {
             endpoint.send_all_messages(&mut self.socket);
         }
+    }
+
+    /// Returns the configured [`DisconnectBehavior`] for this session.
+    ///
+    /// Set at construction time via
+    /// [`crate::SessionBuilder::with_disconnect_behavior`]. Defaults to
+    /// [`DisconnectBehavior::Halt`] for back-compat with the legacy
+    /// GGRS-style "session halts on any peer drop" behavior.
+    #[must_use]
+    pub fn disconnect_behavior(&self) -> DisconnectBehavior {
+        self.disconnect_behavior
+    }
+
+    /// Removes a remote player from the session and continues with the
+    /// remaining peers (graceful drop), regardless of the session's
+    /// configured [`DisconnectBehavior`].
+    ///
+    /// This is the **explicit** form of graceful drop. The configured
+    /// [`DisconnectBehavior`] only governs **automatic** removal on the
+    /// disconnect-timeout path; calling this method always opts in to the
+    /// graceful-drop flow regardless of that setting. The mental model is:
+    ///
+    /// - `DisconnectBehavior::Halt` (default) + auto-timeout → session halts.
+    /// - `DisconnectBehavior::ContinueWithout` + auto-timeout → graceful drop.
+    /// - `remove_player(...)` (any `DisconnectBehavior`) → graceful drop.
+    ///
+    /// On invocation, the player's input queue is frozen (it repeats their
+    /// last confirmed input forever), the player is marked disconnected on
+    /// this session's connection-status table, the corresponding network
+    /// endpoint is disconnected, and a [`FortressEvent::PeerDropped`] event
+    /// is queued. [`FortressEvent::Disconnected`] is also emitted for
+    /// back-compat with code that consumes it. Remaining peers continue
+    /// advancing the session — the game layer decides how to handle the
+    /// gameplay impact (AI takeover, pause, end the match, etc.).
+    ///
+    /// For automatic graceful drop on disconnect timeout, configure
+    /// [`crate::SessionBuilder::with_disconnect_behavior`] with
+    /// [`DisconnectBehavior::ContinueWithout`].
+    ///
+    /// # Difference from [`Self::disconnect_player`]
+    ///
+    /// `disconnect_player` performs the legacy GGRS-style disconnect:
+    /// it marks the player disconnected and disconnects the endpoint, but
+    /// does *not* freeze the input queue or emit `PeerDropped`. With the
+    /// default [`DisconnectBehavior::Halt`], that is enough to halt
+    /// further frame advance because `confirmed_frame` stops progressing.
+    ///
+    /// `remove_player` extends that with the freeze + `PeerDropped` event
+    /// emission required for graceful peer drop.
+    ///
+    /// # Errors
+    /// - Returns [`InvalidRequestKind::DisconnectInvalidHandle`] if
+    ///   `player_handle` is not a registered handle.
+    /// - Returns [`InvalidRequestKind::DisconnectLocalPlayer`] if
+    ///   `player_handle` refers to a local player.
+    /// - Returns [`InvalidRequestKind::PlayerAlreadyRemoved`] if the player
+    ///   has already been removed (or otherwise marked disconnected).
+    ///
+    /// [`InvalidRequestKind::DisconnectInvalidHandle`]: crate::error::InvalidRequestKind::DisconnectInvalidHandle
+    /// [`InvalidRequestKind::DisconnectLocalPlayer`]: crate::error::InvalidRequestKind::DisconnectLocalPlayer
+    /// [`InvalidRequestKind::PlayerAlreadyRemoved`]: crate::error::InvalidRequestKind::PlayerAlreadyRemoved
+    #[must_use = "remove_player errors should be handled"]
+    pub fn remove_player(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError> {
+        let player_type = self.player_reg.handles.get(&player_handle).ok_or(
+            InvalidRequestKind::DisconnectInvalidHandle {
+                handle: player_handle,
+            },
+        )?;
+        let addr = match player_type {
+            PlayerType::Local => {
+                return Err(InvalidRequestKind::DisconnectLocalPlayer {
+                    handle: player_handle,
+                }
+                .into());
+            },
+            PlayerType::Spectator(_) => {
+                return Err(InvalidRequestKind::DisconnectInvalidHandle {
+                    handle: player_handle,
+                }
+                .into());
+            },
+            PlayerType::Remote(addr) => addr.clone(),
+        };
+
+        // Verify the player isn't already removed/disconnected. Using
+        // PlayerAlreadyRemoved (not AlreadyDisconnected) so applications can
+        // distinguish "double remove_player call" from the legacy double
+        // disconnect_player error.
+        let status = self
+            .local_connect_status
+            .get(player_handle.as_usize())
+            .ok_or(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::DisconnectStatusNotFound { player_handle },
+            })?;
+        if status.disconnected {
+            return Err(InvalidRequestKind::PlayerAlreadyRemoved {
+                handle: player_handle,
+            }
+            .into());
+        }
+        let last_frame = status.last_frame;
+
+        // Run the existing disconnect flow (mark disconnected, disconnect
+        // endpoint, set disconnect_frame for rollback). This keeps every
+        // legacy book-keeping side effect intact.
+        self.disconnect_player_at_frame(player_handle, last_frame);
+
+        // Freeze the input queue so further inputs for this player are
+        // silently ignored, and the queue keeps returning the last confirmed
+        // input forever for remaining peers' simulation.
+        if let Err(e) = self.sync_layer.freeze_player(player_handle) {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::InternalError,
+                "Failed to freeze input queue for handle {} during remove_player: {}",
+                player_handle,
+                e
+            );
+        }
+
+        self.event_queue.push_back(FortressEvent::PeerDropped {
+            handle: player_handle,
+            addr: addr.clone(),
+        });
+        // Emit Disconnected as well for back-compat with applications that
+        // consume the legacy event. Mirrors the auto-removal path in
+        // `Event::Disconnected`, which also emits both events for the same
+        // peer in the same batch.
+        self.event_queue
+            .push_back(FortressEvent::Disconnected { addr });
+        Ok(())
     }
 
     /// Disconnects a remote player and all other remote players with the same address from the session.
@@ -1290,6 +1426,215 @@ impl<T: Config> P2PSession<T> {
         self.frames_ahead
     }
 
+    /// Adjusts the input delay for a local player at runtime.
+    ///
+    /// This enables hybrid delay+rollback: a small fixed delay (1-3 frames)
+    /// reduces misprediction frequency. Call this in response to
+    /// [`FortressEvent::InputDelayRecommendation`] events or your own
+    /// heuristics.
+    ///
+    /// # Mid-session behavior
+    ///
+    /// - **Increasing** the delay mid-session is supported. The input queue
+    ///   replicates the most recently added input across the new gap so
+    ///   subsequent sequential inputs continue to be accepted, and the same
+    ///   replicated frames are pushed onto every remote endpoint's
+    ///   pending-output buffer so the remote peer's input sequence remains
+    ///   strictly monotonic.
+    /// - **Decreasing** the delay mid-session is **not** supported; doing so
+    ///   would require dropping inputs that may already have been sent to
+    ///   remote peers. An error is returned in that case.
+    /// - Mid-session increases require **exactly one local player on this
+    ///   peer**. The protocol bundles all local players' inputs into a single
+    ///   packet per frame; with multiple local players, synthesizing
+    ///   replicated bytes for the unaffected players' gap frames would
+    ///   require knowing inputs they have not yet produced. Set the delay
+    ///   before adding any inputs (typically via
+    ///   [`SessionBuilder::with_input_delay`]) when running with multiple
+    ///   local players.
+    ///
+    /// # Errors
+    /// - Returns [`FortressError`] if `player_handle` is not a registered
+    ///   local player.
+    /// - Returns [`FortressError`] (`FrameDelayTooLarge`) if `delay` exceeds
+    ///   `queue_length - 1`.
+    /// - Returns [`FortressError`] (`InputDelayDecreaseUnsupported`) if
+    ///   `delay` is less than the current delay and inputs have already been
+    ///   added.
+    /// - Returns [`FortressError`]
+    ///   (`InputDelayMidSessionMultiLocalUnsupported`) if attempting to
+    ///   increase delay mid-session with more than one local player.
+    /// - Returns [`FortressError`]
+    ///   (`InputDelayMidSessionPendingOutputFull`) if the requested increase
+    ///   would push more gap-fill frames into a remote's pending-output
+    ///   buffer than the configured `pending_output_limit` allows.
+    /// - Internal errors from the input queue or sync layer are surfaced
+    ///   unchanged.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use fortress_rollback::{
+    ///     Config, FortressError, FortressEvent, P2PSession, PlayerHandle,
+    /// };
+    ///
+    /// fn apply_recommendations<C: Config>(
+    ///     session: &mut P2PSession<C>,
+    /// ) -> Result<(), FortressError> {
+    ///     // Collect recommendations first to avoid simultaneous mutable borrows
+    ///     // of the session via events() and set_input_delay().
+    ///     let recommendations: Vec<(PlayerHandle, usize)> = session
+    ///         .events()
+    ///         .filter_map(|event| match event {
+    ///             FortressEvent::InputDelayRecommendation {
+    ///                 player_handle,
+    ///                 suggested_delay,
+    ///                 ..
+    ///             } => Some((player_handle, suggested_delay)),
+    ///             _ => None,
+    ///         })
+    ///         .collect();
+    ///     for (handle, delay) in recommendations {
+    ///         session.set_input_delay(handle, delay)?;
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// [`FortressEvent::InputDelayRecommendation`]: crate::FortressEvent::InputDelayRecommendation
+    /// [`SessionBuilder::with_input_delay`]: crate::SessionBuilder::with_input_delay
+    pub fn set_input_delay(
+        &mut self,
+        player_handle: PlayerHandle,
+        delay: usize,
+    ) -> Result<(), FortressError> {
+        if !self.player_reg.is_local_player(player_handle) {
+            return Err(InvalidRequestKind::NotLocalPlayer {
+                handle: player_handle,
+            }
+            .into());
+        }
+
+        let current_delay = self.sync_layer.frame_delay(player_handle)?;
+        let prev_last_added = self.sync_layer.last_added_frame(player_handle)?;
+
+        // Detect mid-session increase: there are inputs in the queue and the
+        // requested delay is strictly greater than the current delay. Only in
+        // this case do we need to coordinate gap-fill on the protocol layer;
+        // the no-op, initial-setup, and decrease cases are handled entirely
+        // by the input queue.
+        let mid_session_increase = !prev_last_added.is_null()
+            && delay > current_delay
+            && delay <= self.sync_layer.max_frame_delay();
+
+        if mid_session_increase {
+            // Multi-local + mid-session increase is unsupported: see rustdoc.
+            let local_players = self.player_reg.num_local_players();
+            if local_players > 1 {
+                return Err(
+                    InvalidRequestKind::InputDelayMidSessionMultiLocalUnsupported { local_players }
+                        .into(),
+                );
+            }
+            // Verify every running remote endpoint has enough room for the
+            // gap-fill entries up front, before we mutate the input queue.
+            // Spectators receive *confirmed* inputs via a separate stream
+            // (`send_confirmed_inputs`) and are therefore unaffected by this
+            // gap-fill.
+            let delta = delay - current_delay;
+            let mut min_capacity = usize::MAX;
+            for endpoint in self.player_reg.remotes.values() {
+                min_capacity =
+                    std::cmp::min(min_capacity, endpoint.pending_output_capacity_remaining());
+            }
+            if delta > min_capacity {
+                return Err(InvalidRequestKind::InputDelayMidSessionPendingOutputFull {
+                    delta,
+                    capacity: min_capacity,
+                }
+                .into());
+            }
+        }
+
+        // Mutate the input queue. After this returns Ok, last_added_frame has
+        // advanced by `delta` if a mid-session gap-fill happened.
+        self.sync_layer.set_frame_delay(player_handle, delay)?;
+
+        if !mid_session_increase {
+            return Ok(());
+        }
+
+        let new_last_added = self.sync_layer.last_added_frame(player_handle)?;
+        let mut frame = safe_frame_add!(prev_last_added, 1, "P2PSession::set_input_delay gap fill");
+        // Push one InputBytes per replicated gap frame onto every remote
+        // endpoint's pending_output. We pre-validated capacity above.
+        while frame <= new_last_added {
+            let player_input = self.sync_layer.confirmed_input(player_handle, frame)?;
+            let mut inputs = std::collections::BTreeMap::new();
+            inputs.insert(player_handle, player_input);
+            for endpoint in self.player_reg.remotes.values_mut() {
+                endpoint.enqueue_replicated_input(&inputs);
+            }
+            frame = safe_frame_add!(frame, 1, "P2PSession::set_input_delay gap fill loop");
+        }
+
+        // Mirror the queue's advanced last_added_frame on the connect-status
+        // record so confirmed_frame()/last_frame stay consistent with what
+        // remote peers will observe. This must happen before flushing so that
+        // the Input message stamps `peer_connect_status[player_handle].last_frame`
+        // to the new value matching the gap-fill bytes payload.
+        if let Some(status) = self.local_connect_status.get_mut(player_handle.as_usize()) {
+            status.last_frame = new_last_added;
+        }
+
+        // Flush each remote's pending output now so the gap-fill frames travel
+        // on the wire promptly, just as they would have if produced by a
+        // regular advance_frame.
+        for endpoint in self.player_reg.remotes.values_mut() {
+            endpoint.flush_pending_output(&self.local_connect_status);
+            endpoint.send_all_messages(&mut self.socket);
+        }
+
+        Ok(())
+    }
+
+    /// Returns the current input delay (in frames) for a local player.
+    ///
+    /// # Errors
+    /// - Returns [`FortressError`] if `player_handle` is not a registered local player.
+    ///
+    /// # Example
+    ///
+    /// Inspect the current delay before applying a recommendation, so that
+    /// only strict increases are forwarded to [`set_input_delay`]:
+    ///
+    /// ```no_run
+    /// use fortress_rollback::{Config, FortressError, P2PSession, PlayerHandle};
+    ///
+    /// fn maybe_apply_recommendation<C: Config>(
+    ///     session: &mut P2PSession<C>,
+    ///     local_handle: PlayerHandle,
+    ///     recommended_delay: usize,
+    /// ) -> Result<(), FortressError> {
+    ///     let current = session.input_delay(local_handle)?;
+    ///     if recommended_delay > current {
+    ///         session.set_input_delay(local_handle, recommended_delay)?;
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// [`set_input_delay`]: Self::set_input_delay
+    pub fn input_delay(&self, player_handle: PlayerHandle) -> Result<usize, FortressError> {
+        if !self.player_reg.is_local_player(player_handle) {
+            return Err(InvalidRequestKind::NotLocalPlayer {
+                handle: player_handle,
+            }
+            .into());
+        }
+        self.sync_layer.frame_delay(player_handle)
+    }
+
     /// Returns the [`DesyncDetection`] mode set for this session at creation time.
     #[must_use]
     pub fn desync_detection(&self) -> DesyncDetection {
@@ -1927,6 +2272,8 @@ impl<T: Config> P2PSession<T> {
             },
             // disconnect the player, then forward to user
             Event::Disconnected => {
+                let continue_without =
+                    self.disconnect_behavior == DisconnectBehavior::ContinueWithout;
                 for &handle in player_handles.iter() {
                     // unwrap_or_else has side effects (violation reporting)
                     #[allow(clippy::map_unwrap_or)]
@@ -1948,8 +2295,32 @@ impl<T: Config> P2PSession<T> {
                     };
 
                     self.disconnect_player_at_frame(handle, last_frame);
+
+                    // If the application opted into ContinueWithout, freeze the
+                    // affected (non-spectator) input queue so subsequent inputs
+                    // for this player are dropped silently and the queue keeps
+                    // returning the last confirmed value forever, and emit
+                    // PeerDropped so the application can react.
+                    if continue_without && handle.is_valid_player_for(self.num_players) {
+                        if let Err(e) = self.sync_layer.freeze_player(handle) {
+                            report_violation!(
+                                ViolationSeverity::Warning,
+                                ViolationKind::InternalError,
+                                "Failed to freeze input queue for handle {} during peer drop: {}",
+                                handle,
+                                e
+                            );
+                        }
+                        self.event_queue.push_back(FortressEvent::PeerDropped {
+                            handle,
+                            addr: addr.clone(),
+                        });
+                    }
                 }
 
+                // Always emit Disconnected so existing applications relying on
+                // it are unaffected. PeerDropped is in addition for the
+                // ContinueWithout path.
                 self.event_queue
                     .push_back(FortressEvent::Disconnected { addr });
             },
@@ -2108,6 +2479,7 @@ impl<T: Config> fmt::Debug for P2PSession<T> {
             .field("max_prediction", &self.max_prediction)
             .field("state", &self.state)
             .field("disconnect_frame", &self.disconnect_frame)
+            .field("disconnect_behavior", &self.disconnect_behavior)
             .field("current_frame", &self.sync_layer.current_frame())
             .field("frames_ahead", &self.frames_ahead)
             .field("desync_detection", &self.desync_detection)

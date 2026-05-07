@@ -81,7 +81,8 @@ pub use replay::{Replay, ReplayMetadata};
 use serde::{de::DeserializeOwned, Serialize};
 pub use sessions::builder::SessionBuilder;
 pub use sessions::config::{
-    ClockFn, InputQueueConfig, ProtocolConfig, SaveMode, SpectatorConfig, SyncConfig,
+    ClockFn, DisconnectBehavior, InputQueueConfig, ProtocolConfig, SaveMode, SpectatorConfig,
+    SyncConfig,
 };
 pub use sessions::event_drain::EventDrain;
 pub use sessions::p2p_session::P2PSession;
@@ -1578,6 +1579,51 @@ where
         /// The checksum computed during replay playback.
         actual_checksum: u128,
     },
+    /// Recommends adjusting the input delay for a local player based on
+    /// observed network conditions.
+    ///
+    /// **No built-in emitter currently produces this event.** The variant
+    /// exists so that applications and future library features (such as a
+    /// frame-advantage heuristic) may construct and dispatch recommendations
+    /// through the standard event channel. Application code may consume this
+    /// event by calling [`P2PSession::set_input_delay`] in response.
+    ///
+    /// [`P2PSession::set_input_delay`]: crate::P2PSession::set_input_delay
+    InputDelayRecommendation {
+        /// The player handle this recommendation applies to.
+        player_handle: PlayerHandle,
+        /// The current input delay (in frames) for this player at the time
+        /// of emission.
+        current_delay: usize,
+        /// The suggested input delay (in frames).
+        suggested_delay: usize,
+    },
+    /// A peer was removed from the session and the session continues with the
+    /// remaining peers (graceful drop). Emitted in two situations:
+    ///
+    /// 1. Auto-removed because the disconnect timeout fired AND
+    ///    [`crate::DisconnectBehavior::ContinueWithout`] was configured.
+    /// 2. Removed explicitly via [`crate::P2PSession::remove_player`]. The
+    ///    explicit form opts in to graceful-drop semantics regardless of the
+    ///    configured `DisconnectBehavior`.
+    ///
+    /// In both cases the dropped peer's input queue is frozen and will repeat
+    /// their last confirmed input forever for remaining peers' simulation.
+    ///
+    /// # Coexistence with [`Self::Disconnected`]
+    ///
+    /// `FortressEvent::Disconnected` is **also** emitted for the same peer in
+    /// the same `events()` batch, immediately after `PeerDropped`. Legacy
+    /// applications that consume `Disconnected` continue to work unchanged;
+    /// graceful-drop-aware applications should match on `PeerDropped` (or on
+    /// both) to take graceful-drop-specific actions such as marking the
+    /// player as AI-controlled or showing a "left the game" UI.
+    PeerDropped {
+        /// Handle of the removed player.
+        handle: PlayerHandle,
+        /// Address of the removed player.
+        addr: T::Address,
+    },
 }
 
 impl<T: Config> std::fmt::Display for FortressEvent<T>
@@ -1638,6 +1684,18 @@ where
                 expected_checksum,
                 actual_checksum
             ),
+            Self::InputDelayRecommendation {
+                player_handle,
+                current_delay,
+                suggested_delay,
+            } => write!(
+                f,
+                "InputDelayRecommendation(player={}, current={}, suggested={})",
+                player_handle, current_delay, suggested_delay
+            ),
+            Self::PeerDropped { handle, addr } => {
+                write!(f, "PeerDropped(handle={}, addr={})", handle, addr)
+            },
         }
     }
 }

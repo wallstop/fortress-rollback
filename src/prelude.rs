@@ -107,4 +107,4 @@ pub use crate::NetworkStats;
 pub use crate::telemetry::{CollectingTelemetry, SessionTelemetry, TelemetryEvent};
 
 // Common configuration types
-pub use crate::sessions::config::{ProtocolConfig, SyncConfig};
+pub use crate::sessions::config::{DisconnectBehavior, ProtocolConfig, SyncConfig};

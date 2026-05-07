@@ -317,6 +317,141 @@ impl<T: Config> SyncLayer<T> {
         Ok(())
     }
 
+    /// Returns the current frame delay for a player.
+    ///
+    /// # Errors
+    /// Returns a [`FortressError`] if `player_handle >= num_players`.
+    pub fn frame_delay(&self, player_handle: PlayerHandle) -> Result<usize, FortressError> {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            return Err(FortressError::InvalidPlayerHandle {
+                handle: player_handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        let len = self.input_queues.len();
+        let queue = self.input_queues.get(player_handle.as_usize()).ok_or(
+            FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                    name: "input_queues",
+                    index: player_handle.as_usize(),
+                    length: len,
+                }),
+            },
+        )?;
+        Ok(queue.frame_delay())
+    }
+
+    /// Returns the maximum allowed frame delay for any player in this `SyncLayer`.
+    ///
+    /// All input queues share the same `queue_length`, so this is the same value
+    /// for every player. Returns `0` when no input queues are present, which only
+    /// occurs in degenerate sessions with zero players.
+    #[must_use]
+    pub fn max_frame_delay(&self) -> usize {
+        self.input_queues
+            .first()
+            .map_or(0, InputQueue::max_frame_delay)
+    }
+
+    /// Returns the most recently added input frame for the given player, or
+    /// [`Frame::NULL`] if no inputs have been added yet.
+    ///
+    /// # Errors
+    /// Returns a [`FortressError`] if `player_handle >= num_players`.
+    pub(crate) fn last_added_frame(
+        &self,
+        player_handle: PlayerHandle,
+    ) -> Result<Frame, FortressError> {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            return Err(FortressError::InvalidPlayerHandle {
+                handle: player_handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        let len = self.input_queues.len();
+        let queue = self.input_queues.get(player_handle.as_usize()).ok_or(
+            FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                    name: "input_queues",
+                    index: player_handle.as_usize(),
+                    length: len,
+                }),
+            },
+        )?;
+        Ok(queue.last_added_frame())
+    }
+
+    /// Returns the confirmed input for the given player at the given frame.
+    /// Used by the session layer to retrieve the replicated gap-fill bytes
+    /// after a mid-session frame-delay increase.
+    ///
+    /// # Errors
+    /// Returns a [`FortressError`] if `player_handle >= num_players`, the
+    /// queue's slot does not contain `frame`, or the queue is missing.
+    pub(crate) fn confirmed_input(
+        &self,
+        player_handle: PlayerHandle,
+        frame: Frame,
+    ) -> Result<PlayerInput<T::Input>, FortressError> {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            return Err(FortressError::InvalidPlayerHandle {
+                handle: player_handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        let len = self.input_queues.len();
+        let queue = self.input_queues.get(player_handle.as_usize()).ok_or(
+            FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                    name: "input_queues",
+                    index: player_handle.as_usize(),
+                    length: len,
+                }),
+            },
+        )?;
+        queue.confirmed_input(frame)
+    }
+
+    /// Freezes the input queue for a specific player.
+    ///
+    /// After this call, [`Self::add_remote_input`] for `player_handle` is
+    /// silently dropped (the underlying [`InputQueue::add_input`] becomes a
+    /// no-op), and the player's last confirmed input is repeated forever from
+    /// the queue. This is part of the graceful peer-drop flow: combined with
+    /// `connect_status[handle].disconnected = true` at the session level,
+    /// remaining peers can keep simulating using the dropped peer's last
+    /// confirmed input (reported as [`crate::InputStatus::Disconnected`] by
+    /// [`Self::synchronized_inputs`]).
+    ///
+    /// # Errors
+    /// Returns [`FortressError::InvalidPlayerHandle`] if `player_handle` is
+    /// out of range for this sync layer.
+    ///
+    /// [`InputQueue::add_input`]: crate::__internal::InputQueue::add_input
+    pub(crate) fn freeze_player(
+        &mut self,
+        player_handle: PlayerHandle,
+    ) -> Result<(), FortressError> {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            return Err(FortressError::InvalidPlayerHandle {
+                handle: player_handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        let len = self.input_queues.len();
+        let queue = self.input_queues.get_mut(player_handle.as_usize()).ok_or(
+            FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                    name: "input_queues",
+                    index: player_handle.as_usize(),
+                    length: len,
+                }),
+            },
+        )?;
+        queue.freeze();
+        Ok(())
+    }
+
     /// Resets the prediction state for all input queues.
     ///
     /// # Note
@@ -451,7 +586,19 @@ impl<T: Config> SyncLayer<T> {
         };
         for (i, con_stat) in connect_status.iter().enumerate() {
             if con_stat.disconnected && con_stat.last_frame < self.current_frame {
-                inputs.push((T::Input::default(), InputStatus::Disconnected));
+                // Disconnected past last_frame. If the player's queue was
+                // frozen via `freeze_player` (graceful peer drop), surface
+                // the queue's last confirmed input so remaining peers see
+                // the dropped peer's most recent good input rather than a
+                // default value. For non-frozen disconnects (legacy halt
+                // path) keep returning the default to preserve back-compat.
+                let queue = self.input_queues.get(i)?;
+                let value = if queue.is_frozen() {
+                    queue.last_confirmed_input().unwrap_or_default()
+                } else {
+                    T::Input::default()
+                };
+                inputs.push((value, InputStatus::Disconnected));
             } else {
                 let queue = self.input_queues.get_mut(i)?;
                 inputs.push(queue.input(self.current_frame)?);
@@ -461,6 +608,19 @@ impl<T: Config> SyncLayer<T> {
     }
 
     /// Returns confirmed inputs for all players for the current frame of the sync layer.
+    ///
+    /// # Frozen-queue semantics
+    ///
+    /// When a player has been gracefully dropped via [`Self::freeze_player`]
+    /// (the `ContinueWithout` graceful-drop path), and the player is marked
+    /// disconnected past their last frame, this method surfaces the queue's
+    /// frozen `last_confirmed_input` (encoded into a `PlayerInput` with
+    /// [`Frame::NULL`]) instead of a blank/default input. This keeps the byte
+    /// stream sent to spectators consistent with the input stream remaining
+    /// peers actually simulate (see [`Self::synchronized_inputs`]). For
+    /// non-frozen disconnects (legacy halt path) and for queues that never
+    /// received any confirmed input before being frozen, blank input is still
+    /// returned to preserve back-compat.
     pub(crate) fn confirmed_inputs(
         &self,
         frame: Frame,
@@ -468,19 +628,38 @@ impl<T: Config> SyncLayer<T> {
     ) -> Result<Vec<PlayerInput<T::Input>>, FortressError> {
         let mut inputs = Vec::new();
         for (i, con_stat) in connect_status.iter().enumerate() {
+            let queue = self
+                .input_queues
+                .get(i)
+                .ok_or(FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                        name: "input_queues",
+                        index: i,
+                        length: self.input_queues.len(),
+                    }),
+                })?;
             if con_stat.disconnected && con_stat.last_frame < frame {
-                inputs.push(PlayerInput::blank_input(Frame::NULL));
+                // Mirror the freeze logic in `synchronized_inputs` so spectator
+                // state and player state agree on the dropped peer's input.
+                //
+                // The `Frame::NULL` stamp on dropped-peer entries is wire-safe:
+                // `InputBytes::from_inputs` derives the packet's frame from the
+                // first non-NULL entry (any still-connected peer in the same
+                // `inputs` slice supplies it), and `send_confirmed_inputs_to_spectators`
+                // tolerates `Frame::NULL` in its consistency check.
+                let frozen_input = if queue.is_frozen() {
+                    queue.last_confirmed_input()
+                } else {
+                    None
+                };
+                match frozen_input {
+                    Some(input) => inputs.push(PlayerInput {
+                        frame: Frame::NULL,
+                        input,
+                    }),
+                    None => inputs.push(PlayerInput::blank_input(Frame::NULL)),
+                }
             } else {
-                let queue =
-                    self.input_queues
-                        .get(i)
-                        .ok_or(FortressError::InternalErrorStructured {
-                            kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
-                                name: "input_queues",
-                                index: i,
-                                length: self.input_queues.len(),
-                            }),
-                        })?;
                 inputs.push(queue.confirmed_input(frame)?);
             }
         }
