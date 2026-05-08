@@ -49,6 +49,8 @@ Demonstrates all available configuration options including:
 - Custom fine-tuned configurations
 - Competitive and casual setups
 - Spectator configuration
+- Disconnect behavior selection: `DisconnectBehavior::Halt` (default, legacy halt-on-drop) vs `DisconnectBehavior::ContinueWithout` (graceful peer drop) via `SessionBuilder::with_disconnect_behavior`
+- Runtime input-delay adjustment via `P2PSession::set_input_delay` / `P2PSession::input_delay` for hybrid delay+rollback netcode (constraints and error variants documented in the [User Guide](../docs/user-guide.md#adjusting-input-delay-at-runtime))
 
 ```shell
 cargo run --example configuration
@@ -80,7 +82,7 @@ Demonstrates proper error handling patterns:
 - Session setup errors
 - Runtime error handling
 - Recovery strategies
-- Comprehensive error matching
+- Comprehensive error matching, including the runtime-input-delay variants (`InputDelayDecreaseUnsupported`, `InputDelayMidSessionMultiLocalUnsupported`, `InputDelayMidSessionPendingOutputFull`), the `PlayerAlreadyRemoved` variant returned by `P2PSession::remove_player`, and the `InternalErrorKind::InputQueueGapFillFailed` library-bug variant
 
 ```shell
 cargo run --example error_handling

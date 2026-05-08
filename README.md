@@ -94,6 +94,8 @@ Alpha / experimental only.
 - **Config Presets**: `SyncConfig::lan()`, `ProtocolConfig::mobile()`, etc. for common network conditions
 - **Player Handle Convenience Methods**: Easy access to local/remote handles for 1v1 games, player type checking, and iteration — see [User Guide](./docs/user-guide.md#player-handle-convenience-methods)
 - **Unified Session Trait**: Write generic game loops via `Session<T>` — works with P2P, spectator, and sync test sessions — see [User Guide](./docs/user-guide.md#using-the-session-trait)
+- **Runtime Input Delay**: Adjust per-player input delay mid-session via `P2PSession::set_input_delay` for hybrid delay+rollback netcode — see [User Guide](./docs/user-guide.md#adjusting-input-delay-at-runtime)
+- **Graceful Peer Drop**: Configure `DisconnectBehavior::ContinueWithout` so the session keeps advancing for surviving peers, or remove a peer explicitly with `P2PSession::remove_player` (kick / surrender / leave-match) — see [User Guide](./docs/user-guide.md#disconnect-behavior-and-graceful-peer-drop)
 
 📋 **[Complete comparison with GGRS →](./docs/fortress-vs-ggrs.md)** — See all differences, bug fixes, and migration steps
 

@@ -19,6 +19,8 @@ Fortress Rollback is a **correctness-first** Rust library for peer-to-peer rollb
 - **Rollback Netcode** — Peer-to-peer architecture with input prediction and rollback. Hides latency by predicting inputs and seamlessly correcting when actual inputs arrive. [Read the architecture](Architecture)
 - **Formally Verified** — Critical paths verified with TLA+ model checking, Z3 SMT proofs, and Kani for Rust. Protocol correctness proven, not just tested. [View specifications](Formal-Specification)
 - **Deterministic by Design** — Same inputs = same outputs, guaranteed. Deterministic data structures, hashing, and RNG throughout. No hidden non-determinism. [Determinism model](Determinism-Model)
+- **Runtime Input Delay** — Adjust input delay at runtime via `P2PSession::set_input_delay` / `input_delay` as network conditions change, with strict monotonicity guarantees for remote peers. [Runtime input delay](User-Guide#adjusting-input-delay-at-runtime)
+- **Graceful Peer Drop** — Opt in to graceful peer drop with `DisconnectBehavior::ContinueWithout` so the session keeps advancing when a peer disconnects, or remove peers explicitly with `P2PSession::remove_player`. [Graceful peer drop](User-Guide#disconnect-behavior-and-graceful-peer-drop)
 
 <!-- markdownlint-enable MD030 -->
 

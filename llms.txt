@@ -10,6 +10,9 @@ Key information:
 - `Config::Address` requires `Ord` trait (breaking change from GGRS)
 - Desync detection enabled by default (interval: 60 frames)
 - Types renamed: `GgrsError` → `FortressError`, `GgrsEvent` → `FortressEvent`, `GgrsRequest` → `FortressRequest`
+- Runtime input-delay adjustment via `P2PSession::set_input_delay` / `P2PSession::input_delay` (mid-session increases only, single-local-player only)
+- Configurable disconnect behavior via `DisconnectBehavior` (`Halt` legacy default, `ContinueWithout` for graceful drop) selected with `SessionBuilder::with_disconnect_behavior`
+- Explicit graceful peer removal via `P2PSession::remove_player`, which always emits `FortressEvent::PeerDropped` followed by `FortressEvent::Disconnected` regardless of the configured `DisconnectBehavior`
 
 ## User Documentation
 

@@ -23,7 +23,8 @@
 )]
 
 use fortress_rollback::{
-    Config, FortressError, PlayerHandle, PlayerType, SessionBuilder, UdpNonBlockingSocket,
+    Config, FortressError, InternalErrorKind, InvalidRequestKind, PlayerHandle, PlayerType,
+    SessionBuilder, UdpNonBlockingSocket,
 };
 use std::net::SocketAddr;
 
@@ -42,6 +43,7 @@ fn main() {
     configuration_errors();
     session_setup_errors();
     runtime_error_handling();
+    runtime_input_delay_and_remove_errors();
     error_recovery_patterns();
 }
 
@@ -259,6 +261,229 @@ fn runtime_error_handling() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     println!();
+}
+
+/// Demonstrates how to react to the new structured error variants returned
+/// by `P2PSession::set_input_delay` and `P2PSession::remove_player`.
+///
+/// All matches use the structured `InvalidRequestStructured { kind }` and
+/// `InternalErrorStructured { kind }` forms so callers can pattern-match on
+/// the typed variant rather than parsing free-form strings.
+///
+/// Variants exercised here (each with a typical recovery hint):
+///
+/// - `InvalidRequestKind::InputDelayDecreaseUnsupported { current, requested }`
+///   — once inputs have been added, only increases are permitted; carry the
+///   lower delay over to the next session.
+/// - `InvalidRequestKind::InputDelayMidSessionMultiLocalUnsupported { local_players }`
+///   — set the delay via `SessionBuilder::with_input_delay` before inputs
+///   are added when running multi-local on this peer.
+/// - `InvalidRequestKind::InputDelayMidSessionPendingOutputFull { delta, capacity }`
+///   — apply the change in smaller increments, or wait for the remote to
+///   acknowledge outstanding inputs and retry.
+/// - `InvalidRequestKind::PlayerAlreadyRemoved { handle }` — `remove_player`
+///   was called twice for the same handle, or the peer was already
+///   auto-removed under `DisconnectBehavior::ContinueWithout`; treat as a
+///   no-op.
+/// - `InternalErrorKind::InputQueueGapFillFailed { frame }` — library
+///   invariant violation while replicating gap-fill bytes during a
+///   mid-session input-delay increase; report as a bug.
+fn runtime_input_delay_and_remove_errors() {
+    println!("--- Runtime Input-Delay and Remove-Player Error Variants ---\n");
+
+    // Build a session locally so we can issue `set_input_delay`/`remove_player`
+    // calls and pattern-match on the returned error variants. The session
+    // never actually establishes a handshake; we rely on the validation
+    // performed inside the session methods, which runs regardless of
+    // synchronization state.
+    let socket = match UdpNonBlockingSocket::bind_to_port(0) {
+        Ok(s) => s,
+        Err(err) => {
+            println!("   Could not bind socket: {err}; skipping demo.");
+            return;
+        },
+    };
+    let remote: SocketAddr = match "127.0.0.1:17999".parse() {
+        Ok(addr) => addr,
+        Err(err) => {
+            println!("   Could not parse remote address: {err}; skipping demo.");
+            return;
+        },
+    };
+
+    let local_handle = PlayerHandle::new(0);
+    let remote_handle = PlayerHandle::new(1);
+    let session_result = SessionBuilder::<GameConfig>::new()
+        .with_num_players(2)
+        .unwrap()
+        .with_input_delay(2)
+        .unwrap()
+        .add_player(PlayerType::Local, local_handle)
+        .and_then(|b| b.add_player(PlayerType::Remote(remote), remote_handle))
+        .and_then(|b| b.start_p2p_session(socket));
+
+    let mut session = match session_result {
+        Ok(s) => s,
+        Err(err) => {
+            println!("   Could not start P2P session: {err}; skipping demo.");
+            return;
+        },
+    };
+
+    println!("1. set_input_delay error variants:");
+    let _ = demonstrate_set_input_delay_errors(&mut session, local_handle);
+
+    println!("\n2. remove_player error variants:");
+    let _ = demonstrate_remove_player_errors(&mut session, local_handle, remote_handle);
+
+    println!("\n3. InternalErrorKind::InputQueueGapFillFailed:");
+    println!("   This variant fires only on a library-invariant violation while replicating");
+    println!("   gap-fill bytes during a mid-session input-delay increase. Treat as a bug:");
+    println!("   ```rust");
+    println!("   Err(FortressError::InternalErrorStructured {{");
+    println!("       kind: InternalErrorKind::InputQueueGapFillFailed {{ frame }},");
+    println!("   }}) => {{");
+    println!(
+        "       eprintln!(\"internal: input-queue gap-fill failed at frame {{frame}}; please report\");"
+    );
+    println!("   }}");
+    println!("   ```");
+    println!();
+}
+
+/// Issues a few `set_input_delay` calls and pattern-matches on the structured
+/// `InvalidRequestKind` variants the call can return. Uses `?` to propagate
+/// any unexpected `FortressError`; never `unwrap`/`expect`/`panic!`.
+fn demonstrate_set_input_delay_errors<C: Config>(
+    session: &mut fortress_rollback::P2PSession<C>,
+    local_handle: PlayerHandle,
+) -> Result<(), FortressError> {
+    // Initial-setup decrease is allowed (no inputs added yet); use that path
+    // to leave the session in a deterministic state.
+    if let Err(err) = session.set_input_delay(local_handle, 1) {
+        println!("   Unexpected error setting initial delay: {err}");
+        return Err(err);
+    }
+
+    // Now request a decrease again. This is still pre-input so it succeeds —
+    // we set up the conditions for a *mid-session* decrease in `runtime`
+    // tests; this function focuses on shape-matching every variant.
+    if let Err(err) = session.set_input_delay(local_handle, 0) {
+        println!("   Unexpected error decreasing delay: {err}");
+        return Err(err);
+    }
+
+    // Demonstrate the typed-error pattern shapes a caller writes for each of
+    // the three new `InputDelay*` variants. We do not need to actually
+    // trigger every error here — the request says "demonstrate the API".
+    let demo_target = 4_usize;
+    match session.set_input_delay(local_handle, demo_target) {
+        Ok(()) => println!("   set_input_delay(.., {demo_target}) accepted."),
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::InputDelayDecreaseUnsupported { current, requested },
+        }) => {
+            // Recovery: surface a meaningful rejection to the player; the
+            // lower delay can be carried over to the next session.
+            println!(
+                "   InputDelayDecreaseUnsupported: cannot lower delay from {current} to \
+                 {requested} mid-session; the lower value can be carried over to the next match."
+            );
+        },
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::InputDelayMidSessionMultiLocalUnsupported { local_players },
+        }) => {
+            // Recovery: configure delay before adding inputs (e.g., via
+            // `SessionBuilder::with_input_delay`) for couch-co-op setups
+            // with more than one local player on this peer.
+            println!(
+                "   InputDelayMidSessionMultiLocalUnsupported: mid-session increase not \
+                 supported with {local_players} local players on this peer; configure delay \
+                 via SessionBuilder::with_input_delay before adding inputs."
+            );
+        },
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::InputDelayMidSessionPendingOutputFull { delta, capacity },
+        }) => {
+            // Recovery: apply the change in smaller increments, or wait for
+            // the remote to acknowledge outstanding inputs and retry.
+            println!(
+                "   InputDelayMidSessionPendingOutputFull: gap-fill needs {delta} slots, only \
+                 {capacity} available; retry next tick or apply in smaller increments."
+            );
+        },
+        Err(FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::InputQueueGapFillFailed { frame },
+        }) => {
+            // Library bug; surface as fatal and ask the user to file a report
+            // with the failing frame and the call's parameters.
+            println!(
+                "   InputQueueGapFillFailed at frame {frame}: please file a bug with the call \
+                 parameters."
+            );
+        },
+        Err(other) => {
+            // Anything else is an unexpected error; propagate.
+            return Err(other);
+        },
+    }
+
+    Ok(())
+}
+
+/// Issues a few `remove_player` calls and pattern-matches on the structured
+/// `InvalidRequestKind` variants. Uses `?` to propagate unexpected errors;
+/// never `unwrap`/`expect`/`panic!`.
+fn demonstrate_remove_player_errors<C: Config>(
+    session: &mut fortress_rollback::P2PSession<C>,
+    local_handle: PlayerHandle,
+    remote_handle: PlayerHandle,
+) -> Result<(), FortressError> {
+    // Removing a local player is rejected with `DisconnectLocalPlayer`; the
+    // recovery is to tear down the session instead of trying to remove the
+    // local player.
+    match session.remove_player(local_handle) {
+        Ok(()) => println!("   Unexpected: removed local player (this should not happen)"),
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::DisconnectLocalPlayer { handle },
+        }) => {
+            println!(
+                "   DisconnectLocalPlayer({handle}): local players cannot be removed; tear down \
+                 the session instead."
+            );
+        },
+        Err(other) => {
+            println!("   Unexpected error removing local player: {other}");
+            return Err(other);
+        },
+    }
+
+    // Remove the remote player gracefully.
+    match session.remove_player(remote_handle) {
+        Ok(()) => println!("   Removed remote player {remote_handle} (graceful drop)."),
+        Err(other) => {
+            println!("   Unexpected error on first remove: {other}");
+            return Err(other);
+        },
+    }
+
+    // Removing the same remote player a second time returns
+    // `PlayerAlreadyRemoved`; treat as a no-op.
+    match session.remove_player(remote_handle) {
+        Ok(()) => println!("   Unexpected: removed already-removed player"),
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::PlayerAlreadyRemoved { handle },
+        }) => {
+            // Recovery: no-op; the peer is already in the graceful-drop
+            // terminal state.
+            println!(
+                "   PlayerAlreadyRemoved({handle}): peer already in graceful-drop terminal \
+                 state; ignoring duplicate request."
+            );
+        },
+        Err(other) => return Err(other),
+    }
+
+    Ok(())
 }
 
 /// Patterns for graceful error recovery

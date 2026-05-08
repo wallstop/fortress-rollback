@@ -26,8 +26,9 @@
 )]
 
 use fortress_rollback::{
-    Config, DesyncDetection, ProtocolConfig, SaveMode, SessionBuilder, SpectatorConfig, SyncConfig,
-    TimeSyncConfig,
+    Config, DesyncDetection, DisconnectBehavior, FortressError, InvalidRequestKind, PlayerHandle,
+    PlayerType, ProtocolConfig, SaveMode, SessionBuilder, SpectatorConfig, SyncConfig,
+    TimeSyncConfig, UdpNonBlockingSocket,
 };
 use std::net::SocketAddr;
 use web_time::Duration;
@@ -51,6 +52,8 @@ fn main() {
     casual_online_setup();
     spectator_setup();
     dynamic_configuration();
+    disconnect_behavior_setup();
+    runtime_input_delay_demo();
 }
 
 /// Basic configuration with sensible defaults
@@ -421,4 +424,171 @@ fn choose_config_for_network(rtt_ms: u32, packet_loss_percent: f32) -> (usize, S
     };
 
     (input_delay, sync_config, prediction_window)
+}
+
+/// Demonstrates how to opt in to graceful peer drop via
+/// [`SessionBuilder::with_disconnect_behavior`].
+///
+/// `DisconnectBehavior::Halt` is the default, preserving the legacy
+/// halt-on-drop semantics. `DisconnectBehavior::ContinueWithout` enables the
+/// graceful auto-removal flow on the **automatic** disconnect-timeout path:
+/// the dropped peer's input queue is frozen at their last confirmed input,
+/// `FortressEvent::PeerDropped { handle, addr }` is emitted (followed by the
+/// legacy `FortressEvent::Disconnected { addr }`), and the remaining peers
+/// keep advancing using the frozen input.
+///
+/// `DisconnectBehavior` only governs the automatic-timeout path. The legacy
+/// `P2PSession::disconnect_player` retains its non-graceful semantics under
+/// either setting; the explicit `P2PSession::remove_player` always performs
+/// a graceful drop regardless of this setting.
+fn disconnect_behavior_setup() {
+    println!("--- Disconnect Behavior Selection ---\n");
+
+    // Default behavior is `Halt`: a peer drop halts the session.
+    let halt_builder = SessionBuilder::<GameConfig>::new()
+        .with_num_players(2)
+        .unwrap()
+        .with_disconnect_behavior(DisconnectBehavior::Halt);
+    println!("`DisconnectBehavior::Halt` (default, legacy halt-on-drop):");
+    println!("  - On auto-timeout: confirmed_frame() stalls; session halts.");
+    println!("  - Suitable for 1v1 competitive matches and back-compat with");
+    println!("    legacy GGRS-style code.");
+    println!("  Builder: {:?}\n", halt_builder);
+
+    // Opt in to graceful drop for free-for-all / 3+ player games.
+    let graceful_builder = SessionBuilder::<GameConfig>::new()
+        .with_num_players(3)
+        .unwrap()
+        .with_disconnect_behavior(DisconnectBehavior::ContinueWithout);
+    println!("`DisconnectBehavior::ContinueWithout` (graceful peer drop):");
+    println!("  - On auto-timeout: dropped peer's input queue is frozen at their");
+    println!("    last confirmed value, FortressEvent::PeerDropped is emitted");
+    println!("    (followed by Disconnected), and remaining peers keep advancing.");
+    println!("  - Suitable for 3+ player games, casual lobbies, and any flow");
+    println!("    where the show must go on after a peer leaves.");
+    println!("  Builder: {:?}\n", graceful_builder);
+}
+
+/// Demonstrates `P2PSession::set_input_delay` / `P2PSession::input_delay`
+/// for runtime input-delay adjustment.
+///
+/// Constraints (each surfaced via a structured `InvalidRequestKind` variant):
+///
+/// - `NotLocalPlayer { handle }` — handle is not registered as a local player.
+/// - `FrameDelayTooLarge { delay, max_delay }` — delay exceeds the queue's
+///   `max_frame_delay()`.
+/// - `InputDelayDecreaseUnsupported { current, requested }` — once inputs
+///   have been added, only increases are permitted (decreases are allowed
+///   before the first input is added).
+/// - `InputDelayMidSessionMultiLocalUnsupported { local_players }` — a
+///   mid-session increase requires exactly one local player on this peer.
+/// - `InputDelayMidSessionPendingOutputFull { delta, capacity }` — the
+///   gap-fill frames the increase would enqueue exceed a remote's
+///   `pending_output_limit` capacity. Apply the change in smaller increments
+///   or wait for outstanding inputs to be acknowledged and retry.
+///
+/// In addition, `InternalErrorKind::InputQueueGapFillFailed { frame }` may
+/// fire if an internal invariant is violated while replicating gap-fill bytes
+/// during a mid-session increase; treat as a library bug and report it.
+fn runtime_input_delay_demo() {
+    println!("--- Runtime Input Delay Demo ---\n");
+
+    // Bind to ephemeral ports so we can exercise the live-session API. Both
+    // ports are local; this never actually establishes the handshake — it is
+    // enough to demonstrate the API surface.
+    let socket = match UdpNonBlockingSocket::bind_to_port(0) {
+        Ok(s) => s,
+        Err(err) => {
+            println!("   Could not bind socket: {err}; skipping demo.");
+            return;
+        },
+    };
+    let remote: SocketAddr = match "127.0.0.1:17799".parse() {
+        Ok(addr) => addr,
+        Err(err) => {
+            println!("   Could not parse remote address: {err}; skipping demo.");
+            return;
+        },
+    };
+
+    let local_handle = PlayerHandle::new(0);
+    let session_result = SessionBuilder::<GameConfig>::new()
+        .with_num_players(2)
+        .unwrap()
+        .with_input_delay(2)
+        .unwrap()
+        .add_player(PlayerType::Local, local_handle)
+        .and_then(|b| b.add_player(PlayerType::Remote(remote), PlayerHandle::new(1)))
+        .and_then(|b| b.start_p2p_session(socket));
+
+    let mut session = match session_result {
+        Ok(s) => s,
+        Err(err) => {
+            println!("   Could not start P2P session: {err}; skipping demo.");
+            return;
+        },
+    };
+
+    // Read the current delay (set via `with_input_delay(2)` above).
+    match session.input_delay(local_handle) {
+        Ok(delay) => println!("   Initial input delay: {delay} frame(s)"),
+        Err(err) => {
+            println!("   Could not read input delay: {err}; aborting demo.");
+            return;
+        },
+    }
+
+    // Apply an *initial-setup* increase (no inputs added yet → applies cleanly
+    // with no gap-fill replication).
+    match session.set_input_delay(local_handle, 3) {
+        Ok(()) => println!("   Increased input delay to 3 frame(s)."),
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::InputDelayMidSessionPendingOutputFull { delta, capacity },
+        }) => {
+            // Recovery: apply the change in smaller increments next tick, or
+            // wait for the remote to acknowledge outstanding inputs and retry.
+            println!(
+                "   Increase deferred: pending-output buffer needs {delta} slots ({capacity} \
+                 available). Retry next tick."
+            );
+        },
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::InputDelayMidSessionMultiLocalUnsupported { local_players },
+        }) => {
+            // Recovery: configure delay before adding inputs (e.g., via
+            // `SessionBuilder::with_input_delay`) for couch-co-op setups with
+            // more than one local player on this peer.
+            println!(
+                "   Mid-session increase not supported with {local_players} local players on \
+                 this peer; configure delay via SessionBuilder before adding inputs."
+            );
+        },
+        Err(other) => {
+            println!("   Unexpected error: {other}");
+            return;
+        },
+    }
+
+    // Confirm the new delay round-tripped via the getter.
+    match session.input_delay(local_handle) {
+        Ok(delay) => println!("   Updated input delay: {delay} frame(s)"),
+        Err(err) => println!("   Could not read updated input delay: {err}"),
+    }
+
+    // Exercising the decrease path. Decreases are only allowed before any
+    // input has been added; once inputs exist, the call returns
+    // `InputDelayDecreaseUnsupported` and the session retains the higher
+    // delay. Game code typically surfaces the rejection to the player.
+    match session.set_input_delay(local_handle, 1) {
+        Ok(()) => println!("   Decreased input delay to 1 frame (initial-setup path)."),
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::InputDelayDecreaseUnsupported { current, requested },
+        }) => {
+            println!(
+                "   Decrease from {current} to {requested} rejected (mid-session decrease is \
+                 unsupported); carry the lower delay over to the next session."
+            );
+        },
+        Err(other) => println!("   Unexpected error: {other}"),
+    }
 }

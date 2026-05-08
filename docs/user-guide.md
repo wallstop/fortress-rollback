@@ -35,6 +35,7 @@ This guide walks you through integrating Fortress Rollback into your game. By th
     - [Custom Clock (Time Control)](#custom-clock-time-control)
     - [SessionState](#sessionstate)
     - [Prediction Strategies](#prediction-strategies)
+    - [Adjusting Input Delay at Runtime](#adjusting-input-delay-at-runtime)
 11. [Feature Flags](#feature-flags)
     - [Feature Flag Reference](#feature-flag-reference)
     - [Feature Flag Combinations](#feature-flag-combinations)
@@ -44,12 +45,18 @@ This guide walks you through integrating Fortress Rollback into your game. By th
 13. [Testing with SyncTest](#testing-with-synctest)
 14. [Using the Session Trait](#using-the-session-trait)
 15. [Common Patterns](#common-patterns)
-16. [Common Pitfalls](#common-pitfalls)
+16. [Disconnect Behavior and Graceful Peer Drop](#disconnect-behavior-and-graceful-peer-drop)
+    - [Choosing a DisconnectBehavior](#choosing-a-disconnectbehavior)
+    - [Configuring Graceful Drop](#configuring-graceful-drop)
+    - [Reacting to PeerDropped Events](#reacting-to-peerdropped-events)
+    - [Explicit Peer Removal with remove_player](#explicit-peer-removal-with-remove_player)
+    - [Choosing Between disconnect_player and remove_player](#choosing-between-disconnect_player-and-remove_player)
+17. [Common Pitfalls](#common-pitfalls)
     - [Session Termination Anti-Pattern](#session-termination-the-last_confirmed_frame-anti-pattern)
     - [Desync Detection Defaults](#understanding-desync-detection-defaults)
     - [NetworkStats Checksum Fields](#networkstats-checksum-fields-for-desync-detection)
-17. [Desync Detection and SyncHealth API](#desync-detection-and-synchealth-api)
-18. [Troubleshooting](#troubleshooting)
+18. [Desync Detection and SyncHealth API](#desync-detection-and-synchealth-api)
+19. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -1852,6 +1859,124 @@ impl<I: Copy + Default> PredictionStrategy<I> for MyPrediction {
 >
 > **Note:** The `PredictionStrategy` trait requires `Send + Sync` supertrait bounds (`pub trait PredictionStrategy<I>: Send + Sync`). Your custom strategy type must be thread-safe.
 
+### Adjusting Input Delay at Runtime
+
+`SessionBuilder::with_input_delay` fixes the input delay for the lifetime of a session. For matches that span variable network conditions, you can also adjust a local player's delay **after the session has started** via two `P2PSession` methods:
+
+```rust
+// In `P2PSession<C>`:
+pub fn input_delay(&self, player_handle: PlayerHandle) -> Result<usize, FortressError>;
+pub fn set_input_delay(
+    &mut self,
+    player_handle: PlayerHandle,
+    delay: usize,
+) -> Result<(), FortressError>;
+```
+
+This enables hybrid delay+rollback netcode: keep the delay low when the link is healthy and raise it when round-trip time or jitter spikes, so misprediction frequency stays manageable without paying the full latency cost up front. See [Network Quality Monitoring](#network-quality-monitoring) for the `NetworkStats` fields you would typically feed into the decision.
+
+#### Constraints
+
+Mid-session adjustments are deliberately limited so that the input stream remains strictly monotonic for every remote peer:
+
+- **Increases only.** Lowering the delay after inputs have been added would require dropping inputs that may already have been transmitted to remote peers. Decreasing returns [`InvalidRequestKind::InputDelayDecreaseUnsupported`](specs/api-contracts.md#selected-invalidrequestkind-variants--runtime-input-delay-and-peer-removal).
+- **Single local player on this peer.** The protocol bundles all local players' inputs into a single packet per frame. Synthesizing replicated bytes for the *other* local players' gap frames would require knowing inputs they have not yet produced, so increases are rejected with [`InvalidRequestKind::InputDelayMidSessionMultiLocalUnsupported`](specs/api-contracts.md#selected-invalidrequestkind-variants--runtime-input-delay-and-peer-removal) when more than one local player is registered. Use [`SessionBuilder::with_input_delay`](#setting-up-a-p2p-session) instead, before adding inputs, when you need to fix the delay for couch-co-op setups.
+- **Pending-output capacity.** A mid-session increase enqueues `delta = new_delay - current_delay` *gap-fill* frames into every remote endpoint's pending-output buffer. If `delta` is larger than the smallest remaining capacity across remote endpoints, the call returns [`InvalidRequestKind::InputDelayMidSessionPendingOutputFull`](specs/api-contracts.md#selected-invalidrequestkind-variants--runtime-input-delay-and-peer-removal) with `delta` and `capacity` populated for diagnostics. Apply the change in smaller increments or wait for outstanding inputs to be acknowledged.
+
+A no-op call (`delay == current_delay`) returns `Ok(())` without touching the queue. Setting a delay **before any input has been added** behaves like the builder method: it applies cleanly with no gap-fill, including decreases.
+
+#### Gap-fill replication
+
+When a mid-session increase is accepted, the input queue replicates the **most recently added input** across the new gap so subsequent sequential inputs continue to be accepted at the new boundary. The same replicated frames are pushed onto every remote endpoint's pending-output buffer and flushed immediately, so remote peers observe a continuous, strictly monotonic input sequence — they cannot tell the difference between a normal advance and a delay change.
+
+In short: increasing the delay introduces no protocol-level discontinuity, at the cost of repeating the local player's last input for `delta` extra frames. Game logic that treats "held inputs" as meaningful (charging attacks, walking) should be aware that those frames will be observed by all peers.
+
+#### Example: react to changing RTT
+
+```rust
+use fortress_rollback::{Config, FortressError, P2PSession, PlayerHandle};
+
+const HIGH_PING_THRESHOLD_MS: u128 = 120;
+const MAX_INPUT_DELAY: usize = 8;
+
+/// Increase the local player's input delay when ping rises above
+/// `HIGH_PING_THRESHOLD_MS`. Note: only an *initial-setup* decrease is
+/// allowed; once inputs have been added, lowering returns
+/// `InputDelayDecreaseUnsupported`. Most adaptive policies therefore treat
+/// the delay as monotonically non-decreasing for the lifetime of a session.
+fn adapt_input_delay<C: Config>(
+    session: &mut P2PSession<C>,
+    local_handle: PlayerHandle,
+    remote_handle: PlayerHandle,
+) -> Result<(), FortressError> {
+    let stats = match session.network_stats(remote_handle) {
+        Ok(stats) => stats,
+        // `network_stats` returns `NotSynchronized` while the remote is still
+        // handshaking; treat it as "not ready yet" and retry next tick.
+        // Other errors (e.g., handle not registered, handle not a remote
+        // player) indicate a programming bug and are surfaced to the caller.
+        Err(FortressError::NotSynchronized) => return Ok(()),
+        Err(other) => return Err(other),
+    };
+
+    let current = session.input_delay(local_handle)?;
+    let target = if stats.ping >= HIGH_PING_THRESHOLD_MS {
+        current.saturating_add(1).min(MAX_INPUT_DELAY)
+    } else {
+        current
+    };
+
+    if target == current {
+        return Ok(());
+    }
+
+    match session.set_input_delay(local_handle, target) {
+        Ok(()) => Ok(()),
+        // Apply the change in smaller increments next tick.
+        Err(FortressError::InvalidRequestStructured {
+            kind:
+                fortress_rollback::InvalidRequestKind::InputDelayMidSessionPendingOutputFull {
+                    ..
+                },
+        }) => Ok(()),
+        // Surface anything else so the caller can decide how to react.
+        Err(other) => Err(other),
+    }
+}
+```
+
+#### Decrease example
+
+The decrease path is rejected explicitly so games can surface a meaningful error to the player:
+
+```rust
+use fortress_rollback::{Config, FortressError, InvalidRequestKind, P2PSession, PlayerHandle};
+
+fn try_lower_delay<C: Config>(
+    session: &mut P2PSession<C>,
+    handle: PlayerHandle,
+    target: usize,
+) -> Result<(), FortressError> {
+    match session.set_input_delay(handle, target) {
+        Ok(()) => Ok(()),
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::InputDelayDecreaseUnsupported { current, requested },
+        }) => {
+            eprintln!(
+                "Cannot lower input delay from {current} to {requested} mid-session; \
+                 wait for the next match to take effect."
+            );
+            Ok(())
+        },
+        Err(other) => Err(other),
+    }
+}
+```
+
+#### `FortressEvent::InputDelayRecommendation`
+
+The library reserves a `FortressEvent::InputDelayRecommendation { player_handle, current_delay, suggested_delay }` variant for application-level heuristics or future automatic emitters. **No built-in emitter currently produces this event.** Application code may construct and dispatch its own recommendations through the standard event channel and react to them via [`set_input_delay`](#adjusting-input-delay-at-runtime), or simply call `set_input_delay` directly from its own scheduling logic. Exhaustive matches on `FortressEvent` must still handle the variant — see the [Migration Guide](migration.md#unreleased-runtime-input-delay-disconnect-behavior-and-graceful-peer-removal).
+
 ---
 
 ## Feature Flags
@@ -2454,6 +2579,8 @@ FortressRequest::AdvanceFrame { inputs } => {
 }
 ```
 
+By default, a P2P session **halts** as soon as any peer drops: `confirmed_frame()` stops advancing and `advance_frame()` will not progress further. Halting is the legacy GGRS-compatible behavior and is appropriate for 1v1 competitive matches where a disconnect should end the round. For 3+ player games, casual matches, or any session that should keep advancing for the surviving peers, opt in to graceful drop via [`DisconnectBehavior::ContinueWithout`](#disconnect-behavior-and-graceful-peer-drop) or call [`P2PSession::remove_player`](#explicit-peer-removal-with-remove_player) explicitly. See the next section for the full graceful-drop API and a worked example.
+
 ### Multiple Local Players (Couch Co-op)
 
 ```rust
@@ -2489,6 +2616,239 @@ let adjusted_time = if session.frames_ahead() > 2 {
     frame_time
 };
 ```
+
+---
+
+## Disconnect Behavior and Graceful Peer Drop
+
+A `P2PSession` exposes two complementary mechanisms for reacting to a remote peer that goes away:
+
+1. **`DisconnectBehavior`** — a session-wide policy that controls what happens when the **automatic** disconnect-timeout fires for a peer that has gone silent.
+2. **`P2PSession::remove_player`** — an **explicit** method to drop a peer immediately (e.g., kick, surrender, "leave match").
+
+Both can produce graceful drops where the session continues advancing for the surviving peers; the policy controls only the automatic-timeout path, while `remove_player` always opts into the graceful flow. Together they give applications a single, consistent way to handle players leaving mid-match.
+
+### Choosing a `DisconnectBehavior`
+
+```rust
+pub enum DisconnectBehavior {
+    /// Halt the session: no further frames advance once any peer drops. Default.
+    Halt,
+    /// Continue the session with the remaining peers, freezing the dropped
+    /// peer's input queue at their last confirmed input.
+    ContinueWithout,
+}
+```
+
+| Variant            | Use when                                                                                                                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Halt` *(default)* | 1v1 competitive matches where a disconnect should end the round; legacy GGRS-compatible behavior; any flow that wants the application layer to detect the stop and tear down. |
+| `ContinueWithout`  | 3+ player games (free-for-all, team modes, casual lobbies); games where a disconnect should hand the slot to AI; spectator-friendly games where the show must go on.           |
+
+`Halt` preserves the legacy GGRS-style "stop on any peer drop" behavior: after a timeout fires, `confirmed_frame()` stops advancing and the next `advance_frame()` will be unable to progress. This is the default for backwards compatibility.
+
+`ContinueWithout` makes the **automatic** disconnect-timeout follow the same graceful-drop sequence as the explicit [`remove_player`](#explicit-peer-removal-with-remove_player) call: the dropped peer's input queue is **frozen** (it repeats their last confirmed input forever, with [`InputStatus::Disconnected`](#handling-disconnected-players)), a [`FortressEvent::PeerDropped`](#reacting-to-peerdropped-events) event is queued, and remaining peers keep advancing using the frozen input.
+
+> **Note:** `DisconnectBehavior` governs only the **automatic** disconnect-timeout path. The legacy [`P2PSession::disconnect_player`](#choosing-between-disconnect_player-and-remove_player) retains its non-graceful semantics regardless of this setting; use `remove_player` for an explicit graceful drop.
+
+### Configuring Graceful Drop
+
+Opt in via [`SessionBuilder::with_disconnect_behavior`](#complete-configuration-reference) ([contract](specs/api-contracts.md#with_disconnect_behaviorself-behavior-disconnectbehavior---self)):
+
+```rust
+use fortress_rollback::{DisconnectBehavior, PlayerHandle, PlayerType, SessionBuilder};
+use std::net::SocketAddr;
+use std::time::Duration;
+
+# struct GameConfig;
+# impl fortress_rollback::Config for GameConfig {
+#     type Input = u8;
+#     type State = ();
+#     type Address = SocketAddr;
+# }
+# fn build(socket: impl fortress_rollback::NonBlockingSocket<SocketAddr>)
+#   -> Result<(), Box<dyn std::error::Error>> {
+let addr1: SocketAddr = "127.0.0.1:7001".parse()?;
+let addr2: SocketAddr = "127.0.0.1:7002".parse()?;
+
+let session = SessionBuilder::<GameConfig>::new()
+    .with_num_players(3)?
+    .add_player(PlayerType::Local, PlayerHandle::new(0))?
+    .add_player(PlayerType::Remote(addr1), PlayerHandle::new(1))?
+    .add_player(PlayerType::Remote(addr2), PlayerHandle::new(2))?
+    .with_disconnect_timeout(Duration::from_millis(2_000))
+    .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+    .start_p2p_session(socket)?;
+
+assert_eq!(session.disconnect_behavior(), DisconnectBehavior::ContinueWithout);
+# Ok(()) }
+```
+
+`P2PSession::disconnect_behavior()` returns the configured policy at any time, which is useful for diagnostics and for game-layer code that wants to display the active rule to players.
+
+### Reacting to `PeerDropped` Events
+
+When a graceful drop occurs (either from an automatic timeout under `ContinueWithout` or from a call to [`remove_player`](#explicit-peer-removal-with-remove_player)), the session emits **two events** for the dropped peer in the same `events()` batch, in this order:
+
+1. `FortressEvent::PeerDropped { handle, addr }` — the new graceful-drop event. Match on this to take graceful-drop-specific actions.
+2. `FortressEvent::Disconnected { addr }` — the legacy event. Existing applications continue to receive it unchanged.
+
+Match on `PeerDropped` for graceful-aware logic and treat `Disconnected` as a fallback for legacy code. After the events are emitted the dropped peer's input is frozen at their last confirmed value; subsequent `AdvanceFrame` requests will deliver that input with [`InputStatus::Disconnected`](#handling-disconnected-players) for every frame past the dropped peer's last confirmed frame.
+
+```rust
+use fortress_rollback::{Config, FortressEvent, P2PSession};
+
+fn handle_peer_drops<C: Config>(session: &mut P2PSession<C>)
+where
+    C::Address: std::fmt::Display,
+{
+    for event in session.events() {
+        match event {
+            FortressEvent::PeerDropped { handle, addr } => {
+                // Graceful drop: the session is still advancing for the
+                // remaining peers; this peer's input is frozen at their
+                // last confirmed value.
+                println!("Peer {handle} ({addr}) dropped — switching to AI control");
+                // game.mark_ai_controlled(handle);
+            },
+            FortressEvent::Disconnected { addr } => {
+                // Legacy event: arrives in the same batch as PeerDropped on
+                // graceful drops, and on its own under DisconnectBehavior::Halt.
+                println!("Disconnected from {addr}");
+            },
+            _ => {},
+        }
+    }
+}
+```
+
+A complete game loop using `ContinueWithout` looks like this:
+
+```rust
+use fortress_rollback::{
+    Config, DisconnectBehavior, FortressError, FortressEvent, FortressRequest, P2PSession,
+    PlayerHandle, SessionState,
+};
+
+fn run<C: Config>(
+    mut session: P2PSession<C>,
+    local_handle: PlayerHandle,
+    mut next_input: impl FnMut() -> C::Input,
+) -> Result<(), FortressError>
+where
+    C::Address: std::fmt::Display,
+{
+    assert_eq!(session.disconnect_behavior(), DisconnectBehavior::ContinueWithout);
+
+    loop {
+        session.poll_remote_clients();
+
+        for event in session.events() {
+            if let FortressEvent::PeerDropped { handle, addr } = event {
+                eprintln!("Peer {handle} at {addr} left — game continues");
+                // Application-specific cleanup (UI, scoring, etc.) goes here.
+            }
+        }
+
+        if session.current_state() != SessionState::Running {
+            continue;
+        }
+
+        session.add_local_input(local_handle, next_input())?;
+
+        for request in session.advance_frame()? {
+            match request {
+                FortressRequest::SaveGameState { cell, frame } => {
+                    let _ = (cell, frame); // save your state
+                },
+                FortressRequest::LoadGameState { cell, frame } => {
+                    let _ = (cell, frame); // restore your state
+                },
+                FortressRequest::AdvanceFrame { inputs } => {
+                    let _ = inputs; // apply inputs to the simulation
+                },
+            }
+        }
+
+        // ... pacing, exit conditions, etc.
+        # break Ok(());
+    }
+}
+```
+
+### Explicit Peer Removal with `remove_player`
+
+```rust
+// In `P2PSession<C>`:
+pub fn remove_player(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError>;
+```
+
+`remove_player` performs a graceful drop **immediately**, regardless of the configured `DisconnectBehavior`. Use it whenever the drop is initiated by application logic rather than by network silence:
+
+- The player chose to leave the match (concession, surrender, "leave game" UI button).
+- A moderator or host kicked the player.
+- The application detects, out-of-band, that the peer is unreachable and wants to fail fast rather than wait out the disconnect timeout.
+
+On invocation, `remove_player` performs the same sequence as the auto-timeout path under `ContinueWithout`:
+
+1. Marks the player disconnected on the local connection-status table.
+2. Freezes the player's input queue (it repeats the last confirmed input forever for remaining peers' simulation).
+3. Disconnects the underlying network endpoint.
+4. Emits `FortressEvent::PeerDropped { handle, addr }`, **followed by** `FortressEvent::Disconnected { addr }` in the same `events()` batch.
+
+The combined effect is that surviving peers see exactly the same protocol-level state as if the dropped peer had timed out under `ContinueWithout`, but the drop happens on the next session call instead of after a timeout.
+
+```rust
+use fortress_rollback::{
+    Config, FortressError, InvalidRequestKind, P2PSession, PlayerHandle,
+};
+
+fn handle_concede<C: Config>(
+    session: &mut P2PSession<C>,
+    conceding_remote: PlayerHandle,
+) -> Result<(), FortressError> {
+    match session.remove_player(conceding_remote) {
+        Ok(()) => {
+            // The next events() call will yield PeerDropped + Disconnected
+            // for `conceding_remote`. Surviving peers continue advancing.
+            Ok(())
+        },
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::PlayerAlreadyRemoved { handle },
+        }) => {
+            // remove_player was called twice for the same handle (or the
+            // peer was already removed by an auto-timeout under
+            // ContinueWithout). Treat as a no-op.
+            eprintln!("Peer {handle} was already removed; ignoring");
+            Ok(())
+        },
+        Err(other) => Err(other),
+    }
+}
+```
+
+#### Errors
+
+| Error                                                          | When it triggers                                                                                          |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `InvalidRequestKind::DisconnectInvalidHandle { handle }`       | `handle` is not registered, or refers to a spectator (use spectator-specific cleanup instead).            |
+| `InvalidRequestKind::DisconnectLocalPlayer { handle }`         | `handle` refers to a local player. Local players cannot be removed; tear down the session instead.       |
+| `InvalidRequestKind::PlayerAlreadyRemoved { handle }`          | `remove_player` was called twice for the same handle, or the peer was already auto-removed by a timeout. |
+
+### Choosing Between `disconnect_player` and `remove_player`
+
+The session also exposes a legacy `disconnect_player(handle)` method preserved from GGRS. It is **not** the same as `remove_player`:
+
+| Aspect                          | `disconnect_player` (legacy)                                                                                  | `remove_player` (graceful)                                                                       |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Marks player disconnected       | Yes                                                                                                           | Yes                                                                                              |
+| Disconnects network endpoint    | Yes                                                                                                           | Yes                                                                                              |
+| Freezes input queue             | **No** — `confirmed_frame()` stalls and the session halts under default `Halt`                                | **Yes** — last confirmed input repeats forever; surviving peers keep advancing                   |
+| Emits `FortressEvent::PeerDropped` | **No**                                                                                                        | **Yes**, immediately followed by `Disconnected`                                                  |
+| Honors `DisconnectBehavior`     | **No** — `disconnect_player` always performs the legacy non-graceful drop regardless of `DisconnectBehavior`. Under default `Halt` the session halts. Under `ContinueWithout` it does **not** auto-promote to the graceful flow; the queue is not frozen, no `PeerDropped` is emitted, and `confirmed_frame()` stalls just as it does under `Halt`. To get the graceful sequence with explicit removal, call `remove_player` instead. | **No** — always performs the graceful sequence, regardless of policy |
+| Use case                        | Back-compat with code written against GGRS's `disconnect_player`                                              | Application-driven graceful drop (kick, surrender, leave match)                                  |
+
+If you are writing new code, prefer `remove_player`. Reach for `disconnect_player` only when porting GGRS code that depends on its specific halt-on-drop semantics under `DisconnectBehavior::Halt`.
 
 ---
 
@@ -2951,6 +3311,7 @@ This section documents all configuration options available when building a sessi
 | `with_desync_detection_mode(mode)`       | `On { interval: 60 }`         | Checksum comparison between peers                                                                  |
 | `with_disconnect_timeout(duration)`      | 2000ms                        | Time before disconnecting unresponsive peer                                                        |
 | `with_disconnect_notify_delay(duration)` | 500ms                         | Time before warning about potential disconnect                                                     |
+| `with_disconnect_behavior(behavior)`     | `Halt`                        | Action on auto-timeout: `Halt` (legacy) or `ContinueWithout` (graceful drop)                       |
 | `with_check_distance(frames)`            | 2                             | Frames to resimulate in SyncTestSession                                                            |
 | `with_violation_observer(observer)`      | None                          | Custom observer for spec violations                                                                |
 | `add_player(type, handle)`               | —                             | Register a player (local, remote, or spectator)                                                    |
