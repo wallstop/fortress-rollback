@@ -38,6 +38,7 @@ This devcontainer provides a complete environment for developing, testing, and f
 - **yamllint** - YAML file linting
 - **markdownlint** - Markdown file linting
 - **markdown-link-check** - Verify markdown links
+- **Codex CLI** - OpenAI coding agent CLI (`@openai/codex`)
 - **pre-commit** - Pre-commit hook framework
 
 ### Profiling
@@ -59,16 +60,36 @@ After the container starts, verify all tools:
 ./scripts/ci/check-tools.sh
 ```
 
+## Codex CLI Setup
+
+The devcontainer installs OpenAI Codex CLI during image build via npm:
+
+```bash
+codex --version
+```
+
+Authentication options:
+
+- ChatGPT login: `codex login`
+- Headless-friendly login: `codex login --device-auth`
+- API key login (non-interactive): `printenv OPENAI_API_KEY | codex login --with-api-key`
+- One-shot non-interactive runs: set `CODEX_API_KEY` and run `codex exec ...`
+
+Notes:
+
+- Codex auth cache is persisted at `~/.codex` using a dedicated devcontainer volume.
+- The lifecycle hook `.devcontainer/codex-bootstrap.sh` runs on create/start to print readiness guidance.
+
 ## Build Performance
 
 The Dockerfile uses **cargo-binstall** to download pre-built binaries instead of
 compiling tools from source, reducing build time from ~25 minutes to ~3-5 minutes.
 
-| Method | Build Time | When to Use |
-|--------|-----------|-------------|
+| Method                     | Build Time  | When to Use                                    |
+| -------------------------- | ----------- | ---------------------------------------------- |
 | **Pre-built image (GHCR)** | ~30 seconds | Optional fast path when the image is available |
-| **Local Dockerfile build** | ~3-5 min | When modifying the Dockerfile |
-| **Without binstall (old)** | ~25-30 min | N/A (deprecated) |
+| **Local Dockerfile build** | ~3-5 min    | When modifying the Dockerfile                  |
+| **Without binstall (old)** | ~25-30 min  | N/A (deprecated)                               |
 
 ### Using the pre-built image (fastest)
 
@@ -129,15 +150,15 @@ cargo llvm-cov --html
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TLA_TOOLS_JAR` | `.tla-tools/tla2tools.jar` | Path to TLA+ tools |
-| `RUST_BACKTRACE` | `1` | Enable backtraces |
-| `CARGO_INCREMENTAL` | `0` | Disable incremental (for reproducibility) |
-| `MIRIFLAGS` | `-Zmiri-symbolic-alignment-check...` | Miri configuration |
-| `TLA_WORKERS` | `auto` | TLC worker threads |
-| `TLA_MEMORY` | `4g` | TLC JVM heap size |
-| `KANI_TIMEOUT` | `300` | Kani proof timeout (seconds) |
+| Variable            | Default                              | Description                               |
+| ------------------- | ------------------------------------ | ----------------------------------------- |
+| `TLA_TOOLS_JAR`     | `.tla-tools/tla2tools.jar`           | Path to TLA+ tools                        |
+| `RUST_BACKTRACE`    | `1`                                  | Enable backtraces                         |
+| `CARGO_INCREMENTAL` | `0`                                  | Disable incremental (for reproducibility) |
+| `MIRIFLAGS`         | `-Zmiri-symbolic-alignment-check...` | Miri configuration                        |
+| `TLA_WORKERS`       | `auto`                               | TLC worker threads                        |
+| `TLA_MEMORY`        | `4g`                                 | TLC JVM heap size                         |
+| `KANI_TIMEOUT`      | `300`                                | Kani proof timeout (seconds)              |
 
 ## Manual Tool Installation
 
@@ -157,7 +178,7 @@ cargo install cargo-shear cargo-spellcheck cargo-geiger cargo-careful
 
 # CI/CD linting tools
 pip3 install --break-system-packages yamllint pre-commit
-npm install -g markdownlint-cli markdown-link-check
+npm install -g markdownlint-cli markdown-link-check @openai/codex@latest
 
 # actionlint (GitHub Actions linter)
 # Download the script first, then run with bash (avoids shell issues)

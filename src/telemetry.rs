@@ -778,12 +778,12 @@ macro_rules! report_violation {
             );
             $crate::telemetry::TracingObserver.on_violation(&violation);
         }
-        // Under Kani, evaluate severity and kind to suppress unused import warnings
+        // Under Kani, borrow severity and kind to suppress unused import warnings
         // for ViolationSeverity/ViolationKind, but avoid format!() and tracing
         // which cause CBMC state space explosion.
         #[cfg(kani)]
         {
-            let _ = ($severity, $kind);
+            let _ = (&$severity, &$kind);
         }
     }};
 
@@ -800,12 +800,13 @@ macro_rules! report_violation {
             );
             $crate::telemetry::TracingObserver.on_violation(&violation);
         }
-        // Under Kani, evaluate severity, kind, and all format arguments to suppress
-        // unused import/variable warnings, but avoid format!() and tracing which
-        // cause CBMC state space explosion.
+        // Under Kani, borrow severity, kind, and format arguments to suppress
+        // unused import/variable warnings without moving non-Copy values.
+        // `format_args!` validates the format string and references its
+        // arguments, but unlike `format!` it does not allocate or invoke tracing.
         #[cfg(kani)]
         {
-            let _ = ($severity, $kind, $($arg)+);
+            let _ = (&$severity, &$kind, core::format_args!($fmt, $($arg)+));
         }
     }};
 }

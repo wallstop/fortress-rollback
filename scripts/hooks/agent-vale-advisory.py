@@ -37,7 +37,7 @@ _PROSE_REFERENCE = ".llm/skills/workflows/user-facing-docs.md \"Prose Convention
 
 
 # Vale `--output=line` format: ``path:line:col:RuleID:Severity:Message``.
-# A naive ``partition(":")`` mis-buckets Windows drive-letter paths like
+# A naive ``partition(":")`` puts Windows drive-letter paths in the wrong bucket:
 # ``C:\foo\bar.md:14:71:Rule:warning:msg`` (the leading ``C`` would become
 # the bucket key). The regex below captures the path up to the first
 # ``:<digits>:`` segment (the line:col pair), which is the first colon-pair
@@ -68,7 +68,7 @@ def _summarize_lines(stdout: str) -> dict[str, int]:
     Vale's `line` output format is one finding per line:
         path:line:col:RuleID:Severity:Message
     so we bucket by the leading path token. Malformed lines are ignored
-    rather than mis-bucketed.
+    rather than placed in an incorrect bucket.
     """
     counts: dict[str, int] = {}
     for raw in stdout.splitlines():

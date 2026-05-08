@@ -3,7 +3,7 @@
 
 Focuses on the path-bucketing logic in ``_summarize_lines``: the wrapper
 must correctly group findings per file across Linux, macOS, and Windows
-path conventions, and must not mis-bucket Windows drive-letter paths
+path conventions, and must not place Windows drive-letter paths in the wrong bucket
 (``C:\\foo.md:14:71:...``) where a naive split-on-first-colon would key
 the bucket on the drive letter.
 """
@@ -61,7 +61,7 @@ def test_windows_drive_letter_path_bucketing() -> None:
 
 
 def test_malformed_lines_ignored_gracefully() -> None:
-    """Lines that don't match Vale's format are ignored, not mis-bucketed."""
+    """Lines that don't match Vale's format are ignored, not incorrectly bucketed."""
     stdout = (
         "docs/user-guide.md:12:5:Vale.Avoid:warning:OK\n"
         "\n"  # blank

@@ -1,0 +1,31 @@
+# cargo-spellcheck configuration.
+#
+# Rust documentation contains many identifiers, proof harness names, and formal
+# methods abbreviations. Treat those token shapes as code, not prose, so
+# Hunspell findings stay focused on natural-language text.
+
+dev_comments = false
+skip_readme = false
+
+[Hunspell]
+lang = "en_US"
+
+[Hunspell.quirks]
+allow_concatenation = true
+allow_dashes = true
+transform_regex = [
+    # Rust and Kani identifiers in prose: last_saved_frame, proof_frame_new_valid.
+    "^[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+$",
+    # Public Rust type names and acronyms: SyncLayer, TimeSync, CBMC, TLA+.
+    "^[A-Z][A-Za-z0-9]*(?:[A-Z][A-Za-z0-9]*)+$",
+    "^[A-Z][A-Z0-9_+.-]+$",
+    # Formal invariant and timing shorthand: INV-7, <30s, >2min.
+    "^INV-[0-9]+$",
+    "^[<>]?[0-9]+[A-Za-z]+$",
+    # Rust doc fragments that are not words.
+    "^[A-Za-z]+::[A-Za-z0-9_:]+$",
+    "^[A-Za-z_][A-Za-z0-9_]*\\(\\)$",
+]
+
+[Reflow]
+max_line_length = 100

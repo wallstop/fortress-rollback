@@ -456,12 +456,19 @@ run_kani() {
             # Check for common errors
             if grep -q -i "error\[E" "$clean_output" 2>/dev/null; then
                 echo "Compilation errors detected:"
-                grep -E "error\[E[0-9]+\]" "$clean_output" | head -5
+                { grep -E "error\[E[0-9]+\]" "$clean_output" | head -5; } || true
+                echo ""
+                echo "Relevant compiler context:"
+                { grep -E "error\[E[0-9]+\]|^[[:space:]]+-->|value moved here|value used here|move occurs|help:|consider cloning" "$clean_output" | head -40; } || true
+                echo ""
+                echo "Diagnostic hint: Kani compiles with cfg(kani). If normal cargo builds pass,"
+                echo "check #[cfg(kani)] code paths and macros that evaluate arguments differently"
+                echo "from production builds."
             elif grep -q "no harnesses\|No proof harness\|no proof harness" "$clean_output" 2>/dev/null; then
                 echo -e "${RED}Error: Harness not found by Kani${NC}"
             elif grep -q "unsupported\|not supported" "$clean_output" 2>/dev/null; then
                 echo "Unsupported feature detected:"
-                grep -i "unsupported\|not supported" "$clean_output" | head -3
+                { grep -i "unsupported\|not supported" "$clean_output" | head -3; } || true
             fi
             if [[ "$verbose" != "true" ]]; then
                 echo ""

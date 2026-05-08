@@ -118,7 +118,7 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 --retry-all-
     bash /tmp/nodesource_setup.sh && \
     rm /tmp/nodesource_setup.sh && \
     apt-get install -y --no-install-recommends nodejs && \
-    npm install -g markdownlint-cli markdown-link-check && \
+    npm install -g markdownlint-cli markdown-link-check @openai/codex@latest && \
     pip3 install --no-cache-dir --break-system-packages pre-commit && \
     rm -rf /var/lib/apt/lists/*
 
