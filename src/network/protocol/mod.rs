@@ -568,8 +568,14 @@ impl<T: Config> UdpProtocol<T> {
     ///
     /// The caller is expected to pre-validate the available capacity via
     /// [`pending_output_capacity_remaining`]; once the queue is full, this
-    /// method silently drops the entry rather than triggering the disconnect
-    /// path used by `send_input`.
+    /// method drops the entry and reports a `NetworkProtocol` violation
+    /// (severity `Error`) rather than triggering the disconnect path used by
+    /// `send_input`. The violation is emitted via [`report_violation!`],
+    /// which routes through [`TracingObserver`]: install a
+    /// `tracing-subscriber` to capture it.
+    ///
+    /// [`report_violation!`]: crate::report_violation
+    /// [`TracingObserver`]: crate::telemetry::TracingObserver
     ///
     /// [`pending_output_capacity_remaining`]: Self::pending_output_capacity_remaining
     pub(crate) fn enqueue_replicated_input(
@@ -584,7 +590,16 @@ impl<T: Config> UdpProtocol<T> {
         }
         if self.pending_output.len() >= self.protocol_config.pending_output_limit {
             // Refuse to overflow. Caller should have pre-validated via
-            // pending_output_capacity_remaining; this branch is defensive only.
+            // pending_output_capacity_remaining; reaching this branch means
+            // the caller skipped that contract. Surface the violation rather
+            // than silently dropping the entry so the bug is observable.
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "enqueue_replicated_input dropped entry: pending_output full (len={}, limit={})",
+                self.pending_output.len(),
+                self.protocol_config.pending_output_limit
+            );
             return;
         }
         let endpoint_data = InputBytes::from_inputs::<T>(self.num_players, inputs);
@@ -926,14 +941,21 @@ impl<T: Config> UdpProtocol<T> {
                 let player_inputs = input_data.to_player_inputs::<T>(self.handles.len());
                 self.recv_inputs.insert(input_data.frame, input_data);
 
-                for (i, player_input) in player_inputs.into_iter().enumerate() {
-                    // Bounds check on handles - use .get() to be defensive
-                    if let Some(&player_handle) = self.handles.get(i) {
-                        self.event_queue.push_back(Event::Input {
-                            input: player_input,
-                            player: player_handle,
-                        });
-                    }
+                // `to_player_inputs` constructs `player_inputs` by appending
+                // up to `self.handles.len()` entries (and may return early
+                // with a partial vector if a per-player decode fails), so
+                // `player_inputs.len() <= self.handles.len()` always holds.
+                // `zip` truncates to the shorter iterator, so emitting
+                // `Event::Input` only for the entries that decoded
+                // successfully is bounds-safe by construction — no
+                // defensive `.get(i)` check is needed here.
+                for (player_input, &player_handle) in
+                    player_inputs.into_iter().zip(self.handles.iter())
+                {
+                    self.event_queue.push_back(Event::Input {
+                        input: player_input,
+                        player: player_handle,
+                    });
                 }
             }
 
@@ -2712,6 +2734,81 @@ mod tests {
         assert_eq!(
             returned_time, fixed_time,
             "Protocol should use the injected clock function"
+        );
+    }
+
+    /// Regression: when `pending_output` is at the configured limit,
+    /// `enqueue_replicated_input` must refuse to push (to avoid overflow)
+    /// and reach the violation-reporting branch. The observable side-effect
+    /// is that `pending_output.len()` stays at the limit, which this test
+    /// asserts directly.
+    ///
+    /// **On capturing the violation itself:** `report_violation!` routes
+    /// only through the global `TracingObserver` (see
+    /// `src/telemetry.rs:763-812`); it does not push into a thread-local
+    /// `CollectingObserver`, and there is no `report_violation_to!`
+    /// override accepting an observer at the call site here. Capturing the
+    /// emitted `SpecViolation` therefore requires installing a
+    /// `tracing-subscriber` layer that filters on the macro's structured
+    /// fields, which no other unit test in this file does. Adding that
+    /// infrastructure would be a strictly larger change than the
+    /// regression this test guards. The contract callers actually depend
+    /// on is "the entry is dropped instead of overflowing
+    /// `pending_output`", which is exactly what is asserted below; the
+    /// `report_violation!` call immediately precedes the `return;` in
+    /// straight-line control flow, so the side-effect-only assertion (no
+    /// push past the limit) is sufficient to prove the violation branch
+    /// was taken.
+    #[test]
+    fn enqueue_replicated_input_drops_entry_when_pending_output_full() {
+        let small_limit: usize = 4;
+        let config = ProtocolConfig {
+            pending_output_limit: small_limit,
+            ..ProtocolConfig::default()
+        };
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
+        // Drive the protocol to the Running state so `enqueue_replicated_input`
+        // executes the limit check (it is a no-op pre-Running).
+        protocol.synchronize().unwrap();
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            let header = MessageHeader { magic: 999 };
+            let reply = SyncReply {
+                random_reply: random,
+            };
+            protocol.on_sync_reply(header, reply);
+        }
+        assert!(protocol.is_running());
+
+        // Fill `pending_output` directly up to the configured limit.
+        for i in 0..small_limit {
+            protocol.pending_output.push_back(InputBytes {
+                frame: Frame::new(i as i32),
+                bytes: vec![i as u8; 4],
+            });
+        }
+        assert_eq!(protocol.pending_output.len(), small_limit);
+
+        // Try to enqueue one more — must hit the overflow guard, drop the
+        // entry, and leave `pending_output` unchanged.
+        let mut inputs: BTreeMap<PlayerHandle, PlayerInput<TestInput>> = BTreeMap::new();
+        inputs.insert(
+            PlayerHandle::new(0),
+            PlayerInput::new(Frame::new(small_limit as i32), TestInput { inp: 7 }),
+        );
+        protocol.enqueue_replicated_input(&inputs);
+
+        assert_eq!(
+            protocol.pending_output.len(),
+            small_limit,
+            "enqueue_replicated_input must not push past pending_output_limit"
         );
     }
 }

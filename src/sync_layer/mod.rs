@@ -169,6 +169,21 @@ where
     input_queues: Vec<InputQueue<T>>,
 }
 
+/// Builds an `InternalErrorStructured`/`IndexOutOfBounds` error tagged with
+/// the literal collection name `"input_queues"`. Concentrating the literal
+/// in one place avoids drift between callsites and removes the structured-
+/// error ceremony from the surrounding control flow.
+#[inline]
+fn input_queue_oob(index: usize, length: usize) -> FortressError {
+    FortressError::InternalErrorStructured {
+        kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+            name: "input_queues",
+            index,
+            length,
+        }),
+    }
+}
+
 impl<T: Config> SyncLayer<T> {
     /// Creates a new `SyncLayer` instance with given values and default queue length.
     ///
@@ -190,6 +205,32 @@ impl<T: Config> SyncLayer<T> {
     /// * `num_players` - The number of players in the session
     /// * `max_prediction` - Maximum frames of prediction allowed
     /// * `queue_length` - The size of the input queue circular buffer per player
+    ///
+    /// # Behavior on invalid `queue_length`
+    ///
+    /// `InputQueue::with_queue_length` rejects `queue_length < 2`. If the
+    /// requested `queue_length` is invalid, this constructor falls back to
+    /// the library default ([`INPUT_QUEUE_LENGTH`]) for each player slot,
+    /// reporting an `InputQueue` violation per affected slot.
+    ///
+    /// The library default is a compile-time constant guaranteed to be
+    /// `>= 2` (statically asserted in
+    /// `sync_layer_tests::input_queue_length_constant_is_valid_for_with_queue_length`),
+    /// so the secondary fallback is provably unreachable from any
+    /// production caller. The post-loop
+    /// invariant `input_queues.len() == num_players` therefore holds by
+    /// construction in release builds. As a defense-in-depth safety net
+    /// against a future regression that mis-configures the library default
+    /// (e.g., a feature gate setting it to `0`), the constructor reports a
+    /// `Critical` `Configuration` violation per slot that fails to
+    /// initialize and asserts the invariant via `debug_assert_eq!` — this
+    /// surfaces the discrepancy to attached observers and tests rather
+    /// than silently producing a shorter `input_queues` vector.
+    ///
+    /// Even if the returned `Self` is discarded, registered violation
+    /// observers will receive any reports emitted during construction.
+    ///
+    /// [`INPUT_QUEUE_LENGTH`]: crate::input_queue::INPUT_QUEUE_LENGTH
     #[must_use]
     pub fn with_queue_length(
         num_players: usize,
@@ -197,23 +238,48 @@ impl<T: Config> SyncLayer<T> {
         queue_length: usize,
     ) -> Self {
         // initialize input_queues with player indices for deterministic prediction
-        let mut input_queues = Vec::new();
+        let mut input_queues = Vec::with_capacity(num_players);
         for player_index in 0..num_players {
-            // queue_length should be validated before calling this function
-            // If it's invalid, report a violation and use a default
-            match InputQueue::with_queue_length(player_index, queue_length) {
+            // queue_length should be validated before calling this function;
+            // if it's invalid, fall back to the library default and report
+            // a violation. The default is a compile-time constant >= 2
+            // (see `INPUT_QUEUE_LENGTH_IS_VALID` in tests), so the secondary
+            // fallback below is dead code in production. We keep the
+            // secondary `Critical` report as a defense-in-depth signal for
+            // any future regression that mis-configures the constant.
+            if let Some(queue) = InputQueue::with_queue_length(player_index, queue_length) {
+                input_queues.push(queue);
+                continue;
+            }
+            match InputQueue::with_queue_length(
+                player_index,
+                crate::input_queue::INPUT_QUEUE_LENGTH,
+            ) {
                 Some(queue) => input_queues.push(queue),
                 None => {
-                    // Fallback: use the default queue length
-                    if let Some(queue) = InputQueue::with_queue_length(
-                        player_index,
+                    // Unreachable in production: the library default is a
+                    // compile-time constant validated to be `>= 2`.
+                    report_violation!(
+                        ViolationSeverity::Critical,
+                        ViolationKind::Configuration,
+                        "SyncLayer::with_queue_length: default queue length {} is invalid for player {} (requested queue_length={}); input_queues will be shorter than num_players={}",
                         crate::input_queue::INPUT_QUEUE_LENGTH,
-                    ) {
-                        input_queues.push(queue);
-                    }
+                        player_index,
+                        queue_length,
+                        num_players
+                    );
                 },
             }
         }
+        // Post-loop invariant: every player must have a queue. Asserted in
+        // debug builds; the per-slot `Critical` report above already
+        // surfaces any shortfall in release builds, so we do not duplicate
+        // the report here.
+        debug_assert_eq!(
+            input_queues.len(),
+            num_players,
+            "SyncLayer::with_queue_length: input_queues.len() must equal num_players"
+        );
         Self {
             num_players,
             max_prediction,
@@ -287,8 +353,33 @@ impl<T: Config> SyncLayer<T> {
     /// Sets the frame delay for a player.
     ///
     /// # Errors
-    /// Returns a [`FortressError`] if `player_handle >= num_players`.
-    /// Returns a [`FortressError`] if `delay` exceeds the maximum allowed value.
+    /// - Returns [`FortressError::InvalidPlayerHandle`] if `player_handle >= num_players`.
+    /// - Returns [`FortressError::InternalErrorStructured`] with
+    ///   [`InternalErrorKind::IndexOutOfBounds`] (name `"input_queues"`) if
+    ///   the input-queue entry for `player_handle` is missing. This indicates
+    ///   an internal-invariant violation and should not occur in correct code.
+    /// - Surfaces every error variant that
+    ///   [`InputQueue::set_frame_delay`](crate::__internal::InputQueue::set_frame_delay)
+    ///   can return:
+    ///   - [`FortressError::InvalidRequestStructured`] with
+    ///     [`InvalidRequestKind::FrameDelayTooLarge`] if `delay` exceeds the
+    ///     queue's `max_frame_delay()`.
+    ///   - [`FortressError::InvalidRequestStructured`] with
+    ///     [`InvalidRequestKind::InputDelayDecreaseUnsupported`] if `delay`
+    ///     is strictly less than the current frame delay and inputs have
+    ///     already been added (mid-session decreases are unsupported).
+    ///   - [`FortressError::InternalErrorStructured`] with
+    ///     [`InternalErrorKind::IndexOutOfBounds`] (name `"inputs"`) if the
+    ///     queue's most-recent input slot cannot be located while computing
+    ///     the gap-fill source — an internal-invariant violation.
+    ///   - [`FortressError::InternalErrorStructured`] with
+    ///     [`InternalErrorKind::InputQueueGapFillFailed`] if a replicated
+    ///     gap-fill frame cannot be appended (queue overflow or
+    ///     prediction-frame collision) — an internal-invariant violation.
+    ///
+    /// [`InvalidRequestKind::FrameDelayTooLarge`]: crate::error::InvalidRequestKind::FrameDelayTooLarge
+    /// [`InvalidRequestKind::InputDelayDecreaseUnsupported`]: crate::error::InvalidRequestKind::InputDelayDecreaseUnsupported
+    /// [`InternalErrorKind::InputQueueGapFillFailed`]: crate::error::InternalErrorKind::InputQueueGapFillFailed
     ///
     /// # Note
     /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
@@ -306,13 +397,7 @@ impl<T: Config> SyncLayer<T> {
         let len = self.input_queues.len();
         self.input_queues
             .get_mut(player_handle.as_usize())
-            .ok_or(FortressError::InternalErrorStructured {
-                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
-                    name: "input_queues",
-                    index: player_handle.as_usize(),
-                    length: len,
-                }),
-            })?
+            .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?
             .set_frame_delay(delay)?;
         Ok(())
     }
@@ -320,7 +405,11 @@ impl<T: Config> SyncLayer<T> {
     /// Returns the current frame delay for a player.
     ///
     /// # Errors
-    /// Returns a [`FortressError`] if `player_handle >= num_players`.
+    /// - Returns [`FortressError::InvalidPlayerHandle`] if `player_handle >= num_players`.
+    /// - Returns [`FortressError::InternalErrorStructured`] with
+    ///   [`InternalErrorKind::IndexOutOfBounds`] (name `"input_queues"`) if
+    ///   the input-queue entry for `player_handle` is missing. This indicates
+    ///   an internal-invariant violation and should not occur in correct code.
     pub fn frame_delay(&self, player_handle: PlayerHandle) -> Result<usize, FortressError> {
         if !player_handle.is_valid_player_for(self.num_players) {
             return Err(FortressError::InvalidPlayerHandle {
@@ -329,15 +418,10 @@ impl<T: Config> SyncLayer<T> {
             });
         }
         let len = self.input_queues.len();
-        let queue = self.input_queues.get(player_handle.as_usize()).ok_or(
-            FortressError::InternalErrorStructured {
-                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
-                    name: "input_queues",
-                    index: player_handle.as_usize(),
-                    length: len,
-                }),
-            },
-        )?;
+        let queue = self
+            .input_queues
+            .get(player_handle.as_usize())
+            .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?;
         Ok(queue.frame_delay())
     }
 
@@ -369,15 +453,10 @@ impl<T: Config> SyncLayer<T> {
             });
         }
         let len = self.input_queues.len();
-        let queue = self.input_queues.get(player_handle.as_usize()).ok_or(
-            FortressError::InternalErrorStructured {
-                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
-                    name: "input_queues",
-                    index: player_handle.as_usize(),
-                    length: len,
-                }),
-            },
-        )?;
+        let queue = self
+            .input_queues
+            .get(player_handle.as_usize())
+            .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?;
         Ok(queue.last_added_frame())
     }
 
@@ -400,15 +479,10 @@ impl<T: Config> SyncLayer<T> {
             });
         }
         let len = self.input_queues.len();
-        let queue = self.input_queues.get(player_handle.as_usize()).ok_or(
-            FortressError::InternalErrorStructured {
-                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
-                    name: "input_queues",
-                    index: player_handle.as_usize(),
-                    length: len,
-                }),
-            },
-        )?;
+        let queue = self
+            .input_queues
+            .get(player_handle.as_usize())
+            .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?;
         queue.confirmed_input(frame)
     }
 
@@ -439,15 +513,10 @@ impl<T: Config> SyncLayer<T> {
             });
         }
         let len = self.input_queues.len();
-        let queue = self.input_queues.get_mut(player_handle.as_usize()).ok_or(
-            FortressError::InternalErrorStructured {
-                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
-                    name: "input_queues",
-                    index: player_handle.as_usize(),
-                    length: len,
-                }),
-            },
-        )?;
+        let queue = self
+            .input_queues
+            .get_mut(player_handle.as_usize())
+            .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?;
         queue.freeze();
         Ok(())
     }
@@ -480,13 +549,10 @@ impl<T: Config> SyncLayer<T> {
             });
         }
         if self.input_queues.get(player_handle.as_usize()).is_none() {
-            return Err(FortressError::InternalErrorStructured {
-                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
-                    name: "input_queues",
-                    index: player_handle.as_usize(),
-                    length: self.input_queues.len(),
-                }),
-            });
+            return Err(input_queue_oob(
+                player_handle.as_usize(),
+                self.input_queues.len(),
+            ));
         }
         Ok(())
     }
@@ -496,10 +562,8 @@ impl<T: Config> SyncLayer<T> {
     /// # Note
     /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
     pub fn reset_prediction(&mut self) {
-        for i in 0..self.num_players {
-            if let Some(queue) = self.input_queues.get_mut(i) {
-                queue.reset_prediction();
-            }
+        for queue in self.input_queues.iter_mut() {
+            queue.reset_prediction();
         }
     }
 
@@ -589,9 +653,20 @@ impl<T: Config> SyncLayer<T> {
             );
             return Frame::NULL;
         }
-        self.input_queues
-            .get_mut(player_handle.as_usize())
-            .map_or(Frame::NULL, |queue| queue.add_input(input))
+        let queue_count = self.input_queues.len();
+        match self.input_queues.get_mut(player_handle.as_usize()) {
+            Some(queue) => queue.add_input(input),
+            None => {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InputQueue,
+                    "add_local_input: missing input_queues entry for player handle {} (input_queues.len()={})",
+                    player_handle.as_usize(),
+                    queue_count
+                );
+                Frame::NULL
+            },
+        }
     }
 
     /// Adds remote input to the corresponding input queue.
@@ -601,8 +676,20 @@ impl<T: Config> SyncLayer<T> {
         player_handle: PlayerHandle,
         input: PlayerInput<T::Input>,
     ) {
-        if let Some(queue) = self.input_queues.get_mut(player_handle.as_usize()) {
-            queue.add_input(input);
+        let queue_count = self.input_queues.len();
+        match self.input_queues.get_mut(player_handle.as_usize()) {
+            Some(queue) => {
+                queue.add_input(input);
+            },
+            None => {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InputQueue,
+                    "add_remote_input: missing input_queues entry for player handle {} (input_queues.len()={})",
+                    player_handle.as_usize(),
+                    queue_count
+                );
+            },
         }
     }
 
@@ -670,13 +757,7 @@ impl<T: Config> SyncLayer<T> {
             let queue = self
                 .input_queues
                 .get(i)
-                .ok_or(FortressError::InternalErrorStructured {
-                    kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
-                        name: "input_queues",
-                        index: i,
-                        length: self.input_queues.len(),
-                    }),
-                })?;
+                .ok_or_else(|| input_queue_oob(i, self.input_queues.len()))?;
             if con_stat.disconnected && con_stat.last_frame < frame {
                 // Mirror the freeze logic in `synchronized_inputs` so spectator
                 // state and player state agree on the dropped peer's input.
@@ -708,12 +789,11 @@ impl<T: Config> SyncLayer<T> {
     /// Sets the last confirmed frame to a given frame. By raising the last confirmed frame, we can discard all previous frames, as they are no longer necessary.
     pub(crate) fn set_last_confirmed_frame(&mut self, mut frame: Frame, save_mode: SaveMode) {
         // don't set the last confirmed frame after the first incorrect frame before a rollback has happened
-        let mut first_incorrect: Frame = Frame::NULL;
-        for handle in 0..self.num_players {
-            if let Some(queue) = self.input_queues.get(handle) {
-                first_incorrect = std::cmp::max(first_incorrect, queue.first_incorrect_frame());
-            }
-        }
+        let first_incorrect: Frame = self
+            .input_queues
+            .iter()
+            .map(InputQueue::first_incorrect_frame)
+            .fold(Frame::NULL, std::cmp::max);
 
         // if sparse saving option is turned on, don't set the last confirmed frame after the last saved frame
         if save_mode == SaveMode::Sparse {
@@ -739,24 +819,18 @@ impl<T: Config> SyncLayer<T> {
         self.last_confirmed_frame = frame;
         if self.last_confirmed_frame.as_i32() > 0 {
             let discard_frame = safe_frame_sub!(frame, 1, "SyncLayer::confirm_frame");
-            for i in 0..self.num_players {
-                if let Some(queue) = self.input_queues.get_mut(i) {
-                    queue.discard_confirmed_frames(discard_frame);
-                }
+            for queue in self.input_queues.iter_mut() {
+                queue.discard_confirmed_frames(discard_frame);
             }
         }
     }
 
     /// Finds the earliest incorrect frame detected by the individual input queues
     pub(crate) fn check_simulation_consistency(&self, mut first_incorrect: Frame) -> Frame {
-        for handle in 0..self.num_players {
-            if let Some(queue) = self.input_queues.get(handle) {
-                let incorrect = queue.first_incorrect_frame();
-                if !incorrect.is_null()
-                    && (first_incorrect.is_null() || incorrect < first_incorrect)
-                {
-                    first_incorrect = incorrect;
-                }
+        for queue in self.input_queues.iter() {
+            let incorrect = queue.first_incorrect_frame();
+            if !incorrect.is_null() && (first_incorrect.is_null() || incorrect < first_incorrect) {
+                first_incorrect = incorrect;
             }
         }
         first_incorrect
@@ -769,14 +843,11 @@ impl<T: Config> SyncLayer<T> {
         disconnect_frame: Frame,
     ) -> Vec<(PlayerHandle, Frame)> {
         let mut result = Vec::new();
-        for handle in 0..self.num_players {
-            if let Some(queue) = self.input_queues.get(handle) {
-                let incorrect = queue.first_incorrect_frame();
-                if !incorrect.is_null()
-                    && (disconnect_frame.is_null() || incorrect <= disconnect_frame)
-                {
-                    result.push((PlayerHandle::new(handle), incorrect));
-                }
+        for (handle, queue) in self.input_queues.iter().enumerate() {
+            let incorrect = queue.first_incorrect_frame();
+            if !incorrect.is_null() && (disconnect_frame.is_null() || incorrect <= disconnect_frame)
+            {
+                result.push((PlayerHandle::new(handle), incorrect));
             }
         }
         result
@@ -1004,6 +1075,43 @@ mod sync_layer_tests {
             },
             _ => panic!("Expected InvalidPlayerHandle error"),
         }
+    }
+
+    #[test]
+    fn test_with_queue_length_invalid_falls_back_to_default_and_preserves_invariant() {
+        // queue_length < 2 is invalid for InputQueue::with_queue_length;
+        // the constructor must fall back to the library default and still
+        // produce one input queue per player so downstream invariants
+        // (input_queues.len() == num_players) hold.
+        let sync_layer = SyncLayer::<TestConfig>::with_queue_length(3, 8, 1);
+        assert_eq!(
+            sync_layer.input_queues.len(),
+            3,
+            "input_queues.len() must equal num_players even when queue_length is invalid"
+        );
+        assert_eq!(sync_layer.num_players, 3);
+        assert_eq!(sync_layer.max_prediction, 8);
+        // queue_length=0 also falls back.
+        let sync_layer_zero = SyncLayer::<TestConfig>::with_queue_length(2, 4, 0);
+        assert_eq!(sync_layer_zero.input_queues.len(), 2);
+    }
+
+    /// Compile-time guarantee that the secondary fallback inside
+    /// [`SyncLayer::with_queue_length`] is unreachable: the library
+    /// constant the fallback hands to `InputQueue::with_queue_length` must
+    /// satisfy that function's `>= 2` precondition. If a future change to
+    /// `INPUT_QUEUE_LENGTH` (e.g., a new feature gate) violates this, the
+    /// const assertion below fails at compile time.
+    const INPUT_QUEUE_LENGTH_IS_VALID: () = assert!(crate::input_queue::INPUT_QUEUE_LENGTH >= 2);
+
+    #[test]
+    fn input_queue_length_constant_is_valid_for_with_queue_length() {
+        // `INPUT_QUEUE_LENGTH_IS_VALID` is a non-generic const, so the
+        // `assert!` is evaluated unconditionally at compile time when the
+        // constant is defined above. Referencing it here only surfaces the
+        // invariant in test-runner reports — the test would never run if the
+        // const expression failed.
+        let () = INPUT_QUEUE_LENGTH_IS_VALID;
     }
 
     #[test]

@@ -675,13 +675,16 @@ impl<T: Config> P2PSession<T> {
         }
 
         // Freeze input queues and emit `PeerDropped` for every non-spectator
-        // handle owned by the dropped endpoint *before* mutating any
-        // session state. This makes `remove_player` truly transactional: a
-        // freeze-step failure (vanishingly unlikely after pre-validation)
-        // leaves the session untouched. `disconnect_player_at_frame` only
-        // sets `disconnected = true` and disconnects the endpoint, so
-        // freezing first is safe — the queue still ignores any further
-        // inputs once frozen, and `last_confirmed_input` does not change.
+        // handle owned by the dropped endpoint before running the
+        // `disconnect_player_at_frame` flow below. This step *does* mutate
+        // session state (it freezes input queues and pushes `PeerDropped`
+        // events onto the event queue), but the pre-validation above
+        // ensures `freeze_player` cannot fail at this point, so reaching
+        // this call site already guarantees the freeze step will succeed
+        // for every handle. `disconnect_player_at_frame` only sets
+        // `disconnected = true` and disconnects the endpoint, so freezing
+        // first is safe — the queue still ignores any further inputs once
+        // frozen, and `last_confirmed_input` does not change.
         self.emit_peer_dropped_for_endpoint(&addr, &handles_at_addr)?;
 
         // Now run the existing disconnect flow (mark all handles at the
@@ -1542,8 +1545,49 @@ impl<T: Config> P2PSession<T> {
     ///   (`InputDelayMidSessionPendingOutputFull`) if the requested increase
     ///   would push more gap-fill frames into a remote's pending-output
     ///   buffer than the configured `pending_output_limit` allows.
+    /// - Returns [`FortressError::InternalErrorStructured`] with
+    ///   [`InternalErrorKind::ConnectionStatusIndexOutOfBounds`] if the
+    ///   local connect-status entry for `player_handle` is missing during
+    ///   the mid-session gap-fill mirror step. This indicates an internal
+    ///   library bug; reaching this branch should not occur in correct code.
+    /// - Returns [`FortressError::InternalErrorStructured`] with
+    ///   [`InternalErrorKind::IndexOutOfBounds`] (name `"input_queues"`) if
+    ///   any sync-layer input-queue lookup performed while reading the
+    ///   current/last-added/confirmed-input state, or while applying the
+    ///   new frame delay, fails to resolve `player_handle`. Reaching this
+    ///   branch indicates an internal-invariant violation and should not
+    ///   occur in correct code.
     /// - Internal errors from the input queue or sync layer are surfaced
-    ///   unchanged.
+    ///   unchanged. In particular, the bubbled-up
+    ///   [`SyncLayer::set_frame_delay`](crate::__internal::SyncLayer::set_frame_delay)
+    ///   call may surface
+    ///   [`InvalidRequestKind::FrameDelayTooLarge`],
+    ///   [`InvalidRequestKind::InputDelayDecreaseUnsupported`],
+    ///   [`InternalErrorKind::IndexOutOfBounds`] (name `"inputs"`), or
+    ///   [`InternalErrorKind::InputQueueGapFillFailed`] from the underlying
+    ///   input queue.
+    /// - Returns [`FortressError::InvalidPlayerHandle`] if any of the
+    ///   bubbled-up sync-layer calls
+    ///   ([`SyncLayer::frame_delay`](crate::__internal::SyncLayer::frame_delay),
+    ///   `SyncLayer::last_added_frame`, `SyncLayer::confirmed_input`, or
+    ///   [`SyncLayer::set_frame_delay`](crate::__internal::SyncLayer::set_frame_delay))
+    ///   reject `player_handle`. This is unreachable in practice because the
+    ///   `is_local_player(player_handle)` guard above pre-validates the
+    ///   handle, but is documented for completeness so callers can match it
+    ///   without surprise on a coding-error path.
+    /// - Returns [`InvalidRequestKind::NoConfirmedInput`] (surfaced through
+    ///   `SyncLayer::confirmed_input` from the underlying
+    ///   [`InputQueue::confirmed_input`](crate::__internal::InputQueue::confirmed_input))
+    ///   if the gap-fill loop requests a frame for which the input queue has
+    ///   no confirmed input. This is internally unreachable because the loop
+    ///   only iterates over frames `prev_last_added + 1 ..= new_last_added`,
+    ///   which the input queue has just produced as part of the same
+    ///   `set_frame_delay` call; documented for completeness.
+    ///
+    /// [`InvalidRequestKind::FrameDelayTooLarge`]: crate::error::InvalidRequestKind::FrameDelayTooLarge
+    /// [`InvalidRequestKind::InputDelayDecreaseUnsupported`]: crate::error::InvalidRequestKind::InputDelayDecreaseUnsupported
+    /// [`InvalidRequestKind::NoConfirmedInput`]: crate::error::InvalidRequestKind::NoConfirmedInput
+    /// [`InternalErrorKind::InputQueueGapFillFailed`]: crate::error::InternalErrorKind::InputQueueGapFillFailed
     ///
     /// # Example
     ///
@@ -1653,13 +1697,19 @@ impl<T: Config> P2PSession<T> {
         }
 
         // Mirror the queue's advanced last_added_frame on the connect-status
-        // record so confirmed_frame()/last_frame stay consistent with what
-        // remote peers will observe. This must happen before flushing so that
-        // the Input message stamps `peer_connect_status[player_handle].last_frame`
-        // to the new value matching the gap-fill bytes payload.
-        if let Some(status) = self.local_connect_status.get_mut(player_handle.as_usize()) {
-            status.last_frame = new_last_added;
-        }
+        // record before flushing, so each Input message stamps the remote's
+        // `peer_connect_status[player_handle].last_frame` to match the
+        // gap-fill bytes payload. The `?` on the lookup surfaces an
+        // internal-invariant break rather than silently skipping (see the
+        // `ConnectionStatusIndexOutOfBounds` case in this method's
+        // rustdoc).
+        let status = self
+            .local_connect_status
+            .get_mut(player_handle.as_usize())
+            .ok_or(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::ConnectionStatusIndexOutOfBounds { player_handle },
+            })?;
+        status.last_frame = new_last_added;
 
         // Flush each remote's pending output now so the gap-fill frames travel
         // on the wire promptly, just as they would have if produced by a
