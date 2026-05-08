@@ -452,6 +452,45 @@ impl<T: Config> SyncLayer<T> {
         Ok(())
     }
 
+    /// Pre-validates that a subsequent call to [`Self::freeze_player`] for
+    /// `player_handle` would succeed.
+    ///
+    /// Returns the exact same error variant ([`FortressError::InvalidPlayerHandle`]
+    /// or [`InternalErrorKind::IndexOutOfBounds`]) that [`Self::freeze_player`]
+    /// would produce for the same handle. This lets callers pre-validate every
+    /// handle in a multi-handle endpoint before performing any state-mutating
+    /// work, so the freeze step can be made transactional (all-or-nothing) —
+    /// the application-level graceful-drop contract is honored for every
+    /// handle, or no handle.
+    ///
+    /// # Errors
+    /// - Returns [`FortressError::InvalidPlayerHandle`] if `player_handle` is
+    ///   out of range for this sync layer.
+    /// - Returns [`FortressError::InternalErrorStructured`] with
+    ///   [`InternalErrorKind::IndexOutOfBounds`] if no input queue exists for
+    ///   `player_handle` (an internal-invariant violation).
+    pub(crate) fn validate_freeze_player(
+        &self,
+        player_handle: PlayerHandle,
+    ) -> Result<(), FortressError> {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            return Err(FortressError::InvalidPlayerHandle {
+                handle: player_handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        if self.input_queues.get(player_handle.as_usize()).is_none() {
+            return Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                    name: "input_queues",
+                    index: player_handle.as_usize(),
+                    length: self.input_queues.len(),
+                }),
+            });
+        }
+        Ok(())
+    }
+
     /// Resets the prediction state for all input queues.
     ///
     /// # Note

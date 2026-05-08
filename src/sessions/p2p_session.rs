@@ -548,18 +548,32 @@ impl<T: Config> P2PSession<T> {
     /// - `DisconnectBehavior::ContinueWithout` + auto-timeout → graceful drop.
     /// - `remove_player(...)` (any `DisconnectBehavior`) → graceful drop.
     ///
-    /// On invocation, the player's input queue is frozen (it repeats their
-    /// last confirmed input forever), the player is marked disconnected on
-    /// this session's connection-status table, the corresponding network
-    /// endpoint is disconnected, and a [`FortressEvent::PeerDropped`] event
-    /// is queued. [`FortressEvent::Disconnected`] is also emitted for
-    /// back-compat with code that consumes it. Remaining peers continue
+    /// On invocation, the input queue is frozen (it repeats the last
+    /// confirmed input forever) for **every** non-spectator player handle
+    /// owned by the dropped endpoint — not just the targeted handle. A single
+    /// remote address can host more than one player handle (e.g. couch co-op
+    /// behind one socket); the graceful-drop contract applies to all of them.
+    /// Each affected handle is marked disconnected on this session's
+    /// connection-status table, the corresponding network endpoint is
+    /// disconnected, and one [`FortressEvent::PeerDropped`] event per
+    /// non-spectator handle is queued, followed by exactly one address-level
+    /// [`FortressEvent::Disconnected`] event in the same batch for back-compat
+    /// with code that consumes the legacy event. Remaining peers continue
     /// advancing the session — the game layer decides how to handle the
     /// gameplay impact (AI takeover, pause, end the match, etc.).
     ///
     /// For automatic graceful drop on disconnect timeout, configure
     /// [`crate::SessionBuilder::with_disconnect_behavior`] with
     /// [`DisconnectBehavior::ContinueWithout`].
+    ///
+    /// # Spectator endpoints at the same address
+    ///
+    /// `remove_player` operates on the **Remote** endpoint at the address
+    /// only. A `Spectator` endpoint registered at the same `T::Address` is
+    /// an independent endpoint and is **not** affected — it remains running
+    /// and continues receiving forwarded inputs until it disconnects on its
+    /// own. Co-locating a `Remote` and a `Spectator` at the same address is
+    /// unusual; this note documents the behavior for that edge case.
     ///
     /// # Difference from [`Self::disconnect_player`]
     ///
@@ -574,15 +588,27 @@ impl<T: Config> P2PSession<T> {
     ///
     /// # Errors
     /// - Returns [`InvalidRequestKind::DisconnectInvalidHandle`] if
-    ///   `player_handle` is not a registered handle.
+    ///   `player_handle` is unregistered, or refers to a spectator (graceful
+    ///   removal applies to remote player handles only — spectator endpoints
+    ///   disconnect via their own lifecycle).
     /// - Returns [`InvalidRequestKind::DisconnectLocalPlayer`] if
     ///   `player_handle` refers to a local player.
-    /// - Returns [`InvalidRequestKind::PlayerAlreadyRemoved`] if the player
-    ///   has already been removed (or otherwise marked disconnected).
+    /// - Returns [`InvalidRequestKind::PlayerAlreadyRemoved`] if `player_handle`
+    ///   is already marked disconnected — either by a previous `remove_player`
+    ///   call, by auto-removal under [`DisconnectBehavior::ContinueWithout`],
+    ///   or by a previous explicit [`Self::disconnect_player`] call.
+    /// - Returns a [`FortressError::InternalErrorStructured`] (e.g.
+    ///   [`InternalErrorKind::DisconnectStatusNotFound`] or
+    ///   [`InternalErrorKind::IndexOutOfBounds`]) if an internal invariant is
+    ///   violated (a registered handle has no corresponding input queue or
+    ///   connection-status entry). These should not occur in correct code;
+    ///   treat them as a library bug and report.
     ///
     /// [`InvalidRequestKind::DisconnectInvalidHandle`]: crate::error::InvalidRequestKind::DisconnectInvalidHandle
     /// [`InvalidRequestKind::DisconnectLocalPlayer`]: crate::error::InvalidRequestKind::DisconnectLocalPlayer
     /// [`InvalidRequestKind::PlayerAlreadyRemoved`]: crate::error::InvalidRequestKind::PlayerAlreadyRemoved
+    /// [`InternalErrorKind::DisconnectStatusNotFound`]: crate::error::InternalErrorKind::DisconnectStatusNotFound
+    /// [`InternalErrorKind::IndexOutOfBounds`]: crate::error::InternalErrorKind::IndexOutOfBounds
     #[must_use = "remove_player errors should be handled"]
     pub fn remove_player(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError> {
         let player_type = self.player_reg.handles.get(&player_handle).ok_or(
@@ -624,28 +650,47 @@ impl<T: Config> P2PSession<T> {
         }
         let last_frame = status.last_frame;
 
-        // Run the existing disconnect flow (mark disconnected, disconnect
-        // endpoint, set disconnect_frame for rollback). This keeps every
-        // legacy book-keeping side effect intact.
-        self.disconnect_player_at_frame(player_handle, last_frame);
+        // Multi-handle endpoints: a single remote address may own more than
+        // one player handle (e.g. couch co-op behind one socket). The
+        // graceful-drop contract — "freeze each affected player's input queue
+        // so simulation keeps producing the last confirmed input" — must apply
+        // to *every* such handle, not just the targeted one.
+        let handles_at_addr: Vec<PlayerHandle> =
+            self.player_reg.handles_by_address_iter(&addr).collect();
 
-        // Freeze the input queue so further inputs for this player are
-        // silently ignored, and the queue keeps returning the last confirmed
-        // input forever for remaining peers' simulation.
-        if let Err(e) = self.sync_layer.freeze_player(player_handle) {
-            report_violation!(
-                ViolationSeverity::Warning,
-                ViolationKind::InternalError,
-                "Failed to freeze input queue for handle {} during remove_player: {}",
-                player_handle,
-                e
-            );
+        // Pre-validate that every handle's input queue can be frozen BEFORE
+        // performing any state-mutating work. `validate_freeze_player`
+        // returns the exact error variant `freeze_player` would produce, so
+        // the error surfaced here is byte-identical to what would have been
+        // surfaced if we had naively called freeze_player and failed.
+        // Reaching the error branch indicates an internal-invariant violation
+        // (handles registered to an endpoint should always have a
+        // corresponding input queue); spectator handles do not own an input
+        // queue and are skipped here as they are by the helper.
+        for &handle in &handles_at_addr {
+            if !handle.is_valid_player_for(self.num_players) {
+                continue; // spectator (no input queue to freeze)
+            }
+            self.sync_layer.validate_freeze_player(handle)?;
         }
 
-        self.event_queue.push_back(FortressEvent::PeerDropped {
-            handle: player_handle,
-            addr: addr.clone(),
-        });
+        // Freeze input queues and emit `PeerDropped` for every non-spectator
+        // handle owned by the dropped endpoint *before* mutating any
+        // session state. This makes `remove_player` truly transactional: a
+        // freeze-step failure (vanishingly unlikely after pre-validation)
+        // leaves the session untouched. `disconnect_player_at_frame` only
+        // sets `disconnected = true` and disconnects the endpoint, so
+        // freezing first is safe — the queue still ignores any further
+        // inputs once frozen, and `last_confirmed_input` does not change.
+        self.emit_peer_dropped_for_endpoint(&addr, &handles_at_addr)?;
+
+        // Now run the existing disconnect flow (mark all handles at the
+        // address disconnected, disconnect endpoint, set disconnect_frame
+        // for rollback). Passing the originally-targeted handle preserves
+        // the existing `disconnect_frame` semantic — the targeted player's
+        // `last_frame` wins.
+        self.disconnect_player_at_frame(player_handle, last_frame);
+
         // Emit Disconnected as well for back-compat with applications that
         // consume the legacy event. Mirrors the auto-removal path in
         // `Event::Disconnected`, which also emits both events for the same
@@ -656,8 +701,37 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// Disconnects a remote player and all other remote players with the same address from the session.
+    ///
+    /// # Spectator endpoints at the same address
+    ///
+    /// When `player_handle` refers to a **Remote** player, `disconnect_player`
+    /// disconnects the Remote endpoint at the address only. A `Spectator`
+    /// endpoint registered at the same `T::Address` is an independent
+    /// endpoint and is **not** affected — it remains running and continues
+    /// receiving forwarded inputs until it disconnects on its own. When
+    /// `player_handle` refers to a **Spectator**, only that specific
+    /// spectator endpoint is disconnected; any Remote endpoint at the same
+    /// address is left running. Co-locating a `Remote` and a `Spectator` at
+    /// the same address is unusual; this note documents the behavior for
+    /// that edge case.
+    ///
     /// # Errors
-    /// - Returns a [`FortressError`] if you try to disconnect a local player or the provided handle is invalid.
+    /// - Returns [`InvalidRequestKind::DisconnectInvalidHandle`] if
+    ///   `player_handle` is not a registered handle.
+    /// - Returns [`InvalidRequestKind::DisconnectLocalPlayer`] if
+    ///   `player_handle` refers to a local player.
+    /// - Returns [`InvalidRequestKind::AlreadyDisconnected`] if
+    ///   `player_handle` was already disconnected.
+    /// - Returns a [`FortressError::InternalErrorStructured`] (e.g.
+    ///   [`InternalErrorKind::DisconnectStatusNotFound`]) if an internal
+    ///   invariant is violated (a registered remote handle has no
+    ///   corresponding connection-status entry). This should not occur in
+    ///   correct code; treat it as a library bug and report.
+    ///
+    /// [`InvalidRequestKind::DisconnectInvalidHandle`]: crate::error::InvalidRequestKind::DisconnectInvalidHandle
+    /// [`InvalidRequestKind::DisconnectLocalPlayer`]: crate::error::InvalidRequestKind::DisconnectLocalPlayer
+    /// [`InvalidRequestKind::AlreadyDisconnected`]: crate::error::InvalidRequestKind::AlreadyDisconnected
+    /// [`InternalErrorKind::DisconnectStatusNotFound`]: crate::error::InternalErrorKind::DisconnectStatusNotFound
     #[must_use = "disconnect errors should be handled"]
     pub fn disconnect_player(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError> {
         match self.player_reg.handles.get(&player_handle) {
@@ -1396,17 +1470,17 @@ impl<T: Config> P2PSession<T> {
     /// # Examples
     ///
     /// ```ignore
-    /// for handle in session.handles_by_address_iter(peer_addr) {
+    /// for handle in session.handles_by_address_iter(&peer_addr) {
     ///     println!("Handle at {}: {:?}", peer_addr, handle);
     /// }
     /// ```
     ///
     /// [`handles_by_address`]: Self::handles_by_address
     #[must_use = "iterators are lazy and do nothing unless consumed"]
-    pub fn handles_by_address_iter(
-        &self,
-        addr: T::Address,
-    ) -> impl Iterator<Item = PlayerHandle> + '_ {
+    pub fn handles_by_address_iter<'a>(
+        &'a self,
+        addr: &'a T::Address,
+    ) -> impl Iterator<Item = PlayerHandle> + 'a {
         self.player_reg.handles_by_address_iter(addr)
     }
 
@@ -1416,7 +1490,7 @@ impl<T: Config> P2PSession<T> {
     ///
     /// [`handles_by_address_iter`]: Self::handles_by_address_iter
     #[must_use]
-    pub fn handles_by_address(&self, addr: T::Address) -> HandleVec {
+    pub fn handles_by_address(&self, addr: &T::Address) -> HandleVec {
         self.player_reg.handles_by_address(addr)
     }
 
@@ -1822,6 +1896,45 @@ impl<T: Config> P2PSession<T> {
             .into_iter()
             .filter_map(|handle| self.sync_health(handle).map(|health| (handle, health)))
             .collect()
+    }
+
+    /// Apply graceful-drop event emission to every non-spectator handle in
+    /// `handles` belonging to the endpoint at `addr`: freeze each handle's
+    /// input queue and enqueue a [`FortressEvent::PeerDropped`] for it.
+    ///
+    /// Returns `Err` on the first [`SyncLayer::freeze_player`] failure (an
+    /// internal-invariant violation, since handles in an endpoint are
+    /// validated at session creation). On error, any handles successfully
+    /// frozen up to that point remain frozen and their `PeerDropped` events
+    /// remain enqueued — this keeps back-compat with the legacy event stream,
+    /// but callers should surface the error so applications know the
+    /// graceful-drop contract was partially broken.
+    ///
+    /// The address-level [`FortressEvent::Disconnected`] is **not** emitted by
+    /// this helper; the caller is responsible for emitting it. This lets
+    /// callers always emit `Disconnected` for legacy back-compat even when
+    /// graceful-drop emission errors.
+    ///
+    /// Spectator handles in `handles` are skipped (they have no input queue
+    /// to freeze and never receive `PeerDropped`).
+    fn emit_peer_dropped_for_endpoint(
+        &mut self,
+        addr: &T::Address,
+        handles: &[PlayerHandle],
+    ) -> Result<(), FortressError> {
+        for &handle in handles {
+            if !handle.is_valid_player_for(self.num_players) {
+                // Spectator handle (or otherwise out-of-range): no input queue
+                // to freeze and no PeerDropped event for this handle.
+                continue;
+            }
+            self.sync_layer.freeze_player(handle)?;
+            self.event_queue.push_back(FortressEvent::PeerDropped {
+                handle,
+                addr: addr.clone(),
+            });
+        }
+        Ok(())
     }
 
     fn disconnect_player_at_frame(&mut self, player_handle: PlayerHandle, last_frame: Frame) {
@@ -2274,47 +2387,54 @@ impl<T: Config> P2PSession<T> {
             Event::Disconnected => {
                 let continue_without =
                     self.disconnect_behavior == DisconnectBehavior::ContinueWithout;
-                for &handle in player_handles.iter() {
-                    // unwrap_or_else has side effects (violation reporting)
-                    #[allow(clippy::map_unwrap_or)]
-                    let last_frame = if handle.is_valid_player_for(self.num_players) {
-                        self.local_connect_status
-                            .get(handle.as_usize())
-                            .map(|s| s.last_frame)
-                            .unwrap_or_else(|| {
-                                report_violation!(
-                                    ViolationSeverity::Warning,
-                                    ViolationKind::InternalError,
-                                    "Invalid player handle {} when handling disconnect event - using NULL frame",
-                                    handle
-                                );
-                                Frame::NULL
-                            })
-                    } else {
-                        Frame::NULL // spectator
-                    };
 
-                    self.disconnect_player_at_frame(handle, last_frame);
-
-                    // If the application opted into ContinueWithout, freeze the
-                    // affected (non-spectator) input queue so subsequent inputs
-                    // for this player are dropped silently and the queue keeps
-                    // returning the last confirmed value forever, and emit
-                    // PeerDropped so the application can react.
-                    if continue_without && handle.is_valid_player_for(self.num_players) {
-                        if let Err(e) = self.sync_layer.freeze_player(handle) {
+                // `disconnect_player_at_frame` iterates every handle at the
+                // endpoint internally, so a single call handles the whole
+                // endpoint. We pick the LAST handle in `player_handles` to
+                // preserve the pre-refactor behavior (the per-handle loop's
+                // last iteration overwrote `disconnect_frame`).
+                let target_handle = player_handles.last().copied();
+                // unwrap_or_else has side effects (violation reporting)
+                #[allow(clippy::map_unwrap_or)]
+                let last_frame = match target_handle {
+                    Some(handle) if handle.is_valid_player_for(self.num_players) => self
+                        .local_connect_status
+                        .get(handle.as_usize())
+                        .map(|s| s.last_frame)
+                        .unwrap_or_else(|| {
                             report_violation!(
                                 ViolationSeverity::Warning,
                                 ViolationKind::InternalError,
-                                "Failed to freeze input queue for handle {} during peer drop: {}",
-                                handle,
-                                e
+                                "Invalid player handle {} when handling disconnect event - using NULL frame",
+                                handle
                             );
-                        }
-                        self.event_queue.push_back(FortressEvent::PeerDropped {
-                            handle,
-                            addr: addr.clone(),
-                        });
+                            Frame::NULL
+                        }),
+                    _ => Frame::NULL, // spectator endpoint or empty handle list
+                };
+
+                if let Some(handle) = target_handle {
+                    self.disconnect_player_at_frame(handle, last_frame);
+                }
+
+                // If the application opted into ContinueWithout, freeze every
+                // non-spectator input queue at this endpoint and emit one
+                // `PeerDropped` per handle so simulation keeps producing the
+                // last confirmed input for each affected player. On failure
+                // we surface an Error-severity violation (the graceful-drop
+                // contract cannot be honored for any remaining handles), but
+                // still emit the legacy `Disconnected` event below so existing
+                // applications observe the address-level disconnect.
+                if continue_without {
+                    if let Err(e) = self.emit_peer_dropped_for_endpoint(&addr, &player_handles) {
+                        report_violation!(
+                            ViolationSeverity::Error,
+                            ViolationKind::InternalError,
+                            "Failed to freeze input queue during peer drop for endpoint at {:?}: {} \
+                             (graceful-drop contract cannot be honored for one or more handles in this endpoint)",
+                            addr,
+                            e
+                        );
                     }
                 }
 
@@ -3288,7 +3408,7 @@ mod tests {
     fn handles_by_address_returns_correct_handles() {
         let session = create_two_player_session();
         let addr = test_addr(8080);
-        let handles = session.handles_by_address(addr);
+        let handles = session.handles_by_address(&addr);
         assert_eq!(handles.len(), 1);
         assert!(handles.contains(&PlayerHandle::new(1)));
     }
@@ -3297,7 +3417,7 @@ mod tests {
     fn handles_by_address_unknown_returns_empty() {
         let session = create_two_player_session();
         let unknown_addr = test_addr(9999);
-        let handles = session.handles_by_address(unknown_addr);
+        let handles = session.handles_by_address(&unknown_addr);
         assert!(handles.is_empty());
     }
 

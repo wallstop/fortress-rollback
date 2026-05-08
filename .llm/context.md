@@ -218,7 +218,11 @@ For protocol tests that poll in loops (`poll_remote_clients()` / protocol `poll(
 
 **Exclude:** internal refactoring, test improvements, doc-only changes, CI/tooling, lint fixes.
 
-**Unreleased code rule:** Never add separate "Fixed" or "Changed" entries for code that has not yet been released. Fixes to unreleased features should be folded into the existing "Added" entry describing that feature. The changelog should describe the final shipped state, not intermediate development history.
+### Unreleased code rule (enforced; agent preflight wired)
+
+Never add separate `### Fixed` entries, or non-`**Breaking:**` `### Changed` entries, for code that has not yet been released. Fixes and tweaks to unreleased features must be folded into the existing `### Added` entry describing that feature. Only `**Breaking:**` entries (for already-released types -- e.g., new variants on a non-`#[non_exhaustive]` enum) belong in `### Changed` of `[Unreleased]`. The changelog describes the final shipped state, not intermediate development history.
+
+Validate locally: `python3 scripts/hooks/check-changelog-unreleased.py`. Also runs automatically in `scripts/ci/agent-preflight.py` whenever `CHANGELOG.md` is in the changed set, and as the `changelog-unreleased-rule` pre-commit hook.
 
 **Version sync rule:** If `Cargo.toml` is `X.Y.Z`, the matching changelog header must be `## [X.Y.Z] - YYYY-MM-DD` (ISO date required). Keep `## [Unreleased]` undated. Validate with `bash scripts/sync-version.sh --check`; auto-fix with `bash scripts/sync-version.sh --changelog-only`.
 
@@ -233,7 +237,7 @@ For protocol tests that poll in loops (`poll_remote_clients()` / protocol `poll(
 - **After `.llm/` changes:** All `.md` files under `.llm/` must be **300 lines or fewer** (enforced by pre-commit hook `llm-line-limit`)
 - **Link validation:** `./scripts/docs/check-links.sh`
 - **Spell check:** `typos`
-- **Vale (advisory):** `vale docs/` -- checks prose quality, non-blocking in CI
+- **Vale (advisory):** `vale docs/` -- checks prose quality, non-blocking in CI. Cheat-sheet of recurring swaps and weasel words: [`.llm/skills/workflows/user-facing-docs.md`](skills/workflows/user-facing-docs.md#prose-conventions). Agent preflight surfaces per-file counts via the `vale-advisory` check.
 - **Full pre-commit:** `cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run --no-capture`
 
 Shell regex portability rule: avoid PCRE-style escapes in `grep -E`/`sed -E` (`\b`, `\s`, `\w`, etc.). Use POSIX-safe classes like `[[:space:]]`, `[[:alnum:]_]`, and token boundaries `(^|[^[:alnum:]_])word([^[:alnum:]_]|$)`.

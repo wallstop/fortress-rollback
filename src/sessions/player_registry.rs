@@ -285,22 +285,22 @@ impl<T: Config> PlayerRegistry<T> {
     /// let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
     /// registry.handles.insert(PlayerHandle::new(1), PlayerType::Remote(addr));
     ///
-    /// for handle in registry.handles_by_address_iter(addr) {
+    /// for handle in registry.handles_by_address_iter(&addr) {
     ///     assert_eq!(handle, PlayerHandle::new(1));
     /// }
     /// ```
     ///
     /// [`handles_by_address`]: Self::handles_by_address
     #[must_use = "iterators are lazy and do nothing unless consumed"]
-    pub fn handles_by_address_iter(
-        &self,
-        addr: T::Address,
-    ) -> impl Iterator<Item = PlayerHandle> + '_ {
+    pub fn handles_by_address_iter<'a>(
+        &'a self,
+        addr: &'a T::Address,
+    ) -> impl Iterator<Item = PlayerHandle> + 'a {
         self.handles
             .iter()
             .filter_map(move |(h, player_type)| match player_type {
                 PlayerType::Local => None,
-                PlayerType::Remote(a) | PlayerType::Spectator(a) => (*a == addr).then_some(*h),
+                PlayerType::Remote(a) | PlayerType::Spectator(a) => (a == addr).then_some(*h),
             })
     }
 
@@ -310,7 +310,7 @@ impl<T: Config> PlayerRegistry<T> {
     ///
     /// [`handles_by_address_iter`]: Self::handles_by_address_iter
     #[must_use]
-    pub fn handles_by_address(&self, addr: T::Address) -> HandleVec {
+    pub fn handles_by_address(&self, addr: &T::Address) -> HandleVec {
         self.handles_by_address_iter(addr).collect()
     }
 
@@ -672,7 +672,7 @@ mod tests {
         registry.handles.insert(handle1, PlayerType::Remote(addr));
 
         // Look up by address
-        let found = registry.handles_by_address(addr);
+        let found = registry.handles_by_address(&addr);
         assert_eq!(found.len(), 1);
         assert!(found.contains(&handle1));
     }
@@ -685,7 +685,7 @@ mod tests {
         let handle = PlayerHandle::new(10);
         registry.handles.insert(handle, PlayerType::Spectator(addr));
 
-        let found = registry.handles_by_address(addr);
+        let found = registry.handles_by_address(&addr);
         assert_eq!(found.len(), 1);
         assert!(found.contains(&handle));
     }
@@ -700,7 +700,7 @@ mod tests {
         registry.handles.insert(handle, PlayerType::Remote(addr));
 
         // Look up different address
-        let found = registry.handles_by_address(other_addr);
+        let found = registry.handles_by_address(&other_addr);
         assert!(found.is_empty());
     }
 
@@ -712,7 +712,7 @@ mod tests {
         registry.handles.insert(handle, PlayerType::Local);
 
         // Local players don't have addresses, so any address lookup returns empty
-        let found = registry.handles_by_address(test_addr(1234));
+        let found = registry.handles_by_address(&test_addr(1234));
         assert!(found.is_empty());
     }
 
@@ -727,7 +727,7 @@ mod tests {
         registry.handles.insert(handle1, PlayerType::Remote(addr));
         registry.handles.insert(handle2, PlayerType::Remote(addr));
 
-        let found = registry.handles_by_address(addr);
+        let found = registry.handles_by_address(&addr);
         assert_eq!(found.len(), 2);
         assert!(found.contains(&handle1));
         assert!(found.contains(&handle2));

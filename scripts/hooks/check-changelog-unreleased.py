@@ -11,13 +11,48 @@ Exception: '### Changed' entries that ALL start with '**Breaking:**' are
 legitimate (they document new enum variants or API changes affecting
 already-released types).
 
+See `.llm/context.md` (section "Changelog Policy", "Unreleased code rule")
+and `.llm/skills/publishing-organization/changelog.md` for the canonical
+specification.
+
+Assumes a single `## [Unreleased]` section; multiple Unreleased headers in
+one file are not supported and would not be valid Keep-a-Changelog format
+anyway.
+
 Cross-platform: Works on Linux, macOS, and Windows.
 """
 from __future__ import annotations
 
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+
+# Truncation width for entry summaries in diagnostics. Picked so a line
+# fits comfortably in a terminal alongside the path:line: prefix.
+_SUMMARY_WIDTH = 80
+
+_RULE_REFERENCE = (
+    ".llm/context.md \"Unreleased code rule\" / "
+    ".llm/skills/publishing-organization/changelog.md"
+)
+
+
+@dataclass(frozen=True)
+class _Entry:
+    """A single bulleted entry inside a CHANGELOG subsection."""
+
+    line_number: int  # 1-indexed file line number
+    text: str  # Trimmed entry text including the leading dash
+
+
+def _summarize(entry_text: str, width: int = _SUMMARY_WIDTH) -> str:
+    """Return a single-line truncated summary of an entry for diagnostics."""
+    # Collapse internal whitespace so multi-line wraps don't blow up the summary.
+    summary = " ".join(entry_text.split())
+    if len(summary) <= width:
+        return summary
+    return summary[: max(0, width - 1)].rstrip() + "..."
 
 
 def check_file(filepath: Path, repo_root: Path | None = None) -> bool:
@@ -63,54 +98,52 @@ def check_file(filepath: Path, repo_root: Path | None = None) -> bool:
     has_added = False
     fixed_line = 0
     changed_line = 0
-    has_fixed = False
-    has_non_breaking_changed = False
+    fixed_entries: list[_Entry] = []
+    changed_entries: list[_Entry] = []
 
-    # Track current subsection for entry analysis
-    current_subsection = None
-    changed_entries: list[str] = []
+    current_subsection: str | None = None
+    current_entries: list[_Entry] = []
 
     for i in range(unreleased_start + 1, unreleased_end):
         line = lines[i]
         subsection_match = re.match(r"^### (.+)$", line)
         if subsection_match:
-            # Before switching subsections, evaluate the previous one
+            # Save the entries that just finished
             if current_subsection == "Changed":
-                # Check if ALL entries start with **Breaking:**
-                non_breaking = [
-                    e for e in changed_entries
-                    if not e.lstrip("- ").startswith("**Breaking:**")
-                ]
-                if non_breaking:
-                    has_non_breaking_changed = True
+                changed_entries = current_entries
+            elif current_subsection == "Fixed":
+                fixed_entries = current_entries
 
             subsection_name = subsection_match.group(1).strip()
             current_subsection = subsection_name
-            changed_entries = []
+            current_entries = []
 
             if subsection_name == "Added":
                 has_added = True
             elif subsection_name == "Fixed":
-                has_fixed = True
                 fixed_line = i + 1
             elif subsection_name == "Changed":
                 changed_line = i + 1
-        elif current_subsection == "Changed" and line.strip().startswith("- "):
-            changed_entries.append(line.strip())
+        elif current_subsection in ("Changed", "Fixed") and line.lstrip().startswith(
+            "- "
+        ):
+            current_entries.append(_Entry(line_number=i + 1, text=line.strip()))
 
-    # Evaluate the last subsection if it was Changed
+    # Save the last subsection if it was a tracked one
     if current_subsection == "Changed":
-        non_breaking = [
-            e for e in changed_entries
-            if not e.lstrip("- ").startswith("**Breaking:**")
-        ]
-        if non_breaking:
-            has_non_breaking_changed = True
+        changed_entries = current_entries
+    elif current_subsection == "Fixed":
+        fixed_entries = current_entries
 
-    # Check for violations
+    non_breaking_changed = [
+        entry
+        for entry in changed_entries
+        if not entry.text.lstrip("- ").startswith("**Breaking:**")
+    ]
+
     violations_found = False
 
-    if has_added and has_fixed:
+    if has_added and fixed_entries:
         print(
             f"{display_path}:{fixed_line}: '### Fixed' subsection found "
             f"alongside '### Added' in [Unreleased] -- fixes to unreleased "
@@ -119,9 +152,22 @@ def check_file(filepath: Path, repo_root: Path | None = None) -> bool:
             f"intermediate development history.",
             file=sys.stderr,
         )
+        for entry in fixed_entries:
+            print(
+                f"{display_path}:{entry.line_number}: offending Fixed entry: "
+                f"{_summarize(entry.text)}",
+                file=sys.stderr,
+            )
+        print(
+            f"  remedy: fold each entry into the matching '### Added' entry "
+            f"that introduces the affected feature; delete the '### Fixed' "
+            f"subsection.",
+            file=sys.stderr,
+        )
+        print(f"  see: {_RULE_REFERENCE}", file=sys.stderr)
         violations_found = True
 
-    if has_added and has_non_breaking_changed:
+    if has_added and non_breaking_changed:
         print(
             f"{display_path}:{changed_line}: '### Changed' subsection with "
             f"non-Breaking entries found alongside '### Added' in "
@@ -130,6 +176,19 @@ def check_file(filepath: Path, repo_root: Path | None = None) -> bool:
             f"entries (for already-released types) belong in Changed.",
             file=sys.stderr,
         )
+        for entry in non_breaking_changed:
+            print(
+                f"{display_path}:{entry.line_number}: offending Changed "
+                f"entry: {_summarize(entry.text)}",
+                file=sys.stderr,
+            )
+        print(
+            f"  remedy: fold each entry into the existing '### Added' entry "
+            f"for the same feature, OR prefix the entry with '**Breaking:**' "
+            f"if it is a breaking change to an already-released type.",
+            file=sys.stderr,
+        )
+        print(f"  see: {_RULE_REFERENCE}", file=sys.stderr)
         violations_found = True
 
     return not violations_found

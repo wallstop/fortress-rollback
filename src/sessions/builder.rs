@@ -107,10 +107,10 @@ where
     recording: bool,
     /// Optional telemetry observer for session performance events.
     telemetry: Option<Arc<dyn SessionTelemetry>>,
-    /// Controls how a [`P2PSession`] reacts when a peer is disconnected
-    /// (timeout or explicit `disconnect_player`). See [`DisconnectBehavior`]
-    /// for options. Defaults to [`DisconnectBehavior::Halt`] for back-compat
-    /// with legacy GGRS-style behavior.
+    /// Controls how a [`P2PSession`] reacts when a remote peer's
+    /// disconnect-timeout fires. See [`DisconnectBehavior`] for options.
+    /// Defaults to [`DisconnectBehavior::Halt`] for back-compat with legacy
+    /// GGRS-style behavior.
     disconnect_behavior: DisconnectBehavior,
 }
 

@@ -1263,15 +1263,20 @@ impl std::fmt::Display for SaveMode {
     }
 }
 
-/// Controls how a [`P2PSession`] reacts when a remote peer is disconnected
-/// (either by a disconnect timeout firing or by an explicit
-/// [`P2PSession::disconnect_player`]/[`P2PSession::remove_player`] call).
+/// Controls how a [`P2PSession`] reacts when a remote peer's
+/// **automatic disconnect-timeout** fires.
+///
+/// This setting governs ONLY the automatic timeout path. Explicit calls to
+/// [`P2PSession::disconnect_player`] always preserve the legacy halt-on-drop
+/// semantics regardless of this setting; explicit calls to
+/// [`P2PSession::remove_player`] always perform a graceful drop regardless
+/// of this setting. See those methods for details.
 ///
 /// Defaults to [`DisconnectBehavior::Halt`] for back-compat with the legacy
 /// GGRS-style behavior. Set [`DisconnectBehavior::ContinueWithout`] via
 /// [`crate::SessionBuilder::with_disconnect_behavior`] to enable graceful
-/// peer drop, where the session continues advancing for the remaining peers
-/// after a drop.
+/// peer drop on auto-timeout, where the session continues advancing for the
+/// remaining peers after a drop.
 ///
 /// # Example
 ///

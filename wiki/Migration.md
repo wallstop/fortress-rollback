@@ -629,6 +629,28 @@ match session.remove_player(conceding_remote) {
 
 The legacy `disconnect_player` is preserved for back-compat. New code should prefer `remove_player` for graceful drops; see [User Guide — Choosing Between `disconnect_player` and `remove_player`](User-Guide#choosing-between-disconnect_player-and-remove_player) for the full distinction.
 
+### Before / After: `handles_by_address` now takes `&T::Address`
+
+`PlayerRegistry::handles_by_address`, `PlayerRegistry::handles_by_address_iter`, and the `P2PSession` forwarders now borrow the address rather than taking ownership. Pass `&addr` instead of `addr` at every call site.
+
+```rust
+// Before: address taken by value (cloned at call site for owned variables).
+let handles = session.handles_by_address(peer_addr);
+for handle in session.handles_by_address_iter(peer_addr.clone()) {
+    println!("{handle}");
+}
+```
+
+```rust
+// After: address borrowed; no clone required.
+let handles = session.handles_by_address(&peer_addr);
+for handle in session.handles_by_address_iter(&peer_addr) {
+    println!("{handle}");
+}
+```
+
+This change is mechanical: add a leading `&` to every call. There are no behavioral changes.
+
 ## More Information
 
 For a complete comparison of features, bug fixes, and improvements, see [Fortress vs GGRS](Fortress-vs-GGRS).

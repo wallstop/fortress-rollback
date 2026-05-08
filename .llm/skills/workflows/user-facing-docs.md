@@ -1,5 +1,5 @@
 <!-- CATEGORY: Workflows -->
-<!-- WHEN: New public API, breaking changes, new features, configuration changes, behavioral changes requiring user documentation -->
+<!-- WHEN: New public API, breaking changes, new features, configuration changes, behavioral changes requiring user documentation; writing or revising user-facing docs prose, addressing vale prose suggestions, prose conventions and style -->
 
 # User-Facing Documentation Workflow
 
@@ -92,7 +92,7 @@ When changing `pub` items, update inline `///` doc comments on affected structs,
 All code examples must follow these rules:
 
 1. **Self-contained with imports** -- include all `use` statements
-2. **Compilable** -- test with `cargo test --doc` or use hidden `# ` lines for boilerplate
+2. **Compilable** -- test with `cargo test --doc` or use hidden `#` lines for boilerplate
 3. **Zero-panic** -- no `.unwrap()` in production examples; use `?` or proper error handling
 4. **Show simple then advanced** -- start with the common case, then show the full-control case
 
@@ -188,6 +188,38 @@ Complete before marking documentation work done:
 - [ ] Wiki sync run and validated
 
 ---
+
+## Prose Conventions
+
+These match the project's Vale config (`.vale.ini`, `write-good`). Vale is **advisory** (non-blocking) but agentic preflight surfaces per-file counts via `vale-advisory`, so keep the noise low.
+
+- **Prefer active voice.** "X queues Y" beats "Y is queued by X" *unless* Y is the topic of the sentence (technical specs often justify passive when the actor is irrelevant or implied -- do not contort prose to avoid passive when passive is clearer).
+- **Avoid wordy words.** Common swaps:
+
+  | Wordy | Prefer |
+  |-------|--------|
+  | implement | do, build, write |
+  | multiple | many, several specific number |
+  | previously / Previously | before, earlier |
+  | subsequent | next, later |
+  | additional | extra, more |
+  | maximum | most, peak |
+  | monitor | watch |
+  | terminate | end, stop |
+  | equivalent | equal, the same |
+  | eliminate | remove |
+  | indicate | show |
+  | requirement | need |
+  | adjustment | change |
+  | satisfy | meet |
+  | forfeit | give up |
+  | in addition | also |
+  | in many cases | often |
+  | it is / It is | (drop or rewrite) |
+
+- **Drop weasel words.** Strike (or replace with something concrete): `very`, `extremely`, `several`, `usually`, `significantly`, `largely`. If a quantitative claim matters, name a number.
+- **Don't start sentences with "There are/There is".** Lead with the subject.
+- **Preserve technical precision.** If a swap loses meaning (e.g., "subsequent frame" has a precise temporal sense in rollback netcode), keep the original. Vale is advisory for a reason.
 
 ## Anti-Patterns
 

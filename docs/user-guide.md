@@ -2688,12 +2688,12 @@ assert_eq!(session.disconnect_behavior(), DisconnectBehavior::ContinueWithout);
 
 ### Reacting to `PeerDropped` Events
 
-When a graceful drop occurs (either from an automatic timeout under `ContinueWithout` or from a call to [`remove_player`](#explicit-peer-removal-with-remove_player)), the session emits **two events** for the dropped peer in the same `events()` batch, in this order:
+When a graceful drop occurs (either from an automatic timeout under `ContinueWithout` or from a call to [`remove_player`](#explicit-peer-removal-with-remove_player)), the session emits the following events for the dropped endpoint in the same `events()` batch, in this order:
 
-1. `FortressEvent::PeerDropped { handle, addr }` — the new graceful-drop event. Match on this to take graceful-drop-specific actions.
-2. `FortressEvent::Disconnected { addr }` — the legacy event. Existing applications continue to receive it unchanged.
+1. One `FortressEvent::PeerDropped { handle, addr }` per non-spectator player handle owned by the dropped endpoint. For the common single-handle-per-peer case this is exactly one event; for multi-handle endpoints (multiple players sharing a single remote address) it is one event per handle.
+2. A single address-level `FortressEvent::Disconnected { addr }` after all `PeerDropped` events for that endpoint. Existing applications continue to receive this unchanged.
 
-Match on `PeerDropped` for graceful-aware logic and treat `Disconnected` as a fallback for legacy code. After the events are emitted the dropped peer's input is frozen at their last confirmed value; subsequent `AdvanceFrame` requests will deliver that input with [`InputStatus::Disconnected`](#handling-disconnected-players) for every frame past the dropped peer's last confirmed frame.
+`PeerDropped` is per-handle; `Disconnected` is per-address. After the events are emitted, every non-spectator handle owned by the dropped endpoint has its input frozen at its last confirmed value; subsequent `AdvanceFrame` requests will deliver that input with [`InputStatus::Disconnected`](#handling-disconnected-players) for every frame past each handle's last confirmed frame.
 
 ```rust
 use fortress_rollback::{Config, FortressEvent, P2PSession};
@@ -2833,20 +2833,28 @@ fn handle_concede<C: Config>(
 | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `InvalidRequestKind::DisconnectInvalidHandle { handle }`       | `handle` is not registered, or refers to a spectator (use spectator-specific cleanup instead).            |
 | `InvalidRequestKind::DisconnectLocalPlayer { handle }`         | `handle` refers to a local player. Local players cannot be removed; tear down the session instead.       |
-| `InvalidRequestKind::PlayerAlreadyRemoved { handle }`          | `remove_player` was called twice for the same handle, or the peer was already auto-removed by a timeout. |
+| `InvalidRequestKind::PlayerAlreadyRemoved { handle }`          | `handle` is already marked disconnected — either by a previous `remove_player` call, by auto-removal under `ContinueWithout`, or by a previous explicit `disconnect_player` call. |
+
+#### Spectator endpoints at the same address
+
+`remove_player` accepts only **Remote** handles (it rejects Spectator handles with `DisconnectInvalidHandle`); it operates on the Remote endpoint at the targeted address. A `Spectator` endpoint registered at the same `T::Address` is an independent endpoint and is **not** affected by `remove_player` — it remains running and continues receiving forwarded inputs until it disconnects on its own.
+
+`disconnect_player` accepts both Remote and Spectator handles. When the targeted handle is **Remote**, `disconnect_player` operates on the Remote endpoint only; a co-located `Spectator` at the same address is left running. When the targeted handle is **Spectator**, only that specific spectator endpoint is disconnected; any Remote endpoint at the same address is left running.
+
+Co-locating a `Remote` and a `Spectator` at the same address is unusual; this note documents the behavior for that edge case.
 
 ### Choosing Between `disconnect_player` and `remove_player`
 
 The session also exposes a legacy `disconnect_player(handle)` method preserved from GGRS. It is **not** the same as `remove_player`:
 
-| Aspect                          | `disconnect_player` (legacy)                                                                                  | `remove_player` (graceful)                                                                       |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| Marks player disconnected       | Yes                                                                                                           | Yes                                                                                              |
-| Disconnects network endpoint    | Yes                                                                                                           | Yes                                                                                              |
-| Freezes input queue             | **No** — `confirmed_frame()` stalls and the session halts under default `Halt`                                | **Yes** — last confirmed input repeats forever; surviving peers keep advancing                   |
+| Aspect                             | `disconnect_player` (legacy)                                                                                  | `remove_player` (graceful)                                                                       |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Marks player disconnected          | Yes                                                                                                           | Yes                                                                                              |
+| Disconnects network endpoint       | Yes                                                                                                           | Yes                                                                                              |
+| Freezes input queue                | **No** — remaining peers no longer produce confirmed inputs from the dropped peer's endpoint, so `advance_frame` cannot make progress past the dropped peer's last confirmed frame under default `Halt` | **Yes** — last confirmed input repeats forever; surviving peers keep advancing                   |
 | Emits `FortressEvent::PeerDropped` | **No**                                                                                                        | **Yes**, immediately followed by `Disconnected`                                                  |
-| Honors `DisconnectBehavior`     | **No** — `disconnect_player` always performs the legacy non-graceful drop regardless of `DisconnectBehavior`. Under default `Halt` the session halts. Under `ContinueWithout` it does **not** auto-promote to the graceful flow; the queue is not frozen, no `PeerDropped` is emitted, and `confirmed_frame()` stalls just as it does under `Halt`. To get the graceful sequence with explicit removal, call `remove_player` instead. | **No** — always performs the graceful sequence, regardless of policy |
-| Use case                        | Back-compat with code written against GGRS's `disconnect_player`                                              | Application-driven graceful drop (kick, surrender, leave match)                                  |
+| Honors `DisconnectBehavior`        | **No** — `disconnect_player` always performs the legacy non-graceful drop regardless of `DisconnectBehavior`. Under default `Halt` the session halts (remaining peers can no longer produce inputs from the dropped peer's endpoint, so `advance_frame` cannot progress). Under `ContinueWithout` it does **not** auto-promote to the graceful flow; the queue is not frozen, no `PeerDropped` is emitted, and `advance_frame` halts just as it does under `Halt`. To get the graceful sequence with explicit removal, call `remove_player` instead. | **No** — always performs the graceful sequence, regardless of policy |
+| Use case                           | Back-compat with code written against GGRS's `disconnect_player`                                              | Application-driven graceful drop (kick, surrender, leave match)                                  |
 
 If you are writing new code, prefer `remove_player`. Reach for `disconnect_player` only when porting GGRS code that depends on its specific halt-on-drop semantics under `DisconnectBehavior::Halt`.
 

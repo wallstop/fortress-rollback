@@ -518,23 +518,25 @@ Each API is documented with:
 
 **Post:**
 
-- Player marked as disconnected on the local connection-status table
+- Every player handle owned by the dropped endpoint is marked as disconnected on the local connection-status table (multi-handle endpoints — multiple handles sharing a single address — are wound down in full)
 - The corresponding network endpoint is disconnected
-- Future inputs use default value
+- Future inputs for any disconnected handle use the default value (the input queue is **not** frozen — see `remove_player` for graceful drop, which freezes the queue and replays the last confirmed input)
 
 **Errors:**
 
 - `InvalidRequestStructured { kind: DisconnectInvalidHandle { handle } }` - handle not registered
 - `InvalidRequestStructured { kind: DisconnectLocalPlayer { handle } }` - handle refers to a local player
 - `InvalidRequestStructured { kind: AlreadyDisconnected { handle } }` - handle was already disconnected
+- `InternalErrorStructured { kind: DisconnectStatusNotFound { handle } }` - internal-invariant violation (a registered remote handle has no corresponding connection-status entry); should not occur in correct code, treat as a library bug
 
 **Panics:** Never
 
 **Notes:**
 
 - Does **not** freeze the player's input queue and does **not** emit `FortressEvent::PeerDropped`.
-- Under default `DisconnectBehavior::Halt`, this halts the session because `confirmed_frame()` stops progressing once the player is marked disconnected.
+- Always preserves halt-on-drop semantics regardless of the configured `DisconnectBehavior`: remaining peers no longer produce confirmed inputs from the dropped peer's endpoint, so `advance_frame` cannot make progress past that peer's last confirmed frame.
 - For an explicit graceful drop, prefer `remove_player`.
+- When `player_handle` is **Remote**, operates on the Remote endpoint at the address only — a `Spectator` endpoint registered at the same `T::Address` is independent and is **not** affected, remaining running until it disconnects on its own. When `player_handle` is **Spectator**, only that specific spectator endpoint is disconnected; any Remote endpoint at the same address is left running. Co-locating a `Remote` and a `Spectator` at the same address is unusual; this note documents the behavior for that edge case.
 
 ---
 
@@ -549,17 +551,18 @@ Each API is documented with:
 
 **Post:**
 
-- Player marked as disconnected on the local connection-status table
-- Player's input queue is **frozen**: it repeats the last confirmed input forever for remaining peers' simulation
+- Every non-spectator player handle owned by the dropped endpoint is marked disconnected on the local connection-status table
+- Every non-spectator handle's input queue is **frozen**: it repeats its last confirmed input forever for remaining peers' simulation
 - The corresponding network endpoint is disconnected
-- `FortressEvent::PeerDropped { handle, addr }` is queued, **followed by** `FortressEvent::Disconnected { addr }` in the same batch
+- One `FortressEvent::PeerDropped { handle, addr }` per non-spectator handle at the dropped address is queued, **followed by** exactly one `FortressEvent::Disconnected { addr }` in the same batch
 - `confirmed_frame()` continues to advance for remaining peers
 
 **Errors:**
 
 - `InvalidRequestStructured { kind: DisconnectInvalidHandle { handle } }` - handle not registered, or refers to a spectator
 - `InvalidRequestStructured { kind: DisconnectLocalPlayer { handle } }` - handle refers to a local player
-- `InvalidRequestStructured { kind: PlayerAlreadyRemoved { handle } }` - handle was already removed (either via a prior `remove_player` call or via auto-removal under `DisconnectBehavior::ContinueWithout`)
+- `InvalidRequestStructured { kind: PlayerAlreadyRemoved { handle } }` - handle is already marked disconnected (either via a prior `remove_player` call, via auto-removal under `DisconnectBehavior::ContinueWithout`, or via a previous explicit `disconnect_player` call)
+- `InternalErrorStructured { kind: DisconnectStatusNotFound { handle } | IndexOutOfBounds { .. } }` - internal-invariant violation (a registered handle has no corresponding input queue or connection-status entry); should not occur in correct code, treat as a library bug
 
 **Panics:** Never
 
@@ -567,6 +570,7 @@ Each API is documented with:
 
 - Always opts in to graceful-drop semantics regardless of the session's `DisconnectBehavior`. The configured `DisconnectBehavior` only governs the **automatic** disconnect-timeout path.
 - The `PeerDropped` event coexists with the legacy `Disconnected` event; new code should match on `PeerDropped` for graceful-drop-aware handling.
+- Operates on the **Remote** endpoint at the targeted address only. A `Spectator` endpoint registered at the same `T::Address` is an independent endpoint and is **not** affected — it remains running until it disconnects on its own. Co-locating a `Remote` and a `Spectator` at the same address is unusual; this note documents the behavior for that edge case.
 
 ---
 
@@ -837,7 +841,7 @@ FortressRequest::AdvanceFrame { inputs }
 | `InputDelayDecreaseUnsupported { current, requested }`                   | `P2PSession::set_input_delay`                                    | `requested < current` after inputs have been added                                                             | Mid-session decreases are not supported; carry the lower delay over to the next session                                |
 | `InputDelayMidSessionMultiLocalUnsupported { local_players }`            | `P2PSession::set_input_delay`                                    | Mid-session increase attempted with more than one local player on this peer                                    | Set the delay before adding inputs (typically via `SessionBuilder::with_input_delay`) when running multi-local        |
 | `InputDelayMidSessionPendingOutputFull { delta, capacity }`              | `P2PSession::set_input_delay`                                    | Mid-session increase would enqueue `delta` gap-fill frames, exceeding remote `pending_output_limit` `capacity` | Apply the change in smaller increments, or wait for the remote to acknowledge outstanding inputs and retry            |
-| `PlayerAlreadyRemoved { handle }`                                        | `P2PSession::remove_player`                                      | `remove_player` called twice for the same handle, or the peer was already auto-removed via `ContinueWithout`   | Treat as a no-op; the peer is already in the graceful-drop terminal state                                              |
+| `PlayerAlreadyRemoved { handle }`                                        | `P2PSession::remove_player`                                      | `remove_player` called when the handle is already marked disconnected — either by a previous `remove_player` call, by auto-removal via `ContinueWithout`, or by a previous explicit `disconnect_player` call | Treat as a no-op; the peer is already in the graceful-drop terminal state                                              |
 | `NotLocalPlayer { handle }` *(pre-existing variant)*                     | `P2PSession::set_input_delay` / `P2PSession::input_delay`        | `handle` is not registered as a local player (it may be a remote player, spectator, or unregistered)           | Pass a registered local player handle (use `SessionBuilder::add_player(PlayerType::Local, ..)` to register one)        |
 
 ### Selected `InternalErrorKind` Variants — Runtime Input Delay
@@ -856,8 +860,8 @@ FortressRequest::AdvanceFrame { inputs }
 
 | Variant                                                                          | When emitted                                                                                                                                            | Coexisting events                                                  |
 | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `PeerDropped { handle, addr }`                                                   | Auto-removal under `DisconnectBehavior::ContinueWithout` after a disconnect timeout, **or** explicit `P2PSession::remove_player` call                   | `Disconnected { addr }` immediately follows in the same batch      |
-| `Disconnected { addr }`                                                          | Always emitted on peer drop (legacy event); under `Halt` it appears alone, under graceful drop it is preceded by `PeerDropped`                          | Optionally `PeerDropped` (graceful drop only)                      |
+| `PeerDropped { handle, addr }`                                                   | Auto-removal under `DisconnectBehavior::ContinueWithout` after a disconnect timeout, **or** explicit `P2PSession::remove_player` call                   | One event per non-spectator handle at the dropped address; followed by exactly one `Disconnected { addr }` after all `PeerDropped` for the same address in the same batch |
+| `Disconnected { addr }`                                                          | Always emitted on peer drop (legacy event); under `Halt` it appears alone, under graceful drop it appears once per address after that address's `PeerDropped` events     | Optionally preceded by one or more `PeerDropped { handle, addr }` (graceful drop, one per handle at the dropped address) |
 | `InputDelayRecommendation { player_handle, current_delay, suggested_delay }`    | Reserved for application-level heuristics or future automatic emitters. **No built-in emitter currently produces this event.**                          | None                                                               |
 
 ---

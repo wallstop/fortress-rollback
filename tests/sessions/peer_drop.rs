@@ -143,7 +143,6 @@ fn build_three_player_sessions(
     let _ = drain_events(&mut sess2);
     let _ = drain_events(&mut sess3);
 
-    let _ = (a1, a2, a3); // addresses not currently needed by callers
     Ok(ThreePlayerSessions {
         sess1,
         sess2,
@@ -1130,6 +1129,380 @@ fn p2p_continue_without_drop_during_synchronizing() -> Result<(), FortressError>
     for _ in 0..10 {
         sess1.poll_remote_clients();
         clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Multi-handle endpoint regression tests
+//
+// A single remote `T::Address` can own multiple `PlayerHandle` (e.g. couch
+// co-op behind one socket). The graceful-drop contract — "freeze each
+// affected player's input queue so simulation keeps producing the last
+// confirmed input" — must apply to *every* handle owned by the dropped
+// endpoint, not just the targeted one. These tests guard against regressions
+// where only the targeted handle's queue is frozen.
+// ============================================================================
+
+/// Two synchronized peers where session A registers session B as **two**
+/// remote player handles sharing a single address. Returns the sessions and
+/// the shared address `addr_b`.
+struct MultiHandleSessions {
+    sess_a: P2PSession<StubConfig>,
+    sess_b: P2PSession<StubConfig>,
+    addr_b: std::net::SocketAddr,
+    clock: TestClock,
+}
+
+#[track_caller]
+fn build_multi_handle_sessions(
+    behavior: DisconnectBehavior,
+    disconnect_timeout: Option<Duration>,
+) -> Result<MultiHandleSessions, FortressError> {
+    let clock = TestClock::new();
+    let (s_a, s_b, a_a, a_b) = create_channel_pair();
+
+    let mut a_builder = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(3)?
+        .with_disconnect_behavior(behavior);
+    let mut b_builder = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(3)?
+        .with_disconnect_behavior(behavior);
+    if let Some(timeout) = disconnect_timeout {
+        a_builder = a_builder
+            .with_disconnect_timeout(timeout)
+            .with_disconnect_notify_delay(Duration::from_millis(50));
+        b_builder = b_builder
+            .with_disconnect_timeout(timeout)
+            .with_disconnect_notify_delay(Duration::from_millis(50));
+    }
+
+    // Session A: local at handle 0; handles 1 AND 2 are remote at addr_b
+    // (the two players that session B owns locally).
+    let mut sess_a = a_builder
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(a_b), PlayerHandle::new(1))?
+        .add_player(PlayerType::Remote(a_b), PlayerHandle::new(2))?
+        .start_p2p_session(s_a)?;
+
+    // Session B: handle 0 is remote (session A); handles 1 and 2 are local.
+    let mut sess_b = b_builder
+        .add_player(PlayerType::Remote(a_a), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .add_player(PlayerType::Local, PlayerHandle::new(2))?
+        .start_p2p_session(s_b)?;
+
+    synchronize_sessions_deterministic(&mut sess_a, &mut sess_b, &clock, &SyncConfig::default())
+        .expect("multi-handle sessions should sync");
+    drain_sync_events(&mut sess_a, &mut sess_b);
+
+    Ok(MultiHandleSessions {
+        sess_a,
+        sess_b,
+        addr_b: a_b,
+        clock,
+    })
+}
+
+/// `remove_player` on a multi-handle endpoint must freeze every handle's
+/// input queue and emit one `PeerDropped` per handle, followed by a single
+/// address-level `Disconnected`. Both handles' inputs must surface the last
+/// confirmed value (not the default), confirming the queues are actually
+/// frozen.
+#[test]
+fn p2p_remove_player_multi_handle_freezes_all_handles_at_address() -> Result<(), FortressError> {
+    let MultiHandleSessions {
+        mut sess_a,
+        mut sess_b,
+        addr_b,
+        clock,
+    } = build_multi_handle_sessions(DisconnectBehavior::ContinueWithout, None)?;
+
+    let mut stub_a = GameStub::new();
+    let mut stub_b = GameStub::new();
+
+    // Distinct marker inputs so we can tell them apart in the frozen state.
+    const MARKER_H1: u32 = 1111;
+    const MARKER_H2: u32 = 2222;
+
+    // Run several frames so each handle has a confirmed input, then a final
+    // frame that establishes the markers as the last confirmed input.
+    for i in 0..3_u32 {
+        poll_with_advance(&mut sess_a, &mut sess_b, &clock, 3);
+        sess_a
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess_b
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i + 10 })
+            .unwrap();
+        sess_b
+            .add_local_input(PlayerHandle::new(2), StubInput { inp: i + 20 })
+            .unwrap();
+        let r_a = sess_a.advance_frame().unwrap();
+        let r_b = sess_b.advance_frame().unwrap();
+        stub_a.handle_requests(r_a);
+        stub_b.handle_requests(r_b);
+    }
+
+    // Final frame: B sends MARKER_H1 / MARKER_H2 as the last confirmed inputs.
+    poll_with_advance(&mut sess_a, &mut sess_b, &clock, 3);
+    sess_a
+        .add_local_input(PlayerHandle::new(0), StubInput { inp: 9999 })
+        .unwrap();
+    sess_b
+        .add_local_input(PlayerHandle::new(1), StubInput { inp: MARKER_H1 })
+        .unwrap();
+    sess_b
+        .add_local_input(PlayerHandle::new(2), StubInput { inp: MARKER_H2 })
+        .unwrap();
+    let r_a = sess_a.advance_frame().unwrap();
+    let r_b = sess_b.advance_frame().unwrap();
+    stub_a.handle_requests(r_a);
+    stub_b.handle_requests(r_b);
+
+    // Drain so the markers are fully confirmed by sess_a.
+    poll_with_advance(&mut sess_a, &mut sess_b, &clock, 15);
+
+    // Drop the multi-handle endpoint by calling remove_player for ONLY
+    // handle 1. The fix must drop both handle 1 AND handle 2 (sharing addr_b).
+    sess_a.remove_player(PlayerHandle::new(1)).unwrap();
+
+    // Capture all events emitted on sess_a after remove_player.
+    let events: Vec<_> = sess_a.events().collect();
+    let dropped_handles: Vec<PlayerHandle> = events
+        .iter()
+        .filter_map(|e| match e {
+            FortressEvent::PeerDropped { handle, addr } => {
+                assert_eq!(
+                    *addr, addr_b,
+                    "PeerDropped addr must match dropped endpoint"
+                );
+                Some(*handle)
+            },
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        dropped_handles.len(),
+        2,
+        "expected exactly two PeerDropped events (handles 1 and 2); got {:?}",
+        events
+    );
+    assert!(
+        dropped_handles.contains(&PlayerHandle::new(1)),
+        "PeerDropped events must include handle 1; got {:?}",
+        dropped_handles
+    );
+    assert!(
+        dropped_handles.contains(&PlayerHandle::new(2)),
+        "PeerDropped events must include handle 2 (multi-handle endpoint regression); got {:?}",
+        dropped_handles
+    );
+
+    let disconnected_count = events
+        .iter()
+        .filter(|e| matches!(e, FortressEvent::Disconnected { .. }))
+        .count();
+    assert_eq!(
+        disconnected_count, 1,
+        "expected exactly one Disconnected event (per address); got {:?}",
+        events
+    );
+
+    // Advance solo on sess_a; the input slot for BOTH handle 1 AND handle 2
+    // must surface the frozen markers, never the default value (0).
+    let mut h1_observations: Vec<(u32, InputStatus)> = Vec::new();
+    let mut h2_observations: Vec<(u32, InputStatus)> = Vec::new();
+    for i in 0..30_u32 {
+        sess_a.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        sess_a
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i + 100 })
+            .unwrap();
+        let requests = sess_a.advance_frame().unwrap();
+        for request in &*requests {
+            if let FortressRequest::AdvanceFrame { inputs } = request {
+                let inputs: &InputVec<StubInput> = inputs;
+                if let Some(&(input, status)) = inputs.get(1) {
+                    h1_observations.push((input.inp, status));
+                }
+                if let Some(&(input, status)) = inputs.get(2) {
+                    h2_observations.push((input.inp, status));
+                }
+            }
+        }
+        stub_a.handle_requests(requests);
+    }
+
+    assert!(
+        !h1_observations.is_empty() && !h2_observations.is_empty(),
+        "should have observed at least one AdvanceFrame request"
+    );
+    for (value, _status) in &h1_observations {
+        assert_eq!(
+            *value, MARKER_H1,
+            "handle 1 input must be the frozen MARKER_H1 ({}); got {:?}",
+            MARKER_H1, h1_observations
+        );
+    }
+    for (value, _status) in &h2_observations {
+        assert_eq!(
+            *value, MARKER_H2,
+            "handle 2 input must be the frozen MARKER_H2 ({}) — multi-handle freeze regression; \
+             got {:?}",
+            MARKER_H2, h2_observations
+        );
+    }
+
+    // At least one observation per handle must report Disconnected status
+    // once current_frame has outrun the last received frame.
+    assert!(
+        h1_observations
+            .iter()
+            .any(|(_, s)| *s == InputStatus::Disconnected),
+        "handle 1 must report Disconnected status at least once"
+    );
+    assert!(
+        h2_observations
+            .iter()
+            .any(|(_, s)| *s == InputStatus::Disconnected),
+        "handle 2 must report Disconnected status at least once \
+         (multi-handle freeze regression — handle 2 was previously left unfrozen)"
+    );
+
+    Ok(())
+}
+
+/// Same multi-handle setup, but trigger auto-disconnect via timeout under
+/// `ContinueWithout`. Both handles must end up frozen and surface
+/// `PeerDropped` events.
+#[test]
+fn p2p_continue_without_multi_handle_auto_drop() -> Result<(), FortressError> {
+    let short_timeout = Duration::from_millis(200);
+    let MultiHandleSessions {
+        mut sess_a,
+        sess_b,
+        addr_b,
+        clock,
+    } = build_multi_handle_sessions(DisconnectBehavior::ContinueWithout, Some(short_timeout))?;
+
+    // Stop polling sess_b (consume it so it goes silent), then advance sess_a
+    // past the timeout.
+    drop(sess_b);
+    for _ in 0..100 {
+        sess_a.poll_remote_clients();
+        clock.advance(Duration::from_millis(20));
+    }
+
+    let events: Vec<_> = sess_a.events().collect();
+    let dropped_handles: Vec<PlayerHandle> = events
+        .iter()
+        .filter_map(|e| match e {
+            FortressEvent::PeerDropped { handle, addr } => {
+                assert_eq!(
+                    *addr, addr_b,
+                    "PeerDropped addr must match dropped endpoint"
+                );
+                Some(*handle)
+            },
+            _ => None,
+        })
+        .collect();
+
+    // Both handles share the same address; auto-drop must emit both.
+    assert!(
+        dropped_handles.contains(&PlayerHandle::new(1))
+            && dropped_handles.contains(&PlayerHandle::new(2)),
+        "auto-drop on multi-handle endpoint must emit PeerDropped for both handle 1 and handle 2; \
+         got {:?}",
+        dropped_handles
+    );
+
+    // Exactly one address-level Disconnected event for the endpoint.
+    let disconnected_count = events
+        .iter()
+        .filter(|e| matches!(e, FortressEvent::Disconnected { .. }))
+        .count();
+    assert_eq!(
+        disconnected_count, 1,
+        "expected exactly one Disconnected event for the multi-handle endpoint; got {:?}",
+        events
+    );
+
+    Ok(())
+}
+
+/// Verifies the documented event ordering: all `PeerDropped` for an endpoint
+/// come before that endpoint's `Disconnected`, in the same `events()` batch.
+/// (The relative order of `PeerDropped` events for distinct handles at the
+/// same address is intentionally not constrained.)
+#[test]
+fn p2p_remove_player_multi_handle_emits_both_peer_dropped_then_disconnected(
+) -> Result<(), FortressError> {
+    let MultiHandleSessions {
+        mut sess_a,
+        mut sess_b,
+        addr_b: _addr_b,
+        clock,
+    } = build_multi_handle_sessions(DisconnectBehavior::ContinueWithout, None)?;
+
+    let mut stub_a = GameStub::new();
+    let mut stub_b = GameStub::new();
+
+    // Warmup so the endpoint has confirmed inputs for both handles.
+    for i in 0..2_u32 {
+        poll_with_advance(&mut sess_a, &mut sess_b, &clock, 3);
+        sess_a
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i })
+            .unwrap();
+        sess_b
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i + 10 })
+            .unwrap();
+        sess_b
+            .add_local_input(PlayerHandle::new(2), StubInput { inp: i + 20 })
+            .unwrap();
+        let r_a = sess_a.advance_frame().unwrap();
+        let r_b = sess_b.advance_frame().unwrap();
+        stub_a.handle_requests(r_a);
+        stub_b.handle_requests(r_b);
+    }
+
+    // Drop ONE handle of the multi-handle endpoint; the fix drops both.
+    sess_a.remove_player(PlayerHandle::new(1)).unwrap();
+
+    // Capture the batch.
+    let events: Vec<_> = sess_a.events().collect();
+
+    // Find indices of all PeerDropped events and the Disconnected event.
+    let peer_dropped_indices: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| matches!(e, FortressEvent::PeerDropped { .. }).then_some(i))
+        .collect();
+    let disconnected_index = events
+        .iter()
+        .position(|e| matches!(e, FortressEvent::Disconnected { .. }));
+
+    assert_eq!(
+        peer_dropped_indices.len(),
+        2,
+        "expected exactly two PeerDropped events for the multi-handle endpoint; got {:?}",
+        events
+    );
+    let disc_idx = disconnected_index.expect("Disconnected event must be present in batch");
+    for &pd_idx in &peer_dropped_indices {
+        assert!(
+            pd_idx < disc_idx,
+            "every PeerDropped must precede the address-level Disconnected in the same batch; \
+             pd_idx={}, disc_idx={}, events={:?}",
+            pd_idx,
+            disc_idx,
+            events
+        );
     }
 
     Ok(())
