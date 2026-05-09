@@ -754,11 +754,13 @@ impl std::fmt::Debug for CompositeObserver {
 ///
 /// # Kani (Formal Verification)
 ///
-/// Under `cfg(kani)`, this macro evaluates its arguments (to suppress unused
-/// import/variable warnings) but skips `format!()` and tracing. The formatting
-/// and tracing infrastructure create massive symbolic state space for CBMC,
-/// causing proof timeouts. Since this macro only performs logging (no state
-/// mutation), skipping reporting under Kani does not affect correctness verification.
+/// Under `cfg(kani)`, this macro is a true no-op: arguments are borrowed
+/// once via `let _ = &…` to keep unused-variable lints quiet, but no
+/// `core::fmt::Arguments` value is built. Format-string validation
+/// continues to run on every non-Kani build (`cargo build`, `cargo test`,
+/// `cargo clippy`), so format-string regressions are still caught at
+/// development time. Skipping reporting under Kani does not affect
+/// correctness verification — proofs check state, not logging.
 #[macro_export]
 macro_rules! report_violation {
     // Under Kani, report_violation is a no-op to avoid CBMC state explosion
@@ -788,25 +790,29 @@ macro_rules! report_violation {
     }};
 
     // With format args: severity, kind, format, args...
-    ($severity:expr, $kind:expr, $fmt:literal, $($arg:tt)+) => {{
+    //
+    // The matcher uses `expr` (not `tt`) so each argument is a single
+    // expression we can borrow individually under cfg(kani). All existing
+    // callsites pass simple comma-separated expressions; this is compatible.
+    ($severity:expr, $kind:expr, $fmt:literal, $($arg:expr),+ $(,)?) => {{
         #[cfg(not(kani))]
         {
             use $crate::telemetry::ViolationObserver as _;
             let violation = $crate::telemetry::SpecViolation::new(
                 $severity,
                 $kind,
-                format!($fmt, $($arg)+),
+                format!($fmt, $($arg),+),
                 concat!(file!(), ":", line!()),
             );
             $crate::telemetry::TracingObserver.on_violation(&violation);
         }
-        // Under Kani, borrow severity, kind, and format arguments to suppress
-        // unused import/variable warnings without moving non-Copy values.
-        // `format_args!` validates the format string and references its
-        // arguments, but unlike `format!` it does not allocate or invoke tracing.
+        // Under Kani, borrow each argument so non-Copy values are not moved
+        // and unused-variable lints stay quiet, without building a
+        // `core::fmt::Arguments` value (which CBMC tracks symbolically and
+        // can blow up proof state space).
         #[cfg(kani)]
         {
-            let _ = (&$severity, &$kind, core::format_args!($fmt, $($arg)+));
+            let _ = (&$severity, &$kind, $(&$arg,)+);
         }
     }};
 }
@@ -1048,14 +1054,29 @@ macro_rules! report_violation_to {
     }};
 
     // With format args: observer, severity, kind, format, args...
-    ($observer:expr, $severity:expr, $kind:expr, $fmt:literal, $($arg:tt)+) => {{
-        let violation = $crate::telemetry::SpecViolation::new(
-            $severity,
-            $kind,
-            format!($fmt, $($arg)+),
-            concat!(file!(), ":", line!()),
-        );
-        $crate::telemetry::report_to_observer($observer.as_ref(), &violation);
+    //
+    // The matcher uses `expr` (not `tt`) so each argument is a single
+    // expression we can borrow individually under cfg(kani). All existing
+    // callsites pass simple comma-separated expressions; this is compatible.
+    ($observer:expr, $severity:expr, $kind:expr, $fmt:literal, $($arg:expr),+ $(,)?) => {{
+        #[cfg(not(kani))]
+        {
+            let violation = $crate::telemetry::SpecViolation::new(
+                $severity,
+                $kind,
+                format!($fmt, $($arg),+),
+                concat!(file!(), ":", line!()),
+            );
+            $crate::telemetry::report_to_observer($observer.as_ref(), &violation);
+        }
+        // Under Kani, borrow each argument so non-Copy values are not moved
+        // and unused-variable lints stay quiet, without building a
+        // `core::fmt::Arguments` value (which CBMC tracks symbolically and
+        // can blow up proof state space).
+        #[cfg(kani)]
+        {
+            let _ = (&$observer, &$severity, &$kind, $(&$arg,)+);
+        }
     }};
 }
 

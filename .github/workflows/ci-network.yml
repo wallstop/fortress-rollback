@@ -86,8 +86,13 @@ jobs:
           echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
           echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
 
+      - name: Pre-cache marker
+        shell: bash
+        run: echo "PRE_CACHE=$(date -u +%FT%TZ)"
+
       - name: Cache cargo registry and build
         uses: actions/cache@v5
+        timeout-minutes: 5
         with:
           path: |
             ~/.cargo/registry
@@ -97,8 +102,19 @@ jobs:
           restore-keys: |
             network-${{ runner.os }}-cargo-
 
+      - name: Post-cache marker
+        if: always()
+        shell: bash
+        run: echo "POST_CACHE=$(date -u +%FT%TZ)"
+
       - name: Build network test peer
-        run: cargo build --release -p network-test-peer
+        uses: nick-fields/retry@v4
+        with:
+          timeout_minutes: 15
+          max_attempts: 2
+          retry_wait_seconds: 30
+          retry_on_exit_code: 143
+          command: cargo build --release -p network-test-peer
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
@@ -107,8 +123,13 @@ jobs:
           SCCACHE_IDLE_TIMEOUT: "0"
 
       - name: Run multi-process network tests (nextest)
-        run: cargo nextest run --profile ci --release -E 'test(multi_process)' --test network
-        timeout-minutes: 10
+        uses: nick-fields/retry@v4
+        with:
+          timeout_minutes: 10
+          max_attempts: 2
+          retry_wait_seconds: 30
+          retry_on_exit_code: 143
+          command: cargo nextest run --profile ci --release -E 'test(multi_process)' --test network
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}

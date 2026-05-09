@@ -90,6 +90,11 @@ def is_changelog_file(path: str) -> bool:
     return path == "CHANGELOG.md"
 
 
+def is_rust_source_file(path: str) -> bool:
+    """Return True for Rust source files under `src/`."""
+    return path.startswith("src/") and path.endswith(".rs")
+
+
 def git_output_lines(repo_root: Path, args: list[str]) -> set[str]:
     """Run git and return non-empty output lines.
 
@@ -133,6 +138,7 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
     )
     workflow_files = sorted(path for path in changed_files if is_workflow_file(path))
     docs_files = sorted(path for path in changed_files if is_docs_markdown_file(path))
+    rust_files = sorted(path for path in changed_files if is_rust_source_file(path))
     changelog_changed = any(is_changelog_file(path) for path in changed_files)
 
     if run_all or any(is_sync_version_surface_file(path) for path in changed_files):
@@ -233,6 +239,24 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                     "subsequent->next, additional->extra, maximum->most, "
                     "monitor->watch, terminate->end. Drop weasel words "
                     "(very, extremely, several, usually, significantly)."
+                ),
+            )
+        )
+
+    if run_all or rust_files:
+        checks.append(
+            PlannedCheck(
+                check_id="kani-violation-cost",
+                description=(
+                    "advisory grep for multi-arg report_violation! callsites "
+                    "in Kani-reachable files (always passes; see "
+                    "src/telemetry.rs report_violation! docs)"
+                ),
+                command=["bash", "scripts/verification/check-kani-violation-cost.sh"],
+                fix_hint=(
+                    "report_violation! is a no-op under cfg(kani) but format "
+                    "args still surface in CBMC analysis. Reduce format-arg "
+                    "count or simplify the message in flagged callsites."
                 ),
             )
         )

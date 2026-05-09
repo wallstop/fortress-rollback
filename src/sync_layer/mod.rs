@@ -210,25 +210,17 @@ impl<T: Config> SyncLayer<T> {
     ///
     /// `InputQueue::with_queue_length` rejects `queue_length < 2`. If the
     /// requested `queue_length` is invalid, this constructor falls back to
-    /// the library default ([`INPUT_QUEUE_LENGTH`]) for each player slot,
-    /// reporting an `InputQueue` violation per affected slot.
+    /// the library default ([`INPUT_QUEUE_LENGTH`]) for each affected slot.
     ///
     /// The library default is a compile-time constant guaranteed to be
-    /// `>= 2` (statically asserted in
-    /// `sync_layer_tests::input_queue_length_constant_is_valid_for_with_queue_length`),
-    /// so the secondary fallback is provably unreachable from any
-    /// production caller. The post-loop
-    /// invariant `input_queues.len() == num_players` therefore holds by
-    /// construction in release builds. As a defense-in-depth safety net
-    /// against a future regression that misconfigures the library default
-    /// (e.g., a feature gate setting it to `0`), the constructor reports a
-    /// `Critical` `Configuration` violation per slot that fails to
-    /// initialize and asserts the invariant via `debug_assert_eq!` — this
-    /// surfaces the discrepancy to attached observers and tests rather
-    /// than silently producing a shorter `input_queues` vector.
+    /// `>= 2` (statically asserted in `_INPUT_QUEUE_LENGTH_IS_VALID`),
+    /// so the fallback's None arm is unreachable. The post-loop
+    /// `debug_assert_eq!` surfaces any future regression that breaks the
+    /// const-assertion.
     ///
-    /// Even if the returned `Self` is discarded, registered violation
-    /// observers will receive any reports emitted during construction.
+    /// `InputQueue::with_queue_length` itself reports a violation when
+    /// `queue_length < 2`, so callers that pass an invalid length still
+    /// observe the failure through the standard violation channel.
     ///
     /// [`INPUT_QUEUE_LENGTH`]: crate::input_queue::INPUT_QUEUE_LENGTH
     #[must_use]
@@ -237,44 +229,21 @@ impl<T: Config> SyncLayer<T> {
         max_prediction: usize,
         queue_length: usize,
     ) -> Self {
-        // initialize input_queues with player indices for deterministic prediction
         let mut input_queues = Vec::with_capacity(num_players);
         for player_index in 0..num_players {
-            // queue_length should be validated before calling this function;
-            // if it's invalid, fall back to the library default and report
-            // a violation. The default is a compile-time constant >= 2
-            // (see `INPUT_QUEUE_LENGTH_IS_VALID` in tests), so the secondary
-            // fallback below is dead code in production. We keep the
-            // secondary `Critical` report as a defense-in-depth signal for
-            // any future regression that misconfigures the constant.
             if let Some(queue) = InputQueue::with_queue_length(player_index, queue_length) {
                 input_queues.push(queue);
                 continue;
             }
-            match InputQueue::with_queue_length(
-                player_index,
-                crate::input_queue::INPUT_QUEUE_LENGTH,
-            ) {
-                Some(queue) => input_queues.push(queue),
-                None => {
-                    // Unreachable in production: the library default is a
-                    // compile-time constant validated to be `>= 2`.
-                    report_violation!(
-                        ViolationSeverity::Critical,
-                        ViolationKind::Configuration,
-                        "SyncLayer::with_queue_length: default queue length {} is invalid for player {} (requested queue_length={}); input_queues will be shorter than num_players={}",
-                        crate::input_queue::INPUT_QUEUE_LENGTH,
-                        player_index,
-                        queue_length,
-                        num_players
-                    );
-                },
+            // _INPUT_QUEUE_LENGTH_IS_VALID below guarantees this at compile
+            // time; the post-loop debug_assert! catches any future regression
+            // that breaks the const-assertion in non-release builds.
+            if let Some(queue) =
+                InputQueue::with_queue_length(player_index, crate::input_queue::INPUT_QUEUE_LENGTH)
+            {
+                input_queues.push(queue);
             }
         }
-        // Post-loop invariant: every player must have a queue. Asserted in
-        // debug builds; the per-slot `Critical` report above already
-        // surfaces any shortfall in release builds, so we do not duplicate
-        // the report here.
         debug_assert_eq!(
             input_queues.len(),
             num_players,
@@ -884,6 +853,15 @@ impl<T: Config> SyncLayer<T> {
     }
 }
 
+/// Compile-time guarantee that the fallback inside
+/// [`SyncLayer::with_queue_length`] is sound: the library constant
+/// the fallback hands to `InputQueue::with_queue_length` must satisfy
+/// that function's `>= 2` precondition. Evaluated in every build —
+/// not only `#[cfg(test)]` — so the compiler refuses any future
+/// regression that violates it (e.g., a new feature gate that
+/// accidentally reduces `INPUT_QUEUE_LENGTH` below 2).
+const _INPUT_QUEUE_LENGTH_IS_VALID: () = assert!(crate::input_queue::INPUT_QUEUE_LENGTH >= 2);
+
 impl<T: Config> InvariantChecker for SyncLayer<T> {
     /// Checks the invariants of the SyncLayer.
     ///
@@ -1096,22 +1074,14 @@ mod sync_layer_tests {
         assert_eq!(sync_layer_zero.input_queues.len(), 2);
     }
 
-    /// Compile-time guarantee that the secondary fallback inside
-    /// [`SyncLayer::with_queue_length`] is unreachable: the library
-    /// constant the fallback hands to `InputQueue::with_queue_length` must
-    /// satisfy that function's `>= 2` precondition. If a future change to
-    /// `INPUT_QUEUE_LENGTH` (e.g., a new feature gate) violates this, the
-    /// const assertion below fails at compile time.
-    const INPUT_QUEUE_LENGTH_IS_VALID: () = assert!(crate::input_queue::INPUT_QUEUE_LENGTH >= 2);
-
     #[test]
     fn input_queue_length_constant_is_valid_for_with_queue_length() {
-        // `INPUT_QUEUE_LENGTH_IS_VALID` is a non-generic const, so the
-        // `assert!` is evaluated unconditionally at compile time when the
-        // constant is defined above. Referencing it here only surfaces the
-        // invariant in test-runner reports — the test would never run if the
-        // const expression failed.
-        let () = INPUT_QUEUE_LENGTH_IS_VALID;
+        // `_INPUT_QUEUE_LENGTH_IS_VALID` is a non-generic, module-level
+        // const, so the `assert!` is evaluated unconditionally at compile
+        // time. Referencing it here only surfaces the invariant in
+        // test-runner reports — the test would never run if the const
+        // expression failed.
+        let () = super::_INPUT_QUEUE_LENGTH_IS_VALID;
     }
 
     #[test]
