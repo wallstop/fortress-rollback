@@ -2,11 +2,7 @@
 # Kani Formal Verification Script for Fortress Rollback
 #
 # Usage: ./scripts/verification/verify-kani.sh [options]
-#   ./scripts/verification/verify-kani.sh              # Run all Kani proofs
-#   ./scripts/verification/verify-kani.sh --list       # List all proof harnesses
-#   ./scripts/verification/verify-kani.sh --harness X  # Run specific harness
-#   ./scripts/verification/verify-kani.sh --quick      # Run with reduced unwind bounds
-#   ./scripts/verification/verify-kani.sh --tier N     # Run only tier N proofs (1=fast, 2=medium, 3=slow)
+#   See --help for options.
 #
 # Prerequisites:
 #   - Kani installed (script provides install instructions if missing)
@@ -15,7 +11,6 @@
 # Environment Variables:
 #   KANI_TIMEOUT     - Timeout per proof in seconds (default: 300)
 #   KANI_UNWIND      - Default unwind bound (default: use Kani defaults)
-#   KANI_JOBS        - Number of parallel jobs (default: 1)
 #
 # IMPORTANT: When adding new #[kani::proof] functions, you must also add them
 # to the appropriate TIER*_PROOFS array below. Use ./scripts/verification/check-kani-coverage.sh
@@ -23,12 +18,18 @@
 
 set -euo pipefail
 
+# Reset IFS to the POSIX default so word-splitting on space-separated layout
+# strings (used by print_partition / run_tier_proofs via `read -r`) is robust
+# against parent shells that exported a non-default IFS. We additionally use
+# `read -r ... <<<` rather than `set -- $layout` for the layout split, but
+# resetting IFS keeps every other word-split site in this script predictable.
+IFS=$' \t\n'
+
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 KANI_TIMEOUT="${KANI_TIMEOUT:-300}"
 KANI_UNWIND="${KANI_UNWIND:-}"
-KANI_JOBS="${KANI_JOBS:-1}"
 
 # Colors
 RED='\033[0;31m'
@@ -78,6 +79,110 @@ classify_exit_code() {
         137|143) echo "external_terminate" ;;
         *) echo "" ;;
     esac
+}
+
+# Print the canonical "misconfigured matrix" error to stderr.
+#
+# Used by both print_partition() and run_tier_proofs() so the wording stays
+# consistent and there's a single place to update when the diagnostic
+# evolves. Callers pass tier/total/parts; we emit three lines and return.
+emit_misconfigured_matrix_error() {
+    local tier="$1"
+    local total="$2"
+    local parts="$3"
+    local color_on="${4:-}"
+    local color_off="${5:-}"
+
+    echo -e "${color_on}Error: Tier $tier has $total proofs but --parts=$parts was requested.${color_off}" >&2
+    echo -e "${color_on}This is a misconfigured CI matrix: shards beyond shard $total would be empty.${color_off}" >&2
+    echo -e "${color_on}Reduce --parts to at most $total, or rebalance the matrix.${color_off}" >&2
+}
+
+# Compute a balanced 1-indexed shard layout.
+#
+# Given `total` items and `parts` shards, this prints a single line of the
+# form:
+#   "<size_p> <start_p> <end_p> <sizes_csv>"
+# where:
+#   - size_p:    number of items in shard P (0-indexed-exclusive end - start)
+#   - start_p:   inclusive start index for shard P (0-indexed)
+#   - end_p:     exclusive end index for shard P (0-indexed)
+#   - sizes_csv: comma-separated list of per-shard sizes for all P in 1..parts
+#
+# Layout rules (balanced partition; sizes differ by at most 1):
+#   quotient  = total / parts
+#   remainder = total % parts
+#   The first `remainder` shards each get (quotient + 1) items.
+#   The remaining (parts - remainder) shards each get `quotient` items.
+#
+# Preconditions (enforced at runtime; failures abort with a clear message):
+#   - total >= 0, parts >= 1, 1 <= part <= parts
+#   - total >= parts (i.e., no shard is empty); callers MUST validate this
+#     beforehand and emit a diagnostic. We still defensively check it here
+#     so that even if main()'s validation regresses we fail loudly rather
+#     than computing negative or empty indices.
+compute_partition_layout() {
+    local total="$1"
+    local parts="$2"
+    local part="$3"
+
+    # Defensive validation. main() validates --part/--parts before reaching
+    # here, but partition math with non-positive inputs silently produces
+    # negative indices and out-of-bounds reads downstream; we'd rather fail
+    # the function loudly than emit a corrupt layout.
+    if ! [[ "$total" =~ ^[0-9]+$ ]]; then
+        echo "compute_partition_layout: total must be a non-negative integer (got '$total')" >&2
+        return 2
+    fi
+    if ! [[ "$parts" =~ ^[1-9][0-9]*$ ]]; then
+        echo "compute_partition_layout: parts must be a positive integer (got '$parts')" >&2
+        return 2
+    fi
+    if ! [[ "$part" =~ ^[1-9][0-9]*$ ]]; then
+        echo "compute_partition_layout: part must be a positive integer (got '$part')" >&2
+        return 2
+    fi
+    if [[ "$part" -gt "$parts" ]]; then
+        echo "compute_partition_layout: part ($part) must be <= parts ($parts)" >&2
+        return 2
+    fi
+    if [[ "$parts" -gt "$total" ]]; then
+        echo "compute_partition_layout: parts ($parts) exceeds total ($total); trailing shards would be empty" >&2
+        return 2
+    fi
+
+    local quotient=$(( total / parts ))
+    local remainder=$(( total % parts ))
+
+    local size_p
+    local start_p
+    if [[ "$part" -le "$remainder" ]]; then
+        size_p=$(( quotient + 1 ))
+        start_p=$(( (part - 1) * (quotient + 1) ))
+    else
+        size_p=$quotient
+        start_p=$(( remainder * (quotient + 1) + (part - 1 - remainder) * quotient ))
+    fi
+    local end_p=$(( start_p + size_p ))
+
+    # Build per-shard sizes for the diagnostic.
+    local sizes_csv=""
+    local p
+    for ((p=1; p<=parts; p++)); do
+        local s
+        if [[ "$p" -le "$remainder" ]]; then
+            s=$(( quotient + 1 ))
+        else
+            s=$quotient
+        fi
+        if [[ -z "$sizes_csv" ]]; then
+            sizes_csv="$s"
+        else
+            sizes_csv="${sizes_csv},${s}"
+        fi
+    done
+
+    echo "$size_p $start_p $end_p $sizes_csv"
 }
 
 # Tier definitions - proofs grouped by approximate runtime
@@ -231,20 +336,34 @@ print_usage() {
     echo "Usage: $0 [options]"
     echo ""
     echo "Options:"
-    echo "  --list          List all Kani proof harnesses"
-    echo "  --harness NAME  Run specific harness (can be repeated)"
-    echo "  --quick         Run with reduced bounds for faster verification"
-    echo "  --tier N        Run only tier N proofs (1=fast, 2=medium, 3=slow)"
-    echo "  --part P        Run only part P of the tier (use with --parts)"
-    echo "  --parts N       Split tier into N parts (use with --part)"
-    echo "  --verbose       Show detailed Kani output"
-    echo "  --jobs N        Run N harnesses in parallel (default: 1)"
-    echo "  --fail-fast     Stop immediately when any proof fails (useful for CI)"
-    echo "  --help          Show this help message"
+    echo "  --list             List all Kani proof harnesses"
+    echo "  --harness NAME     Run specific harness (can be repeated)"
+    echo "  --quick            Run with reduced bounds for faster verification"
+    echo "  --tier N           Run only tier N proofs (1=fast, 2=medium, 3=slow)"
+    echo "  --part P           Run only part P of the tier (use with --parts)"
+    echo "  --parts N          Split tier into N parts (use with --part)"
+    echo "  --print-partition  Print the planned harness partition for the"
+    echo "                     given --tier/--part/--parts (or --tier alone)"
+    echo "                     and exit without invoking cargo kani"
+    echo "  --verbose          Show detailed Kani output"
+    echo "  --jobs N           Run N harnesses in parallel (default: 1)"
+    echo "  --fail-fast        Stop immediately when any proof fails (useful for CI)"
+    echo "  --help             Show this help message"
     echo ""
     echo "Environment Variables:"
     echo "  KANI_TIMEOUT    Timeout per proof in seconds (default: 300)"
-    echo "  KANI_JOBS       Number of parallel jobs (default: 1)"
+    echo "  KANI_UNWIND     Default unwind bound (default: use Kani defaults)"
+    echo ""
+    echo "Constraints:"
+    echo "  --list             cannot combine with --harness, --tier, --part,"
+    echo "                     --parts, or --print-partition"
+    echo "  --print-partition  requires exactly one --tier (multiple --tier"
+    echo "                     values are rejected) and cannot combine with"
+    echo "                     --harness"
+    echo "  --harness          cannot combine with --tier, --part, or --parts"
+    echo "  --part / --parts   must both be supplied or both omitted, and"
+    echo "                     require --tier (a single --tier on the run"
+    echo "                     path; sharding is per-tier)"
     echo ""
     echo "Tiers:"
     echo "  Tier 1: ${#TIER1_PROOFS[@]} fast proofs (<30s each)"
@@ -366,6 +485,85 @@ list_harnesses() {
         echo -e "${YELLOW}Uncategorized proofs (will run with default tier):${NC}"
         for proof in "${uncategorized[@]}"; do
             echo "  - $proof"
+        done
+    fi
+}
+
+# Print the planned harness partition for the given tier (and optional
+# part/parts) without invoking cargo kani. Used by CI introspection and
+# by the partition tests.
+#
+# Output format on success:
+#   PARTITION tier=<T> total=<N> parts=<M> sizes=<csv>
+#   PART part=<P> size=<S> start=<START> end=<END_EXCL>
+#   <harness 1>
+#   <harness 2>
+#   ...
+#
+# When --part/--parts are omitted, prints all harnesses in the tier.
+print_partition() {
+    local tier="$1"
+    local part="$2"
+    local parts="$3"
+
+    local proofs
+    case "$tier" in
+        1) proofs=("${TIER1_PROOFS[@]}") ;;
+        2) proofs=("${TIER2_PROOFS[@]}") ;;
+        3) proofs=("${TIER3_PROOFS[@]}") ;;
+        *) echo "Invalid tier: $tier" >&2; return 1 ;;
+    esac
+
+    local total_proofs=${#proofs[@]}
+
+    if [[ "$part" -gt 0 ]] && [[ "$parts" -gt 0 ]]; then
+        if [[ "$parts" -gt "$total_proofs" ]]; then
+            emit_misconfigured_matrix_error "$tier" "$total_proofs" "$parts"
+            return 1
+        fi
+
+        local layout
+        # compute_partition_layout exits 2 on programmer-error inputs (after
+        # printing the underlying diagnostic to stderr). We collapse that to 1
+        # here: the user has nothing actionable to do with the distinction.
+        if ! layout=$(compute_partition_layout "$total_proofs" "$parts" "$part"); then
+            return 1
+        fi
+        local size_p start_idx end_idx sizes_csv
+        # `read -r ... <<<` is IFS-local to the heredoc word and avoids the
+        # `set -- $layout` form, which would re-split on whatever IFS the
+        # parent shell exported. We also reset IFS at the top of the script.
+        read -r size_p start_idx end_idx sizes_csv <<< "$layout"
+
+        local last_idx=$(( end_idx - 1 ))
+        # Pluralise "part(s)" so the diagnostic reads naturally for both
+        # parts=1 (rare here -- most callers omit the flags entirely -- but
+        # still possible) and parts>1.
+        local parts_word="parts"
+        [[ "$parts" -eq 1 ]] && parts_word="part"
+        local proofs_word="proofs"
+        [[ "$size_p" -eq 1 ]] && proofs_word="proof"
+        # Human-first diagnostic line (matches the run-path format) so logs
+        # read consistently between introspection and run modes.
+        echo "Tier $tier ($total_proofs proofs) -> $parts $parts_word: [${sizes_csv}]; this is part $part -> $size_p $proofs_word, indices ${start_idx}..${last_idx}"
+        echo "PARTITION tier=$tier total=$total_proofs parts=$parts sizes=$sizes_csv"
+        echo "PART part=$part size=$size_p start=$start_idx end=$end_idx"
+
+        local i
+        for ((i=start_idx; i<end_idx; i++)); do
+            echo "${proofs[$i]}"
+        done
+    else
+        # Human-first diagnostic for the unsharded case too. Pluralise so
+        # "1 part" reads grammatically (was "1 parts" historically).
+        local proofs_word="proofs"
+        [[ "$total_proofs" -eq 1 ]] && proofs_word="proof"
+        echo "Tier $tier ($total_proofs proofs) -> 1 part: [${total_proofs}]; this is part 1 -> $total_proofs $proofs_word, indices 0..$(( total_proofs - 1 ))"
+        echo "PARTITION tier=$tier total=$total_proofs parts=1 sizes=$total_proofs"
+        echo "PART part=1 size=$total_proofs start=0 end=$total_proofs"
+        local h
+        for h in "${proofs[@]}"; do
+            echo "$h"
         done
     fi
 }
@@ -597,17 +795,47 @@ run_tier_proofs() {
         *) echo "Invalid tier: $tier" >&2; return 1 ;;
     esac
 
-    # If part/parts specified, select subset of proofs
+    # If part/parts specified, select subset of proofs using a balanced
+    # partition (sizes differ by at most 1). The previous ceiling-division
+    # algorithm could leave the trailing shard empty (e.g., 16 proofs across
+    # 5 parts: 4,4,4,4,0) or unevenly distributed (37 across 6 parts:
+    # 7,7,7,7,7,2). Balanced layout: 16/5 -> 4,3,3,3,3 and 37/6 -> 7,6,6,6,6,6.
     if [[ "$part" -gt 0 ]] && [[ "$parts" -gt 0 ]]; then
         local total_proofs=${#proofs[@]}
-        local chunk_size=$(( (total_proofs + parts - 1) / parts ))
-        local start_idx=$(( (part - 1) * chunk_size ))
-        local end_idx=$(( start_idx + chunk_size ))
-        if [[ $end_idx -gt $total_proofs ]]; then
-            end_idx=$total_proofs
+
+        # Refuse misconfigured matrices (more shards than items). The trailing
+        # shards would be empty under any partitioning scheme; better to fail
+        # loudly than to silently waste a CI runner.
+        if [[ "$parts" -gt "$total_proofs" ]]; then
+            emit_misconfigured_matrix_error "$tier" "$total_proofs" "$parts" "$RED" "$NC"
+            return 1
         fi
 
+        local layout
+        # See print_partition() for why we collapse compute_partition_layout's
+        # exit 2 (programmer error) into 1 (generic failure): the user has
+        # nothing actionable to do with the distinction.
+        if ! layout=$(compute_partition_layout "$total_proofs" "$parts" "$part"); then
+            return 1
+        fi
+        local size_p start_idx end_idx sizes_csv
+        # `read -r ... <<<` avoids `set -- $layout`, which would re-split on
+        # whatever IFS the parent shell exported. Belt-and-suspenders: we
+        # also reset IFS at the top of the script.
+        read -r size_p start_idx end_idx sizes_csv <<< "$layout"
+
+        # One-time diagnostic: print the planned layout so future sharding
+        # changes are verifiable from CI logs. Pluralise "part(s)" / "proof(s)"
+        # so single-shard / single-proof cases read naturally.
+        local last_idx=$(( end_idx - 1 ))
+        local parts_word="parts"
+        [[ "$parts" -eq 1 ]] && parts_word="part"
+        local proofs_word="proofs"
+        [[ "$size_p" -eq 1 ]] && proofs_word="proof"
+        echo -e "${BLUE}Tier $tier ($total_proofs proofs) -> $parts $parts_word: [${sizes_csv}]; this is part $part -> $size_p $proofs_word, indices ${start_idx}..${last_idx}${NC}"
+
         local selected_proofs=()
+        local i
         for ((i=start_idx; i<end_idx; i++)); do
             selected_proofs+=("${proofs[$i]}")
         done
@@ -664,35 +892,57 @@ main() {
     local quick=false
     local verbose=false
     local list_only=false
+    local print_partition_only=false
     local fail_fast=false
     local harnesses=()
     local tiers=()
     local jobs=1
     local part=0
     local parts=0
+    # Track whether --part / --parts were *passed* (vs. defaulting to 0).
+    # This separates "is integer" from "is positive" from "both/neither
+    # supplied" so the user-facing diagnostic always matches what they did
+    # wrong (e.g. `--part 0` is rejected as "must be positive", not the
+    # misleading "--parts requires --part").
+    local part_given=false
+    local parts_given=false
+    # Track which "ignored under --print-partition" flags were actually
+    # passed, so we only emit the introspection-mode note when there's a
+    # real mismatch between user intent and what the mode does.
+    local quick_given=false
+    local verbose_given=false
+    local jobs_given=false
+    local fail_fast_given=false
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --quick)
                 quick=true
+                quick_given=true
                 shift
                 ;;
             --verbose)
                 verbose=true
+                verbose_given=true
                 shift
                 ;;
             --list)
                 list_only=true
                 shift
                 ;;
+            --print-partition)
+                print_partition_only=true
+                shift
+                ;;
             --fail-fast)
                 fail_fast=true
+                fail_fast_given=true
                 shift
                 ;;
             --harness)
                 if [[ $# -lt 2 ]]; then
-                    echo "Error: --harness requires an argument"
+                    echo >&2 "Error: --harness requires an argument"
                     exit 1
                 fi
                 harnesses+=("$2")
@@ -700,39 +950,58 @@ main() {
                 ;;
             --tier)
                 if [[ $# -lt 2 ]]; then
-                    echo "Error: --tier requires an argument (1, 2, or 3)"
+                    echo >&2 "Error: --tier requires an argument (1, 2, or 3)"
                     exit 1
                 fi
                 if [[ "$2" =~ ^[1-3]$ ]]; then
                     tiers+=("$2")
                 else
-                    echo "Error: --tier must be 1, 2, or 3"
+                    echo >&2 "Error: --tier must be 1, 2, or 3"
                     exit 1
                 fi
                 shift 2
                 ;;
             --part)
                 if [[ $# -lt 2 ]]; then
-                    echo "Error: --part requires a number"
+                    echo "Error: --part requires a number" >&2
+                    exit 1
+                fi
+                if ! [[ "$2" =~ ^-?[0-9]+$ ]]; then
+                    echo "Error: --part must be a positive integer (got '$2')" >&2
                     exit 1
                 fi
                 part="$2"
+                part_given=true
                 shift 2
                 ;;
             --parts)
                 if [[ $# -lt 2 ]]; then
-                    echo "Error: --parts requires a number"
+                    echo "Error: --parts requires a number" >&2
+                    exit 1
+                fi
+                if ! [[ "$2" =~ ^-?[0-9]+$ ]]; then
+                    echo "Error: --parts must be a positive integer (got '$2')" >&2
                     exit 1
                 fi
                 parts="$2"
+                parts_given=true
                 shift 2
                 ;;
             --jobs)
                 if [[ $# -lt 2 ]]; then
-                    echo "Error: --jobs requires a number"
+                    echo "Error: --jobs requires a number" >&2
+                    exit 1
+                fi
+                # Same positive-integer gate as --part/--parts. The previous
+                # behaviour ("--jobs abc" -> arithmetic on a non-numeric ->
+                # "unbound variable" or noisy bash error) is hostile; reject
+                # at parse time with a matching diagnostic.
+                if ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
+                    echo "Error: --jobs must be a positive integer (got '$2')" >&2
                     exit 1
                 fi
                 jobs="$2"
+                jobs_given=true
                 shift 2
                 ;;
             --help|-h)
@@ -740,7 +1009,7 @@ main() {
                 exit 0
                 ;;
             -*)
-                echo "Unknown option: $1"
+                echo >&2 "Unknown option: $1"
                 print_usage
                 exit 1
                 ;;
@@ -752,17 +1021,128 @@ main() {
         esac
     done
 
-    # Validate part/parts combination
-    if [[ "$part" -gt 0 ]] && [[ "$parts" -eq 0 ]]; then
-        echo "Error: --part requires --parts to be specified"
+    # Validate --part / --parts.
+    #
+    # The validation is ordered so each diagnostic matches the exact thing
+    # the user did wrong. Earlier versions of this block ran presence
+    # pairing before positivity, which produced misleading messages
+    # ("--part requires --parts") for standalone bad values like `--part 0`
+    # whose REAL bug is "0 is not positive". The corrected order is:
+    #
+    #   1. If neither flag was given, sharding is off -- nothing to check.
+    #   2. Per-flag positivity FIRST (only checked when the flag was
+    #      passed, so a missing flag doesn't mask a present-but-bad one).
+    #      This is what makes `--part 0` (alone) report "must be a positive
+    #      integer" instead of "requires --parts".
+    #   3. Presence pairing (both or neither must be given).
+    #   4. Range: 1 <= part <= parts.
+    if [[ "$part_given" == "true" ]] || [[ "$parts_given" == "true" ]]; then
+        # Step 2a: positivity for --part, only when --part was passed.
+        if [[ "$part_given" == "true" ]] && ! [[ "$part" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Error: --part must be a positive integer (got '$part')" >&2
+            exit 1
+        fi
+        # Step 2b: positivity for --parts, only when --parts was passed.
+        if [[ "$parts_given" == "true" ]] && ! [[ "$parts" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Error: --parts must be a positive integer (got '$parts')" >&2
+            exit 1
+        fi
+        # Step 3: presence pairing.
+        if [[ "$part_given" != "true" ]]; then
+            echo "Error: --parts requires --part to be specified" >&2
+            exit 1
+        fi
+        if [[ "$parts_given" != "true" ]]; then
+            echo "Error: --part requires --parts to be specified" >&2
+            exit 1
+        fi
+        # Step 4: range.
+        if [[ "$part" -gt "$parts" ]]; then
+            echo "Error: --part ($part) cannot be greater than --parts ($parts)" >&2
+            exit 1
+        fi
+    fi
+
+    # Mutually-exclusive run/no-run modes.
+    #
+    # `--list`, `--print-partition`, `--harness`, and `--tier`+sharding
+    # don't naturally compose:
+    #   * `--list` is a "list everything in every tier" mode; pairing it
+    #     with --harness/--tier/--part/--parts/--print-partition silently
+    #     ignores those flags and emits the unfiltered listing, which is
+    #     surprising (caller probably expected a filtered list).
+    #   * `--print-partition` is a per-tier introspection mode; pairing it
+    #     with --list or --harness silently shadowed --list/--harness in
+    #     earlier revisions. Reject explicitly.
+    if [[ "$list_only" == "true" ]]; then
+        if [[ "$print_partition_only" == "true" ]]; then
+            echo "Error: --list and --print-partition are mutually exclusive" >&2
+            exit 1
+        fi
+        if [[ ${#harnesses[@]} -gt 0 ]]; then
+            echo "Error: --list cannot be combined with --harness" >&2
+            exit 1
+        fi
+        if [[ ${#tiers[@]} -gt 0 ]]; then
+            echo "Error: --list cannot be combined with --tier" >&2
+            exit 1
+        fi
+        if [[ "$part_given" == "true" ]] || [[ "$parts_given" == "true" ]]; then
+            echo "Error: --list cannot be combined with --part or --parts" >&2
+            exit 1
+        fi
+    fi
+    if [[ "$print_partition_only" == "true" ]] && [[ ${#harnesses[@]} -gt 0 ]]; then
+        echo "Error: --print-partition and --harness are mutually exclusive" >&2
         exit 1
     fi
-    if [[ "$parts" -gt 0 ]] && [[ "$part" -eq 0 ]]; then
-        echo "Error: --parts requires --part to be specified"
+
+    # `--harness` selects specific proofs by name; `--tier` selects them by
+    # tier; `--part`/`--parts` shard within a tier. Combining `--harness`
+    # with any of these is ambiguous -- the previous behaviour silently
+    # ignored --tier/--part/--parts when --harness was passed. Reject
+    # explicitly so the user sees the error immediately. (The script's
+    # default, with neither --harness nor --tier, runs every harness; if
+    # the user wants a tier, drop --harness; if they want one harness, drop
+    # --tier/--part/--parts.)
+    if [[ ${#harnesses[@]} -gt 0 ]]; then
+        if [[ ${#tiers[@]} -gt 0 ]]; then
+            echo "Error: --harness cannot be combined with --tier" >&2
+            exit 1
+        fi
+        if [[ "$part_given" == "true" ]] || [[ "$parts_given" == "true" ]]; then
+            echo "Error: --harness cannot be combined with --part or --parts" >&2
+            exit 1
+        fi
+    fi
+
+    # Run-path multi-tier with --part/--parts is ambiguous. The introspection
+    # mode (--print-partition) already rejects multiple --tier values lower
+    # down with its own dedicated message; this check only fires on the run
+    # path. The previous behaviour silently applied the same --part/--parts
+    # to BOTH tiers, producing e.g. "part 3 of 5 of tier 2 AND part 3 of 5
+    # of tier 3" -- a layout the user almost certainly didn't ask for.
+    # Reject with a message that points at the obvious workaround (one
+    # invocation per tier).
+    if [[ "$print_partition_only" != "true" ]] \
+        && [[ ${#tiers[@]} -gt 1 ]] \
+        && { [[ "$part_given" == "true" ]] || [[ "$parts_given" == "true" ]]; }; then
+        echo "Error: --part/--parts cannot be combined with multiple --tier values; invoke once per tier" >&2
         exit 1
     fi
-    if [[ "$part" -gt "$parts" ]] && [[ "$parts" -gt 0 ]]; then
-        echo "Error: --part ($part) cannot be greater than --parts ($parts)"
+
+    # Sharding is per-tier; --part/--parts without --tier has no tier to
+    # shard within. Reject explicitly rather than silently doing nothing
+    # useful (the bare "verify all" path ignored --part/--parts). Skip
+    # under --print-partition: that mode requires --tier explicitly via
+    # its own check below, so this check would only fire when
+    # --print-partition is also missing --tier -- in which case the
+    # introspection-mode error is the more relevant message.
+    if [[ "$print_partition_only" != "true" ]] \
+        && { [[ "$part_given" == "true" ]] || [[ "$parts_given" == "true" ]]; } \
+        && [[ ${#tiers[@]} -eq 0 ]] \
+        && [[ ${#harnesses[@]} -eq 0 ]]; then
+        echo "Error: --part/--parts require --tier" >&2
         exit 1
     fi
 
@@ -770,9 +1150,47 @@ main() {
     # invocation. --harness/--tier paths fan out per-harness, so --jobs N
     # is a no-op there. Warn once and clamp; the bare "verify all" path
     # below (no harnesses, no tiers) keeps --jobs intact.
-    if [[ "$jobs" -gt 1 ]] && { [[ ${#harnesses[@]} -gt 0 ]] || [[ ${#tiers[@]} -gt 0 ]]; }; then
+    #
+    # Skip the clamp warning entirely under --print-partition: introspection
+    # mode never invokes cargo kani, so the "ignored per-harness" note is
+    # misleading. The introspection-mode note emitted below already covers
+    # --jobs (alongside --quick/--verbose/--fail-fast).
+    if [[ "$print_partition_only" != "true" ]] \
+        && [[ "$jobs" -gt 1 ]] \
+        && { [[ ${#harnesses[@]} -gt 0 ]] || [[ ${#tiers[@]} -gt 0 ]]; }; then
         echo -e "${YELLOW}[note] --jobs $jobs is ignored: this script invokes cargo kani per-harness; cargo kani's --jobs parallelizes across harnesses passed in a single invocation${NC}" >&2
         jobs=1
+    fi
+
+    # --print-partition is a pure introspection mode: it prints the planned
+    # harness layout for the given --tier (with optional --part/--parts) and
+    # exits. It must NOT depend on Kani being installed -- tests and CI
+    # introspection both rely on this.
+    #
+    # Multi-tier --print-partition is rejected: emitting two unlabelled
+    # PARTITION/PART blocks back-to-back is ambiguous for downstream
+    # consumers (CI parsers, the partition tests). The user can always
+    # invoke the script once per tier when they want both.
+    if [[ "$print_partition_only" == "true" ]]; then
+        if [[ ${#tiers[@]} -eq 0 ]]; then
+            echo "Error: --print-partition requires --tier" >&2
+            exit 1
+        fi
+        if [[ ${#tiers[@]} -gt 1 ]]; then
+            echo "Error: --print-partition does not support multiple --tier values; invoke once per tier" >&2
+            exit 1
+        fi
+        # Introspection mode: --print-partition prints the planned layout
+        # and exits without invoking cargo kani, so flags that only matter
+        # for the run path (--quick, --verbose, --jobs, --fail-fast) have
+        # no effect. Surface that explicitly when any of them was passed
+        # so the caller doesn't infer they took effect.
+        if [[ "$quick_given" == "true" ]] || [[ "$verbose_given" == "true" ]] \
+            || [[ "$jobs_given" == "true" ]] || [[ "$fail_fast_given" == "true" ]]; then
+            echo "[note] introspection mode; --quick/--verbose/--jobs/--fail-fast ignored" >&2
+        fi
+        print_partition "${tiers[0]}" "$part" "$parts" || exit $?
+        exit 0
     fi
 
     echo "=========================================="
@@ -783,6 +1201,15 @@ main() {
     echo ""
 
     if [[ "$list_only" == "true" ]]; then
+        # Introspection mode: --list prints the harness registry and exits
+        # without invoking cargo kani, so flags that only matter for the
+        # run path (--quick, --verbose, --jobs, --fail-fast) have no
+        # effect. Mirror the --print-partition note so callers don't
+        # infer those flags took effect.
+        if [[ "$quick_given" == "true" ]] || [[ "$verbose_given" == "true" ]] \
+            || [[ "$jobs_given" == "true" ]] || [[ "$fail_fast_given" == "true" ]]; then
+            echo "[note] introspection mode; --quick/--verbose/--jobs/--fail-fast ignored" >&2
+        fi
         list_harnesses
         exit 0
     fi
