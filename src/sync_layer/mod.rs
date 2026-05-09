@@ -220,7 +220,7 @@ impl<T: Config> SyncLayer<T> {
     /// production caller. The post-loop
     /// invariant `input_queues.len() == num_players` therefore holds by
     /// construction in release builds. As a defense-in-depth safety net
-    /// against a future regression that mis-configures the library default
+    /// against a future regression that misconfigures the library default
     /// (e.g., a feature gate setting it to `0`), the constructor reports a
     /// `Critical` `Configuration` violation per slot that fails to
     /// initialize and asserts the invariant via `debug_assert_eq!` — this
@@ -246,7 +246,7 @@ impl<T: Config> SyncLayer<T> {
             // (see `INPUT_QUEUE_LENGTH_IS_VALID` in tests), so the secondary
             // fallback below is dead code in production. We keep the
             // secondary `Critical` report as a defense-in-depth signal for
-            // any future regression that mis-configures the constant.
+            // any future regression that misconfigures the constant.
             if let Some(queue) = InputQueue::with_queue_length(player_index, queue_length) {
                 input_queues.push(queue);
                 continue;
@@ -2311,41 +2311,68 @@ mod kani_sync_layer_proofs {
         type Address = SocketAddr;
     }
 
-    /// Proof: New SyncLayer has valid initial state.
+    const MIN_TRACTABLE_QUEUE_LENGTH: usize = 2;
+
+    fn minimal_sync_layer(num_players: usize, max_prediction: usize) -> SyncLayer<TestConfig> {
+        SyncLayer::<TestConfig>::with_queue_length(
+            num_players,
+            max_prediction,
+            MIN_TRACTABLE_QUEUE_LENGTH,
+        )
+    }
+
+    /// Proof: The default input queue length is valid for `SyncLayer::new`.
     ///
-    /// Verifies all invariants hold at initialization.
-    /// Note: Bounds are reduced for Kani verification tractability.
+    /// This keeps default-constructor precondition coverage separate from
+    /// broader constructor-state proofs, which use the minimal valid queue
+    /// length to keep Kani's state space bounded.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: default queue length satisfies InputQueue construction
+    /// - Related: proof_minimal_sync_layer_initial_state_valid
+    #[kani::proof]
+    fn proof_sync_layer_default_queue_length_valid() {
+        kani::assert(
+            crate::input_queue::INPUT_QUEUE_LENGTH >= MIN_TRACTABLE_QUEUE_LENGTH,
+            "default input queue length should be valid",
+        );
+    }
+
+    /// Proof: Minimal SyncLayer construction has valid initial state.
+    ///
+    /// Verifies initialization invariants using `with_queue_length` and the
+    /// smallest queue length that satisfies `InputQueue` construction.
     ///
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Initial SyncLayer state validity (INV-1, INV-7, INV-8)
     /// - Related: proof_advance_frame_monotonic, proof_saved_states_count
     #[kani::proof]
     #[kani::unwind(12)]
-    fn proof_new_sync_layer_valid() {
+    fn proof_minimal_sync_layer_initial_state_valid() {
         let num_players: usize = kani::any();
         let max_prediction: usize = kani::any();
 
         kani::assume(num_players > 0 && num_players <= 2);
         kani::assume(max_prediction > 0 && max_prediction <= 3);
 
-        let sync_layer = SyncLayer::<TestConfig>::new(num_players, max_prediction);
+        let sync_layer = minimal_sync_layer(num_players, max_prediction);
 
         // INV-1: current_frame starts at 0
         kani::assert(
             sync_layer.current_frame() == Frame::new(0),
-            "New SyncLayer should start at frame 0",
+            "SyncLayer should start at frame 0",
         );
 
         // INV-7: last_confirmed_frame <= current_frame (NULL is treated as -1)
         kani::assert(
             sync_layer.last_confirmed_frame().is_null(),
-            "New SyncLayer should have null last_confirmed_frame",
+            "SyncLayer should have null last_confirmed_frame",
         );
 
         // INV-8: last_saved_frame <= current_frame
         kani::assert(
             sync_layer.last_saved_frame().is_null(),
-            "New SyncLayer should have null last_saved_frame",
+            "SyncLayer should have null last_saved_frame",
         );
 
         // Structural invariants
@@ -2369,7 +2396,7 @@ mod kani_sync_layer_proofs {
     ///
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Frame monotonicity (INV-1)
-    /// - Related: proof_multiple_advances_monotonic, proof_new_sync_layer_valid
+    /// - Related: proof_multiple_advances_monotonic, proof_minimal_sync_layer_initial_state_valid
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_advance_frame_monotonic() {
@@ -2554,7 +2581,7 @@ mod kani_sync_layer_proofs {
     ///
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: SavedStates has max_prediction + 1 slots
-    /// - Related: proof_new_sync_layer_valid, proof_saved_states_circular_index
+    /// - Related: proof_minimal_sync_layer_initial_state_valid, proof_saved_states_circular_index
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_saved_states_count() {
@@ -2625,7 +2652,7 @@ mod kani_sync_layer_proofs {
     ///
     /// - Tier: 3 (Slow, >2min)
     /// - Verifies: reset_prediction preserves frame invariants
-    /// - Related: proof_new_sync_layer_valid
+    /// - Related: proof_minimal_sync_layer_initial_state_valid
     ///   (proof_load_frame_validates_bounds and proof_load_frame_success_maintains_invariants
     ///   still exercise SyncLayer::new(2, 3) for broader multi-player coverage)
     #[kani::proof]

@@ -59,6 +59,24 @@ run_with_timeout() {
     fi
 }
 
+is_timeout_exit() {
+    local exit_code="$1"
+    case "$exit_code" in
+        124)
+            return 0
+            ;;
+        137|143)
+            # CI runners can terminate child processes with SIGKILL (137)
+            # or SIGTERM (143) when an enclosing job timeout/cancellation
+            # fires before GNU timeout can return 124.
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # Tier definitions - proofs grouped by approximate runtime
 # Tier 1: Fast proofs (<30s each) - simple property checks
 TIER1_PROOFS=(
@@ -123,6 +141,8 @@ TIER1_PROOFS=(
     "proof_divisibility_check"
     "proof_empty_input_bytes_valid"
     "proof_extreme_frame_values"
+    # SyncLayer construction preconditions (src/sync_layer/mod.rs)
+    "proof_sync_layer_default_queue_length_valid"
     # Protocol mod.rs proofs (src/network/protocol/mod.rs)
     "proof_protocol_state_count"
     "proof_running_is_active_state"
@@ -160,7 +180,7 @@ TIER2_PROOFS=(
     "proof_queue_index_calculation"
     "proof_length_calculation_consistent"
     # SyncLayer proofs (src/sync_layer/mod.rs)
-    "proof_new_sync_layer_valid"
+    "proof_minimal_sync_layer_initial_state_valid"
     "proof_advance_frame_monotonic"
     "proof_saved_states_count"
     "proof_get_cell_validates_frame"
@@ -398,12 +418,18 @@ run_kani() {
         run_with_timeout "$KANI_TIMEOUT" "${kani_cmd[@]}" > "$output_file" 2>&1 || exit_code=$?
     fi
 
-    # Check for timeout (exit code 124 from GNU timeout/gtimeout).
-    # When neither is available, run_with_timeout runs without a timeout
-    # and this check simply won't trigger.
-    if [[ $exit_code -eq 124 ]]; then
+    # Check for timeout-like exits. GNU timeout/gtimeout returns 124 for
+    # ordinary per-proof timeouts; CI job cancellation or enclosing job
+    # termination can surface as SIGKILL/SIGTERM encoded as 137/143 instead.
+    if is_timeout_exit "$exit_code"; then
         local timed_out_harness="${harness:-all}"
-        echo -e "${RED}TIMEOUT: proof '$timed_out_harness' timed out after ${KANI_TIMEOUT}s. Consider adding/increasing #[kani::unwind(N)].${NC}"
+        if [[ "$exit_code" -eq 124 ]]; then
+            echo -e "${RED}TIMEOUT: proof '$timed_out_harness' exceeded the per-proof timeout of ${KANI_TIMEOUT}s (exit code 124).${NC}"
+        else
+            echo -e "${RED}TERMINATED: proof '$timed_out_harness' ended with timeout/cancellation/termination-like exit code ${exit_code}.${NC}"
+        fi
+        echo "Command: ${kani_cmd[*]}"
+        echo "Hint: make the harness more tractable, split the proof, or add/increase #[kani::unwind(N)] if the bound is too low."
     fi
 
     local end_time
