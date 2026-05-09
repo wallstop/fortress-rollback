@@ -288,7 +288,8 @@ TIER2_PROOFS=(
     "proof_queue_index_calculation"
     "proof_length_calculation_consistent"
     # SyncLayer proofs (src/sync_layer/mod.rs)
-    "proof_minimal_sync_layer_initial_state_valid"
+    "proof_minimal_sync_layer_initial_state_valid_1p"
+    "proof_minimal_sync_layer_initial_state_valid_2p"
     "proof_advance_frame_monotonic"
     "proof_saved_states_count"
     "proof_get_cell_validates_frame"

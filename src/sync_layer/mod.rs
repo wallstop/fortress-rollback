@@ -2261,6 +2261,13 @@ mod sync_layer_tests {
 /// 2. Reduce loop iteration counts
 /// 3. Avoid calling complex methods like `add_remote_input` which involve InputQueue operations
 /// 4. Test one behavior at a time rather than multiple assertions in one proof
+///
+/// Critical anti-pattern (regression caught 2026-05-09): a `kani::any()` value
+/// that flows into a function and becomes a *loop bound* causes CBMC path
+/// explosion. Symbolic values are safe when they only size data structures
+/// (single allocation), but lethal when they bound loops the verifier must
+/// unroll. If a proof using kani::any() hangs or causes runner shutdown,
+/// concretize the parameter that flows into the loop bound.
 #[cfg(kani)]
 mod kani_sync_layer_proofs {
     use super::*;
@@ -2299,7 +2306,8 @@ mod kani_sync_layer_proofs {
     ///
     /// - Tier: 1 (Fast, <30s)
     /// - Verifies: default queue length satisfies InputQueue construction
-    /// - Related: proof_minimal_sync_layer_initial_state_valid
+    /// - Related: proof_minimal_sync_layer_initial_state_valid_1p,
+    ///   proof_minimal_sync_layer_initial_state_valid_2p
     #[kani::proof]
     fn proof_sync_layer_default_queue_length_valid() {
         kani::assert(
@@ -2308,25 +2316,16 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: Minimal SyncLayer construction has valid initial state.
-    ///
-    /// Verifies initialization invariants using `with_queue_length` and the
-    /// smallest queue length that satisfies `InputQueue` construction.
-    ///
-    /// - Tier: 2 (Medium, 30s-2min)
-    /// - Verifies: Initial SyncLayer state validity (INV-1, INV-7, INV-8)
-    /// - Related: proof_advance_frame_monotonic, proof_saved_states_count
-    #[kani::proof]
-    #[kani::unwind(12)]
-    fn proof_minimal_sync_layer_initial_state_valid() {
-        let num_players: usize = kani::any();
-        let max_prediction: usize = kani::any();
-
-        kani::assume(num_players > 0 && num_players <= 2);
-        kani::assume(max_prediction > 0 && max_prediction <= 3);
-
-        let sync_layer = minimal_sync_layer(num_players, max_prediction);
-
+    // Asserts the structural and frame-state invariants for a freshly-constructed
+    // SyncLayer. Factored out so the per-num_players proofs share one assertion
+    // body — keeping the harnesses CBMC-tractable by concretizing num_players
+    // (which would otherwise drive a symbolic loop bound in
+    // SyncLayer::with_queue_length, see lines 2249-2270 for the policy).
+    fn assert_initial_state(
+        sync_layer: &SyncLayer<TestConfig>,
+        expected_num_players: usize,
+        expected_max_prediction: usize,
+    ) {
         // INV-1: current_frame starts at 0
         kani::assert(
             sync_layer.current_frame() == Frame::new(0),
@@ -2347,17 +2346,53 @@ mod kani_sync_layer_proofs {
 
         // Structural invariants
         kani::assert(
-            sync_layer.num_players == num_players,
+            sync_layer.num_players == expected_num_players,
             "num_players should be set correctly",
         );
         kani::assert(
-            sync_layer.max_prediction == max_prediction,
+            sync_layer.max_prediction == expected_max_prediction,
             "max_prediction should be set correctly",
         );
         kani::assert(
-            sync_layer.input_queues.len() == num_players,
+            sync_layer.input_queues.len() == expected_num_players,
             "Should have one input queue per player",
         );
+    }
+
+    /// Proof: Minimal SyncLayer construction has valid initial state (1 player).
+    ///
+    /// Concretizes num_players=1 to keep CBMC tractable. The {1, 2}-player axis is
+    /// covered by this proof and proof_minimal_sync_layer_initial_state_valid_2p
+    /// together; max_prediction is enumerated symbolically across {1, 2, 3}.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Initial SyncLayer state validity (INV-1, INV-7, INV-8)
+    /// - Related: proof_advance_frame_monotonic, proof_saved_states_count
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn proof_minimal_sync_layer_initial_state_valid_1p() {
+        let max_prediction: usize = kani::any();
+        kani::assume(max_prediction > 0 && max_prediction <= 3);
+        let sync_layer = minimal_sync_layer(1, max_prediction);
+        assert_initial_state(&sync_layer, 1, max_prediction);
+    }
+
+    /// Proof: Minimal SyncLayer construction has valid initial state (2 players).
+    ///
+    /// Concretizes num_players=2 to keep CBMC tractable. The {1, 2}-player axis is
+    /// covered by this proof and proof_minimal_sync_layer_initial_state_valid_1p
+    /// together; max_prediction is enumerated symbolically across {1, 2, 3}.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Initial SyncLayer state validity (INV-1, INV-7, INV-8)
+    /// - Related: proof_advance_frame_monotonic, proof_saved_states_count
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn proof_minimal_sync_layer_initial_state_valid_2p() {
+        let max_prediction: usize = kani::any();
+        kani::assume(max_prediction > 0 && max_prediction <= 3);
+        let sync_layer = minimal_sync_layer(2, max_prediction);
+        assert_initial_state(&sync_layer, 2, max_prediction);
     }
 
     /// Proof: advance_frame maintains INV-1 (monotonicity).
@@ -2366,7 +2401,9 @@ mod kani_sync_layer_proofs {
     ///
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Frame monotonicity (INV-1)
-    /// - Related: proof_multiple_advances_monotonic, proof_minimal_sync_layer_initial_state_valid
+    /// - Related: proof_multiple_advances_monotonic,
+    ///   proof_minimal_sync_layer_initial_state_valid_1p,
+    ///   proof_minimal_sync_layer_initial_state_valid_2p
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_advance_frame_monotonic() {
@@ -2551,7 +2588,9 @@ mod kani_sync_layer_proofs {
     ///
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: SavedStates has max_prediction + 1 slots
-    /// - Related: proof_minimal_sync_layer_initial_state_valid, proof_saved_states_circular_index
+    /// - Related: proof_minimal_sync_layer_initial_state_valid_1p,
+    ///   proof_minimal_sync_layer_initial_state_valid_2p,
+    ///   proof_saved_states_circular_index
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_saved_states_count() {
@@ -2622,7 +2661,8 @@ mod kani_sync_layer_proofs {
     ///
     /// - Tier: 3 (Slow, >2min)
     /// - Verifies: reset_prediction preserves frame invariants
-    /// - Related: proof_minimal_sync_layer_initial_state_valid
+    /// - Related: proof_minimal_sync_layer_initial_state_valid_1p,
+    ///   proof_minimal_sync_layer_initial_state_valid_2p
     ///   (proof_load_frame_validates_bounds and proof_load_frame_success_maintains_invariants
     ///   still exercise SyncLayer::new(2, 3) for broader multi-player coverage)
     #[kani::proof]

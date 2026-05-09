@@ -26,7 +26,7 @@ import pytest
 
 # The harness name is used in the fake-cargo invocation and is asserted in
 # the diagnostic command echo. Centralising it keeps the test cases concise.
-HARNESS = "proof_minimal_sync_layer_initial_state_valid"
+HARNESS = "proof_minimal_sync_layer_initial_state_valid_2p"
 KANI_TIMEOUT = "42"
 
 # Verify-kani.sh appends `--default-unwind 8` when invoked with `--quick`.

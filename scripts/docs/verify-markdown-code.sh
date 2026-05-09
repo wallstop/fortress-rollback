@@ -29,6 +29,7 @@ FIX_MODE=false
 STRICT_MODE=false
 FAIL_FAST=false
 SPECIFIC_FILE=""
+SPECIFIC_DIR=""
 
 # Colors
 RED='\033[0;31m'
@@ -52,7 +53,7 @@ declare -a WARNINGS=()
 declare -a AUTO_SKIPPED=()
 
 print_usage() {
-    echo "Usage: $0 [options] [file.md]"
+    echo "Usage: $0 [options] [file.md|directory]"
     echo ""
     echo "Options:"
     echo "  --verbose, -v   Show detailed output including extracted code"
@@ -65,6 +66,7 @@ print_usage() {
     echo "  $0                          # Verify all markdown files"
     echo "  $0 --verbose                # Verify with detailed output"
     echo "  $0 docs/user-guide.md       # Verify specific file"
+    echo "  $0 docs/                    # Verify all markdown in directory"
     echo "  $0 --fix docs/user-guide.md # Show fix suggestions"
     echo "  $0 --strict                 # Don't auto-skip incomplete code"
     echo "  $0 --fail-fast              # CI mode: stop on first failure"
@@ -567,9 +569,11 @@ process_markdown_file() {
     done < <(extract_code_blocks "$file")
 }
 
-# Find all markdown files in the project
+# Find all markdown files in the project (or under an optional root directory).
+# Arguments: $1 = optional root directory (defaults to $PROJECT_ROOT)
 find_markdown_files() {
-    find "$PROJECT_ROOT" \
+    local root_dir="${1:-$PROJECT_ROOT}"
+    find "$root_dir" \
         -name "*.md" \
         -not -path "*/target/*" \
         -not -path "*/.git/*" \
@@ -665,8 +669,12 @@ while [[ $# -gt 0 ]]; do
                 SPECIFIC_FILE="$1"
             elif [[ -f "$PROJECT_ROOT/$1" ]]; then
                 SPECIFIC_FILE="$PROJECT_ROOT/$1"
+            elif [[ -d "$1" ]]; then
+                SPECIFIC_DIR="$1"
+            elif [[ -d "$PROJECT_ROOT/$1" ]]; then
+                SPECIFIC_DIR="$PROJECT_ROOT/$1"
             else
-                echo "File not found: $1"
+                echo "File or directory not found: $1"
                 exit 1
             fi
             shift
@@ -682,6 +690,15 @@ main() {
     local process_result=0
     if [[ -n "$SPECIFIC_FILE" ]]; then
         process_markdown_file "$SPECIFIC_FILE" || process_result=$?
+    elif [[ -n "$SPECIFIC_DIR" ]]; then
+        while IFS= read -r file; do
+            if ! process_markdown_file "$file"; then
+                process_result=1
+                if $FAIL_FAST; then
+                    break
+                fi
+            fi
+        done < <(find_markdown_files "$SPECIFIC_DIR")
     else
         while IFS= read -r file; do
             if ! process_markdown_file "$file"; then

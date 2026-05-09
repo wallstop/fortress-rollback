@@ -307,6 +307,7 @@ jobs:
             lychee-cache-
 
       - name: Run lychee link checker
+        id: lychee
         uses: lycheeverse/lychee-action@v2
         with:
           # Check docs and top-level markdown files
@@ -324,6 +325,11 @@ jobs:
           fail: false  # Don't fail the workflow on broken links initially
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Annotate lychee config errors
+        if: failure() && steps.lychee.conclusion == 'failure'
+        run: |
+          echo "::error file=.lychee.toml::Lychee step failed. If the report mentions 'unknown field' or 'TOML parse error', the config schema is out of sync with the lychee binary the action installed. Compare against https://github.com/lycheeverse/lychee/blob/master/lychee.example.toml for current field names."
 
       - name: Upload lychee report
         uses: actions/upload-artifact@v7

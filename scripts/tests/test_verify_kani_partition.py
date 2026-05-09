@@ -33,7 +33,7 @@ VERIFY_KANI = REPO_ROOT / "scripts" / "verification" / "verify-kani.sh"
 # adds/removes a proof without thinking about sharding.
 TIER_SIZES: dict[int, int] = {
     1: 63,
-    2: 37,
+    2: 38,
     3: 16,
 }
 
@@ -128,7 +128,7 @@ class PartitionCase:
 
 # Production matrices currently use:
 #   tier 1: parts=1
-#   tier 2: parts=6  (37/6 -> 7,6,6,6,6,6 balanced)
+#   tier 2: parts=6  (38/6 -> 7,7,6,6,6,6 balanced)
 #   tier 3: parts=5  (16/5 -> 4,3,3,3,3 balanced; was 4,4,4,4,0 buggy)
 #
 # Plus a couple of additional shapes to cover edge ratios.
@@ -253,7 +253,7 @@ def test_balanced_partition_no_empty_shards(case: PartitionCase) -> None:
     )
 
 
-@pytest.mark.parametrize("tier,parts", [(3, 17), (3, 20), (2, 38)])
+@pytest.mark.parametrize("tier,parts", [(3, 17), (3, 20), (2, 39)])
 def test_partition_rejects_more_parts_than_proofs(tier: int, parts: int) -> None:
     """Misconfigured matrices (parts > total) MUST fail loudly.
 

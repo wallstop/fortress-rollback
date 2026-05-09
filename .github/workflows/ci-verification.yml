@@ -194,6 +194,11 @@ jobs:
           retry_on_exit_code: 143
           command: ./scripts/verification/verify-kani.sh --quick --tier 1 --fail-fast --verbose
 
+      - name: Annotate Kani runner-shutdown failures
+        if: failure()
+        run: |
+          echo "::error file=src/sync_layer/mod.rs,line=2249::If this job ended with 'runner has received a shutdown signal', a proof likely caused CBMC state-space explosion (OOM). Suspect a symbolic kani::any() value driving a loop bound. See src/sync_layer/mod.rs:2249-2270 for the policy. Common fix: concretize the parameter that flows into the symbolic loop."
+
   # Kani Formal Verification (Tier 2 - Medium proofs, split into 6 parallel jobs)
   kani-tier2:
     name: Kani Tier 2 (${{ matrix.part }}/6)
@@ -253,6 +258,11 @@ jobs:
           retry_on_exit_code: 143
           command: ./scripts/verification/verify-kani.sh --quick --tier 2 --part ${{ matrix.part }} --parts 6 --fail-fast
 
+      - name: Annotate Kani runner-shutdown failures
+        if: failure()
+        run: |
+          echo "::error file=src/sync_layer/mod.rs,line=2249::If this job ended with 'runner has received a shutdown signal', a proof likely caused CBMC state-space explosion (OOM). Suspect a symbolic kani::any() value driving a loop bound. See src/sync_layer/mod.rs:2249-2270 for the policy. Common fix: concretize the parameter that flows into the symbolic loop."
+
   # Kani Formal Verification (Tier 3 - Slow proofs, split into 5 parallel jobs)
   kani-tier3:
     name: Kani Tier 3 (${{ matrix.part }}/5)
@@ -309,6 +319,11 @@ jobs:
           retry_wait_seconds: 30
           retry_on_exit_code: 143
           command: ./scripts/verification/verify-kani.sh --quick --tier 3 --part ${{ matrix.part }} --parts 5 --fail-fast
+
+      - name: Annotate Kani runner-shutdown failures
+        if: failure()
+        run: |
+          echo "::error file=src/sync_layer/mod.rs,line=2249::If this job ended with 'runner has received a shutdown signal', a proof likely caused CBMC state-space explosion (OOM). Suspect a symbolic kani::any() value driving a loop bound. See src/sync_layer/mod.rs:2249-2270 for the policy. Common fix: concretize the parameter that flows into the symbolic loop."
 
   # Loom Concurrency Testing (cross-platform)
   loom-tests:

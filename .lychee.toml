@@ -68,9 +68,6 @@ exclude = [
     "^https://medium\\.com",
 ]
 
-# Exclude mail links
-exclude_mail = true
-
 # Exclude these paths from being checked
 exclude_path = [
     "target",
