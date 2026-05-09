@@ -59,21 +59,24 @@ run_with_timeout() {
     fi
 }
 
-is_timeout_exit() {
+# Classify "non-success but no proof verdict" exit codes so we can give a
+# specific diagnostic instead of a generic "Kani failed".
+#
+# Echoes one of:
+#   per_proof_timeout  - GNU timeout(1) fired its own KANI_TIMEOUT (exit 124).
+#                        The harness genuinely ran too long for our budget.
+#   external_terminate - The runner sent SIGTERM/SIGKILL to the child
+#                        (exit 143/137). This is *not* a per-proof timeout:
+#                        it almost always means the enclosing job timeout
+#                        fired, the workflow was cancelled, or (very common
+#                        on GitHub-hosted runners) the runner was preempted.
+#   ""                 - Not a timeout-class exit; treat as a normal failure.
+classify_exit_code() {
     local exit_code="$1"
     case "$exit_code" in
-        124)
-            return 0
-            ;;
-        137|143)
-            # CI runners can terminate child processes with SIGKILL (137)
-            # or SIGTERM (143) when an enclosing job timeout/cancellation
-            # fires before GNU timeout can return 124.
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
+        124) echo "per_proof_timeout" ;;
+        137|143) echo "external_terminate" ;;
+        *) echo "" ;;
     esac
 }
 
@@ -396,8 +399,11 @@ run_kani() {
         kani_cmd+=(--default-unwind 8)
     fi
 
-    # Add jobs for parallel execution
-    # Note: --jobs requires --output-format=terse in Kani 0.66.0+
+    # cargo kani's --jobs N parallelizes across harnesses passed in one
+    # invocation; with --harness it's a no-op. main() pre-clamps jobs=1 in
+    # the per-harness/per-tier paths, so reaching here with jobs>1 means the
+    # user invoked the bare "verify all" path where it actually helps.
+    # --jobs requires --output-format=terse in Kani 0.66.0+.
     if [[ "$jobs" -gt 1 ]]; then
         kani_cmd+=(--jobs "$jobs" --output-format terse)
     fi
@@ -418,18 +424,34 @@ run_kani() {
         run_with_timeout "$KANI_TIMEOUT" "${kani_cmd[@]}" > "$output_file" 2>&1 || exit_code=$?
     fi
 
-    # Check for timeout-like exits. GNU timeout/gtimeout returns 124 for
-    # ordinary per-proof timeouts; CI job cancellation or enclosing job
-    # termination can surface as SIGKILL/SIGTERM encoded as 137/143 instead.
-    if is_timeout_exit "$exit_code"; then
+    # Diagnose timeout-class exits. These look identical to "Kani failed"
+    # without context, but they have very different root causes and remedies.
+    # See classify_exit_code() above for the taxonomy.
+    local exit_class
+    exit_class=$(classify_exit_code "$exit_code")
+    if [[ -n "$exit_class" ]]; then
         local timed_out_harness="${harness:-all}"
-        if [[ "$exit_code" -eq 124 ]]; then
-            echo -e "${RED}TIMEOUT: proof '$timed_out_harness' exceeded the per-proof timeout of ${KANI_TIMEOUT}s (exit code 124).${NC}"
-        else
-            echo -e "${RED}TERMINATED: proof '$timed_out_harness' ended with timeout/cancellation/termination-like exit code ${exit_code}.${NC}"
-        fi
-        echo "Command: ${kani_cmd[*]}"
-        echo "Hint: make the harness more tractable, split the proof, or add/increase #[kani::unwind(N)] if the bound is too low."
+        case "$exit_class" in
+            per_proof_timeout)
+                echo -e "${RED}PER-PROOF TIMEOUT: '$timed_out_harness' exceeded KANI_TIMEOUT=${KANI_TIMEOUT}s (exit 124, GNU timeout fired).${NC}"
+                echo "Command: ${kani_cmd[*]}"
+                echo "Hint: this is a *proof-tractability* problem -- not a CI flake."
+                echo "  - Lower #[kani::unwind(N)] if the bound is too generous."
+                echo "  - Split the harness or shrink symbolic input ranges."
+                echo "  - Raise KANI_TIMEOUT only as a last resort."
+                ;;
+            external_terminate)
+                echo -e "${RED}EXTERNAL TERMINATION: '$timed_out_harness' was killed by signal (exit ${exit_code}).${NC}"
+                echo "Command: ${kani_cmd[*]}"
+                echo "Hint: GNU timeout did NOT fire (that would be exit 124). Likely causes:"
+                echo "  - GitHub-hosted runner preemption / spot reclaim."
+                echo "  - Enclosing job-level 'timeout-minutes' fired in the workflow."
+                echo "  - Workflow cancelled (push superseded, manual cancel, concurrency.cancel-in-progress)."
+                echo "  - OOM kill (less common for Kani; would usually log earlier)."
+                echo "This is a *CI infrastructure* failure mode, distinct from a proof timeout."
+                echo "Re-running the job is the typical mitigation; if it recurs, investigate the runner."
+                ;;
+        esac
     fi
 
     local end_time
@@ -545,8 +567,14 @@ run_kani() {
 
     rm -f "$output_file" "$clean_output"
 
+    # Propagate timeout/signal exits verbatim so the workflow's
+    # nick-fields/retry@v4 retry_on_exit_code can match (e.g. 143).
+    # Real proof failures collapse to 1.
     if [[ $exit_code -ne 0 ]] || [[ $FAILED -gt 0 ]]; then
-        return 1
+        case "$exit_code" in
+            124|137|143) return "$exit_code" ;;
+            *)           return 1 ;;
+        esac
     fi
 
     return 0
@@ -593,14 +621,22 @@ run_tier_proofs() {
     local any_failed=false
     local tier_passed=0
     local tier_failed=0
+    # Highest signal-class exit (124/137/143) seen in this tier; propagated
+    # so the workflow's retry_on_exit_code can fire on runner preemption.
+    local last_signal_exit=0
 
     for harness in "${proofs[@]}"; do
         echo -e "${BLUE}  Verifying: $harness${NC}"
+        local rk_exit=0
         if run_kani "$harness" "$quick" "$verbose" "$jobs"; then
             ((tier_passed++))
         else
+            rk_exit=$?
             any_failed=true
             ((tier_failed++))
+            case "$rk_exit" in
+                124|137|143) last_signal_exit=$rk_exit ;;
+            esac
             if [[ "$quick" == "true" ]]; then
                 echo -e "${YELLOW}Note: Running in --quick mode (--default-unwind 8). Proofs iterating over structures with >8 elements need explicit #[kani::unwind(N)].${NC}"
             fi
@@ -608,6 +644,7 @@ run_tier_proofs() {
                 echo -e "${RED}Stopping early due to --fail-fast${NC}"
                 echo ""
                 echo "Tier $tier Results: $tier_passed passed, $tier_failed failed (stopped early)"
+                [[ $last_signal_exit -ne 0 ]] && return "$last_signal_exit"
                 return 1
             fi
         fi
@@ -617,6 +654,7 @@ run_tier_proofs() {
     echo "Tier $tier Results: $tier_passed passed, $tier_failed failed"
 
     if [[ "$any_failed" == "true" ]]; then
+        [[ $last_signal_exit -ne 0 ]] && return "$last_signal_exit"
         return 1
     fi
     return 0
@@ -728,6 +766,15 @@ main() {
         exit 1
     fi
 
+    # cargo kani's --jobs parallelizes across multiple harnesses in one
+    # invocation. --harness/--tier paths fan out per-harness, so --jobs N
+    # is a no-op there. Warn once and clamp; the bare "verify all" path
+    # below (no harnesses, no tiers) keeps --jobs intact.
+    if [[ "$jobs" -gt 1 ]] && { [[ ${#harnesses[@]} -gt 0 ]] || [[ ${#tiers[@]} -gt 0 ]]; }; then
+        echo -e "${YELLOW}[note] --jobs $jobs is ignored: this script invokes cargo kani per-harness; cargo kani's --jobs parallelizes across harnesses passed in a single invocation${NC}" >&2
+        jobs=1
+    fi
+
     echo "=========================================="
     echo "Fortress Rollback Kani Verification"
     echo "=========================================="
@@ -742,13 +789,21 @@ main() {
 
     # Run verification
     local any_failed=false
+    # Propagate signal-class exits (124/137/143) verbatim so the workflow's
+    # nick-fields/retry@v4 retry_on_exit_code matches.
+    local signal_exit=0
 
     if [[ ${#harnesses[@]} -gt 0 ]]; then
         # Run specific harnesses
         for harness in "${harnesses[@]}"; do
             echo -e "${BLUE}Verifying harness: $harness${NC}"
-            if ! run_kani "$harness" "$quick" "$verbose" "$jobs"; then
+            local rk_exit=0
+            run_kani "$harness" "$quick" "$verbose" "$jobs" || rk_exit=$?
+            if [[ $rk_exit -ne 0 ]]; then
                 any_failed=true
+                case "$rk_exit" in
+                    124|137|143) signal_exit=$rk_exit ;;
+                esac
                 if [[ "$quick" == "true" ]]; then
                     echo -e "${YELLOW}Note: Running in --quick mode (--default-unwind 8). Proofs iterating over structures with >8 elements need explicit #[kani::unwind(N)].${NC}"
                 fi
@@ -761,8 +816,13 @@ main() {
     elif [[ ${#tiers[@]} -gt 0 ]]; then
         # Run specific tiers
         for tier in "${tiers[@]}"; do
-            if ! run_tier_proofs "$tier" "$quick" "$verbose" "$jobs" "$fail_fast" "$part" "$parts"; then
+            local rt_exit=0
+            run_tier_proofs "$tier" "$quick" "$verbose" "$jobs" "$fail_fast" "$part" "$parts" || rt_exit=$?
+            if [[ $rt_exit -ne 0 ]]; then
                 any_failed=true
+                case "$rt_exit" in
+                    124|137|143) signal_exit=$rt_exit ;;
+                esac
                 if [[ "$fail_fast" == "true" ]]; then
                     break
                 fi
@@ -770,12 +830,18 @@ main() {
         done
     else
         # Run all harnesses (default)
-        if ! run_kani "" "$quick" "$verbose" "$jobs"; then
+        local rk_exit=0
+        run_kani "" "$quick" "$verbose" "$jobs" || rk_exit=$?
+        if [[ $rk_exit -ne 0 ]]; then
             any_failed=true
+            case "$rk_exit" in
+                124|137|143) signal_exit=$rk_exit ;;
+            esac
         fi
     fi
 
     if [[ "$any_failed" == "true" ]]; then
+        [[ $signal_exit -ne 0 ]] && exit "$signal_exit"
         exit 1
     fi
 

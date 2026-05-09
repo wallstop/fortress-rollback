@@ -25,7 +25,11 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TLA_DIR="$PROJECT_ROOT/specs/tla"
 TOOLS_DIR="$PROJECT_ROOT/.tla-tools"
 TLA_TOOLS_JAR="${TLA_TOOLS_JAR:-$TOOLS_DIR/tla2tools.jar}"
-TLA_TOOLS_URL="https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar"
+# Single source of truth for the TLA+ tools version. CI sets this from the
+# workflow env so that the actions/cache key and the downloaded artifact
+# stay in lockstep. Override via env to test newer releases locally.
+TLA_TOOLS_VERSION="${TLA_TOOLS_VERSION:-1.8.0}"
+TLA_TOOLS_URL="${TLA_TOOLS_URL:-https://github.com/tlaplus/tlaplus/releases/download/v${TLA_TOOLS_VERSION}/tla2tools.jar}"
 TLA_WORKERS="${TLA_WORKERS:-auto}"
 TLA_MEMORY="${TLA_MEMORY:-4g}"
 TLA_DEPTH="${TLA_DEPTH:-}"
@@ -98,15 +102,20 @@ check_java() {
 }
 
 download_tla_tools() {
-    if [[ -f "$TLA_TOOLS_JAR" ]]; then
+    # Sentinel guards against a stale cached jar after TLA_TOOLS_VERSION bumps.
+    local version_file="$TOOLS_DIR/.version"
+    if [[ -f "$TLA_TOOLS_JAR" ]] && [[ -f "$version_file" ]] && [[ "$(cat "$version_file")" == "$TLA_TOOLS_VERSION" ]]; then
         return 0
     fi
 
-    echo -e "${BLUE}Downloading TLA+ tools...${NC}"
+    echo -e "${BLUE}Downloading TLA+ tools v${TLA_TOOLS_VERSION}...${NC}"
     mkdir -p "$TOOLS_DIR"
 
+    # curl -f / wget default: a 404 must not write an HTML error page
+    # to tla2tools.jar (would otherwise pair with a valid sentinel and
+    # defeat cache invalidation on the next run).
     if command -v curl &> /dev/null; then
-        curl -L -o "$TLA_TOOLS_JAR" "$TLA_TOOLS_URL"
+        curl -fL -o "$TLA_TOOLS_JAR" "$TLA_TOOLS_URL"
     elif command -v wget &> /dev/null; then
         wget -O "$TLA_TOOLS_JAR" "$TLA_TOOLS_URL"
     else
@@ -114,6 +123,15 @@ download_tla_tools() {
         exit 1
     fi
 
+    # Only write the sentinel if the jar is non-empty; a typo'd version would
+    # otherwise leave a broken jar + matching sentinel, forever short-circuiting
+    # this function on subsequent runs.
+    if [[ ! -s "$TLA_TOOLS_JAR" ]]; then
+        echo -e "${RED}Error: downloaded $TLA_TOOLS_JAR is empty${NC}"
+        rm -f "$TLA_TOOLS_JAR"
+        exit 1
+    fi
+    printf '%s\n' "$TLA_TOOLS_VERSION" > "$version_file"
     echo -e "${GREEN}Downloaded TLA+ tools to $TLA_TOOLS_JAR${NC}"
 }
 

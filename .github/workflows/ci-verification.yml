@@ -23,8 +23,24 @@ on:
       - '.github/workflows/ci-verification.yml'
   workflow_dispatch:
 
+# Cancel stale verification runs when a newer commit lands on the same ref.
+# Long-running Kani jobs are expensive and there's no value in finishing a
+# run that has already been superseded. Other CI workflows in this repo
+# (ci-quality, ci-mutation, ci-safety) follow the same pattern.
+concurrency:
+  group: verification-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  # Single source of truth for Kani version used by both `cargo install` and
+  # the actions/cache key. Bump here to upgrade Kani; the cache key invalidates
+  # automatically. Without this pinning, `cargo install --locked kani-verifier`
+  # silently picks up new releases while the cache key never changes, so
+  # runners keep restoring a stale cached binary forever.
+  KANI_VERSION: '0.67.0'
+  # Same single-source-of-truth pattern for TLA+ tools.
+  TLA_TOOLS_VERSION: '1.8.0'
 
 jobs:
   # Validate Kani proof coverage before running actual proofs
@@ -57,7 +73,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .tla-tools
-          key: tla-tools-v1.8.0
+          key: tla-tools-v${{ env.TLA_TOOLS_VERSION }}
 
       - name: Run TLA+ verification
         run: ./scripts/verification/verify-tla.sh --fail-fast
@@ -126,7 +142,6 @@ jobs:
   kani-tier1:
     name: Kani Tier 1 (Fast)
     runs-on: ubuntu-latest
-    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v6
@@ -143,7 +158,7 @@ jobs:
             ~/.cargo/bin/cargo-kani
             ~/.cargo/bin/kani-*
             ~/.kani
-          key: kani-0.66.0-${{ runner.os }}
+          key: kani-${{ env.KANI_VERSION }}-${{ runner.os }}
 
       - name: Install Kani with retry
         uses: nick-fields/retry@v4
@@ -153,7 +168,7 @@ jobs:
           retry_wait_seconds: 60
           command: |
             if ! command -v cargo-kani &> /dev/null; then
-              cargo install --locked kani-verifier
+              cargo install --locked kani-verifier --version "${KANI_VERSION}"
               cargo kani setup
             fi
 
@@ -165,15 +180,24 @@ jobs:
           echo "Rustc: $(rustc --version)"
           echo "Kani: $(cargo kani --version)"
 
+      # Retry only on exit 143 (SIGTERM, runner preemption). Exit 1 (real
+      # proof failure) and exit 124 (per-proof KANI_TIMEOUT) are not retried.
+      # retry_on_exit_code is single-valued; spot reclaim can escalate to
+      # SIGKILL (137) past the grace window -- if 137 recurs, switch to a
+      # wrapper that handles both.
       - name: Run Kani verification (Tier 1 - Fast)
-        run: ./scripts/verification/verify-kani.sh --quick --tier 1 --fail-fast --verbose
-        timeout-minutes: 15
+        uses: nick-fields/retry@v4
+        with:
+          timeout_minutes: 15
+          max_attempts: 2
+          retry_wait_seconds: 30
+          retry_on_exit_code: 143
+          command: ./scripts/verification/verify-kani.sh --quick --tier 1 --fail-fast --verbose
 
   # Kani Formal Verification (Tier 2 - Medium proofs, split into 6 parallel jobs)
   kani-tier2:
     name: Kani Tier 2 (${{ matrix.part }}/6)
     runs-on: ubuntu-latest
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -194,7 +218,7 @@ jobs:
             ~/.cargo/bin/cargo-kani
             ~/.cargo/bin/kani-*
             ~/.kani
-          key: kani-0.66.0-${{ runner.os }}
+          key: kani-${{ env.KANI_VERSION }}-${{ runner.os }}
 
       - name: Install Kani with retry
         uses: nick-fields/retry@v4
@@ -204,7 +228,7 @@ jobs:
           retry_wait_seconds: 60
           command: |
             if ! command -v cargo-kani &> /dev/null; then
-              cargo install --locked kani-verifier
+              cargo install --locked kani-verifier --version "${KANI_VERSION}"
               cargo kani setup
             fi
 
@@ -216,15 +240,23 @@ jobs:
           echo "Rustc: $(rustc --version)"
           echo "Kani: $(cargo kani --version)"
 
+      # --jobs omitted: verify-kani.sh runs one `cargo kani --harness X` per
+      # proof; the matrix above is the parallelism mechanism.
+      # Retry: same as Tier 1 -- only 143 (SIGTERM/preempt); 1 and 124 fail
+      # immediately. See Tier 1 comment re: SIGKILL escalation.
       - name: Run Kani verification (Tier 2 - Part ${{ matrix.part }}/6)
-        run: ./scripts/verification/verify-kani.sh --quick --tier 2 --part ${{ matrix.part }} --parts 6 --fail-fast --jobs 2
-        timeout-minutes: 10
+        uses: nick-fields/retry@v4
+        with:
+          timeout_minutes: 10
+          max_attempts: 2
+          retry_wait_seconds: 30
+          retry_on_exit_code: 143
+          command: ./scripts/verification/verify-kani.sh --quick --tier 2 --part ${{ matrix.part }} --parts 6 --fail-fast
 
   # Kani Formal Verification (Tier 3 - Slow proofs, split into 5 parallel jobs)
   kani-tier3:
     name: Kani Tier 3 (${{ matrix.part }}/5)
     runs-on: ubuntu-latest
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -245,7 +277,7 @@ jobs:
             ~/.cargo/bin/cargo-kani
             ~/.cargo/bin/kani-*
             ~/.kani
-          key: kani-0.66.0-${{ runner.os }}
+          key: kani-${{ env.KANI_VERSION }}-${{ runner.os }}
 
       - name: Install Kani with retry
         uses: nick-fields/retry@v4
@@ -255,7 +287,7 @@ jobs:
           retry_wait_seconds: 60
           command: |
             if ! command -v cargo-kani &> /dev/null; then
-              cargo install --locked kani-verifier
+              cargo install --locked kani-verifier --version "${KANI_VERSION}"
               cargo kani setup
             fi
 
@@ -267,9 +299,16 @@ jobs:
           echo "Rustc: $(rustc --version)"
           echo "Kani: $(cargo kani --version)"
 
+      # See Tier 1/2: --jobs omitted (per-harness invocation); retry only on
+      # 143 (SIGTERM/preempt); 1 and 124 fail immediately.
       - name: Run Kani verification (Tier 3 - Part ${{ matrix.part }}/5)
-        run: ./scripts/verification/verify-kani.sh --quick --tier 3 --part ${{ matrix.part }} --parts 5 --fail-fast --jobs 2
-        timeout-minutes: 20
+        uses: nick-fields/retry@v4
+        with:
+          timeout_minutes: 20
+          max_attempts: 2
+          retry_wait_seconds: 30
+          retry_on_exit_code: 143
+          command: ./scripts/verification/verify-kani.sh --quick --tier 3 --part ${{ matrix.part }} --parts 5 --fail-fast
 
   # Loom Concurrency Testing (cross-platform)
   loom-tests:
