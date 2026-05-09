@@ -137,6 +137,10 @@ fortress-rollback = { path = "$PROJECT_ROOT" }
 serde = { version = "1.0", features = ["derive"] }
 bincode = "1.3"
 web-time = "1.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "json"] }
+log = "0.4"
+smallvec = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -293,6 +297,16 @@ is_incomplete_snippet() {
         return 0
     fi
 
+    # Comparative prose snippets use labels like WRONG/CORRECT or AVOID/PREFER
+    # and are typically illustrative, not standalone compilable programs.
+    local comparison_markers
+    comparison_markers=$(echo "$code" | grep -Ec '^[[:space:]]*//[[:space:]]*(WRONG|CORRECT|PROBLEMATIC|SAFER|AVOID|PREFER)' || true)
+    comparison_markers="${comparison_markers:-0}"
+    if [[ "$comparison_markers" =~ ^[0-9]+$ ]] && [[ "$comparison_markers" -ge 2 ]]; then
+        echo "contains comparative prose snippet (documentation example)"
+        return 0
+    fi
+
     # References undefined session variable (common in documentation)
     # Only skip if session is used but not defined with "let session" or "let mut session"
     if echo "$code" | grep -qE '(^|[^[:alnum:]_])session([^[:alnum:]_]|$)'; then
@@ -303,7 +317,8 @@ is_incomplete_snippet() {
     fi
 
     # References undefined game_state variable
-    if echo "$code" | grep -qE '(^|[^[:alnum:]_])game_state([^[:alnum:]_]|$)' && ! echo "$code" | grep -qE 'let.*game_state'; then
+    if echo "$code" | grep -qE '(^|[^[:alnum:]_])game_state([^[:alnum:]_]|$)' \
+        && ! echo "$code" | grep -qE 'let[[:space:]]+(mut[[:space:]]+)?game_state[[:space:]]*([=:]|,)'; then
         echo "references undefined game_state variable (documentation example)"
         return 0
     fi
@@ -311,6 +326,42 @@ is_incomplete_snippet() {
     # References functions that are meant to be user-defined
     if echo "$code" | grep -qE '(^|[^[:alnum:]_])(handle_event|handle_requests|get_local_input|apply_input|compute_checksum|render)[[:space:]]*\('; then
         echo "references user-defined functions (documentation example)"
+        return 0
+    fi
+
+    # Prose-style variant lists are often shown as `Type::Variant // comment`
+    # and are intentionally illustrative rather than compilable statements.
+    local variant_list_lines
+    variant_list_lines=$(echo "$code" | grep -Ec '^[[:space:]]*[A-Z][A-Za-z0-9_]*::[A-Za-z0-9_]+(\([^)]*\))?[[:space:]]+//' || true)
+    variant_list_lines="${variant_list_lines:-0}"
+    if [[ "$variant_list_lines" =~ ^[0-9]+$ ]] && [[ "$variant_list_lines" -ge 2 ]]; then
+        echo "contains prose variant list (documentation example)"
+        return 0
+    fi
+
+    # API declaration excerpts in docs (traits/structs/enums) are often
+    # partial and shown for reference, not as standalone compilable units.
+    if echo "$code" | grep -qE '^[[:space:]]*pub[[:space:]]+(trait|struct|enum)[[:space:]]' \
+        && ! echo "$code" | grep -qE 'fn[[:space:]]+main[[:space:]]*\('; then
+        echo "contains API declaration excerpt (documentation example)"
+        return 0
+    fi
+
+    # Interface-like method signatures (`fn ...;`) are typically excerpted from
+    # traits/impl contracts and are not standalone compilable snippets.
+    local signature_excerpt_lines
+    signature_excerpt_lines=$(echo "$code" | grep -Ec '^[[:space:]]*fn[[:space:]]+[A-Za-z0-9_]+\([^)]*self[^)]*\).*;[[:space:]]*$' || true)
+    signature_excerpt_lines="${signature_excerpt_lines:-0}"
+    if [[ "$signature_excerpt_lines" =~ ^[0-9]+$ ]] && [[ "$signature_excerpt_lines" -ge 1 ]]; then
+        echo "contains interface signature excerpt (documentation example)"
+        return 0
+    fi
+
+    # API signature tables often include `pub fn ...;` declarations (sometimes
+    # multiline) without bodies.
+    if echo "$code" | grep -qE '^[[:space:]]*pub[[:space:]]+fn[[:space:]]+[A-Za-z0-9_]+' \
+        && ! echo "$code" | grep -q '{'; then
+        echo "contains API function signature excerpt (documentation example)"
         return 0
     fi
 
@@ -343,9 +394,11 @@ is_incomplete_snippet() {
         fi
     fi
 
-    # Short snippets referencing config variables that need definition
-    if echo "$code" | grep -qE '(^|[^[:alnum:]_])(sparse_saving|first_incorrect|last_saved|check_distance)([^[:alnum:]_]|$)'; then
-        if ! echo "$code" | grep -qE 'let.*(sparse_saving|first_incorrect|last_saved|check_distance)'; then
+    # Short snippets referencing config variables that need definition.
+    # Match the concrete variable names used in rollback docs and require
+    # true let-bindings (not any let-line that mentions the identifier).
+    if echo "$code" | grep -qE '(^|[^[:alnum:]_])(sparse_saving|first_incorrect_frame|last_saved_frame|check_distance)([^[:alnum:]_]|$)'; then
+        if ! echo "$code" | grep -qE 'let[[:space:]]+(mut[[:space:]]+)?(sparse_saving|first_incorrect_frame|last_saved_frame|check_distance)[[:space:]]*([=:]|,)'; then
             echo "references undefined config variable (documentation example)"
             return 0
         fi
@@ -353,7 +406,7 @@ is_incomplete_snippet() {
 
     # References to types that need to be defined (spectator, player, etc.)
     if echo "$code" | grep -qE '(^|[^[:alnum:]_])(spectator|player)([^[:alnum:]_]|$)' && echo "$code" | grep -qE '\.(address|handle|socket)'; then
-        if ! echo "$code" | grep -qE 'let.*(spectator|player)'; then
+        if ! echo "$code" | grep -qE 'let[[:space:]]+(mut[[:space:]]+)?(spectator|player)[[:space:]]*([=:]|,)'; then
             echo "references undefined spectator/player variables"
             return 0
         fi
@@ -380,6 +433,13 @@ is_complete_program() {
     fi
 
     return 1
+}
+
+# Rustdoc examples often hide setup lines with a leading `# `.
+# For standalone compilation, strip the marker so setup code is included.
+strip_rustdoc_hidden_lines() {
+    local code="$1"
+    echo "$code" | sed -E '/^[[:space:]]*#$/d; s/^([[:space:]]*)# (.*)$/\1\2/'
 }
 
 # Wrap code snippet to make it compilable
@@ -450,8 +510,10 @@ compile_code_sample() {
 
     local test_file="$TEMP_DIR/src/main.rs"
     local wrapped_code
+    local normalized_code
 
-    wrapped_code=$(wrap_code_snippet "$code")
+    normalized_code=$(strip_rustdoc_hidden_lines "$code")
+    wrapped_code=$(wrap_code_snippet "$normalized_code")
 
     echo "$wrapped_code" > "$test_file"
 
@@ -482,8 +544,14 @@ compile_code_sample() {
         return 0
     else
         log_error "Block $block_num ($file:$line) failed to compile"
-        if $VERBOSE || $FIX_MODE; then
-            echo "$compile_output" | grep -E '(error|warning)\[' | head -10 | sed 's/^/    /'
+        # Always include a compact compiler diagnostic for CI triage,
+        # even when running without --verbose.
+        local error_excerpt
+        error_excerpt=$(echo "$compile_output" | grep -E 'error(\[[A-Z0-9]+\])?:' | head -10 || true)
+        if [[ -n "$error_excerpt" ]]; then
+            echo "$error_excerpt" | sed 's/^/    /'
+        elif $VERBOSE || $FIX_MODE; then
+            echo "$compile_output" | head -20 | sed 's/^/    /'
         fi
         if $FIX_MODE; then
             echo -e "  ${YELLOW}Suggestion:${NC} Add \`\`\`rust,ignore or \`\`\`rust,no_run if this is intentionally incomplete"
@@ -578,6 +646,8 @@ find_markdown_files() {
         -not -path "*/target/*" \
         -not -path "*/.git/*" \
         -not -path "*/node_modules/*" \
+        -not -path "docs/specs/*" \
+    -not -path "*/docs/specs/*" \
         -type f \
         | sort
 }

@@ -7,6 +7,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 scripts_dir = Path(__file__).parent.parent
 spec = importlib.util.spec_from_file_location(
     "agent_preflight",
@@ -25,6 +27,31 @@ plan_checks = agent_preflight.plan_checks
 
 def _ids(checks: list[PlannedCheck]) -> list[str]:
     return [check.check_id for check in checks]
+
+
+CHECK_TRIGGER_CASES: list[tuple[str, str]] = [
+    ("sync-version-check", "README.md"),
+    ("llm-line-limit", ".llm/context.md"),
+    ("llm-skills-quality", ".llm/context.md"),
+    ("skills-index-check", ".llm/skills/workflows/dev-pipeline.md"),
+    ("actionlint", ".github/workflows/ci.yml"),
+    ("changelog-unreleased-rule", "CHANGELOG.md"),
+    ("vale-advisory", "docs/index.md"),
+    ("kani-violation-cost", "src/lib.rs"),
+]
+
+
+@pytest.mark.parametrize(("expected_check_id", "changed_file"), CHECK_TRIGGER_CASES)
+def test_plan_checks_trigger_matrix_includes_expected_check(
+    expected_check_id: str,
+    changed_file: str,
+) -> None:
+    checks = plan_checks({changed_file})
+    check_ids = _ids(checks)
+    assert expected_check_id in check_ids, (
+        f"Expected {expected_check_id!r} for changed file {changed_file!r}; "
+        f"planned checks were: {check_ids!r}"
+    )
 
 
 def test_plan_checks_runs_sync_version_for_version_surface_files() -> None:
@@ -104,16 +131,21 @@ def test_plan_checks_returns_empty_for_non_matching_changes() -> None:
 
 
 def test_plan_checks_run_all_forces_all_checks() -> None:
-    checks = plan_checks(set(), run_all=True)
-    assert _ids(checks) == [
-        "sync-version-check",
-        "llm-line-limit",
-        "llm-skills-quality",
-        "skills-index-check",
-        "actionlint",
-        "changelog-unreleased-rule",
-        "vale-advisory",
-    ]
+    run_all_ids = _ids(plan_checks(set(), run_all=True))
+    trigger_files = {changed_file for _, changed_file in CHECK_TRIGGER_CASES}
+    matrix_ids = _ids(plan_checks(trigger_files))
+
+    missing_from_run_all = sorted(set(matrix_ids) - set(run_all_ids))
+    extra_in_run_all = sorted(set(run_all_ids) - set(matrix_ids))
+    assert run_all_ids == matrix_ids, (
+        "run_all check selection drifted from matrix-driven expectations. "
+        f"missing={missing_from_run_all}, extra={extra_in_run_all}, "
+        f"run_all={run_all_ids}, matrix={matrix_ids}"
+    )
+    assert len(run_all_ids) == len(set(run_all_ids)), (
+        "run_all produced duplicate check IDs: "
+        f"{run_all_ids}"
+    )
 
 
 def test_plan_checks_runs_changelog_rule_when_changelog_changed() -> None:

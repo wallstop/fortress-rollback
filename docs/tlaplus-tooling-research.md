@@ -430,12 +430,12 @@ clean:
 
 ### Tool Downloads
 
-| Resource        | URL                                                                                                              |
-| --------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Stable Releases | [github.com/tlaplus/tlaplus/releases](https://github.com/tlaplus/tlaplus/releases)                               |
-| Nightly Tools   | [nightly.tlapl.us/dist/](https://nightly.tlapl.us/dist/)                                                         |
-| Nightly Toolbox | [nightly.tlapl.us/products/](https://nightly.tlapl.us/products/)                                                 |
-| Maven Artifacts | [oss.sonatype.org/.../tla2tools](https://oss.sonatype.org/content/repositories/snapshots/org/lamport/tla2tools/) |
+| Resource        | URL                                                                                   |
+| --------------- | ------------------------------------------------------------------------------------- |
+| Stable Releases | [github.com/tlaplus/tlaplus/releases](https://github.com/tlaplus/tlaplus/releases)    |
+| Nightly Tools   | [nightly.tlapl.us/dist/](https://nightly.tlapl.us/dist/)                              |
+| Nightly Toolbox | [nightly.tlapl.us/products/](https://nightly.tlapl.us/products/)                      |
+| Maven Artifacts | [repo1.maven.org/.../tlatools](https://repo1.maven.org/maven2/de/hhu/stups/tlatools/) |
 
 ---
 

@@ -2009,7 +2009,8 @@ pub trait Config: 'static + Send + Sync {
     type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Send + Sync + Debug;
 }
 
-/// This [`NonBlockingSocket`] trait is used when you want to use Fortress Rollback with your own socket.
+/// Custom socket trait for Fortress Rollback.
+///
 /// However you wish to send and receive messages, it should be implemented through these two methods.
 /// Messages should be sent in an UDP-like fashion, unordered and unreliable.
 /// Fortress Rollback has an internal protocol on top of this to make sure all important information is sent and received.

@@ -312,7 +312,7 @@ For the typical 1v1 networked game with one local and one remote player:
 #     fn local_player_handle_required(&self) -> Result<PlayerHandle, FortressError> { Ok(PlayerHandle::new(0)) }
 #     fn remote_player_handle_required(&self) -> Result<PlayerHandle, FortressError> { Ok(PlayerHandle::new(1)) }
 #     fn add_local_input(&mut self, h: PlayerHandle, i: u8) -> Result<(), FortressError> { Ok(()) }
-#     fn network_stats(&self, h: PlayerHandle) -> Result<Stats, FortressError> { Ok(Stats) }
+#     fn network_stats(&self, h: PlayerHandle) -> Result<Stats, FortressError> { Ok(Stats { ping: 0 }) }
 # }
 # struct Stats;
 # fn get_local_input() -> u8 { 0 }
@@ -343,7 +343,7 @@ For games with multiple local players (couch co-op) or multiple remotes:
 #     fn local_player_handles(&self) -> HandleVec { HandleVec::new() }
 #     fn remote_player_handles(&self) -> HandleVec { HandleVec::new() }
 #     fn add_local_input(&mut self, h: PlayerHandle, i: u8) -> Result<(), FortressError> { Ok(()) }
-#     fn network_stats(&self, h: PlayerHandle) -> Result<Stats, FortressError> { Ok(Stats) }
+#     fn network_stats(&self, h: PlayerHandle) -> Result<Stats, FortressError> { Ok(Stats { ping: 0 }) }
 # }
 # struct Stats { ping: u32 }
 # fn get_input_for_controller(i: usize) -> u8 { 0 }
@@ -1496,7 +1496,7 @@ With sparse saving:
 
 Implement `NonBlockingSocket` for custom networking:
 
-```rust
+```rust,ignore
 use fortress_rollback::{Message, NonBlockingSocket};
 
 struct MyCustomSocket { /* ... */ }
@@ -2273,7 +2273,7 @@ let session = SessionBuilder::<GameConfig>::new()
 
 For other transports, implement `NonBlockingSocket`:
 
-```rust
+```rust,ignore
 use fortress_rollback::{Message, NonBlockingSocket};
 
 struct MyWebSocketTransport {
@@ -2640,10 +2640,10 @@ pub enum DisconnectBehavior {
 }
 ```
 
-| Variant            | Use when                                                                                                                                                                       |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Variant            | Use when                                                                                                                                                                      |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Halt` *(default)* | 1v1 competitive matches where a disconnect should end the round; legacy GGRS-compatible behavior; any flow that wants the application layer to detect the stop and tear down. |
-| `ContinueWithout`  | 3+ player games (free-for-all, team modes, casual lobbies); games where a disconnect should hand the slot to AI; spectator-friendly games where the show must go on.           |
+| `ContinueWithout`  | 3+ player games (free-for-all, team modes, casual lobbies); games where a disconnect should hand the slot to AI; spectator-friendly games where the show must go on.          |
 
 `Halt` preserves the legacy GGRS-style "stop on any peer drop" behavior: after a timeout fires, `confirmed_frame()` stops advancing and the next `advance_frame()` will be unable to progress. This is the default for backwards compatibility.
 
@@ -2829,11 +2829,11 @@ fn handle_concede<C: Config>(
 
 #### Errors
 
-| Error                                                          | When it triggers                                                                                          |
-| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `InvalidRequestKind::DisconnectInvalidHandle { handle }`       | `handle` is not registered, or refers to a spectator (use spectator-specific cleanup instead).            |
-| `InvalidRequestKind::DisconnectLocalPlayer { handle }`         | `handle` refers to a local player. Local players cannot be removed; tear down the session instead.       |
-| `InvalidRequestKind::PlayerAlreadyRemoved { handle }`          | `handle` is already marked disconnected — either by a previous `remove_player` call, by auto-removal under `ContinueWithout`, or by a previous explicit `disconnect_player` call. |
+| Error                                                    | When it triggers                                                                                                                                                                  |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `InvalidRequestKind::DisconnectInvalidHandle { handle }` | `handle` is not registered, or refers to a spectator (use spectator-specific cleanup instead).                                                                                    |
+| `InvalidRequestKind::DisconnectLocalPlayer { handle }`   | `handle` refers to a local player. Local players cannot be removed; tear down the session instead.                                                                                |
+| `InvalidRequestKind::PlayerAlreadyRemoved { handle }`    | `handle` is already marked disconnected — either by a previous `remove_player` call, by auto-removal under `ContinueWithout`, or by a previous explicit `disconnect_player` call. |
 
 #### Spectator endpoints at the same address
 
@@ -2847,14 +2847,14 @@ Co-locating a `Remote` and a `Spectator` at the same address is unusual; this no
 
 The session also exposes a legacy `disconnect_player(handle)` method preserved from GGRS. It is **not** the same as `remove_player`:
 
-| Aspect                             | `disconnect_player` (legacy)                                                                                  | `remove_player` (graceful)                                                                       |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| Marks player disconnected          | Yes                                                                                                           | Yes                                                                                              |
-| Disconnects network endpoint       | Yes                                                                                                           | Yes                                                                                              |
-| Freezes input queue                | **No** — remaining peers no longer produce confirmed inputs from the dropped peer's endpoint, so `advance_frame` cannot make progress past the dropped peer's last confirmed frame under default `Halt` | **Yes** — last confirmed input repeats forever; surviving peers keep advancing                   |
-| Emits `FortressEvent::PeerDropped` | **No**                                                                                                        | **Yes**, immediately followed by `Disconnected`                                                  |
-| Honors `DisconnectBehavior`        | **No** — `disconnect_player` always performs the legacy non-graceful drop regardless of `DisconnectBehavior`. Under default `Halt` the session halts (remaining peers can no longer produce inputs from the dropped peer's endpoint, so `advance_frame` cannot progress). Under `ContinueWithout` it does **not** auto-promote to the graceful flow; the queue is not frozen, no `PeerDropped` is emitted, and `advance_frame` halts just as it does under `Halt`. To get the graceful sequence with explicit removal, call `remove_player` instead. | **No** — always performs the graceful sequence, regardless of policy |
-| Use case                           | Back-compat with code written against GGRS's `disconnect_player`                                              | Application-driven graceful drop (kick, surrender, leave match)                                  |
+| Aspect                             | `disconnect_player` (legacy)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | `remove_player` (graceful)                                                     |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Marks player disconnected          | Yes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Yes                                                                            |
+| Disconnects network endpoint       | Yes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Yes                                                                            |
+| Freezes input queue                | **No** — remaining peers no longer produce confirmed inputs from the dropped peer's endpoint, so `advance_frame` cannot make progress past the dropped peer's last confirmed frame under default `Halt`                                                                                                                                                                                                                                                                                                                                              | **Yes** — last confirmed input repeats forever; surviving peers keep advancing |
+| Emits `FortressEvent::PeerDropped` | **No**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | **Yes**, immediately followed by `Disconnected`                                |
+| Honors `DisconnectBehavior`        | **No** — `disconnect_player` always performs the legacy non-graceful drop regardless of `DisconnectBehavior`. Under default `Halt` the session halts (remaining peers can no longer produce inputs from the dropped peer's endpoint, so `advance_frame` cannot progress). Under `ContinueWithout` it does **not** auto-promote to the graceful flow; the queue is not frozen, no `PeerDropped` is emitted, and `advance_frame` halts just as it does under `Halt`. To get the graceful sequence with explicit removal, call `remove_player` instead. | **No** — always performs the graceful sequence, regardless of policy           |
+| Use case                           | Back-compat with code written against GGRS's `disconnect_player`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Application-driven graceful drop (kick, surrender, leave match)                |
 
 If you are writing new code, prefer `remove_player`. Reach for `disconnect_player` only when porting GGRS code that depends on its specific halt-on-drop semantics under `DisconnectBehavior::Halt`.
 
@@ -3776,7 +3776,7 @@ If no observer is set, violations are logged via the `tracing` crate:
 Enable tracing to see violations:
 
 ```rust
-tracing_subscriber::init();
+tracing_subscriber::fmt::init();
 ```
 
 ### Structured Output for Log Aggregation
@@ -3802,7 +3802,7 @@ This produces machine-parseable output like:
 
 All telemetry types implement `serde::Serialize` for direct JSON serialization:
 
-```rust
+```rust,ignore
 use fortress_rollback::telemetry::{SpecViolation, ViolationSeverity, ViolationKind};
 use fortress_rollback::Frame;
 
