@@ -16,6 +16,7 @@ REQUIRED_CHECKS_SETTLE_POLL_INTERVAL_SECONDS="${REQUIRED_CHECKS_SETTLE_POLL_INTE
 REQUIRED_STABLE_POLLS_REQUIRED="${REQUIRED_STABLE_POLLS_REQUIRED:-2}"
 NO_REQUIRED_CHECKS_REPORTED_MSG="no required checks reported"
 NO_REQUIRED_CHECKS_SENTINEL="-1"
+SOFT_FAIL_PROTECTED_BRANCH_RULES_EXIT_CODE=20
 
 if ! [[ "$REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS must be a non-negative integer." >&2
@@ -97,13 +98,16 @@ attempt_automerge() {
     # Protect against races: only enable auto-merge if the PR head still matches the triggering SHA.
     local args=(pr merge --auto --squash --match-head-commit "$PR_HEAD_SHA")
     local output
+    local output_lowercase
     args+=("$PR_URL")
     if output="$(gh "${args[@]}" 2>&1)"; then
         return 0
     fi
     echo "Auto-merge attempt failed for squash strategy: $output" >&2
-    if [[ "$output" == *"enablePullRequestAutoMerge"* ]] && [[ "$output" == *"required protected branch rules"* ]]; then
+    output_lowercase="${output,,}"
+    if [[ "$output_lowercase" == *"enablepullrequestautomerge"* ]] && [[ "$output_lowercase" == *"required protected branch rules"* ]]; then
         echo "GitHub auto-merge requires protected branch rules on the PR base branch (for example, require pull requests before merging)." >&2
+        return "$SOFT_FAIL_PROTECTED_BRANCH_RULES_EXIT_CODE"
     fi
     return 1
 }
@@ -711,9 +715,12 @@ if is_stale_event; then
     exit 0
 fi
 
+merge_status=0
 if attempt_automerge; then
     echo "Auto-merge enabled with squash strategy."
     exit 0
+else
+    merge_status=$?
 fi
 
 if is_auto_merge_enabled; then
@@ -724,6 +731,11 @@ fi
 if is_stale_event; then
     echo "PR head moved after squash attempt failure; skipping stale retry."
     exit 0
+fi
+
+if [[ "$merge_status" -eq "$SOFT_FAIL_PROTECTED_BRANCH_RULES_EXIT_CODE" ]]; then
+    echo "Soft-fail: protected branch auto-merge precondition missing; leaving PR open for manual merge policy."
+    exit "$SOFT_FAIL_PROTECTED_BRANCH_RULES_EXIT_CODE"
 fi
 
 echo "Failed to enable Dependabot auto-merge with squash strategy."
