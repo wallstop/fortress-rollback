@@ -16,6 +16,31 @@ resolve_cargo_home() {
   return 1
 }
 
+cargo_home_is_safe() {
+  local cargo_home="${1:-}"
+  cargo_home="${cargo_home//\\//}"
+
+  if [ -z "$cargo_home" ]; then
+    return 1
+  fi
+
+  case "$cargo_home" in
+    /*|[A-Za-z]:/*)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  case "$cargo_home" in
+    "/"|[A-Za-z]:/)
+      return 1
+      ;;
+  esac
+
+  return 0
+}
+
 cargo_tool_cache_glob() {
   local tool_name="$1"
   local cargo_home_value="${2:-}"
@@ -26,7 +51,9 @@ cargo_tool_cache_glob() {
   fi
 
   if [ -z "$cargo_home_value" ]; then
-    cargo_home_value="$(resolve_cargo_home)"
+    if ! cargo_home_value="$(resolve_cargo_home)"; then
+      return 1
+    fi
   fi
 
   cargo_home_value="${cargo_home_value//\\//}"

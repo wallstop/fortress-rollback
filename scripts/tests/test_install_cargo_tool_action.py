@@ -36,16 +36,18 @@ def _run_helper(
     command: str,
     install_list: str,
     env_overrides: dict[str, str] | None = None,
+    helper_path: Path = VERSION_HELPER,
 ) -> subprocess.CompletedProcess[str]:
     bin_dir = _write_cargo_stub(tmp_path, install_list)
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["VERSION_HELPER_PATH"] = str(helper_path)
     if env_overrides:
         env.update(env_overrides)
     return subprocess.run(
-        ["bash", "-c", f"source {VERSION_HELPER}; {command}"],
+        ["bash", "-c", 'source "$VERSION_HELPER_PATH"; eval "$TEST_COMMAND"'],
         cwd=REPO_ROOT,
-        env=env,
+        env={**env, "TEST_COMMAND": command},
         capture_output=True,
         text=True,
         check=False,
@@ -190,6 +192,75 @@ def test_resolve_cargo_home_requires_environment(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "neither CARGO_HOME nor HOME is set" in result.stderr
+
+
+def test_run_helper_supports_shell_metacharacters_in_helper_path(tmp_path: Path) -> None:
+    """Helper sourcing should work when the helper path contains shell metacharacters."""
+    helper_dir = tmp_path / "helper path's"
+    helper_dir.mkdir()
+    helper_copy = helper_dir / "version-check.sh"
+    helper_copy.write_text(VERSION_HELPER.read_text(encoding="utf-8"), encoding="utf-8")
+    helper_copy.chmod(0o755)
+
+    result = _run_helper(
+        tmp_path,
+        "resolve_cargo_home",
+        "",
+        {"CARGO_HOME": "", "HOME": "/tmp/home"},
+        helper_path=helper_copy,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "/tmp/home/.cargo"
+
+
+@pytest.mark.parametrize(
+    ("cargo_home", "expected_returncode"),
+    [
+        ("/tmp/.cargo", 0),
+        ("//server/share/.cargo", 0),
+        ("/c/Users/runneradmin/.cargo", 0),
+        ("C:/Users/runneradmin/.cargo", 0),
+        ("C:\\Users\\runneradmin\\.cargo", 0),
+        ("", 1),
+        ("/", 1),
+        ("C:/", 1),
+        ("C:\\", 1),
+        (".", 1),
+        ("..", 1),
+        ("cargo", 1),
+        ("./cargo", 1),
+        ("../cargo", 1),
+        ("~/.cargo", 1),
+        ("C:relative", 1),
+    ],
+    ids=[
+        "accept_unix_absolute",
+        "accept_unc_absolute",
+        "accept_msys_absolute",
+        "accept_windows_absolute",
+        "accept_windows_backslashes",
+        "reject_empty",
+        "reject_unix_root",
+        "reject_windows_root",
+        "reject_windows_root_backslashes",
+        "reject_relative_current",
+        "reject_relative_parent",
+        "reject_relative_bare",
+        "reject_relative_dot_prefix",
+        "reject_relative_parent_prefix",
+        "reject_tilde",
+        "reject_windows_drive_relative",
+    ],
+)
+def test_cargo_home_is_safe_matrix(
+    tmp_path: Path,
+    cargo_home: str,
+    expected_returncode: int,
+) -> None:
+    """Cargo home safety checks must reject unsafe paths before destructive actions."""
+    command = f"cargo_home_is_safe {_bash_single_quote(cargo_home)}"
+    result = _run_helper(tmp_path, command, "")
+    assert result.returncode == expected_returncode
 
 
 @pytest.mark.parametrize(

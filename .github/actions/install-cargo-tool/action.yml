@@ -68,8 +68,18 @@ runs:
           exit 1
         fi
 
-        CARGO_HOME_RESOLVED="$(resolve_cargo_home)"
-        TOOL_GLOB="$(cargo_tool_cache_glob "$TOOL_NAME" "$CARGO_HOME_RESOLVED")"
+        if ! CARGO_HOME_RESOLVED="$(resolve_cargo_home)"; then
+          echo "❌ ERROR: failed to resolve cargo home"
+          exit 1
+        fi
+        if ! cargo_home_is_safe "$CARGO_HOME_RESOLVED"; then
+          echo "❌ ERROR: resolved cargo home must be an absolute, non-root path (got '$CARGO_HOME_RESOLVED')"
+          exit 1
+        fi
+        if ! TOOL_GLOB="$(cargo_tool_cache_glob "$TOOL_NAME" "$CARGO_HOME_RESOLVED")"; then
+          echo "❌ ERROR: failed to build cargo tool cache glob for '$TOOL_NAME'"
+          exit 1
+        fi
         BIN_DIR="${CARGO_HOME_RESOLVED%/}/bin"
 
         echo "cargo_home=$CARGO_HOME_RESOLVED" >> "$GITHUB_OUTPUT"
@@ -151,7 +161,7 @@ runs:
             echo "installed=false" >> "$GITHUB_OUTPUT"
             echo "⚠️ Cached $TOOL_NAME version does not match requested version $REQUIRED_VERSION"
             printf '%s\n' "$VERSION_OUTPUT"
-            if [ -z "$CARGO_HOME_RESOLVED" ] || [ "$CARGO_HOME_RESOLVED" = "/" ]; then
+            if ! cargo_home_is_safe "$CARGO_HOME_RESOLVED"; then
               echo "❌ ERROR: refusing to clean cache with unsafe cargo home path '$CARGO_HOME_RESOLVED'"
               exit 1
             fi
