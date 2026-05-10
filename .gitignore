@@ -70,3 +70,5 @@ pre-push.log
 pr-description.md
 text_tt*
 proposed_fix
+ci-log*.txt
+ci-log*.log
