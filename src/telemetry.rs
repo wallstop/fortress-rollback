@@ -727,6 +727,23 @@ impl std::fmt::Debug for CompositeObserver {
     }
 }
 
+/// Implementation detail for Kani-friendly telemetry macros.
+#[cfg(kani)]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fortress_borrow_format_args {
+    () => {};
+    (,) => {};
+    ($name:ident = $value:expr $(, $($rest:tt)*)?) => {{
+        let _ = &$value;
+        $crate::__fortress_borrow_format_args!($($($rest)*)?);
+    }};
+    ($value:expr $(, $($rest:tt)*)?) => {{
+        let _ = &$value;
+        $crate::__fortress_borrow_format_args!($($($rest)*)?);
+    }};
+}
+
 /// Macro for reporting specification violations with location tracking.
 ///
 /// This macro creates a [`SpecViolation`] with the current file and line,
@@ -790,29 +807,25 @@ macro_rules! report_violation {
     }};
 
     // With format args: severity, kind, format, args...
-    //
-    // The matcher uses `expr` (not `tt`) so each argument is a single
-    // expression we can borrow individually under cfg(kani). All existing
-    // callsites pass simple comma-separated expressions; this is compatible.
-    ($severity:expr, $kind:expr, $fmt:literal, $($arg:expr),+ $(,)?) => {{
+    ($severity:expr, $kind:expr, $fmt:literal, $($arg:tt)+) => {{
         #[cfg(not(kani))]
         {
             use $crate::telemetry::ViolationObserver as _;
             let violation = $crate::telemetry::SpecViolation::new(
                 $severity,
                 $kind,
-                format!($fmt, $($arg),+),
+                format!($fmt, $($arg)+),
                 concat!(file!(), ":", line!()),
             );
             $crate::telemetry::TracingObserver.on_violation(&violation);
         }
-        // Under Kani, borrow each argument so non-Copy values are not moved
-        // and unused-variable lints stay quiet, without building a
-        // `core::fmt::Arguments` value (which CBMC tracks symbolically and
-        // can blow up proof state space).
+        // Under Kani, borrow format arguments so non-Copy values are not moved
+        // and unused-variable lints stay quiet. Accept `tt` here to preserve
+        // the public `format!`-style syntax, including named arguments.
         #[cfg(kani)]
         {
-            let _ = (&$severity, &$kind, $(&$arg,)+);
+            let _ = (&$severity, &$kind);
+            $crate::__fortress_borrow_format_args!($($arg)+);
         }
     }};
 }
@@ -1044,38 +1057,41 @@ pub fn report_to_observer<O: ViolationObserver + ?Sized>(
 macro_rules! report_violation_to {
     // Basic: observer, severity, kind, message (no format args)
     ($observer:expr, $severity:expr, $kind:expr, $msg:literal) => {{
-        let violation = $crate::telemetry::SpecViolation::new(
-            $severity,
-            $kind,
-            $msg,
-            concat!(file!(), ":", line!()),
-        );
-        $crate::telemetry::report_to_observer($observer.as_ref(), &violation);
-    }};
-
-    // With format args: observer, severity, kind, format, args...
-    //
-    // The matcher uses `expr` (not `tt`) so each argument is a single
-    // expression we can borrow individually under cfg(kani). All existing
-    // callsites pass simple comma-separated expressions; this is compatible.
-    ($observer:expr, $severity:expr, $kind:expr, $fmt:literal, $($arg:expr),+ $(,)?) => {{
         #[cfg(not(kani))]
         {
             let violation = $crate::telemetry::SpecViolation::new(
                 $severity,
                 $kind,
-                format!($fmt, $($arg),+),
+                $msg,
                 concat!(file!(), ":", line!()),
             );
             $crate::telemetry::report_to_observer($observer.as_ref(), &violation);
         }
-        // Under Kani, borrow each argument so non-Copy values are not moved
-        // and unused-variable lints stay quiet, without building a
-        // `core::fmt::Arguments` value (which CBMC tracks symbolically and
-        // can blow up proof state space).
         #[cfg(kani)]
         {
-            let _ = (&$observer, &$severity, &$kind, $(&$arg,)+);
+            let _ = (&$observer, &$severity, &$kind);
+        }
+    }};
+
+    // With format args: observer, severity, kind, format, args...
+    ($observer:expr, $severity:expr, $kind:expr, $fmt:literal, $($arg:tt)+) => {{
+        #[cfg(not(kani))]
+        {
+            let violation = $crate::telemetry::SpecViolation::new(
+                $severity,
+                $kind,
+                format!($fmt, $($arg)+),
+                concat!(file!(), ":", line!()),
+            );
+            $crate::telemetry::report_to_observer($observer.as_ref(), &violation);
+        }
+        // Under Kani, borrow format arguments so non-Copy values are not moved
+        // and unused-variable lints stay quiet. Accept `tt` here to preserve
+        // the public `format!`-style syntax, including named arguments.
+        #[cfg(kani)]
+        {
+            let _ = (&$observer, &$severity, &$kind);
+            $crate::__fortress_borrow_format_args!($($arg)+);
         }
     }};
 }
@@ -2253,6 +2269,35 @@ mod tests {
     }
 
     #[test]
+    fn test_report_violation_macro_accepts_named_format_args() {
+        let expected = 10;
+        let actual = 15;
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "mismatch: expected={expected}, actual={actual}",
+            expected = expected,
+            actual = actual,
+        );
+    }
+
+    #[test]
+    fn test_report_violation_macro_accepts_macro_format_args() {
+        macro_rules! sample_frame {
+            () => {
+                42
+            };
+        }
+
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "sample frame: {}",
+            sample_frame!(),
+        );
+    }
+
+    #[test]
     fn test_report_violation_macro_with_observer() {
         let observer = CollectingObserver::new();
         // Use the observer directly instead of the macro
@@ -2365,6 +2410,51 @@ mod tests {
             actual
         );
         // Just ensure it compiles and doesn't panic
+    }
+
+    #[test]
+    fn test_report_violation_to_macro_accepts_named_format_args() {
+        let observer = Arc::new(CollectingObserver::new());
+        let observer_ref: Option<Arc<dyn ViolationObserver>> = Some(observer.clone());
+        let expected = 10;
+        let actual = 15;
+
+        report_violation_to!(
+            &observer_ref,
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "mismatch: expected={expected}, actual={actual}",
+            expected = expected,
+            actual = actual,
+        );
+
+        let violations = observer.violations();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].message, "mismatch: expected=10, actual=15");
+    }
+
+    #[test]
+    fn test_report_violation_to_macro_accepts_macro_format_args() {
+        macro_rules! sample_frame {
+            () => {
+                42
+            };
+        }
+
+        let observer = Arc::new(CollectingObserver::new());
+        let observer_ref: Option<Arc<dyn ViolationObserver>> = Some(observer.clone());
+
+        report_violation_to!(
+            &observer_ref,
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "sample frame: {}",
+            sample_frame!(),
+        );
+
+        let violations = observer.violations();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].message, "sample frame: 42");
     }
 
     #[test]

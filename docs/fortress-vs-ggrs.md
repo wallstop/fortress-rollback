@@ -54,7 +54,7 @@ struct MyAddress { /* ... */ }
 
 ### 3. New Type Aliases
 
-```text
+```rust
 // FortressResult type alias for ergonomic error handling
 pub type FortressResult<T, E = FortressError> = std::result::Result<T, E>;
 

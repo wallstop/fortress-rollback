@@ -339,9 +339,9 @@ is_incomplete_snippet() {
         return 0
     fi
 
-    # API declaration excerpts in docs (traits/structs/enums) are often
+    # API declaration excerpts in docs (traits/structs/enums/type aliases) are often
     # partial and shown for reference, not as standalone compilable units.
-    if echo "$code" | grep -qE '^[[:space:]]*pub[[:space:]]+(trait|struct|enum)[[:space:]]' \
+    if echo "$code" | grep -qE '^[[:space:]]*pub[[:space:]]+(trait|struct|enum|type)[[:space:]]' \
         && ! echo "$code" | grep -qE 'fn[[:space:]]+main[[:space:]]*\('; then
         echo "contains API declaration excerpt (documentation example)"
         return 0

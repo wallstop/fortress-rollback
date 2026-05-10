@@ -63,6 +63,14 @@ NO_RUN_RUST_BLOCK = textwrap.dedent(
     """
 ).strip()
 
+TYPE_ALIAS_EXCERPT_BLOCK = textwrap.dedent(
+    """
+    ```rust
+    pub type ExampleResult<T, E = ExampleError> = std::result::Result<T, E>;
+    ```
+    """
+).strip()
+
 
 def _write_md(path: Path, body: str) -> Path:
     path.write_text(body + "\n", encoding="utf-8")
@@ -102,6 +110,10 @@ def _build_tree(tmp_path: Path) -> dict[str, Path]:
         tree_root / "no_run.md",
         f"# No run\n\nMarked no_run so the bad code is auto-skipped:\n\n{NO_RUN_RUST_BLOCK}\n",
     )
+    type_alias_excerpt = _write_md(
+        tree_root / "type_alias_excerpt.md",
+        f"# Type alias excerpt\n\n{TYPE_ALIAS_EXCERPT_BLOCK}\n",
+    )
 
     only_good_dir = tmp_path / "only_good"
     only_good_dir.mkdir()
@@ -121,6 +133,7 @@ def _build_tree(tmp_path: Path) -> dict[str, Path]:
         "good": good,
         "bad": bad,
         "no_run": no_run,
+        "type_alias_excerpt": type_alias_excerpt,
         "tree_root": tree_root,
         "only_good": only_good,
         "only_good_dir": only_good_dir,
@@ -155,6 +168,12 @@ CASES: tuple[Case, ...] = (
         name="no_run_block_is_auto_skipped",
         args_builder=lambda paths: [str(paths["no_run"])],
         expected_exit=0,
+    ),
+    Case(
+        name="type_alias_excerpt_is_auto_skipped",
+        args_builder=lambda paths: ["--verbose", str(paths["type_alias_excerpt"])],
+        expected_exit=0,
+        expected_substrings=("contains API declaration excerpt",),
     ),
 )
 

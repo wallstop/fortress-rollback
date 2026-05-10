@@ -129,7 +129,7 @@ src/
 
 **The #2 cause:** Proofs that assert the wrong thing (e.g., wrong enum variant).
 
-**The #3 cause:** `format!()` inside macros (e.g., `report_violation!`) creating explosive CBMC state space. The `report_violation!` macro handles `cfg(kani)` internally (uses `let _ = (args...)` to suppress unused warnings without `format!()`). No additional gating needed when calling it. See [kani.md](skills/formal-verification/kani.md#common-timeout-causes) for details.
+**The #3 cause:** `format!()` inside macros (e.g., `report_violation!`) creating explosive CBMC state space. The `report_violation!` macro handles `cfg(kani)` internally (borrows arguments to suppress unused warnings without `format!()`) while preserving public `format!` token syntax such as named arguments. No additional gating needed when calling it. See [kani.md](skills/formal-verification/kani.md#common-timeout-causes) for details.
 
 ```bash
 cargo kani --harness proof_function_name    # Run specific proof
