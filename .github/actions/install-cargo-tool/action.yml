@@ -8,61 +8,140 @@
 # It uses taiki-e/install-action with retry logic and falls back to
 # cargo install if the binary download consistently fails.
 
-name: 'Install Cargo Tool'
-description: 'Installs a cargo tool with retry logic and fallback to cargo install'
+name: "Install Cargo Tool"
+description: "Installs a cargo tool with retry logic and fallback to cargo install"
 
 inputs:
   tool:
-    description: 'Tool name (e.g., cargo-nextest, cargo-tarpaulin, cargo-hack)'
+    description: "Tool name (e.g., cargo-nextest, cargo-tarpaulin, cargo-hack)"
     required: true
   version:
-    description: 'Tool version (optional, defaults to latest stable)'
+    description: "Tool version (optional, defaults to latest stable)"
     required: false
-    default: ''
+    default: ""
   max-retries:
-    description: 'Maximum number of retry attempts for taiki-e/install-action'
+    description: "Maximum number of retry attempts for taiki-e/install-action"
     required: false
-    default: '3'
+    default: "3"
   retry-delay:
-    description: 'Delay in seconds between retry attempts'
+    description: "Delay in seconds between retry attempts"
     required: false
-    default: '10'
+    default: "10"
   fallback-to-cargo-install:
-    description: 'Whether to fall back to cargo install if binary download fails'
+    description: "Whether to fall back to cargo install if binary download fails"
     required: false
-    default: 'true'
+    default: "true"
 
 outputs:
   install-method:
-    description: 'How the tool was installed (binary, cargo-install, or cache)'
+    description: "How the tool was installed (binary, cargo-install, or cache)"
     value: ${{ steps.final-status.outputs.method }}
 
 runs:
   using: composite
   steps:
+    - name: Resolve cargo cache path
+      id: resolve-cache-path
+      shell: bash
+      run: |
+        set -euo pipefail
+        TOOL_NAME="${{ inputs.tool }}"
+        MAX_RETRIES="${{ inputs.max-retries }}"
+        RETRY_DELAY="${{ inputs.retry-delay }}"
+        if [[ ! "$TOOL_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+          echo "❌ ERROR: invalid tool name '$TOOL_NAME' (allowed: A-Z, a-z, 0-9, ., _, -)"
+          exit 1
+        fi
+        if [[ ! "$MAX_RETRIES" =~ ^[1-3]$ ]]; then
+          echo "❌ ERROR: max-retries must be an integer between 1 and 3 (got '$MAX_RETRIES')"
+          exit 1
+        fi
+        if [[ ! "$RETRY_DELAY" =~ ^[0-9]+$ ]]; then
+          echo "❌ ERROR: retry-delay must be a non-negative integer (got '$RETRY_DELAY')"
+          exit 1
+        fi
+        VERSION_HELPER_PATH="${GITHUB_ACTION_PATH//\\//}/version-check.sh"
+
+        # shellcheck source=.github/actions/install-cargo-tool/version-check.sh
+        if ! source "$VERSION_HELPER_PATH"; then
+          echo "❌ ERROR: failed to source helper script at $VERSION_HELPER_PATH"
+          exit 1
+        fi
+
+        CARGO_HOME_RESOLVED="$(resolve_cargo_home)"
+        TOOL_GLOB="$(cargo_tool_cache_glob "$TOOL_NAME" "$CARGO_HOME_RESOLVED")"
+        BIN_DIR="${CARGO_HOME_RESOLVED%/}/bin"
+
+        echo "cargo_home=$CARGO_HOME_RESOLVED" >> "$GITHUB_OUTPUT"
+        echo "bin_dir=$BIN_DIR" >> "$GITHUB_OUTPUT"
+        echo "tool_glob=$TOOL_GLOB" >> "$GITHUB_OUTPUT"
+
     # Check cache first - significantly faster than downloading
     - name: Cache cargo binaries
       id: cargo-bin-cache
       uses: actions/cache@v5
+      continue-on-error: true
       with:
-        path: |
-          ~/.cargo/bin/${{ inputs.tool }}*
+        path: ${{ steps.resolve-cache-path.outputs.tool_glob }}
         key: cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tool }}-${{ inputs.version || 'latest' }}-v1
         restore-keys: |
           cargo-bin-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tool }}-
+
+    - name: Report cache diagnostics
+      shell: bash
+      run: |
+        set -euo pipefail
+        TOOL_NAME="${{ inputs.tool }}"
+        CARGO_CMD="${TOOL_NAME#cargo-}"
+        CACHE_HIT_VALUE="${{ steps.cargo-bin-cache.outputs.cache-hit }}"
+
+        echo "=== install-cargo-tool diagnostics ==="
+        echo "runner.os=${{ runner.os }}"
+        echo "runner.arch=${{ runner.arch }}"
+        echo "GITHUB_ACTION_PATH(raw)=${GITHUB_ACTION_PATH:-<unset>}"
+        echo "CARGO_HOME(raw)=${CARGO_HOME:-<unset>}"
+        echo "resolved cargo_home=${{ steps.resolve-cache-path.outputs.cargo_home }}"
+        echo "resolved bin_dir=${{ steps.resolve-cache-path.outputs.bin_dir }}"
+        echo "resolved tool_glob=${{ steps.resolve-cache-path.outputs.tool_glob }}"
+        echo "cache outcome=${{ steps.cargo-bin-cache.outcome }}"
+        if [ -n "$CACHE_HIT_VALUE" ]; then
+          echo "cache-hit output=$CACHE_HIT_VALUE"
+        else
+          echo "cache-hit output=<empty>"
+        fi
+
+        if command -v "$TOOL_NAME" &> /dev/null; then
+          echo "tool detected on PATH at: $(command -v "$TOOL_NAME")"
+        elif cargo "$CARGO_CMD" --version &> /dev/null 2>&1; then
+          echo "tool detected as cargo subcommand: cargo $CARGO_CMD"
+        else
+          echo "tool is not yet installed; continuing with install attempts"
+        fi
+
+        VERSION_HELPER_PATH="${GITHUB_ACTION_PATH//\\//}/version-check.sh"
+        if [ ! -f "$VERSION_HELPER_PATH" ]; then
+          echo "❌ ERROR: helper script missing at $VERSION_HELPER_PATH"
+          exit 1
+        fi
 
     - name: Check if tool is already installed
       id: check-installed
       shell: bash
       run: |
+        set -euo pipefail
         TOOL_NAME="${{ inputs.tool }}"
         REQUIRED_VERSION="${{ inputs.version }}"
         # Convert cargo-foo to cargo foo for version check
         CARGO_CMD="${TOOL_NAME#cargo-}"
+        VERSION_HELPER_PATH="${GITHUB_ACTION_PATH//\\//}/version-check.sh"
+        CARGO_HOME_RESOLVED="${{ steps.resolve-cache-path.outputs.cargo_home }}"
         # shellcheck source=.github/actions/install-cargo-tool/version-check.sh
-        source "$GITHUB_ACTION_PATH/version-check.sh"
+        if ! source "$VERSION_HELPER_PATH"; then
+          echo "❌ ERROR: failed to source helper script at $VERSION_HELPER_PATH"
+          exit 1
+        fi
 
-        if command -v "$TOOL_NAME" &> /dev/null || cargo "$CARGO_CMD" --version &> /dev/null 2>&1; then
+        if command -v "$TOOL_NAME" &> /dev/null || cargo "$CARGO_CMD" --version &> /dev/null; then
           VERSION_OUTPUT="$(cargo "$CARGO_CMD" --version 2>/dev/null || "$TOOL_NAME" --version 2>/dev/null || true)"
           if installed_version_matches "$TOOL_NAME" "$VERSION_OUTPUT" "$REQUIRED_VERSION"; then
             echo "installed=true" >> "$GITHUB_OUTPUT"
@@ -72,7 +151,11 @@ runs:
             echo "installed=false" >> "$GITHUB_OUTPUT"
             echo "⚠️ Cached $TOOL_NAME version does not match requested version $REQUIRED_VERSION"
             printf '%s\n' "$VERSION_OUTPUT"
-            rm -f "$HOME/.cargo/bin/$TOOL_NAME" "$HOME/.cargo/bin/$TOOL_NAME.exe"
+            if [ -z "$CARGO_HOME_RESOLVED" ] || [ "$CARGO_HOME_RESOLVED" = "/" ]; then
+              echo "❌ ERROR: refusing to clean cache with unsafe cargo home path '$CARGO_HOME_RESOLVED'"
+              exit 1
+            fi
+            rm -f "$CARGO_HOME_RESOLVED/bin/$TOOL_NAME" "$CARGO_HOME_RESOLVED/bin/$TOOL_NAME.exe"
             echo "📦 $TOOL_NAME needs to be installed"
           fi
         else
@@ -91,7 +174,7 @@ runs:
 
     # Brief delay before retry
     - name: Delay before retry 1
-      if: steps.check-installed.outputs.installed != 'true' && steps.install-attempt-1.outcome == 'failure'
+      if: steps.check-installed.outputs.installed != 'true' && fromJSON(inputs.max-retries) >= 2 && steps.install-attempt-1.outcome == 'failure'
       shell: bash
       run: |
         echo "⏳ First attempt failed, waiting ${{ inputs.retry-delay }}s before retry..."
@@ -100,7 +183,7 @@ runs:
     # Attempt 2
     - name: Install ${{ inputs.tool }} (attempt 2)
       id: install-attempt-2
-      if: steps.check-installed.outputs.installed != 'true' && steps.install-attempt-1.outcome == 'failure'
+      if: steps.check-installed.outputs.installed != 'true' && fromJSON(inputs.max-retries) >= 2 && steps.install-attempt-1.outcome == 'failure'
       uses: taiki-e/install-action@v2
       with:
         tool: ${{ inputs.tool }}${{ inputs.version && format('@{0}', inputs.version) || '' }}
@@ -108,7 +191,7 @@ runs:
 
     # Brief delay before retry
     - name: Delay before retry 2
-      if: steps.check-installed.outputs.installed != 'true' && steps.install-attempt-1.outcome == 'failure' && steps.install-attempt-2.outcome == 'failure'
+      if: steps.check-installed.outputs.installed != 'true' && fromJSON(inputs.max-retries) >= 3 && steps.install-attempt-1.outcome == 'failure' && steps.install-attempt-2.outcome == 'failure'
       shell: bash
       run: |
         echo "⏳ Second attempt failed, waiting ${{ inputs.retry-delay }}s before retry..."
@@ -117,24 +200,45 @@ runs:
     # Attempt 3
     - name: Install ${{ inputs.tool }} (attempt 3)
       id: install-attempt-3
-      if: steps.check-installed.outputs.installed != 'true' && steps.install-attempt-1.outcome == 'failure' && steps.install-attempt-2.outcome == 'failure'
+      if: steps.check-installed.outputs.installed != 'true' && fromJSON(inputs.max-retries) >= 3 && steps.install-attempt-1.outcome == 'failure' && steps.install-attempt-2.outcome == 'failure'
       uses: taiki-e/install-action@v2
       with:
         tool: ${{ inputs.tool }}${{ inputs.version && format('@{0}', inputs.version) || '' }}
       continue-on-error: true
+
+    - name: Determine retry exhaustion
+      id: retry-exhausted
+      if: steps.check-installed.outputs.installed != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        MAX_RETRIES="${{ inputs.max-retries }}"
+        ATTEMPT_1="${{ steps.install-attempt-1.outcome }}"
+        ATTEMPT_2="${{ steps.install-attempt-2.outcome }}"
+        ATTEMPT_3="${{ steps.install-attempt-3.outcome }}"
+
+        ALL_FAILED=false
+        if [ "$MAX_RETRIES" = "1" ] && [ "$ATTEMPT_1" = "failure" ]; then
+          ALL_FAILED=true
+        elif [ "$MAX_RETRIES" = "2" ] && [ "$ATTEMPT_2" = "failure" ]; then
+          ALL_FAILED=true
+        elif [ "$MAX_RETRIES" = "3" ] && [ "$ATTEMPT_3" = "failure" ]; then
+          ALL_FAILED=true
+        fi
+
+        echo "all_failed=$ALL_FAILED" >> "$GITHUB_OUTPUT"
 
     # Fallback: cargo install (slower but more reliable)
     - name: Fallback to cargo install
       id: cargo-install-fallback
       if: |
         steps.check-installed.outputs.installed != 'true' &&
-        steps.install-attempt-1.outcome == 'failure' &&
-        steps.install-attempt-2.outcome == 'failure' &&
-        steps.install-attempt-3.outcome == 'failure' &&
+        steps.retry-exhausted.outputs.all_failed == 'true' &&
         inputs.fallback-to-cargo-install == 'true'
       shell: bash
       run: |
-        echo "⚠️ Binary download failed after 3 attempts, falling back to cargo install..."
+        set -euo pipefail
+        echo "⚠️ Binary download failed after ${{ inputs.max-retries }} attempt(s), falling back to cargo install..."
         TOOL="${{ inputs.tool }}"
         VERSION="${{ inputs.version }}"
 
@@ -151,14 +255,19 @@ runs:
       id: final-status
       shell: bash
       run: |
+        set -euo pipefail
         TOOL_NAME="${{ inputs.tool }}"
         REQUIRED_VERSION="${{ inputs.version }}"
         CARGO_CMD="${TOOL_NAME#cargo-}"
+        VERSION_HELPER_PATH="${GITHUB_ACTION_PATH//\\//}/version-check.sh"
         # shellcheck source=.github/actions/install-cargo-tool/version-check.sh
-        source "$GITHUB_ACTION_PATH/version-check.sh"
+        if ! source "$VERSION_HELPER_PATH"; then
+          echo "❌ ERROR: failed to source helper script at $VERSION_HELPER_PATH"
+          exit 1
+        fi
 
         # Check if tool is now available
-        if command -v "$TOOL_NAME" &> /dev/null || cargo "$CARGO_CMD" --version &> /dev/null 2>&1; then
+        if command -v "$TOOL_NAME" &> /dev/null || cargo "$CARGO_CMD" --version &> /dev/null; then
           # Determine how it was installed
           if [ "${{ steps.check-installed.outputs.installed }}" == "true" ]; then
             echo "method=cache" >> "$GITHUB_OUTPUT"
