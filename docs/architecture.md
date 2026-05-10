@@ -776,7 +776,7 @@ Rollback is triggered when:
 
 ### Rollback Process
 
-```rust,ignore
+```rust
 // Simplified rollback flow in adjust_gamestate()
 
 let frame_to_load = if sparse_saving {

@@ -146,6 +146,10 @@ New proofs must be registered in `scripts/verification/verify-kani.sh`:
 
 Pre-commit validates registration only, NOT that proofs pass. Run affected proofs locally before committing.
 
+## TLA+ Tools Version
+
+The repository-pinned TLA+ tools version lives in `.tla-tools-version`. `scripts/verification/verify-tla.sh`, the devcontainer image/setup hook, and CI cache keys must read that file instead of hardcoding release URLs or duplicate version values.
+
 ## Safety CI Checks
 
 | Check                | Purpose                                      |

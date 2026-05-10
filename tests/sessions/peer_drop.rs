@@ -260,10 +260,8 @@ fn p2p_halt_default_stops_advancing_on_peer_drop() -> Result<(), FortressError> 
     // 1. Calling `disconnect_player` on a session built with the default
     //    `DisconnectBehavior::Halt` does NOT emit `FortressEvent::PeerDropped`
     //    (that is exclusive to the `ContinueWithout` flow).
-    // 2. The dropped peer's input queue is NOT frozen — `is_frozen` is a
-    //    quick way to verify, but since that's an internal flag, we rely on
-    //    the lack of `PeerDropped` plus the absence of any auto-removal side
-    //    effects.
+    // 2. The session stops advancing after the drop instead of substituting
+    //    default input for the disconnected peer.
     //
     // We deliberately exercise this path on a 2-player session, not 3-player.
     // On 3-player Halt sessions, calling `disconnect_player` mid-session
@@ -297,7 +295,27 @@ fn p2p_halt_default_stops_advancing_on_peer_drop() -> Result<(), FortressError> 
     assert_eq!(sess1.disconnect_behavior(), DisconnectBehavior::Halt);
 
     // Disconnect the remote peer.
+    let current_before_disconnect = sess1.current_frame();
+    let confirmed_before_disconnect = sess1.confirmed_frame();
     sess1.disconnect_player(PlayerHandle::new(1)).unwrap();
+    assert_eq!(sess1.current_state(), SessionState::Synchronizing);
+
+    sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: 99 })?;
+    let advance_result = sess1.advance_frame();
+    assert!(
+        matches!(advance_result, Err(FortressError::NotSynchronized)),
+        "Halt behavior must reject frame advance after explicit disconnect"
+    );
+    assert_eq!(
+        sess1.current_frame(),
+        current_before_disconnect,
+        "Halt behavior must not advance current_frame after disconnect"
+    );
+    assert_eq!(
+        sess1.confirmed_frame(),
+        confirmed_before_disconnect,
+        "Halt behavior must not advance confirmed_frame after disconnect"
+    );
 
     // Drain events: we expect no PeerDropped to ever be emitted on the
     // Halt path. (Disconnected may or may not be present depending on
@@ -630,6 +648,70 @@ fn p2p_continue_without_auto_removes_on_disconnect_timeout() -> Result<(), Fortr
         disconnected_count >= 1,
         "expected at least one Disconnected event after timeout"
     );
+
+    Ok(())
+}
+
+#[test]
+fn p2p_halt_auto_timeout_stops_advancing_without_peer_dropped() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (s1, s2, a1, a2) = create_channel_pair();
+
+    let short_timeout = Duration::from_millis(200);
+
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_disconnect_behavior(DisconnectBehavior::Halt)
+        .with_disconnect_timeout(short_timeout)
+        .with_disconnect_notify_delay(Duration::from_millis(50))
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(a2), PlayerHandle::new(1))?
+        .start_p2p_session(s1)?;
+
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_disconnect_behavior(DisconnectBehavior::Halt)
+        .with_disconnect_timeout(short_timeout)
+        .with_disconnect_notify_delay(Duration::from_millis(50))
+        .add_player(PlayerType::Remote(a1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(s2)?;
+
+    synchronize_sessions_deterministic(&mut sess1, &mut sess2, &clock, &SyncConfig::default())
+        .expect("sessions should sync");
+    drain_sync_events(&mut sess1, &mut sess2);
+
+    for _ in 0..100 {
+        sess1.poll_remote_clients();
+        clock.advance(Duration::from_millis(20));
+    }
+
+    let current_after_timeout = sess1.current_frame();
+    let confirmed_after_timeout = sess1.confirmed_frame();
+    assert_eq!(sess1.current_state(), SessionState::Synchronizing);
+
+    let events: Vec<_> = sess1.events().collect();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, FortressEvent::Disconnected { .. })),
+        "Halt timeout should still emit the legacy Disconnected event; got {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. })),
+        "Halt timeout must not emit PeerDropped; got {events:?}"
+    );
+
+    sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: 100 })?;
+    let advance_result = sess1.advance_frame();
+    assert!(
+        matches!(advance_result, Err(FortressError::NotSynchronized)),
+        "Halt timeout must reject frame advance after disconnect"
+    );
+    assert_eq!(sess1.current_frame(), current_after_timeout);
+    assert_eq!(sess1.confirmed_frame(), confirmed_after_timeout);
 
     Ok(())
 }

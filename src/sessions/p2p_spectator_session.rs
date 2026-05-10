@@ -318,8 +318,8 @@ impl<T: Config> SpectatorSession<T> {
         Ok(player_inputs
             .iter()
             .enumerate()
-            .map(|(handle, player_input)| {
-                if let Some(status) = self.host_connect_status.get(handle) {
+            .map(|(player_index, player_input)| {
+                if let Some(status) = self.host_connect_status.get(player_index) {
                     if status.disconnected && status.last_frame < frame_to_grab {
                         (player_input.input, InputStatus::Disconnected)
                     } else {
@@ -335,8 +335,8 @@ impl<T: Config> SpectatorSession<T> {
                     report_violation!(
                         ViolationSeverity::Error,
                         ViolationKind::InternalError,
-                        "spectator: host_connect_status missing for handle {} (host_connect_status.len()={})",
-                        handle,
+                        "spectator: host_connect_status missing for player_index {} (host_connect_status.len()={})",
+                        player_index,
                         host_connect_status_len
                     );
                     (player_input.input, InputStatus::Confirmed)

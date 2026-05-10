@@ -11,6 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = REPO_ROOT / ".devcontainer" / "Dockerfile"
 DEVCONTAINER_JSON = REPO_ROOT / ".devcontainer" / "devcontainer.json"
 BOOTSTRAP_SCRIPT = REPO_ROOT / ".devcontainer" / "codex-bootstrap.sh"
+TLA_VERSION_FILE = REPO_ROOT / ".tla-tools-version"
 
 
 def _write_codex_stub(tmp_path: Path) -> Path:
@@ -83,6 +84,17 @@ class TestCodexDevcontainerConfiguration:
         text = DEVCONTAINER_JSON.read_text(encoding="utf-8")
         assert "bash .devcontainer/codex-bootstrap.sh post-create" in text
         assert "bash .devcontainer/codex-bootstrap.sh post-start" in text
+
+    def test_tla_tools_version_is_repo_pinned(self) -> None:
+        """Devcontainer setup should derive TLA+ tools from the repo version file."""
+        version = TLA_VERSION_FILE.read_text(encoding="utf-8").strip()
+        assert version
+        dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+        devcontainer = DEVCONTAINER_JSON.read_text(encoding="utf-8")
+        assert "COPY .tla-tools-version" in dockerfile
+        assert ".devcontainer/setup-tla-tools.sh" in devcontainer
+        assert f"releases/download/v{version}/tla2tools.jar" not in dockerfile
+        assert f"releases/download/v{version}/tla2tools.jar" not in devcontainer
 
 
 class TestCodexBootstrapScript:
@@ -157,7 +169,49 @@ class TestCodexBootstrapScript:
         assert "attempting permission repair" in result.stdout
         assert "Repaired Codex home permissions" in result.stdout
         assert sudo_log.exists()
-        assert "chown -R" in sudo_log.read_text(encoding="utf-8")
+        sudo_invocation = sudo_log.read_text(encoding="utf-8")
+        assert "-n chown -R" in sudo_invocation
+
+    def test_unwritable_codex_home_does_not_block_when_sudo_prompts(
+        self, tmp_path: Path
+    ) -> None:
+        """Bootstrap should use non-interactive sudo and continue if repair is unavailable."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _write_codex_stub(bin_dir)
+        sudo_path = bin_dir / "sudo"
+        sudo_path.write_text(
+            "#!/bin/bash\n"
+            "set -eu\n"
+            "echo \"$*\" >> \"${SUDO_STUB_LOG:?}\"\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        sudo_path.chmod(0o755)
+
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        codex_home.chmod(0o500)
+
+        sudo_log = tmp_path / "sudo.log"
+
+        env = os.environ.copy()
+        env["HOME"] = str(tmp_path)
+        env["CODEX_HOME"] = str(codex_home)
+        env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+        env["SUDO_STUB_LOG"] = str(sudo_log)
+
+        result = subprocess.run(
+            ["bash", str(BOOTSTRAP_SCRIPT), "post-start"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        assert result.returncode == 0
+        assert "Non-interactive sudo permission repair was unavailable" in result.stderr
+        assert "-n chown -R" in sudo_log.read_text(encoding="utf-8")
 
     def test_logged_in_status_reports_ready(self, tmp_path: Path) -> None:
         """If codex login status succeeds, script reports auth readiness."""

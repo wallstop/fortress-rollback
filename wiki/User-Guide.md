@@ -1496,7 +1496,7 @@ With sparse saving:
 
 Implement `NonBlockingSocket` for custom networking:
 
-```rust,ignore
+```text
 use fortress_rollback::{Message, NonBlockingSocket};
 
 struct MyCustomSocket { /* ... */ }
@@ -2273,7 +2273,7 @@ let session = SessionBuilder::<GameConfig>::new()
 
 For other transports, implement `NonBlockingSocket`:
 
-```rust,ignore
+```text
 use fortress_rollback::{Message, NonBlockingSocket};
 
 struct MyWebSocketTransport {
@@ -3802,7 +3802,7 @@ This produces machine-parseable output like:
 
 All telemetry types implement `serde::Serialize` for direct JSON serialization:
 
-```rust,ignore
+```text
 use fortress_rollback::telemetry::{SpecViolation, ViolationSeverity, ViolationKind};
 use fortress_rollback::Frame;
 

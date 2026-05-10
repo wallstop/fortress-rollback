@@ -159,8 +159,9 @@ jobs:
       - name: Download TLA+ tools
         run: |
           mkdir -p deps/tools
+          TLA_TOOLS_VERSION="$(tr -d '[:space:]' < .tla-tools-version)"
           curl -L -o deps/tools/tla2tools.jar \
-            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+            "https://github.com/tlaplus/tlaplus/releases/download/v${TLA_TOOLS_VERSION}/tla2tools.jar"
 
       - name: Parse TLA+ modules (SANY)
         run: |
@@ -368,13 +369,13 @@ CONSTRAINT StateConstraint
 set -euo pipefail
 
 DEPS_DIR="${1:-deps}"
-TLA_VERSION="${2:-v1.7.4}"
+TLA_TOOLS_VERSION="${2:-$(tr -d '[:space:]' < .tla-tools-version)}"
 
 mkdir -p "$DEPS_DIR/tools"
 
 # Download tla2tools.jar
 curl -L -o "$DEPS_DIR/tools/tla2tools.jar" \
-  "https://github.com/tlaplus/tlaplus/releases/download/$TLA_VERSION/tla2tools.jar"
+  "https://github.com/tlaplus/tlaplus/releases/download/v${TLA_TOOLS_VERSION}/tla2tools.jar"
 
 # Download community modules (optional)
 curl -L -o "$DEPS_DIR/community-modules.jar" \

@@ -59,35 +59,12 @@ runs:
         REQUIRED_VERSION="${{ inputs.version }}"
         # Convert cargo-foo to cargo foo for version check
         CARGO_CMD="${TOOL_NAME#cargo-}"
-
-        version_token_matches() {
-          local output="$1"
-          local required="$2"
-          [ -z "$required" ] && return 0
-          local token
-          while IFS= read -r token; do
-            token="${token#v}"
-            token="${token%:}"
-            token="${token%,}"
-            token="${token%;}"
-            if [ "$token" = "$required" ]; then
-              return 0
-            fi
-          done < <(printf '%s\n' "$output" | tr '[:space:]' '\n')
-          return 1
-        }
-
-        installed_version_matches() {
-          local output="$1"
-          local required="$2"
-          [ -z "$required" ] && return 0
-          version_token_matches "$output" "$required" && return 0
-          version_token_matches "$(cargo install --list 2>/dev/null || true)" "$required"
-        }
+        # shellcheck source=.github/actions/install-cargo-tool/version-check.sh
+        source "$GITHUB_ACTION_PATH/version-check.sh"
 
         if command -v "$TOOL_NAME" &> /dev/null || cargo "$CARGO_CMD" --version &> /dev/null 2>&1; then
           VERSION_OUTPUT="$(cargo "$CARGO_CMD" --version 2>/dev/null || "$TOOL_NAME" --version 2>/dev/null || true)"
-          if installed_version_matches "$VERSION_OUTPUT" "$REQUIRED_VERSION"; then
+          if installed_version_matches "$TOOL_NAME" "$VERSION_OUTPUT" "$REQUIRED_VERSION"; then
             echo "installed=true" >> "$GITHUB_OUTPUT"
             echo "✅ $TOOL_NAME is already installed (from cache)"
             printf '%s\n' "$VERSION_OUTPUT"
@@ -177,31 +154,8 @@ runs:
         TOOL_NAME="${{ inputs.tool }}"
         REQUIRED_VERSION="${{ inputs.version }}"
         CARGO_CMD="${TOOL_NAME#cargo-}"
-
-        version_token_matches() {
-          local output="$1"
-          local required="$2"
-          [ -z "$required" ] && return 0
-          local token
-          while IFS= read -r token; do
-            token="${token#v}"
-            token="${token%:}"
-            token="${token%,}"
-            token="${token%;}"
-            if [ "$token" = "$required" ]; then
-              return 0
-            fi
-          done < <(printf '%s\n' "$output" | tr '[:space:]' '\n')
-          return 1
-        }
-
-        installed_version_matches() {
-          local output="$1"
-          local required="$2"
-          [ -z "$required" ] && return 0
-          version_token_matches "$output" "$required" && return 0
-          version_token_matches "$(cargo install --list 2>/dev/null || true)" "$required"
-        }
+        # shellcheck source=.github/actions/install-cargo-tool/version-check.sh
+        source "$GITHUB_ACTION_PATH/version-check.sh"
 
         # Check if tool is now available
         if command -v "$TOOL_NAME" &> /dev/null || cargo "$CARGO_CMD" --version &> /dev/null 2>&1; then
@@ -231,7 +185,7 @@ runs:
             echo "(version check not available)"
           fi
 
-          if ! installed_version_matches "$VERSION_OUTPUT" "$REQUIRED_VERSION"; then
+          if ! installed_version_matches "$TOOL_NAME" "$VERSION_OUTPUT" "$REQUIRED_VERSION"; then
             echo "❌ ERROR: $TOOL_NAME version does not match requested version $REQUIRED_VERSION"
             exit 1
           fi

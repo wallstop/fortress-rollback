@@ -66,6 +66,10 @@ exclude = [
 
     # Sites that block automated requests
     "^https://medium\\.com",
+
+    # Contact schemes are intentionally not fetched by link checkers.
+    "^mailto:",
+    "^tel:",
 ]
 
 # Exclude these paths from being checked

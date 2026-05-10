@@ -26,8 +26,10 @@ ensure_codex_home_writable() {
     echo "[codex-bootstrap] ${CODEX_HOME_DIR} is not writable (owner ${CURRENT_OWNER}); attempting permission repair."
 
     if command -v sudo >/dev/null 2>&1; then
-        if sudo chown -R "$(id -un):$(id -gn)" "${CODEX_HOME_DIR}" >/dev/null 2>&1; then
+        if sudo -n chown -R "$(id -un):$(id -gn)" "${CODEX_HOME_DIR}" >/dev/null 2>&1; then
             chmod 700 "${CODEX_HOME_DIR}" >/dev/null 2>&1 || true
+        else
+            echo "[codex-bootstrap] Non-interactive sudo permission repair was unavailable." >&2
         fi
     fi
 

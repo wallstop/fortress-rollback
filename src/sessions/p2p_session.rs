@@ -758,6 +758,7 @@ impl<T: Config> P2PSession<T> {
                 if !status.disconnected {
                     let last_frame = status.last_frame;
                     self.disconnect_player_at_frame(player_handle, last_frame);
+                    self.state = SessionState::Synchronizing;
                     return Ok(());
                 }
                 Err(InvalidRequestKind::AlreadyDisconnected {
@@ -802,7 +803,7 @@ impl<T: Config> P2PSession<T> {
                     });
                 },
             },
-            Some(PlayerType::Spectator(addr)) => match self.player_reg.remotes.get(addr) {
+            Some(PlayerType::Spectator(addr)) => match self.player_reg.spectators.get(addr) {
                 Some(endpoint) => endpoint.network_stats()?,
                 None => {
                     return Err(FortressError::InternalErrorStructured {
@@ -2466,6 +2467,12 @@ impl<T: Config> P2PSession<T> {
                 if let Some(handle) = target_handle {
                     self.disconnect_player_at_frame(handle, last_frame);
                 }
+                if !continue_without
+                    && target_handle
+                        .is_some_and(|handle| handle.is_valid_player_for(self.num_players))
+                {
+                    self.state = SessionState::Synchronizing;
+                }
 
                 // If the application opted into ContinueWithout, freeze every
                 // non-spectator input queue at this endpoint and emit one
@@ -3252,6 +3259,29 @@ mod tests {
             Err(FortressError::NotSynchronized) => {},
             _ => panic!("Expected NotSynchronized error"),
         }
+    }
+
+    #[test]
+    fn network_stats_spectator_uses_spectator_endpoint() {
+        let session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(1)
+            .unwrap()
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("Failed to add local player")
+            .add_player(
+                PlayerType::Spectator(test_addr(9090)),
+                PlayerHandle::new(10),
+            )
+            .expect("Failed to add spectator")
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session");
+
+        let result = session.network_stats(PlayerHandle::new(10));
+
+        assert!(
+            matches!(result, Err(FortressError::NotSynchronized)),
+            "spectator endpoint should be found and report its protocol state; got {result:?}"
+        );
     }
 
     // ==========================================

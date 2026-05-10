@@ -25,10 +25,18 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TLA_DIR="$PROJECT_ROOT/specs/tla"
 TOOLS_DIR="$PROJECT_ROOT/.tla-tools"
 TLA_TOOLS_JAR="${TLA_TOOLS_JAR:-$TOOLS_DIR/tla2tools.jar}"
-# Single source of truth for the TLA+ tools version. CI sets this from the
-# workflow env so that the actions/cache key and the downloaded artifact
-# stay in lockstep. Override via env to test newer releases locally.
-TLA_TOOLS_VERSION="${TLA_TOOLS_VERSION:-1.8.0}"
+TLA_TOOLS_VERSION_FILE="${TLA_TOOLS_VERSION_FILE:-$PROJECT_ROOT/.tla-tools-version}"
+if [[ -z "${TLA_TOOLS_VERSION:-}" ]]; then
+    if [[ ! -f "$TLA_TOOLS_VERSION_FILE" ]]; then
+        echo "Error: missing TLA+ tools version file: $TLA_TOOLS_VERSION_FILE" >&2
+        exit 1
+    fi
+    TLA_TOOLS_VERSION="$(tr -d '[:space:]' < "$TLA_TOOLS_VERSION_FILE")"
+fi
+if [[ -z "$TLA_TOOLS_VERSION" ]]; then
+    echo "Error: TLA+ tools version is empty" >&2
+    exit 1
+fi
 TLA_TOOLS_URL="${TLA_TOOLS_URL:-https://github.com/tlaplus/tlaplus/releases/download/v${TLA_TOOLS_VERSION}/tla2tools.jar}"
 TLA_WORKERS="${TLA_WORKERS:-auto}"
 TLA_MEMORY="${TLA_MEMORY:-4g}"

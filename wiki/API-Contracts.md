@@ -755,7 +755,7 @@ for request in session.advance_frame()? {
 
 ### SaveGameState Contract
 
-```rust
+```text
 FortressRequest::SaveGameState { cell, frame }
 ```
 
@@ -774,7 +774,7 @@ FortressRequest::SaveGameState { cell, frame }
 
 ### LoadGameState Contract
 
-```rust
+```text
 FortressRequest::LoadGameState { cell, frame }
 ```
 
@@ -792,7 +792,7 @@ FortressRequest::LoadGameState { cell, frame }
 
 ### AdvanceFrame Contract
 
-```rust
+```text
 FortressRequest::AdvanceFrame { inputs }
 ```
 

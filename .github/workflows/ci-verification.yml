@@ -10,6 +10,7 @@ on:
       - 'specs/**'
       - 'scripts/verification/verify-*.sh'
       - 'scripts/verification/check-kani-coverage.sh'
+      - '.tla-tools-version'
       - '.github/workflows/ci-verification.yml'
   pull_request:
     branches: [main]
@@ -20,6 +21,7 @@ on:
       - 'specs/**'
       - 'scripts/verification/verify-*.sh'
       - 'scripts/verification/check-kani-coverage.sh'
+      - '.tla-tools-version'
       - '.github/workflows/ci-verification.yml'
   workflow_dispatch:
 
@@ -39,8 +41,6 @@ env:
   # silently picks up new releases while the cache key never changes, so
   # runners keep restoring a stale cached binary forever.
   KANI_VERSION: '0.67.0'
-  # Same single-source-of-truth pattern for TLA+ tools.
-  TLA_TOOLS_VERSION: '1.8.0'
 
 jobs:
   # Validate Kani proof coverage before running actual proofs
@@ -73,7 +73,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .tla-tools
-          key: tla-tools-v${{ env.TLA_TOOLS_VERSION }}
+          key: tla-tools-${{ hashFiles('.tla-tools-version') }}
 
       - name: Run TLA+ verification
         run: ./scripts/verification/verify-tla.sh --fail-fast

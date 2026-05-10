@@ -255,7 +255,8 @@ Download manually:
 
 ```bash
 mkdir -p .tla-tools
-curl --proto '=https' --tlsv1.2 -sSfL https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o .tla-tools/tla2tools.jar
+TLA_TOOLS_VERSION="$(tr -d '[:space:]' < .tla-tools-version)"
+curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/tlaplus/tlaplus/releases/download/v${TLA_TOOLS_VERSION}/tla2tools.jar" -o .tla-tools/tla2tools.jar
 ```
 
 ## Files
