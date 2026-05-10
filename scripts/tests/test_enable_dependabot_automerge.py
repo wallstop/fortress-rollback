@@ -309,9 +309,10 @@ def test_reports_branch_protection_requirement_when_automerge_api_rejects(tmp_pa
             "GH_ALLOW_MERGE": "false",
         },
     )
-    assert result.returncode == 1
+    assert result.returncode == 20
     assert "required protected branch rules" in result.stderr
     assert "GitHub auto-merge requires protected branch rules" in result.stderr
+    assert "Soft-fail: protected branch auto-merge precondition missing" in result.stdout
     log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
     assert len(log_lines) == 3
     assert "--required --json name --jq length" in log_lines[0]
@@ -924,20 +925,15 @@ def _find_step(workflow: dict, name: str) -> dict:
     return enable_step
 
 
-def test_workflow_run_command_is_pure_script_invocation() -> None:
-    """The Enable auto-merge step must invoke the script directly with no wrapper.
-
-    Wrapping the script in `timeout`, `timeout-cmd`, `xargs`, or any prefix is
-    forbidden -- the workflow's `timeout-minutes` is the sole ceiling. This test
-    locks in that contract by asserting the run command equals the bare script
-    invocation verbatim, so any wrapper at all (regardless of duration) fails.
-    """
+def test_workflow_classifies_protected_branch_soft_fail() -> None:
+    """Workflow must classify script exit code 20 as soft-fail and fail everything else."""
     workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
     enable_step = _find_step(workflow, "Enable auto-merge")
-    run_value = enable_step["run"].strip()
-    assert run_value == "bash ./scripts/ci/enable-dependabot-automerge.sh", (
-        f"Enable auto-merge step must run the script directly, got: {run_value!r}"
-    )
+    run_value = enable_step["run"]
+    assert "bash ./scripts/ci/enable-dependabot-automerge.sh" in run_value
+    assert "if [[ \"$exit_code\" -eq 20 ]]" in run_value
+    assert "exit \"$exit_code\"" in run_value
+    assert enable_step.get("continue-on-error") is None
 
 
 def test_script_has_no_one_shot_references() -> None:
