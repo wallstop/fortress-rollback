@@ -314,18 +314,31 @@ impl<T: Config> SpectatorSession<T> {
             return Err(FortressError::SpectatorTooFarBehind);
         }
 
+        let host_connect_status_len = self.host_connect_status.len();
         Ok(player_inputs
             .iter()
             .enumerate()
-            .map(|(handle, player_input)| {
-                if let Some(status) = self.host_connect_status.get(handle) {
+            .map(|(player_index, player_input)| {
+                if let Some(status) = self.host_connect_status.get(player_index) {
                     if status.disconnected && status.last_frame < frame_to_grab {
                         (player_input.input, InputStatus::Disconnected)
                     } else {
                         (player_input.input, InputStatus::Confirmed)
                     }
                 } else {
-                    // If we can't get the connection status, assume confirmed
+                    // `host_connect_status` is sized by construction to
+                    // cover every host player; reaching this branch means
+                    // the spectator's snapshot of the host's connect-status
+                    // table is shorter than the host's player list. Surface
+                    // the mismatch rather than silently treating the input
+                    // as Confirmed.
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::InternalError,
+                        "spectator: host_connect_status missing for player_index {} (host_connect_status.len()={})",
+                        player_index,
+                        host_connect_status_len
+                    );
                     (player_input.input, InputStatus::Confirmed)
                 }
             })

@@ -299,7 +299,7 @@ def check_broken_wiki_links(content: str, filename: str, wiki_pages: set[str]) -
     for match in re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", content):
         link_target = match.group(2)
         # Skip external links and anchors
-        if link_target.startswith(("http://", "https://", "#", "mailto:")):
+        if link_target.startswith(("http://", "https://", "#", "mailto:", "tel:")):
             continue
         # Skip asset links
         if link_target.startswith("assets/"):

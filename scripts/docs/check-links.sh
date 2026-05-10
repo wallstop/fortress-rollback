@@ -67,7 +67,7 @@ check_local_file() {
     fi
 
     # Skip external URLs
-    if [[ "$link" =~ ^https?:// ]] || [[ "$link" =~ ^mailto: ]]; then
+    if [[ "$link" =~ ^https?:// ]] || [[ "$link" =~ ^mailto: ]] || [[ "$link" =~ ^tel: ]]; then
         return 0
     fi
 

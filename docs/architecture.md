@@ -858,6 +858,8 @@ Frame:  [9] [1] [2] [3] [4] [5] [6] [7] [8]
 Each player has a `ConnectionStatus`:
 
 ```rust
+use fortress_rollback::Frame;
+
 pub struct ConnectionStatus {
     pub disconnected: bool,  // Is the player disconnected?
     pub last_frame: Frame,   // Last frame we received input for
@@ -1075,6 +1077,8 @@ if observer.has_violation(ViolationKind::FrameSync) {
 Prevents mixing frame numbers with arbitrary integers:
 
 ```rust
+use fortress_rollback::Frame;
+
 let frame = Frame::new(5);
 let next = frame + 1;        // OK: Frame + i32 -> Frame
 let diff = next - frame;     // OK: Frame - Frame -> i32
@@ -1086,7 +1090,11 @@ let diff = next - frame;     // OK: Frame - Frame -> i32
 Prevents invalid handle usage:
 
 ```rust
+use fortress_rollback::PlayerHandle;
+
 let handle = PlayerHandle::new(0);
+let num_players = 2;
+
 if handle.is_valid_player_for(num_players) {
     // Safe to use as player index
 }

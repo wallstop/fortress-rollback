@@ -169,6 +169,21 @@ where
     input_queues: Vec<InputQueue<T>>,
 }
 
+/// Builds an `InternalErrorStructured`/`IndexOutOfBounds` error tagged with
+/// the literal collection name `"input_queues"`. Concentrating the literal
+/// in one place avoids drift between callsites and removes the structured-
+/// error ceremony from the surrounding control flow.
+#[inline]
+fn input_queue_oob(index: usize, length: usize) -> FortressError {
+    FortressError::InternalErrorStructured {
+        kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+            name: "input_queues",
+            index,
+            length,
+        }),
+    }
+}
+
 impl<T: Config> SyncLayer<T> {
     /// Creates a new `SyncLayer` instance with given values and default queue length.
     ///
@@ -190,30 +205,50 @@ impl<T: Config> SyncLayer<T> {
     /// * `num_players` - The number of players in the session
     /// * `max_prediction` - Maximum frames of prediction allowed
     /// * `queue_length` - The size of the input queue circular buffer per player
+    ///
+    /// # Behavior on invalid `queue_length`
+    ///
+    /// `InputQueue::with_queue_length` rejects `queue_length < 2`. If the
+    /// requested `queue_length` is invalid, this constructor falls back to
+    /// the library default ([`INPUT_QUEUE_LENGTH`]) for each affected slot.
+    ///
+    /// The library default is a compile-time constant guaranteed to be
+    /// `>= 2` (statically asserted in `_INPUT_QUEUE_LENGTH_IS_VALID`),
+    /// so the fallback's None arm is unreachable. The post-loop
+    /// `debug_assert_eq!` surfaces any future regression that breaks the
+    /// const-assertion.
+    ///
+    /// `InputQueue::with_queue_length` itself reports a violation when
+    /// `queue_length < 2`, so callers that pass an invalid length still
+    /// observe the failure through the standard violation channel.
+    ///
+    /// [`INPUT_QUEUE_LENGTH`]: crate::input_queue::INPUT_QUEUE_LENGTH
     #[must_use]
     pub fn with_queue_length(
         num_players: usize,
         max_prediction: usize,
         queue_length: usize,
     ) -> Self {
-        // initialize input_queues with player indices for deterministic prediction
-        let mut input_queues = Vec::new();
+        let mut input_queues = Vec::with_capacity(num_players);
         for player_index in 0..num_players {
-            // queue_length should be validated before calling this function
-            // If it's invalid, report a violation and use a default
-            match InputQueue::with_queue_length(player_index, queue_length) {
-                Some(queue) => input_queues.push(queue),
-                None => {
-                    // Fallback: use the default queue length
-                    if let Some(queue) = InputQueue::with_queue_length(
-                        player_index,
-                        crate::input_queue::INPUT_QUEUE_LENGTH,
-                    ) {
-                        input_queues.push(queue);
-                    }
-                },
+            if let Some(queue) = InputQueue::with_queue_length(player_index, queue_length) {
+                input_queues.push(queue);
+                continue;
+            }
+            // _INPUT_QUEUE_LENGTH_IS_VALID below guarantees this at compile
+            // time; the post-loop debug_assert! catches any future regression
+            // that breaks the const-assertion in non-release builds.
+            if let Some(queue) =
+                InputQueue::with_queue_length(player_index, crate::input_queue::INPUT_QUEUE_LENGTH)
+            {
+                input_queues.push(queue);
             }
         }
+        debug_assert_eq!(
+            input_queues.len(),
+            num_players,
+            "SyncLayer::with_queue_length: input_queues.len() must equal num_players"
+        );
         Self {
             num_players,
             max_prediction,
@@ -287,8 +322,33 @@ impl<T: Config> SyncLayer<T> {
     /// Sets the frame delay for a player.
     ///
     /// # Errors
-    /// Returns a [`FortressError`] if `player_handle >= num_players`.
-    /// Returns a [`FortressError`] if `delay` exceeds the maximum allowed value.
+    /// - Returns [`FortressError::InvalidPlayerHandle`] if `player_handle >= num_players`.
+    /// - Returns [`FortressError::InternalErrorStructured`] with
+    ///   [`InternalErrorKind::IndexOutOfBounds`] (name `"input_queues"`) if
+    ///   the input-queue entry for `player_handle` is missing. This indicates
+    ///   an internal-invariant violation and should not occur in correct code.
+    /// - Surfaces every error variant that
+    ///   [`InputQueue::set_frame_delay`](crate::__internal::InputQueue::set_frame_delay)
+    ///   can return:
+    ///   - [`FortressError::InvalidRequestStructured`] with
+    ///     [`InvalidRequestKind::FrameDelayTooLarge`] if `delay` exceeds the
+    ///     queue's `max_frame_delay()`.
+    ///   - [`FortressError::InvalidRequestStructured`] with
+    ///     [`InvalidRequestKind::InputDelayDecreaseUnsupported`] if `delay`
+    ///     is strictly less than the current frame delay and inputs have
+    ///     already been added (mid-session decreases are unsupported).
+    ///   - [`FortressError::InternalErrorStructured`] with
+    ///     [`InternalErrorKind::IndexOutOfBounds`] (name `"inputs"`) if the
+    ///     queue's most-recent input slot cannot be located while computing
+    ///     the gap-fill source — an internal-invariant violation.
+    ///   - [`FortressError::InternalErrorStructured`] with
+    ///     [`InternalErrorKind::InputQueueGapFillFailed`] if a replicated
+    ///     gap-fill frame cannot be appended (queue overflow or
+    ///     prediction-frame collision) — an internal-invariant violation.
+    ///
+    /// [`InvalidRequestKind::FrameDelayTooLarge`]: crate::error::InvalidRequestKind::FrameDelayTooLarge
+    /// [`InvalidRequestKind::InputDelayDecreaseUnsupported`]: crate::error::InvalidRequestKind::InputDelayDecreaseUnsupported
+    /// [`InternalErrorKind::InputQueueGapFillFailed`]: crate::error::InternalErrorKind::InputQueueGapFillFailed
     ///
     /// # Note
     /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
@@ -306,14 +366,163 @@ impl<T: Config> SyncLayer<T> {
         let len = self.input_queues.len();
         self.input_queues
             .get_mut(player_handle.as_usize())
-            .ok_or(FortressError::InternalErrorStructured {
-                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
-                    name: "input_queues",
-                    index: player_handle.as_usize(),
-                    length: len,
-                }),
-            })?
+            .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?
             .set_frame_delay(delay)?;
+        Ok(())
+    }
+
+    /// Returns the current frame delay for a player.
+    ///
+    /// # Errors
+    /// - Returns [`FortressError::InvalidPlayerHandle`] if `player_handle >= num_players`.
+    /// - Returns [`FortressError::InternalErrorStructured`] with
+    ///   [`InternalErrorKind::IndexOutOfBounds`] (name `"input_queues"`) if
+    ///   the input-queue entry for `player_handle` is missing. This indicates
+    ///   an internal-invariant violation and should not occur in correct code.
+    pub fn frame_delay(&self, player_handle: PlayerHandle) -> Result<usize, FortressError> {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            return Err(FortressError::InvalidPlayerHandle {
+                handle: player_handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        let len = self.input_queues.len();
+        let queue = self
+            .input_queues
+            .get(player_handle.as_usize())
+            .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?;
+        Ok(queue.frame_delay())
+    }
+
+    /// Returns the maximum allowed frame delay for any player in this `SyncLayer`.
+    ///
+    /// All input queues share the same `queue_length`, so this is the same value
+    /// for every player. Returns `0` when no input queues are present, which only
+    /// occurs in degenerate sessions with zero players.
+    #[must_use]
+    pub fn max_frame_delay(&self) -> usize {
+        self.input_queues
+            .first()
+            .map_or(0, InputQueue::max_frame_delay)
+    }
+
+    /// Returns the most recently added input frame for the given player, or
+    /// [`Frame::NULL`] if no inputs have been added yet.
+    ///
+    /// # Errors
+    /// Returns a [`FortressError`] if `player_handle >= num_players`.
+    pub(crate) fn last_added_frame(
+        &self,
+        player_handle: PlayerHandle,
+    ) -> Result<Frame, FortressError> {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            return Err(FortressError::InvalidPlayerHandle {
+                handle: player_handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        let len = self.input_queues.len();
+        let queue = self
+            .input_queues
+            .get(player_handle.as_usize())
+            .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?;
+        Ok(queue.last_added_frame())
+    }
+
+    /// Returns the confirmed input for the given player at the given frame.
+    /// Used by the session layer to retrieve the replicated gap-fill bytes
+    /// after a mid-session frame-delay increase.
+    ///
+    /// # Errors
+    /// Returns a [`FortressError`] if `player_handle >= num_players`, the
+    /// queue's slot does not contain `frame`, or the queue is missing.
+    pub(crate) fn confirmed_input(
+        &self,
+        player_handle: PlayerHandle,
+        frame: Frame,
+    ) -> Result<PlayerInput<T::Input>, FortressError> {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            return Err(FortressError::InvalidPlayerHandle {
+                handle: player_handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        let len = self.input_queues.len();
+        let queue = self
+            .input_queues
+            .get(player_handle.as_usize())
+            .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?;
+        queue.confirmed_input(frame)
+    }
+
+    /// Freezes the input queue for a specific player.
+    ///
+    /// After this call, [`Self::add_remote_input`] for `player_handle` is
+    /// silently dropped (the underlying [`InputQueue::add_input`] becomes a
+    /// no-op), and the player's last confirmed input is repeated forever from
+    /// the queue. This is part of the graceful peer-drop flow: combined with
+    /// `connect_status[handle].disconnected = true` at the session level,
+    /// remaining peers can keep simulating using the dropped peer's last
+    /// confirmed input (reported as [`crate::InputStatus::Disconnected`] by
+    /// [`Self::synchronized_inputs`]).
+    ///
+    /// # Errors
+    /// Returns [`FortressError::InvalidPlayerHandle`] if `player_handle` is
+    /// out of range for this sync layer.
+    ///
+    /// [`InputQueue::add_input`]: crate::__internal::InputQueue::add_input
+    pub(crate) fn freeze_player(
+        &mut self,
+        player_handle: PlayerHandle,
+    ) -> Result<(), FortressError> {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            return Err(FortressError::InvalidPlayerHandle {
+                handle: player_handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        let len = self.input_queues.len();
+        let queue = self
+            .input_queues
+            .get_mut(player_handle.as_usize())
+            .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?;
+        queue.freeze();
+        Ok(())
+    }
+
+    /// Pre-validates that a subsequent call to [`Self::freeze_player`] for
+    /// `player_handle` would succeed.
+    ///
+    /// Returns the exact same error variant ([`FortressError::InvalidPlayerHandle`]
+    /// or [`InternalErrorKind::IndexOutOfBounds`]) that [`Self::freeze_player`]
+    /// would produce for the same handle. This lets callers pre-validate every
+    /// handle in a multi-handle endpoint before performing any state-mutating
+    /// work, so the freeze step can be made transactional (all-or-nothing) —
+    /// the application-level graceful-drop contract is honored for every
+    /// handle, or no handle.
+    ///
+    /// # Errors
+    /// - Returns [`FortressError::InvalidPlayerHandle`] if `player_handle` is
+    ///   out of range for this sync layer.
+    /// - Returns [`FortressError::InternalErrorStructured`] with
+    ///   [`InternalErrorKind::IndexOutOfBounds`] if no input queue exists for
+    ///   `player_handle` (an internal-invariant violation).
+    pub(crate) fn validate_freeze_player(
+        &self,
+        player_handle: PlayerHandle,
+    ) -> Result<(), FortressError> {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            return Err(FortressError::InvalidPlayerHandle {
+                handle: player_handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        if self.input_queues.get(player_handle.as_usize()).is_none() {
+            return Err(input_queue_oob(
+                player_handle.as_usize(),
+                self.input_queues.len(),
+            ));
+        }
         Ok(())
     }
 
@@ -322,10 +531,8 @@ impl<T: Config> SyncLayer<T> {
     /// # Note
     /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
     pub fn reset_prediction(&mut self) {
-        for i in 0..self.num_players {
-            if let Some(queue) = self.input_queues.get_mut(i) {
-                queue.reset_prediction();
-            }
+        for queue in self.input_queues.iter_mut() {
+            queue.reset_prediction();
         }
     }
 
@@ -415,9 +622,20 @@ impl<T: Config> SyncLayer<T> {
             );
             return Frame::NULL;
         }
-        self.input_queues
-            .get_mut(player_handle.as_usize())
-            .map_or(Frame::NULL, |queue| queue.add_input(input))
+        let queue_count = self.input_queues.len();
+        match self.input_queues.get_mut(player_handle.as_usize()) {
+            Some(queue) => queue.add_input(input),
+            None => {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InputQueue,
+                    "add_local_input: missing input_queues entry for player handle {} (input_queues.len()={})",
+                    player_handle.as_usize(),
+                    queue_count
+                );
+                Frame::NULL
+            },
+        }
     }
 
     /// Adds remote input to the corresponding input queue.
@@ -427,8 +645,20 @@ impl<T: Config> SyncLayer<T> {
         player_handle: PlayerHandle,
         input: PlayerInput<T::Input>,
     ) {
-        if let Some(queue) = self.input_queues.get_mut(player_handle.as_usize()) {
-            queue.add_input(input);
+        let queue_count = self.input_queues.len();
+        match self.input_queues.get_mut(player_handle.as_usize()) {
+            Some(queue) => {
+                queue.add_input(input);
+            },
+            None => {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InputQueue,
+                    "add_remote_input: missing input_queues entry for player handle {} (input_queues.len()={})",
+                    player_handle.as_usize(),
+                    queue_count
+                );
+            },
         }
     }
 
@@ -451,7 +681,19 @@ impl<T: Config> SyncLayer<T> {
         };
         for (i, con_stat) in connect_status.iter().enumerate() {
             if con_stat.disconnected && con_stat.last_frame < self.current_frame {
-                inputs.push((T::Input::default(), InputStatus::Disconnected));
+                // Disconnected past last_frame. If the player's queue was
+                // frozen via `freeze_player` (graceful peer drop), surface
+                // the queue's last confirmed input so remaining peers see
+                // the dropped peer's most recent good input rather than a
+                // default value. For non-frozen disconnects (legacy halt
+                // path) keep returning the default to preserve back-compat.
+                let queue = self.input_queues.get(i)?;
+                let value = if queue.is_frozen() {
+                    queue.last_confirmed_input().unwrap_or_default()
+                } else {
+                    T::Input::default()
+                };
+                inputs.push((value, InputStatus::Disconnected));
             } else {
                 let queue = self.input_queues.get_mut(i)?;
                 inputs.push(queue.input(self.current_frame)?);
@@ -461,6 +703,19 @@ impl<T: Config> SyncLayer<T> {
     }
 
     /// Returns confirmed inputs for all players for the current frame of the sync layer.
+    ///
+    /// # Frozen-queue semantics
+    ///
+    /// When a player has been gracefully dropped via [`Self::freeze_player`]
+    /// (the `ContinueWithout` graceful-drop path), and the player is marked
+    /// disconnected past their last frame, this method surfaces the queue's
+    /// frozen `last_confirmed_input` (encoded into a `PlayerInput` with
+    /// [`Frame::NULL`]) instead of a blank/default input. This keeps the byte
+    /// stream sent to spectators consistent with the input stream remaining
+    /// peers actually simulate (see [`Self::synchronized_inputs`]). For
+    /// non-frozen disconnects (legacy halt path) and for queues that never
+    /// received any confirmed input before being frozen, blank input is still
+    /// returned to preserve back-compat.
     pub(crate) fn confirmed_inputs(
         &self,
         frame: Frame,
@@ -468,19 +723,32 @@ impl<T: Config> SyncLayer<T> {
     ) -> Result<Vec<PlayerInput<T::Input>>, FortressError> {
         let mut inputs = Vec::new();
         for (i, con_stat) in connect_status.iter().enumerate() {
+            let queue = self
+                .input_queues
+                .get(i)
+                .ok_or_else(|| input_queue_oob(i, self.input_queues.len()))?;
             if con_stat.disconnected && con_stat.last_frame < frame {
-                inputs.push(PlayerInput::blank_input(Frame::NULL));
+                // Mirror the freeze logic in `synchronized_inputs` so spectator
+                // state and player state agree on the dropped peer's input.
+                //
+                // The `Frame::NULL` stamp on dropped-peer entries is wire-safe:
+                // `InputBytes::from_inputs` derives the packet's frame from the
+                // first non-NULL entry (any still-connected peer in the same
+                // `inputs` slice supplies it), and `send_confirmed_inputs_to_spectators`
+                // tolerates `Frame::NULL` in its consistency check.
+                let frozen_input = if queue.is_frozen() {
+                    queue.last_confirmed_input()
+                } else {
+                    None
+                };
+                match frozen_input {
+                    Some(input) => inputs.push(PlayerInput {
+                        frame: Frame::NULL,
+                        input,
+                    }),
+                    None => inputs.push(PlayerInput::blank_input(Frame::NULL)),
+                }
             } else {
-                let queue =
-                    self.input_queues
-                        .get(i)
-                        .ok_or(FortressError::InternalErrorStructured {
-                            kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
-                                name: "input_queues",
-                                index: i,
-                                length: self.input_queues.len(),
-                            }),
-                        })?;
                 inputs.push(queue.confirmed_input(frame)?);
             }
         }
@@ -490,12 +758,11 @@ impl<T: Config> SyncLayer<T> {
     /// Sets the last confirmed frame to a given frame. By raising the last confirmed frame, we can discard all previous frames, as they are no longer necessary.
     pub(crate) fn set_last_confirmed_frame(&mut self, mut frame: Frame, save_mode: SaveMode) {
         // don't set the last confirmed frame after the first incorrect frame before a rollback has happened
-        let mut first_incorrect: Frame = Frame::NULL;
-        for handle in 0..self.num_players {
-            if let Some(queue) = self.input_queues.get(handle) {
-                first_incorrect = std::cmp::max(first_incorrect, queue.first_incorrect_frame());
-            }
-        }
+        let first_incorrect: Frame = self
+            .input_queues
+            .iter()
+            .map(InputQueue::first_incorrect_frame)
+            .fold(Frame::NULL, std::cmp::max);
 
         // if sparse saving option is turned on, don't set the last confirmed frame after the last saved frame
         if save_mode == SaveMode::Sparse {
@@ -521,24 +788,18 @@ impl<T: Config> SyncLayer<T> {
         self.last_confirmed_frame = frame;
         if self.last_confirmed_frame.as_i32() > 0 {
             let discard_frame = safe_frame_sub!(frame, 1, "SyncLayer::confirm_frame");
-            for i in 0..self.num_players {
-                if let Some(queue) = self.input_queues.get_mut(i) {
-                    queue.discard_confirmed_frames(discard_frame);
-                }
+            for queue in self.input_queues.iter_mut() {
+                queue.discard_confirmed_frames(discard_frame);
             }
         }
     }
 
     /// Finds the earliest incorrect frame detected by the individual input queues
     pub(crate) fn check_simulation_consistency(&self, mut first_incorrect: Frame) -> Frame {
-        for handle in 0..self.num_players {
-            if let Some(queue) = self.input_queues.get(handle) {
-                let incorrect = queue.first_incorrect_frame();
-                if !incorrect.is_null()
-                    && (first_incorrect.is_null() || incorrect < first_incorrect)
-                {
-                    first_incorrect = incorrect;
-                }
+        for queue in self.input_queues.iter() {
+            let incorrect = queue.first_incorrect_frame();
+            if !incorrect.is_null() && (first_incorrect.is_null() || incorrect < first_incorrect) {
+                first_incorrect = incorrect;
             }
         }
         first_incorrect
@@ -551,14 +812,11 @@ impl<T: Config> SyncLayer<T> {
         disconnect_frame: Frame,
     ) -> Vec<(PlayerHandle, Frame)> {
         let mut result = Vec::new();
-        for handle in 0..self.num_players {
-            if let Some(queue) = self.input_queues.get(handle) {
-                let incorrect = queue.first_incorrect_frame();
-                if !incorrect.is_null()
-                    && (disconnect_frame.is_null() || incorrect <= disconnect_frame)
-                {
-                    result.push((PlayerHandle::new(handle), incorrect));
-                }
+        for (handle, queue) in self.input_queues.iter().enumerate() {
+            let incorrect = queue.first_incorrect_frame();
+            if !incorrect.is_null() && (disconnect_frame.is_null() || incorrect <= disconnect_frame)
+            {
+                result.push((PlayerHandle::new(handle), incorrect));
             }
         }
         result
@@ -594,6 +852,15 @@ impl<T: Config> SyncLayer<T> {
         self.last_confirmed_frame
     }
 }
+
+/// Compile-time guarantee that the fallback inside
+/// [`SyncLayer::with_queue_length`] is sound: the library constant
+/// the fallback hands to `InputQueue::with_queue_length` must satisfy
+/// that function's `>= 2` precondition. Evaluated in every build —
+/// not only `#[cfg(test)]` — so the compiler refuses any future
+/// regression that violates it (e.g., a new feature gate that
+/// accidentally reduces `INPUT_QUEUE_LENGTH` below 2).
+const _INPUT_QUEUE_LENGTH_IS_VALID: () = assert!(crate::input_queue::INPUT_QUEUE_LENGTH >= 2);
 
 impl<T: Config> InvariantChecker for SyncLayer<T> {
     /// Checks the invariants of the SyncLayer.
@@ -786,6 +1053,35 @@ mod sync_layer_tests {
             },
             _ => panic!("Expected InvalidPlayerHandle error"),
         }
+    }
+
+    #[test]
+    fn test_with_queue_length_invalid_falls_back_to_default_and_preserves_invariant() {
+        // queue_length < 2 is invalid for InputQueue::with_queue_length;
+        // the constructor must fall back to the library default and still
+        // produce one input queue per player so downstream invariants
+        // (input_queues.len() == num_players) hold.
+        let sync_layer = SyncLayer::<TestConfig>::with_queue_length(3, 8, 1);
+        assert_eq!(
+            sync_layer.input_queues.len(),
+            3,
+            "input_queues.len() must equal num_players even when queue_length is invalid"
+        );
+        assert_eq!(sync_layer.num_players, 3);
+        assert_eq!(sync_layer.max_prediction, 8);
+        // queue_length=0 also falls back.
+        let sync_layer_zero = SyncLayer::<TestConfig>::with_queue_length(2, 4, 0);
+        assert_eq!(sync_layer_zero.input_queues.len(), 2);
+    }
+
+    #[test]
+    fn input_queue_length_constant_is_valid_for_with_queue_length() {
+        // `_INPUT_QUEUE_LENGTH_IS_VALID` is a non-generic, module-level
+        // const, so the `assert!` is evaluated unconditionally at compile
+        // time. Referencing it here only surfaces the invariant in
+        // test-runner reports — the test would never run if the const
+        // expression failed.
+        let () = super::_INPUT_QUEUE_LENGTH_IS_VALID;
     }
 
     #[test]
@@ -1965,6 +2261,13 @@ mod sync_layer_tests {
 /// 2. Reduce loop iteration counts
 /// 3. Avoid calling complex methods like `add_remote_input` which involve InputQueue operations
 /// 4. Test one behavior at a time rather than multiple assertions in one proof
+///
+/// Critical anti-pattern (regression caught 2026-05-09): a `kani::any()` value
+/// that flows into a function and becomes a *loop bound* causes CBMC path
+/// explosion. Symbolic values are safe when they only size data structures
+/// (single allocation), but lethal when they bound loops the verifier must
+/// unroll. If a proof using kani::any() hangs or causes runner shutdown,
+/// concretize the parameter that flows into the loop bound.
 #[cfg(kani)]
 mod kani_sync_layer_proofs {
     use super::*;
@@ -1985,56 +2288,111 @@ mod kani_sync_layer_proofs {
         type Address = SocketAddr;
     }
 
-    /// Proof: New SyncLayer has valid initial state.
+    const MIN_TRACTABLE_QUEUE_LENGTH: usize = 2;
+
+    fn minimal_sync_layer(num_players: usize, max_prediction: usize) -> SyncLayer<TestConfig> {
+        SyncLayer::<TestConfig>::with_queue_length(
+            num_players,
+            max_prediction,
+            MIN_TRACTABLE_QUEUE_LENGTH,
+        )
+    }
+
+    /// Proof: The default input queue length is valid for `SyncLayer::new`.
     ///
-    /// Verifies all invariants hold at initialization.
-    /// Note: Bounds are reduced for Kani verification tractability.
+    /// This keeps default-constructor precondition coverage separate from
+    /// broader constructor-state proofs, which use the minimal valid queue
+    /// length to keep Kani's state space bounded.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: default queue length satisfies InputQueue construction
+    /// - Related: proof_minimal_sync_layer_initial_state_valid_1p,
+    ///   proof_minimal_sync_layer_initial_state_valid_2p
+    #[kani::proof]
+    fn proof_sync_layer_default_queue_length_valid() {
+        kani::assert(
+            crate::input_queue::INPUT_QUEUE_LENGTH >= MIN_TRACTABLE_QUEUE_LENGTH,
+            "default input queue length should be valid",
+        );
+    }
+
+    // Asserts the structural and frame-state invariants for a freshly-constructed
+    // SyncLayer. Factored out so the per-num_players proofs share one assertion
+    // body — keeping the harnesses CBMC-tractable by concretizing num_players
+    // (which would otherwise drive a symbolic loop bound in
+    // SyncLayer::with_queue_length, see lines 2249-2270 for the policy).
+    fn assert_initial_state(
+        sync_layer: &SyncLayer<TestConfig>,
+        expected_num_players: usize,
+        expected_max_prediction: usize,
+    ) {
+        // INV-1: current_frame starts at 0
+        kani::assert(
+            sync_layer.current_frame() == Frame::new(0),
+            "SyncLayer should start at frame 0",
+        );
+
+        // INV-7: last_confirmed_frame <= current_frame (NULL is treated as -1)
+        kani::assert(
+            sync_layer.last_confirmed_frame().is_null(),
+            "SyncLayer should have null last_confirmed_frame",
+        );
+
+        // INV-8: last_saved_frame <= current_frame
+        kani::assert(
+            sync_layer.last_saved_frame().is_null(),
+            "SyncLayer should have null last_saved_frame",
+        );
+
+        // Structural invariants
+        kani::assert(
+            sync_layer.num_players == expected_num_players,
+            "num_players should be set correctly",
+        );
+        kani::assert(
+            sync_layer.max_prediction == expected_max_prediction,
+            "max_prediction should be set correctly",
+        );
+        kani::assert(
+            sync_layer.input_queues.len() == expected_num_players,
+            "Should have one input queue per player",
+        );
+    }
+
+    /// Proof: Minimal SyncLayer construction has valid initial state (1 player).
+    ///
+    /// Concretizes num_players=1 to keep CBMC tractable. The {1, 2}-player axis is
+    /// covered by this proof and proof_minimal_sync_layer_initial_state_valid_2p
+    /// together; max_prediction is enumerated symbolically across {1, 2, 3}.
     ///
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Initial SyncLayer state validity (INV-1, INV-7, INV-8)
     /// - Related: proof_advance_frame_monotonic, proof_saved_states_count
     #[kani::proof]
     #[kani::unwind(12)]
-    fn proof_new_sync_layer_valid() {
-        let num_players: usize = kani::any();
+    fn proof_minimal_sync_layer_initial_state_valid_1p() {
         let max_prediction: usize = kani::any();
-
-        kani::assume(num_players > 0 && num_players <= 2);
         kani::assume(max_prediction > 0 && max_prediction <= 3);
+        let sync_layer = minimal_sync_layer(1, max_prediction);
+        assert_initial_state(&sync_layer, 1, max_prediction);
+    }
 
-        let sync_layer = SyncLayer::<TestConfig>::new(num_players, max_prediction);
-
-        // INV-1: current_frame starts at 0
-        kani::assert(
-            sync_layer.current_frame() == Frame::new(0),
-            "New SyncLayer should start at frame 0",
-        );
-
-        // INV-7: last_confirmed_frame <= current_frame (NULL is treated as -1)
-        kani::assert(
-            sync_layer.last_confirmed_frame().is_null(),
-            "New SyncLayer should have null last_confirmed_frame",
-        );
-
-        // INV-8: last_saved_frame <= current_frame
-        kani::assert(
-            sync_layer.last_saved_frame().is_null(),
-            "New SyncLayer should have null last_saved_frame",
-        );
-
-        // Structural invariants
-        kani::assert(
-            sync_layer.num_players == num_players,
-            "num_players should be set correctly",
-        );
-        kani::assert(
-            sync_layer.max_prediction == max_prediction,
-            "max_prediction should be set correctly",
-        );
-        kani::assert(
-            sync_layer.input_queues.len() == num_players,
-            "Should have one input queue per player",
-        );
+    /// Proof: Minimal SyncLayer construction has valid initial state (2 players).
+    ///
+    /// Concretizes num_players=2 to keep CBMC tractable. The {1, 2}-player axis is
+    /// covered by this proof and proof_minimal_sync_layer_initial_state_valid_1p
+    /// together; max_prediction is enumerated symbolically across {1, 2, 3}.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Initial SyncLayer state validity (INV-1, INV-7, INV-8)
+    /// - Related: proof_advance_frame_monotonic, proof_saved_states_count
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn proof_minimal_sync_layer_initial_state_valid_2p() {
+        let max_prediction: usize = kani::any();
+        kani::assume(max_prediction > 0 && max_prediction <= 3);
+        let sync_layer = minimal_sync_layer(2, max_prediction);
+        assert_initial_state(&sync_layer, 2, max_prediction);
     }
 
     /// Proof: advance_frame maintains INV-1 (monotonicity).
@@ -2043,7 +2401,9 @@ mod kani_sync_layer_proofs {
     ///
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Frame monotonicity (INV-1)
-    /// - Related: proof_multiple_advances_monotonic, proof_new_sync_layer_valid
+    /// - Related: proof_multiple_advances_monotonic,
+    ///   proof_minimal_sync_layer_initial_state_valid_1p,
+    ///   proof_minimal_sync_layer_initial_state_valid_2p
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_advance_frame_monotonic() {
@@ -2228,7 +2588,9 @@ mod kani_sync_layer_proofs {
     ///
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: SavedStates has max_prediction + 1 slots
-    /// - Related: proof_new_sync_layer_valid, proof_saved_states_circular_index
+    /// - Related: proof_minimal_sync_layer_initial_state_valid_1p,
+    ///   proof_minimal_sync_layer_initial_state_valid_2p,
+    ///   proof_saved_states_circular_index
     #[kani::proof]
     #[kani::unwind(12)]
     fn proof_saved_states_count() {
@@ -2299,7 +2661,8 @@ mod kani_sync_layer_proofs {
     ///
     /// - Tier: 3 (Slow, >2min)
     /// - Verifies: reset_prediction preserves frame invariants
-    /// - Related: proof_new_sync_layer_valid
+    /// - Related: proof_minimal_sync_layer_initial_state_valid_1p,
+    ///   proof_minimal_sync_layer_initial_state_valid_2p
     ///   (proof_load_frame_validates_bounds and proof_load_frame_success_maintains_invariants
     ///   still exercise SyncLayer::new(2, 3) for broader multi-player coverage)
     #[kani::proof]

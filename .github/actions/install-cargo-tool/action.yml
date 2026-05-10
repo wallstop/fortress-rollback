@@ -56,12 +56,25 @@ runs:
       shell: bash
       run: |
         TOOL_NAME="${{ inputs.tool }}"
+        REQUIRED_VERSION="${{ inputs.version }}"
         # Convert cargo-foo to cargo foo for version check
         CARGO_CMD="${TOOL_NAME#cargo-}"
+        # shellcheck source=.github/actions/install-cargo-tool/version-check.sh
+        source "$GITHUB_ACTION_PATH/version-check.sh"
 
         if command -v "$TOOL_NAME" &> /dev/null || cargo "$CARGO_CMD" --version &> /dev/null 2>&1; then
-          echo "installed=true" >> "$GITHUB_OUTPUT"
-          echo "✅ $TOOL_NAME is already installed (from cache)"
+          VERSION_OUTPUT="$(cargo "$CARGO_CMD" --version 2>/dev/null || "$TOOL_NAME" --version 2>/dev/null || true)"
+          if installed_version_matches "$TOOL_NAME" "$VERSION_OUTPUT" "$REQUIRED_VERSION"; then
+            echo "installed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ $TOOL_NAME is already installed (from cache)"
+            printf '%s\n' "$VERSION_OUTPUT"
+          else
+            echo "installed=false" >> "$GITHUB_OUTPUT"
+            echo "⚠️ Cached $TOOL_NAME version does not match requested version $REQUIRED_VERSION"
+            printf '%s\n' "$VERSION_OUTPUT"
+            rm -f "$HOME/.cargo/bin/$TOOL_NAME" "$HOME/.cargo/bin/$TOOL_NAME.exe"
+            echo "📦 $TOOL_NAME needs to be installed"
+          fi
         else
           echo "installed=false" >> "$GITHUB_OUTPUT"
           echo "📦 $TOOL_NAME needs to be installed"
@@ -139,7 +152,10 @@ runs:
       shell: bash
       run: |
         TOOL_NAME="${{ inputs.tool }}"
+        REQUIRED_VERSION="${{ inputs.version }}"
         CARGO_CMD="${TOOL_NAME#cargo-}"
+        # shellcheck source=.github/actions/install-cargo-tool/version-check.sh
+        source "$GITHUB_ACTION_PATH/version-check.sh"
 
         # Check if tool is now available
         if command -v "$TOOL_NAME" &> /dev/null || cargo "$CARGO_CMD" --version &> /dev/null 2>&1; then
@@ -162,7 +178,17 @@ runs:
           fi
 
           # Show version
-          cargo "$CARGO_CMD" --version || "$TOOL_NAME" --version || echo "(version check not available)"
+          VERSION_OUTPUT="$(cargo "$CARGO_CMD" --version 2>/dev/null || "$TOOL_NAME" --version 2>/dev/null || true)"
+          if [ -n "$VERSION_OUTPUT" ]; then
+            printf '%s\n' "$VERSION_OUTPUT"
+          else
+            echo "(version check not available)"
+          fi
+
+          if ! installed_version_matches "$TOOL_NAME" "$VERSION_OUTPUT" "$REQUIRED_VERSION"; then
+            echo "❌ ERROR: $TOOL_NAME version does not match requested version $REQUIRED_VERSION"
+            exit 1
+          fi
         else
           echo "❌ ERROR: Failed to install $TOOL_NAME after all attempts"
           echo "method=failed" >> "$GITHUB_OUTPUT"

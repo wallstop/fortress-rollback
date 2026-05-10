@@ -4,31 +4,31 @@ on:
   push:
     branches: [main]
     paths:
-      - '**.md'
-      - '**.rs'
-      - 'docs/**'
-      - 'wiki/**'
-      - 'scripts/**'
-      - '.markdownlint.json'
-      - '.markdown-link-check.json'
-      - '.lychee.toml'
-      - '.vale.ini'
-      - '.vale/**'
-      - '.github/workflows/ci-docs.yml'
+      - "**.md"
+      - "**.rs"
+      - "docs/**"
+      - "wiki/**"
+      - "scripts/**"
+      - ".markdownlint.json"
+      - ".markdown-link-check.json"
+      - ".lychee.toml"
+      - ".vale.ini"
+      - ".vale/**"
+      - ".github/workflows/ci-docs.yml"
   pull_request:
     branches: [main]
     paths:
-      - '**.md'
-      - '**.rs'
-      - 'docs/**'
-      - 'wiki/**'
-      - 'scripts/**'
-      - '.markdownlint.json'
-      - '.markdown-link-check.json'
-      - '.lychee.toml'
-      - '.vale.ini'
-      - '.vale/**'
-      - '.github/workflows/ci-docs.yml'
+      - "**.md"
+      - "**.rs"
+      - "docs/**"
+      - "wiki/**"
+      - "scripts/**"
+      - ".markdownlint.json"
+      - ".markdown-link-check.json"
+      - ".lychee.toml"
+      - ".vale.ini"
+      - ".vale/**"
+      - ".github/workflows/ci-docs.yml"
   workflow_dispatch:
 
 jobs:
@@ -43,7 +43,7 @@ jobs:
   vale-lint:
     name: Vale Prose Lint
     runs-on: ubuntu-latest
-    continue-on-error: true  # Advisory, not blocking initially
+    continue-on-error: true # Advisory, not blocking initially
 
     steps:
       - uses: actions/checkout@v6
@@ -121,15 +121,36 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
 
             # Emit GitHub annotations from vale output (limit to 50 to avoid noise)
-            # Vale --output=line format: filepath:line:col:rule:message (5 colon-separated fields)
-            # Example: docs/guide.md:15:1:write-good.Weasel:'few' is a weasel word!
-            head -50 vale-output.txt | while IFS=: read -r file line col rule message; do
+            # Handle both line formats:
+            # - path:line:col:rule:message
+            # - path:line:col:rule:severity:message
+            head -50 vale-output.txt | while IFS= read -r finding; do
+              [ -z "$finding" ] && continue
+
+              IFS=: read -r file line col rule maybe_severity message <<< "$finding"
               [ -z "$file" ] && continue
-              # All Vale findings in this config are advisory (suggestions/warnings)
-              # Map to GitHub notice level for non-blocking visibility
-              level="notice"
-              # Emit GitHub annotation
-              echo "::${level} file=${file},line=${line},col=${col}::[${rule}] ${message}"
+
+              # In 5-field output, maybe_severity is actually the message.
+              if [ -z "$message" ]; then
+                severity="warning"
+                message="$maybe_severity"
+              else
+                severity="$maybe_severity"
+              fi
+
+              case "$severity" in
+                error)
+                  level="error"
+                  ;;
+                warning)
+                  level="warning"
+                  ;;
+                *)
+                  level="notice"
+                  ;;
+              esac
+
+              echo "::${level} file=${file},line=${line},col=${col}::[${rule}:${severity}] ${message}"
             done
           fi
 
@@ -154,7 +175,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Validate wiki consistency
         run: python scripts/docs/check-wiki-consistency.py
@@ -172,7 +193,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install test dependencies
         run: pip install pytest pyyaml
@@ -196,7 +217,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Install markdownlint-cli
         run: npm install -g markdownlint-cli
@@ -270,19 +291,63 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Install markdown-link-check
         run: npm install -g markdown-link-check
 
       - name: Check markdown links (external)
         run: |
-          find . -name "*.md" \
-            -not -path "./target/*" \
-            -not -path "./fuzz/target/*" \
-            -not -path "./loom-tests/target/*" \
-            -exec markdown-link-check --config .markdown-link-check.json {} \;
-        continue-on-error: true  # External links may have rate limits
+          set +e
+          total_files=0
+          failed_files=0
+          : > markdown-link-check-output.txt
+
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            total_files=$((total_files + 1))
+
+            echo "FILE: $file" | tee -a markdown-link-check-output.txt
+            markdown-link-check --config .markdown-link-check.json "$file" 2>&1 | tee -a markdown-link-check-output.txt
+            status=${PIPESTATUS[0]}
+            if [ "$status" -ne 0 ]; then
+              failed_files=$((failed_files + 1))
+            fi
+            echo "" | tee -a markdown-link-check-output.txt
+          done < <(
+            find . -name "*.md" \
+              -not -path "./target/*" \
+              -not -path "./fuzz/target/*" \
+              -not -path "./loom-tests/target/*" \
+              -not -path "./wiki/*" \
+              | sort
+          )
+
+          set -e
+          {
+            echo "## External Markdown Link Check"
+            echo ""
+            echo "- Files scanned: $total_files"
+            echo "- Files with dead links: $failed_files"
+            if [ "$failed_files" -gt 0 ]; then
+              echo "- Result: advisory issues detected; see markdown-link-check-output.txt for details."
+            else
+              echo "- Result: no dead links found."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$failed_files" -gt 0 ]; then
+            echo "::warning::markdown-link-check found dead links in $failed_files file(s). See markdown-link-check-output.txt for details."
+          fi
+        continue-on-error: true # External links may have rate limits
+
+      - name: Upload external markdown-link-check report
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: markdown-link-check-report
+          path: markdown-link-check-output.txt
+          retention-days: 7
 
       - name: Check local file links
         run: ./scripts/docs/check-links.sh
@@ -293,7 +358,7 @@ jobs:
   lychee-link-check:
     name: Lychee Link Check
     runs-on: ubuntu-latest
-    continue-on-error: true  # Advisory initially, may find different issues
+    continue-on-error: true # Advisory initially, may find different issues
 
     steps:
       - uses: actions/checkout@v6
@@ -306,7 +371,27 @@ jobs:
           restore-keys: |
             lychee-cache-
 
+      - name: Validate lychee config schema
+        id: lychee_config
+        uses: lycheeverse/lychee-action@v2
+        continue-on-error: true
+        with:
+          args: >-
+            --config .lychee.toml
+            --dump
+            README.md
+          fail: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Annotate lychee config errors
+        if: steps.lychee_config.outcome == 'failure'
+        run: |
+          echo "::error file=.lychee.toml::Lychee configuration validation failed. Compare against https://github.com/lycheeverse/lychee/blob/master/lychee.example.toml and check the Lychee Config Validation step logs for schema details."
+
       - name: Run lychee link checker
+        id: lychee
+        if: steps.lychee_config.outcome == 'success'
         uses: lycheeverse/lychee-action@v2
         with:
           # Check docs and top-level markdown files
@@ -321,9 +406,42 @@ jobs:
             'LICENSE*'
             '*.md'
           output: lychee-report.md
-          fail: false  # Don't fail the workflow on broken links initially
+          fail: false # Don't fail the workflow on broken links initially
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Annotate lychee runtime errors
+        if: always() && steps.lychee.outcome == 'failure'
+        run: |
+          echo "::warning::Lychee link check step failed. If logs mention 'unknown field' or 'TOML parse error', update .lychee.toml schema; otherwise review broken-link diagnostics in lychee-report.md."
+
+      - name: Summarize lychee run
+        if: always()
+        run: |
+          if [ "${{ steps.lychee_config.outcome }}" = "failure" ]; then
+            {
+              echo "## Lychee Link Check"
+              echo ""
+              echo "- Config validation: failed"
+              echo "- Link scan: skipped"
+              echo "- Action: fix .lychee.toml schema before trusting Lychee results."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ steps.lychee.outcome }}" = "failure" ]; then
+            {
+              echo "## Lychee Link Check"
+              echo ""
+              echo "- Config validation: passed"
+              echo "- Link scan: advisory failures detected"
+              echo "- Action: inspect lychee-report.md artifact for failing URLs."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## Lychee Link Check"
+              echo ""
+              echo "- Config validation: passed"
+              echo "- Link scan: completed"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload lychee report
         uses: actions/upload-artifact@v7
@@ -540,7 +658,7 @@ jobs:
               echo "✅ Coverage meets or exceeds 90% target" >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
-        continue-on-error: true  # Nightly features may break, don't fail CI
+        continue-on-error: true # Nightly features may break, don't fail CI
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v7

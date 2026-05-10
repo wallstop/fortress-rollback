@@ -208,7 +208,7 @@ def parse_wiki_links_from_string(
             display_text = match.group(1).strip()
             target = match.group(2).strip()
             # Skip external URLs and anchors
-            if target.startswith(("http://", "https://", "#", "mailto:")):
+            if target.startswith(("http://", "https://", "#", "mailto:", "tel:")):
                 continue
             # Skip if this markdown link overlaps with a wiki-link position
             # This avoids double-parsing when wiki-link syntax contains brackets.

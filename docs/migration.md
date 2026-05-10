@@ -14,6 +14,7 @@ Fortress Rollback is the correctness-first, verified fork of the original `ggrs`
 - Ensure your `Config::Address` type implements `Ord` + `PartialOrd` (in addition to `Clone + Eq + Hash`).
 - Rename types: `GgrsError` → `FortressError`, `GgrsEvent` → `FortressEvent`, `GgrsRequest` → `FortressRequest`.
 - All examples/tests now import `fortress_rollback`; mirror that pattern in your code.
+- **New in Unreleased:** runtime input-delay adjustment (`set_input_delay`/`input_delay`), opt-in graceful peer drop (`DisconnectBehavior::ContinueWithout`, `with_disconnect_behavior`), and explicit graceful removal (`remove_player`); exhaustive matches on `FortressEvent`, `InvalidRequestKind`, and `InternalErrorKind` need new arms — see [Unreleased section](#unreleased-runtime-input-delay-disconnect-behavior-and-graceful-peer-removal).
 
 ## Dependency Changes
 
@@ -424,6 +425,231 @@ Key differences when using the trait:
 The trait is available in the prelude: `use fortress_rollback::prelude::*;`
 
 For comprehensive examples including a generic game loop, see the [User Guide — Using the Session Trait](user-guide.md#using-the-session-trait).
+
+## Unreleased: Runtime Input Delay, Disconnect Behavior, and Graceful Peer Removal
+
+The forthcoming release introduces three closely related capabilities for `P2PSession`: runtime input-delay adjustment, configurable disconnect behavior, and explicit graceful peer removal. The features are **additive**: existing applications that build sessions with [`SessionBuilder::with_input_delay`](user-guide.md#complete-configuration-reference) — see also [Understanding Input Delay](user-guide.md#understanding-input-delay) for the conceptual background — default `DisconnectBehavior::Halt`, and the legacy `disconnect_player` continue to work unchanged. The breaking-change implications are limited to **exhaustive matches** on a small set of public enums.
+
+### Backwards compatibility at a glance
+
+- `SessionBuilder::with_disconnect_behavior` defaults to `DisconnectBehavior::Halt`, which preserves the legacy GGRS-style halt-on-drop semantics. Code that does not call `with_disconnect_behavior` keeps its current behavior.
+- `P2PSession::disconnect_player` is unchanged. The new `remove_player` is added alongside it; you only need to migrate to `remove_player` if you want graceful drop.
+- `P2PSession::set_input_delay` is a new method. Existing code that fixes the delay at construction time via `with_input_delay` continues to work; mid-session adjustment is opt-in.
+
+### Breaking-change implications for exhaustive matches
+
+`FortressEvent`, `InvalidRequestKind`, and `InternalErrorKind` are **not** `#[non_exhaustive]`. Code that exhaustively matches on these enums must add arms for the new variants:
+
+#### `FortressEvent` — new variants
+
+```rust
+// Before
+match event {
+    FortressEvent::Synchronizing { .. } => { /* ... */ },
+    FortressEvent::Synchronized { .. } => { /* ... */ },
+    FortressEvent::Disconnected { .. } => { /* ... */ },
+    FortressEvent::NetworkInterrupted { .. } => { /* ... */ },
+    FortressEvent::NetworkResumed { .. } => { /* ... */ },
+    FortressEvent::WaitRecommendation { .. } => { /* ... */ },
+    FortressEvent::DesyncDetected { .. } => { /* ... */ },
+    FortressEvent::SyncTimeout { .. } => { /* ... */ },
+    FortressEvent::ReplayDesync { .. } => { /* ... */ },
+}
+
+// After
+match event {
+    FortressEvent::Synchronizing { .. } => { /* ... */ },
+    FortressEvent::Synchronized { .. } => { /* ... */ },
+    FortressEvent::Disconnected { .. } => { /* ... */ },
+    FortressEvent::NetworkInterrupted { .. } => { /* ... */ },
+    FortressEvent::NetworkResumed { .. } => { /* ... */ },
+    FortressEvent::WaitRecommendation { .. } => { /* ... */ },
+    FortressEvent::DesyncDetected { .. } => { /* ... */ },
+    FortressEvent::SyncTimeout { .. } => { /* ... */ },
+    FortressEvent::ReplayDesync { .. } => { /* ... */ },
+    // NEW: emitted on graceful drop. Always paired with `Disconnected` in the
+    // same batch; see User Guide → Disconnect Behavior and Graceful Peer Drop.
+    FortressEvent::PeerDropped { handle, addr } => {
+        // Mark the peer as AI-controlled, show "left the game" UI, etc.
+        let _ = (handle, addr);
+    },
+    // NEW: reserved for application-level heuristics. No built-in emitter
+    // currently produces this event; you may bind-and-ignore
+    // (`InputDelayRecommendation { .. } => {}`) if you do not consume it.
+    // Using `_ => {}` would defeat the exhaustive-match check that prompted
+    // this migration step.
+    FortressEvent::InputDelayRecommendation {
+        player_handle,
+        current_delay,
+        suggested_delay,
+    } => {
+        let _ = (player_handle, current_delay, suggested_delay);
+    },
+}
+```
+
+#### `InvalidRequestKind` — new variants
+
+```rust
+// After
+match err_kind {
+    // ... existing variants ...
+    InvalidRequestKind::InputDelayDecreaseUnsupported { current, requested } => {
+        eprintln!(
+            "Cannot lower input delay from {current} to {requested} mid-session"
+        );
+    },
+    InvalidRequestKind::InputDelayMidSessionMultiLocalUnsupported { local_players } => {
+        eprintln!(
+            "Mid-session input-delay increase is not supported with {local_players} local players"
+        );
+    },
+    InvalidRequestKind::InputDelayMidSessionPendingOutputFull { delta, capacity } => {
+        eprintln!(
+            "Pending-output buffer full: needed {delta} slots, {capacity} available"
+        );
+    },
+    InvalidRequestKind::PlayerAlreadyRemoved { handle } => {
+        eprintln!("Peer {handle} was already removed; ignoring duplicate request");
+    },
+}
+```
+
+#### `InternalErrorKind` — new variant
+
+```rust
+// After
+match internal_kind {
+    // ... existing variants ...
+    InternalErrorKind::InputQueueGapFillFailed { frame } => {
+        // Library invariant violation while replicating gap-fill bytes during
+        // a mid-session input-delay increase. Treat as a bug and report.
+        eprintln!("internal: input-queue gap-fill failed at frame {frame}");
+    },
+}
+```
+
+If you currently use `_ =>` wildcard arms, no changes are required — but consider replacing the wildcard with explicit arms so future additions are caught at compile time.
+
+### Before / After: dynamically adjusting input delay
+
+Previously, the only way to change a session's input delay was at construction time, by branching on measured network conditions and choosing a value before calling `start_p2p_session`. Mid-match adjustments required tearing down and rebuilding the session.
+
+```rust
+// Before: input delay is fixed for the lifetime of the session.
+let session = SessionBuilder::<GameConfig>::new()
+    .with_num_players(2)?
+    .add_player(PlayerType::Local, PlayerHandle::new(0))?
+    .add_player(PlayerType::Remote(addr), PlayerHandle::new(1))?
+    .with_input_delay(2)?
+    .start_p2p_session(socket)?;
+
+// To change the delay, you would have to drop the session and rebuild it.
+```
+
+```rust
+// After: read the current delay and increase it mid-session in response to
+// network conditions. Decreases mid-session are not supported.
+const MAX_INPUT_DELAY: usize = 8;
+let local = PlayerHandle::new(0);
+let stats = session.network_stats(remote_handle)?;
+let current = session.input_delay(local)?;
+if stats.ping > 120 && current < MAX_INPUT_DELAY {
+    match session.set_input_delay(local, current.saturating_add(1).min(MAX_INPUT_DELAY)) {
+        Ok(()) => { /* applied */ },
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::InputDelayMidSessionPendingOutputFull { .. },
+        }) => {
+            // Try again next tick after acknowledgements catch up.
+        },
+        Err(other) => return Err(other),
+    }
+}
+```
+
+See the [User Guide — Adjusting Input Delay at Runtime](user-guide.md#adjusting-input-delay-at-runtime) for the full constraint list and a complete example.
+
+### Before / After: handling a peer disconnect gracefully
+
+Previously, the only way to react to a peer disconnect was to observe `FortressEvent::Disconnected` and tear down the session — `P2PSession::disconnect_player` did not freeze the input queue, so under default `Halt` semantics the session simply stopped advancing.
+
+```rust
+// Before: a disconnect halts the session. There were two ways to react:
+//
+// 1. Observe `FortressEvent::Disconnected` from a network-driven drop and
+//    tear down the match.
+// 2. Call `disconnect_player(handle)` explicitly when the application
+//    decided to drop a peer (kick, surrender, etc.). Under default `Halt`
+//    semantics this also halts the session because `confirmed_frame()`
+//    stops progressing once the peer is marked disconnected; the input
+//    queue is **not** frozen and `FortressEvent::PeerDropped` is **not**
+//    emitted.
+session.disconnect_player(handle)?;
+for event in session.events() {
+    if let FortressEvent::Disconnected { addr } = event {
+        eprintln!("Disconnected from {addr}; tearing down match");
+        return Ok(());
+    }
+}
+```
+
+```rust
+// After (option 1): opt in to automatic graceful drop on timeout.
+let mut session = SessionBuilder::<GameConfig>::new()
+    .with_num_players(3)?
+    .add_player(PlayerType::Local, PlayerHandle::new(0))?
+    .add_player(PlayerType::Remote(a1), PlayerHandle::new(1))?
+    .add_player(PlayerType::Remote(a2), PlayerHandle::new(2))?
+    .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+    .start_p2p_session(socket)?;
+
+for event in session.events() {
+    match event {
+        FortressEvent::PeerDropped { handle, addr } => {
+            eprintln!("Peer {handle} ({addr}) left; continuing with remaining peers");
+        },
+        FortressEvent::Disconnected { .. } => { /* paired event; legacy consumers */ },
+        _ => {},
+    }
+}
+```
+
+```rust
+// After (option 2): drop a specific peer immediately (kick / surrender / leave).
+match session.remove_player(conceding_remote) {
+    Ok(()) => {},
+    Err(FortressError::InvalidRequestStructured {
+        kind: InvalidRequestKind::PlayerAlreadyRemoved { .. },
+    }) => {
+        // Already removed (e.g., a timeout fired first). Treat as a no-op.
+    },
+    Err(other) => return Err(other),
+}
+```
+
+The legacy `disconnect_player` is preserved for back-compat. New code should prefer `remove_player` for graceful drops; see [User Guide — Choosing Between `disconnect_player` and `remove_player`](user-guide.md#choosing-between-disconnect_player-and-remove_player) for the full distinction.
+
+### Before / After: `handles_by_address` now takes `&T::Address`
+
+`PlayerRegistry::handles_by_address`, `PlayerRegistry::handles_by_address_iter`, and the `P2PSession` forwarders now borrow the address rather than taking ownership. Pass `&addr` instead of `addr` at every call site.
+
+```rust
+// Before: address taken by value (cloned at call site for owned variables).
+let handles = session.handles_by_address(peer_addr);
+for handle in session.handles_by_address_iter(peer_addr.clone()) {
+    println!("{handle}");
+}
+```
+
+```rust
+// After: address borrowed; no clone required.
+let handles = session.handles_by_address(&peer_addr);
+for handle in session.handles_by_address_iter(&peer_addr) {
+    println!("{handle}");
+}
+```
+
+This change is mechanical: add a leading `&` to every call. There are no behavioral changes.
 
 ## More Information
 

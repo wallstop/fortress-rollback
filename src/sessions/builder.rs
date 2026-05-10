@@ -17,7 +17,7 @@ use crate::{
 
 // Re-export config types for backwards compatibility with code that imports from builder
 pub use crate::sessions::config::{
-    InputQueueConfig, ProtocolConfig, SaveMode, SpectatorConfig, SyncConfig,
+    DisconnectBehavior, InputQueueConfig, ProtocolConfig, SaveMode, SpectatorConfig, SyncConfig,
 };
 
 const DEFAULT_PLAYERS: usize = 2;
@@ -107,6 +107,11 @@ where
     recording: bool,
     /// Optional telemetry observer for session performance events.
     telemetry: Option<Arc<dyn SessionTelemetry>>,
+    /// Controls how a [`P2PSession`] reacts when a remote peer's
+    /// disconnect-timeout fires. See [`DisconnectBehavior`] for options.
+    /// Defaults to [`DisconnectBehavior::Halt`] for back-compat with legacy
+    /// GGRS-style behavior.
+    disconnect_behavior: DisconnectBehavior,
 }
 
 impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
@@ -136,6 +141,7 @@ impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
             event_queue_size,
             recording,
             telemetry,
+            disconnect_behavior,
         } = self;
 
         f.debug_struct("SessionBuilder")
@@ -161,6 +167,7 @@ impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
             .field("input_queue_config", input_queue_config)
             .field("event_queue_size", event_queue_size)
             .field("recording", recording)
+            .field("disconnect_behavior", disconnect_behavior)
             .finish()
     }
 }
@@ -197,6 +204,7 @@ impl<T: Config> SessionBuilder<T> {
             event_queue_size: DEFAULT_EVENT_QUEUE_SIZE,
             recording: false,
             telemetry: None,
+            disconnect_behavior: DisconnectBehavior::default(),
         }
     }
 
@@ -469,6 +477,34 @@ impl<T: Config> SessionBuilder<T> {
     /// Sets the time before the first notification will be sent in case of a prolonged period of no received packages.
     pub fn with_disconnect_notify_delay(mut self, notify_delay: Duration) -> Self {
         self.disconnect_notify_start = notify_delay;
+        self
+    }
+
+    /// Controls what happens when a peer disconnects mid-session.
+    ///
+    /// Defaults to [`DisconnectBehavior::Halt`] for back-compat with the
+    /// legacy GGRS-style behavior. Set to [`DisconnectBehavior::ContinueWithout`]
+    /// to enable graceful peer drop: the dropped peer's input queue is frozen
+    /// (it repeats their last confirmed input forever), a
+    /// [`crate::FortressEvent::PeerDropped`] event is emitted, and the
+    /// session keeps advancing for the remaining peers.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fortress_rollback::{Config, DisconnectBehavior, SessionBuilder};
+    ///
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Input = u8;
+    /// #     type State = ();
+    /// #     type Address = std::net::SocketAddr;
+    /// # }
+    /// let builder = SessionBuilder::<MyConfig>::new()
+    ///     .with_disconnect_behavior(DisconnectBehavior::ContinueWithout);
+    /// ```
+    pub fn with_disconnect_behavior(mut self, behavior: DisconnectBehavior) -> Self {
+        self.disconnect_behavior = behavior;
         self
     }
 
@@ -1039,6 +1075,7 @@ impl<T: Config> SessionBuilder<T> {
             self.event_queue_size,
             self.recording,
             self.telemetry,
+            self.disconnect_behavior,
         ))
     }
 

@@ -67,3 +67,6 @@ pre-commit.txt
 pre-commit.log
 pre-push.txt
 pre-push.log
+pr-description.md
+text_tt*
+proposed_fix

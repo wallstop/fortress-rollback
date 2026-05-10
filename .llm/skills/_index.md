@@ -93,4 +93,4 @@
 | [dev-pipeline.md](workflows/dev-pipeline.md) | Planning features, structuring development work, end-to-end development process |
 | [investigation.md](workflows/investigation.md) | Debugging failures, diagnosing desyncs, root-cause analysis, systematic troubleshooting |
 | [review-readiness.md](workflows/review-readiness.md) | Before opening PRs, self-review, merge readiness checks |
-| [user-facing-docs.md](workflows/user-facing-docs.md) | New public API, breaking changes, new features, configuration changes, behavioral changes requiring user documentation |
+| [user-facing-docs.md](workflows/user-facing-docs.md) | New public API, breaking changes, new features, configuration changes, behavioral changes requiring user documentation; writing or revising user-facing docs prose, addressing vale prose suggestions, prose conventions and style |

@@ -6,8 +6,8 @@ name: CI - Code Quality
 # - cargo-spellcheck: Spelling and grammar in documentation
 # - cargo-shear: Fast unused dependency detection
 #
-# Note: These are informational checks that provide warnings but don't fail the build
-# to avoid blocking PRs for minor issues like typos or unused dev-dependencies.
+# Note: typos is blocking. cargo-shear and cargo-spellcheck are advisory
+# diagnostics that report issues in the summary without blocking PRs.
 
 on:
   push:
@@ -18,6 +18,9 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '**.md'
+      - '.typos.toml'
+      - '.config/spellcheck.toml'
+      - '.github/actions/install-cargo-tool/**'
       - '.github/workflows/ci-quality.yml'
   pull_request:
     branches: [main]
@@ -27,6 +30,9 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '**.md'
+      - '.typos.toml'
+      - '.config/spellcheck.toml'
+      - '.github/actions/install-cargo-tool/**'
       - '.github/workflows/ci-quality.yml'
   schedule:
     # Run weekly on Sundays at 4 AM UTC (after safety checks at 3 AM)
@@ -65,6 +71,9 @@ jobs:
     name: Unused Dependencies (cargo-shear)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      issues-found: ${{ steps.shear.outputs.issues-found }}
+      exit-code: ${{ steps.shear.outputs.exit-code }}
 
     steps:
       - name: Checkout code
@@ -79,7 +88,10 @@ jobs:
           tool: cargo-shear
 
       - name: Check for unused dependencies
+        id: shear
         run: |
+          set -o pipefail
+
           {
             echo "## Unused Dependencies Check (cargo-shear)"
             echo ""
@@ -88,10 +100,16 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           # cargo-shear is fast but may have false positives
-          # Run and capture output, but don't fail the build
-          if cargo shear 2>&1 | tee shear-output.txt; then
+          # Run and capture output, but keep this job advisory.
+          shear_status=0
+          cargo shear --locked --color never 2>&1 | tee shear-output.txt || shear_status=$?
+          echo "exit-code=$shear_status" >> "$GITHUB_OUTPUT"
+
+          if [ "$shear_status" -eq 0 ]; then
+            echo "issues-found=false" >> "$GITHUB_OUTPUT"
             echo "✅ No unused dependencies detected" >> "$GITHUB_STEP_SUMMARY"
           else
+            echo "issues-found=true" >> "$GITHUB_OUTPUT"
             {
               echo "⚠️ Potentially unused dependencies detected:"
               echo ""
@@ -102,7 +120,6 @@ jobs:
               echo "Note: cargo-shear may have false positives. Verify with \`cargo +nightly udeps\` if needed."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
-        continue-on-error: true
 
       - name: Upload shear report
         uses: actions/upload-artifact@v7
@@ -119,6 +136,10 @@ jobs:
     name: Documentation Spelling
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      issues-found: ${{ steps.spellcheck.outputs.issues-found }}
+      issue-count: ${{ steps.spellcheck.outputs.issue-count }}
+      tool-failed: ${{ steps.spellcheck.outputs.tool-failed }}
 
     steps:
       - name: Checkout code
@@ -131,8 +152,10 @@ jobs:
         uses: ./.github/actions/install-cargo-tool
         with:
           tool: cargo-spellcheck
+          version: 0.15.1
 
       - name: Check spelling in documentation
+        id: spellcheck
         run: |
           {
             echo "## Documentation Spelling Check"
@@ -142,15 +165,35 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           # Run spellcheck on Rust doc comments
-          # Use --code 0 to always exit successfully (advisory only)
-          if cargo spellcheck check 2>&1 | tee spellcheck-output.txt; then
+          # Use -m 1 so findings are machine-detectable, then keep this job
+          # advisory by handling the status explicitly. Limit to Hunspell so
+          # the checked-in Hunspell quirks are the active spelling policy.
+          set -o pipefail
+          spellcheck_status=0
+          cargo spellcheck check --checkers hunspell -m 1 2>&1 | tee spellcheck-output.txt || spellcheck_status=$?
+
+          ISSUE_COUNT=$(grep -cE "^(error|warning):|error: spellcheck|warning:" spellcheck-output.txt || true)
+          ISSUE_COUNT=${ISSUE_COUNT:-0}
+          echo "issue-count=$ISSUE_COUNT" >> "$GITHUB_OUTPUT"
+
+          if [ "$ISSUE_COUNT" -eq 0 ] && [ "$spellcheck_status" -eq 0 ]; then
+            echo "issues-found=false" >> "$GITHUB_OUTPUT"
+            echo "tool-failed=false" >> "$GITHUB_OUTPUT"
             echo "✅ No spelling issues found in documentation" >> "$GITHUB_STEP_SUMMARY"
           else
-            # Use || true + default to handle grep exit code 1 (no matches)
-            ISSUE_COUNT=$(grep -c "error\|warning" spellcheck-output.txt || true)
-            ISSUE_COUNT=${ISSUE_COUNT:-0}
+            if [ "$ISSUE_COUNT" -eq 0 ]; then
+              echo "issues-found=false" >> "$GITHUB_OUTPUT"
+              echo "tool-failed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "issues-found=true" >> "$GITHUB_OUTPUT"
+              echo "tool-failed=false" >> "$GITHUB_OUTPUT"
+            fi
             {
-              echo "⚠️ Found potential spelling issues ($ISSUE_COUNT):"
+              if [ "$ISSUE_COUNT" -eq 0 ]; then
+                echo "⚠️ cargo-spellcheck exited with status $spellcheck_status but emitted no parsed findings:"
+              else
+                echo "⚠️ Found potential spelling issues ($ISSUE_COUNT):"
+              fi
               echo ""
               echo "<details>"
               echo "<summary>Click to expand</summary>"
@@ -164,7 +207,6 @@ jobs:
               echo "Run \`cargo spellcheck fix\` locally to auto-fix issues."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
-        continue-on-error: true
 
       - name: Upload spellcheck report
         uses: actions/upload-artifact@v7
@@ -186,26 +228,40 @@ jobs:
     steps:
       - name: Generate summary
         run: |
-          map_status() {
+          map_job_status() {
             case "$1" in
-              success) echo "✅ Passed" ;;
-              failure) echo "⚠️ Issues Found" ;;
+              success) echo "✅ Completed" ;;
+              failure) echo "⚠️ Failed" ;;
               skipped) echo "⏭️ Skipped" ;;
               cancelled) echo "🚫 Cancelled" ;;
               *) echo "❓ Unknown" ;;
             esac
           }
 
+          map_advisory_status() {
+            if [ "${4:-false}" = "true" ]; then
+              echo "⚠️ Tool Failed"
+            elif [ "$1" = "true" ]; then
+              if [ -n "${2:-}" ] && [ "$2" != "0" ]; then
+                echo "⚠️ Issues Found ($2)"
+              else
+                echo "⚠️ Issues Found"
+              fi
+            else
+              map_job_status "$3"
+            fi
+          }
+
           {
             echo "## Code Quality Summary"
             echo ""
-            echo "These checks are advisory and don't block the build."
+            echo "Typos is blocking. cargo-shear and cargo-spellcheck are advisory diagnostics."
             echo ""
             echo "| Check | Status |"
             echo "|-------|--------|"
-            echo "| Spell Check (typos) | $(map_status '${{ needs.typos.result }}') |"
-            echo "| Unused Dependencies (cargo-shear) | $(map_status '${{ needs.unused-deps-fast.result }}') |"
-            echo "| Documentation Spelling | $(map_status '${{ needs.spellcheck.result }}') |"
+            echo "| Spell Check (typos) | $(map_job_status '${{ needs.typos.result }}') |"
+            echo "| Unused Dependencies (cargo-shear) | $(map_advisory_status '${{ needs.unused-deps-fast.outputs.issues-found }}' '' '${{ needs.unused-deps-fast.result }}') |"
+            echo "| Documentation Spelling | $(map_advisory_status '${{ needs.spellcheck.outputs.issues-found }}' '${{ needs.spellcheck.outputs.issue-count }}' '${{ needs.spellcheck.result }}' '${{ needs.spellcheck.outputs.tool-failed }}') |"
             echo ""
             echo "### Recommendations"
             echo ""

@@ -919,3 +919,57 @@ fn test_spectator_disconnect_timeout() {
     // Just verify we don't panic and can collect events
     let _events: Vec<_> = spec_sess.events().collect();
 }
+
+#[test]
+fn test_spectator_timeout_does_not_halt_host() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (socket1, socket2, host_addr, spec_addr) = create_channel_pair();
+    let short_timeout = Duration::from_millis(200);
+
+    let mut host_sess = SessionBuilder::<StubConfig>::new()
+        .with_num_players(1)?
+        .with_protocol_config(protocol_config(&clock))
+        .with_disconnect_timeout(short_timeout)
+        .with_disconnect_notify_delay(Duration::from_millis(50))
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(1))?
+        .start_p2p_session(socket1)?;
+
+    let mut spec_sess = SessionBuilder::<StubConfig>::new()
+        .with_num_players(1)?
+        .with_protocol_config(protocol_config(&clock))
+        .start_spectator_session(host_addr, socket2)
+        .expect("spectator session should start");
+
+    let result = synchronize_spectator_deterministic(&mut spec_sess, &mut host_sess, &clock);
+    assert_spectator_synchronized(&spec_sess, &host_sess, &result);
+    let _: Vec<_> = host_sess.events().collect();
+    let _: Vec<_> = spec_sess.events().collect();
+
+    for _ in 0..100 {
+        host_sess.poll_remote_clients();
+        clock.advance(Duration::from_millis(20));
+    }
+
+    assert_eq!(
+        host_sess.current_state(),
+        SessionState::Running,
+        "spectator timeout must not halt a running host session"
+    );
+    let events: Vec<_> = host_sess.events().collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, FortressEvent::Disconnected { .. })),
+        "spectator timeout should emit Disconnected; got {events:?}"
+    );
+
+    let current_before_advance = host_sess.current_frame();
+    let mut host_game = GameStub::new();
+    host_sess.add_local_input(PlayerHandle::new(0), StubInput { inp: 42 })?;
+    let requests = host_sess.advance_frame()?;
+    host_game.handle_requests(requests);
+    assert_eq!(host_sess.current_frame(), current_before_advance + 1);
+
+    Ok(())
+}

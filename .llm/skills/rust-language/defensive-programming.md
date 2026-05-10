@@ -52,6 +52,39 @@ match fallible_operation() {
 }
 ```
 
+### No Silent Skips on Internal-Invariant Lookups
+
+Internal-invariant collections (`input_queues`, `local_connect_status`,
+`handles`, etc.) are sized by construction to cover every valid index. If a
+lookup misses, the invariant is broken — that is a library bug, not a
+recoverable condition. The fix depends on the function shape:
+
+| Function shape | Required handling |
+|----------------|-------------------|
+| Returns `Result` | `.ok_or(FortressError::InternalErrorStructured { kind: ... })?` (e.g. `IndexOutOfBounds`, `ConnectionStatusIndexOutOfBounds`) |
+| `&mut self`, returns `()` / `Frame` / etc. | `report_violation!(ViolationSeverity::Error, ViolationKind::InputQueue \| ::NetworkProtocol, "...");` then take a safe fallback |
+| Loops `for i in 0..self.num_players { if let Some(q) = self.input_queues.get(i) {...} }` | Restructure to `for q in self.input_queues.iter() { ... }` — eliminates the silent-skip pattern by construction |
+
+`if let Some(...) = self.collection.get(...)` followed by no `else` arm is a
+red flag for invariant-backed collections: it converts a bug into a no-op.
+The format string in `report_violation!` should include the index, the
+collection name, and `collection.len()` so the diagnostic is actionable.
+
+**Severity rubric** (use the highest applicable tier):
+
+- `ViolationSeverity::Critical` — construction-time configuration breakage
+  that leaves the structure in a permanently broken state (e.g., the
+  per-player queue count is short of `num_players` after a constructor
+  fallback fails — every subsequent operation that indexes by handle is
+  unsafe by construction).
+- `ViolationSeverity::Error` — runtime invariant violation where the call
+  took a safe fallback or returned a structured error to its caller; the
+  session as a whole keeps running, but this specific operation reflects a
+  bug somewhere in the library.
+- `ViolationSeverity::Warning` — recoverable conditions where the system
+  corrected itself (clamping, automatic retries, transient gaps that the
+  caller can ignore).
+
 ## Input Validation
 
 All public APIs must validate inputs at the boundary:

@@ -86,6 +86,10 @@ check_tool "actionlint" "actionlint --version" "false"
 check_tool "yamllint" "yamllint --version" "false"
 echo ""
 
+echo "AI Tooling:"
+check_tool "codex" "codex --version" "false"
+echo ""
+
 echo "Cargo Quality Tools:"
 check_tool "cargo-shear" "cargo shear --version" "false"
 check_tool "cargo-spellcheck" "cargo spellcheck --version" "false"

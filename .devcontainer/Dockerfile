@@ -84,9 +84,13 @@ RUN apt-get update && \
 # ============================================================================
 # Layer 2: Direct downloads (TLA+, actionlint, Vale)
 # ============================================================================
-RUN mkdir -p /opt/tla && \
-    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 --retry-all-errors --max-time 120 https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar \
-      -o /opt/tla/tla2tools.jar
+COPY .tla-tools-version /tmp/tla-tools-version
+RUN TLA_TOOLS_VERSION="$(tr -d '[:space:]' < /tmp/tla-tools-version)" && \
+    mkdir -p /opt/tla && \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 --retry-all-errors --max-time 120 \
+      "https://github.com/tlaplus/tlaplus/releases/download/v${TLA_TOOLS_VERSION}/tla2tools.jar" \
+      -o /opt/tla/tla2tools.jar && \
+    printf '%s\n' "${TLA_TOOLS_VERSION}" > /opt/tla/.version
 
 # Note: devcontainer.json containerEnv overrides this to the workspace copy
 ENV TLA_TOOLS_JAR=/opt/tla/tla2tools.jar
@@ -118,7 +122,7 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 --retry-all-
     bash /tmp/nodesource_setup.sh && \
     rm /tmp/nodesource_setup.sh && \
     apt-get install -y --no-install-recommends nodejs && \
-    npm install -g markdownlint-cli markdown-link-check && \
+    npm install -g markdownlint-cli markdown-link-check @openai/codex@latest && \
     pip3 install --no-cache-dir --break-system-packages pre-commit && \
     rm -rf /var/lib/apt/lists/*
 

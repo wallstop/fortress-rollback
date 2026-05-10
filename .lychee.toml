@@ -4,7 +4,7 @@
 # ============================================================================
 # Output settings
 # ============================================================================
-verbose = false
+verbose = "warn"
 no_progress = true
 format = "markdown"
 
@@ -66,10 +66,11 @@ exclude = [
 
     # Sites that block automated requests
     "^https://medium\\.com",
-]
 
-# Exclude mail links
-exclude_mail = true
+    # Contact schemes are intentionally not fetched by link checkers.
+    "^mailto:",
+    "^tel:",
+]
 
 # Exclude these paths from being checked
 exclude_path = [

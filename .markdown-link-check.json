@@ -14,6 +14,24 @@
     },
     {
       "pattern": "^https://github.com/wallstop/fortress-rollback/issues/new\\?.*template="
+    },
+    {
+      "pattern": "^https://lib\\.rs/?$"
+    },
+    {
+      "pattern": "^https://oss\\.sonatype\\.org/content/repositories/snapshots/org/lamport/tla2tools/?$"
+    },
+    {
+      "pattern": "^https://twitter\\.com"
+    },
+    {
+      "pattern": "^https://x\\.com"
+    },
+    {
+      "pattern": "^https://www\\.linkedin\\.com"
+    },
+    {
+      "pattern": "^https://medium\\.com"
     }
   ],
   "replacementPatterns": [],
@@ -24,6 +42,7 @@
   "fallbackRetryDelay": "30s",
   "aliveStatusCodes": [
     200,
+    204,
     206,
     301,
     302,

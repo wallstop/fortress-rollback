@@ -54,6 +54,22 @@ Fortress Rollback is a **correctness-first** Rust library for peer-to-peer rollb
 
     [:octicons-arrow-right-24: Determinism model](specs/determinism-model.md)
 
+-   :material-tune-variant:{ .lg .middle } **Runtime Input Delay**
+
+    ---
+
+    Adjust input delay at runtime via `P2PSession::set_input_delay` / `input_delay` as network conditions change, with strict monotonicity guarantees for remote peers.
+
+    [:octicons-arrow-right-24: Runtime input delay](user-guide.md#adjusting-input-delay-at-runtime)
+
+-   :material-account-multiple-remove:{ .lg .middle } **Graceful Peer Drop**
+
+    ---
+
+    Opt in to graceful peer drop with `DisconnectBehavior::ContinueWithout` so the session keeps advancing when a peer disconnects, or remove peers explicitly with `P2PSession::remove_player`.
+
+    [:octicons-arrow-right-24: Graceful peer drop](user-guide.md#disconnect-behavior-and-graceful-peer-drop)
+
 </div>
 <!-- markdownlint-enable MD030 -->
 

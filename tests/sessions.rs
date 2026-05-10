@@ -12,9 +12,11 @@ mod common;
 
 // Session test modules
 mod sessions {
+    pub mod input_delay;
     pub mod macro_tests;
     pub mod p2p;
     pub mod p2p_enum;
+    pub mod peer_drop;
     pub mod session_trait;
     pub mod spectator;
     pub mod synctest;

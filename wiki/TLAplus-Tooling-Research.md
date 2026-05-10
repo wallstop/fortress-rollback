@@ -159,8 +159,9 @@ jobs:
       - name: Download TLA+ tools
         run: |
           mkdir -p deps/tools
+          TLA_TOOLS_VERSION="$(tr -d '[:space:]' < .tla-tools-version)"
           curl -L -o deps/tools/tla2tools.jar \
-            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+            "https://github.com/tlaplus/tlaplus/releases/download/v${TLA_TOOLS_VERSION}/tla2tools.jar"
 
       - name: Parse TLA+ modules (SANY)
         run: |
@@ -368,13 +369,13 @@ CONSTRAINT StateConstraint
 set -euo pipefail
 
 DEPS_DIR="${1:-deps}"
-TLA_VERSION="${2:-v1.7.4}"
+TLA_TOOLS_VERSION="${2:-$(tr -d '[:space:]' < .tla-tools-version)}"
 
 mkdir -p "$DEPS_DIR/tools"
 
 # Download tla2tools.jar
 curl -L -o "$DEPS_DIR/tools/tla2tools.jar" \
-  "https://github.com/tlaplus/tlaplus/releases/download/$TLA_VERSION/tla2tools.jar"
+  "https://github.com/tlaplus/tlaplus/releases/download/v${TLA_TOOLS_VERSION}/tla2tools.jar"
 
 # Download community modules (optional)
 curl -L -o "$DEPS_DIR/community-modules.jar" \
@@ -430,12 +431,12 @@ clean:
 
 ### Tool Downloads
 
-| Resource        | URL                                                                                                              |
-| --------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Stable Releases | [github.com/tlaplus/tlaplus/releases](https://github.com/tlaplus/tlaplus/releases)                               |
-| Nightly Tools   | [nightly.tlapl.us/dist/](https://nightly.tlapl.us/dist/)                                                         |
-| Nightly Toolbox | [nightly.tlapl.us/products/](https://nightly.tlapl.us/products/)                                                 |
-| Maven Artifacts | [oss.sonatype.org/.../tla2tools](https://oss.sonatype.org/content/repositories/snapshots/org/lamport/tla2tools/) |
+| Resource        | URL                                                                                   |
+| --------------- | ------------------------------------------------------------------------------------- |
+| Stable Releases | [github.com/tlaplus/tlaplus/releases](https://github.com/tlaplus/tlaplus/releases)    |
+| Nightly Tools   | [nightly.tlapl.us/dist/](https://nightly.tlapl.us/dist/)                              |
+| Nightly Toolbox | [nightly.tlapl.us/products/](https://nightly.tlapl.us/products/)                      |
+| Maven Artifacts | [repo1.maven.org/.../tlatools](https://repo1.maven.org/maven2/de/hhu/stups/tlatools/) |
 
 ---
 

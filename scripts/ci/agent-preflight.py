@@ -80,6 +80,21 @@ def is_workflow_file(path: str) -> bool:
     return Path(path).suffix in {".yml", ".yaml"}
 
 
+def is_docs_markdown_file(path: str) -> bool:
+    """Return True for markdown files under docs/ (vale targets)."""
+    return path.startswith("docs/") and path.endswith(".md")
+
+
+def is_changelog_file(path: str) -> bool:
+    """Return True for the top-level CHANGELOG.md file."""
+    return path == "CHANGELOG.md"
+
+
+def is_rust_source_file(path: str) -> bool:
+    """Return True for Rust source files under `src/`."""
+    return path.startswith("src/") and path.endswith(".rs")
+
+
 def git_output_lines(repo_root: Path, args: list[str]) -> set[str]:
     """Run git and return non-empty output lines.
 
@@ -122,6 +137,9 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
         path for path in changed_files if is_llm_skill_markdown_file(path)
     )
     workflow_files = sorted(path for path in changed_files if is_workflow_file(path))
+    docs_files = sorted(path for path in changed_files if is_docs_markdown_file(path))
+    rust_files = sorted(path for path in changed_files if is_rust_source_file(path))
+    changelog_changed = any(is_changelog_file(path) for path in changed_files)
 
     if run_all or any(is_sync_version_surface_file(path) for path in changed_files):
         checks.append(
@@ -176,6 +194,70 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                 description="validate modified GitHub Actions workflows",
                 command=actionlint_command,
                 fix_hint="Fix workflow syntax and actionlint diagnostics.",
+            )
+        )
+
+    if run_all or changelog_changed:
+        checks.append(
+            PlannedCheck(
+                check_id="changelog-unreleased-rule",
+                description=(
+                    "enforce the [Unreleased] code rule in CHANGELOG.md "
+                    "(see .llm/context.md \"Unreleased code rule\")"
+                ),
+                command=[
+                    PYTHON_EXECUTABLE,
+                    "scripts/hooks/check-changelog-unreleased.py",
+                ],
+                fix_hint=(
+                    "non-Breaking entries in '### Changed' or any entries in "
+                    "'### Fixed' under [Unreleased] must be folded into the "
+                    "matching '### Added' entry. Only '**Breaking:**' entries "
+                    "(for already-released types) belong in '### Changed'. "
+                    "See .llm/skills/publishing-organization/changelog.md."
+                ),
+                # Semantic merge -- no safe auto-fix.
+                fix_command=None,
+            )
+        )
+
+    if run_all or docs_files:
+        vale_command = [PYTHON_EXECUTABLE, "scripts/hooks/agent-vale-advisory.py"]
+        vale_command.extend(docs_files)
+        checks.append(
+            PlannedCheck(
+                check_id="vale-advisory",
+                description=(
+                    "advisory prose linting for docs/ (always passes; "
+                    "see .llm/skills/workflows/user-facing-docs.md "
+                    "'Prose Conventions')"
+                ),
+                command=vale_command,
+                fix_hint=(
+                    "Vale findings are advisory. Common swaps: "
+                    "implement->do, multiple->many, previously->before, "
+                    "subsequent->next, additional->extra, maximum->most, "
+                    "monitor->watch, terminate->end. Drop weasel words "
+                    "(very, extremely, several, usually, significantly)."
+                ),
+            )
+        )
+
+    if run_all or rust_files:
+        checks.append(
+            PlannedCheck(
+                check_id="kani-violation-cost",
+                description=(
+                    "advisory grep for multi-arg report_violation! callsites "
+                    "in Kani-reachable files (always passes; see "
+                    "src/telemetry.rs report_violation! docs)"
+                ),
+                command=["bash", "scripts/verification/check-kani-violation-cost.sh"],
+                fix_hint=(
+                    "report_violation! is a no-op under cfg(kani) but format "
+                    "args still surface in CBMC analysis. Reduce format-arg "
+                    "count or simplify the message in flagged callsites."
+                ),
             )
         )
 

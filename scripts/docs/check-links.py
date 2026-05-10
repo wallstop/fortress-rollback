@@ -226,7 +226,7 @@ def check_markdown_link(
     Returns (is_valid, error_message).
     """
     # Skip external links
-    if link_target.startswith(("http://", "https://", "mailto:", "ftp://")):
+    if link_target.startswith(("http://", "https://", "mailto:", "tel:", "ftp://")):
         return True, ""
 
     # Skip special links

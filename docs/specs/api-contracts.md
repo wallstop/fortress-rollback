@@ -24,6 +24,9 @@ This document specifies preconditions, postconditions, and invariants for all pu
 6. [GameStateCell](#gamestatecell)
 7. [Request Handling](#request-handling)
 8. [Error Catalog](#error-catalog)
+9. [Event Catalog](#event-catalog)
+10. [Cross-Cutting Invariants](#cross-cutting-invariants)
+11. [Revision History](#revision-history)
 
 ---
 
@@ -217,6 +220,29 @@ Each API is documented with:
 **Errors:** None
 
 **Panics:** Never
+
+---
+
+### `with_disconnect_behavior(self, behavior: DisconnectBehavior) -> Self`
+
+```rust
+/// Configure how a P2PSession reacts when the disconnect timeout fires for a
+/// remote peer.
+```
+
+**Pre:** None
+
+**Post:** `self.disconnect_behavior = behavior`
+
+**Errors:** None
+
+**Panics:** Never
+
+**Notes:**
+
+- Default is `DisconnectBehavior::Halt`, preserving the legacy GGRS-style halt-on-drop semantics.
+- `DisconnectBehavior::ContinueWithout` enables graceful peer drop on the **automatic** disconnect-timeout path: the dropped peer's input queue is frozen at the last confirmed input, `FortressEvent::PeerDropped` and `FortressEvent::Disconnected` are both emitted, and remaining peers continue advancing.
+- The setting governs only the automatic-timeout path. The explicit `P2PSession::remove_player` always performs a graceful drop regardless of this setting; the legacy `P2PSession::disconnect_player` retains its non-graceful semantics regardless of this setting.
 
 ---
 
@@ -485,19 +511,135 @@ Each API is documented with:
 ### `disconnect_player(&mut self, handle: PlayerHandle) -> Result<(), FortressError>`
 
 ```rust
-/// Manually disconnect a player.
+/// Manually disconnect a player (legacy halt-on-drop semantics).
 ```
 
-**Pre:** `handle` is registered
+**Pre:** None — all caller-side conditions are validated and returned via the Errors section below.
 
 **Post:**
 
-- Player marked as disconnected
-- Future inputs use default value
+- Every player handle owned by the dropped endpoint is marked as disconnected on the local connection-status table (multi-handle endpoints — multiple handles sharing a single address — are wound down in full)
+- The corresponding network endpoint is disconnected
+- Future inputs for any disconnected handle use the default value (the input queue is **not** frozen — see `remove_player` for graceful drop, which freezes the queue and replays the last confirmed input)
 
 **Errors:**
 
-- `InvalidPlayerHandle` - not registered
+- `InvalidRequestStructured { kind: DisconnectInvalidHandle { handle } }` - handle not registered
+- `InvalidRequestStructured { kind: DisconnectLocalPlayer { handle } }` - handle refers to a local player
+- `InvalidRequestStructured { kind: AlreadyDisconnected { handle } }` - handle was already disconnected
+- `InternalErrorStructured { kind: DisconnectStatusNotFound { handle } }` - internal-invariant violation (a registered remote handle has no corresponding connection-status entry); should not occur in correct code, treat as a library bug
+
+**Panics:** Never
+
+**Notes:**
+
+- Does **not** freeze the player's input queue and does **not** emit `FortressEvent::PeerDropped`.
+- Always preserves halt-on-drop semantics regardless of the configured `DisconnectBehavior`: remaining peers no longer produce confirmed inputs from the dropped peer's endpoint, so `advance_frame` cannot make progress past that peer's last confirmed frame.
+- For an explicit graceful drop, prefer `remove_player`.
+- When `player_handle` is **Remote**, operates on the Remote endpoint at the address only — a `Spectator` endpoint registered at the same `T::Address` is independent and is **not** affected, remaining running until it disconnects on its own. When `player_handle` is **Spectator**, only that specific spectator endpoint is disconnected; any Remote endpoint at the same address is left running. Co-locating a `Remote` and a `Spectator` at the same address is unusual; this note documents the behavior for that edge case.
+
+---
+
+### `remove_player(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError>`
+
+```rust
+/// Remove a remote player from the session and continue with the remaining
+/// peers (graceful drop), regardless of the configured DisconnectBehavior.
+```
+
+**Pre:** None — all caller-side conditions are validated and returned via the Errors section below.
+
+**Post:**
+
+- Every non-spectator player handle owned by the dropped endpoint is marked disconnected on the local connection-status table
+- Every non-spectator handle's input queue is **frozen**: it repeats its last confirmed input forever for remaining peers' simulation
+- The corresponding network endpoint is disconnected
+- One `FortressEvent::PeerDropped { handle, addr }` per non-spectator handle at the dropped address is queued, **followed by** exactly one `FortressEvent::Disconnected { addr }` in the same batch
+- `confirmed_frame()` continues to advance for remaining peers
+
+**Errors:**
+
+- `InvalidRequestStructured { kind: DisconnectInvalidHandle { handle } }` - handle not registered, or refers to a spectator
+- `InvalidRequestStructured { kind: DisconnectLocalPlayer { handle } }` - handle refers to a local player
+- `InvalidRequestStructured { kind: PlayerAlreadyRemoved { handle } }` - handle is already marked disconnected (either via a prior `remove_player` call, via auto-removal under `DisconnectBehavior::ContinueWithout`, or via a previous explicit `disconnect_player` call)
+- `InternalErrorStructured { kind: DisconnectStatusNotFound { handle } | IndexOutOfBounds { .. } }` - internal-invariant violation (a registered handle has no corresponding input queue or connection-status entry); should not occur in correct code, treat as a library bug
+
+**Panics:** Never
+
+**Notes:**
+
+- Always opts in to graceful-drop semantics regardless of the session's `DisconnectBehavior`. The configured `DisconnectBehavior` only governs the **automatic** disconnect-timeout path.
+- The `PeerDropped` event coexists with the legacy `Disconnected` event; new code should match on `PeerDropped` for graceful-drop-aware handling.
+- Operates on the **Remote** endpoint at the targeted address only. A `Spectator` endpoint registered at the same `T::Address` is an independent endpoint and is **not** affected — it remains running until it disconnects on its own. Co-locating a `Remote` and a `Spectator` at the same address is unusual; this note documents the behavior for that edge case.
+
+---
+
+### `disconnect_behavior(&self) -> DisconnectBehavior`
+
+```rust
+/// Return the configured DisconnectBehavior for this session.
+```
+
+**Pre:** None
+
+**Post:** Returns the `DisconnectBehavior` set via `SessionBuilder::with_disconnect_behavior` (default `Halt`).
+
+**Errors:** None
+
+**Panics:** Never
+
+---
+
+### `set_input_delay(&mut self, player_handle: PlayerHandle, delay: usize) -> Result<(), FortressError>`
+
+```rust
+/// Adjust the input delay for a local player at runtime.
+```
+
+**Pre:** `delay` is within the configured `max_frame_delay()` of the input queue (set via `InputQueueConfig::max_frame_delay`; defaults to `queue_length - 1`). All other caller-side conditions are validated and returned via the Errors section below.
+
+**Post:**
+
+- The local player's frame-delay is set to `delay`
+- **No-op case** (`delay == current_delay`): no further side effects
+- **Initial-setup case** (no inputs added yet): the new delay applies cleanly with no gap-fill replication. Decreases are also permitted in this case.
+- **Mid-session increase case** (`delay > current_delay` after inputs have been added on a peer with exactly one local player):
+  - The input queue replicates the most recently added input across `delta = delay - current_delay` new gap frames
+  - The same replicated frames are pushed onto every remote endpoint's pending-output buffer and flushed
+  - The local connection-status `last_frame` is advanced to match the queue's new `last_added_frame`
+  - Remote peers' input sequences remain strictly monotonic
+
+**Errors:**
+
+- `InvalidRequestStructured { kind: NotLocalPlayer { handle } }` - handle is not a local player
+- `InvalidRequestStructured { kind: FrameDelayTooLarge { delay, max_delay } }` - `delay` exceeds `queue_length - 1`
+- `InvalidRequestStructured { kind: InputDelayDecreaseUnsupported { current, requested } }` - `requested < current` and inputs have already been added
+- `InvalidRequestStructured { kind: InputDelayMidSessionMultiLocalUnsupported { local_players } }` - mid-session increase attempted with more than one local player on this peer
+- `InvalidRequestStructured { kind: InputDelayMidSessionPendingOutputFull { delta, capacity } }` - mid-session increase would push more gap-fill frames into a remote's pending-output buffer than the configured `pending_output_limit` allows
+- `InternalErrorStructured { kind: InputQueueGapFillFailed { frame } }` - internal invariant violation while replicating gap-fill bytes (should be reported as a bug)
+
+**Panics:** Never
+
+**Invariants Preserved:**
+
+- INV-3 (Input Immutability): confirmed inputs are not modified by gap-fill replication
+- INV-4 (Queue Bounds): the queue length is unchanged
+
+---
+
+### `input_delay(&self, player_handle: PlayerHandle) -> Result<usize, FortressError>`
+
+```rust
+/// Return the current input delay (in frames) for a local player.
+```
+
+**Pre:** None — all caller-side conditions are validated and returned via the Errors section below.
+
+**Post:** Returns the current frame-delay for `player_handle`
+
+**Errors:**
+
+- `InvalidRequestStructured { kind: NotLocalPlayer { handle } }` - handle is not a local player
 
 **Panics:** Never
 
@@ -613,7 +755,7 @@ for request in session.advance_frame()? {
 
 ### SaveGameState Contract
 
-```rust
+```text
 FortressRequest::SaveGameState { cell, frame }
 ```
 
@@ -632,7 +774,7 @@ FortressRequest::SaveGameState { cell, frame }
 
 ### LoadGameState Contract
 
-```rust
+```text
 FortressRequest::LoadGameState { cell, frame }
 ```
 
@@ -650,7 +792,7 @@ FortressRequest::LoadGameState { cell, frame }
 
 ### AdvanceFrame Contract
 
-```rust
+```text
 FortressRequest::AdvanceFrame { inputs }
 ```
 
@@ -692,6 +834,36 @@ FortressRequest::AdvanceFrame { inputs }
 | `SerializationErrorStructured { kind }`                 | Serialization failure                    | Check input data format                |
 | `FrameArithmeticOverflow { frame, operand, operation }` | Frame arithmetic overflow                | Check frame bounds                     |
 
+### Selected `InvalidRequestKind` Variants — Runtime Input Delay and Peer Removal
+
+| Variant                                                       | Source API                                                | Cause                                                                                                                                                                                                        | Recovery                                                                                                        |
+| ------------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `InputDelayDecreaseUnsupported { current, requested }`        | `P2PSession::set_input_delay`                             | `requested < current` after inputs have been added                                                                                                                                                           | Mid-session decreases are not supported; carry the lower delay over to the next session                         |
+| `InputDelayMidSessionMultiLocalUnsupported { local_players }` | `P2PSession::set_input_delay`                             | Mid-session increase attempted with more than one local player on this peer                                                                                                                                  | Set the delay before adding inputs (typically via `SessionBuilder::with_input_delay`) when running multi-local  |
+| `InputDelayMidSessionPendingOutputFull { delta, capacity }`   | `P2PSession::set_input_delay`                             | Mid-session increase would enqueue `delta` gap-fill frames, exceeding remote `pending_output_limit` `capacity`                                                                                               | Apply the change in smaller increments, or wait for the remote to acknowledge outstanding inputs and retry      |
+| `PlayerAlreadyRemoved { handle }`                             | `P2PSession::remove_player`                               | `remove_player` called when the handle is already marked disconnected — either by a previous `remove_player` call, by auto-removal via `ContinueWithout`, or by a previous explicit `disconnect_player` call | Treat as a no-op; the peer is already in the graceful-drop terminal state                                       |
+| `NotLocalPlayer { handle }` *(pre-existing variant)*          | `P2PSession::set_input_delay` / `P2PSession::input_delay` | `handle` is not registered as a local player (it may be a remote player, spectator, or unregistered)                                                                                                         | Pass a registered local player handle (use `SessionBuilder::add_player(PlayerType::Local, ..)` to register one) |
+
+### Selected `InternalErrorKind` Variants — Runtime Input Delay
+
+| Variant                             | Source API                    | Cause                                                                    | Recovery                                                                   |
+| ----------------------------------- | ----------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------- |
+| `InputQueueGapFillFailed { frame }` | `P2PSession::set_input_delay` | Mid-session gap-fill replication failed an internal invariant at `frame` | Report as a library bug with the failing `frame` and the call's parameters |
+
+---
+
+## Event Catalog
+
+`FortressEvent<T>` is **not** `#[non_exhaustive]`. Adding new variants is a breaking change for exhaustive matches; recent additions are listed below.
+
+### Selected `FortressEvent` Variants — Disconnect, Graceful Drop, and Input Delay
+
+| Variant                                                                      | When emitted                                                                                                                                                         | Coexisting events                                                                                                                                                         |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PeerDropped { handle, addr }`                                               | Auto-removal under `DisconnectBehavior::ContinueWithout` after a disconnect timeout, **or** explicit `P2PSession::remove_player` call                                | One event per non-spectator handle at the dropped address; followed by exactly one `Disconnected { addr }` after all `PeerDropped` for the same address in the same batch |
+| `Disconnected { addr }`                                                      | Always emitted on peer drop (legacy event); under `Halt` it appears alone, under graceful drop it appears once per address after that address's `PeerDropped` events | Optionally preceded by one or more `PeerDropped { handle, addr }` (graceful drop, one per handle at the dropped address)                                                  |
+| `InputDelayRecommendation { player_handle, current_delay, suggested_delay }` | Reserved for application-level heuristics or future automatic emitters. **No built-in emitter currently produces this event.**                                       | None                                                                                                                                                                      |
+
 ---
 
 ## Cross-Cutting Invariants
@@ -707,7 +879,8 @@ These invariants are preserved across ALL public API calls:
 
 ## Revision History
 
-| Version | Date       | Changes                |
-| ------- | ---------- | ---------------------- |
-| 1.0     | 2025-12-06 | Complete API contracts |
-| 0.1     | 2025-12-06 | Initial draft          |
+| Version | Date       | Changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.1     | 2026-05-07 | Added contracts for runtime input delay (`P2PSession::set_input_delay`, `P2PSession::input_delay`), configurable disconnect behavior (`SessionBuilder::with_disconnect_behavior`, `P2PSession::disconnect_behavior`), and explicit graceful peer removal (`P2PSession::remove_player`). Documented new `InvalidRequestKind`/`InternalErrorKind` variants and the new `FortressEvent::PeerDropped` and `FortressEvent::InputDelayRecommendation` events. Added Event Catalog. |
+| 1.0     | 2025-12-06 | Complete API contracts                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 0.1     | 2025-12-06 | Initial draft                                                                                                                                                                                                                                                                                                                                                                                                                                                                |

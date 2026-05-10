@@ -727,6 +727,23 @@ impl std::fmt::Debug for CompositeObserver {
     }
 }
 
+/// Implementation detail for Kani-friendly telemetry macros.
+#[cfg(kani)]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fortress_borrow_format_args {
+    () => {};
+    (,) => {};
+    ($name:ident = $value:expr $(, $($rest:tt)*)?) => {{
+        let _ = &$value;
+        $crate::__fortress_borrow_format_args!($($($rest)*)?);
+    }};
+    ($value:expr $(, $($rest:tt)*)?) => {{
+        let _ = &$value;
+        $crate::__fortress_borrow_format_args!($($($rest)*)?);
+    }};
+}
+
 /// Macro for reporting specification violations with location tracking.
 ///
 /// This macro creates a [`SpecViolation`] with the current file and line,
@@ -754,11 +771,13 @@ impl std::fmt::Debug for CompositeObserver {
 ///
 /// # Kani (Formal Verification)
 ///
-/// Under `cfg(kani)`, this macro evaluates its arguments (to suppress unused
-/// import/variable warnings) but skips `format!()` and tracing. The formatting
-/// and tracing infrastructure create massive symbolic state space for CBMC,
-/// causing proof timeouts. Since this macro only performs logging (no state
-/// mutation), skipping reporting under Kani does not affect correctness verification.
+/// Under `cfg(kani)`, this macro is a true no-op: arguments are borrowed
+/// once via `let _ = &…` to keep unused-variable lints quiet, but no
+/// `core::fmt::Arguments` value is built. Format-string validation
+/// continues to run on every non-Kani build (`cargo build`, `cargo test`,
+/// `cargo clippy`), so format-string regressions are still caught at
+/// development time. Skipping reporting under Kani does not affect
+/// correctness verification — proofs check state, not logging.
 #[macro_export]
 macro_rules! report_violation {
     // Under Kani, report_violation is a no-op to avoid CBMC state explosion
@@ -778,12 +797,12 @@ macro_rules! report_violation {
             );
             $crate::telemetry::TracingObserver.on_violation(&violation);
         }
-        // Under Kani, evaluate severity and kind to suppress unused import warnings
+        // Under Kani, borrow severity and kind to suppress unused import warnings
         // for ViolationSeverity/ViolationKind, but avoid format!() and tracing
         // which cause CBMC state space explosion.
         #[cfg(kani)]
         {
-            let _ = ($severity, $kind);
+            let _ = (&$severity, &$kind);
         }
     }};
 
@@ -800,12 +819,13 @@ macro_rules! report_violation {
             );
             $crate::telemetry::TracingObserver.on_violation(&violation);
         }
-        // Under Kani, evaluate severity, kind, and all format arguments to suppress
-        // unused import/variable warnings, but avoid format!() and tracing which
-        // cause CBMC state space explosion.
+        // Under Kani, borrow format arguments so non-Copy values are not moved
+        // and unused-variable lints stay quiet. Accept `tt` here to preserve
+        // the public `format!`-style syntax, including named arguments.
         #[cfg(kani)]
         {
-            let _ = ($severity, $kind, $($arg)+);
+            let _ = (&$severity, &$kind);
+            $crate::__fortress_borrow_format_args!($($arg)+);
         }
     }};
 }
@@ -1037,24 +1057,42 @@ pub fn report_to_observer<O: ViolationObserver + ?Sized>(
 macro_rules! report_violation_to {
     // Basic: observer, severity, kind, message (no format args)
     ($observer:expr, $severity:expr, $kind:expr, $msg:literal) => {{
-        let violation = $crate::telemetry::SpecViolation::new(
-            $severity,
-            $kind,
-            $msg,
-            concat!(file!(), ":", line!()),
-        );
-        $crate::telemetry::report_to_observer($observer.as_ref(), &violation);
+        #[cfg(not(kani))]
+        {
+            let violation = $crate::telemetry::SpecViolation::new(
+                $severity,
+                $kind,
+                $msg,
+                concat!(file!(), ":", line!()),
+            );
+            $crate::telemetry::report_to_observer($observer.as_ref(), &violation);
+        }
+        #[cfg(kani)]
+        {
+            let _ = (&$observer, &$severity, &$kind);
+        }
     }};
 
     // With format args: observer, severity, kind, format, args...
     ($observer:expr, $severity:expr, $kind:expr, $fmt:literal, $($arg:tt)+) => {{
-        let violation = $crate::telemetry::SpecViolation::new(
-            $severity,
-            $kind,
-            format!($fmt, $($arg)+),
-            concat!(file!(), ":", line!()),
-        );
-        $crate::telemetry::report_to_observer($observer.as_ref(), &violation);
+        #[cfg(not(kani))]
+        {
+            let violation = $crate::telemetry::SpecViolation::new(
+                $severity,
+                $kind,
+                format!($fmt, $($arg)+),
+                concat!(file!(), ":", line!()),
+            );
+            $crate::telemetry::report_to_observer($observer.as_ref(), &violation);
+        }
+        // Under Kani, borrow format arguments so non-Copy values are not moved
+        // and unused-variable lints stay quiet. Accept `tt` here to preserve
+        // the public `format!`-style syntax, including named arguments.
+        #[cfg(kani)]
+        {
+            let _ = (&$observer, &$severity, &$kind);
+            $crate::__fortress_borrow_format_args!($($arg)+);
+        }
     }};
 }
 
@@ -2231,6 +2269,35 @@ mod tests {
     }
 
     #[test]
+    fn test_report_violation_macro_accepts_named_format_args() {
+        let expected = 10;
+        let actual = 15;
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "mismatch: expected={expected}, actual={actual}",
+            expected = expected,
+            actual = actual,
+        );
+    }
+
+    #[test]
+    fn test_report_violation_macro_accepts_macro_format_args() {
+        macro_rules! sample_frame {
+            () => {
+                42
+            };
+        }
+
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "sample frame: {}",
+            sample_frame!(),
+        );
+    }
+
+    #[test]
     fn test_report_violation_macro_with_observer() {
         let observer = CollectingObserver::new();
         // Use the observer directly instead of the macro
@@ -2343,6 +2410,51 @@ mod tests {
             actual
         );
         // Just ensure it compiles and doesn't panic
+    }
+
+    #[test]
+    fn test_report_violation_to_macro_accepts_named_format_args() {
+        let observer = Arc::new(CollectingObserver::new());
+        let observer_ref: Option<Arc<dyn ViolationObserver>> = Some(observer.clone());
+        let expected = 10;
+        let actual = 15;
+
+        report_violation_to!(
+            &observer_ref,
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "mismatch: expected={expected}, actual={actual}",
+            expected = expected,
+            actual = actual,
+        );
+
+        let violations = observer.violations();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].message, "mismatch: expected=10, actual=15");
+    }
+
+    #[test]
+    fn test_report_violation_to_macro_accepts_macro_format_args() {
+        macro_rules! sample_frame {
+            () => {
+                42
+            };
+        }
+
+        let observer = Arc::new(CollectingObserver::new());
+        let observer_ref: Option<Arc<dyn ViolationObserver>> = Some(observer.clone());
+
+        report_violation_to!(
+            &observer_ref,
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "sample frame: {}",
+            sample_frame!(),
+        );
+
+        let violations = observer.violations();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].message, "sample frame: 42");
     }
 
     #[test]
