@@ -2575,6 +2575,58 @@ impl<T: Config> P2PSession<T> {
         Ok(())
     }
 
+    fn resolve_disconnect_handle(
+        &self,
+        player_handles: &[PlayerHandle],
+        addr: &T::Address,
+    ) -> Option<PlayerHandle> {
+        // Prefer explicit remote handles from the event payload to preserve
+        // rollback semantics for remote disconnects.
+        player_handles
+            .iter()
+            .copied()
+            .rfind(|handle| {
+                matches!(
+                    self.player_reg.handles.get(handle),
+                    Some(PlayerType::Remote(_))
+                )
+            })
+            // Then accept any non-local handle carried by the event payload.
+            .or_else(|| {
+                player_handles.iter().rev().copied().find(|handle| {
+                    matches!(
+                        self.player_reg.handles.get(handle),
+                        Some(PlayerType::Remote(_) | PlayerType::Spectator(_))
+                    )
+                })
+            })
+            // Finally, fall back to registry lookup by endpoint address.
+            // If both remote and spectator handles share the same address,
+            // avoid guessing when payload handles are missing.
+            .or_else(|| {
+                let mut first_remote = None;
+                let mut first_spectator = None;
+
+                for handle in self.player_reg.handles_by_address_iter(addr) {
+                    match self.player_reg.handles.get(&handle) {
+                        Some(PlayerType::Remote(_)) if first_remote.is_none() => {
+                            first_remote = Some(handle);
+                        },
+                        Some(PlayerType::Spectator(_)) if first_spectator.is_none() => {
+                            first_spectator = Some(handle);
+                        },
+                        _ => {},
+                    }
+                }
+
+                match (first_remote, first_spectator) {
+                    (Some(remote), None) => Some(remote),
+                    (None, Some(spectator)) => Some(spectator),
+                    (Some(_), Some(_)) | (None, None) => None,
+                }
+            })
+    }
+
     /// Handle events received from the UDP endpoints. Most events are being forwarded to the user for notification, but some require action.
     fn handle_event(
         &mut self,
@@ -2619,35 +2671,68 @@ impl<T: Config> P2PSession<T> {
             },
             // disconnect the player, then forward to user
             Event::Disconnected => {
-                if let Some(target_handle) = player_handles
-                    .iter()
-                    .copied()
-                    .rfind(|handle| handle.is_valid_player_for(self.num_players))
+                if let Some(target_handle) = self.resolve_disconnect_handle(&player_handles, &addr)
                 {
                     let event_count_before_disconnect = self.event_queue.len();
-                    if let Err(e) = self.disconnect_player_with_policy(
-                        target_handle,
-                        None,
-                        self.disconnect_behavior,
-                        DisconnectEventPolicy::Emit,
-                        GracefulDropFailurePolicy::DisconnectAndHalt,
-                    ) {
-                        report_violation!(
-                            ViolationSeverity::Error,
-                            ViolationKind::InternalError,
-                            "Failed to apply disconnect event for endpoint at {:?}: {}",
-                            addr,
-                            e
-                        );
-                        if self.event_queue.len() == event_count_before_disconnect {
+                    let target_kind = match self.player_reg.handles.get(&target_handle) {
+                        Some(PlayerType::Remote(_)) => "remote",
+                        Some(PlayerType::Spectator(_)) => "spectator",
+                        Some(PlayerType::Local) => "local",
+                        None => "unknown",
+                    };
+                    match target_kind {
+                        "remote" => {
+                            if let Err(e) = self.disconnect_player_with_policy(
+                                target_handle,
+                                None,
+                                self.disconnect_behavior,
+                                DisconnectEventPolicy::Emit,
+                                GracefulDropFailurePolicy::DisconnectAndHalt,
+                            ) {
+                                report_violation!(
+                                    ViolationSeverity::Error,
+                                    ViolationKind::InternalError,
+                                    "Failed to apply remote disconnect event for endpoint at {:?} (target={}, handles={:?}): {}",
+                                    addr,
+                                    target_handle,
+                                    player_handles,
+                                    e
+                                );
+                                if self.event_queue.len() == event_count_before_disconnect {
+                                    self.event_queue
+                                        .push_back(FortressEvent::Disconnected { addr });
+                                }
+                            }
+                        },
+                        "spectator" => {
+                            self.disconnect_player_at_frame(target_handle, Frame::NULL);
                             self.event_queue
                                 .push_back(FortressEvent::Disconnected { addr });
-                        }
+                        },
+                        _ => {
+                            report_violation!(
+                                ViolationSeverity::Warning,
+                                ViolationKind::NetworkProtocol,
+                                "Received disconnect event for endpoint {:?} with non-disconnectable target={} (kind={}, handles={:?})",
+                                addr,
+                                target_handle,
+                                target_kind,
+                                player_handles
+                            );
+                            if self.event_queue.len() == event_count_before_disconnect {
+                                self.event_queue
+                                    .push_back(FortressEvent::Disconnected { addr });
+                            }
+                        },
                     }
                 } else {
-                    if let Some(target_handle) = player_handles.last().copied() {
-                        self.disconnect_player_at_frame(target_handle, Frame::NULL);
-                    }
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::NetworkProtocol,
+                        "Received disconnect event for endpoint {:?} with no resolvable handles (handles={:?})",
+                        addr,
+                        player_handles
+                    );
                     self.event_queue
                         .push_back(FortressEvent::Disconnected { addr });
                 }
@@ -3417,52 +3502,85 @@ mod tests {
     }
 
     #[test]
-    fn spectator_disconnect_event_disconnects_spectator_endpoint() {
-        let spectator_addr = test_addr(9090);
-        let mut session = SessionBuilder::<TestConfig>::new()
-            .with_num_players(1)
-            .unwrap()
-            .add_player(PlayerType::Local, PlayerHandle::new(0))
-            .expect("Failed to add local player")
-            .add_player(PlayerType::Spectator(spectator_addr), PlayerHandle::new(1))
-            .expect("Failed to add spectator")
-            .start_p2p_session(DummySocket)
-            .expect("Failed to create session");
+    fn spectator_disconnect_event_disconnects_spectator_endpoint_data_driven() {
+        #[derive(Debug)]
+        struct Scenario {
+            name: &'static str,
+            handles: Vec<PlayerHandle>,
+        }
 
-        assert!(
-            !session
+        let scenarios = [
+            Scenario {
+                name: "spectator_handle_only",
+                handles: vec![PlayerHandle::new(1)],
+            },
+            Scenario {
+                name: "spectator_then_unknown",
+                handles: vec![PlayerHandle::new(1), PlayerHandle::new(99)],
+            },
+            Scenario {
+                name: "unknown_then_spectator",
+                handles: vec![PlayerHandle::new(99), PlayerHandle::new(1)],
+            },
+            Scenario {
+                name: "empty_payload_falls_back_to_address",
+                handles: vec![],
+            },
+        ];
+
+        for scenario in scenarios {
+            let spectator_addr = test_addr(9090);
+            let mut session = SessionBuilder::<TestConfig>::new()
+                .with_num_players(1)
+                .unwrap()
+                .add_player(PlayerType::Local, PlayerHandle::new(0))
+                .expect("Failed to add local player")
+                .add_player(PlayerType::Spectator(spectator_addr), PlayerHandle::new(1))
+                .expect("Failed to add spectator")
+                .start_p2p_session(DummySocket)
+                .expect("Failed to create session");
+
+            let endpoint_before = session
                 .player_reg
                 .spectators
                 .get(&spectator_addr)
-                .expect("spectator endpoint should exist")
-                .is_synchronized(),
-            "new spectator endpoint should not already be synchronized"
-        );
+                .expect("spectator endpoint should exist before disconnect");
+            assert!(
+                !endpoint_before.is_synchronized(),
+                "scenario {}: spectator endpoint unexpectedly synchronized before disconnect",
+                scenario.name,
+            );
 
-        session.handle_event(
-            Event::Disconnected,
-            std::sync::Arc::from([PlayerHandle::new(1)]),
-            spectator_addr,
-        );
+            let handles: Arc<[PlayerHandle]> = Arc::from(scenario.handles.clone());
+            session.handle_event(Event::Disconnected, handles, spectator_addr);
 
-        assert!(
-            session
+            let endpoint_after = session
                 .player_reg
                 .spectators
                 .get(&spectator_addr)
-                .expect("spectator endpoint should still exist")
-                .is_synchronized(),
-            "spectator disconnect event must transition the endpoint out of the running lifecycle"
-        );
-        let events: Vec<_> = session.events().collect();
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(event, FortressEvent::Disconnected { .. }))
-                .count(),
-            1,
-            "spectator disconnect must emit exactly one Disconnected event"
-        );
+                .expect("spectator endpoint should still exist after disconnect event");
+            assert!(
+                endpoint_after.is_synchronized(),
+                "scenario {}: spectator disconnect must move endpoint to a non-blocking state",
+                scenario.name,
+            );
+            assert!(
+                !endpoint_after.is_running(),
+                "scenario {}: spectator endpoint should no longer be running after disconnect",
+                scenario.name,
+            );
+
+            let events: Vec<_> = session.events().collect();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, FortressEvent::Disconnected { .. }))
+                    .count(),
+                1,
+                "scenario {}: spectator disconnect must emit exactly one Disconnected event",
+                scenario.name,
+            );
+        }
     }
 
     // ==========================================
