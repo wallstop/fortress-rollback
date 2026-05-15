@@ -148,6 +148,25 @@ def test_plan_checks_run_all_forces_all_checks() -> None:
     )
 
 
+def test_plan_checks_excludes_slow_interactive_commands() -> None:
+    """Agent preflight must stay changed-file-aware and fast by default."""
+    trigger_files = {changed_file for _, changed_file in CHECK_TRIGGER_CASES}
+    commands = [
+        " ".join(check.command)
+        for check in plan_checks(trigger_files)
+    ]
+    combined = "\n".join(commands)
+
+    forbidden_fragments = [
+        "cargo clippy",
+        "cargo nextest",
+        "cargo doc",
+        "cargo hack",
+    ]
+    for fragment in forbidden_fragments:
+        assert fragment not in combined
+
+
 def test_plan_checks_runs_changelog_rule_when_changelog_changed() -> None:
     checks = plan_checks({"CHANGELOG.md"})
     check_ids = _ids(checks)

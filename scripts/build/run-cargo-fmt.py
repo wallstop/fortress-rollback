@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""
-Cross-platform cargo fmt wrapper for pre-commit hooks.
+"""Cross-platform rustfmt wrapper for pre-commit hooks.
 
-Runs `cargo fmt` to auto-fix formatting, then stages ONLY the Rust files that
-cargo fmt actually modified. This is careful not to stage other unstaged
+Runs `rustfmt` on the Rust files selected by pre-commit, then stages ONLY the
+staged Rust files that rustfmt actually modified. This is careful not to stage other unstaged
 changes the developer may have.
 
 Works on Windows (PowerShell/cmd), macOS, and Linux.
@@ -42,11 +41,27 @@ def get_file_hashes(files: list[str]) -> dict[str, str | None]:
     return {f: compute_file_hash(f) for f in files}
 
 
-def run_cargo_fmt() -> bool:
-    """Run cargo fmt to auto-fix formatting. Returns True on success."""
-    print("Running cargo fmt...")
+def normalize_rust_files(files: list[str]) -> list[str]:
+    """Return unique existing Rust file paths, preserving order."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for file in files:
+        path = Path(file)
+        if file in seen or path.suffix != ".rs" or not path.exists():
+            continue
+        normalized.append(file)
+        seen.add(file)
+    return normalized
+
+
+def run_rustfmt(files: list[str]) -> bool:
+    """Run rustfmt to auto-fix selected files. Returns True on success."""
+    if not files:
+        return True
+
+    print(f"Running rustfmt on {len(files)} file(s)...")
     result = subprocess.run(
-        ["cargo", "fmt"],
+        ["rustfmt", "--edition", "2021", "--config", "skip_children=true", *files],
         capture_output=False,
     )
     return result.returncode == 0
@@ -83,19 +98,22 @@ def stage_modified_files(files_to_stage: list[str]) -> bool:
 def main() -> int:
     """Run cargo fmt to auto-fix and stage only files that were actually modified. Returns exit code."""
     try:
-        # Get staged Rust files and their content hashes before running fmt
+        # Pre-commit passes the selected files. Fallback to staged files when
+        # the script is run directly.
         staged_files = get_staged_rust_files()
-        hashes_before = get_file_hashes(staged_files)
+        files_to_format = normalize_rust_files(sys.argv[1:] or staged_files)
+        staged_files_to_track = [file for file in files_to_format if file in staged_files]
+        hashes_before = get_file_hashes(staged_files_to_track)
 
-        # Run cargo fmt to fix formatting
-        if not run_cargo_fmt():
-            print("\nERROR: cargo fmt failed.", file=sys.stderr)
+        # Run rustfmt to fix formatting
+        if not run_rustfmt(files_to_format):
+            print("\nERROR: rustfmt failed.", file=sys.stderr)
             return 1
 
-        # Compare hashes to find files that cargo fmt actually modified
-        hashes_after = get_file_hashes(staged_files)
+        # Compare hashes to find tracked staged files that rustfmt modified.
+        hashes_after = get_file_hashes(staged_files_to_track)
         files_modified = [
-            f for f in staged_files
+            f for f in staged_files_to_track
             if hashes_before.get(f) != hashes_after.get(f)
         ]
 
@@ -108,8 +126,8 @@ def main() -> int:
 
     except FileNotFoundError as e:
         cmd = str(e).split("'")[1] if "'" in str(e) else "command"
-        if "cargo" in cmd.lower():
-            print("ERROR: cargo not found. Is Rust installed?", file=sys.stderr)
+        if "rustfmt" in cmd.lower():
+            print("ERROR: rustfmt not found. Is the rustfmt component installed?", file=sys.stderr)
             print("  Install from: https://rustup.rs/", file=sys.stderr)
         elif "git" in cmd.lower():
             print("ERROR: git not found. Is Git installed?", file=sys.stderr)

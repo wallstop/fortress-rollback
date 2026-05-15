@@ -6,6 +6,12 @@ on:
     paths:
       - "**.md"
       - "**.rs"
+      - "**.toml"
+      - "**.yml"
+      - "**.yaml"
+      - "**.sh"
+      - "**.txt"
+      - "**.json"
       - "docs/**"
       - "wiki/**"
       - "scripts/**"
@@ -20,6 +26,12 @@ on:
     paths:
       - "**.md"
       - "**.rs"
+      - "**.toml"
+      - "**.yml"
+      - "**.yaml"
+      - "**.sh"
+      - "**.txt"
+      - "**.json"
       - "docs/**"
       - "wiki/**"
       - "scripts/**"
@@ -207,6 +219,16 @@ jobs:
       - name: Validate generated wiki format
         run: python scripts/docs/validate-wiki-output.py --wiki-dir wiki-test-output
 
+  version-sync:
+    name: Version Sync Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check Cargo/changelog/version references
+        run: bash scripts/sync-version.sh --check
+
   markdown-lint:
     name: Markdown Lint
     runs-on: ubuntu-latest
@@ -280,6 +302,9 @@ jobs:
 
       - name: Check doc comment accuracy
         run: ./scripts/ci/check-doc-claims.sh
+
+      - name: Check derive bounds
+        run: ./scripts/ci/check-derive-bounds.sh
 
   link-check:
     name: Link Check
