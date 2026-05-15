@@ -26,14 +26,15 @@
 
 use crate::common::stubs::{GameStub, StubConfig, StubInput};
 use crate::common::{
-    create_channel_pair, create_unconnected_socket, poll_with_advance,
+    create_channel_pair, create_chaos_channel_pair, create_unconnected_socket, poll_with_advance,
     synchronize_sessions_deterministic, SyncConfig, TestClock,
 };
 use fortress_rollback::{
-    FortressError, FortressEvent, InvalidRequestKind, PlayerHandle, PlayerType, ProtocolConfig,
-    SessionBuilder, SessionState,
+    ChaosConfig, FortressError, FortressEvent, InvalidRequestKind, PlayerHandle, PlayerType,
+    ProtocolConfig, SessionBuilder, SessionState,
 };
 use std::net::SocketAddr;
+use web_time::Duration;
 
 fn protocol_config(clock: &TestClock) -> ProtocolConfig {
     ProtocolConfig {
@@ -408,6 +409,167 @@ fn p2p_set_input_delay_mid_session_increase_works_with_large_delta() -> Result<(
     assert_eq!(sess1.current_frame(), frame_before_change_1 + 12);
     assert_eq!(sess2.current_frame(), frame_before_change_2 + 12);
     assert_eq!(sess1.input_delay(PlayerHandle::new(0))?, 8);
+
+    Ok(())
+}
+
+#[test]
+fn p2p_set_input_delay_mid_session_survives_seeded_chaos() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let config1 = ChaosConfig::builder()
+        .latency_ms(15)
+        .jitter_ms(5)
+        .reorder_buffer_size(3)
+        .reorder_rate(0.15)
+        .duplication_rate(0.05)
+        .seed(1_337)
+        .build();
+    let config2 = ChaosConfig::builder()
+        .latency_ms(10)
+        .jitter_ms(5)
+        .reorder_buffer_size(2)
+        .reorder_rate(0.10)
+        .duplication_rate(0.05)
+        .seed(7_331)
+        .build();
+    let (s1, s2, a1, a2) = create_chaos_channel_pair(config1, config2, &clock);
+
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(a2), PlayerHandle::new(1))?
+        .with_input_delay(0)?
+        .start_p2p_session(s1)?;
+
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .add_player(PlayerType::Remote(a1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .with_input_delay(0)?
+        .start_p2p_session(s2)?;
+
+    for _ in 0..300 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+        clock.advance(Duration::from_millis(20));
+    }
+    assert_eq!(sess1.current_state(), SessionState::Running);
+    assert_eq!(sess2.current_state(), SessionState::Running);
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    drive_frames(
+        &mut sess1,
+        &mut sess2,
+        &mut stub1,
+        &mut stub2,
+        &clock,
+        6,
+        |i| StubInput { inp: i * 3 },
+        |i| StubInput { inp: i * 5 },
+        "chaos-phase1@delay=0",
+    );
+
+    let frame_before_change_1 = sess1.current_frame();
+    let frame_before_change_2 = sess2.current_frame();
+    sess1.set_input_delay(PlayerHandle::new(0), 3)?;
+    assert_eq!(sess1.input_delay(PlayerHandle::new(0))?, 3);
+
+    drive_frames(
+        &mut sess1,
+        &mut sess2,
+        &mut stub1,
+        &mut stub2,
+        &clock,
+        12,
+        |i| StubInput { inp: 100 + i },
+        |i| StubInput { inp: 200 + i },
+        "chaos-phase2@delay=3",
+    );
+
+    assert_eq!(sess1.current_state(), SessionState::Running);
+    assert_eq!(sess2.current_state(), SessionState::Running);
+    assert_eq!(sess1.current_frame(), frame_before_change_1 + 12);
+    assert_eq!(sess2.current_frame(), frame_before_change_2 + 12);
+
+    Ok(())
+}
+
+#[test]
+fn p2p_set_input_delay_pending_output_full_preserves_delay() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (s1, s2, a1, a2) = create_channel_pair();
+    let protocol_config = ProtocolConfig {
+        clock: Some(clock.as_protocol_clock()),
+        pending_output_limit: 1,
+        ..ProtocolConfig::default()
+    };
+
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config.clone())
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(a2), PlayerHandle::new(1))?
+        .with_input_delay(0)?
+        .start_p2p_session(s1)?;
+
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config)
+        .add_player(PlayerType::Remote(a1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .with_input_delay(0)?
+        .start_p2p_session(s2)?;
+
+    synchronize_sessions_deterministic(&mut sess1, &mut sess2, &clock, &SyncConfig::default())
+        .expect("Sessions should synchronize");
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    poll_with_advance(&mut sess1, &mut sess2, &clock, 3);
+    sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: 10 })?;
+    sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: 20 })?;
+    let req1 = sess1.advance_frame()?;
+    let req2 = sess2.advance_frame()?;
+    stub1.handle_requests(req1);
+    stub2.handle_requests(req2);
+
+    // Do not poll sess2 again. sess1's one unacked frame occupies the only
+    // pending-output slot, so a mid-session delay increase would need more
+    // protocol capacity than is available.
+    let frame_before = sess1.current_frame();
+    let confirmed_before = sess1.confirmed_frame();
+    let err = sess1
+        .set_input_delay(PlayerHandle::new(0), 1)
+        .expect_err("pending-output capacity should reject the delay increase");
+    assert!(
+        matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::InputDelayMidSessionPendingOutputFull {
+                    delta: 1,
+                    capacity: 0,
+                }
+            }
+        ),
+        "expected InputDelayMidSessionPendingOutputFull, got {err:?}"
+    );
+
+    assert_eq!(sess1.input_delay(PlayerHandle::new(0))?, 0);
+    assert_eq!(
+        sess1.current_frame(),
+        frame_before,
+        "failed delay increase must not advance the session"
+    );
+    assert_eq!(
+        sess1.confirmed_frame(),
+        confirmed_before,
+        "failed delay increase must not mutate confirmation state"
+    );
 
     Ok(())
 }

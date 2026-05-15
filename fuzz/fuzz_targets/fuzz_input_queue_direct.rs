@@ -19,6 +19,7 @@
 
 use arbitrary::Arbitrary;
 use fortress_rollback::__internal::{InputQueue, PlayerInput};
+use fortress_rollback::telemetry::InvariantChecker;
 use fortress_rollback::{Config, Frame, InputStatus};
 use libfuzzer_sys::fuzz_target;
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,8 @@ enum QueueOp {
     DiscardFrames { frame: i16 },
     /// Set frame delay
     SetFrameDelay { delay: u8 },
+    /// Freeze the queue, after which add_input must be a no-op
+    Freeze,
     /// Reset the queue to a given frame
     ResetPrediction,
     /// Get first incorrect frame (for rollback detection)
@@ -107,6 +110,9 @@ fuzz_target!(|fuzz_input: FuzzInput| {
 
     // Track state for validation
     let mut last_added_frame: i32 = -1;
+    let mut last_returned_frame = Frame::NULL;
+    let mut frozen_return_frame = Frame::NULL;
+    let mut current_delay = initial_delay;
     let mut frames_added = 0;
     let mut frames_discarded_up_to: i32 = -1;
 
@@ -127,10 +133,19 @@ fuzz_target!(|fuzz_input: FuzzInput| {
                         PlayerInput::new(Frame::new(frame_val), TestInput { value: *value });
                     let result = queue.add_input(input);
 
+                    if queue.is_frozen() {
+                        assert_eq!(
+                            result, frozen_return_frame,
+                            "frozen add_input must return the pre-freeze last_added_frame"
+                        );
+                        continue;
+                    }
+
                     // Verify result frame is valid
                     if !result.is_null() {
                         // add_input applies frame_delay internally
                         last_added_frame = frame_val;
+                        last_returned_frame = result;
                         frames_added += 1;
 
                         // Periodically discard to prevent queue overflow
@@ -190,9 +205,24 @@ fuzz_target!(|fuzz_input: FuzzInput| {
             },
 
             QueueOp::SetFrameDelay { delay } => {
+                if queue.is_frozen() {
+                    continue;
+                }
                 let delay_val = (*delay as usize) % queue_length;
                 // This may fail if delay is too large
-                let _ = queue.set_frame_delay(delay_val);
+                if queue.set_frame_delay(delay_val).is_ok() {
+                    if !last_returned_frame.is_null() && delay_val > current_delay {
+                        last_returned_frame =
+                            last_returned_frame + (delay_val - current_delay) as i32;
+                    }
+                    current_delay = delay_val;
+                }
+            },
+
+            QueueOp::Freeze => {
+                queue.freeze();
+                frozen_return_frame = last_returned_frame;
+                assert!(queue.is_frozen(), "freeze should set the frozen flag");
             },
 
             QueueOp::ResetPrediction => {
@@ -225,5 +255,9 @@ fuzz_target!(|fuzz_input: FuzzInput| {
         "Final queue length {} exceeds max {}",
         final_length,
         queue_length
+    );
+    assert!(
+        queue.check_invariants().is_ok(),
+        "final queue invariants should hold"
     );
 });

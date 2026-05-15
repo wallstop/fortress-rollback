@@ -47,9 +47,10 @@ VARIABLES
     syncRequests,       \* syncRequests[p] = set of pending sync request IDs
     network,            \* network = sequence of messages in transit
     disconnectTimer,    \* disconnectTimer[p] = timer for disconnect detection
-    shutdownTimer       \* shutdownTimer[p] = timer for shutdown transition
+    shutdownTimer,      \* shutdownTimer[p] = timer for shutdown transition
+    dropped             \* dropped[p] = peer was gracefully removed from play
 
-vars == <<state, syncRemaining, syncRequests, network, disconnectTimer, shutdownTimer>>
+vars == <<state, syncRemaining, syncRequests, network, disconnectTimer, shutdownTimer, dropped>>
 
 (***************************************************************************)
 (* Type Invariant                                                          *)
@@ -61,6 +62,7 @@ TypeInvariant ==
     /\ network \in Seq([type: MessageTypes, from: PEERS, to: PEERS, data: Nat])
     /\ disconnectTimer \in [PEERS -> Nat]
     /\ shutdownTimer \in [PEERS -> Nat]
+    /\ dropped \in [PEERS -> BOOLEAN]
 
 (***************************************************************************)
 (* Initial State                                                           *)
@@ -72,6 +74,7 @@ Init ==
     /\ network = <<>>
     /\ disconnectTimer = [p \in PEERS |-> 0]
     /\ shutdownTimer = [p \in PEERS |-> 0]
+    /\ dropped = [p \in PEERS |-> FALSE]
 
 (***************************************************************************)
 (* Helper: Send a message                                                  *)
@@ -97,7 +100,7 @@ StartSync(p, other) ==
     /\ \E randomId \in 1..5:
         /\ syncRequests' = [syncRequests EXCEPT ![p] = syncRequests[p] \union {randomId}]
         /\ Send([type |-> "SyncRequest", from |-> p, to |-> other, data |-> randomId])
-    /\ UNCHANGED <<syncRemaining, disconnectTimer, shutdownTimer>>
+    /\ UNCHANGED <<syncRemaining, disconnectTimer, shutdownTimer, dropped>>
 
 (***************************************************************************)
 (* Action: Handle SyncRequest - send SyncReply                             *)
@@ -112,7 +115,7 @@ HandleSyncRequest(p) ==
             /\ network' = Append(
                 SubSeq(network, 1, i-1) \o SubSeq(network, i+1, Len(network)),
                 [type |-> "SyncReply", from |-> p, to |-> msg.from, data |-> msg.data])
-    /\ UNCHANGED <<state, syncRemaining, syncRequests, disconnectTimer, shutdownTimer>>
+    /\ UNCHANGED <<state, syncRemaining, syncRequests, disconnectTimer, shutdownTimer, dropped>>
 
 (***************************************************************************)
 (* Action: Handle SyncReply - decrement sync counter                       *)
@@ -132,7 +135,7 @@ HandleSyncReply(p) ==
                THEN state' = [state EXCEPT ![p] = "Running"]
                ELSE state' = state
             /\ network' = SubSeq(network, 1, i-1) \o SubSeq(network, i+1, Len(network))
-    /\ UNCHANGED <<disconnectTimer, shutdownTimer>>
+    /\ UNCHANGED <<disconnectTimer, shutdownTimer, dropped>>
 
 (***************************************************************************)
 (* Action: Send another sync request (retry)                               *)
@@ -144,7 +147,7 @@ RetrySyncRequest(p, other) ==
         /\ randomId \notin syncRequests[p]
         /\ syncRequests' = [syncRequests EXCEPT ![p] = syncRequests[p] \union {randomId}]
         /\ Send([type |-> "SyncRequest", from |-> p, to |-> other, data |-> randomId])
-    /\ UNCHANGED <<state, syncRemaining, disconnectTimer, shutdownTimer>>
+    /\ UNCHANGED <<state, syncRemaining, disconnectTimer, shutdownTimer, dropped>>
 
 (***************************************************************************)
 (* Action: Timeout in Running state -> Disconnected                        *)
@@ -153,6 +156,20 @@ DisconnectTimeout(p) ==
     /\ state[p] = "Running"
     /\ disconnectTimer[p] > 10  \* Simplified timeout threshold
     /\ state' = [state EXCEPT ![p] = "Disconnected"]
+    /\ UNCHANGED <<syncRemaining, syncRequests, network, disconnectTimer, shutdownTimer, dropped>>
+
+(***************************************************************************)
+(* Action: Gracefully drop a running peer                                   *)
+(*                                                                         *)
+(* Models DisconnectBehavior::ContinueWithout. Once marked dropped, a peer  *)
+(* leaves active play and remains disconnected/shutdown; remaining peers    *)
+(* compute progress without waiting on it.                                  *)
+(***************************************************************************)
+DropPeer(p) ==
+    /\ state[p] = "Running"
+    /\ dropped[p] = FALSE
+    /\ state' = [state EXCEPT ![p] = "Disconnected"]
+    /\ dropped' = [dropped EXCEPT ![p] = TRUE]
     /\ UNCHANGED <<syncRemaining, syncRequests, network, disconnectTimer, shutdownTimer>>
 
 (***************************************************************************)
@@ -165,7 +182,7 @@ ReceiveKeepAlive(p) ==
         /\ network[i].to = p
         /\ network' = SubSeq(network, 1, i-1) \o SubSeq(network, i+1, Len(network))
     /\ disconnectTimer' = [disconnectTimer EXCEPT ![p] = 0]
-    /\ UNCHANGED <<state, syncRemaining, syncRequests, shutdownTimer>>
+    /\ UNCHANGED <<state, syncRemaining, syncRequests, shutdownTimer, dropped>>
 
 (***************************************************************************)
 (* Action: Increment disconnect timer (time passes)                        *)
@@ -178,7 +195,7 @@ Tick(p) ==
     /\ IF state[p] = "Disconnected"
        THEN shutdownTimer' = [shutdownTimer EXCEPT ![p] = shutdownTimer[p] + 1]
        ELSE shutdownTimer' = shutdownTimer
-    /\ UNCHANGED <<state, syncRemaining, syncRequests, network>>
+    /\ UNCHANGED <<state, syncRemaining, syncRequests, network, dropped>>
 
 (***************************************************************************)
 (* Action: Shutdown timer expires -> Shutdown                              *)
@@ -187,7 +204,7 @@ ShutdownTimeout(p) ==
     /\ state[p] = "Disconnected"
     /\ shutdownTimer[p] > 5  \* Simplified timeout threshold
     /\ state' = [state EXCEPT ![p] = "Shutdown"]
-    /\ UNCHANGED <<syncRemaining, syncRequests, network, disconnectTimer, shutdownTimer>>
+    /\ UNCHANGED <<syncRemaining, syncRequests, network, disconnectTimer, shutdownTimer, dropped>>
 
 (***************************************************************************)
 (* Action: Explicit shutdown from any state                                *)
@@ -195,7 +212,7 @@ ShutdownTimeout(p) ==
 ExplicitShutdown(p) ==
     /\ state[p] # "Shutdown"
     /\ state' = [state EXCEPT ![p] = "Shutdown"]
-    /\ UNCHANGED <<syncRemaining, syncRequests, network, disconnectTimer, shutdownTimer>>
+    /\ UNCHANGED <<syncRemaining, syncRequests, network, disconnectTimer, shutdownTimer, dropped>>
 
 (***************************************************************************)
 (* Next State Relation                                                     *)
@@ -208,6 +225,7 @@ Next ==
             \/ HandleSyncReply(p)
             \/ RetrySyncRequest(p, other)
             \/ DisconnectTimeout(p)
+            \/ DropPeer(p)
             \/ ReceiveKeepAlive(p)
             \/ Tick(p)
             \/ ShutdownTimeout(p)
@@ -251,6 +269,11 @@ OnlyRunningProcessesInputs ==
             ~\E i \in 1..Len(network):
                 network[i].to = p /\ network[i].type = "Input"
 
+\* SAFE-4: Dropped peers never return to active protocol states
+DroppedPeersDisconnected ==
+    \A p \in PEERS:
+        dropped[p] => state[p] \in {"Disconnected", "Shutdown"}
+
 (***************************************************************************)
 (* Liveness Properties                                                     *)
 (***************************************************************************)
@@ -279,5 +302,6 @@ StateConstraint ==
 Invariants ==
     /\ TypeInvariant
     /\ SyncRemainingNonNegative
+    /\ DroppedPeersDisconnected
 
 =============================================================================

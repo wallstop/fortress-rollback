@@ -53,6 +53,18 @@ const MIN_RECOMMENDATION: u32 = 3;
 #[cfg(test)]
 const DEFAULT_MAX_EVENT_QUEUE_SIZE: usize = 100;
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum DisconnectEventPolicy {
+    Suppress,
+    Emit,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum GracefulDropFailurePolicy {
+    Abort,
+    DisconnectAndHalt,
+}
+
 /// A [`P2PSession`] provides all functionality to connect to remote clients in a peer-to-peer fashion, exchange inputs and handle the gamestate by saving, loading and advancing.
 ///
 /// This type implements the [`Session`] trait, enabling it to be used in generic
@@ -257,6 +269,11 @@ impl<T: Config> P2PSession<T> {
         // receive info from remote players, trigger events and send messages
         self.poll_remote_clients();
 
+        // Apply propagated disconnect knowledge before the state gate. Under
+        // Halt, a remote-reported drop must fail closed on the detecting call
+        // itself instead of advancing one extra frame.
+        self.update_player_disconnects();
+
         // session is not running and synchronized
         if self.state != SessionState::Running {
             trace!("Session not synchronized; returning error");
@@ -303,9 +320,6 @@ impl<T: Config> P2PSession<T> {
             trace!("Saving state of first frame");
             requests.push(self.sync_layer.save_current_state());
         }
-
-        // propagate disconnects to multiple players
-        self.update_player_disconnects();
 
         // find the confirmed frame for which we received all inputs
         let confirmed_frame = self.confirmed_frame();
@@ -616,7 +630,7 @@ impl<T: Config> P2PSession<T> {
                 handle: player_handle,
             },
         )?;
-        let addr = match player_type {
+        match player_type {
             PlayerType::Local => {
                 return Err(InvalidRequestKind::DisconnectLocalPlayer {
                     handle: player_handle,
@@ -629,8 +643,8 @@ impl<T: Config> P2PSession<T> {
                 }
                 .into());
             },
-            PlayerType::Remote(addr) => addr.clone(),
-        };
+            PlayerType::Remote(_) => {},
+        }
 
         // Verify the player isn't already removed/disconnected. Using
         // PlayerAlreadyRemoved (not AlreadyDisconnected) so applications can
@@ -648,59 +662,13 @@ impl<T: Config> P2PSession<T> {
             }
             .into());
         }
-        let last_frame = status.last_frame;
-
-        // Multi-handle endpoints: a single remote address may own more than
-        // one player handle (e.g. couch co-op behind one socket). The
-        // graceful-drop contract — "freeze each affected player's input queue
-        // so simulation keeps producing the last confirmed input" — must apply
-        // to *every* such handle, not just the targeted one.
-        let handles_at_addr: Vec<PlayerHandle> =
-            self.player_reg.handles_by_address_iter(&addr).collect();
-
-        // Pre-validate that every handle's input queue can be frozen BEFORE
-        // performing any state-mutating work. `validate_freeze_player`
-        // returns the exact error variant `freeze_player` would produce, so
-        // the error surfaced here is byte-identical to what would have been
-        // surfaced if we had naively called freeze_player and failed.
-        // Reaching the error branch indicates an internal-invariant violation
-        // (handles registered to an endpoint should always have a
-        // corresponding input queue); spectator handles do not own an input
-        // queue and are skipped here as they are by the helper.
-        for &handle in &handles_at_addr {
-            if !handle.is_valid_player_for(self.num_players) {
-                continue; // spectator (no input queue to freeze)
-            }
-            self.sync_layer.validate_freeze_player(handle)?;
-        }
-
-        // Freeze input queues and emit `PeerDropped` for every non-spectator
-        // handle owned by the dropped endpoint before running the
-        // `disconnect_player_at_frame` flow below. This step *does* mutate
-        // session state (it freezes input queues and pushes `PeerDropped`
-        // events onto the event queue), but the pre-validation above
-        // ensures `freeze_player` cannot fail at this point, so reaching
-        // this call site already guarantees the freeze step will succeed
-        // for every handle. `disconnect_player_at_frame` only sets
-        // `disconnected = true` and disconnects the endpoint, so freezing
-        // first is safe — the queue still ignores any further inputs once
-        // frozen, and `last_confirmed_input` does not change.
-        self.emit_peer_dropped_for_endpoint(&addr, &handles_at_addr)?;
-
-        // Now run the existing disconnect flow (mark all handles at the
-        // address disconnected, disconnect endpoint, set disconnect_frame
-        // for rollback). Passing the originally-targeted handle preserves
-        // the existing `disconnect_frame` semantic — the targeted player's
-        // `last_frame` wins.
-        self.disconnect_player_at_frame(player_handle, last_frame);
-
-        // Emit Disconnected as well for back-compat with applications that
-        // consume the legacy event. Mirrors the auto-removal path in
-        // `Event::Disconnected`, which also emits both events for the same
-        // peer in the same batch.
-        self.event_queue
-            .push_back(FortressEvent::Disconnected { addr });
-        Ok(())
+        self.disconnect_player_with_policy(
+            player_handle,
+            None,
+            DisconnectBehavior::ContinueWithout,
+            DisconnectEventPolicy::Emit,
+            GracefulDropFailurePolicy::Abort,
+        )
     }
 
     /// Disconnects a remote player and all other remote players with the same address from the session.
@@ -756,10 +724,13 @@ impl<T: Config> P2PSession<T> {
                         kind: InternalErrorKind::DisconnectStatusNotFound { player_handle },
                     })?;
                 if !status.disconnected {
-                    let last_frame = status.last_frame;
-                    self.disconnect_player_at_frame(player_handle, last_frame);
-                    self.state = SessionState::Synchronizing;
-                    return Ok(());
+                    return self.disconnect_player_with_policy(
+                        player_handle,
+                        None,
+                        DisconnectBehavior::Halt,
+                        DisconnectEventPolicy::Suppress,
+                        GracefulDropFailurePolicy::DisconnectAndHalt,
+                    );
                 }
                 Err(InvalidRequestKind::AlreadyDisconnected {
                     handle: player_handle,
@@ -1988,7 +1959,147 @@ impl<T: Config> P2PSession<T> {
         Ok(())
     }
 
+    fn remote_disconnect_snapshot(
+        &self,
+        player_handle: PlayerHandle,
+        last_frame_overrides: Option<&BTreeMap<PlayerHandle, Frame>>,
+    ) -> Result<(T::Address, Vec<PlayerHandle>, Frame), FortressError> {
+        let addr = match self.player_reg.handles.get(&player_handle) {
+            Some(PlayerType::Remote(addr)) => addr.clone(),
+            Some(PlayerType::Local) => {
+                return Err(InvalidRequestKind::DisconnectLocalPlayer {
+                    handle: player_handle,
+                }
+                .into());
+            },
+            Some(PlayerType::Spectator(_)) | None => {
+                return Err(InvalidRequestKind::DisconnectInvalidHandle {
+                    handle: player_handle,
+                }
+                .into());
+            },
+        };
+        let endpoint =
+            self.player_reg
+                .remotes
+                .get(&addr)
+                .ok_or(FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::EndpointNotFoundForRemote { player_handle },
+                })?;
+        let mut handles: Vec<PlayerHandle> = endpoint.handles().iter().copied().collect();
+        if handles.is_empty() {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::InternalError,
+                "Remote endpoint at {:?} had no handles during disconnect; using requested handle {}",
+                addr,
+                player_handle
+            );
+            handles.push(player_handle);
+        }
+
+        let mut earliest_last_frame = Frame::new(i32::MAX);
+        for &handle in &handles {
+            let status = self.local_connect_status.get(handle.as_usize()).ok_or(
+                FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::DisconnectStatusNotFound {
+                        player_handle: handle,
+                    },
+                },
+            )?;
+            let last_frame = last_frame_overrides
+                .and_then(|overrides| overrides.get(&handle).copied())
+                .unwrap_or(status.last_frame);
+            earliest_last_frame = std::cmp::min(earliest_last_frame, last_frame);
+        }
+
+        if earliest_last_frame.as_i32() == i32::MAX {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::InternalError,
+                "Remote endpoint at {:?} had no valid handle statuses during disconnect; using NULL frame",
+                addr
+            );
+            earliest_last_frame = Frame::NULL;
+        }
+
+        Ok((addr, handles, earliest_last_frame))
+    }
+
+    fn validate_graceful_drop_handles(
+        &self,
+        handles: &[PlayerHandle],
+    ) -> Result<(), FortressError> {
+        for &handle in handles {
+            if !handle.is_valid_player_for(self.num_players) {
+                continue;
+            }
+            self.sync_layer.validate_freeze_player(handle)?;
+        }
+        Ok(())
+    }
+
+    fn disconnect_player_with_policy(
+        &mut self,
+        player_handle: PlayerHandle,
+        last_frame_overrides: Option<&BTreeMap<PlayerHandle, Frame>>,
+        behavior: DisconnectBehavior,
+        event_policy: DisconnectEventPolicy,
+        graceful_failure_policy: GracefulDropFailurePolicy,
+    ) -> Result<(), FortressError> {
+        let (addr, handles, earliest_last_frame) =
+            self.remote_disconnect_snapshot(player_handle, last_frame_overrides)?;
+
+        let mut graceful_drop_error = None;
+        if behavior == DisconnectBehavior::ContinueWithout
+            && event_policy == DisconnectEventPolicy::Emit
+        {
+            match self.validate_graceful_drop_handles(&handles) {
+                Ok(()) => {
+                    if let Err(e) = self.emit_peer_dropped_for_endpoint(&addr, &handles) {
+                        graceful_drop_error = Some(e);
+                    }
+                },
+                Err(e) => graceful_drop_error = Some(e),
+            }
+        }
+
+        if graceful_drop_error.is_some()
+            && graceful_failure_policy == GracefulDropFailurePolicy::Abort
+        {
+            if let Some(e) = graceful_drop_error {
+                return Err(e);
+            }
+        }
+
+        self.disconnect_player_at_frames(player_handle, earliest_last_frame, last_frame_overrides);
+
+        if behavior == DisconnectBehavior::Halt || graceful_drop_error.is_some() {
+            self.state = SessionState::Synchronizing;
+        }
+
+        if event_policy == DisconnectEventPolicy::Emit {
+            self.event_queue
+                .push_back(FortressEvent::Disconnected { addr });
+        }
+
+        if let Some(e) = graceful_drop_error {
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
     fn disconnect_player_at_frame(&mut self, player_handle: PlayerHandle, last_frame: Frame) {
+        self.disconnect_player_at_frames(player_handle, last_frame, None);
+    }
+
+    fn disconnect_player_at_frames(
+        &mut self,
+        player_handle: PlayerHandle,
+        earliest_last_frame: Frame,
+        last_frame_overrides: Option<&BTreeMap<PlayerHandle, Frame>>,
+    ) {
         // disconnect the remote player
         let Some(player_type) = self.player_reg.handles.get(&player_handle) else {
             report_violation!(
@@ -2022,15 +2133,32 @@ impl<T: Config> P2PSession<T> {
                         );
                         continue;
                     };
+                    let existing_last_frame = status.last_frame;
+                    let handle_last_frame = last_frame_overrides
+                        .and_then(|overrides| overrides.get(&handle).copied())
+                        .unwrap_or(existing_last_frame);
+                    if status.disconnected {
+                        status.last_frame = std::cmp::min(status.last_frame, handle_last_frame);
+                    } else {
+                        status.last_frame = handle_last_frame;
+                    }
                     status.disconnected = true;
                 }
                 endpoint.disconnect();
 
-                if self.sync_layer.current_frame() > last_frame {
+                if self.sync_layer.current_frame() > earliest_last_frame {
                     // remember to adjust simulation to account for the fact that the player disconnected a few frames ago,
                     // resimulating with correct disconnect flags (to account for user having some AI kick in).
-                    self.disconnect_frame =
-                        safe_frame_add!(last_frame, 1, "P2PSession::disconnect_player_at_frame");
+                    let disconnect_frame = safe_frame_add!(
+                        earliest_last_frame,
+                        1,
+                        "P2PSession::disconnect_player_at_frame"
+                    );
+                    self.disconnect_frame = if self.disconnect_frame.is_null() {
+                        disconnect_frame
+                    } else {
+                        std::cmp::min(self.disconnect_frame, disconnect_frame)
+                    };
                 }
             },
             PlayerType::Spectator(addr) => {
@@ -2269,6 +2397,11 @@ impl<T: Config> P2PSession<T> {
     /// Check if players are registered as disconnected for earlier frames on other remote players in comparison to our local assumption.
     /// Disconnect players that are disconnected for other players and update the frame they disconnected
     fn update_player_disconnects(&mut self) {
+        let mut propagated_by_addr: BTreeMap<T::Address, BTreeMap<PlayerHandle, Frame>> =
+            BTreeMap::new();
+        let mut representative_by_addr: BTreeMap<T::Address, PlayerHandle> = BTreeMap::new();
+        let mut newly_disconnected_by_addr: BTreeMap<T::Address, bool> = BTreeMap::new();
+
         for handle_idx in 0..self.num_players {
             let handle = PlayerHandle::new(handle_idx);
             let mut queue_connected = true;
@@ -2309,8 +2442,58 @@ impl<T: Config> P2PSession<T> {
                 // If so, we need to re-adjust. This can happen when we e.g. detect our own disconnect at frame n
                 // and later receive a disconnect notification for frame n-1.
                 if local_connected || local_min_confirmed > queue_min_confirmed {
-                    self.disconnect_player_at_frame(handle, queue_min_confirmed);
+                    let Some(PlayerType::Remote(addr)) = self.player_reg.handles.get(&handle)
+                    else {
+                        continue;
+                    };
+                    propagated_by_addr
+                        .entry(addr.clone())
+                        .or_default()
+                        .insert(handle, queue_min_confirmed);
+                    representative_by_addr.entry(addr.clone()).or_insert(handle);
+                    newly_disconnected_by_addr
+                        .entry(addr.clone())
+                        .and_modify(|newly_disconnected| {
+                            *newly_disconnected = *newly_disconnected || local_connected;
+                        })
+                        .or_insert(local_connected);
                 }
+            }
+        }
+
+        for (addr, overrides) in &propagated_by_addr {
+            let Some(&representative) = representative_by_addr.get(addr) else {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::InternalError,
+                    "Missing representative handle for propagated disconnect at {:?}",
+                    addr
+                );
+                continue;
+            };
+            let event_policy = if newly_disconnected_by_addr
+                .get(addr)
+                .copied()
+                .unwrap_or(false)
+            {
+                DisconnectEventPolicy::Emit
+            } else {
+                DisconnectEventPolicy::Suppress
+            };
+            if let Err(e) = self.disconnect_player_with_policy(
+                representative,
+                Some(overrides),
+                self.disconnect_behavior,
+                event_policy,
+                GracefulDropFailurePolicy::DisconnectAndHalt,
+            ) {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InternalError,
+                    "Failed to apply propagated disconnect for endpoint at {:?}: {}",
+                    addr,
+                    e
+                );
             }
         }
     }
@@ -2436,70 +2619,38 @@ impl<T: Config> P2PSession<T> {
             },
             // disconnect the player, then forward to user
             Event::Disconnected => {
-                let continue_without =
-                    self.disconnect_behavior == DisconnectBehavior::ContinueWithout;
-
-                // `disconnect_player_at_frame` iterates every handle at the
-                // endpoint internally, so a single call handles the whole
-                // endpoint. We pick the LAST handle in `player_handles` to
-                // preserve the pre-refactor behavior (the per-handle loop's
-                // last iteration overwrote `disconnect_frame`).
-                let target_handle = player_handles.last().copied();
-                // unwrap_or_else has side effects (violation reporting)
-                #[allow(clippy::map_unwrap_or)]
-                let last_frame = match target_handle {
-                    Some(handle) if handle.is_valid_player_for(self.num_players) => self
-                        .local_connect_status
-                        .get(handle.as_usize())
-                        .map(|s| s.last_frame)
-                        .unwrap_or_else(|| {
-                            report_violation!(
-                                ViolationSeverity::Warning,
-                                ViolationKind::InternalError,
-                                "Invalid player handle {} when handling disconnect event - using NULL frame",
-                                handle
-                            );
-                            Frame::NULL
-                        }),
-                    _ => Frame::NULL, // spectator endpoint or empty handle list
-                };
-
-                if let Some(handle) = target_handle {
-                    self.disconnect_player_at_frame(handle, last_frame);
-                }
-                if !continue_without
-                    && target_handle
-                        .is_some_and(|handle| handle.is_valid_player_for(self.num_players))
+                if let Some(target_handle) = player_handles
+                    .iter()
+                    .copied()
+                    .rfind(|handle| handle.is_valid_player_for(self.num_players))
                 {
-                    self.state = SessionState::Synchronizing;
-                }
-
-                // If the application opted into ContinueWithout, freeze every
-                // non-spectator input queue at this endpoint and emit one
-                // `PeerDropped` per handle so simulation keeps producing the
-                // last confirmed input for each affected player. On failure
-                // we surface an Error-severity violation (the graceful-drop
-                // contract cannot be honored for any remaining handles), but
-                // still emit the legacy `Disconnected` event below so existing
-                // applications observe the address-level disconnect.
-                if continue_without {
-                    if let Err(e) = self.emit_peer_dropped_for_endpoint(&addr, &player_handles) {
+                    let event_count_before_disconnect = self.event_queue.len();
+                    if let Err(e) = self.disconnect_player_with_policy(
+                        target_handle,
+                        None,
+                        self.disconnect_behavior,
+                        DisconnectEventPolicy::Emit,
+                        GracefulDropFailurePolicy::DisconnectAndHalt,
+                    ) {
                         report_violation!(
                             ViolationSeverity::Error,
                             ViolationKind::InternalError,
-                            "Failed to freeze input queue during peer drop for endpoint at {:?}: {} \
-                             (graceful-drop contract cannot be honored for one or more handles in this endpoint)",
+                            "Failed to apply disconnect event for endpoint at {:?}: {}",
                             addr,
                             e
                         );
+                        if self.event_queue.len() == event_count_before_disconnect {
+                            self.event_queue
+                                .push_back(FortressEvent::Disconnected { addr });
+                        }
                     }
+                } else {
+                    if let Some(target_handle) = player_handles.last().copied() {
+                        self.disconnect_player_at_frame(target_handle, Frame::NULL);
+                    }
+                    self.event_queue
+                        .push_back(FortressEvent::Disconnected { addr });
                 }
-
-                // Always emit Disconnected so existing applications relying on
-                // it are unaffected. PeerDropped is in addition for the
-                // ContinueWithout path.
-                self.event_queue
-                    .push_back(FortressEvent::Disconnected { addr });
             },
             // forward sync timeout to user
             Event::SyncTimeout { elapsed_ms } => {
@@ -2805,6 +2956,20 @@ mod tests {
             .expect("Failed to add local player")
             .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(1))
             .expect("Failed to add remote player")
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session")
+    }
+
+    fn create_multi_handle_remote_session() -> P2PSession<TestConfig> {
+        SessionBuilder::new()
+            .with_num_players(3)
+            .unwrap()
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("Failed to add local player")
+            .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(1))
+            .expect("Failed to add remote player 1")
+            .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(2))
+            .expect("Failed to add remote player 2")
             .start_p2p_session(DummySocket)
             .expect("Failed to create session")
     }
@@ -3223,6 +3388,81 @@ mod tests {
                 kind: InvalidRequestKind::AlreadyDisconnected { .. }
             })
         ));
+    }
+
+    #[test]
+    fn disconnect_player_multi_handle_uses_earliest_last_frame_for_rollback() {
+        let mut session = create_multi_handle_remote_session();
+        session.state = SessionState::Running;
+        session.local_connect_status[1].last_frame = Frame::new(5);
+        session.local_connect_status[2].last_frame = Frame::new(2);
+        for _ in 0..10 {
+            session.sync_layer.advance_frame();
+        }
+
+        session
+            .disconnect_player(PlayerHandle::new(1))
+            .expect("multi-handle remote disconnect should succeed");
+
+        assert_eq!(
+            session.disconnect_frame,
+            Frame::new(3),
+            "rollback must start at earliest affected last_frame + 1"
+        );
+        assert!(session.local_connect_status[1].disconnected);
+        assert!(session.local_connect_status[2].disconnected);
+        assert_eq!(session.local_connect_status[1].last_frame, Frame::new(5));
+        assert_eq!(session.local_connect_status[2].last_frame, Frame::new(2));
+        assert_eq!(session.current_state(), SessionState::Synchronizing);
+    }
+
+    #[test]
+    fn spectator_disconnect_event_disconnects_spectator_endpoint() {
+        let spectator_addr = test_addr(9090);
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(1)
+            .unwrap()
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("Failed to add local player")
+            .add_player(PlayerType::Spectator(spectator_addr), PlayerHandle::new(1))
+            .expect("Failed to add spectator")
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session");
+
+        assert!(
+            !session
+                .player_reg
+                .spectators
+                .get(&spectator_addr)
+                .expect("spectator endpoint should exist")
+                .is_synchronized(),
+            "new spectator endpoint should not already be synchronized"
+        );
+
+        session.handle_event(
+            Event::Disconnected,
+            std::sync::Arc::from([PlayerHandle::new(1)]),
+            spectator_addr,
+        );
+
+        assert!(
+            session
+                .player_reg
+                .spectators
+                .get(&spectator_addr)
+                .expect("spectator endpoint should still exist")
+                .is_synchronized(),
+            "spectator disconnect event must transition the endpoint out of the running lifecycle"
+        );
+        let events: Vec<_> = session.events().collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, FortressEvent::Disconnected { .. }))
+                .count(),
+            1,
+            "spectator disconnect must emit exactly one Disconnected event"
+        );
     }
 
     // ==========================================

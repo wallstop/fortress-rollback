@@ -2750,4 +2750,116 @@ mod kani_sync_layer_proofs {
             "With sparse saving, confirmed frame should not exceed last saved",
         );
     }
+
+    /// Proof: invalid freeze handles are rejected.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Graceful-drop handle validation
+    /// - Related: proof_set_frame_delay_validates_handle
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_freeze_player_rejects_invalid_handle() {
+        let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(1, 1, 2);
+
+        let result = sync_layer.freeze_player(PlayerHandle::new(2));
+        kani::assert(result.is_err(), "invalid freeze handle should fail");
+        kani::assert(
+            sync_layer.current_frame() == Frame::new(0),
+            "failed freeze should not change current frame",
+        );
+    }
+
+    /// Proof: freezing a player preserves frame-state fields.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Graceful-drop freeze does not mutate frame bookkeeping
+    /// - Related: proof_freeze_player_rejects_invalid_handle
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn proof_freeze_player_preserves_frame_state() {
+        let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(1, 1, 2);
+        sync_layer.save_current_state();
+        sync_layer.advance_frame();
+
+        let current_before = sync_layer.current_frame();
+        let confirmed_before = sync_layer.last_confirmed_frame();
+        let saved_before = sync_layer.last_saved_frame();
+
+        let result = sync_layer.freeze_player(PlayerHandle::new(0));
+        kani::assert(result.is_ok(), "valid freeze should succeed");
+        kani::assert(
+            sync_layer.current_frame() == current_before,
+            "freeze should preserve current_frame",
+        );
+        kani::assert(
+            sync_layer.last_confirmed_frame() == confirmed_before,
+            "freeze should preserve last_confirmed_frame",
+        );
+        kani::assert(
+            sync_layer.last_saved_frame() == saved_before,
+            "freeze should preserve last_saved_frame",
+        );
+    }
+
+    /// Proof: frozen disconnected players produce the same input for
+    /// synchronized simulation and confirmed spectator streams.
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Frozen disconnected synchronized/confirmed parity
+    /// - Related: proof_freeze_player_preserves_frame_state
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn proof_frozen_disconnected_inputs_match_confirmed_stream() {
+        let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(1, 1, 3);
+        let input = PlayerInput::new(Frame::new(0), TestInput { inp: 11 });
+        sync_layer.add_remote_input(PlayerHandle::new(0), input);
+        let confirmed = sync_layer.confirmed_input(PlayerHandle::new(0), Frame::new(0));
+        kani::assert(confirmed.is_ok(), "input should be accepted");
+
+        let freeze = sync_layer.freeze_player(PlayerHandle::new(0));
+        kani::assert(freeze.is_ok(), "freeze should succeed");
+        sync_layer.advance_frame();
+
+        let mut connect_status = [ConnectionStatus::default(); 1];
+        connect_status[0].disconnected = true;
+        connect_status[0].last_frame = Frame::new(0);
+
+        let synchronized = sync_layer.synchronized_inputs(&connect_status);
+        kani::assert(
+            synchronized.is_some(),
+            "frozen disconnected synchronized input should be available",
+        );
+        if let Some(inputs) = synchronized {
+            kani::assert(inputs.len() == 1, "one synchronized input expected");
+            if let Some((input_value, status)) = inputs.first() {
+                kani::assert(
+                    input_value.inp == 11,
+                    "synchronized input should repeat frozen value",
+                );
+                kani::assert(
+                    *status == InputStatus::Disconnected,
+                    "synchronized status should be Disconnected",
+                );
+            }
+        }
+
+        let confirmed = sync_layer.confirmed_inputs(Frame::new(1), &connect_status);
+        kani::assert(
+            confirmed.is_ok(),
+            "frozen disconnected confirmed stream should be available",
+        );
+        if let Ok(inputs) = confirmed {
+            kani::assert(inputs.len() == 1, "one confirmed input expected");
+            if let Some(input_value) = inputs.first() {
+                kani::assert(
+                    input_value.input.inp == 11,
+                    "confirmed stream should repeat frozen value",
+                );
+                kani::assert(
+                    input_value.frame == Frame::NULL,
+                    "dropped confirmed entry should use NULL frame stamp",
+                );
+            }
+        }
+    }
 }

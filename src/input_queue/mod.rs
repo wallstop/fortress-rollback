@@ -259,6 +259,13 @@ impl<T: Config> InputQueue<T> {
             return Err(InvalidRequestKind::FrameDelayTooLarge { delay, max_delay }.into());
         }
 
+        // Frozen queues represent a dropped peer under ContinueWithout. Once frozen,
+        // their simulation input must remain stable regardless of later queue
+        // mutation attempts.
+        if self.frozen {
+            return Ok(());
+        }
+
         // No-op: nothing to do.
         if delay == self.frame_delay {
             return Ok(());
@@ -302,15 +309,18 @@ impl<T: Config> InputQueue<T> {
                 });
             },
         };
-        // The gap-fill loop is not atomic on `add_input_by_frame` failure: a partial
-        // failure leaves the queue with some filler frames written and `frame_delay`
-        // still at the old value. This is acceptable because `add_input_by_frame`
-        // only fails on internal invariant violations (queue overflow, prediction-
-        // frame collision), which themselves indicate the session is already
-        // compromised — at that point the structured error returned here surfaces
-        // the underlying failure rather than masking it. Recovering atomically would
-        // require snapshotting and rewinding the circular buffer, which is more
-        // complex than the failure mode warrants.
+        let snapshot_head = self.head;
+        let snapshot_tail = self.tail;
+        let snapshot_length = self.length;
+        let snapshot_first_frame = self.first_frame;
+        let snapshot_last_added_frame = self.last_added_frame;
+        let snapshot_first_incorrect_frame = self.first_incorrect_frame;
+        let snapshot_last_requested_frame = self.last_requested_frame;
+        let snapshot_frame_delay = self.frame_delay;
+        let snapshot_inputs = self.inputs.clone();
+        let snapshot_prediction = self.prediction;
+        let snapshot_last_confirmed_input = self.last_confirmed_input;
+
         for _ in 0..delta {
             let next_frame = safe_frame_add!(
                 self.last_added_frame,
@@ -323,6 +333,18 @@ impl<T: Config> InputQueue<T> {
                 input: last_input.input,
             };
             if !self.add_input_by_frame(filler, next_frame) {
+                self.head = snapshot_head;
+                self.tail = snapshot_tail;
+                self.length = snapshot_length;
+                self.first_frame = snapshot_first_frame;
+                self.last_added_frame = snapshot_last_added_frame;
+                self.first_incorrect_frame = snapshot_first_incorrect_frame;
+                self.last_requested_frame = snapshot_last_requested_frame;
+                self.frame_delay = snapshot_frame_delay;
+                self.inputs = snapshot_inputs;
+                self.prediction = snapshot_prediction;
+                self.last_confirmed_input = snapshot_last_confirmed_input;
+
                 return Err(FortressError::InternalErrorStructured {
                     kind: InternalErrorKind::InputQueueGapFillFailed { frame: next_frame },
                 });
@@ -1015,6 +1037,25 @@ mod input_queue_tests {
         InputQueue::<TestConfig>::new(player_index).expect("Failed to create test queue")
     }
 
+    /// Helper to assert that every queue field remains unchanged.
+    #[track_caller]
+    fn assert_queue_unchanged(queue: &InputQueue<TestConfig>, before: &InputQueue<TestConfig>) {
+        assert_eq!(queue.head, before.head);
+        assert_eq!(queue.tail, before.tail);
+        assert_eq!(queue.length, before.length);
+        assert_eq!(queue.first_frame, before.first_frame);
+        assert_eq!(queue.last_added_frame, before.last_added_frame);
+        assert_eq!(queue.first_incorrect_frame, before.first_incorrect_frame);
+        assert_eq!(queue.last_requested_frame, before.last_requested_frame);
+        assert_eq!(queue.frame_delay, before.frame_delay);
+        assert_eq!(queue.player_index, before.player_index);
+        assert_eq!(queue.queue_length, before.queue_length);
+        assert_eq!(queue.inputs, before.inputs);
+        assert_eq!(queue.prediction, before.prediction);
+        assert_eq!(queue.last_confirmed_input, before.last_confirmed_input);
+        assert_eq!(queue.frozen, before.frozen);
+    }
+
     #[test]
     fn test_add_input_wrong_frame() {
         let mut queue = test_queue(0);
@@ -1551,6 +1592,7 @@ mod input_queue_tests {
         // Add a single input so we are mid-session.
         let input = PlayerInput::new(Frame::new(0), TestInput { inp: 1 });
         queue.add_input(input);
+        let before = queue.clone();
 
         let err = queue
             .set_frame_delay(1)
@@ -1564,8 +1606,44 @@ mod input_queue_tests {
             },
             other => panic!("unexpected error variant: {other:?}"),
         }
-        // Delay is unchanged after the rejected decrease.
-        assert_eq!(queue.frame_delay(), 2);
+        assert_queue_unchanged(&queue, &before);
+    }
+
+    /// Increasing frame delay mid-session must be transactional: if the queue
+    /// cannot accept all filler frames, no filler frame or delay update remains.
+    #[test]
+    fn test_frame_delay_increase_gap_fill_failure_preserves_state() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 4).expect("valid queue length");
+
+        for i in 0..4i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            assert_eq!(queue.add_input(input), Frame::new(i));
+        }
+        assert_eq!(queue.length, queue.queue_length);
+        queue.check_invariants().expect("full queue is valid");
+        let before = queue.clone();
+
+        let err = queue
+            .set_frame_delay(1)
+            .expect_err("full queue cannot accept gap-fill frame");
+        match err {
+            FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::InputQueueGapFillFailed { frame },
+            } => {
+                assert_eq!(frame, Frame::new(4));
+            },
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+
+        assert_queue_unchanged(&queue, &before);
+        queue
+            .check_invariants()
+            .expect("failed delay increase preserves invariants");
+        assert!(
+            queue.confirmed_input(Frame::new(4)).is_err(),
+            "failed gap fill must not leave a filler frame behind"
+        );
     }
 
     /// Setting the frame delay to its current value is a no-op even mid-session.
@@ -2123,6 +2201,24 @@ mod input_queue_tests {
         // Repeated calls remain no-ops.
         assert_eq!(queue.add_input(frame_4_input), last_added_before);
         assert_eq!(queue.length, length_before);
+    }
+
+    #[test]
+    fn test_freeze_no_op_on_set_frame_delay() {
+        let mut queue = test_queue(0);
+        for i in 0..3i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            assert_eq!(queue.add_input(input), Frame::new(i));
+        }
+
+        queue.freeze();
+        let before = queue.clone();
+
+        queue
+            .set_frame_delay(2)
+            .expect("valid frame-delay request on frozen queue should be a no-op");
+
+        assert_queue_unchanged(&queue, &before);
     }
 
     #[test]
@@ -2851,6 +2947,221 @@ mod kani_input_queue_proofs {
         );
     }
 
+    /// Proof: Mid-session frame-delay increases gap-fill with confirmed inputs.
+    ///
+    /// Verifies the runtime delay-increase contract on actual `InputQueue`
+    /// state: increasing delay after inputs exist replicates the most recent
+    /// confirmed input into the created gap and leaves the next user input
+    /// sequential under the new delay.
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Delay increase gap-fill and post-change sequentiality
+    /// - Related: proof_frame_delay_maintains_invariants
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn proof_frame_delay_increase_gap_fills_confirmed_inputs() {
+        let mut queue = test_queue(0);
+
+        let input0 = PlayerInput::new(Frame::new(0), TestInput { inp: 4 });
+        let input1 = PlayerInput::new(Frame::new(1), TestInput { inp: 9 });
+        kani::assert(
+            queue.add_input(input0) == Frame::new(0),
+            "First input should land at frame 0",
+        );
+        kani::assert(
+            queue.add_input(input1) == Frame::new(1),
+            "Second input should land at frame 1",
+        );
+
+        let result = queue.set_frame_delay(2);
+        kani::assert(result.is_ok(), "Delay increase should succeed");
+        kani::assert(queue.frame_delay == 2, "Frame delay should update");
+        kani::assert(
+            queue.last_added_frame == Frame::new(3),
+            "Delay increase should add two gap-fill frames",
+        );
+
+        let gap2 = queue.confirmed_input(Frame::new(2));
+        let gap3 = queue.confirmed_input(Frame::new(3));
+        kani::assert(gap2.is_ok(), "First gap-fill frame should be confirmed");
+        kani::assert(gap3.is_ok(), "Second gap-fill frame should be confirmed");
+
+        if let Ok(input) = gap2 {
+            kani::assert(
+                input.input.inp == 9,
+                "First gap-fill input should replicate the previous input",
+            );
+        }
+        if let Ok(input) = gap3 {
+            kani::assert(
+                input.input.inp == 9,
+                "Second gap-fill input should replicate the previous input",
+            );
+        }
+
+        let next = PlayerInput::new(Frame::new(2), TestInput { inp: 11 });
+        kani::assert(
+            queue.add_input(next) == Frame::new(4),
+            "Next user input should remain sequential under new delay",
+        );
+    }
+
+    /// Proof: Mid-session frame-delay decreases are rejected without mutation.
+    ///
+    /// Verifies the transactional rejection path for unsupported delay
+    /// decreases after inputs exist.
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Delay decrease rejection and state preservation
+    /// - Related: proof_frame_delay_increase_gap_fills_confirmed_inputs
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn proof_frame_delay_decrease_rejected_no_mutation() {
+        let mut queue = test_queue(0);
+
+        kani::assert(
+            queue.set_frame_delay(2).is_ok(),
+            "Initial delay setup should succeed",
+        );
+        let input = PlayerInput::new(Frame::new(0), TestInput { inp: 7 });
+        kani::assert(
+            queue.add_input(input) == Frame::new(2),
+            "Delayed input should land at frame 2",
+        );
+
+        let old_head = queue.head;
+        let old_tail = queue.tail;
+        let old_length = queue.length;
+        let old_last_added = queue.last_added_frame;
+        let old_first_incorrect = queue.first_incorrect_frame;
+        let old_last_requested = queue.last_requested_frame;
+        let old_delay = queue.frame_delay;
+        let old_frozen = queue.frozen;
+
+        let result = queue.set_frame_delay(1);
+        kani::assert(result.is_err(), "Mid-session delay decrease should fail");
+        kani::assert(queue.head == old_head, "Head should not change");
+        kani::assert(queue.tail == old_tail, "Tail should not change");
+        kani::assert(queue.length == old_length, "Length should not change");
+        kani::assert(
+            queue.last_added_frame == old_last_added,
+            "last_added_frame should not change",
+        );
+        kani::assert(
+            queue.first_incorrect_frame == old_first_incorrect,
+            "first_incorrect_frame should not change",
+        );
+        kani::assert(
+            queue.last_requested_frame == old_last_requested,
+            "last_requested_frame should not change",
+        );
+        kani::assert(queue.frame_delay == old_delay, "Delay should not change");
+        kani::assert(queue.frozen == old_frozen, "Frozen flag should not change");
+
+        let confirmed = queue.confirmed_input(Frame::new(2));
+        kani::assert(
+            confirmed.is_ok(),
+            "Previously confirmed delayed input should remain available",
+        );
+        if let Ok(input) = confirmed {
+            kani::assert(
+                input.input.inp == 7,
+                "Previously confirmed delayed input should be unchanged",
+            );
+        }
+    }
+
+    /// Proof: Frozen queues do not mutate when new inputs are added.
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Freeze no-op behavior for subsequent add_input calls
+    /// - Related: proof_frame_delay_decrease_rejected_no_mutation
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn proof_freeze_add_input_no_mutation() {
+        let mut queue = test_queue(0);
+
+        let input0 = PlayerInput::new(Frame::new(0), TestInput { inp: 1 });
+        let input1 = PlayerInput::new(Frame::new(1), TestInput { inp: 2 });
+        queue.add_input(input0);
+        queue.add_input(input1);
+        queue.freeze();
+
+        let old_head = queue.head;
+        let old_tail = queue.tail;
+        let old_length = queue.length;
+        let old_last_added = queue.last_added_frame;
+        let old_delay = queue.frame_delay;
+
+        let attempted = PlayerInput::new(Frame::new(2), TestInput { inp: 99 });
+        let returned = queue.add_input(attempted);
+
+        kani::assert(
+            returned == old_last_added,
+            "Frozen add_input should return existing last_added_frame",
+        );
+        kani::assert(queue.is_frozen(), "Queue should remain frozen");
+        kani::assert(queue.head == old_head, "Head should not change");
+        kani::assert(queue.tail == old_tail, "Tail should not change");
+        kani::assert(queue.length == old_length, "Length should not change");
+        kani::assert(
+            queue.last_added_frame == old_last_added,
+            "last_added_frame should not change",
+        );
+        kani::assert(queue.frame_delay == old_delay, "Delay should not change");
+
+        let confirmed = queue.confirmed_input(old_last_added);
+        kani::assert(
+            confirmed.is_ok(),
+            "Last confirmed input should remain available after freeze",
+        );
+        if let Ok(input) = confirmed {
+            kani::assert(
+                input.input.inp == 2,
+                "Frozen queue should preserve last confirmed input",
+            );
+        }
+    }
+
+    /// Proof: Confirmed retrieval matches the delayed frame produced by add_input.
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: add_input return frame and confirmed_input agree under delay
+    /// - Related: proof_frame_delay_maintains_invariants
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn proof_confirmed_input_matches_delayed_add() {
+        let mut queue = test_queue(0);
+
+        kani::assert(
+            queue.set_frame_delay(1).is_ok(),
+            "Initial delay setup should succeed",
+        );
+        let input = PlayerInput::new(Frame::new(0), TestInput { inp: 42 });
+        let actual_frame = queue.add_input(input);
+
+        kani::assert(
+            actual_frame == Frame::new(1),
+            "Input should land at delayed frame",
+        );
+
+        let confirmed = queue.confirmed_input(actual_frame);
+        kani::assert(
+            confirmed.is_ok(),
+            "Delayed frame should be retrievable as confirmed input",
+        );
+        if let Ok(confirmed_input) = confirmed {
+            kani::assert(
+                confirmed_input.frame == actual_frame,
+                "Confirmed input frame should match add_input return",
+            );
+            kani::assert(
+                confirmed_input.input.inp == 42,
+                "Confirmed input payload should match add_input payload",
+            );
+        }
+    }
+
     /// Proof: Non-sequential inputs are rejected.
     ///
     /// Verifies that add_input rejects non-sequential frame inputs, preserving invariants.
@@ -2959,6 +3270,175 @@ mod kani_input_queue_proofs {
         kani::assert(
             offset < INPUT_QUEUE_LENGTH,
             "Calculated offset should be valid",
+        );
+    }
+
+    /// Proof: Mid-session delay increase fills the exact new gap.
+    ///
+    /// Uses a concrete delta of 2 for tractability while covering the runtime
+    /// branch that snapshots state, appends filler frames, and updates
+    /// `frame_delay`.
+    ///
+    /// - Tier: 3 (Slow, >2min)
+    /// - Verifies: Runtime delay increase gap-fill sequence
+    /// - Related: proof_frame_delay_maintains_invariants,
+    ///   proof_delay_decrease_after_input_rejected_no_mutation
+    #[kani::proof]
+    #[kani::unwind(15)]
+    fn proof_mid_session_delay_increase_gap_fills_sequentially() {
+        let mut queue = test_queue(0);
+
+        let input = PlayerInput::new(Frame::new(0), TestInput { inp: 7 });
+        let added = queue.add_input(input);
+        kani::assert(added == Frame::new(0), "initial input should be accepted");
+
+        let result = queue.set_frame_delay(2);
+        kani::assert(result.is_ok(), "valid delay increase should succeed");
+        kani::assert(queue.frame_delay == 2, "frame delay should be updated");
+        kani::assert(
+            queue.last_added_frame == Frame::new(2),
+            "delay increase by 2 should append two filler frames",
+        );
+        kani::assert(queue.length == 3, "queue should contain input plus fillers");
+        kani::assert(queue.head < INPUT_QUEUE_LENGTH, "head remains in bounds");
+        kani::assert(queue.tail < INPUT_QUEUE_LENGTH, "tail remains in bounds");
+
+        let frame1 = queue.confirmed_input(Frame::new(1));
+        let frame2 = queue.confirmed_input(Frame::new(2));
+        kani::assert(frame1.is_ok(), "first filler frame should be confirmed");
+        kani::assert(frame2.is_ok(), "second filler frame should be confirmed");
+        if let Ok(filler) = frame1 {
+            kani::assert(filler.input.inp == 7, "first filler repeats last input");
+        }
+        if let Ok(filler) = frame2 {
+            kani::assert(filler.input.inp == 7, "second filler repeats last input");
+        }
+    }
+
+    /// Proof: Mid-session delay decreases are rejected without mutating state.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Rejected delay decrease no-mutation
+    /// - Related: proof_mid_session_delay_increase_gap_fills_sequentially
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn proof_delay_decrease_after_input_rejected_no_mutation() {
+        let mut queue = test_queue(0);
+
+        let set_result = queue.set_frame_delay(2);
+        kani::assert(set_result.is_ok(), "initial delay should be accepted");
+        let input = PlayerInput::new(Frame::new(0), TestInput { inp: 9 });
+        let added = queue.add_input(input);
+        kani::assert(added == Frame::new(2), "delayed input should be accepted");
+
+        let head_before = queue.head;
+        let tail_before = queue.tail;
+        let length_before = queue.length;
+        let last_added_before = queue.last_added_frame;
+        let first_incorrect_before = queue.first_incorrect_frame;
+        let last_requested_before = queue.last_requested_frame;
+        let delay_before = queue.frame_delay;
+
+        let decrease = queue.set_frame_delay(1);
+        kani::assert(decrease.is_err(), "delay decrease should be rejected");
+        kani::assert(queue.head == head_before, "head should be unchanged");
+        kani::assert(queue.tail == tail_before, "tail should be unchanged");
+        kani::assert(queue.length == length_before, "length should be unchanged");
+        kani::assert(
+            queue.last_added_frame == last_added_before,
+            "last_added_frame should be unchanged",
+        );
+        kani::assert(
+            queue.first_incorrect_frame == first_incorrect_before,
+            "first_incorrect_frame should be unchanged",
+        );
+        kani::assert(
+            queue.last_requested_frame == last_requested_before,
+            "last_requested_frame should be unchanged",
+        );
+        kani::assert(
+            queue.frame_delay == delay_before,
+            "delay should be unchanged",
+        );
+    }
+
+    /// Proof: Freezing makes later queue mutations no-ops.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Freeze no-mutation after later set_frame_delay/add_input
+    /// - Related: proof_delay_decrease_after_input_rejected_no_mutation
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn proof_freeze_add_input_noop_preserves_state() {
+        let mut queue = test_queue(0);
+
+        let input0 = PlayerInput::new(Frame::new(0), TestInput { inp: 4 });
+        let input1 = PlayerInput::new(Frame::new(1), TestInput { inp: 5 });
+        let added0 = queue.add_input(input0);
+        let added1 = queue.add_input(input1);
+        kani::assert(added0 == Frame::new(0), "first input accepted");
+        kani::assert(added1 == Frame::new(1), "second input accepted");
+
+        queue.freeze();
+
+        let head_before = queue.head;
+        let tail_before = queue.tail;
+        let length_before = queue.length;
+        let last_added_before = queue.last_added_frame;
+        let first_incorrect_before = queue.first_incorrect_frame;
+        let last_requested_before = queue.last_requested_frame;
+        let delay_before = queue.frame_delay;
+
+        let delay_result = queue.set_frame_delay(2);
+        kani::assert(
+            delay_result.is_ok(),
+            "valid set_frame_delay on frozen queue should be a no-op",
+        );
+        kani::assert(queue.head == head_before, "head should be unchanged");
+        kani::assert(queue.tail == tail_before, "tail should be unchanged");
+        kani::assert(queue.length == length_before, "length should be unchanged");
+        kani::assert(
+            queue.last_added_frame == last_added_before,
+            "last_added_frame should be unchanged",
+        );
+        kani::assert(
+            queue.first_incorrect_frame == first_incorrect_before,
+            "first_incorrect_frame should be unchanged",
+        );
+        kani::assert(
+            queue.last_requested_frame == last_requested_before,
+            "last_requested_frame should be unchanged",
+        );
+        kani::assert(
+            queue.frame_delay == delay_before,
+            "delay should be unchanged",
+        );
+
+        let late = PlayerInput::new(Frame::new(2), TestInput { inp: 99 });
+        let result = queue.add_input(late);
+
+        kani::assert(
+            result == last_added_before,
+            "frozen add_input should return existing last_added_frame",
+        );
+        kani::assert(queue.head == head_before, "head should be unchanged");
+        kani::assert(queue.tail == tail_before, "tail should be unchanged");
+        kani::assert(queue.length == length_before, "length should be unchanged");
+        kani::assert(
+            queue.last_added_frame == last_added_before,
+            "last_added_frame should be unchanged",
+        );
+        kani::assert(
+            queue.first_incorrect_frame == first_incorrect_before,
+            "first_incorrect_frame should be unchanged",
+        );
+        kani::assert(
+            queue.last_requested_frame == last_requested_before,
+            "last_requested_frame should be unchanged",
+        );
+        kani::assert(
+            queue.frame_delay == delay_before,
+            "delay should be unchanged",
         );
     }
 }

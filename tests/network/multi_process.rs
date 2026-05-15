@@ -886,16 +886,27 @@ impl NetworkScenario {
     /// Returns a diagnostic summary of this scenario.
     fn summary(&self) -> String {
         format!(
-            "{}: peer1(loss={:.0}%, lat={}ms±{}ms), peer2(loss={:.0}%, lat={}ms±{}ms), frames={}, delay={}",
+            "{}: peer1(loss={:.0}%, lat={}ms±{}ms, reorder={:.0}%/{}, dup={:.0}%, burst={:.0}%x{}), peer2(loss={:.0}%, lat={}ms±{}ms, reorder={:.0}%/{}, dup={:.0}%, burst={:.0}%x{}), frames={}, delay={}, seeds=42/43, sync={:?}",
             self.name,
             self.peer1_profile.packet_loss * 100.0,
             self.peer1_profile.latency_ms,
             self.peer1_profile.jitter_ms,
+            self.peer1_profile.reorder_rate * 100.0,
+            self.peer1_profile.reorder_buffer_size,
+            self.peer1_profile.duplicate_rate * 100.0,
+            self.peer1_profile.burst_loss_prob * 100.0,
+            self.peer1_profile.burst_loss_len,
             self.peer2_profile.packet_loss * 100.0,
             self.peer2_profile.latency_ms,
             self.peer2_profile.jitter_ms,
+            self.peer2_profile.reorder_rate * 100.0,
+            self.peer2_profile.reorder_buffer_size,
+            self.peer2_profile.duplicate_rate * 100.0,
+            self.peer2_profile.burst_loss_prob * 100.0,
+            self.peer2_profile.burst_loss_len,
             self.frames,
             self.input_delay,
+            self.sync_preset,
         )
     }
 }
@@ -3660,6 +3671,30 @@ mod infrastructure_tests {
         assert_eq!(scenario.input_delay, 4);
         assert_eq!(scenario.timeout_secs, 120);
         assert_eq!(scenario.sync_preset, Some("mobile".to_string()));
+    }
+
+    /// Test NetworkScenario summary includes seeded chaos/profile details.
+    #[test]
+    fn test_network_scenario_summary_reports_seeded_profile() {
+        let scenario = NetworkScenario::symmetric("summary_test", NetworkProfile::bursty())
+            .with_frames(60)
+            .with_input_delay(3)
+            .with_sync_preset("stress_test");
+
+        let summary = scenario.summary();
+        assert!(summary.contains("summary_test"));
+        assert!(
+            summary.contains("seeds=42/43"),
+            "Summary should report deterministic peer seeds: {summary}"
+        );
+        assert!(
+            summary.contains("reorder=") && summary.contains("dup=") && summary.contains("burst="),
+            "Summary should report extended chaos profile fields: {summary}"
+        );
+        assert!(
+            summary.contains("sync=Some(\"stress_test\")"),
+            "Summary should report sync preset: {summary}"
+        );
     }
 
     /// Test NetworkScenario sync_preset is properly propagated to peer configs.

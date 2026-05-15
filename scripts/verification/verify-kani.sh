@@ -287,6 +287,8 @@ TIER2_PROOFS=(
     "proof_head_wraparound"
     "proof_queue_index_calculation"
     "proof_length_calculation_consistent"
+    "proof_delay_decrease_after_input_rejected_no_mutation"
+    "proof_freeze_add_input_noop_preserves_state"
     # SyncLayer proofs (src/sync_layer/mod.rs)
     "proof_minimal_sync_layer_initial_state_valid_1p"
     "proof_minimal_sync_layer_initial_state_valid_2p"
@@ -294,6 +296,8 @@ TIER2_PROOFS=(
     "proof_saved_states_count"
     "proof_get_cell_validates_frame"
     "proof_saved_states_circular_index"
+    "proof_freeze_player_rejects_invalid_handle"
+    "proof_freeze_player_preserves_frame_state"
     # Protocol state transition proofs (src/network/protocol/state.rs)
     "proof_transition_matrix_rejects_backwards"
     "proof_transition_matrix_sequential"
@@ -320,6 +324,11 @@ TIER3_PROOFS=(
     "proof_sequential_inputs_maintain_invariants"
     "proof_discard_maintains_invariants"
     "proof_frame_delay_maintains_invariants"
+    "proof_frame_delay_increase_gap_fills_confirmed_inputs"
+    "proof_frame_delay_decrease_rejected_no_mutation"
+    "proof_freeze_add_input_no_mutation"
+    "proof_confirmed_input_matches_delayed_add"
+    "proof_mid_session_delay_increase_gap_fills_sequentially"
     "proof_non_sequential_rejected"
     "proof_reset_maintains_structure"
     "proof_confirmed_input_valid_index"
@@ -331,6 +340,7 @@ TIER3_PROOFS=(
     "proof_reset_prediction_preserves_frames"
     "proof_confirmed_frame_bounded"
     "proof_sparse_saving_respects_saved_frame"
+    "proof_frozen_disconnected_inputs_match_confirmed_stream"
 )
 
 print_usage() {

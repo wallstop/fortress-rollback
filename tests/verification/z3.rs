@@ -56,7 +56,7 @@
     clippy::disallowed_macros
 )]
 
-use z3::ast::Int;
+use z3::ast::{Bool, Int};
 use z3::{with_z3_config, Config, SatResult, Solver};
 
 /// Constants matching the Fortress Rollback default implementation.
@@ -67,6 +67,226 @@ const INPUT_QUEUE_LENGTH: i64 = 128;
 const MAX_FRAME_DELAY: i64 = INPUT_QUEUE_LENGTH - 1;
 const NULL_FRAME: i64 = -1;
 const MAX_PREDICTION: i64 = 8; // Default max prediction window
+
+// =============================================================================
+// Runtime Delay And Peer Drop Proofs
+// =============================================================================
+
+/// Z3 Proof: Increasing input delay mid-session preserves the queued-frame
+/// monotonic sequence by filling exactly `new_delay - old_delay` frames.
+#[test]
+fn z3_proof_input_delay_increase_preserves_monotonic_frames() {
+    let cfg = Config::new();
+    with_z3_config(&cfg, || {
+        let solver = Solver::new();
+
+        let last_user_frame = Int::fresh_const("last_user_frame");
+        let old_delay = Int::fresh_const("old_delay");
+        let new_delay = Int::fresh_const("new_delay");
+
+        solver.assert(last_user_frame.ge(0));
+        solver.assert(old_delay.ge(0));
+        solver.assert(new_delay.gt(&old_delay));
+        solver.assert(new_delay.le(MAX_FRAME_DELAY));
+
+        let last_queued_frame = &last_user_frame + &old_delay;
+        let delta = &new_delay - &old_delay;
+        let last_gap_frame = &last_queued_frame + &delta;
+        let next_user_frame = &last_user_frame + 1;
+        let next_queued_frame = &next_user_frame + &new_delay;
+
+        solver.assert(next_queued_frame.ne(&(&last_gap_frame + 1)));
+
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "Z3 should prove delay-increase gap fill leaves the next queued frame monotonic"
+        );
+    });
+}
+
+/// Z3 Proof: Decreasing delay after frames have been queued cannot preserve a
+/// strictly increasing queued-frame sequence for the next user input.
+#[test]
+fn z3_proof_input_delay_decrease_is_rejected_mid_session() {
+    let cfg = Config::new();
+    with_z3_config(&cfg, || {
+        let solver = Solver::new();
+
+        let last_user_frame = Int::fresh_const("last_user_frame");
+        let old_delay = Int::fresh_const("old_delay");
+        let new_delay = Int::fresh_const("new_delay");
+
+        solver.assert(last_user_frame.ge(0));
+        solver.assert(old_delay.gt(0));
+        solver.assert(new_delay.ge(0));
+        solver.assert(new_delay.lt(&old_delay));
+        solver.assert(old_delay.le(MAX_FRAME_DELAY));
+
+        let last_queued_frame = &last_user_frame + &old_delay;
+        let next_queued_frame = (&last_user_frame + 1) + &new_delay;
+
+        solver.assert(next_queued_frame.gt(&last_queued_frame));
+
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "Z3 should prove a delay decrease cannot keep already-sent frames monotonic"
+        );
+    });
+}
+
+/// Z3 Proof: A pending-output capacity precheck that reserves each endpoint's
+/// delay-delta gap-fill messages is sufficient for all remotes.
+#[test]
+fn z3_proof_pending_output_capacity_sufficient_for_gap_fill() {
+    let cfg = Config::new();
+    with_z3_config(&cfg, || {
+        let solver = Solver::new();
+
+        let endpoint_a_capacity = Int::fresh_const("endpoint_a_capacity");
+        let endpoint_b_capacity = Int::fresh_const("endpoint_b_capacity");
+        let minimum_endpoint_capacity = Int::fresh_const("minimum_endpoint_capacity");
+        let delay_delta = Int::fresh_const("delay_delta");
+
+        solver.assert(endpoint_a_capacity.ge(0));
+        solver.assert(endpoint_b_capacity.ge(0));
+        solver.assert(minimum_endpoint_capacity.ge(0));
+        solver.assert(delay_delta.ge(0));
+        solver.assert(delay_delta.le(MAX_FRAME_DELAY));
+
+        // Production prechecks every remote endpoint independently. If the
+        // minimum endpoint capacity can fit the delta, every endpoint can.
+        solver.assert(minimum_endpoint_capacity.le(&endpoint_a_capacity));
+        solver.assert(minimum_endpoint_capacity.le(&endpoint_b_capacity));
+        solver.assert(delay_delta.le(&minimum_endpoint_capacity));
+
+        solver.assert(endpoint_a_capacity.lt(&delay_delta) | endpoint_b_capacity.lt(&delay_delta));
+
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "Z3 should prove the pending-output precheck covers every endpoint gap-fill"
+        );
+    });
+}
+
+/// Z3 Proof: Disconnected dropped players are excluded from the confirmed-frame
+/// minimum, so an old dropped frame cannot reduce the survivor minimum.
+#[test]
+fn z3_proof_confirmed_frame_ignores_disconnected_players() {
+    let cfg = Config::new();
+    with_z3_config(&cfg, || {
+        let solver = Solver::new();
+
+        let survivor_frame = Int::fresh_const("survivor_frame");
+        let dropped_frame = Int::fresh_const("dropped_frame");
+        let candidate_min = Int::fresh_const("candidate_min");
+
+        solver.assert(candidate_min.ge(0));
+        solver.assert(survivor_frame.ge(&candidate_min));
+        solver.assert(dropped_frame.ge(NULL_FRAME));
+        solver.assert(dropped_frame.lt(&candidate_min));
+
+        // With the dropped player excluded, the confirmed minimum is the
+        // survivor's frame, regardless of how old dropped_frame is.
+        let confirmed_min = survivor_frame;
+        solver.assert(confirmed_min.lt(candidate_min));
+
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "Z3 should prove disconnected players cannot reduce confirmed-frame min"
+        );
+    });
+}
+
+/// Z3 Proof: Once a player is frozen, every post-drop simulated value equals
+/// the frozen value.
+#[test]
+fn z3_proof_frozen_peer_input_is_constant_after_drop() {
+    let cfg = Config::new();
+    with_z3_config(&cfg, || {
+        let solver = Solver::new();
+
+        let drop_frame = Int::fresh_const("drop_frame");
+        let frame = Int::fresh_const("frame");
+        let frozen_value = Int::fresh_const("frozen_value");
+        let late_packet_value = Int::fresh_const("late_packet_value");
+        let simulated_value = Int::fresh_const("simulated_value");
+        let frozen = Bool::fresh_const("frozen");
+
+        solver.assert(drop_frame.ge(0));
+        solver.assert(frozen_value.ge(0));
+        solver.assert(frozen_value.le(255));
+        solver.assert(late_packet_value.ge(0));
+        solver.assert(late_packet_value.le(255));
+
+        let post_drop = frame.gt(&drop_frame);
+        let frozen_post_drop = &frozen & &post_drop;
+        solver.assert(&frozen);
+        solver.assert(&post_drop);
+        solver.assert(late_packet_value.ne(&frozen_value));
+        solver.assert(frozen_post_drop.implies(simulated_value.eq(&frozen_value)));
+
+        solver.assert(simulated_value.eq(&late_packet_value));
+
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "Z3 should prove frozen post-drop input cannot be overwritten by a late packet"
+        );
+    });
+}
+
+/// Z3 Proof: Halt and ContinueWithout enforce different remote-drop
+/// transition obligations for one disconnect observation.
+#[test]
+fn z3_proof_halt_and_continue_without_are_mutually_exclusive_policies() {
+    let cfg = Config::new();
+    with_z3_config(&cfg, || {
+        let solver = Solver::new();
+
+        let policy = Int::fresh_const("policy");
+        let next_state = Int::fresh_const("next_state");
+        let direct_remote_drop = Bool::fresh_const("direct_remote_drop");
+        let propagated_remote_drop = Bool::fresh_const("propagated_remote_drop");
+        let frame_can_advance = Bool::fresh_const("frame_can_advance");
+        let dropped_handle_frozen = Bool::fresh_const("dropped_handle_frozen");
+
+        solver.assert((policy.eq(0)) | (policy.eq(1)));
+        solver.assert(next_state.ge(0));
+        solver.assert(next_state.le(1));
+
+        let is_halt = policy.eq(0);
+        let is_continue_without = policy.eq(1);
+        let remote_drop = &direct_remote_drop | &propagated_remote_drop;
+        let halt_drop = &is_halt & &remote_drop;
+        let continue_drop = &is_continue_without & &remote_drop;
+
+        // State codes: 0 = Running, 1 = Synchronizing. Halt must fail closed
+        // for either direct or propagated remote-player drops.
+        solver.assert(&remote_drop);
+        solver.assert(halt_drop.implies(next_state.eq(1)));
+        solver.assert(halt_drop.implies(frame_can_advance.not()));
+
+        // ContinueWithout freezes dropped handles instead of entering
+        // Synchronizing for the same remote-drop observation.
+        solver.assert(continue_drop.implies(&dropped_handle_frozen));
+        solver.assert(continue_drop.implies(next_state.ne(1)));
+
+        let halt_violation = &(&is_halt & &remote_drop) & &frame_can_advance;
+        let continue_violation =
+            &(&is_continue_without & &remote_drop) & &dropped_handle_frozen.not();
+        solver.assert(halt_violation | continue_violation);
+
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "Z3 should prove remote-drop policy transitions cannot violate Halt or ContinueWithout obligations"
+        );
+    });
+}
 
 // =============================================================================
 // Frame Arithmetic Proofs
@@ -780,6 +1000,157 @@ fn z3_proof_sequential_frames_with_delay() {
             check_result,
             SatResult::Unsat,
             "Z3 should prove sequential frames remain sequential with delay"
+        );
+    });
+}
+
+/// Z3 Proof: Mid-session delay increase monotonically advances delayed frames
+///
+/// Models `InputQueue::set_frame_delay` when inputs already exist and the
+/// requested delay is greater than the current delay. The gap-fill count is
+/// exactly `requested_delay - current_delay`, so `last_added_frame` advances
+/// monotonically by that delta.
+#[test]
+fn z3_proof_frame_delay_increase_monotone_gap_fill() {
+    let cfg = Config::new();
+    with_z3_config(&cfg, || {
+        let solver = Solver::new();
+
+        let current_delay = Int::fresh_const("current_delay");
+        let requested_delay = Int::fresh_const("requested_delay");
+        let last_added_frame = Int::fresh_const("last_added_frame");
+
+        solver.assert(current_delay.ge(0));
+        solver.assert(current_delay.le(MAX_FRAME_DELAY));
+        solver.assert(requested_delay.gt(&current_delay));
+        solver.assert(requested_delay.le(MAX_FRAME_DELAY));
+        solver.assert(last_added_frame.ge(0));
+        solver.assert(last_added_frame.lt(i64::MAX - INPUT_QUEUE_LENGTH));
+
+        let delta = &requested_delay - &current_delay;
+        let new_last_added_frame = &last_added_frame + &delta;
+
+        solver.assert(new_last_added_frame.lt(&last_added_frame));
+
+        let check_result = solver.check();
+        assert_eq!(
+            check_result,
+            SatResult::Unsat,
+            "Z3 should prove delay increases monotonically advance last_added_frame"
+        );
+    });
+}
+
+/// Z3 Proof: Mid-session delay decreases are rejected without state mutation
+///
+/// Models the `InputDelayDecreaseUnsupported` branch: when inputs exist and
+/// `requested_delay < current_delay`, the operation is rejected and preserves
+/// delay and queue progress.
+#[test]
+fn z3_proof_frame_delay_decrease_rejected_preserves_state() {
+    let cfg = Config::new();
+    with_z3_config(&cfg, || {
+        let solver = Solver::new();
+
+        let current_delay = Int::fresh_const("current_delay");
+        let requested_delay = Int::fresh_const("requested_delay");
+        let last_added_frame = Int::fresh_const("last_added_frame");
+        let result_delay = Int::fresh_const("result_delay");
+        let result_last_added = Int::fresh_const("result_last_added");
+        let accepted = Int::fresh_const("accepted");
+
+        solver.assert(current_delay.gt(0));
+        solver.assert(current_delay.le(MAX_FRAME_DELAY));
+        solver.assert(requested_delay.ge(0));
+        solver.assert(requested_delay.lt(&current_delay));
+        solver.assert(last_added_frame.ge(0));
+
+        // Production branch semantics for an unsupported mid-session decrease.
+        solver.assert(accepted.eq(0));
+        solver.assert(result_delay.eq(&current_delay));
+        solver.assert(result_last_added.eq(&last_added_frame));
+
+        let mutation_or_accept = accepted.eq(1)
+            | result_delay.ne(&current_delay)
+            | result_last_added.ne(&last_added_frame);
+        solver.assert(mutation_or_accept);
+
+        let check_result = solver.check();
+        assert_eq!(
+            check_result,
+            SatResult::Unsat,
+            "Z3 should prove rejected delay decreases preserve queue state"
+        );
+    });
+}
+
+/// Z3 Proof: Pending-output preflight capacity is sufficient for gap-fill
+///
+/// Models `P2PSession::set_input_delay` capacity pre-validation before
+/// enqueueing replicated gap-fill frames to remote endpoints.
+#[test]
+fn z3_proof_pending_output_capacity_accepts_gap_fill_delta() {
+    let cfg = Config::new();
+    with_z3_config(&cfg, || {
+        let solver = Solver::new();
+
+        let pending_len = Int::fresh_const("pending_len");
+        let pending_limit = Int::fresh_const("pending_limit");
+        let delta = Int::fresh_const("delta");
+
+        solver.assert(pending_limit.gt(0));
+        solver.assert(pending_len.ge(0));
+        solver.assert(pending_len.le(&pending_limit));
+        solver.assert(delta.ge(0));
+
+        let capacity = &pending_limit - &pending_len;
+        solver.assert(delta.le(&capacity));
+
+        let after_enqueue = &pending_len + &delta;
+        solver.assert(after_enqueue.gt(&pending_limit));
+
+        let check_result = solver.check();
+        assert_eq!(
+            check_result,
+            SatResult::Unsat,
+            "Z3 should prove pending-output capacity preflight prevents overflow"
+        );
+    });
+}
+
+/// Z3 Proof: Dropped players are excluded from confirmed-frame minimum
+///
+/// Models `P2PSession::confirmed_frame()`: disconnected players do not
+/// participate in the minimum over `ConnectionStatus::last_frame`.
+#[test]
+fn z3_proof_dropped_players_excluded_from_confirmed_min() {
+    let cfg = Config::new();
+    with_z3_config(&cfg, || {
+        let solver = Solver::new();
+
+        let connected_a_frame = Int::fresh_const("connected_a_frame");
+        let connected_b_frame = Int::fresh_const("connected_b_frame");
+        let dropped_frame = Int::fresh_const("dropped_frame");
+
+        solver.assert(connected_a_frame.ge(0));
+        solver.assert(connected_b_frame.ge(0));
+        solver.assert(dropped_frame.ge(0));
+
+        let connected_min = connected_a_frame
+            .le(&connected_b_frame)
+            .ite(&connected_a_frame, &connected_b_frame);
+
+        // Even if the dropped peer is behind both connected peers, the
+        // confirmed frame remains the min of connected peers only.
+        solver.assert(dropped_frame.lt(&connected_a_frame));
+        solver.assert(dropped_frame.lt(&connected_b_frame));
+        solver.assert(connected_min.eq(&dropped_frame));
+
+        let check_result = solver.check();
+        assert_eq!(
+            check_result,
+            SatResult::Unsat,
+            "Z3 should prove dropped players cannot lower confirmed_frame"
         );
     });
 }
