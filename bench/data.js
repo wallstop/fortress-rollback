@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778384700606,
+  "lastUpdate": 1778907181349,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "fd615115f040eda22dc606b63900efcd07f18a81",
-          "message": "chore(deps): bump serde_json from 1.0.148 to 1.0.149 (#60)\n\nBumps [serde_json](https://github.com/serde-rs/json) from 1.0.148 to\n1.0.149.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/serde-rs/json/releases\">serde_json's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v1.0.149</h2>\n<ul>\n<li>Align arbitrary_precision number strings with zmij's formatting (<a\nhref=\"https://redirect.github.com/serde-rs/json/issues/1306\">#1306</a>,\nthanks <a href=\"https://github.com/b41sh\"><code>@​b41sh</code></a>)</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/serde-rs/json/commit/4f6dbfac79647d032b0997b5ab73022340c6dab7\"><code>4f6dbfa</code></a>\nRelease 1.0.149</li>\n<li><a\nhref=\"https://github.com/serde-rs/json/commit/f3df680098007496f5580903890892d51116d129\"><code>f3df680</code></a>\nTouch up PR 1306</li>\n<li><a\nhref=\"https://github.com/serde-rs/json/commit/e16730ff445bc38c04537109d99e80c594f8150c\"><code>e16730f</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/serde-rs/json/issues/1306\">#1306</a>\nfrom b41sh/fix-float-number-display</li>\n<li><a\nhref=\"https://github.com/serde-rs/json/commit/eeb2bcd3f2fd2300de21381e23b3cebd33bfca30\"><code>eeb2bcd</code></a>\nAlign <code>arbitrary_precision</code> number strings with zmij’s\nformatting</li>\n<li>See full diff in <a\nhref=\"https://github.com/serde-rs/json/compare/v1.0.148...v1.0.149\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=serde_json&package-manager=cargo&previous-version=1.0.148&new-version=1.0.149)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot merge` will merge this PR after your CI passes on it\n- `@dependabot squash and merge` will squash and merge this PR after\nyour CI passes on it\n- `@dependabot cancel merge` will cancel a previously requested merge\nand block automerging\n- `@dependabot reopen` will reopen this PR if it is closed\n- `@dependabot close` will close this PR and stop Dependabot recreating\nit. You can achieve the same result by closing it manually\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-01-22T16:28:17-08:00",
-          "tree_id": "1792ac5bda787f9f44fcf2a1b901cfd6bea472f2",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/fd615115f040eda22dc606b63900efcd07f18a81"
-        },
-        "date": 1769128385703,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 99,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 145,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 494,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 723,
-            "range": "± 7",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1066,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 102019,
-            "range": "± 713",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27209,
-            "range": "± 877",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1243,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 101",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1601,
             "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f259855ed4a12f45aae368aac2679033d3cbbd8b",
+          "message": "Stronger Correctness Around Input Delays and Peer Disconnect (#160)\n\n## Description\n\nStrengthens correctness guarantees around input delay and peer\ndisconnect, with two key behavioral fixes and expanded test coverage.\n\n**Input queue atomicity on gap-fill failure:** `set_frame_delay()`\npreviously left the queue in a partially-written state if the gap-fill\nloop hit an internal invariant violation. It now snapshots all queue\nfields before the loop and fully restores them on failure, so a failed\n`InputQueueGapFillFailed` error leaves the queue unchanged.\n\n**Frozen queues ignore delay changes:** Input queues frozen by\n`ContinueWithout` peer-drop now silently no-op on subsequent\n`set_frame_delay()` calls, preventing mutation of a dropped peer's\nstable simulation input.\n\n**Propagated disconnect knowledge triggers `ContinueWithout`:**\nPreviously `DisconnectBehavior::ContinueWithout` only fired on the\ndetecting peer's automatic timeout. It now also fires when disconnect\nknowledge is propagated from another peer, so all remaining peers apply\ngraceful-drop consistently.\n\n**Fail-closed on freeze failure:** In the `ContinueWithout` auto-drop\npath, if `freeze_player` fails the endpoint is still marked disconnected\nand the session falls back to `Synchronizing` rather than emitting a\nwarning and continuing in a partially-frozen state.\n\n## Type of Change\n\n- [x] =\u001b Bug fix (non-breaking change that fixes an issue)\n- [x] >ê Test (adding or updating tests)\n- [x] =' CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --all-targets --features\ntokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n\n## Testing\n\n**Tests added/modified:**\n\n- `tests/sessions/input_delay.rs` \u0014 new cases covering atomic rollback\nof `set_frame_delay` on failure and frozen-queue no-op behavior\n- `tests/sessions/peer_drop.rs` \u0014 extended coverage of `ContinueWithout`\nwhen disconnect is propagated from a third peer\n- `tests/verification/property.rs` \u0014 new property-based tests for input\nqueue and disconnect invariants\n- `tests/verification/metamorphic.rs` \u0014 metamorphic relation checks for\nqueue state under delay changes\n- `tests/verification/z3.rs` \u0014 additional Z3-backed verification cases\n- `specs/tla/PeerDrop.tla` \u0014 new TLA+ spec modeling graceful peer drop\n- `specs/tla/InputQueue.tla`, `specs/tla/NetworkProtocol.tla` \u0014 extended\nspecs\n\n**Manual testing performed:**\n\n- (None beyond automated tests)\n\n## Related Issues\n\n<!-- Link any related issues using GitHub keywords -->\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Touches core rollback/session correctness paths:\n`InputQueue::set_frame_delay` semantics (including frozen queues) and\npeer-drop/disconnect modeling, where subtle state bugs could affect\ndeterminism. Most changes are guarded by expanded fuzz/Kani/TLA+ specs\nand CI checks, reducing regression risk but still warranting careful\nreview.\n> \n> **Overview**\n> Strengthens correctness around runtime input-delay changes and\ngraceful peer drop.\n> \n> `InputQueue::set_frame_delay` is now **transactional** for mid-session\ndelay increases: if the gap-fill replication hits an internal invariant\nfailure, the queue is restored to its pre-call state and returns\n`InputQueueGapFillFailed`. Frozen queues (dropped peers under\n`ContinueWithout`) now treat `set_frame_delay` as a **silent no-op**,\neven for out-of-range delays.\n> \n> Verification and tooling are expanded to lock these behaviors in:\nnew/updated fuzz targets, additional Kani proof harnesses and partition\ntests, extended TLA+ models (`InputQueue` delay/freeze + new `PeerDrop`\nspec, plus protocol invariants), and CI/hook policy updates (new\nversion-sync workflow, docs CI scoping, manual-only slow hooks, new\n`.tla-tools/` guard hook, and a file-scoped `rustfmt` wrapper).\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n361890a2f8005ebe82a5779f35fb1b94bb6cff56. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-05-15T21:47:50-07:00",
+          "tree_id": "b84c1c61a96f579cfad43f23bac224e8ef6649fd",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/f259855ed4a12f45aae368aac2679033d3cbbd8b"
+        },
+        "date": 1778907180299,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 102,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 141,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 566,
+            "range": "± 26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 905,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1333,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 95278,
+            "range": "± 446",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 24720,
+            "range": "± 384",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 676,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 869,
+            "range": "± 9",
             "unit": "ns/iter"
           },
           {
