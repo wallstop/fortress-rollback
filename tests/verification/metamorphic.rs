@@ -660,6 +660,118 @@ fn test_metamorphic_opposite_inputs_cancel() {
 }
 
 // ============================================================================
+// Runtime InputQueue Metamorphic Tests
+// ============================================================================
+
+#[cfg(test)]
+mod runtime_input_queue_metamorphic {
+    use super::*;
+    use fortress_rollback::__internal::{InputQueue, PlayerInput};
+    use proptest::prelude::*;
+
+    fn queue_input(byte: u8) -> MetaInput {
+        MetaInput::new(byte & 0x0f, (byte >> 4) & 0x03)
+    }
+
+    fn add_prefix(queue: &mut InputQueue<MetaConfig>, values: &[u8]) {
+        for (frame, &value) in values.iter().enumerate() {
+            queue.add_input(PlayerInput::new(
+                Frame::new(frame as i32),
+                queue_input(value),
+            ));
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Metamorphic relation: a late actual input that matches the
+        /// prediction is observationally equivalent to eager delivery of that
+        /// same input for the predicted frame.
+        #[test]
+        fn prop_late_matching_input_equivalent_to_eager_delivery(
+            prefix in prop::collection::vec(any::<u8>(), 1..24),
+        ) {
+            let predicted_frame = Frame::new(prefix.len() as i32);
+            let predicted_input = queue_input(*prefix.last().expect("non-empty prefix"));
+
+            let mut eager = InputQueue::<MetaConfig>::with_queue_length(0, 64).expect("queue");
+            add_prefix(&mut eager, &prefix);
+            let eager_added = eager.add_input(PlayerInput::new(predicted_frame, predicted_input));
+            prop_assert_eq!(eager_added, predicted_frame);
+            let eager_confirmed = eager
+                .confirmed_input(predicted_frame)
+                .expect("eager input should be confirmed");
+
+            let mut late = InputQueue::<MetaConfig>::with_queue_length(0, 64).expect("queue");
+            add_prefix(&mut late, &prefix);
+            let (late_prediction, late_status) = late
+                .input(predicted_frame)
+                .expect("late path should predict the next frame");
+            prop_assert_eq!(late_status, InputStatus::Predicted);
+            prop_assert_eq!(late_prediction, predicted_input);
+
+            let late_added = late.add_input(PlayerInput::new(predicted_frame, predicted_input));
+            prop_assert_eq!(late_added, predicted_frame);
+            prop_assert!(late.first_incorrect_frame().is_null());
+            let late_confirmed = late
+                .confirmed_input(predicted_frame)
+                .expect("matching late input should become confirmed");
+
+            prop_assert_eq!(late_confirmed, eager_confirmed);
+        }
+
+        /// Metamorphic relation: increasing delay in two stages produces the
+        /// same gap-fill stream as one increase to the final delay.
+        #[test]
+        fn prop_staged_delay_increase_equivalent_to_direct_increase(
+            prefix in prop::collection::vec(any::<u8>(), 1..16),
+            first_delta in 1usize..4,
+            second_delta in 1usize..4,
+            next_value in any::<u8>(),
+        ) {
+            let final_delay = first_delta + second_delta;
+            let last_prefix_input = queue_input(*prefix.last().expect("non-empty prefix"));
+            let next_input = queue_input(next_value);
+            let next_user_frame = Frame::new(prefix.len() as i32);
+
+            let mut direct = InputQueue::<MetaConfig>::with_queue_length(0, 64).expect("queue");
+            add_prefix(&mut direct, &prefix);
+            direct
+                .set_frame_delay(final_delay)
+                .expect("direct delay increase should succeed");
+
+            let mut staged = InputQueue::<MetaConfig>::with_queue_length(0, 64).expect("queue");
+            add_prefix(&mut staged, &prefix);
+            staged
+                .set_frame_delay(first_delta)
+                .expect("first staged delay increase should succeed");
+            staged
+                .set_frame_delay(final_delay)
+                .expect("second staged delay increase should succeed");
+
+            for gap_frame in prefix.len()..(prefix.len() + final_delay) {
+                let frame = Frame::new(gap_frame as i32);
+                let direct_gap = direct.confirmed_input(frame).expect("direct gap frame");
+                let staged_gap = staged.confirmed_input(frame).expect("staged gap frame");
+                prop_assert_eq!(direct_gap.input, last_prefix_input);
+                prop_assert_eq!(staged_gap, direct_gap);
+            }
+
+            let direct_added = direct.add_input(PlayerInput::new(next_user_frame, next_input));
+            let staged_added = staged.add_input(PlayerInput::new(next_user_frame, next_input));
+            let expected_frame = Frame::new(prefix.len() as i32 + final_delay as i32);
+            prop_assert_eq!(direct_added, expected_frame);
+            prop_assert_eq!(staged_added, expected_frame);
+            prop_assert_eq!(
+                staged.confirmed_input(expected_frame).expect("staged next input"),
+                direct.confirmed_input(expected_frame).expect("direct next input")
+            );
+        }
+    }
+}
+
+// ============================================================================
 // Property-Based Metamorphic Tests
 // ============================================================================
 

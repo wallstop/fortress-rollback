@@ -1,0 +1,44 @@
+name: CI - Version Sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.rs"
+      - "**.md"
+      - "**.toml"
+      - "**.yml"
+      - "**.yaml"
+      - "**.sh"
+      - "**.txt"
+      - "**.json"
+      - "scripts/sync-version.sh"
+      - ".github/workflows/ci-version-sync.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "**.rs"
+      - "**.md"
+      - "**.toml"
+      - "**.yml"
+      - "**.yaml"
+      - "**.sh"
+      - "**.txt"
+      - "**.json"
+      - "scripts/sync-version.sh"
+      - ".github/workflows/ci-version-sync.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  version-sync:
+    name: Version Sync Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check Cargo/changelog/version references
+        run: bash scripts/sync-version.sh --check

@@ -42,9 +42,11 @@ With the following prefixes commonly used:
 More about the [GitHub flow](https://guides.github.com/introduction/flow/).
 More about the [Conventional Commits Specification](https://www.conventionalcommits.org/en/v1.0.0/)
 
-## Pre-commit Hooks
+## Local Hooks
 
-This project uses [pre-commit](https://pre-commit.com/) to ensure code quality before commits.
+This project uses [pre-commit](https://pre-commit.com/) for fast local feedback
+before commits and pushes. CI runs exhaustive Rust, documentation, and
+feature-matrix checks; developers can run those checks manually when needed.
 
 ### Setup
 
@@ -52,30 +54,43 @@ This project uses [pre-commit](https://pre-commit.com/) to ensure code quality b
 # Install pre-commit (requires Python)
 pip install pre-commit
 
-# Install the git hooks
-pre-commit install
+# Install the git hooks managed by .pre-commit-config.yaml
+pre-commit install --hook-type pre-commit --hook-type pre-push
 ```
 
 ### What's Checked
 
-The pre-commit hooks validate:
+The pre-commit hook is intentionally fast (<10 seconds) and file-scoped. It
+validates:
 
-- **Code formatting**: `cargo fmt` for Rust files
-- **Linting**: `cargo clippy` for Rust code quality
+- **Code formatting**: `rustfmt` for changed Rust files
 - **Markdown formatting**: `markdownlint` for consistent documentation
-- **Link validation**: Local file references and markdown links
-- **Rustdoc links**: Intra-doc link resolution
 - **General hygiene**: Trailing whitespace, YAML/TOML syntax, merge conflicts
+
+Slow full-repository checks such as `cargo clippy`, `cargo doc`, link
+validation, and `cargo hack` are manual/CI checks rather than blocking every
+commit or push.
 
 ### Running Manually
 
 ```bash
-# Run all hooks on all files
-pre-commit run --all-files
+# Run fast pre-commit hooks on current changes
+pre-commit run
+
+# Run manual full-repository hooks
+pre-commit run --hook-stage manual cargo-clippy --all-files
+pre-commit run --hook-stage manual rustdoc-links --all-files
+pre-commit run --hook-stage manual check-links --all-files
+pre-commit run --hook-stage manual cargo-hack-check --all-files
+pre-commit run --hook-stage manual sync-wiki --all-files
+pre-commit run --hook-stage manual check-llm-skills --all-files
+pre-commit run --hook-stage manual check-shell-portability --all-files
+pre-commit run --hook-stage manual sync-version-check --all-files
+pre-commit run --hook-stage manual check-doc-claims --all-files
+pre-commit run --hook-stage manual check-derive-bounds --all-files
 
 # Run a specific hook
 pre-commit run markdownlint --all-files
-pre-commit run check-links --all-files
 
 # Run the link checker script directly
 ./scripts/docs/check-links.sh --verbose

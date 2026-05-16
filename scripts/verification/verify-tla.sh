@@ -57,6 +57,7 @@ SPECS=(
     "Rollback"
     "TimeSync"
     "SpectatorSession"
+    "PeerDrop"
 )
 
 # Track results

@@ -29,6 +29,21 @@ import pytest
 # Import functions from the loaded module
 find_inline_code_ranges = check_links.find_inline_code_ranges
 find_code_fence_ranges = check_links.find_code_fence_ranges
+should_skip_markdown_file = check_links.should_skip_markdown_file
+
+
+class TestSkippedMarkdownPaths:
+    """Tests for repository-wide link-check exclusions."""
+
+    def test_progress_session_notes_are_skipped(self) -> None:
+        """Ignored progress logs must not block local hooks."""
+        assert should_skip_markdown_file(
+            Path("progress/session-139-property-test-conversion.md")
+        )
+
+    def test_docs_markdown_is_checked(self) -> None:
+        """Project documentation remains in scope."""
+        assert not should_skip_markdown_file(Path("docs/contributing.md"))
 
 
 class TestFindInlineCodeRanges:

@@ -224,6 +224,434 @@ proptest! {
 }
 
 // ============================================================================
+// Broader Runtime InputQueue Matrix
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(96))]
+
+    /// AddInput: sequential user frames are accepted and shifted exactly by
+    /// the configured runtime delay.
+    #[test]
+    fn prop_add_input_accepts_sequential_frames_with_delay(
+        delay in 0usize..8,
+        count in 1usize..32,
+        base_value in any::<u8>(),
+    ) {
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
+        queue.set_frame_delay(delay).expect("initial delay should be valid");
+
+        for user_frame in 0..count as i32 {
+            let value = base_value.wrapping_add(user_frame as u8);
+            let added = queue.add_input(PlayerInput::new(
+                Frame::new(user_frame),
+                TestInput { value },
+            ));
+            let expected_frame = Frame::new(user_frame + delay as i32);
+            prop_assert_eq!(
+                added,
+                expected_frame,
+                "user frame {} should land at delayed frame {:?}",
+                user_frame,
+                expected_frame
+            );
+
+            let confirmed = queue.confirmed_input(expected_frame).expect("delayed frame confirmed");
+            prop_assert_eq!(confirmed.input.value, value);
+            prop_assert_eq!(confirmed.frame, expected_frame);
+            prop_assert!(queue.check_invariants().is_ok());
+        }
+    }
+
+    /// Runtime delay increase: increasing delay after inputs exist gap-fills
+    /// with the last confirmed input and keeps later AddInput calls sequential.
+    #[test]
+    fn prop_runtime_delay_increase_gap_fills_and_preserves_sequence(
+        initial_count in 2usize..24,
+        increase in 1usize..8,
+        post_count in 1usize..16,
+        base_value in any::<u8>(),
+    ) {
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 96).expect("queue");
+
+        for frame in 0..initial_count as i32 {
+            let value = base_value.wrapping_add(frame as u8);
+            let added = queue.add_input(PlayerInput::new(Frame::new(frame), TestInput { value }));
+            prop_assert_eq!(added, Frame::new(frame));
+        }
+
+        let last_pre_change_frame = Frame::new(initial_count as i32 - 1);
+        let last_pre_change_value = base_value.wrapping_add((initial_count - 1) as u8);
+        queue
+            .set_frame_delay(increase)
+            .expect("mid-session increase should succeed");
+        prop_assert_eq!(queue.frame_delay(), increase);
+
+        for filled_frame in initial_count as i32..(initial_count + increase) as i32 {
+            let confirmed = queue
+                .confirmed_input(Frame::new(filled_frame))
+                .expect("gap-filled frame should be confirmed");
+            prop_assert_eq!(
+                confirmed.input.value,
+                last_pre_change_value,
+                "gap-filled frame {} should repeat frame {:?}",
+                filled_frame,
+                last_pre_change_frame
+            );
+        }
+
+        for offset in 0..post_count as i32 {
+            let user_frame = initial_count as i32 + offset;
+            let expected_frame = Frame::new(user_frame + increase as i32);
+            let value = base_value.wrapping_add((64 + offset) as u8);
+            let added = queue.add_input(PlayerInput::new(
+                Frame::new(user_frame),
+                TestInput { value },
+            ));
+            prop_assert_eq!(added, expected_frame);
+            let confirmed = queue
+                .confirmed_input(expected_frame)
+                .expect("post-change frame should be confirmed");
+            prop_assert_eq!(confirmed.input.value, value);
+        }
+
+        prop_assert!(queue.check_invariants().is_ok());
+    }
+
+    /// Runtime delay decrease: decreasing delay after inputs exist is rejected
+    /// and leaves observable queue state unchanged.
+    #[test]
+    fn prop_runtime_delay_decrease_is_rejected_without_state_change(
+        initial_count in 2usize..24,
+        current_delay in 1usize..8,
+        decrease_by in 1usize..8,
+        base_value in any::<u8>(),
+    ) {
+        let requested_delay = current_delay.saturating_sub(decrease_by);
+        prop_assume!(requested_delay < current_delay);
+
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 96).expect("queue");
+        queue.set_frame_delay(current_delay).expect("initial delay should be valid");
+
+        for frame in 0..initial_count as i32 {
+            let value = base_value.wrapping_add(frame as u8);
+            let added = queue.add_input(PlayerInput::new(Frame::new(frame), TestInput { value }));
+            prop_assert_eq!(added, Frame::new(frame + current_delay as i32));
+        }
+
+        let last_frame = Frame::new(initial_count as i32 - 1 + current_delay as i32);
+        let last_confirmed_before = queue
+            .confirmed_input(last_frame)
+            .expect("last delayed frame should be confirmed");
+
+        let err = queue
+            .set_frame_delay(requested_delay)
+            .expect_err("mid-session delay decrease should be rejected");
+        prop_assert!(
+            matches!(
+                err,
+                fortress_rollback::FortressError::InvalidRequestStructured {
+                    kind: fortress_rollback::InvalidRequestKind::InputDelayDecreaseUnsupported { .. }
+                }
+            ),
+            "expected InputDelayDecreaseUnsupported, got {err:?}"
+        );
+
+        prop_assert_eq!(queue.frame_delay(), current_delay);
+        let last_confirmed_after = queue
+            .confirmed_input(last_frame)
+            .expect("last delayed frame should remain confirmed");
+        prop_assert_eq!(last_confirmed_after, last_confirmed_before);
+        prop_assert!(queue.check_invariants().is_ok());
+    }
+
+    /// Freeze: once frozen, AddInput is a no-op and future predictions keep
+    /// using the last confirmed input.
+    #[test]
+    fn prop_freeze_keeps_last_confirmed_input_stable(
+        count in 1usize..32,
+        ignored_inputs in 1usize..16,
+        base_value in any::<u8>(),
+    ) {
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
+
+        for frame in 0..count as i32 {
+            let value = base_value.wrapping_add(frame as u8);
+            queue.add_input(PlayerInput::new(Frame::new(frame), TestInput { value }));
+        }
+
+        let last_frame = Frame::new(count as i32 - 1);
+        let last_value = base_value.wrapping_add((count - 1) as u8);
+        let last_confirmed_before = queue
+            .confirmed_input(last_frame)
+            .expect("last input should be confirmed before freeze");
+
+        queue.freeze();
+        prop_assert!(queue.is_frozen());
+
+        for offset in 0..ignored_inputs as i32 {
+            let ignored = PlayerInput::new(
+                Frame::new(count as i32 + offset),
+                TestInput {
+                    value: base_value.wrapping_add((128 + offset) as u8),
+                },
+            );
+            prop_assert_eq!(queue.add_input(ignored), last_frame);
+        }
+
+        let last_confirmed_after = queue
+            .confirmed_input(last_frame)
+            .expect("last confirmed frame should survive freeze");
+        prop_assert_eq!(last_confirmed_after, last_confirmed_before);
+
+        let (predicted, status) = queue
+            .input(Frame::new(count as i32 + ignored_inputs as i32 + 4))
+            .expect("frozen queue should still predict");
+        prop_assert_eq!(status, InputStatus::Predicted);
+        prop_assert_eq!(predicted.value, last_value);
+        prop_assert!(queue.check_invariants().is_ok());
+    }
+
+    /// GetInput + ConfirmedInput: confirmed frames remain retrievable at the
+    /// discard boundary, the normal input path rejects older frames, and
+    /// future frames predict from the most recent confirmed value.
+    #[test]
+    fn prop_get_input_and_confirmed_input_status_matrix(
+        count in 4usize..40,
+        discard_at in 1usize..20,
+        base_value in any::<u8>(),
+    ) {
+        let discard_at = discard_at.min(count - 2);
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
+
+        for frame in 0..count as i32 {
+            let value = base_value.wrapping_add(frame as u8);
+            queue.add_input(PlayerInput::new(Frame::new(frame), TestInput { value }));
+        }
+
+        queue.discard_confirmed_frames(Frame::new(discard_at as i32));
+
+        let boundary_frame = Frame::new(discard_at as i32);
+        let boundary = queue
+            .confirmed_input(boundary_frame)
+            .expect("discard boundary frame should be retained");
+        prop_assert_eq!(
+            boundary.input.value,
+            base_value.wrapping_add(discard_at as u8)
+        );
+
+        let before_boundary = queue.input(Frame::new(discard_at as i32 - 1));
+        prop_assert!(before_boundary.is_none(), "input() should reject frames before the tail");
+
+        let (retrieved, status) = queue.input(boundary_frame).expect("boundary input should exist");
+        prop_assert_eq!(status, InputStatus::Confirmed);
+        prop_assert_eq!(retrieved.value, boundary.input.value);
+
+        let future_frame = Frame::new(count as i32 + 5);
+        prop_assert!(queue.confirmed_input(future_frame).is_err());
+        let (predicted, status) = queue.input(future_frame).expect("future input should predict");
+        prop_assert_eq!(status, InputStatus::Predicted);
+        prop_assert_eq!(
+            predicted.value,
+            base_value.wrapping_add((count - 1) as u8)
+        );
+    }
+
+    /// Late packet/rollback signal: when the actual input for a predicted frame
+    /// arrives late, matching input clears prediction and differing input marks
+    /// the first incorrect frame until rollback reset.
+    #[test]
+    fn prop_late_actual_input_marks_or_clears_prediction(
+        confirmed_count in 1usize..24,
+        base_value in any::<u8>(),
+        differs in any::<bool>(),
+    ) {
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 64).expect("queue");
+
+        for frame in 0..confirmed_count as i32 {
+            let value = base_value.wrapping_add(frame as u8);
+            queue.add_input(PlayerInput::new(Frame::new(frame), TestInput { value }));
+        }
+
+        let predicted_frame = Frame::new(confirmed_count as i32);
+        let last_value = base_value.wrapping_add((confirmed_count - 1) as u8);
+        let (predicted, status) = queue.input(predicted_frame).expect("next frame should predict");
+        prop_assert_eq!(status, InputStatus::Predicted);
+        prop_assert_eq!(predicted.value, last_value);
+
+        let actual_value = if differs {
+            last_value.wrapping_add(1)
+        } else {
+            last_value
+        };
+        let added = queue.add_input(PlayerInput::new(
+            predicted_frame,
+            TestInput {
+                value: actual_value,
+            },
+        ));
+        prop_assert_eq!(added, predicted_frame);
+
+        if differs {
+            prop_assert_eq!(queue.first_incorrect_frame(), predicted_frame);
+            prop_assert!(
+                queue.input(Frame::new(confirmed_count as i32 + 1)).is_none(),
+                "queue should refuse to predict further after a misprediction"
+            );
+        } else {
+            prop_assert!(queue.first_incorrect_frame().is_null());
+            let (confirmed, status) = queue.input(predicted_frame).expect("late match confirmed");
+            prop_assert_eq!(status, InputStatus::Confirmed);
+            prop_assert_eq!(confirmed.value, actual_value);
+        }
+
+        queue.reset_prediction();
+        prop_assert!(queue.first_incorrect_frame().is_null());
+        prop_assert!(queue.check_invariants().is_ok());
+    }
+}
+
+proptest! {
+    /// Runtime delay increases fill the exact gap with the last confirmed input
+    /// and preserve the queue's sequential acceptance rule for the next input.
+    #[test]
+    fn prop_input_queue_delay_increase_gap_fill_sequence(
+        initial_delay in 0usize..4,
+        delta in 1usize..4,
+        num_inputs in 1usize..6,
+        values in prop::collection::vec(any::<u8>(), 6),
+        next_value in any::<u8>(),
+    ) {
+        let queue_length = 32;
+        let new_delay = initial_delay + delta;
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, queue_length).expect("queue");
+        queue.set_frame_delay(initial_delay).expect("initial delay");
+
+        for (frame, &value) in values.iter().take(num_inputs).enumerate() {
+            let accepted = queue.add_input(PlayerInput::new(
+                Frame::new(frame as i32),
+                TestInput { value },
+            ));
+            prop_assert_eq!(accepted, Frame::new((frame + initial_delay) as i32));
+        }
+
+        let last_user_frame = num_inputs - 1;
+        let last_queued_frame = last_user_frame + initial_delay;
+        let last_value = values[last_user_frame];
+
+        queue.set_frame_delay(new_delay).expect("delay increase should gap fill");
+        prop_assert_eq!(queue.frame_delay(), new_delay);
+
+        for gap in 1..=delta {
+            let filler = queue
+                .confirmed_input(Frame::new((last_queued_frame + gap) as i32))
+                .expect("gap filler should be confirmed");
+            prop_assert_eq!(filler.input.value, last_value);
+        }
+
+        let next_user_frame = num_inputs;
+        let accepted = queue.add_input(PlayerInput::new(
+            Frame::new(next_user_frame as i32),
+            TestInput { value: next_value },
+        ));
+        prop_assert_eq!(accepted, Frame::new((next_user_frame + new_delay) as i32));
+        let confirmed = queue
+            .confirmed_input(Frame::new((next_user_frame + new_delay) as i32))
+            .expect("post-increase input should be confirmed");
+        prop_assert_eq!(confirmed.input.value, next_value);
+        prop_assert!(queue.check_invariants().is_ok());
+    }
+
+    /// Runtime delay decreases after inputs exist are rejected and leave the
+    /// confirmed input stream unchanged.
+    #[test]
+    fn prop_input_queue_delay_decrease_rejected_without_mutation(
+        initial_delay in 1usize..6,
+        requested_delay in 0usize..5,
+        num_inputs in 1usize..6,
+        values in prop::collection::vec(any::<u8>(), 6),
+    ) {
+        prop_assume!(requested_delay < initial_delay);
+
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 32).expect("queue");
+        queue.set_frame_delay(initial_delay).expect("initial delay");
+        for (frame, &value) in values.iter().take(num_inputs).enumerate() {
+            let accepted = queue.add_input(PlayerInput::new(
+                Frame::new(frame as i32),
+                TestInput { value },
+            ));
+            prop_assert_eq!(accepted, Frame::new((frame + initial_delay) as i32));
+        }
+
+        let confirmed_before: Vec<_> = (0..num_inputs)
+            .map(|frame| {
+                queue
+                    .confirmed_input(Frame::new((frame + initial_delay) as i32))
+                    .expect("confirmed input before rejected decrease")
+            })
+            .collect();
+        let first_incorrect_before = queue.first_incorrect_frame();
+
+        let result = queue.set_frame_delay(requested_delay);
+        prop_assert!(result.is_err());
+        prop_assert_eq!(queue.frame_delay(), initial_delay);
+        prop_assert_eq!(queue.first_incorrect_frame(), first_incorrect_before);
+
+        for (idx, expected) in confirmed_before.iter().enumerate() {
+            let actual = queue
+                .confirmed_input(Frame::new((idx + initial_delay) as i32))
+                .expect("confirmed input after rejected decrease");
+            prop_assert_eq!(actual.input.value, expected.input.value);
+            prop_assert_eq!(actual.frame, expected.frame);
+        }
+        prop_assert!(queue.check_invariants().is_ok());
+    }
+
+    /// Once frozen, later inputs are ignored and the queue keeps serving the
+    /// last confirmed input as the prediction source.
+    #[test]
+    fn prop_input_queue_freeze_ignores_late_inputs(
+        num_inputs in 1usize..6,
+        values in prop::collection::vec(any::<u8>(), 6),
+        late_values in prop::collection::vec(any::<u8>(), 1..12),
+    ) {
+        let mut queue = InputQueue::<TestConfig>::with_queue_length(0, 32).expect("queue");
+        for (frame, &value) in values.iter().take(num_inputs).enumerate() {
+            let accepted = queue.add_input(PlayerInput::new(
+                Frame::new(frame as i32),
+                TestInput { value },
+            ));
+            prop_assert_eq!(accepted, Frame::new(frame as i32));
+        }
+
+        let frozen_frame = Frame::new((num_inputs - 1) as i32);
+        let frozen_value = values[num_inputs - 1];
+        queue.freeze();
+        prop_assert!(queue.is_frozen());
+
+        for (idx, &value) in late_values.iter().enumerate() {
+            let returned = queue.add_input(PlayerInput::new(
+                Frame::new((num_inputs + idx) as i32),
+                TestInput { value },
+            ));
+            prop_assert_eq!(returned, frozen_frame);
+
+            let confirmed = queue
+                .confirmed_input(frozen_frame)
+                .expect("frozen last confirmed input remains available");
+            prop_assert_eq!(confirmed.input.value, frozen_value);
+
+            let (predicted, status) = queue
+                .input(Frame::new((num_inputs + idx + 16) as i32))
+                .expect("frozen queue should keep predicting");
+            prop_assert_eq!(status, InputStatus::Predicted);
+            prop_assert_eq!(predicted.value, frozen_value);
+        }
+        prop_assert!(queue.check_invariants().is_ok());
+    }
+}
+
+// ============================================================================
 // SyncLayer Invariant Tests
 // ============================================================================
 

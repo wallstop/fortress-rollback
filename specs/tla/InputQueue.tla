@@ -63,10 +63,12 @@ VARIABLES
     lastAddedFrame,         \* Frame of most recently added input
     lastRequestedFrame,     \* Frame most recently requested (for discard protection)
     firstIncorrectFrame,    \* First frame where prediction was wrong
-    lastConfirmedInput      \* Last confirmed input (used for predictions)
+    lastConfirmedInput,     \* Last confirmed input (used for predictions)
+    frameDelay,             \* Runtime input delay in frames
+    frozen                  \* TRUE after graceful peer drop freezes the queue
 
 vars == <<inputs, head, tail, length, lastAddedFrame, lastRequestedFrame,
-          firstIncorrectFrame, lastConfirmedInput>>
+          firstIncorrectFrame, lastConfirmedInput, frameDelay, frozen>>
 
 (***************************************************************************)
 (* Type Definitions                                                        *)
@@ -89,6 +91,8 @@ TypeInvariant ==
     /\ lastRequestedFrame \in Frame
     /\ firstIncorrectFrame \in Frame
     /\ lastConfirmedInput \in Input
+    /\ frameDelay \in 0..(QUEUE_LENGTH - 1)
+    /\ frozen \in BOOLEAN
 
 (***************************************************************************)
 (* Initial State                                                           *)
@@ -104,6 +108,8 @@ Init ==
     /\ lastRequestedFrame = NULL_FRAME
     /\ firstIncorrectFrame = NULL_FRAME
     /\ lastConfirmedInput = BlankInput
+    /\ frameDelay = 0
+    /\ frozen = FALSE
 
 (***************************************************************************)
 (* Helper: Modular arithmetic for circular buffer                          *)
@@ -172,16 +178,19 @@ FIFOOrdering ==
 (* used as the basis for future predictions via RepeatLastConfirmed.       *)
 (***************************************************************************)
 AddInput(input) ==
+    /\ ~frozen
     /\ input.frame \in 0..MAX_FRAME
+    /\ input.frame + frameDelay <= MAX_FRAME
     /\ \/ lastAddedFrame = NULL_FRAME
-       \/ input.frame = lastAddedFrame + 1
-    /\ inputs' = [inputs EXCEPT ![head] = input]
+       \/ input.frame + frameDelay = lastAddedFrame + 1
+    /\ LET stored == [frame |-> input.frame + frameDelay, value |-> input.value]
+       IN /\ inputs' = [inputs EXCEPT ![head] = stored]
+          /\ lastConfirmedInput' = stored
     /\ head' = NextIndex(head)
     /\ length' = IF length < QUEUE_LENGTH THEN length + 1 ELSE length
     /\ tail' = IF length >= QUEUE_LENGTH THEN NextIndex(tail) ELSE tail
-    /\ lastAddedFrame' = input.frame
-    /\ lastConfirmedInput' = input  \* Update last confirmed input for predictions
-    /\ UNCHANGED <<lastRequestedFrame, firstIncorrectFrame>>
+    /\ lastAddedFrame' = input.frame + frameDelay
+    /\ UNCHANGED <<lastRequestedFrame, firstIncorrectFrame, frameDelay, frozen>>
 
 (***************************************************************************)
 (* Action: Get input for a frame (returns confirmed or predicted)          *)
@@ -194,7 +203,7 @@ GetInput(frame) ==
                              THEN frame
                              ELSE lastRequestedFrame
     /\ UNCHANGED <<inputs, head, tail, length, lastAddedFrame,
-                   firstIncorrectFrame, lastConfirmedInput>>
+                   firstIncorrectFrame, lastConfirmedInput, frameDelay, frozen>>
 
 (***************************************************************************)
 (* Action: Add remote input (may detect incorrect prediction)              *)
@@ -207,20 +216,23 @@ GetInput(frame) ==
 (* `self.prediction` was generated from `last_confirmed_input`.            *)
 (***************************************************************************)
 AddRemoteInput(input) ==
+    /\ ~frozen
     /\ input.frame \in 0..MAX_FRAME
+    /\ input.frame + frameDelay <= MAX_FRAME
     /\ \/ lastAddedFrame = NULL_FRAME
-       \/ input.frame = lastAddedFrame + 1
-    /\ inputs' = [inputs EXCEPT ![head] = input]
+       \/ input.frame + frameDelay = lastAddedFrame + 1
+    /\ LET stored == [frame |-> input.frame + frameDelay, value |-> input.value]
+       IN /\ inputs' = [inputs EXCEPT ![head] = stored]
+          /\ lastConfirmedInput' = stored
     /\ head' = NextIndex(head)
     /\ length' = IF length < QUEUE_LENGTH THEN length + 1 ELSE length
     /\ tail' = IF length >= QUEUE_LENGTH THEN NextIndex(tail) ELSE tail
-    /\ lastAddedFrame' = input.frame
+    /\ lastAddedFrame' = input.frame + frameDelay
     \* Check if prediction was wrong (compares against last confirmed input)
     /\ IF firstIncorrectFrame = NULL_FRAME /\ input.value # lastConfirmedInput.value
-       THEN firstIncorrectFrame' = input.frame
+       THEN firstIncorrectFrame' = input.frame + frameDelay
        ELSE firstIncorrectFrame' = firstIncorrectFrame
-    /\ lastConfirmedInput' = input
-    /\ UNCHANGED <<lastRequestedFrame>>
+    /\ UNCHANGED <<lastRequestedFrame, frameDelay, frozen>>
 
 (***************************************************************************)
 (* Action: Discard confirmed inputs up to a frame                          *)
@@ -234,7 +246,7 @@ DiscardConfirmed(upToFrame) ==
     /\ tail' = NextIndex(tail)
     /\ length' = length - 1
     /\ UNCHANGED <<inputs, head, lastAddedFrame, lastRequestedFrame,
-                   firstIncorrectFrame, lastConfirmedInput>>
+                   firstIncorrectFrame, lastConfirmedInput, frameDelay, frozen>>
 
 (***************************************************************************)
 (* Action: Reset prediction tracking (after rollback)                      *)
@@ -243,7 +255,64 @@ ResetPrediction ==
     /\ firstIncorrectFrame # NULL_FRAME
     /\ firstIncorrectFrame' = NULL_FRAME
     /\ UNCHANGED <<inputs, head, tail, length, lastAddedFrame,
-                   lastRequestedFrame, lastConfirmedInput>>
+                   lastRequestedFrame, lastConfirmedInput, frameDelay, frozen>>
+
+(***************************************************************************)
+(* Action: Set frame delay                                                  *)
+(*                                                                         *)
+(* Initial setup may choose any valid delay. Mid-session decreases are      *)
+(* rejected as no-ops. Mid-session increases are modeled one frame at a     *)
+(* time, filling the new gap with the most recent confirmed input so frame  *)
+(* sequence remains contiguous. Repeating this action models larger         *)
+(* production delta increases.                                              *)
+(***************************************************************************)
+SetFrameDelay(newDelay) ==
+    /\ newDelay \in 0..(QUEUE_LENGTH - 1)
+    /\ \/ /\ newDelay = frameDelay
+          /\ UNCHANGED vars
+       \/ /\ frozen
+          /\ UNCHANGED vars
+       \/ /\ lastAddedFrame = NULL_FRAME
+          /\ frameDelay' = newDelay
+          /\ UNCHANGED <<inputs, head, tail, length, lastAddedFrame,
+                         lastRequestedFrame, firstIncorrectFrame,
+                         lastConfirmedInput, frozen>>
+       \/ /\ ~frozen
+          /\ lastAddedFrame # NULL_FRAME
+          /\ newDelay = frameDelay + 1
+          /\ lastAddedFrame + 1 <= MAX_FRAME
+          /\ length < QUEUE_LENGTH
+          /\ LET stored == [frame |-> lastAddedFrame + 1,
+                            value |-> lastConfirmedInput.value]
+             IN /\ inputs' = [inputs EXCEPT ![head] = stored]
+                /\ lastConfirmedInput' = stored
+          /\ head' = NextIndex(head)
+          /\ length' = length + 1
+          /\ tail' = tail
+          /\ lastAddedFrame' = lastAddedFrame + 1
+          /\ frameDelay' = newDelay
+          /\ UNCHANGED <<lastRequestedFrame, firstIncorrectFrame, frozen>>
+       \/ /\ ~frozen
+          /\ lastAddedFrame # NULL_FRAME
+          /\ newDelay > frameDelay
+          /\ length = QUEUE_LENGTH
+          /\ UNCHANGED vars
+       \/ /\ lastAddedFrame # NULL_FRAME
+          /\ newDelay < frameDelay
+          /\ UNCHANGED vars
+
+(***************************************************************************)
+(* Action: Freeze queue after graceful peer drop                            *)
+(*                                                                         *)
+(* Freezing only flips the flag. AddInput/AddRemoteInput are disabled while *)
+(* frozen, preserving the final confirmed input for deterministic reads.    *)
+(***************************************************************************)
+Freeze ==
+    /\ ~frozen
+    /\ frozen' = TRUE
+    /\ UNCHANGED <<inputs, head, tail, length, lastAddedFrame,
+                   lastRequestedFrame, firstIncorrectFrame,
+                   lastConfirmedInput, frameDelay>>
 
 (***************************************************************************)
 (* Next State Relation                                                     *)
@@ -258,6 +327,8 @@ Next ==
     \/ \E f \in 0..MAX_FRAME: GetInput(f)
     \/ \E f \in 0..MAX_FRAME: DiscardConfirmed(f)
     \/ ResetPrediction
+    \/ \E d \in 0..(QUEUE_LENGTH - 1): SetFrameDelay(d)
+    \/ Freeze
 
 (***************************************************************************)
 (* Specification                                                           *)
@@ -295,6 +366,7 @@ IncorrectEventuallyCleared ==
 StateConstraint ==
     /\ (lastAddedFrame = NULL_FRAME \/ lastAddedFrame <= MAX_FRAME)
     /\ length <= QUEUE_LENGTH
+    /\ frameDelay <= QUEUE_LENGTH - 1
 
 (**************************************************************************)
 (* Theorems                                                                *)

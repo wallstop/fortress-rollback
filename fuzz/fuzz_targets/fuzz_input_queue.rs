@@ -69,11 +69,17 @@ fuzz_target!(|fuzz_input: FuzzInput| {
     };
 
     // Build the session
-    let mut builder = SessionBuilder::<TestConfig>::new()
-        .with_num_players(num_players)
-        .with_input_delay(input_delay)
-        .with_input_queue_config(InputQueueConfig::minimal())
-        .with_check_distance(check_distance);
+    let mut builder = match SessionBuilder::<TestConfig>::new().with_num_players(num_players) {
+        Ok(builder) => builder,
+        Err(_) => return,
+    }
+    .with_input_queue_config(InputQueueConfig::minimal())
+    .with_check_distance(check_distance);
+
+    builder = match builder.with_input_delay(input_delay) {
+        Ok(builder) => builder,
+        Err(_) => return,
+    };
 
     // Add players - builder takes ownership on each add_player call
     for i in 0..num_players {
@@ -128,8 +134,6 @@ fuzz_target!(|fuzz_input: FuzzInput| {
                                         current_state[current_state.len() - 512..].to_vec();
                                 }
                             },
-                            // Handle any other request types (future proofing)
-                            _ => {},
                         }
                     }
                 }

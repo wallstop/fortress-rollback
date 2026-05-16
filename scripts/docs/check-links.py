@@ -18,6 +18,8 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
+SKIP_DIRS = {"target", "node_modules", ".git", "progress"}
+
 
 class LinkCheckResult(NamedTuple):
     """Result of link checking."""
@@ -217,6 +219,11 @@ def _rel(path: Path, root: Path) -> Path:
         return path
 
 
+def should_skip_markdown_file(rel_path: Path) -> bool:
+    """Return True when a markdown file is outside the checked documentation set."""
+    return any(part in SKIP_DIRS for part in rel_path.parts)
+
+
 def check_markdown_link(
     source_file: Path, link_target: str, project_root: Path, verbose: bool = False
 ) -> tuple[bool, str]:
@@ -348,14 +355,11 @@ def main() -> int:
     total_checked = 0
     files_checked = 0
 
-    # Directories to skip
-    skip_dirs = {"target", "node_modules", ".git", "fuzz/target", "loom-tests/target"}
-
     # Find all markdown files
     for md_file in project_root.rglob("*.md"):
         # Skip files in excluded directories
         rel_path = md_file.relative_to(project_root)
-        if any(part in skip_dirs for part in rel_path.parts):
+        if should_skip_markdown_file(rel_path):
             continue
 
         result = check_markdown_file(md_file, project_root, verbose)

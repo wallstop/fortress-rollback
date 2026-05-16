@@ -19,23 +19,24 @@ exits.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VERIFY_KANI = REPO_ROOT / "scripts" / "verification" / "verify-kani.sh"
 
-# Tier sizes pinned to the production registry. These are intentionally
-# duplicated rather than scraped so the test breaks loudly when somebody
-# adds/removes a proof without thinking about sharding.
-TIER_SIZES: dict[int, int] = {
-    1: 63,
-    2: 38,
-    3: 16,
-}
+# The set of tiers the script defines. This is the ONLY ground-truth
+# duplication: adding a tier to verify-kani.sh requires adding it here so
+# the partition test suite exercises every tier. The PER-TIER PROOF COUNT
+# is intentionally NOT duplicated -- it is discovered at test time via
+# ``--print-partition --tier N`` so adding/removing proofs cannot stale
+# this test file. See the ``tier_totals`` fixture.
+TIERS: tuple[int, ...] = (1, 2, 3)
 
 
 def _balanced_layout(total: int, parts: int) -> list[int]:
@@ -49,17 +50,36 @@ def _balanced_layout(total: int, parts: int) -> list[int]:
 
 
 def _print_partition(
-    tier: int, part: int | None = None, parts: int | None = None
+    tier: int,
+    part: int | None = None,
+    parts: int | None = None,
+    script: Path | None = None,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Invoke verify-kani.sh in --print-partition mode."""
-    cmd: list[str] = ["bash", str(VERIFY_KANI), "--print-partition", "--tier", str(tier)]
+    """Invoke verify-kani.sh in --print-partition mode.
+
+    ``script`` and ``cwd`` default to the workspace's verify-kani.sh and
+    repo root. Tests that exercise a *copied* script (e.g. via
+    ``fake_cargo_repo_factory``) must pass the copied script path so
+    discovery and execution agree on which script is the source of
+    truth.
+    """
+    script_path = script if script is not None else VERIFY_KANI
+    run_cwd = cwd if cwd is not None else REPO_ROOT
+    cmd: list[str] = [
+        "bash",
+        str(script_path),
+        "--print-partition",
+        "--tier",
+        str(tier),
+    ]
     if part is not None:
         cmd.extend(["--part", str(part)])
     if parts is not None:
         cmd.extend(["--parts", str(parts)])
     return subprocess.run(
         cmd,
-        cwd=REPO_ROOT,
+        cwd=run_cwd,
         capture_output=True,
         text=True,
         check=False,
@@ -94,65 +114,169 @@ def _parse_partition_output(stdout: str) -> tuple[dict[str, str], list[str]]:
     return headers, harnesses
 
 
-# Validate the test's own ground truth: TIER_SIZES must match the script.
-def test_tier_sizes_match_script() -> None:
-    """Hard-pin TIER_SIZES so adding proofs without updating tests fails."""
-    for tier, expected in TIER_SIZES.items():
+# ---------------------------------------------------------------------------
+# Unit tests for the `_balanced_layout` helper itself. The partition tests
+# below use this helper to compute expected shard sizes; if the helper is
+# wrong, both the assertions and the "expected" values are wrong together
+# and bugs hide. These tests pin the helper's behaviour against worked
+# examples so any future edit to the formula must be intentional.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "total,parts,expected",
+    [
+        # Exact division: every shard the same size.
+        (10, 5, [2, 2, 2, 2, 2]),
+        (1, 1, [1]),
+        # Remainder of 1: first shard gets +1.
+        (11, 5, [3, 2, 2, 2, 2]),
+        # Remainder spread across the first ``remainder`` shards.
+        (16, 5, [4, 3, 3, 3, 3]),
+        (22, 5, [5, 5, 4, 4, 4]),
+        # Single shard: everyone in one bucket.
+        (42, 1, [42]),
+        # One-per-shard: parts == total.
+        (5, 5, [1, 1, 1, 1, 1]),
+        # parts == total - 1: one shard of size 2, rest size 1.
+        (5, 4, [2, 1, 1, 1]),
+    ],
+    ids=lambda v: str(v),
+)
+def test_balanced_layout_formula(
+    total: int, parts: int, expected: list[int]
+) -> None:
+    """``_balanced_layout`` matches worked examples and the formula spec."""
+    assert _balanced_layout(total, parts) == expected
+    # Invariant cross-check: the result must itself be balanced.
+    result = _balanced_layout(total, parts)
+    assert sum(result) == total
+    assert max(result) - min(result) <= 1
+    assert len(result) == parts
+
+
+@pytest.fixture(scope="session")
+def tier_totals() -> dict[int, int]:
+    """Discover the per-tier proof count from verify-kani.sh at test time.
+
+    Querying ``--print-partition --tier N`` is the single source of truth.
+    This avoids the historic fragility of pinning the counts as Python
+    constants -- a contributor adding or removing a proof should not have
+    to update this test file. The script's own ``--print-partition`` output
+    is what CI consumes, so deriving from it tests exactly what ships.
+
+    The fixture is ``session``-scoped so each tier is queried at most once
+    per pytest invocation (the script is a bash interpreter spawn and the
+    Kani registry is small, but caching keeps the test suite fast).
+    """
+    totals: dict[int, int] = {}
+    for tier in TIERS:
         result = _print_partition(tier=tier)
         assert result.returncode == 0, (
-            f"--print-partition --tier {tier} failed: {result.stderr}"
+            f"--print-partition --tier {tier} failed during fixture "
+            f"setup: {result.stderr}"
         )
         headers, harnesses = _parse_partition_output(result.stdout)
-        assert int(headers["total"]) == expected, (
-            f"Tier {tier} total mismatch: script says {headers['total']}, "
-            f"test pins {expected}. Update TIER_SIZES (and verify the "
-            f"matrix shard count is still appropriate)."
+        total = int(headers["total"])
+        # The fixture itself enforces the only invariant that matters:
+        # the header total must equal the number of harness lines. This
+        # catches partition-side bugs where the header and the emitted
+        # list diverge -- regardless of how many proofs are in the tier.
+        assert len(harnesses) == total, (
+            f"Tier {tier}: header total={total} but "
+            f"--print-partition emitted {len(harnesses)} harness lines."
         )
-        assert len(harnesses) == expected, (
-            f"Tier {tier}: header total={headers['total']} but emitted "
-            f"{len(harnesses)} harness lines."
-        )
+        assert total >= 1, f"Tier {tier} must have at least one proof."
+        totals[tier] = total
+    return totals
+
+
+def test_tier_header_total_matches_harness_count(
+    tier_totals: dict[int, int],
+) -> None:
+    """Every declared tier emits ``total`` matching its harness-line count.
+
+    The check itself runs inside the ``tier_totals`` fixture; this test
+    exists so the invariant is visible in the test report and so the
+    fixture is forced to run even if no other test references it.
+    """
+    assert set(tier_totals) == set(TIERS)
+    for tier, total in tier_totals.items():
+        assert total >= 1, f"Tier {tier} reported zero proofs."
 
 
 @dataclass(frozen=True)
 class PartitionCase:
-    """One ``(tier, parts)`` shard layout to validate.
+    """One shard-layout shape to validate.
 
-    The expected sizes are derived from the balanced-partition formula at
-    test time so the test stays in sync with TIER_SIZES.
+    A case is expressed as ``(tier, parts_for)`` where ``parts_for`` is a
+    callable that derives the shard count from the tier's runtime total.
+    Expressing cases as functions of ``total`` (rather than as absolute
+    ``parts`` constants) means adding or removing proofs cannot stale the
+    parameter list: a "split evenly" or "each shard one proof" case stays
+    semantically correct regardless of the total.
     """
 
     tier: int
-    parts: int
+    parts_for: Callable[[int], int]
+    label: str
 
 
-# Production matrices currently use:
-#   tier 1: parts=1
-#   tier 2: parts=6  (38/6 -> 7,7,6,6,6,6 balanced)
-#   tier 3: parts=5  (16/5 -> 4,3,3,3,3 balanced; was 4,4,4,4,0 buggy)
+# Shape-based partition cases. Each shape exercises a distinct ratio of
+# parts-to-total so a partition-algorithm bug at any size class (single
+# shard, every-shard-one, exact division, off-by-one division) surfaces.
 #
-# Plus a couple of additional shapes to cover edge ratios.
+# Production CI matrices currently use small absolute shard counts per
+# tier; those are matrix-shape decisions that live in workflow YAML and
+# are not duplicated here. The shapes below cover the algorithmic edge
+# cases that the partition logic must handle regardless of the matrix.
 PARTITION_CASES: tuple[PartitionCase, ...] = (
-    PartitionCase(tier=1, parts=1),
-    PartitionCase(tier=2, parts=6),
-    PartitionCase(tier=3, parts=5),
-    PartitionCase(tier=3, parts=4),
-    # Tier 3 / 8 parts: 16/8 -> 2,2,2,2,2,2,2,2 (exact).
-    PartitionCase(tier=3, parts=8),
-    # Tier 3 / 7 parts: 16/7 -> 3,3,2,2,2,2,2 (uneven, no empty shards).
-    PartitionCase(tier=3, parts=7),
+    # Single shard: the unsharded path (parts==1). Must emit one shard
+    # whose size equals the tier total.
+    PartitionCase(tier=1, parts_for=lambda _total: 1, label="unsharded"),
+    PartitionCase(tier=2, parts_for=lambda _total: 1, label="unsharded"),
+    PartitionCase(tier=3, parts_for=lambda _total: 1, label="unsharded"),
+    # Two shards: classic split. Half-and-half (or off-by-one).
+    PartitionCase(tier=2, parts_for=lambda _total: 2, label="two_shards"),
+    PartitionCase(tier=3, parts_for=lambda _total: 2, label="two_shards"),
+    # Many shards: parts close to total/2. Exercises the typical CI
+    # matrix shape without pinning the absolute shard count.
+    PartitionCase(
+        tier=2, parts_for=lambda total: max(2, total // 2), label="half"
+    ),
+    PartitionCase(
+        tier=3, parts_for=lambda total: max(2, total // 2), label="half"
+    ),
+    # Off-by-one: parts == total - 1. Exercises a remainder-of-1 layout
+    # where one shard is +1 larger than the rest. With current totals
+    # this also catches the historical 16/5 -> 4,4,4,4,0 empty-shard bug
+    # class generically -- if any single shard is empty, the invariant
+    # checks below trip.
+    PartitionCase(
+        tier=3,
+        parts_for=lambda total: max(2, total - 1),
+        label="total_minus_one",
+    ),
+    # One proof per shard: parts == total. Exact division; every shard
+    # has size 1. Boundary case for size-derived diagnostics.
+    PartitionCase(
+        tier=2, parts_for=lambda total: total, label="one_per_shard"
+    ),
+    PartitionCase(
+        tier=3, parts_for=lambda total: total, label="one_per_shard"
+    ),
 )
 
 
 @pytest.mark.parametrize(
     "case",
     PARTITION_CASES,
-    ids=lambda c: f"tier{c.tier}_parts{c.parts}",
+    ids=lambda c: f"tier{c.tier}_{c.label}",
 )
-def test_balanced_partition_no_empty_shards(case: PartitionCase) -> None:
+def test_balanced_partition_no_empty_shards(
+    case: PartitionCase, tier_totals: dict[int, int]
+) -> None:
     """Every shard from 1..parts gets a non-empty, balanced subset.
 
-    Asserts (in addition to the per-case PARTITION_CASES checks):
+    Asserts:
         * Each shard's harness count matches the balanced layout
           (sizes differ by at most 1).
         * No shard is empty (the original 16/5 -> 4,4,4,4,0 bug).
@@ -162,13 +286,17 @@ def test_balanced_partition_no_empty_shards(case: PartitionCase) -> None:
           ``min(parsed_sizes) > 0`` AND
           ``max(parsed_sizes) - min(parsed_sizes) <= 1`` AND
           ``sum(parsed_sizes) == total``.
-          This is a stricter, more general check than asserting the absence
-          of one historical buggy literal -- any future partition algorithm
-          that violates "balanced + non-empty + total-preserving" will fail
+          This is a layout-agnostic check -- any partition algorithm that
+          violates "balanced + non-empty + total-preserving" will fail
           here regardless of the specific bad layout it produces.
     """
-    total = TIER_SIZES[case.tier]
-    expected_sizes = _balanced_layout(total, case.parts)
+    total = tier_totals[case.tier]
+    parts = case.parts_for(total)
+    assert 1 <= parts <= total, (
+        f"Test setup error: parts ({parts}) must satisfy 1 <= parts <= "
+        f"total ({total}) for tier {case.tier} ({case.label})."
+    )
+    expected_sizes = _balanced_layout(total, parts)
     assert min(expected_sizes) >= 1, (
         "Test invariant: total >= parts so no shard should be empty."
     )
@@ -181,10 +309,10 @@ def test_balanced_partition_no_empty_shards(case: PartitionCase) -> None:
     expected_start = 0
     parsed_sizes: list[int] = []
 
-    for part in range(1, case.parts + 1):
-        result = _print_partition(case.tier, part=part, parts=case.parts)
+    for part in range(1, parts + 1):
+        result = _print_partition(case.tier, part=part, parts=parts)
         assert result.returncode == 0, (
-            f"--print-partition tier={case.tier} part={part} parts={case.parts} "
+            f"--print-partition tier={case.tier} part={part} parts={parts} "
             f"failed (exit {result.returncode}):\n{result.stderr}"
         )
 
@@ -192,7 +320,7 @@ def test_balanced_partition_no_empty_shards(case: PartitionCase) -> None:
 
         assert int(headers["tier"]) == case.tier
         assert int(headers["total"]) == total
-        assert int(headers["parts"]) == case.parts
+        assert int(headers["parts"]) == parts
         assert int(headers["part"]) == part
 
         size = int(headers["size"])
@@ -236,32 +364,49 @@ def test_balanced_partition_no_empty_shards(case: PartitionCase) -> None:
     assert seen_indices == set(range(total))
 
     # Stricter, layout-agnostic invariant: balanced + non-empty + total-
-    # preserving. Replaces the historical narrow check against the literal
-    # "4,4,4,4,0" string -- any future bug that produces an empty shard,
-    # an unbalanced shard, or a total-mismatch fails here.
+    # preserving. Any future bug that produces an empty shard, an
+    # unbalanced shard, or a total-mismatch fails here.
     assert min(parsed_sizes) > 0, (
-        f"Empty shard in tier {case.tier} parts {case.parts}: "
+        f"Empty shard in tier {case.tier} parts {parts}: "
         f"sizes={parsed_sizes}"
     )
     assert max(parsed_sizes) - min(parsed_sizes) <= 1, (
-        f"Unbalanced shards in tier {case.tier} parts {case.parts}: "
+        f"Unbalanced shards in tier {case.tier} parts {parts}: "
         f"sizes={parsed_sizes} (max - min must be <= 1)"
     )
     assert sum(parsed_sizes) == total, (
         f"Sum of shard sizes ({sum(parsed_sizes)}) != tier total ({total}) "
-        f"for tier {case.tier} parts {case.parts}: sizes={parsed_sizes}"
+        f"for tier {case.tier} parts {parts}: sizes={parsed_sizes}"
     )
 
 
-@pytest.mark.parametrize("tier,parts", [(3, 17), (3, 20), (2, 39)])
-def test_partition_rejects_more_parts_than_proofs(tier: int, parts: int) -> None:
+@pytest.mark.parametrize(
+    "tier,excess",
+    [
+        # Smallest off-by-one: parts == total + 1.
+        (1, 1),
+        (2, 1),
+        (3, 1),
+        # Larger excess to exercise a clearly-misconfigured matrix.
+        (1, 5),
+        (2, 5),
+        (3, 5),
+    ],
+    ids=lambda v: str(v),
+)
+def test_partition_rejects_more_parts_than_proofs(
+    tier: int, excess: int, tier_totals: dict[int, int]
+) -> None:
     """Misconfigured matrices (parts > total) MUST fail loudly.
 
     The previous implementation silently produced empty shards. We now
     refuse to plan such a layout so CI fails at partition time rather
-    than wasting a runner that does nothing.
+    than wasting a runner that does nothing. The number of parts is
+    derived from the tier's runtime total + ``excess`` so adding proofs
+    cannot stale the parameter list.
     """
-    total = TIER_SIZES[tier]
+    total = tier_totals[tier]
+    parts = total + excess
     assert parts > total, "Test setup error: parts must exceed total."
 
     result = _print_partition(tier, part=1, parts=parts)
@@ -275,23 +420,25 @@ def test_partition_rejects_more_parts_than_proofs(tier: int, parts: int) -> None
     assert "misconfigured CI matrix" in combined
 
 
-def test_partition_layout_diagnostic_matches_balanced_formula() -> None:
+def test_partition_layout_diagnostic_matches_balanced_formula(
+    tier_totals: dict[int, int],
+) -> None:
     """The PARTITION header's sizes CSV matches the balanced-layout formula.
 
     This is the single source of truth for the planned shard sizes and is
     printed once before partition runs so future sharding changes are
     verifiable from CI logs.
 
-    Note: the historical buggy layout (``4,4,4,4,0`` for tier 3 / 5 parts)
-    is deliberately not asserted-against by literal here; the
-    balanced-layout invariants in
-    :func:`test_balanced_partition_no_empty_shards`
-    (``min > 0``, ``max - min <= 1``, ``sum == total``) catch any empty/
-    unbalanced shard regardless of the specific bad layout.
+    The expected sizes are computed from the tier's runtime total via the
+    balanced-layout formula so the test stays correct as proofs are added.
     """
     tier = 3
-    parts = 5
-    total = TIER_SIZES[tier]
+    total = tier_totals[tier]
+    # Pick a shard count that is guaranteed to leave a remainder for any
+    # tier total >= 3: total // 2 + 1 (which is > total / 2 but < total
+    # when total >= 3). This exercises the remainder branch of the
+    # balanced-layout formula rather than the exact-division branch.
+    parts = max(2, total // 2 + 1)
     expected_sizes = _balanced_layout(total, parts)
 
     result = _print_partition(tier, part=1, parts=parts)
@@ -662,17 +809,34 @@ def test_print_partition_omits_note_when_no_run_flags() -> None:
 # with PARTITION which made the introspection mode and run-path log
 # format gratuitously inconsistent.
 # ---------------------------------------------------------------------------
-def test_print_partition_starts_with_human_readable_diagnostic() -> None:
-    """First line of `--print-partition` is the human-readable layout line."""
-    result = _print_partition(tier=3, part=1, parts=5)
+def test_print_partition_starts_with_human_readable_diagnostic(
+    tier_totals: dict[int, int],
+) -> None:
+    """First line of `--print-partition` is the human-readable layout line.
+
+    The expected diagnostic string is built from the tier's runtime total
+    and the balanced-layout formula so adding proofs cannot stale this
+    test. The run-path emits the same shape; ``test_run_path_emits_
+    layout_diagnostic_and_runs_balanced_partition`` asserts they agree.
+    """
+    tier = 3
+    parts = max(2, tier_totals[tier] // 2 + 1)
+    part = 1
+    total = tier_totals[tier]
+    expected_sizes = _balanced_layout(total, parts)
+    expected_part_size = expected_sizes[part - 1]
+    expected_prefix = (
+        f"Tier {tier} ({total} proofs) -> {parts} parts: "
+        f"[{','.join(str(s) for s in expected_sizes)}]; this is part "
+        f"{part} -> {expected_part_size} "
+        f"{'proof' if expected_part_size == 1 else 'proofs'}, "
+        f"indices 0..{expected_part_size - 1}"
+    )
+
+    result = _print_partition(tier=tier, part=part, parts=parts)
     assert result.returncode == 0
     lines = result.stdout.splitlines()
     assert lines, f"Empty stdout from --print-partition: {result!r}"
-    # Should match the same shape as run_tier_proofs's diagnostic.
-    expected_prefix = (
-        "Tier 3 (16 proofs) -> 5 parts: [4,3,3,3,3]; this is part 1 -> "
-        "4 proofs, indices 0..3"
-    )
     assert lines[0] == expected_prefix, (
         f"First line of --print-partition does not match the run-path "
         f"diagnostic format.\nExpected: {expected_prefix!r}\n"
@@ -684,20 +848,27 @@ def test_print_partition_starts_with_human_readable_diagnostic() -> None:
     )
 
 
-def test_print_partition_unsharded_starts_with_human_readable_diagnostic() -> None:
+def test_print_partition_unsharded_starts_with_human_readable_diagnostic(
+    tier_totals: dict[int, int],
+) -> None:
     """Unsharded mode also emits the human-readable layout line first.
 
-    Note: the diagnostic uses ``"1 part"`` (singular) -- not ``"1 parts"`` --
-    so the unsharded message reads grammatically. Sharded layouts (parts>1)
-    keep ``"N parts"``.
+    The diagnostic uses ``"1 part"`` (singular) -- not ``"1 parts"`` --
+    so the unsharded message reads grammatically. Sharded layouts
+    (parts>1) keep ``"N parts"``.
     """
-    result = _print_partition(tier=3)
+    tier = 3
+    total = tier_totals[tier]
+    expected_prefix = f"Tier {tier} ({total} proofs) -> 1 part: ["
+
+    result = _print_partition(tier=tier)
     assert result.returncode == 0
     lines = result.stdout.splitlines()
     assert lines
-    assert lines[0].startswith("Tier 3 (16 proofs) -> 1 part: ["), (
-        f"Unsharded --print-partition first line should be the "
-        f"human-readable diagnostic with singular 'part'; got: {lines[0]!r}"
+    assert lines[0].startswith(expected_prefix), (
+        f"Unsharded --print-partition first line should start with "
+        f"the singular 'part' diagnostic {expected_prefix!r}; "
+        f"got: {lines[0]!r}"
     )
 
 
@@ -759,6 +930,7 @@ KANI_SUCCESS_SUMMARY = (
 def test_run_path_emits_layout_diagnostic_and_runs_balanced_partition(
     fake_cargo_repo_factory,
     verify_kani_runner,
+    tier_totals: dict[int, int],
 ) -> None:
     """The real run path prints the layout diagnostic and runs the right shards.
 
@@ -767,12 +939,18 @@ def test_run_path_emits_layout_diagnostic_and_runs_balanced_partition(
     shim that emits a Kani-style "Complete - ..." summary so the script
     reports success, and asserts:
 
-    * The layout diagnostic line ``"Tier 3 (16 proofs) -> 5 parts:
-      [4,3,3,3,3]; this is part 1 -> 4 proofs, indices 0..3"`` appears
-      verbatim in stdout (substring-matched against ANSI-stripped text).
+    * The layout diagnostic line ``"Tier T (N proofs) -> P parts: [...]
+      ; this is part 1 -> S proofs, indices 0..S-1"`` appears verbatim
+      in stdout (substring-matched against ANSI-stripped text). The
+      string is BUILT from the tier's runtime total and the balanced-
+      layout formula -- there are no literal proof counts in this test.
     * Every harness in part 1's expected balanced subset is verified
-      (the script echoes ``Verifying: <harness>`` per harness).
-    * No harness from outside part 1's range is verified.
+      (the script echoes ``Verifying: <harness>`` per harness). The
+      expected harness names are DISCOVERED from ``--print-partition``
+      output rather than pinned, so re-ordering or adding proofs cannot
+      stale this test.
+    * No harness from a later shard is verified in part 1. The "later"
+      harness is also discovered from ``--print-partition``.
 
     Together these lock down the run-path partitioning end-to-end, not
     just the introspection layout.
@@ -781,24 +959,53 @@ def test_run_path_emits_layout_diagnostic_and_runs_balanced_partition(
         success_summary=KANI_SUCCESS_SUMMARY,
     )
 
-    # Reference harnesses for tier 3: pinned here so any change to the
-    # tier-3 ordering is caught instead of silently rebalancing.
     tier = 3
-    parts = 5
+    total = tier_totals[tier]
+    # Pick a parts count that:
+    #   1. leaves an uneven split (remainder > 0) so the test exercises
+    #      both larger and smaller shards;
+    #   2. is small enough that part 1 has more than one harness (so the
+    #      "every harness in part 1" loop is non-trivial);
+    #   3. leaves at least one later shard so we can pick an out-of-part
+    #      harness from it.
+    # ``total // 2 + 1`` satisfies all three for any total >= 3.
+    parts = max(3, total // 2 + 1)
     part = 1
-    total = TIER_SIZES[tier]
     expected_sizes = _balanced_layout(total, parts)
     expected_part_size = expected_sizes[part - 1]
-    # First 4 harnesses of tier 3 in script order.
-    expected_part_harnesses = [
-        "proof_index_wrapping_consistent",
-        "proof_add_single_input_maintains_invariants",
-        "proof_sequential_inputs_maintain_invariants",
-        "proof_discard_maintains_invariants",
-    ]
+
+    # Discover the expected harness names from --print-partition rather
+    # than pinning them. We invoke the COPIED script (the one the runner
+    # uses) rather than the workspace script so discovery and execution
+    # cannot diverge if the fixture or workspace state differs.
+    part1_introspect = _print_partition(
+        tier=tier, part=part, parts=parts, script=script_path, cwd=repo
+    )
+    assert part1_introspect.returncode == 0, part1_introspect.stderr
+    _, expected_part_harnesses = _parse_partition_output(
+        part1_introspect.stdout
+    )
     assert len(expected_part_harnesses) == expected_part_size, (
-        "Test setup error: expected_part_harnesses must equal balanced "
-        "layout's part-1 size."
+        f"Test invariant: --print-partition emitted "
+        f"{len(expected_part_harnesses)} harness lines but the balanced "
+        f"layout expects {expected_part_size}."
+    )
+
+    # Pick an out-of-part harness from the LAST shard. This is also
+    # discovered (from the copied script), not pinned.
+    last_part = parts
+    last_introspect = _print_partition(
+        tier=tier, part=last_part, parts=parts, script=script_path, cwd=repo
+    )
+    assert last_introspect.returncode == 0, last_introspect.stderr
+    _, last_part_harnesses = _parse_partition_output(last_introspect.stdout)
+    assert last_part_harnesses, (
+        "Test invariant: the last shard must contain at least one harness."
+    )
+    out_of_part_harness = last_part_harnesses[0]
+    assert out_of_part_harness not in expected_part_harnesses, (
+        f"Test setup error: chosen out-of-part harness "
+        f"{out_of_part_harness!r} also appears in part {part}."
     )
 
     result = verify_kani_runner(
@@ -823,14 +1030,14 @@ def test_run_path_emits_layout_diagnostic_and_runs_balanced_partition(
     )
 
     # Strip ANSI colour codes once so substring matching is reliable.
-    import re
-
     plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
 
     expected_diag = (
         f"Tier {tier} ({total} proofs) -> {parts} parts: "
         f"[{','.join(str(s) for s in expected_sizes)}]; this is part "
-        f"{part} -> {expected_part_size} proofs, indices 0..3"
+        f"{part} -> {expected_part_size} "
+        f"{'proof' if expected_part_size == 1 else 'proofs'}, "
+        f"indices 0..{expected_part_size - 1}"
     )
     assert expected_diag in plain, (
         f"Run-path layout diagnostic missing.\n"
@@ -845,12 +1052,11 @@ def test_run_path_emits_layout_diagnostic_and_runs_balanced_partition(
             f"{part}; not found in stdout.\n--- stdout ---\n{plain}"
         )
 
-    # No harness from later parts must run in part 1. Pick a known
-    # tier-3 harness that should land in part 5 (last shard, index 13+).
-    out_of_part_harness = "proof_sparse_saving_respects_saved_frame"
+    # The out-of-part harness must not run in part 1.
     assert f"Verifying: {out_of_part_harness}" not in plain, (
-        f"Harness {out_of_part_harness!r} should not run in part "
-        f"{part}; it appeared in stdout.\n--- stdout ---\n{plain}"
+        f"Harness {out_of_part_harness!r} (from part {last_part}) should "
+        f"not run in part {part}; it appeared in stdout.\n"
+        f"--- stdout ---\n{plain}"
     )
 
 
@@ -862,53 +1068,62 @@ def test_run_path_emits_layout_diagnostic_and_runs_balanced_partition(
 # and singular ``proof`` for size==1. These tests pin both forms.
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
-    "tier,parts,expected_phrase",
-    [
-        # parts > 1 -> plural everywhere.
-        (3, 5, "5 parts:"),
-        (2, 6, "6 parts:"),
-        # parts == 1 (sharded form) -> "1 part" singular.
-        # 16 / 1 = 16 proofs in the only shard, so "16 proofs" plural.
-        (3, 1, "1 part:"),
-    ],
-    ids=lambda v: v if isinstance(v, str) else str(v),
+    "tier_for_parts1",
+    [1, 2, 3],
+    ids=lambda v: f"tier{v}",
 )
-def test_print_partition_pluralises_parts_word(
-    tier: int, parts: int, expected_phrase: str
+def test_print_partition_pluralises_parts_singular_for_one(
+    tier_for_parts1: int, tier_totals: dict[int, int]
 ) -> None:
-    """The diagnostic uses singular ``part`` for parts==1 and plural otherwise."""
-    result = _print_partition(tier=tier, part=1, parts=parts)
-    assert result.returncode == 0, (
-        f"--print-partition failed: {result.stderr}"
-    )
-    first_line = result.stdout.splitlines()[0]
-    assert expected_phrase in first_line, (
-        f"Expected pluralisation token {expected_phrase!r} in first line; "
-        f"got: {first_line!r}"
-    )
-    # Inverse: the wrong form must never coexist with the right one.
-    if expected_phrase == "1 part:":
-        assert " 1 parts:" not in first_line, (
-            f"Singular case leaked plural form: {first_line!r}"
-        )
-    else:
-        # Plural cases must not accidentally print "<N> part:" (without 's').
-        bad = expected_phrase.replace(" parts:", " part:")
-        assert bad not in first_line, (
-            f"Plural case leaked singular form: {first_line!r}"
-        )
-
-
-def test_print_partition_pluralises_proof_word_for_single_proof_shard() -> None:
-    """When a shard contains exactly one proof, the diagnostic says ``1 proof``.
-
-    Tier 3 has 16 proofs; sharding into 16 parts gives 1 proof per shard.
-    The historical bug emitted ``"1 proofs"`` which is ungrammatical.
-    """
-    result = _print_partition(tier=3, part=1, parts=16)
+    """When parts==1 the diagnostic uses singular ``1 part:`` not ``1 parts:``."""
+    result = _print_partition(tier=tier_for_parts1, part=1, parts=1)
     assert result.returncode == 0, result.stderr
     first_line = result.stdout.splitlines()[0]
-    # "this is part 1 -> 1 proof, indices 0..0" (singular).
+    assert " 1 part:" in first_line, (
+        f"Expected singular ' 1 part:' in: {first_line!r}"
+    )
+    assert " 1 parts:" not in first_line, (
+        f"Singular case leaked plural form: {first_line!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "tier",
+    [2, 3],
+    ids=lambda v: f"tier{v}",
+)
+def test_print_partition_pluralises_parts_plural_for_many(
+    tier: int, tier_totals: dict[int, int]
+) -> None:
+    """Plural ``N parts:`` for parts > 1; never ``N part:`` for N > 1."""
+    total = tier_totals[tier]
+    parts = max(2, total // 2)
+    result = _print_partition(tier=tier, part=1, parts=parts)
+    assert result.returncode == 0, result.stderr
+    first_line = result.stdout.splitlines()[0]
+    assert f" {parts} parts:" in first_line, (
+        f"Expected plural ' {parts} parts:' in: {first_line!r}"
+    )
+    assert f" {parts} part:" not in first_line, (
+        f"Plural case leaked singular form: {first_line!r}"
+    )
+
+
+def test_print_partition_pluralises_proof_word_for_single_proof_shard(
+    tier_totals: dict[int, int],
+) -> None:
+    """When a shard contains exactly one proof, the diagnostic says ``1 proof``.
+
+    Sharding a tier into ``parts == total`` gives exactly 1 proof per
+    shard (exact division). Using the runtime total instead of a literal
+    keeps this test correct as proofs are added.
+    """
+    tier = 3
+    total = tier_totals[tier]
+    parts = total  # one shard per proof
+    result = _print_partition(tier=tier, part=1, parts=parts)
+    assert result.returncode == 0, result.stderr
+    first_line = result.stdout.splitlines()[0]
     assert "-> 1 proof," in first_line, (
         f"Expected '-> 1 proof,' (singular) in: {first_line!r}"
     )

@@ -1,17 +1,18 @@
 # Pre-commit hooks for Fortress Rollback
-# Install: pip install pre-commit && pre-commit install
-# Run manually: pre-commit run --all-files
+# Install: pip install pre-commit && pre-commit install --hook-type pre-commit --hook-type pre-push
+# Run staged/current checks manually: pre-commit run
 #
 # See https://pre-commit.com for more information
 #
 # Cross-platform notes:
-# - Works on Linux, macOS, and Windows (with bash for some hooks)
+# - Fast pre-commit hooks work on Linux, macOS, and Windows
 # - Most hooks use local Python scripts for maximum Windows compatibility
-# - Exception: check-code-fence-syntax requires bash (available via Git Bash or WSL)
-# - On Windows: Git Bash or WSL recommended for full hook support
+# - Manual/CI hooks may require bash (available via Git Bash or WSL)
 
 default_language_version:
   python: python3
+
+default_stages: [pre-commit]
 
 repos:
   # All hooks are local Python scripts for maximum Windows compatibility
@@ -56,6 +57,13 @@ repos:
         language: python
         types: [text]
 
+      - id: check-no-tla-tools-cache
+        name: reject commits under .tla-tools/ (runtime cache)
+        entry: python scripts/hooks/check-no-tla-tools-cache.py
+        language: python
+        pass_filenames: true
+        always_run: true
+
       - id: mixed-line-ending
         name: fix line endings (LF)
         entry: python scripts/hooks/mixed-line-ending.py
@@ -94,6 +102,7 @@ repos:
         language: python
         types: [rust]
         pass_filenames: false
+        stages: [manual]
 
       - id: rustdoc-links
         name: rustdoc link check
@@ -101,6 +110,7 @@ repos:
         language: python
         pass_filenames: false
         files: '\.rs$'
+        stages: [manual]
 
       - id: check-doc-claims
         name: check doc comment accuracy
@@ -108,6 +118,7 @@ repos:
         language: system
         pass_filenames: false
         files: '\.rs$'
+        stages: [manual]
 
       - id: check-derive-bounds
         name: check derive bounds
@@ -115,6 +126,7 @@ repos:
         language: system
         pass_filenames: false
         files: '\.rs$'
+        stages: [manual]
 
       # ══════════════════════════════════════════════════════════════════════
       # Documentation checks
@@ -140,6 +152,7 @@ repos:
         language: python
         pass_filenames: false
         files: '\.(md|rs)$'
+        stages: [manual]
 
       - id: check-code-fence-syntax
         name: check code fence syntax
@@ -147,6 +160,7 @@ repos:
         language: system
         pass_filenames: false
         files: '\.md$'
+        stages: [manual]
 
       - id: sync-wiki
         name: sync wiki mirrors
@@ -154,6 +168,7 @@ repos:
         language: python
         pass_filenames: false
         files: '^(docs/.*\.md|wiki/.*\.md|scripts/docs/sync-wiki\.py)$'
+        stages: [manual]
 
       - id: wiki-consistency
         name: wiki consistency check
@@ -161,6 +176,7 @@ repos:
         language: python
         pass_filenames: false
         files: '^(docs/.*\.md|wiki/.*\.md|scripts/docs/sync-wiki\.py)$'
+        stages: [manual]
 
       - id: check-theme-colors
         name: check docs theme colors
@@ -182,6 +198,7 @@ repos:
         language: system
         pass_filenames: false
         files: '(\.rs|\.md|\.toml|\.yml|\.yaml|\.sh|\.txt|\.json)$'
+        stages: [manual]
 
       - id: changelog-unreleased-rule
         name: changelog unreleased code rule
@@ -210,6 +227,7 @@ repos:
         language: system
         pass_filenames: false
         files: '^\.llm/.*\.md$'
+        stages: [manual]
 
       # ══════════════════════════════════════════════════════════════════════
       # Container & infrastructure checks
@@ -230,6 +248,7 @@ repos:
         language: python
         files: '^scripts/(hooks/|build/|docs/|verification/|ci/)?[a-z][^/]*\.py$'
         pass_filenames: true
+        stages: [manual]
 
       - id: check-shell-portability
         name: check shell portability
@@ -237,6 +256,7 @@ repos:
         language: system
         files: '\.sh$'
         pass_filenames: false
+        stages: [manual]
 
       # ══════════════════════════════════════════════════════════════════════
       # CI validation (skip gracefully if tools not installed)
@@ -261,7 +281,7 @@ repos:
         language: python
         pass_filenames: false
         files: '\.rs$|Cargo\.toml$'
-        stages: [pre-push]
+        stages: [manual]
 
       - id: check-issue-template-versions
         name: check issue template versions (skips if offline)

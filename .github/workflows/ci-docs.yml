@@ -6,28 +6,40 @@ on:
     paths:
       - "**.md"
       - "**.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "docs/**"
       - "wiki/**"
-      - "scripts/**"
+      - "scripts/docs/**"
+      - "scripts/tests/**"
+      - "scripts/ci/check-doc-claims.sh"
+      - "scripts/ci/check-derive-bounds.sh"
       - ".markdownlint.json"
       - ".markdown-link-check.json"
       - ".lychee.toml"
       - ".vale.ini"
       - ".vale/**"
+      - ".github/actions/install-cargo-tool/**"
       - ".github/workflows/ci-docs.yml"
   pull_request:
     branches: [main]
     paths:
       - "**.md"
       - "**.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "docs/**"
       - "wiki/**"
-      - "scripts/**"
+      - "scripts/docs/**"
+      - "scripts/tests/**"
+      - "scripts/ci/check-doc-claims.sh"
+      - "scripts/ci/check-derive-bounds.sh"
       - ".markdownlint.json"
       - ".markdown-link-check.json"
       - ".lychee.toml"
       - ".vale.ini"
       - ".vale/**"
+      - ".github/actions/install-cargo-tool/**"
       - ".github/workflows/ci-docs.yml"
   workflow_dispatch:
 
@@ -280,6 +292,9 @@ jobs:
 
       - name: Check doc comment accuracy
         run: ./scripts/ci/check-doc-claims.sh
+
+      - name: Check derive bounds
+        run: ./scripts/ci/check-derive-bounds.sh
 
   link-check:
     name: Link Check

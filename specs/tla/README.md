@@ -33,6 +33,7 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | `ChecksumExchange.tla` | `ChecksumExchange.cfg` | ✓ CI | Checksum exchange for desync detection |
 | `SpectatorSession.tla` | `SpectatorSession.cfg` | ✓ CI | Spectator session with frame delay and catchup |
 | `TimeSync.tla` | `TimeSync.cfg` | ✓ CI | Time synchronization for peer frame rate coordination |
+| `PeerDrop.tla` | `PeerDrop.cfg` | ✓ CI | Halt vs ContinueWithout peer-drop policy model |
 
 ## Properties Verified
 
@@ -57,10 +58,23 @@ This directory contains TLA+ specifications for formally verifying the correctne
 - INV-5: Head and tail indices always valid
 - FIFO ordering preserved
 - No frame gaps in queue
+- Runtime input delay stays within queue capacity
+- Mid-session delay increases preserve contiguous queued frames
+- Frozen queues reject later adds and preserve the final confirmed input
 
 **Liveness:**
 
 - Predictions eventually confirmed (with rollback)
+
+### PeerDrop.tla
+
+**Safety:**
+
+- Halt transitions to `Synchronizing` after any dropped peer
+- ContinueWithout freezes dropped players and keeps survivors independent
+- `PeerDropped` events are emitted only by ContinueWithout
+- Dropped players are excluded from survivor progress
+- Rollback starts no later than every dropped player's `lastFrame + 1`
 
 ### Rollback.tla
 

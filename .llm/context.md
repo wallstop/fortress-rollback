@@ -17,7 +17,7 @@
 ## Quick Commands
 
 ```bash
-cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run --no-capture  # Pre-commit
+cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run --no-capture  # Full local validation
 cargo c && cargo t                        # Aliases from .cargo/config.toml
 typos                                     # Spell check (CI enforced)
 cargo test --features z3-verification -- --nocapture  # Z3 proofs (slow)
@@ -150,6 +150,8 @@ Pre-commit validates registration only, NOT that proofs pass. Run affected proof
 
 The repository-pinned TLA+ tools version lives in `.tla-tools-version`. `scripts/verification/verify-tla.sh`, the devcontainer image/setup hook, and CI cache keys must read that file instead of hardcoding release URLs or duplicate version values.
 
+The `.tla-tools/` directory is a **runtime cache** (`tla2tools.jar` plus a generated `.version` sentinel) populated by those scripts. It is `.gitignore`d and must never be committed — the `check-no-tla-tools-cache` pre-commit hook (`scripts/hooks/check-no-tla-tools-cache.py`) enforces this. Committing the sentinel desynchronizes it from the actual cached jar and silently disables the staleness guard.
+
 ## Safety CI Checks
 
 | Check                | Purpose                                      |
@@ -238,11 +240,12 @@ Validate locally: `python3 scripts/hooks/check-changelog-unreleased.py`. Also ru
 - **After markdown changes:** `npx markdownlint 'file.md' --config .markdownlint.json --fix`
 - **Before finalizing agent work:** `python3 scripts/ci/agent-preflight.py --auto-fix` (changed-file-aware early checks; if output includes `Falling back to --all checks.`, resolve git-state issues and rerun)
 - **After shell-script changes:** `bash scripts/ci/check-shell-portability.sh`
+- **Hook policy:** `pre-commit`/`pre-push` target <10s; slow full-repo checks belong in manual hooks, agent preflight, or CI.
 - **After `.llm/` changes:** All `.md` files under `.llm/` must be **300 lines or fewer** (enforced by pre-commit hook `llm-line-limit`)
 - **Link validation:** `./scripts/docs/check-links.sh`
 - **Spell check:** `typos`
 - **Vale (advisory):** `vale docs/` -- checks prose quality, non-blocking in CI. Cheat-sheet of recurring swaps and weasel words: [`.llm/skills/workflows/user-facing-docs.md`](skills/workflows/user-facing-docs.md#prose-conventions). Agent preflight surfaces per-file counts via the `vale-advisory` check.
-- **Full pre-commit:** `cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run --no-capture`
+- **Full local validation:** `cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run --no-capture`
 
 Shell regex portability rule: avoid PCRE-style escapes in `grep -E`/`sed -E` (`\b`, `\s`, `\w`, etc.). Use POSIX-safe classes like `[[:space:]]`, `[[:alnum:]_]`, and token boundaries `(^|[^[:alnum:]_])word([^[:alnum:]_]|$)`.
 

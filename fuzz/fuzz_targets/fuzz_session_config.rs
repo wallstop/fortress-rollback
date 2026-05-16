@@ -63,7 +63,10 @@ fuzz_target!(|config: FuzzConfig| {
     let mut builder = SessionBuilder::<StubConfig>::new();
 
     // Test with_num_players - should handle any value
-    builder = builder.with_num_players(config.num_players as usize);
+    builder = match builder.with_num_players(config.num_players as usize) {
+        Ok(builder) => builder,
+        Err(_) => return,
+    };
 
     // Test with_max_prediction_window - should handle any value
     builder = builder.with_max_prediction_window(config.max_prediction_frames as usize);
@@ -72,7 +75,10 @@ fuzz_target!(|config: FuzzConfig| {
     builder = builder.with_input_queue_config(queue_config);
 
     // Test with_input_delay - use clamped value to avoid expected panics
-    builder = builder.with_input_delay(input_delay);
+    builder = match builder.with_input_delay(input_delay) {
+        Ok(builder) => builder,
+        Err(_) => return,
+    };
 
     // Test with_disconnect_timeout - should handle any duration
     builder = builder.with_disconnect_timeout(std::time::Duration::from_millis(

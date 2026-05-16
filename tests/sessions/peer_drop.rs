@@ -25,8 +25,8 @@ use crate::common::{
     POLL_INTERVAL_DETERMINISTIC,
 };
 use fortress_rollback::{
-    DisconnectBehavior, FortressError, FortressEvent, FortressRequest, InputStatus, InputVec,
-    P2PSession, PlayerHandle, PlayerType, ProtocolConfig, SessionBuilder, SessionState,
+    DisconnectBehavior, FortressError, FortressEvent, FortressRequest, Frame, InputStatus,
+    InputVec, P2PSession, PlayerHandle, PlayerType, ProtocolConfig, SessionBuilder, SessionState,
     SpectatorSession,
 };
 use web_time::Duration;
@@ -90,6 +90,26 @@ fn poll_three(
         sess3.poll_remote_clients();
         clock.advance(POLL_INTERVAL_DETERMINISTIC);
     }
+}
+
+fn advance_session(
+    session: &mut P2PSession<StubConfig>,
+    stub: &mut GameStub,
+    handle: PlayerHandle,
+    value: u32,
+) -> Result<Vec<(Frame, InputVec<StubInput>)>, FortressError> {
+    session.add_local_input(handle, StubInput { inp: value })?;
+    let mut frame = session.current_frame();
+    let requests = session.advance_frame()?;
+    let mut advanced_inputs = Vec::new();
+    for request in &*requests {
+        if let FortressRequest::AdvanceFrame { inputs } = request {
+            advanced_inputs.push((frame, inputs.clone()));
+            frame = Frame::new(frame.as_i32() + 1);
+        }
+    }
+    stub.handle_requests(requests);
+    Ok(advanced_inputs)
 }
 
 /// Three synchronized peers + shared test clock.
@@ -249,6 +269,183 @@ fn p2p_continue_without_advances_after_peer_drop() -> Result<(), FortressError> 
         "sess2 confirmed_frame should advance: before={:?}, after={:?}",
         confirmed_before_sess2,
         sess2.confirmed_frame()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn p2p_continue_without_propagated_disconnect_freezes_dropped_peer() -> Result<(), FortressError> {
+    let ThreePlayerSessions {
+        mut sess1,
+        mut sess2,
+        mut sess3,
+        clock,
+    } = build_three_player_sessions(DisconnectBehavior::ContinueWithout)?;
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let mut stub3 = GameStub::new();
+
+    const MARKER_C: u32 = 4242;
+    for i in 0..3_u32 {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        advance_session(&mut sess1, &mut stub1, PlayerHandle::new(0), i)?;
+        advance_session(&mut sess2, &mut stub2, PlayerHandle::new(1), i + 10)?;
+        advance_session(&mut sess3, &mut stub3, PlayerHandle::new(2), i + 20)?;
+    }
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 8);
+    advance_session(&mut sess1, &mut stub1, PlayerHandle::new(0), 100)?;
+    advance_session(&mut sess2, &mut stub2, PlayerHandle::new(1), 200)?;
+    advance_session(&mut sess3, &mut stub3, PlayerHandle::new(2), MARKER_C)?;
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 15);
+
+    // Session 2 learns that C is gone first. Session 1 must learn that
+    // through B's propagated connection status, even though C has not timed
+    // out locally on session 1.
+    sess2.remove_player(PlayerHandle::new(2))?;
+    let _ = drain_events(&mut sess2);
+
+    let mut observed_c = Vec::new();
+    for i in 0..30_u32 {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        advance_session(&mut sess2, &mut stub2, PlayerHandle::new(1), i + 300)?;
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        let inputs = advance_session(&mut sess1, &mut stub1, PlayerHandle::new(0), i + 400)?;
+        for (frame, frame_inputs) in inputs {
+            if let Some(&(input, status)) = frame_inputs.get(2) {
+                observed_c.push((frame, input.inp, status));
+            }
+        }
+    }
+
+    let events = drain_events(&mut sess1);
+    let peer_dropped_count = events
+        .iter()
+        .filter(|event| matches!(event, FortressEvent::PeerDropped { .. }))
+        .count();
+    assert_eq!(
+        peer_dropped_count, 1,
+        "propagated ContinueWithout drop must emit exactly one PeerDropped; got {events:?}"
+    );
+    let peer_dropped_c_count = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                FortressEvent::PeerDropped {
+                    handle,
+                    ..
+                } if *handle == PlayerHandle::new(2)
+            )
+        })
+        .count();
+    assert_eq!(
+        peer_dropped_c_count, 1,
+        "propagated ContinueWithout drop must emit PeerDropped for C exactly once; got {events:?}"
+    );
+    let disconnected_count = events
+        .iter()
+        .filter(|event| matches!(event, FortressEvent::Disconnected { .. }))
+        .count();
+    assert_eq!(
+        disconnected_count, 1,
+        "propagated ContinueWithout drop must emit exactly one Disconnected; got {events:?}"
+    );
+    let first_disconnected_index = observed_c
+        .iter()
+        .position(|&(_, _, status)| status == InputStatus::Disconnected)
+        .expect("propagated drop must eventually mark C disconnected");
+    let connected_after_cutoff: Vec<_> = observed_c
+        .iter()
+        .skip(first_disconnected_index)
+        .filter(|&&(_, _, status)| status != InputStatus::Disconnected)
+        .collect();
+    assert_eq!(
+        connected_after_cutoff,
+        Vec::<&(Frame, u32, InputStatus)>::new(),
+        "frames after propagated cutoff must stay disconnected; got {observed_c:?}"
+    );
+    let disconnected_marker_count = observed_c
+        .iter()
+        .filter(|&&(_, value, status)| value == MARKER_C && status == InputStatus::Disconnected)
+        .count();
+    assert!(
+        disconnected_marker_count > 0,
+        "session 1 must eventually simulate C's frozen marker as disconnected; got {observed_c:?}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn p2p_halt_propagated_disconnect_transitions_to_synchronizing() -> Result<(), FortressError> {
+    let ThreePlayerSessions {
+        mut sess1,
+        mut sess2,
+        mut sess3,
+        clock,
+    } = build_three_player_sessions(DisconnectBehavior::Halt)?;
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let mut stub3 = GameStub::new();
+
+    for i in 0..4_u32 {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        advance_session(&mut sess1, &mut stub1, PlayerHandle::new(0), i)?;
+        advance_session(&mut sess2, &mut stub2, PlayerHandle::new(1), i + 10)?;
+        advance_session(&mut sess3, &mut stub3, PlayerHandle::new(2), i + 20)?;
+    }
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 10);
+
+    sess2.remove_player(PlayerHandle::new(2))?;
+    let _ = drain_events(&mut sess2);
+
+    let mut detected_without_advance = false;
+    for i in 0..12_u32 {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        advance_session(&mut sess2, &mut stub2, PlayerHandle::new(1), i + 100)?;
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        let frame_before_detecting_call = sess1.current_frame();
+        sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i + 200 })?;
+        match sess1.advance_frame() {
+            Err(FortressError::NotSynchronized) => {
+                assert_eq!(
+                    sess1.current_frame(),
+                    frame_before_detecting_call,
+                    "detecting a propagated Halt drop must not advance one extra frame"
+                );
+                detected_without_advance = true;
+                break;
+            },
+            Ok(requests) => {
+                stub1.handle_requests(requests);
+            },
+            Err(err) => return Err(err),
+        }
+    }
+
+    assert!(
+        detected_without_advance,
+        "session 1 should detect the propagated Halt drop during advance_frame"
+    );
+    assert_eq!(
+        sess1.current_state(),
+        SessionState::Synchronizing,
+        "propagated Halt drop must fail closed"
+    );
+    let events = drain_events(&mut sess1);
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, FortressEvent::PeerDropped { .. })),
+        "Halt propagated drop must not emit PeerDropped; got {events:?}"
+    );
+    sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: 999 })?;
+    assert!(
+        matches!(sess1.advance_frame(), Err(FortressError::NotSynchronized)),
+        "Halt propagated drop must reject further frame advance"
     );
 
     Ok(())
@@ -583,6 +780,105 @@ fn p2p_continue_without_frozen_input_repeats_last() -> Result<(), FortressError>
         "expected at least one Disconnected status across {} observations",
         observed_dropped_inputs.len()
     );
+
+    Ok(())
+}
+
+#[test]
+fn p2p_continue_without_late_packets_after_freeze_do_not_mutate_input() -> Result<(), FortressError>
+{
+    let clock = TestClock::new();
+    let (s1, s2, a1, a2) = create_channel_pair();
+
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(a2), PlayerHandle::new(1))?
+        .start_p2p_session(s1)?;
+
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+        .add_player(PlayerType::Remote(a1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(s2)?;
+
+    synchronize_sessions_deterministic(&mut sess1, &mut sess2, &clock, &SyncConfig::default())
+        .expect("sessions should sync");
+    drain_sync_events(&mut sess1, &mut sess2);
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    const FROZEN_MARKER: u32 = 31337;
+    const LATE_PACKET_MARKER: u32 = 999_001;
+
+    for i in 0..3_u32 {
+        poll_with_advance(&mut sess1, &mut sess2, &clock, 3);
+        sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i })?;
+        sess2.add_local_input(
+            PlayerHandle::new(1),
+            StubInput {
+                inp: if i == 2 { FROZEN_MARKER } else { i + 100 },
+            },
+        )?;
+        let r1 = sess1.advance_frame()?;
+        let r2 = sess2.advance_frame()?;
+        stub1.handle_requests(r1);
+        stub2.handle_requests(r2);
+    }
+    poll_with_advance(&mut sess1, &mut sess2, &clock, 15);
+
+    sess1.remove_player(PlayerHandle::new(1))?;
+    let frame_at_drop = sess1.current_frame();
+
+    // Keep the dropped peer sending new inputs and poll sess1 so those late
+    // packets are delivered after sess1 has frozen handle 1. The frozen queue
+    // must ignore them and keep returning FROZEN_MARKER.
+    let mut observed_remote_inputs = Vec::new();
+    for i in 0..24_u32 {
+        sess2.add_local_input(
+            PlayerHandle::new(1),
+            StubInput {
+                inp: LATE_PACKET_MARKER + i,
+            },
+        )?;
+        if let Ok(requests) = sess2.advance_frame() {
+            stub2.handle_requests(requests);
+        }
+
+        poll_with_advance(&mut sess1, &mut sess2, &clock, 3);
+        sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: 50_000 + i })?;
+        let requests = sess1.advance_frame()?;
+        for request in &*requests {
+            if let FortressRequest::AdvanceFrame { inputs } = request {
+                if sess1.current_frame() > frame_at_drop {
+                    if let Some(&(input, status)) = inputs.get(1) {
+                        observed_remote_inputs.push((input.inp, status));
+                    }
+                }
+            }
+        }
+        stub1.handle_requests(requests);
+    }
+
+    assert!(
+        !observed_remote_inputs.is_empty(),
+        "expected post-freeze observations from the dropped handle"
+    );
+    assert!(
+        observed_remote_inputs
+            .iter()
+            .any(|(_, status)| *status == InputStatus::Disconnected),
+        "late packets must not prevent the frozen handle from reporting Disconnected; got {observed_remote_inputs:?}"
+    );
+    for (value, _status) in &observed_remote_inputs {
+        assert_eq!(
+            *value, FROZEN_MARKER,
+            "late packets after freeze must not replace the frozen input; got {observed_remote_inputs:?}"
+        );
+    }
 
     Ok(())
 }
