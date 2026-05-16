@@ -16,8 +16,9 @@ guard to incorrectly skip updating an older local jar — and bloats history
 with binary blobs that should never live in git.
 
 This hook is a defensive guard around `.gitignore`. It runs against the
-candidate file list `pre-commit` passes on stdin (one path per argument) and
-exits non-zero with a remediation message if any of them live under
+candidate file list `pre-commit` passes as command-line arguments (one path
+per argument) and exits non-zero with a remediation message if any of them
+live under
 `.tla-tools/`. It also performs a repository-wide sweep via
 `git ls-files .tla-tools/` so that even a hook invocation that received no
 arguments (`pre-commit run --all-files` against an empty fileset) will catch

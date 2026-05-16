@@ -23,6 +23,7 @@ INSTALL_HOOKS = REPO_ROOT / "scripts" / "install-hooks.sh"
 CARGO_HACK_WRAPPER = REPO_ROOT / "scripts" / "build" / "check-cargo-hack.py"
 RUSTFMT_WRAPPER = REPO_ROOT / "scripts" / "build" / "run-cargo-fmt.py"
 CI_DOCS_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-docs.yml"
+CI_VERSION_SYNC_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-version-sync.yml"
 
 SLOW_HOOK_IDS = {
     "cargo-clippy",
@@ -52,6 +53,48 @@ MANUAL_DOC_HOOK_IDS = {
     "check-doc-claims",
     "check-derive-bounds",
 }
+DOCS_WORKFLOW_REQUIRED_PATHS = {
+    "**.md",
+    "**.rs",
+    "Cargo.toml",
+    "Cargo.lock",
+    "docs/**",
+    "wiki/**",
+    "scripts/docs/**",
+    "scripts/tests/**",
+    "scripts/ci/check-doc-claims.sh",
+    "scripts/ci/check-derive-bounds.sh",
+    ".markdownlint.json",
+    ".markdown-link-check.json",
+    ".lychee.toml",
+    ".vale.ini",
+    ".vale/**",
+    ".github/actions/install-cargo-tool/**",
+    ".github/workflows/ci-docs.yml",
+}
+DOCS_WORKFLOW_FORBIDDEN_PATHS = {
+    "scripts/**",
+    "**.toml",
+    "**.yml",
+    "**.yaml",
+    "**.sh",
+    "**.txt",
+    "**.json",
+}
+VERSION_SYNC_REQUIRED_PATH_GLOBS = {
+    "**.rs",
+    "**.md",
+    "**.toml",
+    "**.yml",
+    "**.yaml",
+    "**.sh",
+    "**.txt",
+    "**.json",
+}
+VERSION_SYNC_REQUIRED_PATHS = {
+    "scripts/sync-version.sh",
+    ".github/workflows/ci-version-sync.yml",
+}
 
 
 @pytest.fixture()
@@ -74,6 +117,28 @@ def _hook_by_id(config: dict, hook_id: str) -> dict:
         if hook["id"] == hook_id:
             return hook
     raise AssertionError(f"Hook {hook_id!r} not found")
+
+
+def _load_yaml(path: Path) -> dict:
+    if not HAS_YAML:
+        pytest.skip("PyYAML not installed")
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert isinstance(data, dict)
+    return data
+
+
+def _workflow_paths(workflow: dict, event: str) -> set[str]:
+    on_block = workflow.get("on")
+    if on_block is None:
+        on_block = workflow.get(True)
+    assert isinstance(on_block, dict), "Workflow missing on block"
+
+    event_block = on_block.get(event)
+    assert isinstance(event_block, dict), f"Workflow missing {event!r} block"
+
+    paths = event_block.get("paths")
+    assert isinstance(paths, list), f"Workflow {event!r} block missing paths"
+    return {str(path) for path in paths}
 
 
 def test_default_hook_stage_is_fast_pre_commit(pre_commit_config: dict) -> None:
@@ -139,6 +204,8 @@ def test_rust_formatter_wrapper_is_file_scoped() -> None:
     assert '"rustfmt"' in content
     assert "skip_children=true" in content
     assert '["cargo", "fmt"]' not in content
+    assert "Run cargo fmt to auto-fix" not in content
+    assert "Failed to run cargo fmt" not in content
 
 
 @pytest.mark.parametrize("path", [DOCS_CONTRIBUTING, WIKI_CONTRIBUTING])
@@ -156,8 +223,28 @@ def test_ci_docs_enforces_manual_policy_checks() -> None:
     """Checks removed from fast hooks must still have CI coverage."""
     content = CI_DOCS_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "bash scripts/sync-version.sh --check" in content
     assert "./scripts/ci/check-doc-claims.sh" in content
     assert "./scripts/ci/check-derive-bounds.sh" in content
-    for pattern in ("**.toml", "**.yml", "**.yaml", "**.sh", "**.txt", "**.json"):
-        assert pattern in content
+    assert "bash scripts/sync-version.sh --check" not in content
+
+
+def test_ci_docs_trigger_paths_are_scoped() -> None:
+    """Docs CI must not include broad non-doc globs introduced for version sync."""
+    workflow = _load_yaml(CI_DOCS_WORKFLOW)
+
+    for event in ("push", "pull_request"):
+        paths = _workflow_paths(workflow, event)
+        assert DOCS_WORKFLOW_REQUIRED_PATHS <= paths
+        assert DOCS_WORKFLOW_FORBIDDEN_PATHS.isdisjoint(paths)
+
+
+def test_version_sync_workflow_handles_broad_version_globs() -> None:
+    """Broad extension globs belong in the dedicated version-sync workflow."""
+    content = CI_VERSION_SYNC_WORKFLOW.read_text(encoding="utf-8")
+    workflow = _load_yaml(CI_VERSION_SYNC_WORKFLOW)
+
+    assert "bash scripts/sync-version.sh --check" in content
+    for event in ("push", "pull_request"):
+        paths = _workflow_paths(workflow, event)
+        assert VERSION_SYNC_REQUIRED_PATH_GLOBS <= paths
+        assert VERSION_SYNC_REQUIRED_PATHS <= paths

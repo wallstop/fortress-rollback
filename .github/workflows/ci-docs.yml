@@ -6,40 +6,40 @@ on:
     paths:
       - "**.md"
       - "**.rs"
-      - "**.toml"
-      - "**.yml"
-      - "**.yaml"
-      - "**.sh"
-      - "**.txt"
-      - "**.json"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "docs/**"
       - "wiki/**"
-      - "scripts/**"
+      - "scripts/docs/**"
+      - "scripts/tests/**"
+      - "scripts/ci/check-doc-claims.sh"
+      - "scripts/ci/check-derive-bounds.sh"
       - ".markdownlint.json"
       - ".markdown-link-check.json"
       - ".lychee.toml"
       - ".vale.ini"
       - ".vale/**"
+      - ".github/actions/install-cargo-tool/**"
       - ".github/workflows/ci-docs.yml"
   pull_request:
     branches: [main]
     paths:
       - "**.md"
       - "**.rs"
-      - "**.toml"
-      - "**.yml"
-      - "**.yaml"
-      - "**.sh"
-      - "**.txt"
-      - "**.json"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "docs/**"
       - "wiki/**"
-      - "scripts/**"
+      - "scripts/docs/**"
+      - "scripts/tests/**"
+      - "scripts/ci/check-doc-claims.sh"
+      - "scripts/ci/check-derive-bounds.sh"
       - ".markdownlint.json"
       - ".markdown-link-check.json"
       - ".lychee.toml"
       - ".vale.ini"
       - ".vale/**"
+      - ".github/actions/install-cargo-tool/**"
       - ".github/workflows/ci-docs.yml"
   workflow_dispatch:
 
@@ -218,16 +218,6 @@ jobs:
 
       - name: Validate generated wiki format
         run: python scripts/docs/validate-wiki-output.py --wiki-dir wiki-test-output
-
-  version-sync:
-    name: Version Sync Check
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Check Cargo/changelog/version references
-        run: bash scripts/sync-version.sh --check
 
   markdown-lint:
     name: Markdown Lint

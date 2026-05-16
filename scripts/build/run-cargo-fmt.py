@@ -96,7 +96,7 @@ def stage_modified_files(files_to_stage: list[str]) -> bool:
 
 
 def main() -> int:
-    """Run cargo fmt to auto-fix and stage only files that were actually modified. Returns exit code."""
+    """Run rustfmt to auto-fix and stage only files that were actually modified. Returns exit code."""
     try:
         # Pre-commit passes the selected files. Fallback to staged files when
         # the script is run directly.
@@ -117,7 +117,7 @@ def main() -> int:
             if hashes_before.get(f) != hashes_after.get(f)
         ]
 
-        # Stage only the files that cargo fmt modified
+        # Stage only the files that rustfmt modified
         if not stage_modified_files(files_modified):
             print("\nERROR: Failed to stage formatted files.", file=sys.stderr)
             return 1
@@ -135,7 +135,7 @@ def main() -> int:
             print(f"ERROR: {cmd} not found.", file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"ERROR: Failed to run cargo fmt: {e}", file=sys.stderr)
+        print(f"ERROR: Failed to run rustfmt: {e}", file=sys.stderr)
         return 1
 
 
