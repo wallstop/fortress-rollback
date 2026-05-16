@@ -254,16 +254,19 @@ impl<T: Config> InputQueue<T> {
     ///
     /// [`advance_queue_head`]: Self::advance_queue_head
     pub fn set_frame_delay(&mut self, delay: usize) -> Result<(), FortressError> {
+        // Frozen queues represent a dropped peer under ContinueWithout. Once
+        // frozen, their simulation input must remain stable regardless of
+        // later queue mutation attempts, and `set_frame_delay` is contractually
+        // a silent no-op. This guard MUST precede any validation (including the
+        // `delay > max_frame_delay()` check) so an out-of-range delay does not
+        // surface an error on a queue whose owner is already gone.
+        if self.frozen {
+            return Ok(());
+        }
+
         let max_delay = self.max_frame_delay();
         if delay > max_delay {
             return Err(InvalidRequestKind::FrameDelayTooLarge { delay, max_delay }.into());
-        }
-
-        // Frozen queues represent a dropped peer under ContinueWithout. Once frozen,
-        // their simulation input must remain stable regardless of later queue
-        // mutation attempts.
-        if self.frozen {
-            return Ok(());
         }
 
         // No-op: nothing to do.
@@ -2217,6 +2220,28 @@ mod input_queue_tests {
         queue
             .set_frame_delay(2)
             .expect("valid frame-delay request on frozen queue should be a no-op");
+
+        assert_queue_unchanged(&queue, &before);
+    }
+
+    #[test]
+    fn test_freeze_no_op_on_set_frame_delay_with_oversized_delay() {
+        // Regression: even an out-of-range `delay` must be a silent no-op on a
+        // frozen queue. The frozen guard must precede the `FrameDelayTooLarge`
+        // validation; otherwise we surface an error for a peer that is gone.
+        let mut queue = test_queue(0);
+        for i in 0..3i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            assert_eq!(queue.add_input(input), Frame::new(i));
+        }
+
+        queue.freeze();
+        let before = queue.clone();
+        let oversized = queue.max_frame_delay() + 1;
+
+        queue
+            .set_frame_delay(oversized)
+            .expect("oversized frame-delay on a frozen queue must be a silent no-op, not an error");
 
         assert_queue_unchanged(&queue, &before);
     }

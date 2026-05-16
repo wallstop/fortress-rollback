@@ -57,6 +57,13 @@ repos:
         language: python
         types: [text]
 
+      - id: check-no-tla-tools-cache
+        name: reject commits under .tla-tools/ (runtime cache)
+        entry: python scripts/hooks/check-no-tla-tools-cache.py
+        language: python
+        pass_filenames: true
+        always_run: true
+
       - id: mixed-line-ending
         name: fix line endings (LF)
         entry: python scripts/hooks/mixed-line-ending.py

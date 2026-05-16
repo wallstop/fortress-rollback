@@ -150,6 +150,8 @@ Pre-commit validates registration only, NOT that proofs pass. Run affected proof
 
 The repository-pinned TLA+ tools version lives in `.tla-tools-version`. `scripts/verification/verify-tla.sh`, the devcontainer image/setup hook, and CI cache keys must read that file instead of hardcoding release URLs or duplicate version values.
 
+The `.tla-tools/` directory is a **runtime cache** (`tla2tools.jar` plus a generated `.version` sentinel) populated by those scripts. It is `.gitignore`d and must never be committed — the `check-no-tla-tools-cache` pre-commit hook (`scripts/hooks/check-no-tla-tools-cache.py`) enforces this. Committing the sentinel desynchronizes it from the actual cached jar and silently disables the staleness guard.
+
 ## Safety CI Checks
 
 | Check                | Purpose                                      |

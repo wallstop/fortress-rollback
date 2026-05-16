@@ -2039,6 +2039,34 @@ impl<T: Config> P2PSession<T> {
         Ok(())
     }
 
+    /// Force the session into a non-advancing state after an internal error
+    /// prevented a disconnect observation from being applied.
+    ///
+    /// When the network layer reports a remote peer drop (either via a direct
+    /// `Event::Disconnected` from the endpoint or via cross-peer propagation in
+    /// [`Self::update_player_disconnects`]) and the bookkeeping needed to apply
+    /// it fails partway, leaving the session in `SessionState::Running` would
+    /// allow `advance_frame()` to continue producing inputs as if every peer
+    /// were still healthy. That is the worst possible outcome: the simulation
+    /// silently desyncs without surfacing the disconnect to the caller.
+    ///
+    /// Fail-closed semantics: we transition to `SessionState::Synchronizing`,
+    /// which causes subsequent `advance_frame()` calls to return
+    /// `NotSynchronized` until the caller takes action. The transition is
+    /// idempotent and never re-enters `Running` automatically — only
+    /// `check_initial_sync` can do that, and only after every remote endpoint
+    /// has reported a fresh synchronization.
+    ///
+    /// Callers are responsible for emitting their own `report_violation!` with
+    /// the contextual details that triggered the fail-closed; this helper only
+    /// mutates state so it can be called from any error branch without forcing
+    /// each call site to construct a synthetic `FortressError`.
+    fn enter_fail_closed_disconnect_state(&mut self) {
+        if self.state != SessionState::Synchronizing {
+            self.state = SessionState::Synchronizing;
+        }
+    }
+
     fn disconnect_player_with_policy(
         &mut self,
         player_handle: PlayerHandle,
@@ -2463,12 +2491,18 @@ impl<T: Config> P2PSession<T> {
 
         for (addr, overrides) in &propagated_by_addr {
             let Some(&representative) = representative_by_addr.get(addr) else {
+                // The two maps are populated together earlier in this function,
+                // so reaching this branch indicates an internal invariant
+                // violation — the safe response is the same as any other
+                // "disconnect observation we could not apply": fail closed
+                // rather than silently dropping the disconnect.
                 report_violation!(
-                    ViolationSeverity::Warning,
+                    ViolationSeverity::Error,
                     ViolationKind::InternalError,
                     "Missing representative handle for propagated disconnect at {:?}",
                     addr
                 );
+                self.enter_fail_closed_disconnect_state();
                 continue;
             };
             let event_policy = if newly_disconnected_by_addr
@@ -2494,6 +2528,11 @@ impl<T: Config> P2PSession<T> {
                     addr,
                     e
                 );
+                // Fail closed: disconnect knowledge has been observed but could
+                // not be fully applied. Returning to Synchronizing prevents
+                // subsequent `advance_frame()` calls from continuing the
+                // simulation as if every peer were still healthy.
+                self.enter_fail_closed_disconnect_state();
             }
         }
     }
@@ -2710,6 +2749,11 @@ impl<T: Config> P2PSession<T> {
                                 self.event_queue
                                     .push_back(FortressEvent::Disconnected { addr });
                             }
+                            // Fail closed: a remote endpoint reported a
+                            // disconnect that we could not fully apply.
+                            // Leaving the session Running would let the
+                            // simulation advance with stale connection state.
+                            self.enter_fail_closed_disconnect_state();
                         }
                     },
                     Some(PlayerType::Spectator(_)) => {
@@ -2730,6 +2774,10 @@ impl<T: Config> P2PSession<T> {
                             self.event_queue
                                 .push_back(FortressEvent::Disconnected { addr });
                         }
+                        // Registry state is reported as potentially corrupt;
+                        // fail closed rather than continue advancing on a
+                        // disconnect observation we could not apply.
+                        self.enter_fail_closed_disconnect_state();
                     },
                 }
             },
@@ -4293,5 +4341,62 @@ mod tests {
         }
         // Replay should pass validation since frame alignment is maintained.
         replay.validate().unwrap();
+    }
+
+    // ==========================================
+    // Fail-closed disconnect helper tests
+    // ==========================================
+    //
+    // These regression tests pin the contract that
+    // `enter_fail_closed_disconnect_state` provides to the two call sites in
+    // `update_player_disconnects` and `handle_event(Event::Disconnected)`:
+    // when applying a disconnect observation fails partway, the session must
+    // transition out of `Running` so subsequent `advance_frame()` calls fail
+    // with `NotSynchronized` rather than silently desyncing.
+
+    #[test]
+    fn enter_fail_closed_transitions_running_to_synchronizing() {
+        let mut session = create_two_player_session();
+        // Force Running so we can observe the transition; in a real run this
+        // would have happened via `check_initial_sync`.
+        session.state = SessionState::Running;
+
+        session.enter_fail_closed_disconnect_state();
+
+        assert_eq!(
+            session.current_state(),
+            SessionState::Synchronizing,
+            "fail-closed must move Running -> Synchronizing",
+        );
+    }
+
+    #[test]
+    fn enter_fail_closed_is_idempotent_when_already_synchronizing() {
+        let mut session = create_two_player_session();
+        // Default for a session with remotes is already Synchronizing.
+        assert_eq!(session.current_state(), SessionState::Synchronizing);
+
+        // Repeated calls must be a no-op; we should never accidentally re-enter
+        // any "transition" side effects (the helper only mutates `state`).
+        session.enter_fail_closed_disconnect_state();
+        session.enter_fail_closed_disconnect_state();
+
+        assert_eq!(session.current_state(), SessionState::Synchronizing);
+    }
+
+    #[test]
+    fn fail_closed_blocks_advance_frame() {
+        // Contract: after a fail-closed transition, `advance_frame()` must
+        // refuse to run regardless of what else the session might think.
+        let mut session = create_two_player_session();
+        session.state = SessionState::Running;
+
+        session.enter_fail_closed_disconnect_state();
+
+        let result = session.advance_frame();
+        assert!(
+            matches!(result, Err(FortressError::NotSynchronized)),
+            "expected NotSynchronized after fail-closed",
+        );
     }
 }

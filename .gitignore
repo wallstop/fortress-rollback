@@ -47,6 +47,14 @@ states/**
 *.z3-trace
 states.dot
 
+# TLA+ tools cache: `tla2tools.jar` is a multi-megabyte binary fetched at runtime
+# by `scripts/verification/verify-tla.sh` and `.devcontainer/setup-tla-tools.sh`;
+# `.version` is a generated sentinel tracking which jar revision is cached. The
+# pinned upstream version lives in the tracked `.tla-tools-version` file at the
+# repo root — that is the single source of truth. Committing anything under
+# `.tla-tools/` causes drift between the sentinel and the actual cached jar.
+.tla-tools/
+
 loom-tests/target/**
 mutants.out/**
 progress/**
