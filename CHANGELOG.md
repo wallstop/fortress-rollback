@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-05-16
+
 ### Added
 
 - `P2PSession::set_input_delay()` and `P2PSession::input_delay()` for runtime input-delay adjustment, enabling hybrid delay+rollback in response to changing network conditions. Mid-session **increases** are supported on peers with a single local player: the input queue replicates the most recently added input across the new gap, and the same replicated frames are pushed onto every remote endpoint's pending-output buffer so the remote peer's input sequence remains strictly monotonic. Mid-session **decreases** return an `InputDelayDecreaseUnsupported` error and leave the queue unchanged; mid-session increases on peers with multiple local players return `InputDelayMidSessionMultiLocalUnsupported`. If mid-session increase gap-fill fails an internal queue invariant, the input queue restores its prior state and delay before returning `InputQueueGapFillFailed`. The mid-session gap-fill mirror step now surfaces `InternalErrorStructured(ConnectionStatusIndexOutOfBounds { player_handle })` if the matching `local_connect_status` entry is missing rather than silently skipping the update; if this error is returned through the public API, it indicates an internal-invariant violation and should be treated as a library bug. On a **frozen** input queue (a dropped peer under `ContinueWithout`), `set_input_delay` is unconditionally a silent no-op — including when the requested delay would exceed `max_frame_delay()`, which no longer leaks a `FrameDelayTooLarge` error for an already-gone peer.
@@ -472,7 +474,8 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/wallstop/fortress-rollback/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/wallstop/fortress-rollback/compare/v0.5.0...v0.6.0

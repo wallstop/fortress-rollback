@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "fortress-rollback"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "bincode",
  "clap",
