@@ -428,8 +428,9 @@ impl<T: Config> SpectatorSession<T> {
             );
 
             // Respect the stream-delay boundary: never advance past the viewable
-            // frame. This is a clean stop, NOT an error — more frames will become
-            // viewable as the host sends newer inputs.
+            // frame. If no earlier frame was gathered in this batch, the post-loop
+            // guard reports PredictionThreshold so callers know playback is waiting
+            // for newer host inputs to move the delayed boundary forward.
             if frame_to_grab > viewable {
                 break;
             }
@@ -649,19 +650,48 @@ impl<T: Config> SpectatorSession<T> {
         // used during event handling above (before removal), so removing entries now
         // is safe. The shared `host_connect_status` is not per-host, so removal does
         // not disturb it.
-        if !disconnected_hosts.is_empty() {
-            let mut index = 0;
-            self.hosts.retain(|_| {
-                let keep = !disconnected_hosts.contains(&index);
-                index += 1;
-                keep
-            });
-        }
+        self.remove_disconnected_hosts(disconnected_hosts);
 
         // send out all pending UDP messages
         for host in &mut self.hosts {
             host.send_all_messages(&mut self.socket);
         }
+    }
+
+    fn remove_disconnected_hosts(&mut self, disconnected_hosts: Vec<usize>) {
+        if disconnected_hosts.is_empty() {
+            return;
+        }
+
+        let mut remove_host = vec![false; self.hosts.len()];
+        for host_index in disconnected_hosts {
+            if let Some(should_remove) = remove_host.get_mut(host_index) {
+                *should_remove = true;
+            } else {
+                report_violation_to!(
+                    &self.violation_observer,
+                    ViolationSeverity::Error,
+                    ViolationKind::InternalError,
+                    "spectator: disconnected host index {} out of bounds (hosts.len()={})",
+                    host_index,
+                    self.hosts.len()
+                );
+            }
+        }
+
+        self.hosts = std::mem::take(&mut self.hosts)
+            .into_iter()
+            .zip(remove_host)
+            .filter_map(
+                |(host, should_remove)| {
+                    if should_remove {
+                        None
+                    } else {
+                        Some(host)
+                    }
+                },
+            )
+            .collect();
     }
 
     /// Returns the current frame of a session.
@@ -1872,6 +1902,31 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn spectator_stream_delay_boundary_returns_prediction_threshold() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_spectator_config(crate::SpectatorConfig {
+                stream_delay: 2,
+                ..crate::SpectatorConfig::default()
+            })
+            .start_spectator_session(test_addr(7060), DummySocket)
+            .unwrap();
+        session.state = SessionState::Running;
+        session.current_frame = Frame::new(3);
+        session.last_recv_frame = Frame::new(5);
+        let blocked_frame = Frame::new(4);
+        let buffer_index = blocked_frame.buffer_index(session.buffer_size).unwrap();
+        session.inputs[buffer_index][0] = PlayerInput::new(blocked_frame, 40);
+        session.inputs[buffer_index][1] = PlayerInput::new(blocked_frame, 41);
+
+        let result = session.advance_frame();
+
+        assert!(matches!(result, Err(FortressError::PredictionThreshold)));
+        assert_eq!(session.current_frame(), Frame::new(3));
+    }
+
     // ==========================================
     // Failover / Multi-host Tests
     // ==========================================
@@ -1893,6 +1948,61 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session.num_hosts(), 3);
+    }
+
+    #[test]
+    fn spectator_remove_disconnected_hosts_uses_original_indices() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(
+                &[
+                    test_addr(7110),
+                    test_addr(7111),
+                    test_addr(7112),
+                    test_addr(7113),
+                ],
+                DummySocket,
+            )
+            .unwrap();
+
+        session.remove_disconnected_hosts(vec![2, 0, 2]);
+
+        let remaining_ports: Vec<_> = session
+            .hosts
+            .iter()
+            .map(|host| host.peer_addr().port())
+            .collect();
+        assert_eq!(remaining_ports, vec![7111, 7113]);
+    }
+
+    #[test]
+    fn spectator_remove_disconnected_hosts_ignores_invalid_indices() {
+        use crate::telemetry::CollectingObserver;
+
+        let observer = Arc::new(CollectingObserver::new());
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_violation_observer(observer.clone())
+            .start_spectator_session_multi(
+                &[test_addr(7120), test_addr(7121), test_addr(7122)],
+                DummySocket,
+            )
+            .unwrap();
+
+        session.remove_disconnected_hosts(vec![usize::MAX, 1]);
+
+        let remaining_ports: Vec<_> = session
+            .hosts
+            .iter()
+            .map(|host| host.peer_addr().port())
+            .collect();
+        assert_eq!(remaining_ports, vec![7120, 7122]);
+        assert!(observer
+            .violations()
+            .iter()
+            .any(|violation| violation.kind == ViolationKind::InternalError));
     }
 
     #[test]
