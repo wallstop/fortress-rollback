@@ -141,7 +141,9 @@ impl TimeSync {
     pub fn with_config(config: TimeSyncConfig) -> Self {
         let window_size = config.window_size.max(1); // Ensure at least 1
         Self {
+            // alloc-bound: window_size is the trusted local TimeSyncConfig field set at construction, not wire data (no numeric cap is enforced)
             local: vec![0; window_size],
+            // alloc-bound: window_size is the trusted local TimeSyncConfig field set at construction, not wire data (no numeric cap is enforced)
             remote: vec![0; window_size],
             window_size,
         }

@@ -242,6 +242,19 @@ pub enum RleDecodeReason {
         /// The buffer length.
         buffer_len: usize,
     },
+    /// The declared decoded length exceeded the safety bound.
+    ///
+    /// The RLE format encodes run lengths as varints that are not backed by
+    /// buffer bytes, so malformed (e.g. malicious) input can claim an enormous
+    /// decoded length. To avoid an unbounded allocation that would abort the
+    /// process, decoding rejects any input whose decoded length would exceed
+    /// the internal maximum.
+    DecodedLengthExceedsMaximum {
+        /// The decoded length the input declared (saturated at `usize::MAX`).
+        decoded_len: usize,
+        /// The maximum decoded length permitted.
+        max: usize,
+    },
     /// An unknown or unexpected error occurred during RLE decoding.
     ///
     /// This variant is used as a fallback when the underlying error cannot be
@@ -268,6 +281,9 @@ impl Display for RleDecodeReason {
                     "truncated data: offset {} exceeds buffer length {}",
                     offset, buffer_len
                 )
+            },
+            Self::DecodedLengthExceedsMaximum { decoded_len, max } => {
+                write!(f, "decoded length {} exceeds maximum {}", decoded_len, max)
             },
             Self::Unknown => {
                 write!(f, "unknown RLE decode error")
@@ -1677,6 +1693,19 @@ mod tests {
         assert!(display.contains("truncated data"));
         assert!(display.contains("100"));
         assert!(display.contains("50"));
+    }
+
+    #[test]
+    fn test_rle_decode_reason_decoded_length_exceeds_maximum() {
+        let reason = RleDecodeReason::DecodedLengthExceedsMaximum {
+            decoded_len: 100_000,
+            max: 64,
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("decoded length"));
+        assert!(display.contains("exceeds maximum"));
+        assert!(display.contains("100000"));
+        assert!(display.contains("64"));
     }
 
     #[test]

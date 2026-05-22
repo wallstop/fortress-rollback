@@ -230,6 +230,7 @@ impl<T: Config> UdpProtocol<T> {
         let handles: Arc<[PlayerHandle]> = handles.into();
 
         // peer connection status
+        // alloc-bound: num_players is the session player count fixed at construction
         let peer_connect_status = vec![ConnectionStatus::default(); num_players];
 
         // received input history - may fail if serialization is broken

@@ -89,6 +89,7 @@ pub fn delta_encode<'a>(
 ) -> Vec<u8> {
     let (lower, upper) = pending_input.size_hint();
     let capacity = upper.unwrap_or(lower) * ref_bytes.len();
+    // alloc-bound: capacity is (in-memory pending_input count) * ref_bytes.len(); pending_input is a local collection, not wire data
     let mut bytes = Vec::with_capacity(capacity);
 
     for input in pending_input {
@@ -189,6 +190,7 @@ pub fn delta_decode(ref_bytes: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, Compr
     }
 
     let out_size = data.len() / ref_bytes.len();
+    // alloc-bound: out_size = data.len() / ref_bytes.len() <= data.len(); `data` is a caller-provided in-memory slice (delta_decode is publicly re-exported), so the bound holds regardless of caller
     let mut output = Vec::with_capacity(out_size);
 
     for output_index in 0..out_size {
@@ -573,6 +575,10 @@ mod compression_tests {
                 offset: 5,
                 buffer_len: 3,
             },
+            RleDecodeReason::DecodedLengthExceedsMaximum {
+                decoded_len: 999,
+                max: 64,
+            },
             RleDecodeReason::Unknown,
         ];
 
@@ -582,6 +588,44 @@ mod compression_tests {
             };
             let result = map_rle_error(error);
             assert_eq!(result, CompressionError::RleDecode { reason });
+        }
+    }
+
+    /// Verifies that `decode()` rejects an RLE decompression bomb (a tiny
+    /// packet claiming a huge decoded length) rather than attempting an
+    /// unbounded allocation that would abort the process.
+    #[test]
+    fn decode_rle_bomb_through_compression_returns_rle_error() {
+        // Arrange: a single contiguous-run header claiming a length far above
+        // the cap. Reuse the public rle internals to build the varint.
+        let bomb_len = (crate::rle::MAX_DECODED_LEN as u64) + 1;
+        let header = (bomb_len << 2) | 1; // repeat=1, bit=0 (zero fill)
+        let bomb = {
+            // LEB128-encode the header inline (varint module is private to rle).
+            let mut buf = Vec::new();
+            let mut value = header;
+            while value >= 0x80 {
+                buf.push((value as u8) | 0x80);
+                value >>= 7;
+            }
+            buf.push(value as u8);
+            buf
+        };
+        let reference = &[0x01, 0x02, 0x03, 0x04];
+
+        // Act
+        let result = decode(reference, &bomb);
+
+        // Assert: surfaced as the structured RLE bound error.
+        match result {
+            Err(CompressionError::RleDecode { reason }) => {
+                assert!(
+                    matches!(reason, RleDecodeReason::DecodedLengthExceedsMaximum { .. }),
+                    "expected DecodedLengthExceedsMaximum, got: {:?}",
+                    reason
+                );
+            },
+            other => panic!("expected RleDecode error, got: {:?}", other),
         }
     }
 

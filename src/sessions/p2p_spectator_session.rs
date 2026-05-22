@@ -91,6 +91,7 @@ impl<T: Config> SpectatorSession<T> {
         event_queue_size: usize,
     ) -> Self {
         // host connection status
+        // alloc-bound: num_players is the session player count fixed at construction
         let host_connect_status = vec![ConnectionStatus::default(); num_players];
 
         // Use at least 1 for buffer size to prevent panics
@@ -109,7 +110,9 @@ impl<T: Config> SpectatorSession<T> {
             state: SessionState::Synchronizing,
             num_players,
             buffer_size: actual_buffer_size,
+            // alloc-bound: outer length is actual_buffer_size (the clamped spectator buffer size, validated <= SPECTATOR_MAX_BUFFER_SIZE)
             inputs: vec![
+                // alloc-bound: inner length is num_players (session player count fixed at construction)
                 vec![PlayerInput::blank_input(Frame::NULL); num_players];
                 actual_buffer_size
             ],
@@ -375,6 +378,30 @@ impl<T: Config> SpectatorSession<T> {
         self.violation_observer.as_ref()
     }
 
+    /// Computes the request-batch preallocation capacity for [`advance_frame`].
+    ///
+    /// `frames_to_advance` is clamped to `buffer_size` because the advance loop
+    /// breaks once `frame_to_grab` passes the viewable boundary, and the number
+    /// of buffered-but-unsimulated frames can never exceed `buffer_size`. This
+    /// keeps the allocation bounded even when an unvalidated `catchup_speed`
+    /// (e.g. from a directly constructed [`SpectatorConfig`]) is pathologically
+    /// large. When rewind is enabled each advanced frame also emits a
+    /// `SaveGameState`, so the batch can hold up to twice as many requests.
+    ///
+    /// [`advance_frame`]: Self::advance_frame
+    fn advance_capacity(
+        frames_to_advance: usize,
+        buffer_size: usize,
+        enable_rewind: bool,
+    ) -> usize {
+        let bounded = frames_to_advance.min(buffer_size);
+        if enable_rewind {
+            bounded.saturating_mul(2)
+        } else {
+            bounded
+        }
+    }
+
     /// You should call this to notify Fortress Rollback that you are ready to advance your gamestate by a single frame.
     /// Returns an order-sensitive [`RequestVec`]. You should fulfill all requests in the exact order they are provided.
     /// Failure to do so will result in incorrect game state, potential desync, or errors returned from subsequent API calls.
@@ -416,11 +443,9 @@ impl<T: Config> SpectatorSession<T> {
         // which may exceed the inline capacity of 4, so we keep with_capacity here.
         // With rewind enabled each advanced frame also emits a SaveGameState, so the
         // batch can hold up to twice as many requests.
-        let capacity = if self.enable_rewind {
-            frames_to_advance.saturating_mul(2)
-        } else {
-            frames_to_advance
-        };
+        let capacity =
+            Self::advance_capacity(frames_to_advance, self.buffer_size, self.enable_rewind);
+        // alloc-bound: advance_capacity clamps frames_to_advance to buffer_size before doubling, so capacity <= buffer_size * 2
         let mut requests = RequestVec::<T>::with_capacity(capacity);
 
         for _ in 0..frames_to_advance {
@@ -1116,6 +1141,50 @@ mod tests {
     fn spectator_session_creates_successfully() {
         let session = create_test_spectator_session();
         assert!(session.is_some());
+    }
+
+    #[test]
+    fn advance_capacity_clamps_pathological_frames_to_advance() {
+        // A pathological catchup_speed (usize::MAX) must not blow up the
+        // preallocation: the result is clamped to buffer_size, then doubled
+        // for rewind.
+        let capacity = SpectatorSession::<TestConfig>::advance_capacity(usize::MAX, 60, true);
+        assert_eq!(capacity, 120);
+
+        let capacity_no_rewind =
+            SpectatorSession::<TestConfig>::advance_capacity(usize::MAX, 60, false);
+        assert_eq!(capacity_no_rewind, 60);
+    }
+
+    #[test]
+    fn advance_capacity_normal_cases_return_expected_small_values() {
+        // Normal operation: frames_to_advance == 1.
+        assert_eq!(
+            SpectatorSession::<TestConfig>::advance_capacity(1, 60, false),
+            1
+        );
+        assert_eq!(
+            SpectatorSession::<TestConfig>::advance_capacity(1, 60, true),
+            2
+        );
+        // Catchup below the buffer bound passes through (doubled with rewind).
+        assert_eq!(
+            SpectatorSession::<TestConfig>::advance_capacity(4, 60, false),
+            4
+        );
+        assert_eq!(
+            SpectatorSession::<TestConfig>::advance_capacity(4, 60, true),
+            8
+        );
+    }
+
+    #[test]
+    fn advance_capacity_does_not_overflow_with_huge_buffer_size() {
+        // Even when buffer_size itself is huge, the *2 rewind doubling uses
+        // saturating arithmetic and must not panic.
+        let capacity =
+            SpectatorSession::<TestConfig>::advance_capacity(usize::MAX, usize::MAX, true);
+        assert_eq!(capacity, usize::MAX);
     }
 
     #[test]

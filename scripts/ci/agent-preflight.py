@@ -273,6 +273,28 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
         )
 
     if run_all or rust_source_files:
+        unbounded_alloc_command = [
+            PYTHON_EXECUTABLE,
+            "scripts/hooks/check-unbounded-alloc.py",
+        ]
+        unbounded_alloc_command.extend(rust_source_files)
+        checks.append(
+            PlannedCheck(
+                check_id="unbounded-alloc",
+                description=(
+                    "require an '// alloc-bound:' justification on "
+                    "dynamically-sized allocations in src/ "
+                    "(see .llm/skills/rust-language/defensive-programming.md)"
+                ),
+                command=unbounded_alloc_command,
+                fix_hint=(
+                    "Add an '// alloc-bound: <why>' comment (same line or the "
+                    "line above) stating why the size is bounded, or bound the "
+                    "size if it is genuinely unbounded (e.g. a length read from "
+                    "the wire or an unvalidated config field)."
+                ),
+            )
+        )
         checks.append(
             PlannedCheck(
                 check_id="kani-violation-cost",

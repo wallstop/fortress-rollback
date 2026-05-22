@@ -23,9 +23,7 @@ typos                                     # Spell check (CI enforced)
 cargo test --features z3-verification -- --nocapture  # Z3 proofs (slow)
 ```
 
-Always use `--no-capture` (nextest) or `-- --nocapture` (cargo test) so test output is visible on failure.
-
-**Test output rule:** NEVER pipe test output through `tail`/`head`. Redirect to a temp file instead:
+**Test output rule:** Always use `--no-capture` (nextest) / `-- --nocapture` (cargo test) so output is visible on failure, and NEVER pipe test output through `tail`/`head` -- redirect to a temp file instead:
 
 ```bash
 cargo nextest run --no-capture > /tmp/test-results.txt 2>&1  # Then read the file
@@ -56,6 +54,7 @@ Rules: always `bat --paging=never` (bare `bat` blocks); never redirect to `/dev/
 - **Public items documented** -- Rustdoc with examples
 - **Overflow checks in release** -- Integer overflow caught at runtime
 - **Deterministic behavior** -- Same inputs must always produce same outputs
+- **Bounded allocation** -- Never trust a length from the wire; validate config at the boundary. Dynamically-sized allocs in `src/` need an `// alloc-bound:` justification (enforced by `check-unbounded-alloc`); see [defensive-programming.md](skills/rust-language/defensive-programming.md#bounded-allocation)
 
 ```rust
 // FORBIDDEN in production:  value.unwrap(), .expect(), array[i], panic!(), todo!()

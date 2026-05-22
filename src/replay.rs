@@ -397,6 +397,7 @@ impl<I> ReplayRecorder<I> {
     where
         I: Default + Clone,
     {
+        // alloc-bound: self.num_players is the recording's player count fixed at construction
         self.frames.push(vec![I::default(); self.num_players]);
         self.checksums.push(None);
         self.skipped_frames = self.skipped_frames.saturating_add(1);

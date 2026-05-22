@@ -531,6 +531,25 @@ match internal_kind {
 
 If you currently use `_ =>` wildcard arms, no changes are required — but consider replacing the wildcard with explicit arms so future additions are caught at compile time.
 
+#### `RleDecodeReason` — new variant
+
+`RleDecodeReason` (reported via `FortressError::InternalErrorStructured` / `CompressionError::RleDecode`) gains a `DecodedLengthExceedsMaximum` variant. It is returned when received-input decompression rejects a malformed packet that declares a decoded length above the internal 64 MiB safety bound, instead of attempting an unbounded allocation. Exhaustive matches must add an arm:
+
+```rust
+// After
+match reason {
+    // ... existing variants ...
+    RleDecodeReason::DecodedLengthExceedsMaximum { decoded_len, max } => {
+        // A peer sent a decompression bomb: the declared decoded length
+        // exceeds the safety bound. The packet was dropped; no allocation
+        // was attempted. Usually indicates corruption or a malicious peer.
+        eprintln!("rejected oversized decode: {decoded_len} > {max}");
+    },
+}
+```
+
+If you currently use `_ =>` wildcard arms, no changes are required — but explicit arms catch future additions at compile time.
+
 ### Before / After: dynamically adjusting input delay
 
 Previously, the only way to change a session's input delay was at construction time, by branching on measured network conditions and choosing a value before calling `start_p2p_session`. Mid-match adjustments required tearing down and rebuilding the session.

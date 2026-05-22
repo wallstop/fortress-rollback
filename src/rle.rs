@@ -40,6 +40,25 @@ use crate::{FortressError, InternalErrorKind, RleDecodeReason};
 /// Result type for RLE operations.
 pub type RleResult<T> = Result<T, FortressError>;
 
+/// Hard upper bound on the decoded length accepted by [`decode`].
+///
+/// RLE input arrives from untrusted peers over the network (see
+/// `UdpProtocol::on_input` in `network/protocol/mod.rs`). A contiguous-run
+/// header encodes its length as a varint that is *not* backed by buffer bytes,
+/// so a tiny malicious packet can claim a decoded length up to ~2^62. Without a
+/// cap, [`decode`] would call `vec![0u8; decoded_len]`, and because the default
+/// allocator aborts the process on allocation failure, that is an uncatchable
+/// DoS (cf. RUSTSEC-2022-0035).
+///
+/// 64 MiB is enormously generous relative to any legitimate decode: a single
+/// input packet carries at most `pending_output_limit` inputs (validated to
+/// `<= 4096`, see `ProtocolConfig::validate`), each a small serialized
+/// `Config::Input` (the protocol estimates ~8 bytes/player and ideal UDP
+/// packets are `<= 508` bytes). Even pathological-but-valid traffic decodes to
+/// far less than a megabyte, so this bound never rejects honest input while it
+/// bounds the worst-case allocation a malformed packet can drive.
+pub const MAX_DECODED_LEN: usize = 64 * 1024 * 1024;
+
 /// Varint encoding/decoding utilities.
 ///
 /// Uses LEB128 (Little Endian Base 128) variable-length encoding.
@@ -81,6 +100,7 @@ mod varint {
     #[inline]
     #[allow(dead_code)]
     pub fn encode_to_vec(value: u64) -> Vec<u8> {
+        // alloc-bound: encoded_len(value) is at most 10 (max LEB128 bytes for a u64)
         let mut buf = vec![0u8; encoded_len(value)];
         encode(value, &mut buf);
         buf
@@ -146,6 +166,7 @@ pub fn encode(buf: impl AsRef<[u8]>) -> Vec<u8> {
 
 /// Encode a bitfield starting at a specific offset.
 fn encode_with_offset(buf: &[u8], offset: usize) -> Vec<u8> {
+    // alloc-bound: encode_len_with_offset returns the exact encoded size of the in-memory `buf` (bounded by buf.len())
     let mut enc = Vec::with_capacity(encode_len_with_offset(buf, offset));
     let mut contiguous_len: u64 = 0;
     let mut contiguous = false;
@@ -309,6 +330,7 @@ pub fn decode(buf: impl AsRef<[u8]>) -> RleResult<Vec<u8>> {
 /// Decode an RLE-encoded bitfield starting at a specific offset.
 fn decode_with_offset(buf: &[u8], mut offset: usize) -> RleResult<Vec<u8>> {
     let decoded_len = decode_len_with_offset(buf, offset)?;
+    // alloc-bound: decode_len_with_offset caps decoded_len at MAX_DECODED_LEN (64 MiB) and errors on overflow
     let mut bitfield = vec![0u8; decoded_len];
     let mut ptr = 0;
 
@@ -373,6 +395,11 @@ fn decode_with_offset(buf: &[u8], mut offset: usize) -> RleResult<Vec<u8>> {
 }
 
 /// Returns the decoded length for an RLE-encoded bitfield.
+///
+/// Returns [`RleDecodeReason::DecodedLengthExceedsMaximum`] as soon as the
+/// running decoded length would exceed [`MAX_DECODED_LEN`] (or overflow
+/// `usize`), without finishing the sum. This bounds the allocation in
+/// [`decode_with_offset`] for malformed input claiming a huge length.
 fn decode_len_with_offset(buf: &[u8], mut offset: usize) -> RleResult<usize> {
     let mut len: usize = 0;
 
@@ -387,9 +414,37 @@ fn decode_len_with_offset(buf: &[u8], mut offset: usize) -> RleResult<usize> {
             (next >> 1) as usize
         };
 
-        len += slice;
+        // Accumulate with checked arithmetic and a hard cap. A contiguous-run
+        // `slice` comes straight from an untrusted varint, so an unchecked
+        // `+=` would both risk a usize overflow (panic under overflow-checks)
+        // and let a tiny packet drive an enormous `vec![0u8; len]` allocation.
+        len = len
+            .checked_add(slice)
+            .filter(|&l| l <= MAX_DECODED_LEN)
+            .ok_or(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError {
+                    reason: RleDecodeReason::DecodedLengthExceedsMaximum {
+                        decoded_len: len.saturating_add(slice),
+                        max: MAX_DECODED_LEN,
+                    },
+                },
+            })?;
         if repeat == 0 {
-            offset += slice;
+            // Guards 32-bit targets: `slice` is at most MAX_DECODED_LEN (the
+            // `len` check above bounds it), so on 64-bit this never overflows
+            // and is effectively unreachable. Keep `checked_add` for 32-bit
+            // `usize` safety, and report the buffer-position overflow as the
+            // semantically-correct truncation rather than a decoded-length cap.
+            offset = offset
+                .checked_add(slice)
+                .ok_or(FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::RleDecodeError {
+                        reason: RleDecodeReason::TruncatedData {
+                            offset: offset.saturating_add(slice),
+                            buffer_len: buf.len(),
+                        },
+                    },
+                })?;
         }
     }
 
@@ -839,6 +894,99 @@ mod tests {
         let invalid = vec![100u8]; // Claims 50 bytes (100 >> 1 = 50), but none available
         let result = decode_len_with_offset(&invalid, 0);
         assert!(result.is_err(), "Should error on truncated data");
+    }
+
+    // ======================================
+    // Decompression-bomb / allocation bounds
+    // ======================================
+
+    /// Asserts the given error is the `DecodedLengthExceedsMaximum` RLE reason.
+    #[track_caller]
+    fn assert_decoded_length_exceeds_maximum(result: RleResult<Vec<u8>>) {
+        match result {
+            Err(FortressError::InternalErrorStructured {
+                kind:
+                    InternalErrorKind::RleDecodeError {
+                        reason: RleDecodeReason::DecodedLengthExceedsMaximum { max, .. },
+                    },
+            }) => {
+                assert_eq!(max, MAX_DECODED_LEN, "reported max should be the cap");
+            },
+            other => panic!("expected DecodedLengthExceedsMaximum, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_tiny_input_claiming_huge_contiguous_run_returns_error() {
+        // Arrange: a single contiguous-run header that claims a length far
+        // larger than the cap. Format: varint(length << 2 | bit << 1 | 1).
+        // The length is NOT backed by buffer bytes, so this tiny packet would
+        // drive an enormous `vec![0u8; len]` without the cap.
+        let bomb_len = (MAX_DECODED_LEN as u64) + 1;
+        let header = (bomb_len << 2) | 1; // repeat=1, bit=0 (zero fill)
+        let bomb = varint::encode_to_vec(header);
+
+        // Act
+        let result = decode(&bomb);
+
+        // Assert: rejected with the structured error rather than OOM/abort.
+        assert_decoded_length_exceeds_maximum(result);
+    }
+
+    #[test]
+    fn decode_len_accumulation_overflow_returns_error() {
+        // Arrange: two maximal contiguous-run headers. Each claims a length of
+        // u64::MAX >> 2; summed (and even individually) they exceed the cap, and
+        // the accumulation would overflow usize without checked arithmetic.
+        let huge = (u64::MAX << 2) | 1; // repeat=1, length = u64::MAX >> 2
+        let mut data = varint::encode_to_vec(huge);
+        data.extend(varint::encode_to_vec(huge));
+
+        // Act
+        let result = decode(&data);
+
+        // Assert: errors instead of panicking on overflow.
+        assert_decoded_length_exceeds_maximum(result);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // 300K-element loop + roundtrip is too heavy under Miri
+    fn decode_large_but_valid_buffer_roundtrips_under_cap() {
+        // Arrange: a few hundred KB of mixed data well under MAX_DECODED_LEN.
+        let mut data = Vec::with_capacity(300 * 1024);
+        for i in 0..(300 * 1024) {
+            // Mix runs of zeros/0xFF with arbitrary bytes so both code paths run.
+            data.push(match i % 7 {
+                0 | 1 => 0u8,
+                2 | 3 => 255u8,
+                other => (other * 31 + 1) as u8,
+            });
+        }
+        assert!(data.len() < MAX_DECODED_LEN);
+
+        // Act
+        let encoded = encode(&data);
+        let decoded = decode(&encoded).unwrap();
+
+        // Assert: roundtrip succeeds and stays within the bound.
+        assert_eq!(data, decoded);
+        assert!(decoded.len() <= MAX_DECODED_LEN);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // allocates 64 MiB + scans 64M bytes; too heavy under Miri
+    fn decode_at_exactly_max_decoded_len_is_accepted() {
+        // Arrange: a contiguous run claiming exactly MAX_DECODED_LEN zeros.
+        // This is the boundary case (<=) and must be accepted, not rejected.
+        let header = ((MAX_DECODED_LEN as u64) << 2) | 1; // repeat=1, bit=0
+        let encoded = varint::encode_to_vec(header);
+
+        // Act
+        let decoded = decode(&encoded).unwrap();
+
+        // Assert: exactly the cap, all zero-filled.
+        assert_eq!(decoded.len(), MAX_DECODED_LEN);
+        assert!(decoded.iter().all(|&b| b == 0));
     }
 
     #[test]

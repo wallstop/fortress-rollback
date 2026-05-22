@@ -102,6 +102,13 @@ repos:
         language: python
         types: [rust]
 
+      - id: unbounded-alloc
+        name: check unbounded allocations have // alloc-bound justification
+        entry: python scripts/hooks/check-unbounded-alloc.py
+        language: python
+        types: [rust]
+        files: '^src/.*\.rs$'
+
       - id: cargo-clippy
         name: cargo clippy
         entry: python scripts/build/run-cargo-clippy.py

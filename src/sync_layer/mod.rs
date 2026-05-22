@@ -229,6 +229,7 @@ impl<T: Config> SyncLayer<T> {
         max_prediction: usize,
         queue_length: usize,
     ) -> Self {
+        // alloc-bound: num_players is the session player count fixed at construction (validated non-zero by SessionBuilder)
         let mut input_queues = Vec::with_capacity(num_players);
         for player_index in 0..num_players {
             if let Some(queue) = InputQueue::with_queue_length(player_index, queue_length) {
@@ -677,6 +678,7 @@ impl<T: Config> SyncLayer<T> {
         let mut inputs = if num_players <= 4 {
             InputVec::new()
         } else {
+            // alloc-bound: num_players == connect_status.len() (an in-memory slice the caller owns)
             InputVec::with_capacity(num_players)
         };
         for (i, con_stat) in connect_status.iter().enumerate() {

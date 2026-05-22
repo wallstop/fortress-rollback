@@ -75,6 +75,7 @@ impl<T: Config> SyncTestSession<T> {
         violation_observer: Option<Arc<dyn ViolationObserver>>,
         queue_length: usize,
     ) -> Self {
+        // alloc-bound: num_players is the session player count fixed at construction
         let dummy_connect_status = vec![ConnectionStatus::default(); num_players];
 
         let mut sync_layer =

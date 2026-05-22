@@ -1041,6 +1041,9 @@ impl SpectatorConfig {
     ///   [`Frame`](crate::Frame) domain.
     /// - [`stream_delay`](Self::stream_delay) is greater than or equal to
     ///   [`buffer_size`](Self::buffer_size).
+    /// - [`catchup_speed`](Self::catchup_speed) exceeds the maximum buffer size.
+    /// - [`max_frames_behind`](Self::max_frames_behind) exceeds the maximum
+    ///   buffer size.
     ///
     /// [`catchup_speed`](Self::catchup_speed) may be `0` to preserve the
     /// historical "no catch-up advance is attempted" behavior.
@@ -1055,6 +1058,33 @@ impl SpectatorConfig {
                 min: 0,
                 max: SPECTATOR_MAX_STREAM_DELAY_U64,
                 actual: usize_to_u64_saturating(self.stream_delay),
+            }
+            .into());
+        }
+
+        // These `<= SPECTATOR_MAX_BUFFER_SIZE` checks are a frame-domain sanity
+        // bound only; they do NOT bound the catchup allocation directly. The
+        // actual allocation protection is `advance_capacity`'s clamp of the
+        // request batch to `buffer_size` at the call site. `catchup_speed == 0`
+        // stays valid (documented compat), and we deliberately do not impose
+        // the stricter `< buffer_size` relationship here (the builder methods do
+        // that) so previously-accepted direct configs keep working.
+        if self.catchup_speed > SPECTATOR_MAX_BUFFER_SIZE {
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "catchup_speed",
+                min: 0,
+                max: SPECTATOR_MAX_BUFFER_SIZE_U64,
+                actual: usize_to_u64_saturating(self.catchup_speed),
+            }
+            .into());
+        }
+
+        if self.max_frames_behind > SPECTATOR_MAX_BUFFER_SIZE {
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "max_frames_behind",
+                min: 0,
+                max: SPECTATOR_MAX_BUFFER_SIZE_U64,
+                actual: usize_to_u64_saturating(self.max_frames_behind),
             }
             .into());
         }
@@ -2703,6 +2733,88 @@ mod tests {
                 }
             } if actual == SPECTATOR_MAX_STREAM_DELAY_U64 + 1
         ));
+    }
+
+    #[test]
+    fn spectator_config_validate_rejects_oversized_catchup_speed() {
+        let config = SpectatorConfig {
+            catchup_speed: SPECTATOR_MAX_BUFFER_SIZE + 1,
+            ..SpectatorConfig::default()
+        };
+
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "catchup_speed",
+                    min: 0,
+                    max: SPECTATOR_MAX_BUFFER_SIZE_U64,
+                    actual,
+                }
+            } if actual == SPECTATOR_MAX_BUFFER_SIZE_U64 + 1
+        ));
+    }
+
+    #[test]
+    fn spectator_config_validate_rejects_oversized_max_frames_behind() {
+        let config = SpectatorConfig {
+            max_frames_behind: SPECTATOR_MAX_BUFFER_SIZE + 1,
+            ..SpectatorConfig::default()
+        };
+
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "max_frames_behind",
+                    min: 0,
+                    max: SPECTATOR_MAX_BUFFER_SIZE_U64,
+                    actual,
+                }
+            } if actual == SPECTATOR_MAX_BUFFER_SIZE_U64 + 1
+        ));
+    }
+
+    #[test]
+    fn spectator_config_validate_accepts_zero_catchup_speed() {
+        // catchup_speed == 0 is documented compat and must remain valid.
+        let config = SpectatorConfig {
+            catchup_speed: 0,
+            ..SpectatorConfig::default()
+        };
+
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn spectator_config_validate_accepts_all_presets() {
+        // None of the shipped presets may be rejected by the new range checks.
+        for config in [
+            SpectatorConfig::default(),
+            SpectatorConfig::new(),
+            SpectatorConfig::fast_paced(),
+            SpectatorConfig::slow_connection(),
+            SpectatorConfig::local(),
+            SpectatorConfig::broadcast(),
+        ] {
+            config
+                .validate()
+                .unwrap_or_else(|e| panic!("preset {:?} should validate: {:?}", config, e));
+        }
+    }
+
+    #[test]
+    fn spectator_config_validate_accepts_catchup_speed_at_maximum() {
+        let config = SpectatorConfig {
+            buffer_size: SPECTATOR_MAX_BUFFER_SIZE,
+            catchup_speed: SPECTATOR_MAX_BUFFER_SIZE,
+            max_frames_behind: SPECTATOR_MAX_BUFFER_SIZE,
+            ..SpectatorConfig::default()
+        };
+
+        config.validate().unwrap();
     }
 
     #[test]

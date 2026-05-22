@@ -192,6 +192,7 @@ impl<T: Config> InputQueue<T> {
             first_incorrect_frame: Frame::NULL,
             last_requested_frame: Frame::NULL,
             prediction: PlayerInput::blank_input(Frame::NULL),
+            // alloc-bound: queue_length is a trusted local InputQueueConfig value (validated only `>= 2` above), not wire-derived data
             inputs: vec![PlayerInput::blank_input(Frame::NULL); queue_length],
             player_index,
             queue_length,

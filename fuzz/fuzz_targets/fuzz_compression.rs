@@ -7,11 +7,14 @@
 //! # Safety Properties Tested
 //! - No panics on arbitrary byte sequences in Input messages
 //! - Safe handling of edge cases (empty, very long, all zeros, all ones)
+//! - The decode path (including the RLE decompression-bomb guard) never
+//!   panics or over-allocates on arbitrary attacker-controlled bytes
 
 #![no_main]
 
 use arbitrary::Arbitrary;
-use fortress_rollback::network::codec;
+use fortress_rollback::network::{codec, compression};
+use fortress_rollback::rle::MAX_DECODED_LEN;
 use libfuzzer_sys::fuzz_target;
 
 /// Structured input for compression fuzzing
@@ -21,6 +24,9 @@ struct CompressionInput {
     reference: Vec<u8>,
     /// Multiple input sequences to encode
     inputs: Vec<Vec<u8>>,
+    /// Arbitrary (attacker-controlled) bytes fed straight into the decode path
+    /// to exercise the RLE decompression-bomb guard.
+    decode_data: Vec<u8>,
 }
 
 fuzz_target!(|input: CompressionInput| {
@@ -68,4 +74,18 @@ fuzz_target!(|input: CompressionInput| {
         .map(|i| if i % 2 == 0 { 0x55 } else { 0xAA })
         .collect();
     let _ = codec::encode(&alternating);
+
+    // Fuzz the DECODE path on arbitrary attacker-controlled bytes. This is the
+    // network-reachable path (UdpProtocol::on_input -> compression::decode ->
+    // rle::decode). It must never panic or over-allocate; if it returns Ok, the
+    // total decoded byte count is bounded by the RLE safety cap.
+    if let Ok(decoded) = compression::decode(&input.reference, &input.decode_data) {
+        let total: usize = decoded.iter().map(Vec::len).sum();
+        assert!(
+            total <= MAX_DECODED_LEN,
+            "decoded {} bytes exceeds MAX_DECODED_LEN {}",
+            total,
+            MAX_DECODED_LEN
+        );
+    }
 });

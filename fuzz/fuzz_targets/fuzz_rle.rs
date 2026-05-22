@@ -17,7 +17,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use fortress_rollback::rle::{decode, encode};
+use fortress_rollback::rle::{decode, encode, MAX_DECODED_LEN};
 use libfuzzer_sys::fuzz_target;
 
 /// Structured input for RLE fuzzing with different scenarios
@@ -91,7 +91,16 @@ fuzz_target!(|input: RleInput| {
         TestMode::DecodeArbitrary { bytes } => {
             // Decoding arbitrary bytes should not panic
             // Result may be Ok or Err, but should never crash
-            let _result = decode(&bytes);
+            if let Ok(decoded) = decode(&bytes) {
+                // The safety bound must hold for any accepted input: a
+                // malformed packet can never drive an allocation past the cap.
+                assert!(
+                    decoded.len() <= MAX_DECODED_LEN,
+                    "decoded length {} exceeds MAX_DECODED_LEN {}",
+                    decoded.len(),
+                    MAX_DECODED_LEN
+                );
+            }
         },
 
         TestMode::StressPattern { pattern } => {

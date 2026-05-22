@@ -31,9 +31,12 @@ impl InputBytes {
         match codec::encode(&T::Input::default()) {
             Ok(encoded) => {
                 let input_size = encoded.len();
-                let size = input_size * num_players;
+                // saturating_mul matches the sibling `from_inputs` and avoids an
+                // overflow panic under release `overflow-checks`.
+                let size = input_size.saturating_mul(num_players);
                 Some(Self {
                     frame: Frame::NULL,
+                    // alloc-bound: size = serialized-input size * num_players (saturating); num_players is the session player count fixed at construction, not wire data
                     bytes: vec![0; size],
                 })
             },
@@ -60,6 +63,7 @@ impl InputBytes {
         // Pre-allocate based on expected size: each input is serialized once
         // Estimate 8 bytes per input as reasonable starting capacity
         let estimated_size = num_players.saturating_mul(8);
+        // alloc-bound: estimated_size = num_players * 8; num_players is the session player count fixed at construction
         let mut bytes = Vec::with_capacity(estimated_size);
         let mut frame = Frame::NULL;
         // in ascending order
@@ -107,6 +111,7 @@ impl InputBytes {
     ///
     /// If the data is malformed or deserialization fails, returns an empty vector and logs an error.
     pub fn to_player_inputs<T: Config>(&self, num_players: usize) -> Vec<PlayerInput<T::Input>> {
+        // alloc-bound: num_players is the session player count fixed at construction
         let mut player_inputs = Vec::with_capacity(num_players);
 
         // Validate inputs before processing

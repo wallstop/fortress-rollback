@@ -23,7 +23,8 @@ impl<T> SavedStates<T> {
     pub fn new(max_pred: usize) -> Self {
         // we need to store the current frame plus the number of max predictions, so that we can
         // roll back to the very first frame even when we have predicted as far ahead as we can.
-        let num_cells = max_pred + 1;
+        let num_cells = max_pred.saturating_add(1);
+        // alloc-bound: num_cells = max_pred + 1 (saturating, avoids overflow panic); max_pred is the trusted local max-prediction config (small, default 8), not wire data
         let mut states = Vec::with_capacity(num_cells);
         for _ in 0..num_cells {
             states.push(GameStateCell::default());

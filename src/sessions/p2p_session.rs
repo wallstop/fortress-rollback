@@ -161,6 +161,7 @@ impl<T: Config> P2PSession<T> {
         disconnect_behavior: DisconnectBehavior,
     ) -> Self {
         // local connection status
+        // alloc-bound: num_players is the trusted/local session player count (the builder rejects 0), not wire-derived data
         let local_connect_status = vec![ConnectionStatus::default(); num_players];
 
         // sync layer & set input delay
