@@ -38,6 +38,15 @@ use web_time::{Duration, Instant};
 use crate::input_queue::INPUT_QUEUE_LENGTH;
 use crate::{FortressError, InvalidRequestKind};
 
+const SPECTATOR_MAX_STREAM_DELAY: usize = 2_147_483_647;
+const SPECTATOR_MAX_BUFFER_SIZE: usize = 2_147_483_648;
+const SPECTATOR_MAX_STREAM_DELAY_U64: u64 = 2_147_483_647;
+const SPECTATOR_MAX_BUFFER_SIZE_U64: u64 = 2_147_483_648;
+
+fn usize_to_u64_saturating(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
 /// A clock function that returns the current [`Instant`].
 ///
 /// This type alias is used for clock injection in [`ProtocolConfig`], enabling
@@ -924,13 +933,16 @@ pub struct SpectatorConfig {
     ///
     /// A larger buffer allows the spectator to tolerate more latency
     /// or jitter, but uses more memory.
+    /// Must be between `1` and `2_147_483_648` inclusive so every ring slot
+    /// can be addressed from the non-negative [`Frame`](crate::Frame) domain.
     ///
     /// Default: 60 (1 second at 60 FPS)
     pub buffer_size: usize,
 
     /// How many frames to advance per step when the spectator is behind.
     /// When the spectator falls more than `max_frames_behind` frames behind
-    /// the host, it will advance this many frames per step to catch up.
+    /// the currently viewable edge, it will advance this many frames per step
+    /// to catch up.
     ///
     /// Higher values catch up faster but may cause visual stuttering.
     /// A value of `0` is allowed for compatibility: when catch-up mode is
@@ -959,9 +971,9 @@ pub struct SpectatorConfig {
     ///
     /// Default: 0 (follow the live edge)
     ///
-    /// Must be less than [`buffer_size`](Self::buffer_size). A delay greater
-    /// than or equal to the buffer size would make every buffered frame
-    /// unviewable.
+    /// Must fit in the [`Frame`](crate::Frame) domain and be less than
+    /// [`buffer_size`](Self::buffer_size). A delay greater than or equal to the
+    /// buffer size would make every buffered frame unviewable.
     pub stream_delay: usize,
 
     /// Whether the spectator records game state every frame to support
@@ -1023,6 +1035,10 @@ impl SpectatorConfig {
     ///
     /// Returns a [`FortressError`] if:
     /// - [`buffer_size`](Self::buffer_size) is `0`.
+    /// - [`buffer_size`](Self::buffer_size) is too large to index with
+    ///   [`Frame`](crate::Frame) values.
+    /// - [`stream_delay`](Self::stream_delay) is too large to represent in the
+    ///   [`Frame`](crate::Frame) domain.
     /// - [`stream_delay`](Self::stream_delay) is greater than or equal to
     ///   [`buffer_size`](Self::buffer_size).
     ///
@@ -1033,12 +1049,32 @@ impl SpectatorConfig {
             return Err(InvalidRequestKind::ZeroBufferSize.into());
         }
 
+        if self.stream_delay > SPECTATOR_MAX_STREAM_DELAY {
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "stream_delay",
+                min: 0,
+                max: SPECTATOR_MAX_STREAM_DELAY_U64,
+                actual: usize_to_u64_saturating(self.stream_delay),
+            }
+            .into());
+        }
+
+        if self.buffer_size > SPECTATOR_MAX_BUFFER_SIZE {
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "buffer_size",
+                min: 1,
+                max: SPECTATOR_MAX_BUFFER_SIZE_U64,
+                actual: usize_to_u64_saturating(self.buffer_size),
+            }
+            .into());
+        }
+
         if self.stream_delay >= self.buffer_size {
             return Err(InvalidRequestKind::ConfigValueOutOfRange {
                 field: "stream_delay",
                 min: 0,
-                max: self.buffer_size.saturating_sub(1) as u64,
-                actual: self.stream_delay as u64,
+                max: usize_to_u64_saturating(self.buffer_size.saturating_sub(1)),
+                actual: usize_to_u64_saturating(self.stream_delay),
             }
             .into());
         }
@@ -2612,6 +2648,61 @@ mod tests {
         assert!(config.enable_rewind);
         // Differs from default because of the new fields.
         assert_ne!(config, SpectatorConfig::default());
+    }
+
+    #[test]
+    fn spectator_config_validate_accepts_frame_domain_boundaries() {
+        let config = SpectatorConfig {
+            buffer_size: SPECTATOR_MAX_BUFFER_SIZE,
+            stream_delay: SPECTATOR_MAX_STREAM_DELAY,
+            ..SpectatorConfig::default()
+        };
+
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn spectator_config_validate_rejects_buffer_size_outside_frame_domain() {
+        let config = SpectatorConfig {
+            buffer_size: SPECTATOR_MAX_BUFFER_SIZE + 1,
+            stream_delay: 0,
+            ..SpectatorConfig::default()
+        };
+
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "buffer_size",
+                    min: 1,
+                    max: SPECTATOR_MAX_BUFFER_SIZE_U64,
+                    actual,
+                }
+            } if actual == SPECTATOR_MAX_BUFFER_SIZE_U64 + 1
+        ));
+    }
+
+    #[test]
+    fn spectator_config_validate_rejects_stream_delay_outside_frame_domain() {
+        let config = SpectatorConfig {
+            buffer_size: SPECTATOR_MAX_BUFFER_SIZE,
+            stream_delay: SPECTATOR_MAX_STREAM_DELAY + 1,
+            ..SpectatorConfig::default()
+        };
+
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "stream_delay",
+                    min: 0,
+                    max: SPECTATOR_MAX_STREAM_DELAY_U64,
+                    actual,
+                }
+            } if actual == SPECTATOR_MAX_STREAM_DELAY_U64 + 1
+        ));
     }
 
     #[test]

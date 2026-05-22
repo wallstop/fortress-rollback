@@ -95,6 +95,11 @@ def is_rust_source_file(path: str) -> bool:
     return path.startswith("src/") and path.endswith(".rs")
 
 
+def is_rust_file(path: str) -> bool:
+    """Return True for any Rust file."""
+    return path.endswith(".rs")
+
+
 def git_output_lines(repo_root: Path, args: list[str]) -> set[str]:
     """Run git and return non-empty output lines.
 
@@ -138,7 +143,10 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
     )
     workflow_files = sorted(path for path in changed_files if is_workflow_file(path))
     docs_files = sorted(path for path in changed_files if is_docs_markdown_file(path))
-    rust_files = sorted(path for path in changed_files if is_rust_source_file(path))
+    rust_files = sorted(path for path in changed_files if is_rust_file(path))
+    rust_source_files = sorted(
+        path for path in changed_files if is_rust_source_file(path)
+    )
     changelog_changed = any(is_changelog_file(path) for path in changed_files)
 
     if run_all or any(is_sync_version_surface_file(path) for path in changed_files):
@@ -244,6 +252,27 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
         )
 
     if run_all or rust_files:
+        command = [
+            PYTHON_EXECUTABLE,
+            "scripts/hooks/check-advance-frame-error-handling.py",
+        ]
+        command.extend(rust_files)
+        checks.append(
+            PlannedCheck(
+                check_id="advance-frame-error-handling",
+                description=(
+                    "reject advance_frame() calls whose errors are swallowed by "
+                    "if let Ok(..)"
+                ),
+                command=command,
+                fix_hint=(
+                    "Use ? when any error should fail, or match only the exact "
+                    "expected error such as PredictionThreshold."
+                ),
+            )
+        )
+
+    if run_all or rust_source_files:
         checks.append(
             PlannedCheck(
                 check_id="kani-violation-cost",

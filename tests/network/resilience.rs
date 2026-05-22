@@ -53,8 +53,8 @@
 use crate::common::stubs::{GameStub, StubConfig, StubInput};
 use crate::common::{create_channel_pair, create_chaos_channel_pair, TestClock};
 use fortress_rollback::{
-    ChaosConfig, FortressError, FortressEvent, PlayerHandle, PlayerType, ProtocolConfig, SaveMode,
-    SessionBuilder, SessionState, SyncConfig, TimeSyncConfig,
+    ChaosConfig, FortressError, FortressEvent, PlayerHandle, PlayerType, ProtocolConfig,
+    RequestVec, SaveMode, SessionBuilder, SessionState, SyncConfig, TimeSyncConfig,
 };
 use std::time::Duration;
 
@@ -63,6 +63,19 @@ fn protocol_config(clock: &TestClock) -> ProtocolConfig {
     ProtocolConfig {
         clock: Some(clock.as_protocol_clock()),
         ..ProtocolConfig::default()
+    }
+}
+
+#[track_caller]
+fn handle_advance_frame_allowing(
+    result: Result<RequestVec<StubConfig>, FortressError>,
+    game: &mut GameStub,
+    allowed: impl Fn(&FortressError) -> bool,
+) {
+    match result {
+        Ok(requests) => game.handle_requests(requests),
+        Err(err) if allowed(&err) => {},
+        Err(err) => panic!("unexpected advance_frame error: {err:?}"),
     }
 }
 
@@ -1174,13 +1187,13 @@ fn test_no_panics_under_worst_case() -> Result<(), FortressError> {
             let _ = sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i });
             let _ = sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: i });
 
-            // May fail with NotSynchronized if connection degraded too much
-            if let Ok(requests1) = sess1.advance_frame() {
-                stub1.handle_requests(requests1);
-            }
-            if let Ok(requests2) = sess2.advance_frame() {
-                stub2.handle_requests(requests2);
-            }
+            // May fail with NotSynchronized if connection degraded too much.
+            handle_advance_frame_allowing(sess1.advance_frame(), &mut stub1, |err| {
+                matches!(err, FortressError::NotSynchronized)
+            });
+            handle_advance_frame_allowing(sess2.advance_frame(), &mut stub2, |err| {
+                matches!(err, FortressError::NotSynchronized)
+            });
         }
     }
 
@@ -1348,13 +1361,19 @@ fn test_burst_packet_loss() -> Result<(), FortressError> {
         let _ = sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i });
         let _ = sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: i });
 
-        // May fail with InvalidFrame early on - that's okay
-        if let Ok(requests1) = sess1.advance_frame() {
-            stub1.handle_requests(requests1);
-        }
-        if let Ok(requests2) = sess2.advance_frame() {
-            stub2.handle_requests(requests2);
-        }
+        // May fail with InvalidFrame early on - that's okay.
+        handle_advance_frame_allowing(sess1.advance_frame(), &mut stub1, |err| {
+            matches!(
+                err,
+                FortressError::InvalidFrame { .. } | FortressError::InvalidFrameStructured { .. }
+            )
+        });
+        handle_advance_frame_allowing(sess2.advance_frame(), &mut stub2, |err| {
+            matches!(
+                err,
+                FortressError::InvalidFrame { .. } | FortressError::InvalidFrameStructured { .. }
+            )
+        });
     }
 
     // At least some frames should have advanced despite burst loss
@@ -2568,12 +2587,12 @@ fn test_network_flapping_simulation() -> Result<(), FortressError> {
         let _ = sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i });
         let _ = sess2.add_local_input(PlayerHandle::new(1), StubInput { inp: i });
 
-        if let Ok(requests1) = sess1.advance_frame() {
-            stub1.handle_requests(requests1);
-        }
-        if let Ok(requests2) = sess2.advance_frame() {
-            stub2.handle_requests(requests2);
-        }
+        handle_advance_frame_allowing(sess1.advance_frame(), &mut stub1, |err| {
+            matches!(err, FortressError::NotSynchronized)
+        });
+        handle_advance_frame_allowing(sess2.advance_frame(), &mut stub2, |err| {
+            matches!(err, FortressError::NotSynchronized)
+        });
     }
 
     // At least some frames should advance

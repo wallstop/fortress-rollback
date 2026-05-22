@@ -2380,11 +2380,7 @@ impl<T: Config> P2PSession<T> {
                     self.num_players,
                     self.next_spectator_frame
                 );
-                self.next_spectator_frame = safe_frame_add!(
-                    self.next_spectator_frame,
-                    1,
-                    "P2PSession::send_confirmed_inputs skip"
-                );
+                self.next_spectator_frame = self.next_spectator_frame.try_add(1)?;
                 continue;
             }
 
@@ -2412,11 +2408,7 @@ impl<T: Config> P2PSession<T> {
             }
 
             // onto the next frame
-            self.next_spectator_frame = safe_frame_add!(
-                self.next_spectator_frame,
-                1,
-                "P2PSession::send_confirmed_inputs next"
-            );
+            self.next_spectator_frame = self.next_spectator_frame.try_add(1)?;
         }
 
         Ok(())
@@ -3400,7 +3392,7 @@ mod tests {
         session
             .add_local_input(PlayerHandle::new(0), 42u8)
             .expect("Input failed");
-        let _ = session.advance_frame();
+        let _requests = session.advance_frame().expect("Advance failed");
         assert_eq!(session.current_frame(), Frame::new(1));
     }
 
@@ -3410,7 +3402,7 @@ mod tests {
         session
             .add_local_input(PlayerHandle::new(0), 42u8)
             .expect("Input failed");
-        let _ = session.advance_frame();
+        let _requests = session.advance_frame().expect("Advance failed");
         // Now trying to advance again without input should fail
         let result = session.advance_frame();
         assert!(result.is_err());
@@ -3842,7 +3834,7 @@ mod tests {
             session
                 .add_local_input(PlayerHandle::new(0), (i * 10) as u8)
                 .expect("Input failed");
-            let _ = session.advance_frame();
+            let _requests = session.advance_frame().expect("Advance failed");
         }
 
         // After advancing, confirmed_frame should be at least 0
@@ -3871,7 +3863,7 @@ mod tests {
             session
                 .add_local_input(PlayerHandle::new(0), i as u8)
                 .expect("Input failed");
-            let _ = session.advance_frame();
+            let _requests = session.advance_frame().expect("Advance failed");
         }
 
         let confirmed = session.confirmed_frame();
@@ -3918,7 +3910,7 @@ mod tests {
             session
                 .add_local_input(PlayerHandle::new(0), (i % 256) as u8)
                 .expect("Input failed");
-            let _ = session.advance_frame();
+            let _requests = session.advance_frame().expect("Advance failed");
         }
 
         // Frame 0 should have been discarded by now (we're past INPUT_QUEUE_LENGTH)
@@ -3988,7 +3980,7 @@ mod tests {
                 session
                     .add_local_input(PlayerHandle::new(0), (i % 256) as u8)
                     .expect("Input failed");
-                let _ = session.advance_frame();
+                let _requests = session.advance_frame().expect("Advance failed");
             }
 
             let result = session.confirmed_inputs_for_frame(Frame::new(tc.frame_to_query));

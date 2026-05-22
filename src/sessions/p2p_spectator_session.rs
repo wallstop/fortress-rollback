@@ -8,7 +8,7 @@ use crate::{
         messages::ConnectionStatus,
         protocol::{Event, UdpProtocol},
     },
-    report_violation, report_violation_to, safe_frame_add,
+    report_violation, report_violation_to,
     sessions::session_trait::Session,
     telemetry::{ViolationKind, ViolationObserver, ViolationSeverity},
     Config, EventDrain, FortressError, FortressEvent, FortressRequest, FortressResult, Frame,
@@ -131,9 +131,10 @@ impl<T: Config> SpectatorSession<T> {
 
     /// Returns the number of hosts currently feeding this spectator.
     ///
-    /// For a single-host spectator this is always `1`. For a failover spectator
-    /// created via [`SessionBuilder::start_spectator_session_multi`], this starts
-    /// at the number of supplied addresses and drops by one each time a host
+    /// For a single-host spectator this starts at `1` and may drop to `0` if
+    /// the host disconnects. For a failover spectator created via
+    /// [`SessionBuilder::start_spectator_session_multi`], this starts at the
+    /// number of supplied addresses and drops by one each time a host
     /// disconnects, letting the application observe redundancy in real time.
     ///
     /// # Example
@@ -257,12 +258,17 @@ impl<T: Config> SpectatorSession<T> {
     /// Computes the most recent frame the spectator is currently allowed to view.
     ///
     /// This is the live edge ([`Self::last_recv_frame`]) pulled back by
-    /// [`Self::stream_delay`] frames. It stays clamped to [`Frame::NULL`] (or
-    /// below the first received frame) when no inputs have been received yet, so
-    /// callers never try to grab a negative frame.
+    /// [`Self::stream_delay`] frames. It stays clamped to [`Frame::NULL`] when
+    /// no delayed frame is viewable yet, so callers never try to grab a negative
+    /// frame.
     fn viewable_frame(&self) -> Frame {
-        let delay = i32::try_from(self.stream_delay).unwrap_or(i32::MAX);
-        self.last_recv_frame.saturating_sub(delay)
+        let Ok(delay) = i32::try_from(self.stream_delay) else {
+            return Frame::NULL;
+        };
+        self.last_recv_frame
+            .checked_sub(delay)
+            .filter(|frame| *frame >= Frame::NULL)
+            .unwrap_or(Frame::NULL)
     }
 
     /// Returns the current [`SessionState`] of a session.
@@ -274,10 +280,9 @@ impl<T: Config> SpectatorSession<T> {
     /// Returns the number of frames behind the host
     #[must_use]
     pub fn frames_behind_host(&self) -> usize {
-        let diff = self.last_recv_frame - self.current_frame;
         // Gracefully handle the case where current_frame somehow exceeds last_recv_frame.
         // This shouldn't happen in normal operation, but we report it and return 0 rather than panic.
-        if diff < 0 {
+        if self.current_frame > self.last_recv_frame {
             report_violation!(
                 ViolationSeverity::Warning,
                 ViolationKind::FrameSync,
@@ -287,7 +292,12 @@ impl<T: Config> SpectatorSession<T> {
             );
             return 0;
         }
-        diff as usize
+        Self::positive_frame_distance(self.last_recv_frame, self.current_frame).unwrap_or(0)
+    }
+
+    fn positive_frame_distance(lead: Frame, base: Frame) -> Option<usize> {
+        let diff = i64::from(lead.as_i32()) - i64::from(base.as_i32());
+        (diff > 0).then(|| usize::try_from(diff).unwrap_or(usize::MAX))
     }
 
     /// Used to fetch some statistics about the quality of the network connection.
@@ -392,14 +402,8 @@ impl<T: Config> SpectatorSession<T> {
         // How far behind the viewable edge we are. We use this (rather than the raw
         // distance to the live edge) so a configured stream_delay does not force the
         // spectator into perpetual catchup mode.
-        let effective_behind = if viewable > self.current_frame {
-            // The `viewable > current_frame` guard guarantees the `Frame - Frame`
-            // difference is strictly positive, so the `as usize` cast is sound and
-            // never wraps (mirrors the non-negative reasoning in `frames_behind_host`).
-            (viewable - self.current_frame) as usize
-        } else {
-            0
-        };
+        let effective_behind =
+            Self::positive_frame_distance(viewable, self.current_frame).unwrap_or(0);
 
         let frames_to_advance = if effective_behind > self.max_frames_behind {
             self.catchup_speed
@@ -421,11 +425,7 @@ impl<T: Config> SpectatorSession<T> {
 
         for _ in 0..frames_to_advance {
             // get inputs for the next frame
-            let frame_to_grab = safe_frame_add!(
-                self.current_frame,
-                1,
-                "SpectatorSession::advance_frames next"
-            );
+            let frame_to_grab = self.current_frame.try_add(1)?;
 
             // Respect the stream-delay boundary: never advance past the viewable
             // frame. If no earlier frame was gathered in this batch, the post-loop
@@ -1175,6 +1175,44 @@ mod tests {
         assert_eq!(session.frames_behind_host(), 0);
     }
 
+    #[test]
+    fn spectator_session_frames_behind_host_uses_wide_distance_math() {
+        let mut session = create_test_spectator_session().unwrap();
+        session.current_frame = Frame::NULL;
+        session.last_recv_frame = Frame::new(i32::MAX);
+
+        assert_eq!(
+            session.frames_behind_host(),
+            2_147_483_648,
+            "distance from NULL to i32::MAX should not overflow i32 math"
+        );
+    }
+
+    #[test]
+    fn spectator_session_viewable_frame_clamps_to_null_until_delay_is_available() {
+        let mut session = create_test_spectator_session().unwrap();
+        session.stream_delay = 5;
+
+        session.last_recv_frame = Frame::NULL;
+        assert_eq!(session.viewable_frame(), Frame::NULL);
+
+        session.last_recv_frame = Frame::new(3);
+        assert_eq!(session.viewable_frame(), Frame::NULL);
+
+        session.last_recv_frame = Frame::new(5);
+        assert_eq!(session.viewable_frame(), Frame::new(0));
+    }
+
+    #[test]
+    fn spectator_session_single_host_count_can_drop_to_zero() {
+        let mut session = create_test_spectator_session().unwrap();
+        assert_eq!(session.num_hosts(), 1);
+
+        session.remove_disconnected_hosts(vec![0]);
+
+        assert_eq!(session.num_hosts(), 0);
+    }
+
     // ==========================================
     // advance_frame Tests
     // ==========================================
@@ -1473,6 +1511,32 @@ mod tests {
             })
             .start_spectator_session_multi(&[test_addr(7402), test_addr(7403)], DummySocket);
         assert!(invalid_multi.is_none());
+    }
+
+    #[test]
+    fn spectator_config_frame_domain_is_validated_by_builders() {
+        use crate::SpectatorConfig;
+
+        let invalid_buffer = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_spectator_config(SpectatorConfig {
+                buffer_size: 2_147_483_649,
+                ..SpectatorConfig::default()
+            })
+            .start_spectator_session(test_addr(7404), DummySocket);
+        assert!(invalid_buffer.is_none());
+
+        let invalid_delay = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_spectator_config(SpectatorConfig {
+                buffer_size: 2_147_483_648,
+                stream_delay: 2_147_483_648,
+                ..SpectatorConfig::default()
+            })
+            .start_spectator_session_multi(&[test_addr(7405), test_addr(7406)], DummySocket);
+        assert!(invalid_delay.is_none());
     }
 
     #[test]

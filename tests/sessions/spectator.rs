@@ -35,6 +35,39 @@ fn protocol_config(clock: &TestClock) -> ProtocolConfig {
     }
 }
 
+#[track_caller]
+fn advance_frame_allowing<T: fortress_rollback::Config>(
+    result: Result<RequestVec<T>, FortressError>,
+    allowed: impl Fn(&FortressError) -> bool,
+) -> Option<RequestVec<T>> {
+    match result {
+        Ok(requests) => Some(requests),
+        Err(err) if allowed(&err) => None,
+        Err(err) => panic!("unexpected advance_frame error: {err:?}"),
+    }
+}
+
+#[track_caller]
+fn advance_frame_allowing_prediction_threshold<T: fortress_rollback::Config>(
+    result: Result<RequestVec<T>, FortressError>,
+) -> Option<RequestVec<T>> {
+    advance_frame_allowing(result, |err| {
+        matches!(err, FortressError::PredictionThreshold)
+    })
+}
+
+#[track_caller]
+fn advance_frame_allowing_prediction_threshold_or_not_synchronized<T: fortress_rollback::Config>(
+    result: Result<RequestVec<T>, FortressError>,
+) -> Option<RequestVec<T>> {
+    advance_frame_allowing(result, |err| {
+        matches!(
+            err,
+            FortressError::PredictionThreshold | FortressError::NotSynchronized
+        )
+    })
+}
+
 // ============================================================================
 // Basic Session Tests
 // ============================================================================
@@ -636,9 +669,8 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
     }
 
     // Spectator should be able to get inputs now
-    if let Ok(requests) = spec_sess.advance_frame() {
-        assert!(!requests.is_empty());
-    }
+    let requests = spec_sess.advance_frame()?;
+    assert!(!requests.is_empty());
 
     Ok(())
 }
@@ -1038,12 +1070,10 @@ fn test_multi_host_spectator_advances() -> Result<(), FortressError> {
     for frame in 0..10 {
         host1.add_local_input(PlayerHandle::new(0), StubInput { inp: frame })?;
         host2.add_local_input(PlayerHandle::new(1), StubInput { inp: frame })?;
-        if let Ok(r) = host1.advance_frame() {
-            g1.handle_requests(r);
-        }
-        if let Ok(r) = host2.advance_frame() {
-            g2.handle_requests(r);
-        }
+        let r = host1.advance_frame()?;
+        g1.handle_requests(r);
+        let r = host2.advance_frame()?;
+        g2.handle_requests(r);
         for _ in 0..4 {
             host1.poll_remote_clients();
             host2.poll_remote_clients();
@@ -1058,7 +1088,7 @@ fn test_multi_host_spectator_advances() -> Result<(), FortressError> {
     for _ in 0..50 {
         host1.poll_remote_clients();
         host2.poll_remote_clients();
-        if let Ok(requests) = spec.advance_frame() {
+        if let Some(requests) = advance_frame_allowing_prediction_threshold(spec.advance_frame()) {
             spec_game.handle_requests(requests);
             advanced = true;
         }
@@ -1144,9 +1174,11 @@ fn test_multi_host_spectator_failover_on_timeout() -> Result<(), FortressError> 
     for frame in 0..200 {
         // Only host2 stays alive and continues to send to the spectator.
         host2.add_local_input(PlayerHandle::new(1), StubInput { inp: frame })?;
-        // host2 will be in prediction (host1 silent) but still advances locally
-        // up to the prediction window; ignore PredictionThreshold.
-        if let Ok(r) = host2.advance_frame() {
+        // host2 may stop advancing after host1 goes silent; only the expected
+        // wait/halt errors are tolerated while the spectator observes failover.
+        if let Some(r) =
+            advance_frame_allowing_prediction_threshold_or_not_synchronized(host2.advance_frame())
+        {
             g2.handle_requests(r);
         }
         host2.poll_remote_clients();
@@ -1158,7 +1190,7 @@ fn test_multi_host_spectator_failover_on_timeout() -> Result<(), FortressError> 
             }
         }
 
-        if let Ok(requests) = spec.advance_frame() {
+        if let Some(requests) = advance_frame_allowing_prediction_threshold(spec.advance_frame()) {
             spec_game.handle_requests(requests);
         }
 
@@ -1419,7 +1451,7 @@ fn test_rewind_seek_round_trip() -> Result<(), FortressError> {
     let mut spec_game = GameStub::new();
     let mut captured_frame3: Option<StateStub> = None;
     for _ in 0..40 {
-        if let Ok(requests) = spec.advance_frame() {
+        if let Some(requests) = advance_frame_allowing_prediction_threshold(spec.advance_frame()) {
             spec_game.handle_requests(requests);
         }
         if spec_game.gs.frame == 4 && captured_frame3.is_none() {
@@ -1466,7 +1498,7 @@ fn test_rewind_seek_round_trip() -> Result<(), FortressError> {
     for _ in 0..40 {
         host.poll_remote_clients();
         spec.poll_remote_clients();
-        if let Ok(requests) = spec.advance_frame() {
+        if let Some(requests) = advance_frame_allowing_prediction_threshold(spec.advance_frame()) {
             spec_game.handle_requests(requests);
             resumed = true;
         }
@@ -1799,7 +1831,7 @@ fn test_rewind_forward_seek_after_rewind() -> Result<(), FortressError> {
     let mut spec_game = GameStub::new();
     let mut captured_frame7: Option<StateStub> = None;
     for _ in 0..60 {
-        if let Ok(requests) = spec.advance_frame() {
+        if let Some(requests) = advance_frame_allowing_prediction_threshold(spec.advance_frame()) {
             spec_game.handle_requests(requests);
         }
         if spec_game.gs.frame == 8 && captured_frame7.is_none() {
@@ -1948,7 +1980,7 @@ fn test_catchup_with_rewind_saves_correct_frames() -> Result<(), FortressError> 
     let mut spec_game = GameStub::new();
     let mut saw_batched_save = false;
     for _ in 0..60 {
-        if let Ok(requests) = spec.advance_frame() {
+        if let Some(requests) = advance_frame_allowing_prediction_threshold(spec.advance_frame()) {
             let save_count = requests
                 .iter()
                 .filter(|r| matches!(r, FortressRequest::SaveGameState { .. }))
@@ -2062,12 +2094,10 @@ fn test_multi_host_inputs_confirmed_and_monotonic() -> Result<(), FortressError>
     for frame in 0..12 {
         host1.add_local_input(PlayerHandle::new(0), StubInput { inp: frame })?;
         host2.add_local_input(PlayerHandle::new(1), StubInput { inp: frame })?;
-        if let Ok(r) = host1.advance_frame() {
-            g1.handle_requests(r);
-        }
-        if let Ok(r) = host2.advance_frame() {
-            g2.handle_requests(r);
-        }
+        let r = host1.advance_frame()?;
+        g1.handle_requests(r);
+        let r = host2.advance_frame()?;
+        g2.handle_requests(r);
         for _ in 0..4 {
             host1.poll_remote_clients();
             host2.poll_remote_clients();
@@ -2084,7 +2114,7 @@ fn test_multi_host_inputs_confirmed_and_monotonic() -> Result<(), FortressError>
     for _ in 0..80 {
         host1.poll_remote_clients();
         host2.poll_remote_clients();
-        if let Ok(requests) = spec.advance_frame() {
+        if let Some(requests) = advance_frame_allowing_prediction_threshold(spec.advance_frame()) {
             for request in requests.iter() {
                 if let FortressRequest::AdvanceFrame { inputs } = request {
                     for (_input, status) in inputs.iter() {
@@ -2183,7 +2213,7 @@ fn test_seek_to_current_frame_returns_missing_state() -> Result<(), FortressErro
     // Advance the spectator a few frames so current_frame == N for some N >= 1.
     let mut spec_game = GameStub::new();
     for _ in 0..40 {
-        if let Ok(requests) = spec.advance_frame() {
+        if let Some(requests) = advance_frame_allowing_prediction_threshold(spec.advance_frame()) {
             spec_game.handle_requests(requests);
         }
         clock.advance(POLL_INTERVAL_DETERMINISTIC);
