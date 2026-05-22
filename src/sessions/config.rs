@@ -881,6 +881,12 @@ impl ProtocolConfig {
 /// These settings control spectator behavior including buffer sizes,
 /// catch-up speed, and frame lag tolerance.
 ///
+/// # Forward Compatibility
+///
+/// New fields may be added to this struct in future versions. To ensure your
+/// code continues to compile, always use the `..Default::default()` or
+/// `..SpectatorConfig::default()` pattern when constructing instances.
+///
 /// # Example
 ///
 /// ```
@@ -898,6 +904,14 @@ impl ProtocolConfig {
 /// let slow_connection_config = SpectatorConfig {
 ///     buffer_size: 120,
 ///     max_frames_behind: 20,
+///     ..SpectatorConfig::default()
+/// };
+///
+/// // Hold playback a few frames behind the live edge to deter stream-sniping,
+/// // and enable rewind so the spectator can seek backwards.
+/// let broadcast_config = SpectatorConfig {
+///     stream_delay: 8,
+///     enable_rewind: true,
 ///     ..SpectatorConfig::default()
 /// };
 /// ```
@@ -919,6 +933,9 @@ pub struct SpectatorConfig {
     /// the host, it will advance this many frames per step to catch up.
     ///
     /// Higher values catch up faster but may cause visual stuttering.
+    /// A value of `0` is allowed for compatibility: when catch-up mode is
+    /// triggered, the spectator advances no frames and `advance_frame` returns
+    /// `Ok(<empty>)`.
     ///
     /// Default: 1
     pub catchup_speed: usize,
@@ -930,6 +947,37 @@ pub struct SpectatorConfig {
     ///
     /// Default: 10
     pub max_frames_behind: usize,
+
+    /// The number of frames to hold playback back from the live edge.
+    ///
+    /// When non-zero, the spectator will not advance past
+    /// `last_received_frame - stream_delay`. This deliberately delays the
+    /// spectator's view of the match, which is useful for broadcast scenarios
+    /// to deter stream-sniping (a competitor watching the stream to react to
+    /// hidden information). The held-back frames are still buffered and become
+    /// viewable as the host sends newer inputs.
+    ///
+    /// Default: 0 (follow the live edge)
+    ///
+    /// Must be less than [`buffer_size`](Self::buffer_size). A delay greater
+    /// than or equal to the buffer size would make every buffered frame
+    /// unviewable.
+    pub stream_delay: usize,
+
+    /// Whether the spectator records game state every frame to support
+    /// rewinding and seeking within the buffered window.
+    ///
+    /// When `true`, the spectator emits a [`SaveGameState`] request before each
+    /// advance and supports [`seek_to_frame`], allowing the application to jump
+    /// to any previously simulated frame still within the buffer. When `false`
+    /// (the default), no state is saved and [`seek_to_frame`] returns a
+    /// "not supported" error.
+    ///
+    /// Default: false
+    ///
+    /// [`SaveGameState`]: crate::FortressRequest::SaveGameState
+    /// [`seek_to_frame`]: crate::SpectatorSession::seek_to_frame
+    pub enable_rewind: bool,
 }
 
 impl Default for SpectatorConfig {
@@ -938,6 +986,8 @@ impl Default for SpectatorConfig {
             buffer_size: 60,
             catchup_speed: 1,
             max_frames_behind: 10,
+            stream_delay: 0,
+            enable_rewind: false,
         }
     }
 }
@@ -949,12 +999,14 @@ impl std::fmt::Display for SpectatorConfig {
             buffer_size,
             catchup_speed,
             max_frames_behind,
+            stream_delay,
+            enable_rewind,
         } = self;
 
         write!(
             f,
-            "SpectatorConfig {{ buffer: {}, catchup_speed: {}, max_behind: {} }}",
-            buffer_size, catchup_speed, max_frames_behind,
+            "SpectatorConfig {{ buffer: {}, catchup_speed: {}, max_behind: {}, stream_delay: {}, enable_rewind: {} }}",
+            buffer_size, catchup_speed, max_frames_behind, stream_delay, enable_rewind,
         )
     }
 }
@@ -963,6 +1015,35 @@ impl SpectatorConfig {
     /// Creates a new `SpectatorConfig` with default values.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Validates this spectator configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FortressError`] if:
+    /// - [`buffer_size`](Self::buffer_size) is `0`.
+    /// - [`stream_delay`](Self::stream_delay) is greater than or equal to
+    ///   [`buffer_size`](Self::buffer_size).
+    ///
+    /// [`catchup_speed`](Self::catchup_speed) may be `0` to preserve the
+    /// historical "no catch-up advance is attempted" behavior.
+    pub fn validate(&self) -> Result<(), FortressError> {
+        if self.buffer_size == 0 {
+            return Err(InvalidRequestKind::ZeroBufferSize.into());
+        }
+
+        if self.stream_delay >= self.buffer_size {
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "stream_delay",
+                min: 0,
+                max: self.buffer_size.saturating_sub(1) as u64,
+                actual: self.stream_delay as u64,
+            }
+            .into());
+        }
+
+        Ok(())
     }
 
     /// Configuration preset for fast-paced games.
@@ -974,6 +1055,8 @@ impl SpectatorConfig {
             buffer_size: 90,
             catchup_speed: 2,
             max_frames_behind: 15,
+            stream_delay: 0,
+            enable_rewind: false,
         }
     }
 
@@ -985,6 +1068,8 @@ impl SpectatorConfig {
             buffer_size: 120,
             catchup_speed: 1,
             max_frames_behind: 20,
+            stream_delay: 0,
+            enable_rewind: false,
         }
     }
 
@@ -996,6 +1081,8 @@ impl SpectatorConfig {
             buffer_size: 30,
             catchup_speed: 2,
             max_frames_behind: 5,
+            stream_delay: 0,
+            enable_rewind: false,
         }
     }
 
@@ -1017,6 +1104,8 @@ impl SpectatorConfig {
             catchup_speed: 1,
             // Can fall far behind before catching up - prioritize smooth playback
             max_frames_behind: 30,
+            stream_delay: 0,
+            enable_rewind: false,
         }
     }
 
@@ -1032,6 +1121,8 @@ impl SpectatorConfig {
             catchup_speed: 1,
             // High tolerance for network variability
             max_frames_behind: 25,
+            stream_delay: 0,
+            enable_rewind: false,
         }
     }
 }
@@ -2490,6 +2581,37 @@ mod tests {
         assert_eq!(config.buffer_size, 60);
         assert_eq!(config.catchup_speed, 1);
         assert_eq!(config.max_frames_behind, 10);
+        assert_eq!(config.stream_delay, 0);
+        assert!(!config.enable_rewind);
+    }
+
+    #[test]
+    fn spectator_config_presets_have_default_stream_and_rewind() {
+        // All presets keep the additive fields at their defaults so existing
+        // behavior is unchanged when opting into a preset.
+        for config in [
+            SpectatorConfig::fast_paced(),
+            SpectatorConfig::slow_connection(),
+            SpectatorConfig::local(),
+            SpectatorConfig::broadcast(),
+            SpectatorConfig::mobile(),
+        ] {
+            assert_eq!(config.stream_delay, 0);
+            assert!(!config.enable_rewind);
+        }
+    }
+
+    #[test]
+    fn spectator_config_new_fields_settable() {
+        let config = SpectatorConfig {
+            stream_delay: 8,
+            enable_rewind: true,
+            ..SpectatorConfig::default()
+        };
+        assert_eq!(config.stream_delay, 8);
+        assert!(config.enable_rewind);
+        // Differs from default because of the new fields.
+        assert_ne!(config, SpectatorConfig::default());
     }
 
     #[test]
@@ -2547,11 +2669,22 @@ mod tests {
         assert!(display_str.contains("buffer: 60"));
         assert!(display_str.contains("catchup_speed: 1"));
         assert!(display_str.contains("max_behind: 10"));
+        assert!(display_str.contains("stream_delay: 0"));
+        assert!(display_str.contains("enable_rewind: false"));
 
         let config = SpectatorConfig::broadcast();
         let display_str = config.to_string();
         assert!(display_str.contains("buffer: 180"));
         assert!(display_str.contains("max_behind: 30"));
+
+        let config = SpectatorConfig {
+            stream_delay: 7,
+            enable_rewind: true,
+            ..SpectatorConfig::default()
+        };
+        let display_str = config.to_string();
+        assert!(display_str.contains("stream_delay: 7"));
+        assert!(display_str.contains("enable_rewind: true"));
     }
 
     #[test]

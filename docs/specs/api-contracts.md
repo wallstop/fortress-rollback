@@ -289,7 +289,16 @@ Each API is documented with:
 
 - Returns `Some(session)` with session created in `Synchronizing` state
 - Host endpoint begins synchronization
-- Returns `None` if protocol initialization fails (e.g., serialization issues)
+- Returns `None` if protocol configuration validation, spectator configuration
+  validation, or protocol initialization fails (e.g., serialization issues)
+
+**Spectator configuration validation:**
+
+- `SpectatorConfig::buffer_size` must be greater than `0`
+- `SpectatorConfig::stream_delay` must be smaller than `buffer_size`
+- `SpectatorConfig::catchup_speed == 0` is accepted; if catch-up mode is
+  reached with zero speed, no frame is attempted and `advance_frame` returns
+  `Ok(<empty>)`
 
 **Errors:** None (returns `Option`, not `Result`)
 
@@ -657,8 +666,18 @@ Each API is documented with:
 
 **Post:**
 
-- Returns `AdvanceFrame` requests only (no save/load)
-- May return multiple frames if catching up
+- Returns one `AdvanceFrame` request per advanced frame.
+- If `SpectatorConfig::enable_rewind` is enabled, each advanced frame is
+  preceded by a `SaveGameState` request for the same frame label.
+- May return multiple frames if catching up.
+- A failover spectator with no remaining hosts may still advance through
+  already-buffered frames. After the buffered viewable frames drain,
+  `PredictionThreshold` is returned.
+- For redundant hosts, newer frames may replace older ring-slot contents, but
+  duplicate data for the same player/frame is first-writer-wins. Identical
+  duplicates are ignored; divergent duplicates report a frame-sync violation and
+  never overwrite the first value. Duplicate host addresses route inbound
+  packets to the first matching endpoint.
 
 **Errors:**
 

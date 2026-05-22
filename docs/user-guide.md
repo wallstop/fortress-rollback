@@ -1299,6 +1299,21 @@ let mut spectator_session = SessionBuilder::<GameConfig>::new()
     })?;
 ```
 
+Spectator startup returns `None` when the protocol configuration is invalid,
+the spectator configuration is invalid, or the host endpoint cannot be
+initialized. `SpectatorConfig::buffer_size` must be greater than zero, and
+`stream_delay` must be smaller than `buffer_size`.
+
+For failover spectators created with `start_spectator_session_multi`, confirmed
+inputs for a frame come from the first host that delivers them. Newer frames may
+replace older ring-slot contents, but duplicate data for the same player/frame
+uses first-writer-wins semantics: identical duplicates are ignored, and
+divergent duplicates report a frame-sync violation without overwriting the first
+value. If duplicate host addresses are supplied, inbound packets are routed to
+the first matching host endpoint. When every host disconnects, the spectator may
+still advance through frames that were already buffered; after those buffered
+frames are no longer viewable, `advance_frame` returns `PredictionThreshold`.
+
 **SpectatorConfig presets:**
 
 - `SpectatorConfig::fast_paced()`: 90-frame buffer, 2x catchup (action games)
@@ -3430,9 +3445,24 @@ let config = SpectatorConfig {
     buffer_size: 60,       // Input buffer size in frames (default: 60)
     catchup_speed: 1,      // Frames per step when catching up (default: 1)
     max_frames_behind: 10, // When to start catching up (default: 10)
+    stream_delay: 0,       // Frames to stay behind the live edge (default: 0)
+    enable_rewind: false,  // Save state for seek_to_frame (default: false)
     ..Default::default()
 };
 ```
+
+`buffer_size` must be greater than zero, and `stream_delay` must be less than
+`buffer_size`; invalid spectator configs make spectator startup return `None`.
+`catchup_speed == 0` is allowed for compatibility. If catch-up mode is
+triggered with zero speed, no frame is attempted and `advance_frame` returns
+`Ok(<empty>)`.
+
+When `enable_rewind` is true, each spectator advance emits a `SaveGameState`
+immediately before the matching `AdvanceFrame`, and `seek_to_frame(frame)` can
+load any saved state still in the ring. Seeking without rewind enabled returns
+`NotSupported`; negative targets return `MustBeNonNegative`; `target + 1`
+overflow returns `FrameArithmeticOverflow`; missing or overwritten states return
+`MissingState`.
 
 **Presets:**
 

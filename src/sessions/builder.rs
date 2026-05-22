@@ -1084,17 +1084,150 @@ impl<T: Config> SessionBuilder<T> {
     /// The host will broadcast all confirmed inputs to this session.
     /// This session can be used to spectate a session without contributing to the game input.
     ///
+    /// For redundancy across multiple game peers, see
+    /// [`start_spectator_session_multi`](Self::start_spectator_session_multi).
+    ///
     /// # Returns
-    /// Returns `None` if the protocol initialization fails (e.g., due to serialization issues with the Input type).
+    /// Returns `None` if the protocol or spectator configuration is invalid,
+    /// or if protocol initialization fails (e.g., due to serialization issues
+    /// with the Input type).
     pub fn start_spectator_session(
         self,
         host_addr: T::Address,
         socket: impl NonBlockingSocket<T::Address> + 'static,
     ) -> Option<SpectatorSession<T>> {
-        // Validate the protocol configuration
+        // Validate the configurations before constructing endpoints.
         self.protocol_config.validate().ok()?;
+        self.spectator_config.validate().ok()?;
 
-        // create host endpoint
+        // create the single host endpoint and synchronize it
+        let host = self.build_spectator_host(host_addr)?;
+
+        Some(SpectatorSession::new(
+            self.num_players,
+            Box::new(socket),
+            vec![host],
+            self.spectator_config.buffer_size,
+            self.spectator_config.max_frames_behind,
+            self.spectator_config.catchup_speed,
+            self.spectator_config.stream_delay,
+            self.spectator_config.enable_rewind,
+            self.violation_observer,
+            self.event_queue_size,
+        ))
+    }
+
+    /// Consumes the builder to create a redundant (failover) [`SpectatorSession`].
+    ///
+    /// Unlike [`start_spectator_session`](Self::start_spectator_session), this connects
+    /// to **multiple** game peers ("hosts") at once. Confirmed inputs are accepted from
+    /// whichever host delivers a given frame first, so the buffer is filled even if some
+    /// hosts lag or fail. If duplicate host addresses are provided, inbound packets are
+    /// routed to the first matching host endpoint; later duplicates do not receive that
+    /// packet.
+    ///
+    /// Newer frames may replace older ring-slot contents, but duplicate data for the
+    /// same player/frame is first-writer-wins: identical duplicates are ignored, and
+    /// divergent duplicates report a frame-sync violation without overwriting the first
+    /// value.
+    ///
+    /// The supplied addresses should be distinct game peers that are all spectating the
+    /// same match (e.g. several players in the same P2P session who each registered this
+    /// spectator). Spectation continues while at least one host remains connected. When a
+    /// host disconnects it is removed and a [`FortressEvent::Disconnected`] event is
+    /// emitted for it; observe [`SpectatorSession::num_hosts`] to track redundancy. When
+    /// all hosts have dropped, already-buffered frames may still drain normally. Once no
+    /// buffered frame is viewable, [`advance_frame`](SpectatorSession::advance_frame)
+    /// returns [`FortressError::PredictionThreshold`].
+    ///
+    /// A [`SpectatorConfig::catchup_speed`] of `0` remains accepted for compatibility:
+    /// if catch-up mode is triggered, no frame is attempted and
+    /// [`advance_frame`](SpectatorSession::advance_frame) returns `Ok(<empty>)`.
+    ///
+    /// # Returns
+    ///
+    /// Returns `None` if `host_addrs` is empty, if the protocol or spectator
+    /// configuration is invalid, or if protocol initialization fails for any address
+    /// (e.g. due to serialization issues with the Input type).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use fortress_rollback::prelude::*;
+    /// # use fortress_rollback::Message;
+    /// # use std::net::SocketAddr;
+    /// # #[derive(Debug)]
+    /// # struct TestConfig;
+    /// # impl Config for TestConfig {
+    /// #     type Input = u8;
+    /// #     type State = u8;
+    /// #     type Address = SocketAddr;
+    /// # }
+    /// # struct DummySocket;
+    /// # impl NonBlockingSocket<SocketAddr> for DummySocket {
+    /// #     fn send_to(&mut self, _msg: &Message, _addr: &SocketAddr) {}
+    /// #     fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> { Vec::new() }
+    /// # }
+    /// let host_a: SocketAddr = "127.0.0.1:7000".parse()?;
+    /// let host_b: SocketAddr = "127.0.0.1:7001".parse()?;
+    /// let session = SessionBuilder::<TestConfig>::new()
+    ///     .with_num_players(2)?
+    ///     .start_spectator_session_multi(&[host_a, host_b], DummySocket)
+    ///     .ok_or(FortressError::NotSynchronized)?;
+    /// assert_eq!(session.num_hosts(), 2);
+    ///
+    /// // An empty address list yields no session.
+    /// let none = SessionBuilder::<TestConfig>::new()
+    ///     .with_num_players(2)?
+    ///     .start_spectator_session_multi(&[], DummySocket);
+    /// assert!(none.is_none());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// [`FortressEvent::Disconnected`]: crate::FortressEvent::Disconnected
+    /// [`FortressError::PredictionThreshold`]: crate::FortressError::PredictionThreshold
+    /// [`SpectatorSession::num_hosts`]: crate::SpectatorSession::num_hosts
+    pub fn start_spectator_session_multi(
+        self,
+        host_addrs: &[T::Address],
+        socket: impl NonBlockingSocket<T::Address> + 'static,
+    ) -> Option<SpectatorSession<T>> {
+        // A failover spectator needs at least one host.
+        if host_addrs.is_empty() {
+            return None;
+        }
+
+        // Validate the configurations once before constructing endpoints.
+        self.protocol_config.validate().ok()?;
+        self.spectator_config.validate().ok()?;
+
+        // Build and synchronize one host endpoint per address.
+        let mut hosts = Vec::with_capacity(host_addrs.len());
+        for host_addr in host_addrs {
+            hosts.push(self.build_spectator_host(host_addr.clone())?);
+        }
+
+        Some(SpectatorSession::new(
+            self.num_players,
+            Box::new(socket),
+            hosts,
+            self.spectator_config.buffer_size,
+            self.spectator_config.max_frames_behind,
+            self.spectator_config.catchup_speed,
+            self.spectator_config.stream_delay,
+            self.spectator_config.enable_rewind,
+            self.violation_observer,
+            self.event_queue_size,
+        ))
+    }
+
+    /// Builds and synchronizes a single spectator host endpoint for `host_addr`.
+    ///
+    /// Returns `None` if protocol creation or synchronization fails. Shared by
+    /// [`start_spectator_session`](Self::start_spectator_session) and
+    /// [`start_spectator_session_multi`](Self::start_spectator_session_multi) to avoid
+    /// duplicating the single-host construction logic.
+    fn build_spectator_host(&self, host_addr: T::Address) -> Option<UdpProtocol<T>> {
         let mut host = UdpProtocol::new(
             (0..self.num_players).map(PlayerHandle::new).collect(),
             host_addr,
@@ -1106,19 +1239,10 @@ impl<T: Config> SessionBuilder<T> {
             self.fps,
             DesyncDetection::Off,
             self.sync_config,
-            self.protocol_config,
+            self.protocol_config.clone(),
         )?;
         host.synchronize().ok()?;
-        Some(SpectatorSession::new(
-            self.num_players,
-            Box::new(socket),
-            host,
-            self.spectator_config.buffer_size,
-            self.spectator_config.max_frames_behind,
-            self.spectator_config.catchup_speed,
-            self.violation_observer,
-            self.event_queue_size,
-        ))
+        Some(host)
     }
 
     /// Consumes the builder to construct a new [`SyncTestSession`]. During a [`SyncTestSession`], Fortress Rollback will simulate a rollback every frame
