@@ -44,9 +44,9 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use fortress_rollback::{
-    hash::DeterministicHasher, ChaosConfig, ChaosSocket, Config, FortressRequest, Frame,
-    InputStatus, PlayerHandle, PlayerType, RequestVec, SessionBuilder, SessionState, SyncConfig,
-    UdpNonBlockingSocket,
+    hash::DeterministicHasher, ChaosConfig, ChaosSocket, Config, FortressEvent, FortressRequest,
+    Frame, InputStatus, PlayerHandle, PlayerType, ProtocolConfig, RequestVec, SessionBuilder,
+    SessionState, SyncConfig, TimeSyncConfig, UdpNonBlockingSocket,
 };
 use serde::{Deserialize, Serialize};
 
@@ -313,7 +313,6 @@ impl TestGame {
                         .log_advance(self.state.frame, self.state.value, &inputs);
                     self.state.advance(&inputs);
                 },
-                _ => unreachable!("Unknown request type"),
             }
         }
     }
@@ -327,11 +326,116 @@ struct TestResult {
     checksum: u64,
     rollbacks: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    error_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     debug_log: Option<Vec<DebugEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostics: Option<ChecksumDiagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<RuntimeDiagnostics>,
+}
+
+#[derive(Clone, Default, Serialize)]
+struct EventSummary {
+    synchronizing: u32,
+    synchronized: u32,
+    network_interrupted: u32,
+    network_resumed: u32,
+    disconnected: u32,
+    sync_timeout: u32,
+    wait_recommendation: u32,
+    input_delay_recommendation: u32,
+    desync_detected: u32,
+    peer_dropped: u32,
+    replay_desync: u32,
+}
+
+impl EventSummary {
+    fn record(&mut self, event: FortressEvent<TestConfig>) {
+        match event {
+            FortressEvent::Synchronizing { .. } => self.synchronizing += 1,
+            FortressEvent::Synchronized { .. } => self.synchronized += 1,
+            FortressEvent::Disconnected { .. } => self.disconnected += 1,
+            FortressEvent::NetworkInterrupted { .. } => self.network_interrupted += 1,
+            FortressEvent::NetworkResumed { .. } => self.network_resumed += 1,
+            FortressEvent::WaitRecommendation { .. } => self.wait_recommendation += 1,
+            FortressEvent::DesyncDetected { .. } => self.desync_detected += 1,
+            FortressEvent::SyncTimeout { .. } => self.sync_timeout += 1,
+            FortressEvent::ReplayDesync { .. } => self.replay_desync += 1,
+            FortressEvent::InputDelayRecommendation { .. } => {
+                self.input_delay_recommendation += 1;
+            },
+            FortressEvent::PeerDropped { .. } => self.peer_dropped += 1,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RuntimeDiagnostics {
+    session_state: String,
+    current_frame: i32,
+    confirmed_frame: i32,
+    target_frame: i32,
+    elapsed_ms: u128,
+    sync_preset: Option<String>,
+    sync_config: String,
+    protocol_config: String,
+    time_sync_config: String,
+    sync_health: String,
+    events: EventSummary,
+}
+
+fn protocol_config_for_preset(preset: Option<&str>) -> ProtocolConfig {
+    match preset {
+        Some("mobile" | "extreme" | "stress_test") => ProtocolConfig::mobile(),
+        Some("high_latency") => ProtocolConfig::high_latency(),
+        _ => ProtocolConfig::default(),
+    }
+}
+
+fn time_sync_config_for_preset(preset: Option<&str>) -> TimeSyncConfig {
+    match preset {
+        Some("lan") => TimeSyncConfig::lan(),
+        Some("competitive") => TimeSyncConfig::competitive(),
+        Some("mobile" | "extreme" | "stress_test" | "high_latency") => TimeSyncConfig::mobile(),
+        _ => TimeSyncConfig::default(),
+    }
+}
+
+fn drain_session_events(
+    session: &mut fortress_rollback::P2PSession<TestConfig>,
+    events: &mut EventSummary,
+) {
+    for event in session.events() {
+        events.record(event);
+    }
+}
+
+fn runtime_diagnostics(
+    session: &fortress_rollback::P2PSession<TestConfig>,
+    target_frame: i32,
+    start_time: Instant,
+    sync_preset: &Option<String>,
+    sync_config: SyncConfig,
+    protocol_config: &ProtocolConfig,
+    time_sync_config: TimeSyncConfig,
+    events: &EventSummary,
+) -> RuntimeDiagnostics {
+    RuntimeDiagnostics {
+        session_state: session.current_state().to_string(),
+        current_frame: session.current_frame().as_i32(),
+        confirmed_frame: session.confirmed_frame().as_i32(),
+        target_frame,
+        elapsed_ms: start_time.elapsed().as_millis(),
+        sync_preset: sync_preset.clone(),
+        sync_config: sync_config.to_string(),
+        protocol_config: protocol_config.to_string(),
+        time_sync_config: time_sync_config.to_string(),
+        sync_health: format!("{:?}", session.all_sync_health()),
+        events: events.clone(),
+    }
 }
 
 fn parse_args() -> Args {
@@ -475,9 +579,11 @@ fn output_error(msg: &str) {
         final_value: 0,
         checksum: 0,
         rollbacks: 0,
+        error_kind: Some("configuration".to_string()),
         error: Some(msg.to_string()),
         debug_log: None,
         diagnostics: None,
+        runtime: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     println!("{json}");
@@ -523,9 +629,11 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
+                error_kind: Some("io".to_string()),
                 error: Some(format!("Failed to bind socket: {e}")),
                 debug_log: None,
                 diagnostics: None,
+                runtime: None,
             };
         },
     };
@@ -551,23 +659,29 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
+                error_kind: Some("configuration".to_string()),
                 error: Some(format!(
                     "Unknown sync preset: '{}'. Valid presets: lan, lossy, mobile, high_latency, competitive, extreme, stress_test",
                     preset
                 )),
                 debug_log: None,
                 diagnostics: None,
+                runtime: None,
             };
         },
         None => SyncConfig::default(),
     };
+    let protocol_config = protocol_config_for_preset(args.sync_preset.as_deref());
+    let time_sync_config = time_sync_config_for_preset(args.sync_preset.as_deref());
 
     let mut sess_builder = SessionBuilder::<TestConfig>::new()
         .with_num_players(num_players)
         .unwrap()
         .with_input_delay(args.input_delay)
         .unwrap()
-        .with_sync_config(sync_config);
+        .with_sync_config(sync_config)
+        .with_protocol_config(protocol_config.clone())
+        .with_time_sync_config(time_sync_config);
 
     // Add players based on our index
     let local_handle = PlayerHandle::new(args.player_index);
@@ -583,9 +697,11 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
+                error_kind: Some("configuration".to_string()),
                 error: Some(format!("Failed to add local player: {e}")),
                 debug_log: None,
                 diagnostics: None,
+                runtime: None,
             };
         },
     };
@@ -599,9 +715,11 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
+                error_kind: Some("configuration".to_string()),
                 error: Some(format!("Failed to add remote player: {e}")),
                 debug_log: None,
                 diagnostics: None,
+                runtime: None,
             };
         },
     };
@@ -615,14 +733,17 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
+                error_kind: Some("session".to_string()),
                 error: Some(format!("Failed to start session: {e}")),
                 debug_log: None,
                 diagnostics: None,
+                runtime: None,
             };
         },
     };
 
     let mut game = TestGame::new(args.debug);
+    let mut event_summary = EventSummary::default();
     let start_time = Instant::now();
     let timeout = Duration::from_secs(if args.timeout_secs > 0 {
         args.timeout_secs
@@ -637,12 +758,23 @@ fn run_test(args: &Args) -> TestResult {
             // Compute checksum from confirmed inputs (even though we timed out)
             let (checksum, diagnostics) =
                 compute_confirmed_checksum_with_diagnostics(&session, args.target_frames);
+            let runtime = runtime_diagnostics(
+                &session,
+                args.target_frames,
+                start_time,
+                &args.sync_preset,
+                sync_config,
+                &protocol_config,
+                time_sync_config,
+                &event_summary,
+            );
             return TestResult {
                 success: false,
                 final_frame: game.state.frame,
                 final_value: game.state.value,
                 checksum,
                 rollbacks: game.rollback_count,
+                error_kind: Some("timeout".to_string()),
                 error: Some(format!(
                     "Timeout (current_frame={}, confirmed_frame={}, target={})",
                     session.current_frame(),
@@ -655,11 +787,13 @@ fn run_test(args: &Args) -> TestResult {
                     None
                 },
                 diagnostics: Some(diagnostics),
+                runtime: Some(runtime),
             };
         }
 
         // Poll network to receive any pending inputs
         session.poll_remote_clients();
+        drain_session_events(&mut session, &mut event_summary);
 
         // Check for completion:
         // We're done when:
@@ -704,6 +838,7 @@ fn run_test(args: &Args) -> TestResult {
 
             while settle_start.elapsed() < settle_duration {
                 session.poll_remote_clients();
+                drain_session_events(&mut session, &mut event_summary);
                 std::thread::sleep(Duration::from_millis(5));
             }
 
@@ -724,12 +859,23 @@ fn run_test(args: &Args) -> TestResult {
                 );
             }
 
+            let runtime = runtime_diagnostics(
+                &session,
+                args.target_frames,
+                start_time,
+                &args.sync_preset,
+                sync_config,
+                &protocol_config,
+                time_sync_config,
+                &event_summary,
+            );
             return TestResult {
                 success: true,
                 final_frame: game.state.frame,
                 final_value: confirmed_value, // Use confirmed value, not speculative
                 checksum,
                 rollbacks: game.rollback_count,
+                error_kind: None,
                 error: None,
                 debug_log: if args.debug {
                     Some(game.debug_log.entries)
@@ -737,6 +883,7 @@ fn run_test(args: &Args) -> TestResult {
                     None
                 },
                 diagnostics: Some(checksum_diagnostics),
+                runtime: Some(runtime),
             };
         }
 
@@ -753,12 +900,23 @@ fn run_test(args: &Args) -> TestResult {
             if let Err(e) = session.add_local_input(local_handle, input) {
                 let (checksum, diagnostics) =
                     compute_confirmed_checksum_with_diagnostics(&session, args.target_frames);
+                let runtime = runtime_diagnostics(
+                    &session,
+                    args.target_frames,
+                    start_time,
+                    &args.sync_preset,
+                    sync_config,
+                    &protocol_config,
+                    time_sync_config,
+                    &event_summary,
+                );
                 return TestResult {
                     success: false,
                     final_frame: game.state.frame,
                     final_value: game.state.value,
                     checksum,
                     rollbacks: game.rollback_count,
+                    error_kind: Some("session".to_string()),
                     error: Some(format!("Failed to add input: {e}")),
                     debug_log: if args.debug {
                         Some(game.debug_log.entries)
@@ -766,20 +924,35 @@ fn run_test(args: &Args) -> TestResult {
                         None
                     },
                     diagnostics: Some(diagnostics),
+                    runtime: Some(runtime),
                 };
             }
 
             match session.advance_frame() {
-                Ok(requests) => game.handle_requests(requests),
+                Ok(requests) => {
+                    drain_session_events(&mut session, &mut event_summary);
+                    game.handle_requests(requests);
+                },
                 Err(e) => {
                     let (checksum, diagnostics) =
                         compute_confirmed_checksum_with_diagnostics(&session, args.target_frames);
+                    let runtime = runtime_diagnostics(
+                        &session,
+                        args.target_frames,
+                        start_time,
+                        &args.sync_preset,
+                        sync_config,
+                        &protocol_config,
+                        time_sync_config,
+                        &event_summary,
+                    );
                     return TestResult {
                         success: false,
                         final_frame: game.state.frame,
                         final_value: game.state.value,
                         checksum,
                         rollbacks: game.rollback_count,
+                        error_kind: Some("session".to_string()),
                         error: Some(format!("Failed to advance frame: {e}")),
                         debug_log: if args.debug {
                             Some(game.debug_log.entries)
@@ -787,6 +960,7 @@ fn run_test(args: &Args) -> TestResult {
                             None
                         },
                         diagnostics: Some(diagnostics),
+                        runtime: Some(runtime),
                     };
                 },
             }

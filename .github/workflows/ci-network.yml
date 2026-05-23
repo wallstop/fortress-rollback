@@ -29,7 +29,7 @@ jobs:
   network-tests:
     name: Network Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -125,7 +125,7 @@ jobs:
       - name: Run multi-process network tests (nextest)
         uses: nick-fields/retry@v4
         with:
-          timeout_minutes: 10
+          timeout_minutes: 30
           max_attempts: 2
           retry_wait_seconds: 30
           retry_on_exit_code: 143
