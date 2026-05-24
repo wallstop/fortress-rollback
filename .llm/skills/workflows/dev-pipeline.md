@@ -135,7 +135,7 @@ If the change introduces a meaningful architecture or behavior choice, add a one
 ```bash
 # Check frequently (after every logical change)
 cargo check
-cargo clippy --all-targets --features tokio,json
+cargo clippy --workspace --all-targets --features tokio,json
 
 # Run affected tests
 cargo nextest run module_name --no-capture

@@ -54,7 +54,7 @@ Record these facts before proceeding:
 ```bash
 # Reproduce the exact CI command
 cargo fmt --check
-cargo clippy --all-targets --features tokio,json -- -D warnings
+cargo clippy --workspace --all-targets --features tokio,json -- -D warnings
 cargo nextest run --no-capture
 ```
 

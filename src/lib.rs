@@ -2408,121 +2408,200 @@ mod tests {
     // FortressEvent Display Tests
     // ==========================================
 
-    #[test]
-    fn fortress_event_display_synchronizing() {
-        let event: FortressEvent<TestConfig> = FortressEvent::Synchronizing {
-            addr: test_addr(8080),
-            total: 5,
-            count: 2,
-            total_requests_sent: 3,
-            elapsed_ms: 100,
+    /// Asserts a [`FortressEvent`]'s `Display` output against substrings derived
+    /// from an **exhaustive** match over the variant.
+    ///
+    /// This is the Display-path drift detector that mirrors the exhaustive event
+    /// `match` in the network-test-peer: the `match self` below has no `_` arm, so
+    /// adding any new [`FortressEvent`] variant fails to compile until its expected
+    /// Display substrings are spelled out here. Each arm returns the leading
+    /// `"Variant("` prefix (checked with `starts_with`) followed by the labelled
+    /// field substrings that the [`Display`](std::fmt::Display) impl must emit
+    /// (each checked with `contains`).
+    ///
+    /// Every variant's Display ends with `)`, so the helper also asserts
+    /// `ends_with(')')`. Combined with the per-field substrings this rejects any
+    /// trailing garbage appended after the closing paren, keeping the strength of
+    /// the cases that were originally exact-string (`assert_eq!`) comparisons
+    /// without re-spelling each full row.
+    #[track_caller]
+    fn check_event_display(event: &FortressEvent<TestConfig>) {
+        // Exhaustive: no `_` arm. A new variant must be added here (and to the
+        // sample list in the test) before the suite will compile.
+        let expected: Vec<String> = match event {
+            FortressEvent::Synchronizing {
+                addr,
+                total,
+                count,
+                total_requests_sent,
+                elapsed_ms,
+            } => vec![
+                "Synchronizing(".to_string(),
+                format!("{count}/{total}"),
+                format!("addr={addr}"),
+                format!("requests_sent={total_requests_sent}"),
+                format!("elapsed={elapsed_ms}ms"),
+            ],
+            FortressEvent::Synchronized { addr } => {
+                vec!["Synchronized(".to_string(), format!("addr={addr}")]
+            },
+            FortressEvent::Disconnected { addr } => {
+                vec!["Disconnected(".to_string(), format!("addr={addr}")]
+            },
+            FortressEvent::NetworkInterrupted {
+                addr,
+                disconnect_timeout,
+            } => vec![
+                "NetworkInterrupted(".to_string(),
+                format!("addr={addr}"),
+                format!("timeout={disconnect_timeout}ms"),
+            ],
+            FortressEvent::NetworkResumed { addr } => {
+                vec!["NetworkResumed(".to_string(), format!("addr={addr}")]
+            },
+            FortressEvent::WaitRecommendation { skip_frames } => vec![
+                "WaitRecommendation(".to_string(),
+                format!("skip_frames={skip_frames}"),
+            ],
+            FortressEvent::DesyncDetected {
+                frame,
+                local_checksum,
+                remote_checksum,
+                addr,
+            } => vec![
+                "DesyncDetected(".to_string(),
+                format!("frame={}", frame.as_i32()),
+                format!("local={local_checksum:#x}"),
+                format!("remote={remote_checksum:#x}"),
+                format!("addr={addr}"),
+            ],
+            FortressEvent::SyncTimeout { addr, elapsed_ms } => vec![
+                "SyncTimeout(".to_string(),
+                format!("addr={addr}"),
+                format!("elapsed={elapsed_ms}ms"),
+            ],
+            FortressEvent::ReplayDesync {
+                frame,
+                expected_checksum,
+                actual_checksum,
+            } => vec![
+                "ReplayDesync(".to_string(),
+                format!("frame={}", frame.as_i32()),
+                format!("expected={expected_checksum:#x}"),
+                format!("actual={actual_checksum:#x}"),
+            ],
+            FortressEvent::SpectatorDivergence {
+                frame,
+                player,
+                primary_addr,
+                conflicting_addr,
+            } => vec![
+                "SpectatorDivergence(".to_string(),
+                format!("frame={}", frame.as_i32()),
+                format!("player={player}"),
+                format!("primary_addr={primary_addr}"),
+                format!("conflicting_addr={conflicting_addr}"),
+            ],
+            FortressEvent::InputDelayRecommendation {
+                player_handle,
+                current_delay,
+                suggested_delay,
+            } => vec![
+                "InputDelayRecommendation(".to_string(),
+                format!("player={player_handle}"),
+                format!("current={current_delay}"),
+                format!("suggested={suggested_delay}"),
+            ],
+            FortressEvent::PeerDropped { handle, addr } => vec![
+                "PeerDropped(".to_string(),
+                format!("handle={handle}"),
+                format!("addr={addr}"),
+            ],
         };
+
         let display = event.to_string();
-        assert!(display.starts_with("Synchronizing("));
-        assert!(display.contains("2/5"));
-        assert!(display.contains("127.0.0.1:8080"));
-        assert!(display.contains("requests_sent=3"));
-        assert!(display.contains("elapsed=100ms"));
+        let (prefix, substrings) = expected
+            .split_first()
+            .expect("each variant must supply at least the prefix");
+        assert!(
+            display.starts_with(prefix.as_str()),
+            "{display:?} should start with {prefix:?}"
+        );
+        assert!(
+            display.ends_with(')'),
+            "{display:?} should end with ')' (rejects trailing garbage)"
+        );
+        for needle in substrings {
+            assert!(
+                display.contains(needle.as_str()),
+                "{display:?} should contain {needle:?}"
+            );
+        }
     }
 
     #[test]
-    fn fortress_event_display_synchronized() {
-        let event: FortressEvent<TestConfig> = FortressEvent::Synchronized {
-            addr: test_addr(9000),
-        };
-        assert_eq!(event.to_string(), "Synchronized(addr=127.0.0.1:9000)");
-    }
+    fn fortress_event_display_renders_every_variant() {
+        // One constructed sample per FortressEvent variant. The helper derives
+        // the expected substrings via an exhaustive match, so this list and the
+        // helper's match must both name every variant -- a missing variant fails
+        // to compile, guarding the Display path against silent drift.
+        let samples: &[FortressEvent<TestConfig>] = &[
+            FortressEvent::Synchronizing {
+                addr: test_addr(8080),
+                total: 5,
+                count: 2,
+                total_requests_sent: 3,
+                elapsed_ms: 100,
+            },
+            FortressEvent::Synchronized {
+                addr: test_addr(9000),
+            },
+            FortressEvent::Disconnected {
+                addr: test_addr(7000),
+            },
+            FortressEvent::NetworkInterrupted {
+                addr: test_addr(8080),
+                disconnect_timeout: 5000,
+            },
+            FortressEvent::NetworkResumed {
+                addr: test_addr(8080),
+            },
+            FortressEvent::WaitRecommendation { skip_frames: 3 },
+            FortressEvent::DesyncDetected {
+                frame: Frame::new(100),
+                local_checksum: 0x1234,
+                remote_checksum: 0x5678,
+                addr: test_addr(8080),
+            },
+            FortressEvent::SyncTimeout {
+                addr: test_addr(8080),
+                elapsed_ms: 10000,
+            },
+            FortressEvent::ReplayDesync {
+                frame: Frame::new(42),
+                expected_checksum: 0xAAAA,
+                actual_checksum: 0xBBBB,
+            },
+            FortressEvent::SpectatorDivergence {
+                frame: Frame::new(7),
+                player: PlayerHandle::new(1),
+                primary_addr: test_addr(7000),
+                conflicting_addr: test_addr(7001),
+            },
+            FortressEvent::InputDelayRecommendation {
+                player_handle: PlayerHandle::new(2),
+                current_delay: 3,
+                suggested_delay: 5,
+            },
+            FortressEvent::PeerDropped {
+                handle: PlayerHandle::new(4),
+                addr: test_addr(7002),
+            },
+        ];
 
-    #[test]
-    fn fortress_event_display_disconnected() {
-        let event: FortressEvent<TestConfig> = FortressEvent::Disconnected {
-            addr: test_addr(7000),
-        };
-        assert_eq!(event.to_string(), "Disconnected(addr=127.0.0.1:7000)");
-    }
-
-    #[test]
-    fn fortress_event_display_network_interrupted() {
-        let event: FortressEvent<TestConfig> = FortressEvent::NetworkInterrupted {
-            addr: test_addr(8080),
-            disconnect_timeout: 5000,
-        };
-        let display = event.to_string();
-        assert!(display.starts_with("NetworkInterrupted("));
-        assert!(display.contains("127.0.0.1:8080"));
-        assert!(display.contains("timeout=5000ms"));
-    }
-
-    #[test]
-    fn fortress_event_display_network_resumed() {
-        let event: FortressEvent<TestConfig> = FortressEvent::NetworkResumed {
-            addr: test_addr(8080),
-        };
-        assert_eq!(event.to_string(), "NetworkResumed(addr=127.0.0.1:8080)");
-    }
-
-    #[test]
-    fn fortress_event_display_wait_recommendation() {
-        let event: FortressEvent<TestConfig> = FortressEvent::WaitRecommendation { skip_frames: 3 };
-        assert_eq!(event.to_string(), "WaitRecommendation(skip_frames=3)");
-    }
-
-    #[test]
-    fn fortress_event_display_desync_detected() {
-        let event: FortressEvent<TestConfig> = FortressEvent::DesyncDetected {
-            frame: Frame::new(100),
-            local_checksum: 0x1234,
-            remote_checksum: 0x5678,
-            addr: test_addr(8080),
-        };
-        let display = event.to_string();
-        assert!(display.starts_with("DesyncDetected("));
-        assert!(display.contains("frame=100"));
-        assert!(display.contains("local=0x1234"));
-        assert!(display.contains("remote=0x5678"));
-        assert!(display.contains("127.0.0.1:8080"));
-    }
-
-    #[test]
-    fn fortress_event_display_sync_timeout() {
-        let event: FortressEvent<TestConfig> = FortressEvent::SyncTimeout {
-            addr: test_addr(8080),
-            elapsed_ms: 10000,
-        };
-        let display = event.to_string();
-        assert!(display.starts_with("SyncTimeout("));
-        assert!(display.contains("127.0.0.1:8080"));
-        assert!(display.contains("elapsed=10000ms"));
-    }
-
-    #[test]
-    fn fortress_event_display_replay_desync() {
-        let event: FortressEvent<TestConfig> = FortressEvent::ReplayDesync {
-            frame: Frame::new(42),
-            expected_checksum: 0xAAAA,
-            actual_checksum: 0xBBBB,
-        };
-        let display = event.to_string();
-        assert!(display.starts_with("ReplayDesync("));
-        assert!(display.contains("frame=42"));
-        assert!(display.contains("expected=0xaaaa"));
-        assert!(display.contains("actual=0xbbbb"));
-    }
-
-    #[test]
-    fn fortress_event_display_spectator_divergence() {
-        let event: FortressEvent<TestConfig> = FortressEvent::SpectatorDivergence {
-            frame: Frame::new(7),
-            player: PlayerHandle::new(1),
-            primary_addr: test_addr(7000),
-            conflicting_addr: test_addr(7001),
-        };
-        let display = event.to_string();
-        assert!(display.starts_with("SpectatorDivergence("));
-        assert!(display.contains("frame=7"));
-        assert!(display.contains("player=PlayerHandle(1)"));
-        assert!(display.contains("127.0.0.1:7000"));
-        assert!(display.contains("127.0.0.1:7001"));
+        for event in samples {
+            check_event_display(event);
+        }
     }
 
     #[test]

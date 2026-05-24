@@ -1200,6 +1200,7 @@ impl<T: Config> SessionBuilder<T> {
     /// ```
     ///
     /// [`FortressEvent::Disconnected`]: crate::FortressEvent::Disconnected
+    /// [`FortressEvent::SpectatorDivergence`]: crate::FortressEvent::SpectatorDivergence
     /// [`FortressError::PredictionThreshold`]: crate::FortressError::PredictionThreshold
     /// [`SpectatorSession::num_hosts`]: crate::SpectatorSession::num_hosts
     pub fn start_spectator_session_multi(

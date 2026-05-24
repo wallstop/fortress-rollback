@@ -350,10 +350,15 @@ struct EventSummary {
     desync_detected: u32,
     peer_dropped: u32,
     replay_desync: u32,
+    spectator_divergence: u32,
 }
 
 impl EventSummary {
     fn record(&mut self, event: FortressEvent<TestConfig>) {
+        // This match is intentionally exhaustive (no `_ =>` wildcard): it is the
+        // compile-time detector for newly added `FortressEvent` variants. Each
+        // per-variant counter is a diagnostic surfaced in the peer's JSON output,
+        // so a new variant must fail to compile here until it is wired through.
         match event {
             FortressEvent::Synchronizing { .. } => self.synchronizing += 1,
             FortressEvent::Synchronized { .. } => self.synchronized += 1,
@@ -368,6 +373,7 @@ impl EventSummary {
                 self.input_delay_recommendation += 1;
             },
             FortressEvent::PeerDropped { .. } => self.peer_dropped += 1,
+            FortressEvent::SpectatorDivergence { .. } => self.spectator_divergence += 1,
         }
     }
 }
@@ -413,6 +419,9 @@ fn drain_session_events(
     }
 }
 
+// Aggregates many independent diagnostic fields into a single struct for the
+// JSON report; grouping them into sub-structs would not aid this test harness.
+#[allow(clippy::too_many_arguments)]
 fn runtime_diagnostics(
     session: &fortress_rollback::P2PSession<TestConfig>,
     target_frame: i32,

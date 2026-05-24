@@ -23,13 +23,13 @@
 
 ```bash
 # Pre-refactoring
-cargo nextest run && cargo clippy --all-targets --features tokio,json
+cargo nextest run && cargo clippy --workspace --all-targets --features tokio,json
 
 # After each change
 cargo check && cargo nextest run
 
 # Post-refactoring
-cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run
+cargo fmt && cargo clippy --workspace --all-targets --features tokio,json && cargo nextest run
 rg "unwrap\(\)|expect\(|panic!\(|todo!\(" src/
 ```
 
@@ -76,11 +76,13 @@ rg "unwrap\(\)|expect\(|panic!\(|todo!\(" src/
 ## Automated Transformation Checklist
 
 ### Pre-Refactoring
+
 - [ ] Tests pass: `cargo nextest run`
-- [ ] No clippy warnings: `cargo clippy --all-targets --features tokio,json`
+- [ ] No clippy warnings: `cargo clippy --workspace --all-targets --features tokio,json`
 - [ ] Git commit current changes
 
 ### Post-Refactoring
+
 - [ ] All tests pass
 - [ ] No new clippy warnings
 - [ ] No new panicking patterns

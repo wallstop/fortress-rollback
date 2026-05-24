@@ -2,7 +2,7 @@
 """
 Cross-platform cargo clippy wrapper for pre-commit hooks.
 
-Runs `cargo clippy --all-targets --features tokio,json` with warnings as errors.
+Runs `cargo clippy --workspace --all-targets --features tokio,json` with warnings as errors.
 Works on Windows (PowerShell/cmd), macOS, and Linux.
 """
 
@@ -26,7 +26,7 @@ def main() -> int:
         # Include tokio,json features so feature-gated code is also linted
         result = subprocess.run(
             [
-                "cargo", "clippy", "--all-targets",
+                "cargo", "clippy", "--workspace", "--all-targets",
                 "--features", "tokio,json",
                 "--", "-D", "warnings",
             ],

@@ -17,7 +17,7 @@
 ## Quick Commands
 
 ```bash
-cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run --no-capture  # Full local validation
+cargo fmt && cargo clippy --workspace --all-targets --features tokio,json && cargo nextest run --no-capture  # Full local validation
 cargo c && cargo t                        # Aliases from .cargo/config.toml
 typos                                     # Spell check (CI enforced)
 cargo test --features z3-verification -- --nocapture  # Z3 proofs (slow)
@@ -233,7 +233,7 @@ Validate locally: `python3 scripts/hooks/check-changelog-unreleased.py`. Also ru
 
 ## Mandatory Linting
 
-- **After Rust changes:** `cargo fmt && cargo clippy --all-targets --features tokio,json` (or `cargo c`)
+- **After Rust changes:** `cargo fmt && cargo clippy --workspace --all-targets --features tokio,json` (or `cargo c`)
 - **After workflow changes:** `actionlint` (no exceptions)
 - **After doc changes:** `cargo doc --no-deps`
 - **After markdown changes:** `npx markdownlint 'file.md' --config .markdownlint.json --fix`
@@ -244,7 +244,7 @@ Validate locally: `python3 scripts/hooks/check-changelog-unreleased.py`. Also ru
 - **Link validation:** `./scripts/docs/check-links.sh`
 - **Spell check:** `typos`
 - **Vale (advisory):** `vale docs/` -- checks prose quality, non-blocking in CI. Cheat-sheet of recurring swaps and weasel words: [`.llm/skills/workflows/user-facing-docs.md`](skills/workflows/user-facing-docs.md#prose-conventions). Agent preflight surfaces per-file counts via the `vale-advisory` check.
-- **Full local validation:** `cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run --no-capture`
+- **Full local validation:** `cargo fmt && cargo clippy --workspace --all-targets --features tokio,json && cargo nextest run --no-capture`
 
 Shell regex portability rule: avoid PCRE-style escapes in `grep -E`/`sed -E` (`\b`, `\s`, `\w`, etc.). Use POSIX-safe classes like `[[:space:]]`, `[[:alnum:]_]`, and token boundaries `(^|[^[:alnum:]_])word([^[:alnum:]_]|$)`.
 
@@ -279,7 +279,7 @@ For docs/wiki mirrors, use a first-line `<!-- SYNC: ... -->` header with explici
 ## Quality Checklist
 
 - [ ] `cargo fmt` run
-- [ ] `cargo clippy --all-targets --features tokio,json` passes
+- [ ] `cargo clippy --workspace --all-targets --features tokio,json` passes
 - [ ] All tests pass (`cargo nextest run`)
 - [ ] Tests for new functionality included
 - [ ] Rustdoc comments with examples
@@ -291,7 +291,7 @@ For docs/wiki mirrors, use a first-line `<!-- SYNC: ... -->` header with explici
 
 ## For Agents
 
-When spawning sub-agents or using Task tools: the sub-agent MUST run `cargo fmt` and verify `cargo clippy --all-targets --features tokio,json` passes on any modified files. If the sub-agent cannot run these, the parent agent must run them after receiving changes.
+When spawning sub-agents or using Task tools: the sub-agent MUST run `cargo fmt` and verify `cargo clippy --workspace --all-targets --features tokio,json` passes on any modified files. If the sub-agent cannot run these, the parent agent must run them after receiving changes.
 
 ---
 
