@@ -1,5 +1,5 @@
 use std::{
-    io::ErrorKind,
+    io::{Error, ErrorKind},
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
 };
 
@@ -30,21 +30,43 @@ const IDEAL_MAX_UDP_PACKET_SIZE: usize = 508;
 pub struct UdpNonBlockingSocket {
     socket: UdpSocket,
     /// Receive buffer - reused across recv_from calls
-    recv_buffer: [u8; RECV_BUFFER_SIZE],
+    recv_buffer: Vec<u8>,
     /// Send buffer - reused across send_to calls to avoid allocation
-    send_buffer: [u8; SEND_BUFFER_SIZE],
+    send_buffer: Vec<u8>,
 }
 
 impl UdpNonBlockingSocket {
     /// Binds an UDP Socket to 0.0.0.0:port and set it to non-blocking mode.
     pub fn bind_to_port(port: u16) -> Result<Self, std::io::Error> {
+        Self::bind_to_port_with_buffer_sizes(port, RECV_BUFFER_SIZE, SEND_BUFFER_SIZE)
+    }
+
+    /// Binds a UDP socket with caller-configured receive and send buffer sizes.
+    ///
+    /// The default [`bind_to_port`](Self::bind_to_port) constructor uses 4 KiB
+    /// receive and 1 KiB send buffers. Applications with larger serialized
+    /// inputs can raise either value without implementing a custom socket.
+    pub fn bind_to_port_with_buffer_sizes(
+        port: u16,
+        recv_buffer_size: usize,
+        send_buffer_size: usize,
+    ) -> Result<Self, std::io::Error> {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
         let socket = UdpSocket::bind(addr)?;
         socket.set_nonblocking(true)?;
+        Self::from_socket_with_buffer_sizes(socket, recv_buffer_size, send_buffer_size)
+    }
+
+    /// Wraps an existing UDP socket with caller-configured buffers.
+    pub fn from_socket_with_buffer_sizes(
+        socket: UdpSocket,
+        recv_buffer_size: usize,
+        send_buffer_size: usize,
+    ) -> Result<Self, std::io::Error> {
         Ok(Self {
             socket,
-            recv_buffer: [0; RECV_BUFFER_SIZE],
-            send_buffer: [0; SEND_BUFFER_SIZE],
+            recv_buffer: zeroed_buffer(recv_buffer_size, "udp recv buffer")?,
+            send_buffer: zeroed_buffer(send_buffer_size, "udp send buffer")?,
         })
     }
 
@@ -134,18 +156,18 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
                 Ok((number_of_bytes, src_addr)) => {
                     // Defensive check: if we received more bytes than buffer allows,
                     // something is seriously wrong - skip this packet
-                    if number_of_bytes > RECV_BUFFER_SIZE {
+                    if number_of_bytes > self.recv_buffer.len() {
                         report_violation!(
                             ViolationSeverity::Error,
                             ViolationKind::NetworkProtocol,
                             "Received {} bytes but buffer is only {} bytes",
                             number_of_bytes,
-                            RECV_BUFFER_SIZE
+                            self.recv_buffer.len()
                         );
                         continue;
                     }
                     if let Some(buf_slice) = self.recv_buffer.get(0..number_of_bytes) {
-                        if let Ok(msg) = codec::decode_value(buf_slice) {
+                        if let Ok((msg, _consumed)) = codec::decode_message(buf_slice) {
                             received_messages.push((src_addr, msg));
                         }
                     } else {
@@ -154,7 +176,7 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
                             ViolationKind::NetworkProtocol,
                             "recv_buffer slice [0..{}] out of bounds (buffer size: {})",
                             number_of_bytes,
-                            RECV_BUFFER_SIZE
+                            self.recv_buffer.len()
                         );
                     }
                 },
@@ -176,6 +198,16 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
             }
         }
     }
+}
+
+fn zeroed_buffer(size: usize, name: &'static str) -> Result<Vec<u8>, Error> {
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(size)
+        .map_err(|_err| Error::other(format!("failed to reserve {name} of {size} bytes")))?;
+    // alloc-bound: exact size was reserved fallibly above; resize only initializes that capacity
+    buffer.resize(size, 0);
+    Ok(buffer)
 }
 
 impl UdpNonBlockingSocket {
@@ -274,6 +306,15 @@ mod tests {
             "Failed to bind to ephemeral port 0: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    #[cfg(not(miri))] // Miri cannot execute foreign functions like socket()
+    fn test_udp_socket_bind_with_custom_buffer_sizes() {
+        let socket = UdpNonBlockingSocket::bind_to_port_with_buffer_sizes(0, 8192, 2048).unwrap();
+
+        assert_eq!(socket.recv_buffer.len(), 8192);
+        assert_eq!(socket.send_buffer.len(), 2048);
     }
 
     #[test]

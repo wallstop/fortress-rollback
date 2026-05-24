@@ -77,7 +77,7 @@ pub use network::chaos_socket::{ChaosConfig, ChaosConfigBuilder, ChaosSocket, Ch
 pub use network::messages::Message;
 pub use network::network_stats::NetworkStats;
 pub use network::udp_socket::UdpNonBlockingSocket;
-pub use replay::{Replay, ReplayMetadata};
+pub use replay::{Replay, ReplayDecodeConfig, ReplayMetadata};
 use serde::{de::DeserializeOwned, Serialize};
 pub use sessions::builder::SessionBuilder;
 pub use sessions::config::{
@@ -318,9 +318,13 @@ pub mod __internal {
     pub use crate::time_sync::TimeSync;
 
     // Network internals
-    pub use crate::network::compression::{decode, delta_decode, delta_encode, encode};
+    pub use crate::network::compression::{
+        decode, decode_with_max_len, delta_decode, delta_encode, encode,
+    };
     pub use crate::network::messages::ConnectionStatus;
-    pub use crate::network::protocol::{Event, ProtocolState, UdpProtocol};
+    pub use crate::network::protocol::{
+        fuzz_protocol_input_packet, Event, ProtocolState, UdpProtocol,
+    };
 
     // RLE compression (internal implementation)
     pub use crate::rle::{decode as rle_decode, encode as rle_encode};
@@ -1579,6 +1583,17 @@ where
         /// The checksum computed during replay playback.
         actual_checksum: u128,
     },
+    /// Redundant spectator hosts reported different inputs for the same player and frame.
+    SpectatorDivergence {
+        /// The frame where redundant hosts disagreed.
+        frame: Frame,
+        /// The player whose input differed between hosts.
+        player: PlayerHandle,
+        /// The canonical/highest-priority host address.
+        primary_addr: T::Address,
+        /// The lower-priority host address that supplied conflicting input.
+        conflicting_addr: T::Address,
+    },
     /// Recommends adjusting the input delay for a local player based on
     /// observed network conditions.
     ///
@@ -1683,6 +1698,19 @@ where
                 frame.as_i32(),
                 expected_checksum,
                 actual_checksum
+            ),
+            Self::SpectatorDivergence {
+                frame,
+                player,
+                primary_addr,
+                conflicting_addr,
+            } => write!(
+                f,
+                "SpectatorDivergence(frame={}, player={}, primary_addr={}, conflicting_addr={})",
+                frame.as_i32(),
+                player,
+                primary_addr,
+                conflicting_addr
             ),
             Self::InputDelayRecommendation {
                 player_handle,
@@ -2014,6 +2042,16 @@ pub trait Config: 'static + Send + Sync {
 /// However you wish to send and receive messages, it should be implemented through these two methods.
 /// Messages should be sent in an UDP-like fashion, unordered and unreliable.
 /// Fortress Rollback has an internal protocol on top of this to make sure all important information is sent and received.
+///
+/// # Allocation contract
+///
+/// [`NonBlockingSocket::receive_all_messages`] returns an owned batch, so custom
+/// socket implementations must keep that batch bounded. Do not grow the returned
+/// [`Vec`] from untrusted wire lengths without a protocol-level cap, and prefer
+/// fallible reservation when buffering packets internally. If an implementation
+/// has more packets ready than its configured cap, it should return a bounded
+/// prefix and keep or drop the remainder according to that transport's normal
+/// backpressure policy rather than risking allocator abort.
 #[cfg(feature = "sync-send")]
 pub trait NonBlockingSocket<A>: Send + Sync
 where
@@ -2024,6 +2062,12 @@ where
 
     /// This method should return all messages received since the last time this method was called.
     /// The pairs `(A, Message)` indicate from which address each packet was received.
+    ///
+    /// Allocation contract: this existing trait shape drains into a `Vec`. Current
+    /// session code treats that as the socket-adapter boundary and performs
+    /// additional internal staging fallibly where practical. A future trait
+    /// redesign should add bounded draining so socket adapters can stream packets
+    /// without building an unbounded collection first.
     fn receive_all_messages(&mut self) -> Vec<(A, Message)>;
 }
 
@@ -2049,6 +2093,16 @@ pub trait Config: 'static {
 /// However you wish to send and receive messages, it should be implemented through these two methods.
 /// Messages should be sent in an UDP-like fashion, unordered and unreliable.
 /// Fortress Rollback has an internal protocol on top of this to make sure all important information is sent and received.
+///
+/// # Allocation contract
+///
+/// [`NonBlockingSocket::receive_all_messages`] returns an owned batch, so custom
+/// socket implementations must keep that batch bounded. Do not grow the returned
+/// [`Vec`] from untrusted wire lengths without a protocol-level cap, and prefer
+/// fallible reservation when buffering packets internally. If an implementation
+/// has more packets ready than its configured cap, it should return a bounded
+/// prefix and keep or drop the remainder according to that transport's normal
+/// backpressure policy rather than risking allocator abort.
 #[cfg(not(feature = "sync-send"))]
 pub trait NonBlockingSocket<A>
 where
@@ -2059,6 +2113,12 @@ where
 
     /// This method should return all messages received since the last time this method was called.
     /// The pairs `(A, Message)` indicate from which address each packet was received.
+    ///
+    /// Allocation contract: this existing trait shape drains into a `Vec`. Current
+    /// session code treats that as the socket-adapter boundary and performs
+    /// additional internal staging fallibly where practical. A future trait
+    /// redesign should add bounded draining so socket adapters can stream packets
+    /// without building an unbounded collection first.
     fn receive_all_messages(&mut self) -> Vec<(A, Message)>;
 }
 
@@ -2447,6 +2507,46 @@ mod tests {
         assert!(display.contains("frame=42"));
         assert!(display.contains("expected=0xaaaa"));
         assert!(display.contains("actual=0xbbbb"));
+    }
+
+    #[test]
+    fn fortress_event_display_spectator_divergence() {
+        let event: FortressEvent<TestConfig> = FortressEvent::SpectatorDivergence {
+            frame: Frame::new(7),
+            player: PlayerHandle::new(1),
+            primary_addr: test_addr(7000),
+            conflicting_addr: test_addr(7001),
+        };
+        let display = event.to_string();
+        assert!(display.starts_with("SpectatorDivergence("));
+        assert!(display.contains("frame=7"));
+        assert!(display.contains("player=PlayerHandle(1)"));
+        assert!(display.contains("127.0.0.1:7000"));
+        assert!(display.contains("127.0.0.1:7001"));
+    }
+
+    #[test]
+    fn fortress_event_spectator_divergence_fields() {
+        let event: FortressEvent<TestConfig> = FortressEvent::SpectatorDivergence {
+            frame: Frame::new(9),
+            player: PlayerHandle::new(0),
+            primary_addr: test_addr(7100),
+            conflicting_addr: test_addr(7101),
+        };
+        if let FortressEvent::SpectatorDivergence {
+            frame,
+            player,
+            primary_addr,
+            conflicting_addr,
+        } = event
+        {
+            assert_eq!(frame, Frame::new(9));
+            assert_eq!(player, PlayerHandle::new(0));
+            assert_eq!(primary_addr, test_addr(7100));
+            assert_eq!(conflicting_addr, test_addr(7101));
+        } else {
+            panic!("Expected SpectatorDivergence");
+        }
     }
 
     #[test]

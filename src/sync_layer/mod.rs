@@ -107,6 +107,7 @@ mod saved_states;
 pub use game_state_cell::{GameStateAccessor, GameStateCell};
 pub use saved_states::SavedStates;
 
+use crate::error::allocation_failed;
 use crate::frame_info::PlayerInput;
 use crate::input_queue::InputQueue;
 use crate::network::messages::ConnectionStatus;
@@ -206,59 +207,67 @@ impl<T: Config> SyncLayer<T> {
     /// * `max_prediction` - Maximum frames of prediction allowed
     /// * `queue_length` - The size of the input queue circular buffer per player
     ///
-    /// # Behavior on invalid `queue_length`
-    ///
-    /// `InputQueue::with_queue_length` rejects `queue_length < 2`. If the
-    /// requested `queue_length` is invalid, this constructor falls back to
-    /// the library default ([`INPUT_QUEUE_LENGTH`]) for each affected slot.
-    ///
-    /// The library default is a compile-time constant guaranteed to be
-    /// `>= 2` (statically asserted in `_INPUT_QUEUE_LENGTH_IS_VALID`),
-    /// so the fallback's None arm is unreachable. The post-loop
-    /// `debug_assert_eq!` surfaces any future regression that breaks the
-    /// const-assertion.
-    ///
-    /// `InputQueue::with_queue_length` itself reports a violation when
-    /// `queue_length < 2`, so callers that pass an invalid length still
-    /// observe the failure through the standard violation channel.
-    ///
-    /// [`INPUT_QUEUE_LENGTH`]: crate::input_queue::INPUT_QUEUE_LENGTH
+    /// Production construction uses [`Self::try_with_queue_length`] so invalid
+    /// configuration and failed reservations can be returned as structured
+    /// errors. This compatibility wrapper reports the error and returns an
+    /// empty internal layer rather than panicking or allocating unchecked.
     #[must_use]
     pub fn with_queue_length(
         num_players: usize,
         max_prediction: usize,
         queue_length: usize,
     ) -> Self {
-        // alloc-bound: num_players is the session player count fixed at construction (validated non-zero by SessionBuilder)
-        let mut input_queues = Vec::with_capacity(num_players);
-        for player_index in 0..num_players {
-            if let Some(queue) = InputQueue::with_queue_length(player_index, queue_length) {
-                input_queues.push(queue);
-                continue;
-            }
-            // _INPUT_QUEUE_LENGTH_IS_VALID below guarantees this at compile
-            // time; the post-loop debug_assert! catches any future regression
-            // that breaks the const-assertion in non-release builds.
-            if let Some(queue) =
-                InputQueue::with_queue_length(player_index, crate::input_queue::INPUT_QUEUE_LENGTH)
-            {
-                input_queues.push(queue);
-            }
+        match Self::try_with_queue_length(num_players, max_prediction, queue_length) {
+            Ok(sync_layer) => sync_layer,
+            Err(error) => {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::FrameSync,
+                    "Failed to create SyncLayer: {}. Falling back to an empty internal layer.",
+                    error
+                );
+                Self {
+                    num_players: 0,
+                    max_prediction: 0,
+                    last_confirmed_frame: Frame::NULL,
+                    last_saved_frame: Frame::NULL,
+                    current_frame: Frame::new(0),
+                    saved_states: SavedStates::new(0),
+                    input_queues: Vec::new(),
+                }
+            },
         }
-        debug_assert_eq!(
-            input_queues.len(),
-            num_players,
-            "SyncLayer::with_queue_length: input_queues.len() must equal num_players"
-        );
-        Self {
+    }
+
+    /// Creates a new `SyncLayer`, returning a structured error if any backing
+    /// buffer cannot be reserved.
+    pub(crate) fn try_with_queue_length(
+        num_players: usize,
+        max_prediction: usize,
+        queue_length: usize,
+    ) -> Result<Self, FortressError> {
+        let mut input_queues = Vec::new();
+        input_queues
+            .try_reserve_exact(num_players)
+            .map_err(|_err| allocation_failed("sync_layer.input_queues", num_players))?;
+        for player_index in 0..num_players {
+            input_queues.push(InputQueue::try_with_queue_length(
+                player_index,
+                queue_length,
+            )?);
+        }
+
+        let saved_states = SavedStates::try_new(max_prediction)?;
+
+        Ok(Self {
             num_players,
             max_prediction,
             last_confirmed_frame: Frame::NULL,
             last_saved_frame: Frame::NULL,
             current_frame: Frame::new(0),
-            saved_states: SavedStates::new(max_prediction),
+            saved_states,
             input_queues,
-        }
+        })
     }
 
     /// Returns the current simulation frame.
@@ -675,12 +684,16 @@ impl<T: Config> SyncLayer<T> {
         connect_status: &[ConnectionStatus],
     ) -> Option<InputVec<T::Input>> {
         let num_players = connect_status.len();
-        let mut inputs = if num_players <= 4 {
-            InputVec::new()
-        } else {
-            // alloc-bound: num_players == connect_status.len() (an in-memory slice the caller owns)
-            InputVec::with_capacity(num_players)
-        };
+        let mut inputs = InputVec::new();
+        if inputs.try_reserve(num_players).is_err() {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InputQueue,
+                "Failed to reserve synchronized input buffer for {} players",
+                num_players
+            );
+            return None;
+        }
         for (i, con_stat) in connect_status.iter().enumerate() {
             if con_stat.disconnected && con_stat.last_frame < self.current_frame {
                 // Disconnected past last_frame. If the player's queue was
@@ -1058,22 +1071,29 @@ mod sync_layer_tests {
     }
 
     #[test]
-    fn test_with_queue_length_invalid_falls_back_to_default_and_preserves_invariant() {
-        // queue_length < 2 is invalid for InputQueue::with_queue_length;
-        // the constructor must fall back to the library default and still
-        // produce one input queue per player so downstream invariants
-        // (input_queues.len() == num_players) hold.
+    fn test_with_queue_length_invalid_returns_empty_internal_fallback() {
+        // Production construction uses try_with_queue_length and returns the
+        // structured QueueLengthTooSmall error. The compatibility wrapper must
+        // still avoid panicking, so it reports a violation and returns an empty
+        // internal layer.
         let sync_layer = SyncLayer::<TestConfig>::with_queue_length(3, 8, 1);
-        assert_eq!(
-            sync_layer.input_queues.len(),
-            3,
-            "input_queues.len() must equal num_players even when queue_length is invalid"
-        );
-        assert_eq!(sync_layer.num_players, 3);
-        assert_eq!(sync_layer.max_prediction, 8);
-        // queue_length=0 also falls back.
+        assert_eq!(sync_layer.input_queues.len(), 0);
+        assert_eq!(sync_layer.num_players, 0);
+        assert_eq!(sync_layer.max_prediction, 0);
+
+        let err = match SyncLayer::<TestConfig>::try_with_queue_length(3, 8, 1) {
+            Ok(_) => panic!("queue_length < 2 should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: crate::InvalidRequestKind::QueueLengthTooSmall { length: 1 }
+            }
+        ));
+
         let sync_layer_zero = SyncLayer::<TestConfig>::with_queue_length(2, 4, 0);
-        assert_eq!(sync_layer_zero.input_queues.len(), 2);
+        assert_eq!(sync_layer_zero.input_queues.len(), 0);
     }
 
     #[test]

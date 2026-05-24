@@ -781,13 +781,6 @@ impl<T: Config> SessionBuilder<T> {
         mut self,
         max_frames_behind: usize,
     ) -> Result<Self, FortressError> {
-        if max_frames_behind < 1 || max_frames_behind >= self.spectator_config.buffer_size {
-            return Err(InvalidRequestKind::MaxFramesBehindInvalid {
-                value: max_frames_behind,
-                buffer_size: self.spectator_config.buffer_size,
-            }
-            .into());
-        }
         self.max_frames_behind = max_frames_behind;
         self.spectator_config.max_frames_behind = max_frames_behind;
         Ok(self)
@@ -798,13 +791,6 @@ impl<T: Config> SessionBuilder<T> {
     ///
     /// Note: Prefer using [`Self::with_spectator_config`] for configuring spectator behavior.
     pub fn with_catchup_speed(mut self, catchup_speed: usize) -> Result<Self, FortressError> {
-        if catchup_speed < 1 || catchup_speed >= self.spectator_config.max_frames_behind {
-            return Err(InvalidRequestKind::CatchupSpeedInvalid {
-                speed: catchup_speed,
-                max_frames_behind: self.spectator_config.max_frames_behind,
-            }
-            .into());
-        }
         self.catchup_speed = catchup_speed;
         self.spectator_config.catchup_speed = catchup_speed;
         Ok(self)
@@ -1005,6 +991,25 @@ impl<T: Config> SessionBuilder<T> {
             .with_input_delay(4)
     }
 
+    fn validate_rollback_config(&self) -> Result<(), FortressError> {
+        self.input_queue_config.validate()?;
+        self.input_queue_config
+            .validate_frame_delay(self.input_delay)?;
+        self.protocol_config.validate()?;
+        Ok(())
+    }
+
+    fn validate_spectator_config(&self) -> Result<(), FortressError> {
+        self.protocol_config.validate()?;
+        self.spectator_config.validate()
+    }
+
+    fn validate_synctest_config(&self) -> Result<(), FortressError> {
+        self.input_queue_config.validate()?;
+        self.input_queue_config
+            .validate_frame_delay(self.input_delay)
+    }
+
     /// Consumes the builder to construct a [`P2PSession`] and starts synchronization of endpoints.
     /// # Errors
     /// - Returns a [`FortressError`] if insufficient players have been registered.
@@ -1012,9 +1017,15 @@ impl<T: Config> SessionBuilder<T> {
         mut self,
         socket: impl NonBlockingSocket<T::Address> + 'static,
     ) -> Result<P2PSession<T>, FortressError> {
-        // check if all players are added
-        let registered_count = (0..self.num_players)
-            .filter(|&i| self.player_reg.handles.contains_key(&PlayerHandle::new(i)))
+        self.validate_rollback_config()?;
+
+        // check if all players are added without iterating over the configured
+        // player count, which may be intentionally huge.
+        let registered_count = self
+            .player_reg
+            .handles
+            .keys()
+            .filter(|handle| handle.is_valid_player_for(self.num_players))
             .count();
         if registered_count < self.num_players {
             return Err(InvalidRequestKind::NotEnoughPlayers {
@@ -1042,26 +1053,30 @@ impl<T: Config> SessionBuilder<T> {
                 PlayerType::Remote(peer_addr) => {
                     let endpoint = self
                         .create_endpoint(handles, peer_addr.clone(), self.local_players)
-                        .ok_or(SerializationErrorKind::EndpointCreationFailed)?;
+                        .map_err(|error| match error {
+                            FortressError::InvalidRequestStructured {
+                                kind: InvalidRequestKind::AllocationFailed { .. },
+                            } => error,
+                            _ => SerializationErrorKind::EndpointCreationFailed.into(),
+                        })?;
                     self.player_reg.remotes.insert(peer_addr, endpoint);
                 },
                 PlayerType::Spectator(peer_addr) => {
                     let endpoint = self
                         .create_endpoint(handles, peer_addr.clone(), self.num_players) // the host of the spectator sends inputs for all players
-                        .ok_or(SerializationErrorKind::SpectatorEndpointCreationFailed)?;
+                        .map_err(|error| match error {
+                            FortressError::InvalidRequestStructured {
+                                kind: InvalidRequestKind::AllocationFailed { .. },
+                            } => error,
+                            _ => SerializationErrorKind::SpectatorEndpointCreationFailed.into(),
+                        })?;
                     self.player_reg.spectators.insert(peer_addr, endpoint);
                 },
                 PlayerType::Local => (),
             }
         }
 
-        // Validate configurations
-        self.protocol_config.validate()?;
-        self.input_queue_config.validate()?;
-        self.input_queue_config
-            .validate_frame_delay(self.input_delay)?;
-
-        Ok(P2PSession::<T>::new(
+        P2PSession::<T>::new(
             self.num_players,
             self.max_prediction,
             Box::new(socket),
@@ -1076,7 +1091,7 @@ impl<T: Config> SessionBuilder<T> {
             self.recording,
             self.telemetry,
             self.disconnect_behavior,
-        ))
+        )
     }
 
     /// Consumes the builder to create a new [`SpectatorSession`].
@@ -1096,14 +1111,12 @@ impl<T: Config> SessionBuilder<T> {
         host_addr: T::Address,
         socket: impl NonBlockingSocket<T::Address> + 'static,
     ) -> Option<SpectatorSession<T>> {
-        // Validate the configurations before constructing endpoints.
-        self.protocol_config.validate().ok()?;
-        self.spectator_config.validate().ok()?;
+        self.validate_spectator_config().ok()?;
 
         // create the single host endpoint and synchronize it
         let host = self.build_spectator_host(host_addr)?;
 
-        Some(SpectatorSession::new(
+        SpectatorSession::new(
             self.num_players,
             Box::new(socket),
             vec![host],
@@ -1114,22 +1127,24 @@ impl<T: Config> SessionBuilder<T> {
             self.spectator_config.enable_rewind,
             self.violation_observer,
             self.event_queue_size,
-        ))
+        )
+        .ok()
     }
 
     /// Consumes the builder to create a redundant (failover) [`SpectatorSession`].
     ///
     /// Unlike [`start_spectator_session`](Self::start_spectator_session), this connects
-    /// to **multiple** game peers ("hosts") at once. Confirmed inputs are accepted from
-    /// whichever host delivers a given frame first, so the buffer is filled even if some
-    /// hosts lag or fail. If duplicate host addresses are provided, inbound packets are
-    /// routed to the first matching host endpoint; later duplicates do not receive that
-    /// packet.
+    /// to **multiple** game peers ("hosts") at once. Unresolved frames use the
+    /// highest-priority currently connected host by the order in `host_addrs` as
+    /// the canonical source. Lower-priority host snapshots remain provisional
+    /// while a higher-priority host is connected. If duplicate host addresses are
+    /// provided, inbound packets are routed to the first matching host endpoint;
+    /// later duplicates do not receive that packet.
     ///
-    /// Newer frames may replace older ring-slot contents, but duplicate data for the
-    /// same player/frame is first-writer-wins: identical duplicates are ignored, and
-    /// divergent duplicates report a frame-sync violation without overwriting the first
-    /// value.
+    /// Connected redundant hosts that disagree for the same player/frame report a
+    /// frame-sync violation, emit [`FortressEvent::SpectatorDivergence`], and
+    /// make future [`advance_frame`](SpectatorSession::advance_frame) calls return
+    /// [`FortressError::SpectatorDivergence`].
     ///
     /// The supplied addresses should be distinct game peers that are all spectating the
     /// same match (e.g. several players in the same P2P session who each registered this
@@ -1197,17 +1212,16 @@ impl<T: Config> SessionBuilder<T> {
             return None;
         }
 
-        // Validate the configurations once before constructing endpoints.
-        self.protocol_config.validate().ok()?;
-        self.spectator_config.validate().ok()?;
+        self.validate_spectator_config().ok()?;
 
         // Build and synchronize one host endpoint per address.
-        let mut hosts = Vec::with_capacity(host_addrs.len());
+        let mut hosts = Vec::new();
+        hosts.try_reserve_exact(host_addrs.len()).ok()?;
         for host_addr in host_addrs {
             hosts.push(self.build_spectator_host(host_addr.clone())?);
         }
 
-        Some(SpectatorSession::new(
+        SpectatorSession::new(
             self.num_players,
             Box::new(socket),
             hosts,
@@ -1218,7 +1232,8 @@ impl<T: Config> SessionBuilder<T> {
             self.spectator_config.enable_rewind,
             self.violation_observer,
             self.event_queue_size,
-        ))
+        )
+        .ok()
     }
 
     /// Builds and synchronizes a single spectator host endpoint for `host_addr`.
@@ -1228,8 +1243,14 @@ impl<T: Config> SessionBuilder<T> {
     /// [`start_spectator_session_multi`](Self::start_spectator_session_multi) to avoid
     /// duplicating the single-host construction logic.
     fn build_spectator_host(&self, host_addr: T::Address) -> Option<UdpProtocol<T>> {
+        let mut handles = Vec::new();
+        handles.try_reserve_exact(self.num_players).ok()?;
+        for handle in (0..self.num_players).map(PlayerHandle::new) {
+            handles.push(handle);
+        }
+
         let mut host = UdpProtocol::new(
-            (0..self.num_players).map(PlayerHandle::new).collect(),
+            handles,
             host_addr,
             self.num_players,
             1, //should not matter since the spectator is never sending
@@ -1240,7 +1261,9 @@ impl<T: Config> SessionBuilder<T> {
             DesyncDetection::Off,
             self.sync_config,
             self.protocol_config.clone(),
-        )?;
+            self.time_sync_config,
+        )
+        .ok()?;
         host.synchronize().ok()?;
         Some(host)
     }
@@ -1252,6 +1275,8 @@ impl<T: Config> SessionBuilder<T> {
     /// This is a great way to test if your system runs deterministically.
     /// After creating the session, add a local player, set input delay for them and then start the session.
     pub fn start_synctest_session(self) -> Result<SyncTestSession<T>, FortressError> {
+        self.validate_synctest_config()?;
+
         if self.check_dist >= self.max_prediction {
             return Err(InvalidRequestKind::CheckDistanceTooLarge {
                 check_dist: self.check_dist,
@@ -1260,19 +1285,14 @@ impl<T: Config> SessionBuilder<T> {
             .into());
         }
 
-        // Validate the input queue configuration
-        self.input_queue_config.validate()?;
-        self.input_queue_config
-            .validate_frame_delay(self.input_delay)?;
-
-        Ok(SyncTestSession::with_queue_length(
+        SyncTestSession::try_with_queue_length(
             self.num_players,
             self.max_prediction,
             self.check_dist,
             self.input_delay,
             self.violation_observer,
             self.input_queue_config.queue_length,
-        ))
+        )
     }
 
     /// Creates a replay playback session from a recorded [`Replay`].
@@ -1390,7 +1410,7 @@ impl<T: Config> SessionBuilder<T> {
         handles: Vec<PlayerHandle>,
         peer_addr: T::Address,
         local_players: usize,
-    ) -> Option<UdpProtocol<T>> {
+    ) -> Result<UdpProtocol<T>, FortressError> {
         // create the endpoint, set parameters
         let mut endpoint = UdpProtocol::new(
             handles,
@@ -1404,10 +1424,11 @@ impl<T: Config> SessionBuilder<T> {
             self.desync_detection,
             self.sync_config,
             self.protocol_config.clone(),
+            self.time_sync_config,
         )?;
         // start the synchronization
-        endpoint.synchronize().ok()?;
-        Some(endpoint)
+        endpoint.synchronize()?;
+        Ok(endpoint)
     }
 }
 
@@ -1597,7 +1618,7 @@ mod tests {
     #[test]
     fn test_with_event_queue_size_accepts_valid_values() {
         // Test various valid values
-        for size in [10, 50, 100, 200, 500] {
+        for size in [10, 50, 100, 200, 500, usize::MAX] {
             let builder = SessionBuilder::<TestConfig>::new()
                 .with_event_queue_size(size)
                 .expect("Valid event queue size should be accepted");
@@ -1619,6 +1640,149 @@ mod tests {
 
     fn test_addr(port: u16) -> SocketAddr {
         SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port)
+    }
+
+    struct DummySocket;
+
+    impl NonBlockingSocket<SocketAddr> for DummySocket {
+        fn send_to(&mut self, _msg: &crate::Message, _addr: &SocketAddr) {}
+
+        fn receive_all_messages(&mut self) -> Vec<(SocketAddr, crate::Message)> {
+            Vec::new()
+        }
+    }
+
+    fn single_local_builder() -> SessionBuilder<TestConfig> {
+        SessionBuilder::<TestConfig>::new()
+            .with_num_players(1)
+            .unwrap()
+            .add_local_player(0)
+            .unwrap()
+    }
+
+    fn assert_allocation_failed(err: FortressError, expected_context: &'static str) {
+        match err {
+            FortressError::InvalidRequestStructured {
+                kind:
+                    InvalidRequestKind::AllocationFailed {
+                        context,
+                        requested_elements,
+                    },
+            } => {
+                assert_eq!(context, expected_context);
+                assert!(requested_elements > 0);
+            },
+            other => panic!("expected allocation failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_num_players_accepts_large_user_configured_values() {
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_num_players(usize::MAX)
+            .unwrap();
+
+        assert_eq!(builder.num_players, usize::MAX);
+    }
+
+    #[test]
+    fn start_p2p_session_reports_not_enough_players_for_huge_player_count_quickly() {
+        let err = SessionBuilder::<TestConfig>::new()
+            .with_num_players(usize::MAX)
+            .unwrap()
+            .add_local_player(0)
+            .unwrap()
+            .start_p2p_session(DummySocket)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::NotEnoughPlayers {
+                    expected: usize::MAX,
+                    actual: 1,
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn legacy_spectator_setters_accept_large_user_configured_values() {
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_max_frames_behind(usize::MAX)
+            .unwrap()
+            .with_catchup_speed(usize::MAX)
+            .unwrap();
+
+        assert_eq!(builder.max_frames_behind, usize::MAX);
+        assert_eq!(builder.catchup_speed, usize::MAX);
+        assert_eq!(builder.spectator_config.max_frames_behind, usize::MAX);
+        assert_eq!(builder.spectator_config.catchup_speed, usize::MAX);
+    }
+
+    #[test]
+    fn legacy_spectator_setters_accept_zero_catchup_speed() {
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_catchup_speed(0)
+            .unwrap();
+
+        assert_eq!(builder.catchup_speed, 0);
+        assert_eq!(builder.spectator_config.catchup_speed, 0);
+    }
+
+    #[test]
+    fn start_p2p_session_reports_max_prediction_allocation_failure() {
+        let err = single_local_builder()
+            .with_max_prediction_window(usize::MAX)
+            .start_p2p_session(DummySocket)
+            .unwrap_err();
+
+        assert_allocation_failed(err, "saved_states.states");
+    }
+
+    #[test]
+    fn start_p2p_session_reports_time_sync_allocation_failure() {
+        let err = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_time_sync_config(TimeSyncConfig {
+                window_size: usize::MAX,
+            })
+            .add_local_player(0)
+            .unwrap()
+            .add_remote_player(1, test_addr(7_000))
+            .unwrap()
+            .start_p2p_session(DummySocket)
+            .unwrap_err();
+
+        assert_allocation_failed(err, "time_sync.local");
+    }
+
+    #[test]
+    fn start_p2p_session_reports_input_queue_allocation_failure() {
+        let err = single_local_builder()
+            .with_input_queue_config(InputQueueConfig {
+                queue_length: usize::MAX,
+            })
+            .start_p2p_session(DummySocket)
+            .unwrap_err();
+
+        assert_allocation_failed(err, "input_queue.inputs");
+    }
+
+    #[test]
+    fn start_spectator_session_returns_none_when_buffer_reservation_fails() {
+        let session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_spectator_config(SpectatorConfig {
+                buffer_size: usize::MAX,
+                stream_delay: 0,
+                ..SpectatorConfig::default()
+            })
+            .start_spectator_session(test_addr(7_500), DummySocket);
+
+        assert!(session.is_none());
     }
 
     #[test]

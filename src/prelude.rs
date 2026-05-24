@@ -63,7 +63,7 @@ pub use crate::sessions::replay_session::ReplaySession;
 pub use crate::sessions::sync_test_session::SyncTestSession;
 
 // Replay types
-pub use crate::replay::{Replay, ReplayMetadata};
+pub use crate::replay::{Replay, ReplayDecodeConfig, ReplayMetadata};
 
 // Core traits
 pub use crate::{Config, NonBlockingSocket, Session};

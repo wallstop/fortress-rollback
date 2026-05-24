@@ -8,11 +8,12 @@ mod input_bytes;
 mod state;
 
 pub use event::Event;
-use input_bytes::InputBytes;
+use input_bytes::{log_input_decode_error, InputBytes};
 pub use state::ProtocolState;
 
+use crate::error::{allocation_failed, SerializationErrorKind};
 use crate::frame_info::PlayerInput;
-use crate::network::compression::{decode, encode};
+use crate::network::compression::{decode_with_max_len, try_encode};
 use crate::network::messages::{
     ChecksumReport, ConnectionStatus, Input, InputAck, Message, MessageBody, MessageHeader,
     QualityReply, QualityReport, SyncReply, SyncRequest,
@@ -20,7 +21,7 @@ use crate::network::messages::{
 use crate::rng::{random, Pcg32, Rng, SeedableRng};
 use crate::sessions::config::{ProtocolConfig, SyncConfig};
 use crate::telemetry::{ViolationKind, ViolationSeverity};
-use crate::time_sync::TimeSync;
+use crate::time_sync::{TimeSync, TimeSyncConfig};
 use crate::{report_violation, safe_frame_add, safe_frame_sub};
 use crate::{
     Config, DesyncDetection, FortressError, Frame, InvalidRequestKind, NonBlockingSocket,
@@ -181,6 +182,126 @@ impl<T: Config> PartialEq for UdpProtocol<T> {
     }
 }
 
+/// Fuzz-only helper that exercises the protocol `Input` acceptance path with
+/// arbitrary packet fields while keeping construction inside this private
+/// module. This is re-exported through `__internal` for `cargo fuzz`; it is not
+/// part of the stable public API.
+#[doc(hidden)]
+pub fn fuzz_protocol_input_packet(
+    start_frame: i32,
+    ack_frame: i32,
+    peer_connect_status: &[(bool, i32)],
+    bytes: &[u8],
+    pending_frames: &[i32],
+) {
+    #[derive(Debug, Clone)]
+    struct FuzzConfig;
+
+    impl Config for FuzzConfig {
+        type Input = u8;
+        type State = u8;
+        type Address = u16;
+    }
+
+    let protocol_config = ProtocolConfig {
+        pending_output_limit: 16,
+        protocol_rng_seed: Some(0),
+        ..ProtocolConfig::default()
+    };
+    let Ok(mut protocol) = UdpProtocol::<FuzzConfig>::new(
+        vec![PlayerHandle::new(0), PlayerHandle::new(1)],
+        1,
+        2,
+        1,
+        8,
+        Duration::from_secs(5),
+        Duration::from_secs(3),
+        60,
+        DesyncDetection::Off,
+        SyncConfig::default(),
+        protocol_config,
+        TimeSyncConfig::default(),
+    ) else {
+        return;
+    };
+
+    protocol.state = ProtocolState::Running;
+    for &frame in pending_frames
+        .iter()
+        .take(protocol.protocol_config.pending_output_limit)
+    {
+        if protocol.pending_output.len() >= protocol.protocol_config.pending_output_limit {
+            break;
+        }
+        let mut pending_bytes = Vec::new();
+        if pending_bytes.try_reserve_exact(1).is_err() {
+            return;
+        }
+        pending_bytes.push(0);
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(frame),
+            bytes: pending_bytes,
+        });
+    }
+
+    let mut status = Vec::new();
+    if status
+        .try_reserve_exact(peer_connect_status.len().min(8))
+        .is_err()
+    {
+        return;
+    }
+    for &(disconnected, last_frame) in peer_connect_status.iter().take(8) {
+        status.push(ConnectionStatus {
+            disconnected,
+            last_frame: Frame::new(last_frame),
+        });
+    }
+
+    let mut packet_bytes = Vec::new();
+    let byte_limit = bytes.len().min(4096);
+    if packet_bytes.try_reserve_exact(byte_limit).is_err() {
+        return;
+    }
+    packet_bytes.extend_from_slice(&bytes[..byte_limit]);
+
+    let body = Input {
+        peer_connect_status: status,
+        disconnect_requested: false,
+        start_frame: Frame::new(start_frame),
+        ack_frame: Frame::new(ack_frame),
+        bytes: packet_bytes,
+    };
+    protocol.on_input(&body);
+
+    let history_limit = protocol
+        .protocol_config
+        .input_history_multiplier
+        .saturating_mul(protocol.max_prediction);
+    assert!(
+        protocol.recv_inputs.len() <= history_limit.saturating_add(1),
+        "protocol input history exceeded configured bound"
+    );
+    assert!(
+        protocol.pending_output.len() <= protocol.protocol_config.pending_output_limit,
+        "protocol pending output exceeded configured bound"
+    );
+}
+
+struct StagedInputFrame<I>
+where
+    I: Copy + Clone + PartialEq + Eq,
+{
+    input_data: InputBytes,
+    player_inputs: Vec<PlayerInput<I>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AckDisposition {
+    Apply,
+    Ignore,
+}
+
 impl<T: Config> UdpProtocol<T> {
     /// Internal constructor for UDP protocol handler.
     ///
@@ -202,7 +323,8 @@ impl<T: Config> UdpProtocol<T> {
         desync_detection: DesyncDetection,
         sync_config: SyncConfig,
         protocol_config: ProtocolConfig,
-    ) -> Option<Self> {
+        time_sync_config: TimeSyncConfig,
+    ) -> Result<Self, FortressError> {
         // Compute initial time using custom clock if configured, or Instant::now()
         let now = match &protocol_config.clock {
             Some(clock_fn) => clock_fn(),
@@ -230,17 +352,29 @@ impl<T: Config> UdpProtocol<T> {
         let handles: Arc<[PlayerHandle]> = handles.into();
 
         // peer connection status
-        // alloc-bound: num_players is the session player count fixed at construction
-        let peer_connect_status = vec![ConnectionStatus::default(); num_players];
+        let mut peer_connect_status = Vec::new();
+        peer_connect_status
+            .try_reserve_exact(num_players)
+            .map_err(|_err| allocation_failed("protocol.peer_connect_status", num_players))?;
+        for _ in 0..num_players {
+            peer_connect_status.push(ConnectionStatus::default());
+        }
 
         // received input history - may fail if serialization is broken
         let mut recv_inputs = BTreeMap::new();
-        recv_inputs.insert(Frame::NULL, InputBytes::zeroed::<T>(recv_player_num)?);
+        recv_inputs.insert(
+            Frame::NULL,
+            InputBytes::zeroed::<T>(recv_player_num)
+                .ok_or(SerializationErrorKind::EndpointCreationFailed)?,
+        );
 
         // last acked input - may fail if serialization is broken
-        let last_acked_input = InputBytes::zeroed::<T>(local_players)?;
+        let last_acked_input = InputBytes::zeroed::<T>(local_players)
+            .ok_or(SerializationErrorKind::EndpointCreationFailed)?;
 
-        Some(Self {
+        let time_sync_layer = TimeSync::try_with_config(time_sync_config)?;
+
+        Ok(Self {
             num_players,
             handles,
             send_queue: VecDeque::new(),
@@ -284,7 +418,7 @@ impl<T: Config> UdpProtocol<T> {
             recv_inputs,
 
             // time sync
-            time_sync_layer: TimeSync::new(),
+            time_sync_layer,
             local_frame_advantage: 0,
             remote_frame_advantage: 0,
 
@@ -368,6 +502,12 @@ impl<T: Config> UdpProtocol<T> {
 
     pub(crate) fn is_running(&self) -> bool {
         self.state == ProtocolState::Running
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_running_for_tests(&mut self) {
+        self.state = ProtocolState::Running;
+        self.remote_magic = 1;
     }
 
     pub(crate) fn is_handling_message(&self, addr: &T::Address) -> bool {
@@ -488,7 +628,59 @@ impl<T: Config> UdpProtocol<T> {
         self.event_queue.drain(..)
     }
 
-    fn pop_pending_output(&mut self, ack_frame: Frame) {
+    fn classify_ack_frame(&self, ack_frame: Frame) -> AckDisposition {
+        if ack_frame == Frame::NULL {
+            return AckDisposition::Ignore;
+        }
+
+        if !ack_frame.is_valid() {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "Ignoring invalid ack frame {}",
+                ack_frame
+            );
+            return AckDisposition::Ignore;
+        }
+
+        if self.last_acked_input.frame.is_valid() && ack_frame <= self.last_acked_input.frame {
+            trace!(
+                "Ignoring stale ack frame {} (last_acked={})",
+                ack_frame,
+                self.last_acked_input.frame
+            );
+            return AckDisposition::Ignore;
+        }
+
+        let Some(newest_pending) = self.pending_output.back().map(|input| input.frame) else {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "Ignoring ack frame {} with no pending output",
+                ack_frame
+            );
+            return AckDisposition::Ignore;
+        };
+
+        if ack_frame > newest_pending {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "Ignoring future ack frame {} (newest pending frame {})",
+                ack_frame,
+                newest_pending
+            );
+            return AckDisposition::Ignore;
+        }
+
+        AckDisposition::Apply
+    }
+
+    fn apply_ack_frame(&mut self, ack_frame: Frame) {
+        if self.classify_ack_frame(ack_frame) != AckDisposition::Apply {
+            return;
+        }
+
         while !self.pending_output.is_empty() {
             if let Some(input) = self.pending_output.front() {
                 if input.frame <= ack_frame {
@@ -653,10 +845,21 @@ impl<T: Config> UdpProtocol<T> {
             body.start_frame = input.frame;
 
             // encode all pending inputs to a byte buffer
-            body.bytes = encode(
+            body.bytes = match try_encode(
                 &self.last_acked_input.bytes,
                 self.pending_output.iter().map(|gi| &gi.bytes),
-            );
+            ) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "Failed to encode pending inputs: {:?}",
+                        err
+                    );
+                    return;
+                },
+            };
             trace!(
                 "Encoded {} bytes from {} pending output(s) into {} bytes",
                 {
@@ -793,6 +996,15 @@ impl<T: Config> UdpProtocol<T> {
             return;
         }
 
+        if !self.message_allowed_in_current_state(&msg.body) {
+            trace!(
+                "Dropping {:?} while protocol is in {:?}",
+                msg.body,
+                self.state
+            );
+            return;
+        }
+
         // update time when we last received packages
         self.last_recv_time = self.now();
 
@@ -813,6 +1025,20 @@ impl<T: Config> UdpProtocol<T> {
             MessageBody::QualityReply(body) => self.on_quality_reply(body),
             MessageBody::ChecksumReport(body) => self.on_checksum_report(body),
             MessageBody::KeepAlive => (),
+        }
+    }
+
+    fn message_allowed_in_current_state(&self, body: &MessageBody) -> bool {
+        match self.state {
+            ProtocolState::Initializing | ProtocolState::Synchronizing => {
+                matches!(
+                    body,
+                    MessageBody::SyncRequest(_) | MessageBody::SyncReply(_)
+                )
+            },
+            ProtocolState::Running => true,
+            ProtocolState::Disconnected => matches!(body, MessageBody::SyncRequest(_)),
+            ProtocolState::Shutdown => false,
         }
     }
 
@@ -859,39 +1085,37 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     fn on_input(&mut self, body: &Input) {
-        // drop pending outputs until the ack frame
-        self.pop_pending_output(body.ack_frame);
+        let ack_disposition = self.classify_ack_frame(body.ack_frame);
 
-        // update the peer connection status
-        if body.disconnect_requested {
-            // if a disconnect is requested, disconnect now
-            if self.state != ProtocolState::Disconnected && !self.disconnect_event_sent {
-                self.event_queue.push_back(Event::Disconnected);
-                self.disconnect_event_sent = true;
-            }
-        } else {
-            // update the peer connection status
-            // Use zip to safely handle potential length mismatches (malformed packets)
-            for (local, remote) in self
-                .peer_connect_status
-                .iter_mut()
-                .zip(body.peer_connect_status.iter())
-            {
-                local.disconnected = remote.disconnected || local.disconnected;
-                local.last_frame = std::cmp::max(local.last_frame, remote.last_frame);
-            }
+        if body.peer_connect_status.len() != self.num_players {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "Received input with {} connection-status entries, expected {}",
+                body.peer_connect_status.len(),
+                self.num_players
+            );
+            return;
+        }
+
+        if !body.start_frame.is_valid() {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "Received input with invalid start frame {}",
+                body.start_frame
+            );
+            return;
         }
 
         // Validate that received inputs are in a recoverable order.
         // If we receive an input for a frame that's too far ahead, we can't decode it
         // because we don't have the reference frame. This is normal UDP behavior -
         // packets can be lost or reordered. We just drop it and wait for retransmission.
-        let next_expected = safe_frame_add!(
-            self.last_recv_frame(),
-            1,
-            "UdpProtocol::on_input next_expected"
-        );
-        if self.last_recv_frame() != Frame::NULL && next_expected < body.start_frame {
+        let last_recv_frame = self.last_recv_frame();
+        let next_expected =
+            safe_frame_add!(last_recv_frame, 1, "UdpProtocol::on_input next_expected");
+        if last_recv_frame != Frame::NULL && next_expected < body.start_frame {
             report_violation!(
                 ViolationSeverity::Warning,
                 ViolationKind::NetworkProtocol,
@@ -904,7 +1128,7 @@ impl<T: Config> UdpProtocol<T> {
 
         // if we did not receive any input yet, we decode with the blank input,
         // otherwise we use the input previous to the start of the encoded inputs
-        let decode_frame = if self.last_recv_frame() == Frame::NULL {
+        let decode_frame = if last_recv_frame == Frame::NULL {
             Frame::NULL
         } else {
             safe_frame_sub!(body.start_frame, 1, "UdpProtocol::on_input decode_frame")
@@ -912,9 +1136,29 @@ impl<T: Config> UdpProtocol<T> {
 
         // if we have the necessary input saved, we decode
         if let Some(decode_inp) = self.recv_inputs.get(&decode_frame) {
-            self.running_last_input_recv = self.now();
+            let max_decoded_input_bytes = match decode_inp
+                .bytes
+                .len()
+                .checked_mul(self.protocol_config.pending_output_limit)
+            {
+                Some(max) => max,
+                None => {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "Input decode limit overflow: reference bytes {} * pending output limit {}",
+                        decode_inp.bytes.len(),
+                        self.protocol_config.pending_output_limit
+                    );
+                    return;
+                },
+            };
 
-            let recv_inputs = match decode(&decode_inp.bytes, &body.bytes) {
+            let recv_inputs = match decode_with_max_len(
+                &decode_inp.bytes,
+                &body.bytes,
+                max_decoded_input_bytes,
+            ) {
                 Ok(inputs) => inputs,
                 Err(e) => {
                     report_violation!(
@@ -927,10 +1171,38 @@ impl<T: Config> UdpProtocol<T> {
                 },
             };
 
+            let mut staged_frames = Vec::new();
+            if staged_frames.try_reserve(recv_inputs.len()).is_err() {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::NetworkProtocol,
+                    "Failed to reserve {} decoded input frame(s)",
+                    recv_inputs.len()
+                );
+                return;
+            }
+
             for (i, inp) in recv_inputs.into_iter().enumerate() {
-                let inp_frame = body.start_frame + i as i32;
+                let Ok(frame_offset) = i32::try_from(i) else {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "Decoded input batch has too many frames to represent as i32 offsets"
+                    );
+                    return;
+                };
+                let Some(inp_frame) = body.start_frame.checked_add(frame_offset) else {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "Decoded input frame overflow from start frame {} and offset {}",
+                        body.start_frame,
+                        frame_offset
+                    );
+                    return;
+                };
                 // skip inputs that we don't need
-                if inp_frame <= self.last_recv_frame() {
+                if inp_frame <= last_recv_frame {
                     continue;
                 }
 
@@ -938,26 +1210,61 @@ impl<T: Config> UdpProtocol<T> {
                     frame: inp_frame,
                     bytes: inp,
                 };
-                // send the input to the session
-                let player_inputs = input_data.to_player_inputs::<T>(self.handles.len());
-                self.recv_inputs.insert(input_data.frame, input_data);
+                let player_inputs =
+                    match input_data.try_to_player_inputs_exact::<T>(self.handles.len()) {
+                        Ok(player_inputs) => player_inputs,
+                        Err(err) => {
+                            log_input_decode_error(err);
+                            return;
+                        },
+                    };
 
-                // `to_player_inputs` constructs `player_inputs` by appending
-                // up to `self.handles.len()` entries (and may return early
-                // with a partial vector if a per-player decode fails), so
-                // `player_inputs.len() <= self.handles.len()` always holds.
-                // `zip` truncates to the shorter iterator, so emitting
-                // `Event::Input` only for the entries that decoded
-                // successfully is bounds-safe by construction — no
-                // defensive `.get(i)` check is needed here.
+                staged_frames.push(StagedInputFrame {
+                    input_data,
+                    player_inputs,
+                });
+            }
+
+            if ack_disposition == AckDisposition::Apply {
+                self.apply_ack_frame(body.ack_frame);
+            }
+
+            let should_emit_disconnect = body.disconnect_requested
+                && self.state != ProtocolState::Disconnected
+                && !self.disconnect_event_sent;
+
+            // update the peer connection status
+            if !body.disconnect_requested {
+                for (local, remote) in self
+                    .peer_connect_status
+                    .iter_mut()
+                    .zip(body.peer_connect_status.iter())
+                {
+                    local.disconnected = remote.disconnected || local.disconnected;
+                    local.last_frame = std::cmp::max(local.last_frame, remote.last_frame);
+                }
+            }
+
+            self.running_last_input_recv = self.now();
+            for staged in staged_frames {
+                let peer_connect_status = body.peer_connect_status.clone();
+                self.recv_inputs
+                    .insert(staged.input_data.frame, staged.input_data);
+
                 for (player_input, &player_handle) in
-                    player_inputs.into_iter().zip(self.handles.iter())
+                    staged.player_inputs.into_iter().zip(self.handles.iter())
                 {
                     self.event_queue.push_back(Event::Input {
                         input: player_input,
                         player: player_handle,
+                        peer_connect_status: peer_connect_status.clone(),
                     });
                 }
+            }
+
+            if should_emit_disconnect {
+                self.event_queue.push_back(Event::Disconnected);
+                self.disconnect_event_sent = true;
             }
 
             // send an input ack
@@ -965,16 +1272,25 @@ impl<T: Config> UdpProtocol<T> {
 
             // delete received inputs that are too old
             let last_recv_frame = self.last_recv_frame();
-            let history_frames =
-                self.protocol_config.input_history_multiplier as i32 * self.max_prediction as i32;
-            self.recv_inputs
-                .retain(|&k, _| k >= last_recv_frame - history_frames);
+            let history_frames = self
+                .protocol_config
+                .input_history_multiplier
+                .checked_mul(self.max_prediction)
+                .and_then(|frames| i32::try_from(frames).ok())
+                .unwrap_or(i32::MAX);
+            self.recv_inputs.retain(|&k, _| {
+                k >= safe_frame_sub!(
+                    last_recv_frame,
+                    history_frames,
+                    "UdpProtocol::on_input history prune"
+                )
+            });
         }
     }
 
     /// Upon receiving a `InputAck`, discard the oldest buffered input including the acked input.
     fn on_input_ack(&mut self, body: InputAck) {
-        self.pop_pending_output(body.ack_frame);
+        self.apply_ack_frame(body.ack_frame);
     }
 
     /// Upon receiving a `QualityReport`, update network stats and reply with a `QualityReply`.
@@ -1075,6 +1391,14 @@ mod tests {
         type Address = SocketAddr;
     }
 
+    struct BoolConfig;
+
+    impl Config for BoolConfig {
+        type Input = bool;
+        type State = TestState;
+        type Address = SocketAddr;
+    }
+
     fn test_addr() -> SocketAddr {
         "127.0.0.1:7000".parse().unwrap()
     }
@@ -1118,8 +1442,21 @@ mod tests {
             DesyncDetection::Off,
             sync_config,
             protocol_config,
+            TimeSyncConfig::default(),
         )
         .expect("Failed to create test protocol")
+    }
+
+    fn complete_test_sync(protocol: &mut UdpProtocol<TestConfig>) {
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            protocol.on_sync_reply(
+                MessageHeader { magic: 999 },
+                SyncReply {
+                    random_reply: random,
+                },
+            );
+        }
     }
 
     // ==========================================
@@ -1357,6 +1694,103 @@ mod tests {
     }
 
     #[test]
+    fn handle_message_drops_gameplay_messages_while_synchronizing_without_side_effects() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(0),
+            bytes: vec![1, 2, 3, 4],
+        });
+
+        let initial_recv_time = protocol.last_recv_time;
+        let initial_pending_len = protocol.pending_output.len();
+        let initial_last_acked = protocol.last_acked_input.frame;
+        let initial_status = protocol.peer_connect_status.clone();
+        let initial_remote_advantage = protocol.remote_frame_advantage;
+        let initial_checksum_len = protocol.pending_checksums.len();
+        let initial_event_len = protocol.event_queue.len();
+
+        let messages = [
+            Message {
+                header: MessageHeader { magic: 123 },
+                body: MessageBody::Input(Input {
+                    peer_connect_status: vec![
+                        ConnectionStatus {
+                            disconnected: true,
+                            last_frame: Frame::new(99),
+                        };
+                        2
+                    ],
+                    disconnect_requested: false,
+                    start_frame: Frame::new(0),
+                    ack_frame: Frame::new(0),
+                    bytes: vec![1, 2, 3],
+                }),
+            },
+            Message {
+                header: MessageHeader { magic: 123 },
+                body: MessageBody::InputAck(InputAck {
+                    ack_frame: Frame::new(0),
+                }),
+            },
+            Message {
+                header: MessageHeader { magic: 123 },
+                body: MessageBody::QualityReport(QualityReport {
+                    frame_advantage: 7,
+                    ping: 123,
+                }),
+            },
+            Message {
+                header: MessageHeader { magic: 123 },
+                body: MessageBody::QualityReply(QualityReply { pong: 456 }),
+            },
+            Message {
+                header: MessageHeader { magic: 123 },
+                body: MessageBody::ChecksumReport(ChecksumReport {
+                    checksum: 0xABCD,
+                    frame: Frame::new(1),
+                }),
+            },
+            Message {
+                header: MessageHeader { magic: 123 },
+                body: MessageBody::KeepAlive,
+            },
+        ];
+
+        for message in &messages {
+            protocol.handle_message(message);
+        }
+
+        assert_eq!(protocol.last_recv_time, initial_recv_time);
+        assert_eq!(protocol.pending_output.len(), initial_pending_len);
+        assert_eq!(protocol.last_acked_input.frame, initial_last_acked);
+        assert_eq!(protocol.peer_connect_status, initial_status);
+        assert_eq!(protocol.remote_frame_advantage, initial_remote_advantage);
+        assert_eq!(protocol.pending_checksums.len(), initial_checksum_len);
+        assert_eq!(protocol.event_queue.len(), initial_event_len);
+    }
+
+    #[test]
+    fn running_peer_still_answers_sync_request() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+        protocol.send_queue.clear();
+
+        protocol.handle_message(&Message {
+            header: MessageHeader { magic: 999 },
+            body: MessageBody::SyncRequest(SyncRequest { random_request: 42 }),
+        });
+
+        assert!(matches!(
+            protocol.send_queue.front().map(|message| &message.body),
+            Some(MessageBody::SyncReply(SyncReply { random_reply: 42 }))
+        ));
+    }
+
+    #[test]
     fn network_resumed_event_after_interrupt() {
         let mut protocol: UdpProtocol<TestConfig> =
             create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
@@ -1440,6 +1874,105 @@ mod tests {
             Frame::new(2)
         );
         assert_eq!(protocol.last_acked_input.frame, Frame::new(1));
+    }
+
+    #[test]
+    fn input_ack_rejects_future_ack_without_popping_pending_output() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+        protocol.event_queue.clear();
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(0),
+            bytes: vec![0, 0, 0, 0],
+        });
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(1),
+            bytes: vec![1, 0, 0, 0],
+        });
+
+        protocol.on_input_ack(InputAck {
+            ack_frame: Frame::new(99),
+        });
+
+        assert_eq!(protocol.pending_output.len(), 2);
+        assert_eq!(protocol.last_acked_input.frame, Frame::NULL);
+    }
+
+    #[test]
+    fn on_input_ignores_future_ack_but_accepts_valid_input() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+        protocol.event_queue.clear();
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(0),
+            bytes: vec![0, 0, 0, 0],
+        });
+
+        let zeroed_bytes = protocol
+            .recv_inputs
+            .get(&Frame::NULL)
+            .unwrap()
+            .bytes
+            .clone();
+        let test_bytes = crate::network::codec::encode(&TestInput { inp: 42 }).unwrap();
+        let encoded =
+            crate::network::compression::encode(&zeroed_bytes, std::iter::once(&test_bytes));
+
+        protocol.on_input(&Input {
+            start_frame: Frame::new(0),
+            ack_frame: Frame::new(99),
+            bytes: encoded,
+            disconnect_requested: false,
+            peer_connect_status: vec![ConnectionStatus::default(); 2],
+        });
+
+        assert!(protocol.recv_inputs.contains_key(&Frame::new(0)));
+        assert_eq!(protocol.pending_output.len(), 1);
+        assert_eq!(
+            protocol.pending_output.front().unwrap().frame,
+            Frame::new(0)
+        );
+        assert_eq!(protocol.last_acked_input.frame, Frame::NULL);
+        assert!(protocol
+            .event_queue
+            .iter()
+            .any(|event| matches!(event, Event::Input { .. })));
+    }
+
+    #[test]
+    fn on_input_disconnect_request_emits_inputs_before_disconnect() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+        protocol.event_queue.clear();
+
+        let zeroed_bytes = protocol
+            .recv_inputs
+            .get(&Frame::NULL)
+            .unwrap()
+            .bytes
+            .clone();
+        let test_bytes = crate::network::codec::encode(&TestInput { inp: 42 }).unwrap();
+        let encoded =
+            crate::network::compression::encode(&zeroed_bytes, std::iter::once(&test_bytes));
+
+        protocol.on_input(&Input {
+            start_frame: Frame::new(0),
+            ack_frame: Frame::NULL,
+            bytes: encoded,
+            disconnect_requested: true,
+            peer_connect_status: vec![ConnectionStatus::default(); 2],
+        });
+
+        let events: Vec<_> = protocol.event_queue.drain(..).collect();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events.first(), Some(Event::Input { .. })));
+        assert!(matches!(events.get(1), Some(Event::Disconnected)));
     }
 
     #[test]
@@ -1540,6 +2073,7 @@ mod tests {
             DesyncDetection::On { interval: 1 },
             SyncConfig::default(),
             protocol_config,
+            TimeSyncConfig::default(),
         )
         .expect("Failed to create test protocol");
 
@@ -1672,6 +2206,7 @@ mod tests {
             DesyncDetection::Off,
             sync_config,
             ProtocolConfig::default(),
+            TimeSyncConfig::default(),
         )
         .expect("Failed to create test protocol");
         protocol.synchronize().unwrap();
@@ -1907,6 +2442,7 @@ mod tests {
             DesyncDetection::Off,
             SyncConfig::default(),
             ProtocolConfig::default(),
+            TimeSyncConfig::default(),
         )
         .expect("Failed to create test protocol");
         assert!(protocol1 != protocol3);
@@ -2014,7 +2550,8 @@ mod tests {
 
         // Encode frame 1 relative to frame 0
         let frame1_bytes = vec![1u8; 4];
-        let encoded = encode(&initial_bytes, std::iter::once(&frame1_bytes));
+        let encoded =
+            crate::network::compression::encode(&initial_bytes, std::iter::once(&frame1_bytes));
 
         let input = Input {
             start_frame: Frame::new(1), // Consecutive - gap of 1 is ok
@@ -2085,7 +2622,8 @@ mod tests {
             "Input size should match zeroed size"
         );
 
-        let encoded = encode(&zeroed_bytes, std::iter::once(&test_bytes));
+        let encoded =
+            crate::network::compression::encode(&zeroed_bytes, std::iter::once(&test_bytes));
 
         let input = Input {
             start_frame: Frame::new(0),
@@ -2136,7 +2674,8 @@ mod tests {
 
         // Receive frame 6 (gap of exactly 1)
         let frame6_bytes = vec![6u8; 4];
-        let encoded = encode(&frame5_bytes, std::iter::once(&frame6_bytes));
+        let encoded =
+            crate::network::compression::encode(&frame5_bytes, std::iter::once(&frame6_bytes));
 
         let input = Input {
             start_frame: Frame::new(6), // last_recv_frame() + 1 = 6, so 6 >= 6 is ok
@@ -2156,6 +2695,149 @@ mod tests {
             "Gap of 1 should be acceptable"
         );
         assert_eq!(protocol.recv_inputs.len(), inputs_before + 1);
+    }
+
+    #[test]
+    fn on_input_drops_packet_when_configured_decode_limit_overflows() {
+        let config = ProtocolConfig {
+            pending_output_limit: usize::MAX,
+            ..ProtocolConfig::default()
+        };
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
+        protocol.synchronize().unwrap();
+
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            protocol.on_sync_reply(
+                MessageHeader { magic: 999 },
+                SyncReply {
+                    random_reply: random,
+                },
+            );
+        }
+
+        let reference = vec![0u8; 2];
+        protocol.recv_inputs.insert(
+            Frame::new(0),
+            InputBytes {
+                frame: Frame::new(0),
+                bytes: reference,
+            },
+        );
+
+        let input = Input {
+            start_frame: Frame::new(1),
+            ack_frame: Frame::NULL,
+            bytes: vec![1, 2, 3],
+            disconnect_requested: false,
+            peer_connect_status: vec![ConnectionStatus::default(); 2],
+        };
+        let inputs_before = protocol.recv_inputs.len();
+
+        protocol.on_input(&input);
+
+        assert_eq!(protocol.recv_inputs.len(), inputs_before);
+        assert!(!protocol.recv_inputs.contains_key(&Frame::new(1)));
+    }
+
+    #[test]
+    fn on_input_rejects_wrong_status_length_atomically() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+        protocol.event_queue.clear();
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(0),
+            bytes: vec![0, 0, 0, 0],
+        });
+
+        let input = Input {
+            start_frame: Frame::new(0),
+            ack_frame: Frame::new(0),
+            bytes: vec![0],
+            disconnect_requested: false,
+            peer_connect_status: vec![ConnectionStatus::default()],
+        };
+        let inputs_before = protocol.recv_inputs.len();
+        let pending_before = protocol.pending_output.len();
+        let status_before = protocol.peer_connect_status.clone();
+
+        protocol.on_input(&input);
+
+        assert_eq!(protocol.recv_inputs.len(), inputs_before);
+        assert_eq!(protocol.pending_output.len(), pending_before);
+        assert_eq!(protocol.last_acked_input.frame, Frame::NULL);
+        assert_eq!(protocol.peer_connect_status, status_before);
+        assert!(protocol.event_queue.is_empty());
+    }
+
+    #[test]
+    fn on_input_rejects_malformed_per_player_decode_atomically() {
+        let mut protocol = UdpProtocol::<BoolConfig>::new(
+            vec![PlayerHandle::new(0), PlayerHandle::new(1)],
+            test_addr(),
+            2,
+            1,
+            8,
+            Duration::from_secs(5),
+            Duration::from_secs(3),
+            60,
+            DesyncDetection::Off,
+            SyncConfig::default(),
+            ProtocolConfig::default(),
+            TimeSyncConfig::default(),
+        )
+        .expect("bool protocol should be created");
+        protocol.synchronize().unwrap();
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            protocol.on_sync_reply(
+                MessageHeader { magic: 999 },
+                SyncReply {
+                    random_reply: random,
+                },
+            );
+        }
+        protocol.event_queue.clear();
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(0),
+            bytes: vec![false as u8],
+        });
+
+        let reference = protocol
+            .recv_inputs
+            .get(&Frame::NULL)
+            .unwrap()
+            .bytes
+            .clone();
+        let malformed_frame = vec![2_u8, 0_u8];
+        let input = Input {
+            start_frame: Frame::new(0),
+            ack_frame: Frame::new(0),
+            bytes: crate::network::compression::encode(
+                &reference,
+                std::iter::once(&malformed_frame),
+            ),
+            disconnect_requested: false,
+            peer_connect_status: vec![ConnectionStatus::default(); 2],
+        };
+        let inputs_before = protocol.recv_inputs.len();
+        let pending_before = protocol.pending_output.len();
+
+        protocol.on_input(&input);
+
+        assert_eq!(protocol.recv_inputs.len(), inputs_before);
+        assert_eq!(protocol.pending_output.len(), pending_before);
+        assert_eq!(protocol.last_acked_input.frame, Frame::NULL);
+        assert!(protocol.event_queue.is_empty());
     }
 
     /// Test frame gap boundary: gap of exactly 2 is rejected
@@ -2899,6 +3581,7 @@ mod property_tests {
             DesyncDetection::Off,
             sync_config,
             protocol_config,
+            TimeSyncConfig::default(),
         )
         .expect("Failed to create test protocol")
     }
@@ -3463,6 +4146,7 @@ mod property_tests {
                 DesyncDetection::On { interval: 1 },
                 SyncConfig::default(),
                 protocol_config,
+                TimeSyncConfig::default(),
             )
             .expect("Failed to create protocol");
 
@@ -3505,6 +4189,7 @@ mod property_tests {
                 DesyncDetection::On { interval: 1 },
                 SyncConfig::default(),
                 protocol_config,
+                TimeSyncConfig::default(),
             )
             .expect("Failed to create protocol");
 

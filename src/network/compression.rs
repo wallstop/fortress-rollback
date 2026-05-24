@@ -12,6 +12,7 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::error::allocation_failed;
 use crate::report_violation;
 use crate::rle;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
@@ -76,10 +77,29 @@ impl From<CompressionError> for FortressError {
 
 /// Encodes input bytes using XOR delta encoding followed by RLE compression.
 pub fn encode<'a>(reference: &[u8], pending_input: impl Iterator<Item = &'a Vec<u8>>) -> Vec<u8> {
+    match try_encode(reference, pending_input) {
+        Ok(encoded) => encoded,
+        Err(err) => {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "encode: failed to reserve compression output: {:?}",
+                err
+            );
+            Vec::new()
+        },
+    }
+}
+
+/// Encodes input bytes using fallible delta-buffer allocation.
+pub(crate) fn try_encode<'a>(
+    reference: &[u8],
+    pending_input: impl Iterator<Item = &'a Vec<u8>>,
+) -> Result<Vec<u8>, FortressError> {
     // first, do a XOR encoding to the reference input (will probably lead to a lot of same bits in sequence)
-    let buf = delta_encode(reference, pending_input);
+    let buf = try_delta_encode(reference, pending_input)?;
     // then, RLE encode the buffer (making use of the property mentioned above)
-    rle::encode(buf)
+    rle::try_encode(buf)
 }
 
 /// Performs XOR delta encoding against a reference.
@@ -87,10 +107,26 @@ pub fn delta_encode<'a>(
     ref_bytes: &[u8],
     pending_input: impl Iterator<Item = &'a Vec<u8>>,
 ) -> Vec<u8> {
-    let (lower, upper) = pending_input.size_hint();
-    let capacity = upper.unwrap_or(lower) * ref_bytes.len();
-    // alloc-bound: capacity is (in-memory pending_input count) * ref_bytes.len(); pending_input is a local collection, not wire data
-    let mut bytes = Vec::with_capacity(capacity);
+    match try_delta_encode(ref_bytes, pending_input) {
+        Ok(encoded) => encoded,
+        Err(err) => {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "delta_encode: failed to reserve output: {:?}",
+                err
+            );
+            Vec::new()
+        },
+    }
+}
+
+/// Performs XOR delta encoding against a reference with fallible allocation.
+pub(crate) fn try_delta_encode<'a>(
+    ref_bytes: &[u8],
+    pending_input: impl Iterator<Item = &'a Vec<u8>>,
+) -> Result<Vec<u8>, FortressError> {
+    let mut bytes = Vec::new();
 
     for input in pending_input {
         let input_bytes = input;
@@ -106,11 +142,15 @@ pub fn delta_encode<'a>(
             continue;
         }
 
+        let requested = bytes.len().saturating_add(input_bytes.len());
+        bytes
+            .try_reserve(input_bytes.len())
+            .map_err(|_err| allocation_failed("compression.delta_encode", requested))?;
         for (reference_byte, input_byte) in ref_bytes.iter().zip(input_bytes.iter()) {
             bytes.push(reference_byte ^ input_byte);
         }
     }
-    bytes
+    Ok(bytes)
 }
 
 /// Maps an RLE error to a `CompressionError`.
@@ -145,8 +185,17 @@ fn map_rle_error(e: FortressError) -> CompressionError {
 /// - RLE decoding fails (e.g., truncated or malformed data)
 /// - Delta decoding fails (e.g., empty reference, length mismatch)
 pub fn decode(reference: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, CompressionError> {
+    decode_with_max_len(reference, data, rle::DEFAULT_MAX_DECODED_LEN)
+}
+
+/// Decodes RLE-compressed XOR delta-encoded data with a caller-provided decoded-length limit.
+pub fn decode_with_max_len(
+    reference: &[u8],
+    data: &[u8],
+    max_decoded_len: usize,
+) -> Result<Vec<Vec<u8>>, CompressionError> {
     // decode the RLE encoding first
-    let buf = rle::decode(data).map_err(map_rle_error)?;
+    let buf = rle::decode_with_max_len(data, max_decoded_len).map_err(map_rle_error)?;
 
     // decode the delta-encoding
     delta_decode(reference, &buf)
@@ -190,12 +239,26 @@ pub fn delta_decode(ref_bytes: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, Compr
     }
 
     let out_size = data.len() / ref_bytes.len();
-    // alloc-bound: out_size = data.len() / ref_bytes.len() <= data.len(); `data` is a caller-provided in-memory slice (delta_decode is publicly re-exported), so the bound holds regardless of caller
-    let mut output = Vec::with_capacity(out_size);
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(out_size)
+        .map_err(|_err| CompressionError::DeltaDecode {
+            reason: DeltaDecodeReason::AllocationFailed {
+                context: "compression.delta_decode.output",
+                requested_elements: out_size,
+            },
+        })?;
 
     for output_index in 0..out_size {
-        // Pre-allocate buffer capacity to reduce reallocations in hot path
-        let mut buffer = Vec::with_capacity(ref_bytes.len());
+        let mut buffer = Vec::new();
+        buffer.try_reserve_exact(ref_bytes.len()).map_err(|_err| {
+            CompressionError::DeltaDecode {
+                reason: DeltaDecodeReason::AllocationFailed {
+                    context: "compression.delta_decode.buffer",
+                    requested_elements: ref_bytes.len(),
+                },
+            }
+        })?;
         for byte_index in 0..ref_bytes.len() {
             let data_idx = ref_bytes.len() * output_index + byte_index;
             // Use .copied() to convert Option<&u8> to Option<u8> for clearer XOR semantics
@@ -407,6 +470,18 @@ mod compression_tests {
     }
 
     #[test]
+    fn test_delta_decode_reason_allocation_failed() {
+        let reason = DeltaDecodeReason::AllocationFailed {
+            context: "test",
+            requested_elements: 42,
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("failed to reserve"));
+        assert!(display.contains("test"));
+        assert!(display.contains("42"));
+    }
+
+    #[test]
     fn test_delta_decode_reason_unknown() {
         let reason = DeltaDecodeReason::Unknown;
         let display = format!("{}", reason);
@@ -579,6 +654,7 @@ mod compression_tests {
                 decoded_len: 999,
                 max: 64,
             },
+            RleDecodeReason::AllocationFailed { requested_len: 42 },
             RleDecodeReason::Unknown,
         ];
 
@@ -598,7 +674,7 @@ mod compression_tests {
     fn decode_rle_bomb_through_compression_returns_rle_error() {
         // Arrange: a single contiguous-run header claiming a length far above
         // the cap. Reuse the public rle internals to build the varint.
-        let bomb_len = (crate::rle::MAX_DECODED_LEN as u64) + 1;
+        let bomb_len = (crate::rle::DEFAULT_MAX_DECODED_LEN as u64) + 1;
         let header = (bomb_len << 2) | 1; // repeat=1, bit=0 (zero fill)
         let bomb = {
             // LEB128-encode the header inline (varint module is private to rle).
@@ -627,6 +703,24 @@ mod compression_tests {
             },
             other => panic!("expected RleDecode error, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn decode_with_max_len_uses_caller_configured_limit() {
+        let reference = vec![1, 2];
+        let inputs = [vec![3, 4], vec![5, 6]];
+        let encoded = try_encode(&reference, inputs.iter()).unwrap();
+
+        let low_limit_result = decode_with_max_len(&reference, &encoded, 3);
+
+        assert!(matches!(
+            low_limit_result,
+            Err(CompressionError::RleDecode {
+                reason: RleDecodeReason::DecodedLengthExceedsMaximum { .. }
+            })
+        ));
+        let decoded = decode_with_max_len(&reference, &encoded, 4).unwrap();
+        assert_eq!(decoded, inputs.to_vec());
     }
 
     /// Integration test: verifies that `decode()` returns the expected error

@@ -33,11 +33,10 @@
 //    - Auto-sync preset selection via `with_auto_sync_preset()`
 //    - Parameterized, table-driven, easier to extend
 //
-// Hostile tests should use `NetworkScenario` with `with_auto_sync_preset()` and
-// `run_test_with_retry()` unless they need direct peer config to validate a
-// specific low-level behavior such as custom seeds. Direct peer config tests
-// that use significant packet loss or burst loss must set an explicit robust
-// sync preset.
+// Hostile real-UDP tests are smoke coverage. Tests may use `NetworkScenario`
+// with `with_auto_sync_preset()` and `run_test_with_retry()` only when they
+// still require zero retries for acceptance. Direct peer config tests that use
+// significant packet loss or burst loss must set an explicit robust sync preset.
 //
 // See: `.llm/skills/testing/network-chaos-testing.md` for chaos testing best practices
 // =============================================================================
@@ -1089,13 +1088,14 @@ impl NetworkScenario {
         self.run_test_with_retry_config(port_base, DEFAULT_MAX_RETRIES)
     }
 
-    /// Runs the test with retry logic for flaky network scenarios.
+    /// Runs the test with retry logic for flaky network smoke scenarios.
     ///
     /// This method will retry the test up to `max_retries` times if it fails due
     /// to a sync timeout, which can occasionally happen with aggressive burst loss
     /// parameters even when using the `stress_test` sync preset. Each retry uses
     /// different ports (offset by `RETRY_PORT_OFFSET`) to avoid any potential port
-    /// reuse issues.
+    /// reuse issues. A successful final attempt still fails the test if any retry
+    /// was required, so real UDP smoke tests cannot hide acceptance failures.
     ///
     /// # Arguments
     ///
@@ -1109,7 +1109,8 @@ impl NetworkScenario {
     ///
     /// # Panics
     ///
-    /// Panics if the test fails on all attempts (via `verify_determinism`).
+    /// Panics if the test fails on all attempts (via `verify_determinism`) or if
+    /// the final success required at least one retry.
     fn run_test_with_retry_config(
         &self,
         port_base: u16,
@@ -1157,6 +1158,11 @@ impl NetworkScenario {
 
         // Verify determinism on final attempt (will panic if it still fails)
         verify_determinism(&result1, &result2, self.name);
+        assert_eq!(
+            retry_count, 0,
+            "{} succeeded only after {} retry attempt(s); real UDP smoke tests must not hide failures behind retries",
+            self.name, retry_count
+        );
 
         // Log scenario results
         let suffix = if retry_count > 0 {
@@ -3606,7 +3612,11 @@ fn test_scenario_local_perfect() {
         .with_input_delay(0);
 
     println!("Testing perfect local scenario: {}", scenario.summary());
-    let (result1, result2) = scenario.run_test(10340);
+    let (result1, result2, retry_count) = scenario.run_test_with_retry(10340);
+    assert_eq!(
+        retry_count, 0,
+        "local_perfect should pass over real UDP without retry; a retry would hide a baseline transport regression"
+    );
 
     // With perfect conditions and no input delay, rollbacks are possible
     // due to process scheduling, but should be minimal
@@ -5022,6 +5032,10 @@ fn test_one_sided_burst_loss() {
             .with_auto_sync_preset();
 
     let (result1, result2, retry_count) = scenario.run_test_with_retry(10606);
+    assert_eq!(
+        retry_count, 0,
+        "one_sided_burst_loss acceptance must not depend on UDP retries"
+    );
     verify_determinism(&result1, &result2, "one_sided_burst_loss");
 
     println!(

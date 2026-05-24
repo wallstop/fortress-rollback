@@ -14,7 +14,7 @@
 
 use arbitrary::Arbitrary;
 use fortress_rollback::network::{codec, compression};
-use fortress_rollback::rle::MAX_DECODED_LEN;
+use fortress_rollback::rle::DEFAULT_MAX_DECODED_LEN;
 use libfuzzer_sys::fuzz_target;
 
 /// Structured input for compression fuzzing
@@ -82,10 +82,10 @@ fuzz_target!(|input: CompressionInput| {
     if let Ok(decoded) = compression::decode(&input.reference, &input.decode_data) {
         let total: usize = decoded.iter().map(Vec::len).sum();
         assert!(
-            total <= MAX_DECODED_LEN,
-            "decoded {} bytes exceeds MAX_DECODED_LEN {}",
+            total <= DEFAULT_MAX_DECODED_LEN,
+            "decoded {} bytes exceeds DEFAULT_MAX_DECODED_LEN {}",
             total,
-            MAX_DECODED_LEN
+            DEFAULT_MAX_DECODED_LEN
         );
     }
 });

@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::error::allocation_failed;
 use crate::{
     frame_info::PlayerInput,
     network::{
@@ -21,6 +22,66 @@ use crate::{
 /// When not catching up to the host, spectators advance one frame at a time to maintain
 /// smooth playback. During catchup mode (when far behind), `catchup_speed` is used instead.
 const NORMAL_SPEED: usize = 1;
+
+struct HostFrameSnapshot<I>
+where
+    I: Copy + Clone + PartialEq + Eq,
+{
+    frame: Frame,
+    inputs: Vec<Option<PlayerInput<I>>>,
+    status: Vec<ConnectionStatus>,
+}
+
+impl<I> HostFrameSnapshot<I>
+where
+    I: Copy + Clone + PartialEq + Eq,
+{
+    fn new(
+        frame: Frame,
+        num_players: usize,
+        status: Vec<ConnectionStatus>,
+    ) -> Result<Self, FortressError> {
+        let mut inputs = Vec::new();
+        inputs
+            .try_reserve_exact(num_players)
+            .map_err(|_err| allocation_failed("spectator.host_frame_snapshot", num_players))?;
+        for _ in 0..num_players {
+            inputs.push(None);
+        }
+
+        Ok(Self {
+            frame,
+            inputs,
+            status,
+        })
+    }
+
+    fn is_complete(&self) -> bool {
+        self.inputs.iter().all(Option::is_some)
+    }
+}
+
+struct HostEventBatch<T>
+where
+    T: Config,
+{
+    host_index: usize,
+    addr: T::Address,
+    events: Vec<Event<T>>,
+}
+
+#[derive(Clone)]
+struct CanonicalFrameHost<A> {
+    frame: Frame,
+    addr: A,
+}
+
+#[derive(Clone)]
+struct SpectatorDivergenceState<A> {
+    frame: Frame,
+    player: PlayerHandle,
+    _marker: std::marker::PhantomData<A>,
+}
 
 /// [`SpectatorSession`] provides all functionality to connect to a remote host in a peer-to-peer fashion.
 ///
@@ -44,10 +105,13 @@ where
     socket: Box<dyn NonBlockingSocket<T::Address>>,
     /// One or more redundant hosts feeding confirmed inputs to this spectator.
     ///
-    /// Whichever host delivers a frame first fills the buffer. A host that
-    /// disconnects is removed; spectation continues while at least one host
-    /// remains. See [`SpectatorSession::num_hosts`].
+    /// Unresolved frames use the highest-priority currently connected host by
+    /// this vector's order as the canonical source. A host that disconnects is
+    /// removed; spectation continues while at least one host remains. See
+    /// [`SpectatorSession::num_hosts`].
     hosts: Vec<UdpProtocol<T>>,
+    host_snapshots: Vec<Vec<Option<HostFrameSnapshot<T::Input>>>>,
+    canonical_hosts: Vec<Option<CanonicalFrameHost<T::Address>>>,
     event_queue: VecDeque<FortressEvent<T>>,
     current_frame: Frame,
     last_recv_frame: Frame,
@@ -67,6 +131,11 @@ where
     violation_observer: Option<Arc<dyn ViolationObserver>>,
     /// Maximum number of events to queue before oldest are dropped.
     max_event_queue_size: usize,
+    spectator_divergence: Option<SpectatorDivergenceState<T::Address>>,
+    /// Host indices that will emit `Disconnected` during the current poll.
+    /// Cross-host comparisons must ignore these hosts so same-poll failover
+    /// cannot falsely latch divergence against a host that is no longer connected.
+    disconnecting_hosts: Vec<usize>,
 }
 
 impl<T: Config> SpectatorSession<T> {
@@ -74,9 +143,10 @@ impl<T: Config> SpectatorSession<T> {
     /// The session will receive inputs from all players from the given host(s) directly.
     /// The session will use the provided socket.
     ///
-    /// `hosts` may contain more than one endpoint for failover: confirmed inputs
-    /// are accepted from whichever host delivers them first, and the session keeps
-    /// advancing while at least one host remains connected.
+    /// `hosts` may contain more than one endpoint for failover: unresolved frames
+    /// use the highest-priority currently connected host by host order as their
+    /// canonical source, and the session keeps advancing while at least one host
+    /// remains connected.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         num_players: usize,
@@ -89,36 +159,80 @@ impl<T: Config> SpectatorSession<T> {
         enable_rewind: bool,
         violation_observer: Option<Arc<dyn ViolationObserver>>,
         event_queue_size: usize,
-    ) -> Self {
+    ) -> Result<Self, FortressError> {
         // host connection status
-        // alloc-bound: num_players is the session player count fixed at construction
-        let host_connect_status = vec![ConnectionStatus::default(); num_players];
+        let mut host_connect_status = Vec::new();
+        host_connect_status
+            .try_reserve_exact(num_players)
+            .map_err(|_err| allocation_failed("spectator.host_connect_status", num_players))?;
+        for _ in 0..num_players {
+            host_connect_status.push(ConnectionStatus::default());
+        }
 
         // Use at least 1 for buffer size to prevent panics
         let actual_buffer_size = buffer_size.max(1);
 
         // When rewind is enabled, allocate one game-state cell per ring slot.
-        let state_buffer = if enable_rewind {
-            (0..actual_buffer_size)
-                .map(|_| GameStateCell::default())
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let mut state_buffer = Vec::new();
+        if enable_rewind {
+            state_buffer
+                .try_reserve_exact(actual_buffer_size)
+                .map_err(|_err| allocation_failed("spectator.state_buffer", actual_buffer_size))?;
+            for _ in 0..actual_buffer_size {
+                state_buffer.push(GameStateCell::default());
+            }
+        }
 
-        Self {
+        let mut inputs = Vec::new();
+        inputs
+            .try_reserve_exact(actual_buffer_size)
+            .map_err(|_err| allocation_failed("spectator.inputs", actual_buffer_size))?;
+        for _ in 0..actual_buffer_size {
+            let mut frame_inputs = Vec::new();
+            frame_inputs
+                .try_reserve_exact(num_players)
+                .map_err(|_err| allocation_failed("spectator.frame_inputs", num_players))?;
+            for _ in 0..num_players {
+                frame_inputs.push(PlayerInput::blank_input(Frame::NULL));
+            }
+            inputs.push(frame_inputs);
+        }
+
+        let mut host_snapshots = Vec::new();
+        host_snapshots
+            .try_reserve_exact(hosts.len())
+            .map_err(|_err| allocation_failed("spectator.host_snapshots", hosts.len()))?;
+        for _ in 0..hosts.len() {
+            let mut frames = Vec::new();
+            frames
+                .try_reserve_exact(actual_buffer_size)
+                .map_err(|_err| {
+                    allocation_failed("spectator.host_snapshot_frames", actual_buffer_size)
+                })?;
+            for _ in 0..actual_buffer_size {
+                frames.push(None);
+            }
+            host_snapshots.push(frames);
+        }
+
+        let mut canonical_hosts = Vec::new();
+        canonical_hosts
+            .try_reserve_exact(actual_buffer_size)
+            .map_err(|_err| allocation_failed("spectator.canonical_hosts", actual_buffer_size))?;
+        for _ in 0..actual_buffer_size {
+            canonical_hosts.push(None);
+        }
+
+        Ok(Self {
             state: SessionState::Synchronizing,
             num_players,
             buffer_size: actual_buffer_size,
-            // alloc-bound: outer length is actual_buffer_size (the clamped spectator buffer size, validated <= SPECTATOR_MAX_BUFFER_SIZE)
-            inputs: vec![
-                // alloc-bound: inner length is num_players (session player count fixed at construction)
-                vec![PlayerInput::blank_input(Frame::NULL); num_players];
-                actual_buffer_size
-            ],
+            inputs,
             host_connect_status,
             socket,
             hosts,
+            host_snapshots,
+            canonical_hosts,
             event_queue: VecDeque::new(),
             current_frame: Frame::NULL,
             last_recv_frame: Frame::NULL,
@@ -129,7 +243,9 @@ impl<T: Config> SpectatorSession<T> {
             state_buffer,
             violation_observer,
             max_event_queue_size: event_queue_size,
-        }
+            spectator_divergence: None,
+            disconnecting_hosts: Vec::new(),
+        })
     }
 
     /// Returns the number of hosts currently feeding this spectator.
@@ -265,6 +381,10 @@ impl<T: Config> SpectatorSession<T> {
     /// no delayed frame is viewable yet, so callers never try to grab a negative
     /// frame.
     fn viewable_frame(&self) -> Frame {
+        if self.hosts.is_empty() && self.spectator_divergence.is_none() {
+            return self.last_recv_frame;
+        }
+
         let Ok(delay) = i32::try_from(self.stream_delay) else {
             return Frame::NULL;
         };
@@ -272,6 +392,15 @@ impl<T: Config> SpectatorSession<T> {
             .checked_sub(delay)
             .filter(|frame| *frame >= Frame::NULL)
             .unwrap_or(Frame::NULL)
+    }
+
+    fn spectator_divergence_error(&self) -> Option<FortressError> {
+        self.spectator_divergence
+            .as_ref()
+            .map(|divergence| FortressError::SpectatorDivergence {
+                frame: divergence.frame,
+                player: divergence.player,
+            })
     }
 
     /// Returns the current [`SessionState`] of a session.
@@ -361,7 +490,9 @@ impl<T: Config> SpectatorSession<T> {
         .into())
     }
 
-    /// Returns all events that happened since last queried for events. If the number of stored events exceeds `MAX_EVENT_QUEUE_SIZE`, the oldest events will be discarded.
+    /// Returns all events that happened since last queried for events. If the
+    /// number of stored events exceeds the configured event queue size, the
+    /// oldest events will be discarded.
     #[must_use = "events should be handled to react to session state changes"]
     pub fn events(&mut self) -> EventDrain<'_, T> {
         EventDrain::from_drain(self.event_queue.drain(..))
@@ -414,8 +545,16 @@ impl<T: Config> SpectatorSession<T> {
     /// [`NotSynchronized`]: FortressError::NotSynchronized
     #[must_use = "FortressRequests must be processed to advance the game state"]
     pub fn advance_frame(&mut self) -> FortressResult<RequestVec<T>> {
+        if let Some(err) = self.spectator_divergence_error() {
+            return Err(err);
+        }
+
         // receive info from host, trigger events and send messages
         self.poll_remote_clients();
+
+        if let Some(err) = self.spectator_divergence_error() {
+            return Err(err);
+        }
 
         if self.state != SessionState::Running {
             return Err(FortressError::NotSynchronized);
@@ -438,15 +577,15 @@ impl<T: Config> SpectatorSession<T> {
             NORMAL_SPEED
         };
 
-        // Pre-allocate for the expected number of frames to advance.
-        // In normal operation this is 1 (fits inline), in catchup mode it's catchup_speed
-        // which may exceed the inline capacity of 4, so we keep with_capacity here.
-        // With rewind enabled each advanced frame also emits a SaveGameState, so the
-        // batch can hold up to twice as many requests.
+        // Reserve fallibly for the expected catch-up batch. In normal operation
+        // this stays inline; when users configure a very large catchup_speed, a
+        // failed heap reservation becomes a structured error instead of an abort.
         let capacity =
             Self::advance_capacity(frames_to_advance, self.buffer_size, self.enable_rewind);
-        // alloc-bound: advance_capacity clamps frames_to_advance to buffer_size before doubling, so capacity <= buffer_size * 2
-        let mut requests = RequestVec::<T>::with_capacity(capacity);
+        let mut requests = RequestVec::<T>::new();
+        requests
+            .try_reserve(capacity)
+            .map_err(|_err| allocation_failed("spectator.advance.requests", capacity))?;
 
         for _ in 0..frames_to_advance {
             // get inputs for the next frame
@@ -650,24 +789,133 @@ impl<T: Config> SpectatorSession<T> {
             }
         }
 
-        // Run each host's poll and collect events tagged with the originating host
-        // index. We gather everything first to avoid a borrow conflict between the
-        // mutable host iteration and the event-handling that also mutates `self`.
-        // (`self.hosts` and `self.host_connect_status` are disjoint fields, so the
-        // mutable-host + immutable-connect_status borrow below is allowed.)
-        let mut events = Vec::new();
-        for (host_index, host) in self.hosts.iter_mut().enumerate() {
-            let addr = host.peer_addr();
-            for event in host.poll(&self.host_connect_status) {
-                events.push((host_index, event, addr.clone()));
+        // Handle all events locally, recording which hosts disconnected this poll.
+        // Host events are drained into a per-host temporary first to avoid a
+        // borrow conflict between the mutable host poll and event handling that
+        // mutates the wider spectator session. Every batch is collected before
+        // handling begins so hosts that emit Disconnected later in host order are
+        // already excluded from unresolved-frame canonical comparisons.
+        //
+        let hosts_len = self.hosts.len();
+
+        // alloc-bound: disconnecting host indices are deduplicated on insertion,
+        // so this vector is bounded by the number of hosts present at poll start.
+        self.disconnecting_hosts.clear();
+        if self
+            .disconnecting_hosts
+            .try_reserve_exact(hosts_len)
+            .is_err()
+        {
+            report_violation_to!(
+                &self.violation_observer,
+                ViolationSeverity::Error,
+                ViolationKind::InternalError,
+                "spectator: failed to reserve disconnecting host collection for {} hosts",
+                hosts_len
+            );
+            return;
+        }
+
+        // alloc-bound: disconnected host indices are deduplicated on insertion,
+        // so this vector is bounded by the number of hosts present at poll start.
+        let mut disconnected_hosts = Vec::new();
+        if disconnected_hosts.try_reserve_exact(hosts_len).is_err() {
+            report_violation_to!(
+                &self.violation_observer,
+                ViolationSeverity::Error,
+                ViolationKind::InternalError,
+                "spectator: failed to reserve disconnected host collection for {} hosts",
+                hosts_len
+            );
+            self.disconnecting_hosts.clear();
+            return;
+        }
+
+        // alloc-bound: one drained event batch is stored per host present at
+        // poll start, so this collection is bounded by `hosts_len`.
+        let mut host_event_batches = Vec::new();
+        if host_event_batches.try_reserve_exact(hosts_len).is_err() {
+            report_violation_to!(
+                &self.violation_observer,
+                ViolationSeverity::Error,
+                ViolationKind::InternalError,
+                "spectator: failed to reserve event batches for {} hosts",
+                hosts_len
+            );
+            self.disconnecting_hosts.clear();
+            return;
+        }
+
+        for host_index in 0..hosts_len {
+            // alloc-bound: this temporary is scoped to one host's drained
+            // protocol events for one poll. Growth is fallible, so an
+            // unexpectedly large protocol queue reports an internal violation
+            // instead of risking allocator abort.
+            let mut host_events = Vec::new();
+            let addr = {
+                let Some(host) = self.hosts.get_mut(host_index) else {
+                    continue;
+                };
+                let addr = host.peer_addr();
+                let events = host.poll(&self.host_connect_status);
+                let (lower_bound, _upper_bound) = events.size_hint();
+                if host_events.try_reserve_exact(lower_bound).is_err() {
+                    report_violation_to!(
+                        &self.violation_observer,
+                        ViolationSeverity::Error,
+                        ViolationKind::InternalError,
+                        "spectator: failed to reserve {} host events",
+                        lower_bound
+                    );
+                    return;
+                }
+                for event in events {
+                    if host_events.try_reserve(1).is_err() {
+                        report_violation_to!(
+                            &self.violation_observer,
+                            ViolationSeverity::Error,
+                            ViolationKind::InternalError,
+                            "spectator: failed to grow host event collection"
+                        );
+                        return;
+                    }
+                    host_events.push(event);
+                }
+                addr
+            };
+
+            host_event_batches.push(HostEventBatch {
+                host_index,
+                addr,
+                events: host_events,
+            });
+        }
+
+        for batch in &host_event_batches {
+            if !batch
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::Disconnected))
+            {
+                continue;
+            }
+            if !self.disconnecting_hosts.contains(&batch.host_index) {
+                self.disconnecting_hosts.push(batch.host_index);
             }
         }
 
-        // handle all events locally, recording which hosts disconnected this poll
-        let mut disconnected_hosts = Vec::new();
-        for (host_index, event, addr) in std::mem::take(&mut events) {
-            if let Some(disconnected_index) = self.handle_event(host_index, event, addr) {
-                disconnected_hosts.push(disconnected_index);
+        for batch in host_event_batches {
+            for event in batch.events {
+                if disconnected_hosts.contains(&batch.host_index) {
+                    continue;
+                }
+                if let Some(host_index) =
+                    self.handle_event(batch.host_index, event, batch.addr.clone())
+                {
+                    if !disconnected_hosts.contains(&host_index) {
+                        disconnected_hosts.push(host_index);
+                    }
+                }
             }
         }
 
@@ -676,6 +924,8 @@ impl<T: Config> SpectatorSession<T> {
         // is safe. The shared `host_connect_status` is not per-host, so removal does
         // not disturb it.
         self.remove_disconnected_hosts(disconnected_hosts);
+        self.disconnecting_hosts.clear();
+        self.try_commit_ready_frames();
 
         // send out all pending UDP messages
         for host in &mut self.hosts {
@@ -683,40 +933,40 @@ impl<T: Config> SpectatorSession<T> {
         }
     }
 
-    fn remove_disconnected_hosts(&mut self, disconnected_hosts: Vec<usize>) {
+    fn remove_disconnected_hosts(&mut self, mut disconnected_hosts: Vec<usize>) {
         if disconnected_hosts.is_empty() {
             return;
         }
 
-        let mut remove_host = vec![false; self.hosts.len()];
-        for host_index in disconnected_hosts {
-            if let Some(should_remove) = remove_host.get_mut(host_index) {
-                *should_remove = true;
-            } else {
+        let hosts_len = self.hosts.len();
+        disconnected_hosts.sort_unstable();
+        disconnected_hosts.dedup();
+        for &host_index in &disconnected_hosts {
+            if host_index >= hosts_len {
                 report_violation_to!(
                     &self.violation_observer,
                     ViolationSeverity::Error,
                     ViolationKind::InternalError,
                     "spectator: disconnected host index {} out of bounds (hosts.len()={})",
                     host_index,
-                    self.hosts.len()
+                    hosts_len
                 );
             }
         }
 
-        self.hosts = std::mem::take(&mut self.hosts)
-            .into_iter()
-            .zip(remove_host)
-            .filter_map(
-                |(host, should_remove)| {
-                    if should_remove {
-                        None
-                    } else {
-                        Some(host)
-                    }
-                },
-            )
-            .collect();
+        let mut host_index = 0;
+        self.hosts.retain(|_host| {
+            let should_remove = disconnected_hosts.binary_search(&host_index).is_ok();
+            host_index += 1;
+            !should_remove
+        });
+
+        let mut host_index = 0;
+        self.host_snapshots.retain(|_snapshots| {
+            let should_remove = disconnected_hosts.binary_search(&host_index).is_ok();
+            host_index += 1;
+            !should_remove
+        });
     }
 
     /// Returns the current frame of a session.
@@ -815,6 +1065,410 @@ impl<T: Config> SpectatorSession<T> {
             .collect())
     }
 
+    fn snapshot_input(
+        &self,
+        host_index: usize,
+        frame: Frame,
+        player_index: usize,
+    ) -> Option<PlayerInput<T::Input>> {
+        let buffer_index = frame.buffer_index(self.buffer_size)?;
+        let snapshot = self
+            .host_snapshots
+            .get(host_index)?
+            .get(buffer_index)?
+            .as_ref()?;
+        if snapshot.frame != frame {
+            return None;
+        }
+        snapshot.inputs.get(player_index).copied().flatten()
+    }
+
+    fn snapshot_is_complete(&self, host_index: usize, frame: Frame) -> bool {
+        let Some(buffer_index) = frame.buffer_index(self.buffer_size) else {
+            return false;
+        };
+        self.host_snapshots
+            .get(host_index)
+            .and_then(|host| host.get(buffer_index))
+            .and_then(Option::as_ref)
+            .is_some_and(|snapshot| snapshot.frame == frame && snapshot.is_complete())
+    }
+
+    fn host_is_disconnect_pending(&self, host_index: usize) -> bool {
+        self.disconnecting_hosts.contains(&host_index)
+    }
+
+    fn has_surviving_host(&self) -> bool {
+        (0..self.hosts.len()).any(|host_index| !self.host_is_disconnect_pending(host_index))
+    }
+
+    fn latch_spectator_divergence(
+        &mut self,
+        frame: Frame,
+        player: PlayerHandle,
+        primary_addr: T::Address,
+        conflicting_addr: T::Address,
+    ) {
+        if self.spectator_divergence.is_some() {
+            return;
+        }
+
+        report_violation_to!(
+            &self.violation_observer,
+            ViolationSeverity::Error,
+            ViolationKind::FrameSync,
+            "spectator: divergent host input for player {} at frame {}; failing closed",
+            player,
+            frame
+        );
+        self.event_queue
+            .push_back(FortressEvent::SpectatorDivergence {
+                frame,
+                player,
+                primary_addr,
+                conflicting_addr,
+            });
+        self.spectator_divergence = Some(SpectatorDivergenceState {
+            frame,
+            player,
+            _marker: std::marker::PhantomData,
+        });
+        self.trim_event_queue();
+    }
+
+    fn trim_event_queue(&mut self) {
+        while self.event_queue.len() > self.max_event_queue_size {
+            self.event_queue.pop_front();
+        }
+    }
+
+    fn detect_staged_input_disagreement(
+        &mut self,
+        host_index: usize,
+        input: PlayerInput<T::Input>,
+        player: PlayerHandle,
+        addr: T::Address,
+        compare_disconnect_pending: bool,
+    ) -> bool {
+        let player_index = player.as_usize();
+        for other_host_index in 0..self.hosts.len() {
+            if other_host_index == host_index {
+                continue;
+            }
+            if self.host_is_disconnect_pending(other_host_index) && !compare_disconnect_pending {
+                continue;
+            }
+            let Some(other_input) =
+                self.snapshot_input(other_host_index, input.frame, player_index)
+            else {
+                continue;
+            };
+            if input.equal(&other_input, true) {
+                continue;
+            }
+
+            let Some(other_addr) = self.hosts.get(other_host_index).map(UdpProtocol::peer_addr)
+            else {
+                continue;
+            };
+            let (primary_addr, conflicting_addr) = if other_host_index < host_index {
+                (other_addr, addr)
+            } else {
+                (addr, other_addr)
+            };
+            self.latch_spectator_divergence(input.frame, player, primary_addr, conflicting_addr);
+            return true;
+        }
+
+        if input.frame <= self.last_recv_frame {
+            let Some(buffer_index) = input.frame.buffer_index(self.buffer_size) else {
+                return false;
+            };
+            let Some(Some(canonical_host)) = self.canonical_hosts.get(buffer_index) else {
+                return false;
+            };
+            if canonical_host.frame != input.frame {
+                return false;
+            }
+            let Some(committed_input) = self
+                .inputs
+                .get(buffer_index)
+                .and_then(|frame_inputs| frame_inputs.get(player_index))
+                .copied()
+            else {
+                return false;
+            };
+            if !committed_input.equal(&input, true) {
+                self.latch_spectator_divergence(
+                    input.frame,
+                    player,
+                    canonical_host.addr.clone(),
+                    addr,
+                );
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn try_commit_ready_frames(&mut self) {
+        self.try_commit_ready_frames_with_pending_host(None);
+    }
+
+    fn try_commit_ready_frames_with_pending_host(
+        &mut self,
+        pending_host_to_include: Option<usize>,
+    ) {
+        loop {
+            if self.spectator_divergence.is_some() {
+                return;
+            }
+
+            let Some(next_frame) = self.last_recv_frame.checked_add(1) else {
+                return;
+            };
+            let canonical_host_index = (0..self.hosts.len())
+                .find(|&index| !self.host_is_disconnect_pending(index))
+                .or(pending_host_to_include);
+            let Some(canonical_host_index) = canonical_host_index else {
+                return;
+            };
+            if !self.snapshot_is_complete(canonical_host_index, next_frame) {
+                return;
+            }
+
+            if self.detect_snapshot_disagreement(
+                canonical_host_index,
+                next_frame,
+                !self.has_surviving_host(),
+            ) {
+                return;
+            }
+
+            self.commit_canonical_snapshot(canonical_host_index, next_frame);
+        }
+    }
+
+    fn detect_snapshot_disagreement(
+        &mut self,
+        canonical_host_index: usize,
+        frame: Frame,
+        compare_disconnect_pending: bool,
+    ) -> bool {
+        let primary_addr = match self.hosts.get(canonical_host_index) {
+            Some(host) => host.peer_addr(),
+            None => return false,
+        };
+
+        for host_index in 0..self.hosts.len() {
+            if host_index == canonical_host_index {
+                continue;
+            }
+            if self.host_is_disconnect_pending(host_index) && !compare_disconnect_pending {
+                continue;
+            }
+            let conflicting_addr = match self.hosts.get(host_index) {
+                Some(host) => host.peer_addr(),
+                None => continue,
+            };
+
+            for player_index in 0..self.num_players {
+                let Some(primary_input) =
+                    self.snapshot_input(canonical_host_index, frame, player_index)
+                else {
+                    continue;
+                };
+                let Some(conflicting_input) = self.snapshot_input(host_index, frame, player_index)
+                else {
+                    continue;
+                };
+                if !primary_input.equal(&conflicting_input, true) {
+                    self.latch_spectator_divergence(
+                        frame,
+                        PlayerHandle::new(player_index),
+                        primary_addr,
+                        conflicting_addr,
+                    );
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    fn commit_canonical_snapshot(&mut self, host_index: usize, frame: Frame) {
+        let Some(buffer_index) = frame.buffer_index(self.buffer_size) else {
+            return;
+        };
+
+        for player_index in 0..self.num_players {
+            let Some(input) = self.snapshot_input(host_index, frame, player_index) else {
+                return;
+            };
+            if let Some(slot) = self
+                .inputs
+                .get_mut(buffer_index)
+                .and_then(|frame_inputs| frame_inputs.get_mut(player_index))
+            {
+                *slot = input;
+            } else {
+                report_violation_to!(
+                    &self.violation_observer,
+                    ViolationSeverity::Error,
+                    ViolationKind::InternalError,
+                    "spectator: canonical input slot missing for player {} at frame {}",
+                    player_index,
+                    frame
+                );
+                return;
+            }
+        }
+
+        let Some(snapshot) = self
+            .host_snapshots
+            .get(host_index)
+            .and_then(|host| host.get(buffer_index))
+            .and_then(Option::as_ref)
+        else {
+            return;
+        };
+        for player_index in 0..self.num_players {
+            let Some(status) = snapshot.status.get(player_index).copied() else {
+                report_violation_to!(
+                    &self.violation_observer,
+                    ViolationSeverity::Error,
+                    ViolationKind::InternalError,
+                    "spectator: canonical status missing for player {} at frame {}",
+                    player_index,
+                    frame
+                );
+                return;
+            };
+            if let Some(slot) = self.host_connect_status.get_mut(player_index) {
+                *slot = status;
+            }
+        }
+
+        if let Some(host) = self.hosts.get_mut(host_index) {
+            host.update_local_frame_advantage(frame);
+            if let Some(slot) = self.canonical_hosts.get_mut(buffer_index) {
+                *slot = Some(CanonicalFrameHost {
+                    frame,
+                    addr: host.peer_addr(),
+                });
+            }
+        }
+
+        self.last_recv_frame = frame;
+    }
+
+    fn handle_host_input(
+        &mut self,
+        host_index: usize,
+        input: PlayerInput<T::Input>,
+        player: PlayerHandle,
+        status_snapshot: Vec<ConnectionStatus>,
+        addr: T::Address,
+    ) {
+        // Validate frame before using as index - negative frames would wrap around
+        if input.frame.is_null() || input.frame.as_i32() < 0 {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "Received input with invalid frame {:?} for player {} - ignoring",
+                input.frame,
+                player
+            );
+            return;
+        }
+
+        // Validate player handle is in bounds
+        if player.as_usize() >= self.num_players {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::InternalError,
+                "Received input for player {} but only {} players configured - ignoring",
+                player,
+                self.num_players
+            );
+            return;
+        }
+
+        let Some(frame_index) = input.frame.buffer_index(self.buffer_size) else {
+            return;
+        };
+
+        let mut same_host_conflict = false;
+        {
+            let Some(host_ring) = self.host_snapshots.get_mut(host_index) else {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::InternalError,
+                    "Received input from unknown host index {} - ignoring",
+                    host_index
+                );
+                return;
+            };
+            let Some(slot) = host_ring.get_mut(frame_index) else {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::InternalError,
+                    "Failed to stage input at frame {} - frame index {} out of bounds",
+                    input.frame,
+                    frame_index
+                );
+                return;
+            };
+            if !matches!(slot, Some(snapshot) if snapshot.frame == input.frame) {
+                let Ok(snapshot) =
+                    HostFrameSnapshot::new(input.frame, self.num_players, status_snapshot)
+                else {
+                    return;
+                };
+                *slot = Some(snapshot);
+            }
+
+            let Some(snapshot) = slot.as_mut() else {
+                return;
+            };
+            let Some(player_slot) = snapshot.inputs.get_mut(player.as_usize()) else {
+                return;
+            };
+            if let Some(existing_input) = player_slot {
+                same_host_conflict = !existing_input.equal(&input, true);
+            } else {
+                *player_slot = Some(input);
+            }
+        }
+
+        if same_host_conflict {
+            self.latch_spectator_divergence(input.frame, player, addr.clone(), addr);
+            return;
+        }
+
+        let host_disconnect_pending = self.host_is_disconnect_pending(host_index);
+        let compare_disconnect_pending = host_disconnect_pending && !self.has_surviving_host();
+        if (!host_disconnect_pending || compare_disconnect_pending)
+            && self.detect_staged_input_disagreement(
+                host_index,
+                input,
+                player,
+                addr,
+                compare_disconnect_pending,
+            )
+        {
+            return;
+        }
+
+        if input.frame > self.last_recv_frame {
+            self.try_commit_ready_frames_with_pending_host(
+                host_disconnect_pending.then_some(host_index),
+            );
+        }
+    }
+
     /// Handles a single protocol event originating from `host_index`.
     ///
     /// Returns `Some(host_index)` if the event was an [`Event::Disconnected`],
@@ -876,126 +1530,23 @@ impl<T: Config> SpectatorSession<T> {
                     .push_back(FortressEvent::SyncTimeout { addr, elapsed_ms });
             },
             // add the input and all associated information
-            Event::Input { input, player } => {
-                // Validate frame before using as index - negative frames would wrap around
-                if input.frame.is_null() || input.frame.as_i32() < 0 {
-                    report_violation!(
-                        ViolationSeverity::Warning,
-                        ViolationKind::FrameSync,
-                        "Received input with invalid frame {:?} for player {} - ignoring",
-                        input.frame,
-                        player
-                    );
-                    return None;
-                }
-
-                // Validate player handle is in bounds
-                if player.as_usize() >= self.num_players {
-                    report_violation!(
-                        ViolationSeverity::Warning,
-                        ViolationKind::InternalError,
-                        "Received input for player {} but only {} players configured - ignoring",
-                        player,
-                        self.num_players
-                    );
-                    return None;
-                }
-
-                // Save the input. With redundant hosts, the first report for a
-                // given player/frame wins: identical duplicates are ignored, while
-                // divergent duplicates are reported and ignored. Newer frames may
-                // replace older contents in the same ring slot.
-                let frame_index = input.frame.as_i32() as usize % self.buffer_size;
-                if let Some(frame_inputs) = self.inputs.get_mut(frame_index) {
-                    if let Some(player_input) = frame_inputs.get_mut(player.as_usize()) {
-                        if input.frame > player_input.frame {
-                            *player_input = input;
-                        } else if input.frame == player_input.frame
-                            && !player_input.equal(&input, true)
-                        {
-                            report_violation_to!(
-                                &self.violation_observer,
-                                ViolationSeverity::Error,
-                                ViolationKind::FrameSync,
-                                "spectator: divergent duplicate input for player {} at frame {} ignored",
-                                player,
-                                input.frame
-                            );
-                        }
-                    } else {
-                        report_violation!(
-                            ViolationSeverity::Warning,
-                            ViolationKind::InternalError,
-                            "Failed to store input for player {} at frame {} - player index out of bounds",
-                            player,
-                            input.frame
-                        );
-                        return None;
-                    }
-                } else {
-                    report_violation!(
-                        ViolationSeverity::Warning,
-                        ViolationKind::InternalError,
-                        "Failed to store input at frame {} - frame index {} out of bounds",
-                        input.frame,
-                        frame_index
-                    );
-                    return None;
-                }
-
-                // Whether this input is at or beyond the live-edge frontier. Only the
-                // freshest host should refresh the shared connect-status and frame
-                // advantage; a lagging redundant host must not overwrite them with
-                // stale data.
-                let is_frontier = input.frame >= self.last_recv_frame;
-
-                // advance the live edge only on strictly newer frames
-                if input.frame > self.last_recv_frame {
-                    self.last_recv_frame = input.frame;
-                }
-
-                if let Some(host) = self.hosts.get_mut(host_index) {
-                    if is_frontier {
-                        host.update_local_frame_advantage(input.frame);
-                    }
-
-                    // Update host connection status from THIS host. Connected
-                    // last-frame freshness only comes from frontier hosts, but
-                    // disconnect cutoffs are monotonic knowledge and must still
-                    // be accepted from lagging hosts.
-                    for i in 0..self.num_players {
-                        let status = host.peer_connect_status(PlayerHandle::new(i));
-                        if let Some(slot) = self.host_connect_status.get_mut(i) {
-                            merge_connection_status_if_relevant(slot, status, is_frontier);
-                        } else {
-                            report_violation!(
-                                ViolationSeverity::Warning,
-                                ViolationKind::InternalError,
-                                "Failed to update connection status for player {} - index out of bounds",
-                                i
-                            );
-                        }
-                    }
-                } else {
-                    report_violation!(
-                        ViolationSeverity::Warning,
-                        ViolationKind::InternalError,
-                        "Received input from unknown host index {} - ignoring frame advantage update",
-                        host_index
-                    );
-                }
+            Event::Input {
+                input,
+                player,
+                peer_connect_status,
+            } => {
+                self.handle_host_input(host_index, input, player, peer_connect_status, addr);
             },
         }
 
         // check event queue size and discard oldest events if too big
-        while self.event_queue.len() > self.max_event_queue_size {
-            self.event_queue.pop_front();
-        }
+        self.trim_event_queue();
 
         disconnected_host
     }
 }
 
+#[cfg(test)]
 fn merge_connection_status(current: &mut ConnectionStatus, incoming: ConnectionStatus) {
     if current.disconnected {
         if incoming.disconnected {
@@ -1009,16 +1560,6 @@ fn merge_connection_status(current: &mut ConnectionStatus, incoming: ConnectionS
         current.last_frame = incoming.last_frame;
     } else {
         current.last_frame = std::cmp::max(current.last_frame, incoming.last_frame);
-    }
-}
-
-fn merge_connection_status_if_relevant(
-    current: &mut ConnectionStatus,
-    incoming: ConnectionStatus,
-    is_frontier: bool,
-) {
-    if is_frontier || incoming.disconnected {
-        merge_connection_status(current, incoming);
     }
 }
 
@@ -1079,6 +1620,10 @@ impl<T: Config> Session<T> for SpectatorSession<T> {
 )]
 mod tests {
     use super::*;
+    use crate::network::{
+        compression,
+        messages::{Input, MessageBody, MessageHeader},
+    };
     use crate::{Config, Message, NonBlockingSocket, SessionBuilder};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -1104,6 +1649,64 @@ mod tests {
         fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
             Vec::new()
         }
+    }
+
+    fn spectator_input_message(
+        frame: Frame,
+        player_inputs: [u8; 2],
+        peer_connect_status: Vec<ConnectionStatus>,
+    ) -> Message {
+        spectator_input_message_with_disconnect(frame, player_inputs, peer_connect_status, false)
+    }
+
+    fn spectator_input_message_with_disconnect(
+        frame: Frame,
+        player_inputs: [u8; 2],
+        peer_connect_status: Vec<ConnectionStatus>,
+        disconnect_requested: bool,
+    ) -> Message {
+        let input_bytes = vec![player_inputs[0], player_inputs[1]];
+        let encoded = compression::encode(&[0_u8; 2], std::iter::once(&input_bytes));
+
+        Message {
+            header: MessageHeader { magic: 1 },
+            body: MessageBody::Input(Input {
+                peer_connect_status,
+                disconnect_requested,
+                start_frame: frame,
+                ack_frame: Frame::NULL,
+                bytes: encoded,
+            }),
+        }
+    }
+
+    fn queue_host_input(
+        session: &mut SpectatorSession<TestConfig>,
+        host_index: usize,
+        frame: Frame,
+        player_inputs: [u8; 2],
+        peer_connect_status: Vec<ConnectionStatus>,
+    ) {
+        let msg = spectator_input_message(frame, player_inputs, peer_connect_status);
+        session.hosts[host_index].force_running_for_tests();
+        session.hosts[host_index].handle_message(&msg);
+    }
+
+    fn queue_host_disconnect_input(
+        session: &mut SpectatorSession<TestConfig>,
+        host_index: usize,
+        frame: Frame,
+        player_inputs: [u8; 2],
+        peer_connect_status: Vec<ConnectionStatus>,
+    ) {
+        let msg = spectator_input_message_with_disconnect(
+            frame,
+            player_inputs,
+            peer_connect_status,
+            true,
+        );
+        session.hosts[host_index].force_running_for_tests();
+        session.hosts[host_index].handle_message(&msg);
     }
 
     // Helper function to create a spectator session for testing
@@ -1583,25 +2186,25 @@ mod tests {
     }
 
     #[test]
-    fn spectator_config_frame_domain_is_validated_by_builders() {
+    fn spectator_config_builders_do_not_impose_arbitrary_buffer_caps() {
         use crate::SpectatorConfig;
 
-        let invalid_buffer = SessionBuilder::<TestConfig>::new()
+        let large_buffer = SessionBuilder::<TestConfig>::new()
             .with_num_players(2)
             .unwrap()
             .with_spectator_config(SpectatorConfig {
-                buffer_size: 2_147_483_649,
+                buffer_size: 4_097,
                 ..SpectatorConfig::default()
             })
             .start_spectator_session(test_addr(7404), DummySocket);
-        assert!(invalid_buffer.is_none());
+        assert!(large_buffer.is_some());
 
         let invalid_delay = SessionBuilder::<TestConfig>::new()
             .with_num_players(2)
             .unwrap()
             .with_spectator_config(SpectatorConfig {
-                buffer_size: 2_147_483_648,
-                stream_delay: 2_147_483_648,
+                buffer_size: 4_096,
+                stream_delay: 4_096,
                 ..SpectatorConfig::default()
             })
             .start_spectator_session_multi(&[test_addr(7405), test_addr(7406)], DummySocket);
@@ -1858,7 +2461,7 @@ mod tests {
     }
 
     #[test]
-    fn spectator_duplicate_same_frame_divergent_input_keeps_first_and_reports_violation() {
+    fn spectator_redundant_host_divergence_latches_error_and_event() {
         use crate::telemetry::CollectingObserver;
 
         let observer = Arc::new(CollectingObserver::new());
@@ -1866,42 +2469,359 @@ mod tests {
             .with_num_players(2)
             .unwrap()
             .with_violation_observer(observer.clone())
-            .start_spectator_session(test_addr(7301), DummySocket)
+            .start_spectator_session_multi(&[test_addr(7301), test_addr(7302)], DummySocket)
             .unwrap();
-        session.last_recv_frame = Frame::new(10);
-        let frame = Frame::new(2);
-        let player = PlayerHandle::new(0);
-        let addr = test_addr(7301);
+        session.state = SessionState::Running;
+        let frame = Frame::new(0);
 
-        assert_eq!(
-            session.handle_event(
-                0,
-                Event::Input {
-                    input: PlayerInput::new(frame, 11),
-                    player,
-                },
-                addr,
-            ),
-            None
+        queue_host_input(
+            &mut session,
+            0,
+            frame,
+            [11, 22],
+            vec![ConnectionStatus::default(); 2],
         );
-        assert_eq!(
-            session.handle_event(
-                0,
-                Event::Input {
-                    input: PlayerInput::new(frame, 99),
-                    player,
-                },
-                addr,
-            ),
-            None
-        );
-
+        session.poll_remote_clients();
         let buffer_index = frame.buffer_index(session.buffer_size).unwrap();
         assert_eq!(session.inputs[buffer_index][0].input, 11_u8);
+
+        queue_host_input(
+            &mut session,
+            1,
+            frame,
+            [99, 22],
+            vec![ConnectionStatus::default(); 2],
+        );
+        session.poll_remote_clients();
+
         assert!(observer
             .violations()
             .iter()
             .any(|violation| violation.kind == ViolationKind::FrameSync));
+        assert!(session.events().any(|event| {
+            matches!(
+                event,
+                FortressEvent::SpectatorDivergence {
+                    frame: event_frame,
+                    player,
+                    ..
+                } if event_frame == frame && player == PlayerHandle::new(0)
+            )
+        }));
+        assert!(matches!(
+            session.advance_frame(),
+            Err(FortressError::SpectatorDivergence {
+                frame: event_frame,
+                player,
+            }) if event_frame == frame && player == PlayerHandle::new(0)
+        ));
+    }
+
+    #[test]
+    fn spectator_partial_host_input_conflict_latches_after_canonical_commit() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7305), test_addr(7306)], DummySocket)
+            .unwrap();
+        let frame = Frame::new(0);
+
+        session.handle_host_input(
+            0,
+            PlayerInput::new(frame, 11),
+            PlayerHandle::new(0),
+            vec![ConnectionStatus::default(); 2],
+            test_addr(7305),
+        );
+        session.handle_host_input(
+            0,
+            PlayerInput::new(frame, 22),
+            PlayerHandle::new(1),
+            vec![ConnectionStatus::default(); 2],
+            test_addr(7305),
+        );
+        assert_eq!(session.last_recv_frame, frame);
+
+        session.handle_host_input(
+            1,
+            PlayerInput::new(frame, 99),
+            PlayerHandle::new(0),
+            vec![ConnectionStatus::default(); 2],
+            test_addr(7306),
+        );
+
+        assert!(matches!(
+            session.advance_frame(),
+            Err(FortressError::SpectatorDivergence {
+                frame: event_frame,
+                player,
+            }) if event_frame == frame && player == PlayerHandle::new(0)
+        ));
+    }
+
+    #[test]
+    fn spectator_partial_host_input_conflict_latches_before_canonical_commit() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7307), test_addr(7308)], DummySocket)
+            .unwrap();
+        let frame = Frame::new(0);
+
+        session.handle_host_input(
+            1,
+            PlayerInput::new(frame, 99),
+            PlayerHandle::new(0),
+            vec![ConnectionStatus::default(); 2],
+            test_addr(7308),
+        );
+        assert_eq!(session.last_recv_frame, Frame::NULL);
+
+        session.handle_host_input(
+            0,
+            PlayerInput::new(frame, 11),
+            PlayerHandle::new(0),
+            vec![ConnectionStatus::default(); 2],
+            test_addr(7307),
+        );
+
+        assert!(session.events().any(|event| {
+            matches!(
+                event,
+                FortressEvent::SpectatorDivergence {
+                    frame: event_frame,
+                    player,
+                    primary_addr,
+                    conflicting_addr,
+                } if event_frame == frame
+                    && player == PlayerHandle::new(0)
+                    && primary_addr == test_addr(7307)
+                    && conflicting_addr == test_addr(7308)
+            )
+        }));
+        assert!(matches!(
+            session.advance_frame(),
+            Err(FortressError::SpectatorDivergence {
+                frame: event_frame,
+                player,
+            }) if event_frame == frame && player == PlayerHandle::new(0)
+        ));
+    }
+
+    #[test]
+    fn spectator_pending_primary_disconnect_allows_unresolved_failover_without_divergence() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7311), test_addr(7312)], DummySocket)
+            .unwrap();
+        let frame = Frame::new(0);
+        let status = vec![ConnectionStatus::default(); 2];
+
+        session.handle_host_input(
+            0,
+            PlayerInput::new(frame, 99),
+            PlayerHandle::new(0),
+            status.clone(),
+            test_addr(7311),
+        );
+        assert_eq!(session.last_recv_frame, Frame::NULL);
+
+        session.disconnecting_hosts.push(0);
+        session.handle_host_input(
+            1,
+            PlayerInput::new(frame, 11),
+            PlayerHandle::new(0),
+            status.clone(),
+            test_addr(7312),
+        );
+        session.handle_host_input(
+            1,
+            PlayerInput::new(frame, 22),
+            PlayerHandle::new(1),
+            status,
+            test_addr(7312),
+        );
+
+        assert!(session.spectator_divergence.is_none());
+        assert!(!session
+            .events()
+            .any(|event| { matches!(event, FortressEvent::SpectatorDivergence { .. }) }));
+        assert_eq!(session.last_recv_frame, frame);
+        let buffer_index = frame.buffer_index(session.buffer_size).unwrap();
+        assert_eq!(session.inputs[buffer_index][0].input, 11_u8);
+        assert_eq!(session.inputs[buffer_index][1].input, 22_u8);
+    }
+
+    #[test]
+    fn spectator_same_poll_later_disconnect_is_excluded_before_earlier_input() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7313), test_addr(7314)], DummySocket)
+            .unwrap();
+        let frame = Frame::new(0);
+        let status = vec![ConnectionStatus::default(); 2];
+
+        session.handle_host_input(
+            1,
+            PlayerInput::new(frame, 99),
+            PlayerHandle::new(0),
+            status.clone(),
+            test_addr(7314),
+        );
+        assert_eq!(session.last_recv_frame, Frame::NULL);
+
+        queue_host_disconnect_input(&mut session, 1, frame, [99, 22], status.clone());
+        queue_host_input(&mut session, 0, frame, [11, 22], status);
+        session.poll_remote_clients();
+
+        assert_eq!(session.num_hosts(), 1);
+        assert!(session.spectator_divergence.is_none());
+        assert!(!session
+            .events()
+            .any(|event| { matches!(event, FortressEvent::SpectatorDivergence { .. }) }));
+        assert_eq!(session.last_recv_frame, frame);
+        let buffer_index = frame.buffer_index(session.buffer_size).unwrap();
+        assert_eq!(session.inputs[buffer_index][0].input, 11_u8);
+        assert_eq!(session.inputs[buffer_index][1].input, 22_u8);
+    }
+
+    #[test]
+    fn spectator_same_host_input_before_disconnect_is_preserved() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session(test_addr(7315), DummySocket)
+            .unwrap();
+        let frame = Frame::new(0);
+        let status = vec![ConnectionStatus::default(); 2];
+
+        queue_host_input(&mut session, 0, frame, [11, 22], status.clone());
+        queue_host_disconnect_input(&mut session, 0, frame, [11, 22], status);
+        session.poll_remote_clients();
+
+        assert_eq!(session.num_hosts(), 0);
+        assert!(session.spectator_divergence.is_none());
+        assert_eq!(session.last_recv_frame, frame);
+        let buffer_index = frame.buffer_index(session.buffer_size).unwrap();
+        assert_eq!(session.inputs[buffer_index][0].input, 11_u8);
+        assert_eq!(session.inputs[buffer_index][1].input, 22_u8);
+    }
+
+    #[test]
+    fn spectator_disconnect_packet_preserves_final_inputs() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session(test_addr(7316), DummySocket)
+            .unwrap();
+        let frame = Frame::new(0);
+        let status = vec![ConnectionStatus::default(); 2];
+
+        queue_host_disconnect_input(&mut session, 0, frame, [11, 22], status);
+        session.poll_remote_clients();
+
+        assert_eq!(session.num_hosts(), 0);
+        assert!(session.spectator_divergence.is_none());
+        assert_eq!(session.last_recv_frame, frame);
+        let buffer_index = frame.buffer_index(session.buffer_size).unwrap();
+        assert_eq!(session.inputs[buffer_index][0].input, 11_u8);
+        assert_eq!(session.inputs[buffer_index][1].input, 22_u8);
+    }
+
+    #[test]
+    fn spectator_all_hosts_disconnect_with_conflict_latches_divergence() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7317), test_addr(7318)], DummySocket)
+            .unwrap();
+        let frame = Frame::new(0);
+        let status = vec![ConnectionStatus::default(); 2];
+
+        queue_host_disconnect_input(&mut session, 0, frame, [11, 22], status.clone());
+        queue_host_disconnect_input(&mut session, 1, frame, [99, 22], status);
+        session.poll_remote_clients();
+
+        assert_eq!(session.num_hosts(), 0);
+        assert!(matches!(
+            session.spectator_divergence,
+            Some(SpectatorDivergenceState {
+                frame: event_frame,
+                player,
+                ..
+            }) if event_frame == frame && player == PlayerHandle::new(0)
+        ));
+        assert!(session.events().any(|event| {
+            matches!(
+                event,
+                FortressEvent::SpectatorDivergence {
+                    frame: event_frame,
+                    player,
+                    ..
+                } if event_frame == frame && player == PlayerHandle::new(0)
+            )
+        }));
+        assert!(matches!(
+            session.advance_frame(),
+            Err(FortressError::SpectatorDivergence {
+                frame: event_frame,
+                player,
+            }) if event_frame == frame && player == PlayerHandle::new(0)
+        ));
+    }
+
+    #[test]
+    fn spectator_host_frame_snapshot_keeps_packet_status_per_frame() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7309)], DummySocket)
+            .unwrap();
+        let frame0 = Frame::new(0);
+        let frame1 = Frame::new(1);
+        let status0 = vec![
+            ConnectionStatus {
+                disconnected: false,
+                last_frame: frame0,
+            },
+            ConnectionStatus {
+                disconnected: false,
+                last_frame: frame0,
+            },
+        ];
+        let status1 = vec![
+            ConnectionStatus {
+                disconnected: false,
+                last_frame: frame1,
+            },
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: frame1,
+            },
+        ];
+
+        queue_host_input(&mut session, 0, frame0, [0, 0], status0.clone());
+        queue_host_input(&mut session, 0, frame1, [1, 2], status1.clone());
+        session.poll_remote_clients();
+
+        let frame0_index = frame0.buffer_index(session.buffer_size).unwrap();
+        let frame1_index = frame1.buffer_index(session.buffer_size).unwrap();
+        assert_eq!(
+            session.host_snapshots[0][frame0_index]
+                .as_ref()
+                .unwrap()
+                .status,
+            status0
+        );
+        assert_eq!(
+            session.host_snapshots[0][frame1_index]
+                .as_ref()
+                .unwrap()
+                .status,
+            status1
+        );
     }
 
     #[test]
@@ -1955,42 +2875,164 @@ mod tests {
     }
 
     #[test]
-    fn spectator_connection_status_merge_accepts_lagging_disconnect_only() {
-        let mut current = ConnectionStatus {
-            disconnected: false,
-            last_frame: Frame::new(20),
-        };
-
-        merge_connection_status_if_relevant(
-            &mut current,
+    fn spectator_same_frame_redundant_host_cannot_refresh_or_disconnect_shared_status() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7310), test_addr(7311)], DummySocket)
+            .unwrap();
+        let frame = Frame::new(0);
+        let fresh_status = vec![
             ConnectionStatus {
                 disconnected: false,
-                last_frame: Frame::new(10),
+                last_frame: frame,
             },
-            false,
-        );
-        assert_eq!(
-            current,
             ConnectionStatus {
                 disconnected: false,
-                last_frame: Frame::new(20),
-            }
+                last_frame: frame,
+            },
+        ];
+
+        queue_host_input(&mut session, 0, frame, [11, 22], fresh_status);
+        session.poll_remote_clients();
+        assert_eq!(session.last_recv_frame, frame);
+        assert_eq!(
+            session.host_connect_status,
+            vec![
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: frame,
+                },
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: frame,
+                },
+            ]
         );
 
-        merge_connection_status_if_relevant(
-            &mut current,
+        let stale_same_frame_status = vec![
             ConnectionStatus {
-                disconnected: true,
-                last_frame: Frame::new(7),
+                disconnected: false,
+                last_frame: Frame::new(99),
             },
-            false,
-        );
-        assert_eq!(
-            current,
             ConnectionStatus {
                 disconnected: true,
-                last_frame: Frame::new(7),
-            }
+                last_frame: Frame::new(3),
+            },
+        ];
+        queue_host_input(&mut session, 1, frame, [11, 22], stale_same_frame_status);
+        session.poll_remote_clients();
+
+        assert_eq!(
+            session.host_connect_status,
+            vec![
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: frame,
+                },
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: frame,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn spectator_lower_priority_snapshot_is_provisional_until_primary_arrives() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7320), test_addr(7321)], DummySocket)
+            .unwrap();
+        let frame = Frame::new(0);
+        let lower_status = vec![
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(4),
+            },
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(4),
+            },
+        ];
+        queue_host_input(&mut session, 1, frame, [11, 22], lower_status);
+        session.poll_remote_clients();
+        assert_eq!(session.last_recv_frame, Frame::NULL);
+
+        let primary_status = vec![
+            ConnectionStatus {
+                disconnected: false,
+                last_frame: frame,
+            },
+            ConnectionStatus {
+                disconnected: false,
+                last_frame: frame,
+            },
+        ];
+        queue_host_input(&mut session, 0, frame, [11, 22], primary_status);
+        session.poll_remote_clients();
+
+        assert_eq!(session.last_recv_frame, frame);
+        assert_eq!(
+            session.host_connect_status,
+            vec![
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: frame,
+                },
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: frame,
+                },
+            ]
+        );
+        let buffer_index = frame.buffer_index(session.buffer_size).unwrap();
+        assert_eq!(session.inputs[buffer_index][0].input, 11_u8);
+        assert_eq!(session.inputs[buffer_index][1].input, 22_u8);
+    }
+
+    #[test]
+    fn spectator_disconnected_primary_promotes_next_host_for_unresolved_frame() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7330), test_addr(7331)], DummySocket)
+            .unwrap();
+        let frame = Frame::new(0);
+        let promoted_status = vec![
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(4),
+            },
+            ConnectionStatus {
+                disconnected: false,
+                last_frame: frame,
+            },
+        ];
+        queue_host_input(&mut session, 1, frame, [31, 32], promoted_status);
+        session.poll_remote_clients();
+        assert_eq!(session.last_recv_frame, Frame::NULL);
+
+        session.remove_disconnected_hosts(vec![0]);
+        session.try_commit_ready_frames();
+
+        assert_eq!(session.last_recv_frame, frame);
+        let buffer_index = frame.buffer_index(session.buffer_size).unwrap();
+        assert_eq!(session.inputs[buffer_index][0].input, 31_u8);
+        assert_eq!(session.inputs[buffer_index][1].input, 32_u8);
+        assert_eq!(
+            session.host_connect_status,
+            vec![
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(4),
+                },
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: frame,
+                },
+            ]
         );
     }
 
@@ -2029,6 +3071,46 @@ mod tests {
             1
         );
 
+        assert!(matches!(
+            session.advance_frame(),
+            Err(FortressError::PredictionThreshold)
+        ));
+    }
+
+    #[test]
+    fn spectator_stream_delay_releases_after_clean_all_hosts_disconnect() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_spectator_config(crate::SpectatorConfig {
+                stream_delay: 2,
+                ..crate::SpectatorConfig::default()
+            })
+            .start_spectator_session(test_addr(7061), DummySocket)
+            .unwrap();
+        session.state = SessionState::Running;
+        session.hosts.clear();
+        session.current_frame = Frame::NULL;
+        session.last_recv_frame = Frame::new(3);
+
+        for frame in [Frame::new(0), Frame::new(1), Frame::new(2), Frame::new(3)] {
+            let buffer_index = frame.buffer_index(session.buffer_size).unwrap();
+            session.inputs[buffer_index][0] = PlayerInput::new(frame, frame.as_i32() as u8);
+            session.inputs[buffer_index][1] =
+                PlayerInput::new(frame, frame.as_i32().saturating_add(10) as u8);
+        }
+
+        for expected in 0..=3 {
+            let requests = session.advance_frame().unwrap();
+            assert_eq!(session.current_frame(), Frame::new(expected));
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| matches!(request, FortressRequest::AdvanceFrame { .. }))
+                    .count(),
+                1
+            );
+        }
         assert!(matches!(
             session.advance_frame(),
             Err(FortressError::PredictionThreshold)

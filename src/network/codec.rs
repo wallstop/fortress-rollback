@@ -35,6 +35,13 @@
 
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
+use std::io::{self, Write};
+
+use crate::network::messages::{
+    ChecksumReport, ConnectionStatus, Input, InputAck, Message, MessageBody, MessageHeader,
+    QualityReply, QualityReport, SyncReply, SyncRequest,
+};
+use crate::Frame;
 
 // The bincode configuration used throughout Fortress Rollback.
 //
@@ -46,6 +53,42 @@ use std::fmt;
 // This is a zero-cost abstraction - the config is computed at compile time.
 fn config() -> impl bincode::config::Config {
     bincode::config::standard().with_fixed_int_encoding()
+}
+
+struct FallibleVecWriter<'a> {
+    buffer: &'a mut Vec<u8>,
+}
+
+impl Write for FallibleVecWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buffer
+            .try_reserve(buf.len())
+            .map_err(|_err| io::Error::other("failed to reserve output buffer"))?;
+        self.buffer.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct CountingWriter {
+    len: usize,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.len = self
+            .len
+            .checked_add(buf.len())
+            .ok_or_else(|| io::Error::other("encoded length overflow"))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Represents what operation was being performed when a codec error occurred.
@@ -189,6 +232,129 @@ impl std::error::Error for CodecError {}
 /// Result type for codec operations.
 pub type CodecResult<T> = Result<T, CodecError>;
 
+fn decode_message_error(message: impl Into<String>) -> CodecError {
+    CodecError::decode(message, CodecOperation::DecodeMessage)
+}
+
+fn read_array<const N: usize>(
+    bytes: &[u8],
+    cursor: &mut usize,
+    field: &'static str,
+) -> CodecResult<[u8; N]> {
+    let end = cursor
+        .checked_add(N)
+        .ok_or_else(|| decode_message_error(format!("{} offset overflow", field)))?;
+    let slice = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| decode_message_error(format!("truncated {}", field)))?;
+    let mut out = [0_u8; N];
+    out.copy_from_slice(slice);
+    *cursor = end;
+    Ok(out)
+}
+
+fn read_u16(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<u16> {
+    Ok(u16::from_le_bytes(read_array(bytes, cursor, field)?))
+}
+
+fn read_u32(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<u32> {
+    Ok(u32::from_le_bytes(read_array(bytes, cursor, field)?))
+}
+
+fn read_i16(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<i16> {
+    Ok(i16::from_le_bytes(read_array(bytes, cursor, field)?))
+}
+
+fn read_i32(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<i32> {
+    Ok(i32::from_le_bytes(read_array(bytes, cursor, field)?))
+}
+
+fn read_u128(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<u128> {
+    Ok(u128::from_le_bytes(read_array(bytes, cursor, field)?))
+}
+
+fn read_bool(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<bool> {
+    let value = read_array::<1>(bytes, cursor, field)?[0];
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        other => Err(decode_message_error(format!(
+            "invalid boolean value {} for {}",
+            other, field
+        ))),
+    }
+}
+
+fn read_usize(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<usize> {
+    let value = u64::from_le_bytes(read_array(bytes, cursor, field)?);
+    usize::try_from(value)
+        .map_err(|_err| decode_message_error(format!("{} length exceeds usize", field)))
+}
+
+fn decode_connection_status(bytes: &[u8], cursor: &mut usize) -> CodecResult<ConnectionStatus> {
+    Ok(ConnectionStatus {
+        disconnected: read_bool(bytes, cursor, "connection_status.disconnected")?,
+        last_frame: Frame::new(read_i32(bytes, cursor, "connection_status.last_frame")?),
+    })
+}
+
+fn decode_input(bytes: &[u8], cursor: &mut usize) -> CodecResult<Input> {
+    let status_len = read_usize(bytes, cursor, "input.peer_connect_status.len")?;
+    let status_bytes = status_len
+        .checked_mul(5)
+        .ok_or_else(|| decode_message_error("input.peer_connect_status byte length overflow"))?;
+    let remaining = bytes.len().saturating_sub(*cursor);
+    if status_bytes > remaining {
+        return Err(decode_message_error(format!(
+            "input.peer_connect_status length {} exceeds remaining packet bytes {}",
+            status_len, remaining
+        )));
+    }
+
+    let mut peer_connect_status = Vec::new();
+    peer_connect_status
+        .try_reserve_exact(status_len)
+        .map_err(|_err| {
+            decode_message_error(format!(
+                "failed to reserve {} connection status entries",
+                status_len
+            ))
+        })?;
+    for _ in 0..status_len {
+        peer_connect_status.push(decode_connection_status(bytes, cursor)?);
+    }
+
+    let disconnect_requested = read_bool(bytes, cursor, "input.disconnect_requested")?;
+    let start_frame = Frame::new(read_i32(bytes, cursor, "input.start_frame")?);
+    let ack_frame = Frame::new(read_i32(bytes, cursor, "input.ack_frame")?);
+
+    let byte_len = read_usize(bytes, cursor, "input.bytes.len")?;
+    let remaining = bytes.len().saturating_sub(*cursor);
+    if byte_len > remaining {
+        return Err(decode_message_error(format!(
+            "input.bytes length {} exceeds remaining packet bytes {}",
+            byte_len, remaining
+        )));
+    }
+    let byte_slice = bytes
+        .get(*cursor..*cursor + byte_len)
+        .ok_or_else(|| decode_message_error("input.bytes slice out of bounds"))?;
+    let mut input_bytes = Vec::new();
+    input_bytes.try_reserve_exact(byte_len).map_err(|_err| {
+        decode_message_error(format!("failed to reserve {} input bytes", byte_len))
+    })?;
+    input_bytes.extend_from_slice(byte_slice);
+    *cursor += byte_len;
+
+    Ok(Input {
+        peer_connect_status,
+        disconnect_requested,
+        start_frame,
+        ack_frame,
+        bytes: input_bytes,
+    })
+}
+
 /// Encodes a value into a new `Vec<u8>`.
 ///
 /// This is the simplest encoding function but allocates a new vector.
@@ -205,8 +371,13 @@ pub type CodecResult<T> = Result<T, CodecError>;
 /// # Ok::<(), fortress_rollback::network::codec::CodecError>(())
 /// ```
 pub fn encode<T: Serialize>(value: &T) -> CodecResult<Vec<u8>> {
-    bincode::serde::encode_to_vec(value, config())
-        .map_err(|e| CodecError::encode(e.to_string(), CodecOperation::Encode))
+    let len = encoded_len(value)?;
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(len).map_err(|_err| {
+        CodecError::encode("failed to reserve output buffer", CodecOperation::Encode)
+    })?;
+    encode_append(value, &mut buffer)?;
+    Ok(buffer)
 }
 
 /// Encodes a value into an existing byte slice.
@@ -263,9 +434,18 @@ pub fn encode_into<T: Serialize>(value: &T, buffer: &mut [u8]) -> CodecResult<us
 /// ```
 pub fn encode_append<T: Serialize>(value: &T, buffer: &mut Vec<u8>) -> CodecResult<usize> {
     let start_len = buffer.len();
-    bincode::serde::encode_into_std_write(value, buffer, config())
+    let mut writer = FallibleVecWriter { buffer };
+    bincode::serde::encode_into_std_write(value, &mut writer, config())
         .map(|_| buffer.len() - start_len)
         .map_err(|e| CodecError::encode(e.to_string(), CodecOperation::AppendToBuffer))
+}
+
+/// Computes the encoded length without allocating an output buffer.
+pub(crate) fn encoded_len<T: Serialize>(value: &T) -> CodecResult<usize> {
+    let mut writer = CountingWriter { len: 0 };
+    bincode::serde::encode_into_std_write(value, &mut writer, config())
+        .map(|_| writer.len)
+        .map_err(|e| CodecError::encode(e.to_string(), CodecOperation::Encode))
 }
 
 /// Decodes a value from a byte slice.
@@ -287,6 +467,58 @@ pub fn encode_append<T: Serialize>(value: &T, buffer: &mut Vec<u8>) -> CodecResu
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<(T, usize)> {
     bincode::serde::decode_from_slice(bytes, config())
         .map_err(|e| CodecError::decode(e.to_string(), CodecOperation::Decode))
+}
+
+/// Decodes a network [`Message`] without allocating from untrusted length prefixes.
+///
+/// This mirrors the crate's bincode configuration for the fixed network message
+/// schema, but checks every variable-length field against the remaining packet
+/// bytes before reserving memory.
+pub(crate) fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
+    let mut cursor = 0;
+    let header = MessageHeader {
+        magic: read_u16(bytes, &mut cursor, "message.header.magic")?,
+    };
+    let variant = read_u32(bytes, &mut cursor, "message.body.variant")?;
+    let body = match variant {
+        0 => MessageBody::SyncRequest(SyncRequest {
+            random_request: read_u32(bytes, &mut cursor, "sync_request.random_request")?,
+        }),
+        1 => MessageBody::SyncReply(SyncReply {
+            random_reply: read_u32(bytes, &mut cursor, "sync_reply.random_reply")?,
+        }),
+        2 => MessageBody::Input(decode_input(bytes, &mut cursor)?),
+        3 => MessageBody::InputAck(InputAck {
+            ack_frame: Frame::new(read_i32(bytes, &mut cursor, "input_ack.ack_frame")?),
+        }),
+        4 => MessageBody::QualityReport(QualityReport {
+            frame_advantage: read_i16(bytes, &mut cursor, "quality_report.frame_advantage")?,
+            ping: read_u128(bytes, &mut cursor, "quality_report.ping")?,
+        }),
+        5 => MessageBody::QualityReply(QualityReply {
+            pong: read_u128(bytes, &mut cursor, "quality_reply.pong")?,
+        }),
+        6 => MessageBody::ChecksumReport(ChecksumReport {
+            checksum: read_u128(bytes, &mut cursor, "checksum_report.checksum")?,
+            frame: Frame::new(read_i32(bytes, &mut cursor, "checksum_report.frame")?),
+        }),
+        7 => MessageBody::KeepAlive,
+        other => {
+            return Err(decode_message_error(format!(
+                "unknown message body variant {}",
+                other
+            )))
+        },
+    };
+
+    if cursor != bytes.len() {
+        return Err(decode_message_error(format!(
+            "message has {} trailing byte(s)",
+            bytes.len() - cursor
+        )));
+    }
+
+    Ok((Message { header, body }, cursor))
 }
 
 /// Decodes a value from a byte slice, ignoring the bytes consumed.
@@ -317,7 +549,10 @@ pub fn decode_value<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<T> {
 )]
 mod tests {
     use super::*;
-    use crate::network::messages::{Message, MessageBody, MessageHeader, SyncRequest};
+    use crate::network::messages::{
+        ChecksumReport, ConnectionStatus, Input, InputAck, Message, MessageBody, MessageHeader,
+        QualityReply, QualityReport, SyncReply, SyncRequest,
+    };
 
     #[test]
     fn test_encode_decode_roundtrip_primitive() {
@@ -339,6 +574,150 @@ mod tests {
         let bytes = encode(&original).unwrap();
         let (decoded, _): (Message, _) = decode(&bytes).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn decode_message_roundtrips_every_body_variant() {
+        let messages = [
+            Message {
+                header: MessageHeader { magic: 0xABCD },
+                body: MessageBody::SyncRequest(SyncRequest {
+                    random_request: 999,
+                }),
+            },
+            Message {
+                header: MessageHeader { magic: 0xABCD },
+                body: MessageBody::SyncReply(SyncReply { random_reply: 123 }),
+            },
+            Message {
+                header: MessageHeader { magic: 0xABCD },
+                body: MessageBody::Input(Input {
+                    peer_connect_status: vec![
+                        ConnectionStatus {
+                            disconnected: false,
+                            last_frame: Frame::new(10),
+                        },
+                        ConnectionStatus {
+                            disconnected: true,
+                            last_frame: Frame::new(20),
+                        },
+                    ],
+                    disconnect_requested: false,
+                    start_frame: Frame::new(100),
+                    ack_frame: Frame::new(50),
+                    bytes: vec![1, 2, 3, 4, 5],
+                }),
+            },
+            Message {
+                header: MessageHeader { magic: 0xABCD },
+                body: MessageBody::InputAck(InputAck {
+                    ack_frame: Frame::new(77),
+                }),
+            },
+            Message {
+                header: MessageHeader { magic: 0xABCD },
+                body: MessageBody::QualityReport(QualityReport {
+                    frame_advantage: -2,
+                    ping: 1_000,
+                }),
+            },
+            Message {
+                header: MessageHeader { magic: 0xABCD },
+                body: MessageBody::QualityReply(QualityReply { pong: 2_000 }),
+            },
+            Message {
+                header: MessageHeader { magic: 0xABCD },
+                body: MessageBody::ChecksumReport(ChecksumReport {
+                    checksum: 0xDEAD_BEEF,
+                    frame: Frame::new(88),
+                }),
+            },
+            Message {
+                header: MessageHeader { magic: 0xABCD },
+                body: MessageBody::KeepAlive,
+            },
+        ];
+
+        for original in messages {
+            let bytes = encode(&original).unwrap();
+            let generic: Message = decode_value(&bytes).unwrap();
+            let (manual, consumed) = decode_message(&bytes).unwrap();
+
+            assert_eq!(generic, original);
+            assert_eq!(manual, original);
+            assert_eq!(consumed, bytes.len());
+        }
+    }
+
+    #[test]
+    fn decode_message_roundtrips_input_without_generic_vec_decode() {
+        let original = Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::Input(Input {
+                peer_connect_status: vec![
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(10),
+                    },
+                    ConnectionStatus {
+                        disconnected: true,
+                        last_frame: Frame::new(20),
+                    },
+                ],
+                disconnect_requested: false,
+                start_frame: Frame::new(100),
+                ack_frame: Frame::new(50),
+                bytes: vec![1, 2, 3, 4, 5],
+            }),
+        };
+        let bytes = encode(&original).unwrap();
+
+        let (decoded, consumed) = decode_message(&bytes).unwrap();
+
+        assert_eq!(decoded, original);
+        assert_eq!(consumed, bytes.len());
+    }
+
+    #[test]
+    fn decode_message_rejects_vec_length_that_exceeds_packet_bytes() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes());
+        bytes.extend_from_slice(&2_u32.to_le_bytes()); // MessageBody::Input
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // peer_connect_status len
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    #[test]
+    fn decode_message_rejects_input_bytes_length_that_exceeds_packet_bytes() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes());
+        bytes.extend_from_slice(&2_u32.to_le_bytes()); // MessageBody::Input
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // peer_connect_status len
+        bytes.push(0); // disconnect_requested
+        bytes.extend_from_slice(&100_i32.to_le_bytes()); // start_frame
+        bytes.extend_from_slice(&50_i32.to_le_bytes()); // ack_frame
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // input.bytes len
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    #[test]
+    fn decode_message_rejects_trailing_bytes() {
+        let original = Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::KeepAlive,
+        };
+        let mut bytes = encode(&original).unwrap();
+        bytes.push(0);
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
     }
 
     #[test]

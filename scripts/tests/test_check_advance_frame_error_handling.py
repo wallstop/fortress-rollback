@@ -164,3 +164,105 @@ def test_ignores_comments(tmp_path: Path) -> None:
     issues = check_file(path)
 
     assert issues == []
+
+
+def test_ignores_block_comments(tmp_path: Path) -> None:
+    path = tmp_path / "spectator.rs"
+    path.write_text(
+        "/*\n"
+        "if let Ok(requests) = session.advance_frame() {\n"
+        "    game.handle_requests(requests);\n"
+        "}\n"
+        "*/\n"
+        "/*! assert!(session.advance_frame().is_ok()); */\n",
+        encoding="utf-8",
+    )
+
+    issues = check_file(path)
+
+    assert issues == []
+
+
+def test_ignores_nested_block_comments(tmp_path: Path) -> None:
+    path = tmp_path / "spectator.rs"
+    path.write_text(
+        "/* outer\n"
+        "   /* inner */\n"
+        "   let _ = session.advance_frame();\n"
+        "*/\n",
+        encoding="utf-8",
+    )
+
+    issues = check_file(path)
+
+    assert issues == []
+
+
+def test_ignores_ordinary_string_literals(tmp_path: Path) -> None:
+    path = tmp_path / "spectator.rs"
+    path.write_text(
+        'const EXAMPLE: &str = "if let Ok(requests) = session.advance_frame() {}";\n'
+        'const ESCAPED: &str = "quote: \\"; let _ = session.advance_frame();";\n'
+        'const MULTILINE: &str = "assert!(session.advance_frame().is_ok());\n'
+        'still inside the string";\n',
+        encoding="utf-8",
+    )
+
+    issues = check_file(path)
+
+    assert issues == []
+
+
+def test_ignores_raw_and_prefixed_string_literals(tmp_path: Path) -> None:
+    path = tmp_path / "spectator.rs"
+    path.write_text(
+        'const RAW: &str = r#"if let Ok(requests) = session.advance_frame() {}"#;\n'
+        'const BYTE_RAW: &[u8] = br##"assert!(session.advance_frame().is_ok());"##;\n'
+        'const BYTE: &[u8] = b"let _ = session.advance_frame();";\n'
+        'const C_STRING: &CStr = c"session.advance_frame().ok()";\n'
+        'const C_RAW: &CStr = cr#"while let Ok(x) = session.advance_frame() {}"#;\n',
+        encoding="utf-8",
+    )
+
+    issues = check_file(path)
+
+    assert issues == []
+
+
+def test_ignores_char_and_byte_char_literals_without_masking_lifetimes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "spectator.rs"
+    path.write_text(
+        "fn test<'a>(value: &'a str) -> &'a str {\n"
+        "    let quote = '\\'';\n"
+        "    let unicode = '\\u{27}';\n"
+        "    let byte = b'(';\n"
+        "    let label = 'retry: loop { break 'retry; };\n"
+        "    session.advance_frame()?;\n"
+        "    value\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    issues = check_file(path)
+
+    assert issues == []
+
+
+def test_still_flags_code_after_ignored_spans(tmp_path: Path) -> None:
+    path = tmp_path / "spectator.rs"
+    path.write_text(
+        "/* let _ = session.advance_frame(); */\n"
+        'const EXAMPLE: &str = "if let Ok(requests) = session.advance_frame() {}";\n'
+        "fn test() {\n"
+        "    let _ = session.advance_frame();\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    issues = check_file(path)
+
+    assert len(issues) == 1
+    assert ":4:" in issues[0]
+    assert "result is discarded" in issues[0]

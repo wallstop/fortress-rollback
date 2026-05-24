@@ -189,18 +189,21 @@ must_use_candidate = "warn"
 
 ## Bounded Allocation
 
-The default allocator **aborts the process** on allocation failure (uncatchable, cf. RUSTSEC-2022-0035). So any `Vec::with_capacity(n)`, `vec![x; n]`, or `reserve(n)` whose `n` comes from an unbounded source (a length read from the wire, an unvalidated config field) is a DoS/abort vector.
+The default allocator **aborts the process** on allocation failure (uncatchable, cf. RUSTSEC-2022-0035). So any `Vec::with_capacity(n)`, `vec![x; n]`, or `reserve(n)` whose `n` comes from an unbounded source (a length read from the wire, a user-configurable size) is a DoS/abort vector unless the allocation is made fallible first.
 
 Two rules:
 
-1. **Never trust a length from the wire.** Cap any size derived from network input against a hard maximum *before* allocating, and use `checked_add` while accumulating so a crafted packet cannot overflow `usize`. Return a structured error on the bomb path instead of allocating. Example: `rle::decode` caps the decoded length at `rle::MAX_DECODED_LEN` (64 MiB).
-2. **Validate config at the boundary.** Range-check public config fields (e.g. in a `validate()` called by the builder) so a directly-constructed config cannot drive a huge allocation. Defense-in-depth: also clamp the size at the allocation site so the bound holds even if validation is bypassed.
+1. **Never trust a length from the wire.** Bound any size derived from network input against a caller-configured limit or explicit default *before* allocating, and use `checked_add` while accumulating so a crafted packet cannot overflow `usize`. Return a structured error on the bomb path instead of allocating. Example: protocol input decode derives its RLE decoded-length limit from `ProtocolConfig::pending_output_limit` and the reference input size; standalone `rle::decode` uses `rle::DEFAULT_MAX_DECODED_LEN`. Avoid generic serde/bincode container decoding for untrusted bytes when the schema has `Vec`, `String`, or similar length-prefixed fields; parse those lengths explicitly, validate them against the actual input/config, reserve fallibly, and then copy/decode the bounded payload.
+2. **Do not invent arbitrary caps for user configuration.** Validate true semantic invariants at the boundary (for example `queue_length >= 2` or `stream_delay < buffer_size`), then use `try_reserve*`/checked arithmetic at construction so huge but user-requested sizes return a structured allocation error instead of aborting the process.
 
-Every dynamically-sized allocation in `src/` must carry an `// alloc-bound: <why>` comment (same line or the line above) stating why its size is bounded. Pure integer literals (`with_capacity(4)`, `vec![0u8; 16]`) and exact `.len()`/`.count()` sizes are exempt. The `check-unbounded-alloc` pre-commit hook (also run by agent-preflight) enforces this; tests/proofs in trailing `#[cfg(test)]` / `#[cfg(kani)]` modules are skipped.
+Every dynamically-sized infallible allocation in `src/` must carry an `// alloc-bound: <why>` comment (same line or the line above) stating why its size is concretely bounded. Pure integer literals (`with_capacity(4)`, `vec![0u8; 16]`), exact `.len()`/`.count()` sizes, and fallible `try_reserve*` reservations are exempt. Weak markers such as "trusted local config" or "no numeric cap" are rejected by the hook. Tests/proofs in trailing `#[cfg(test)]` / `#[cfg(kani)]` modules are skipped.
 
 ```rust
-// alloc-bound: num_players is the validated session player count fixed at construction
-let mut queues = Vec::with_capacity(num_players);
+let mut queues = Vec::new();
+queues.try_reserve_exact(num_players)?;
+for player in 0..num_players {
+    queues.push(InputQueue::try_with_queue_length(player, queue_length)?);
+}
 ```
 
 ## Checklist

@@ -12,7 +12,7 @@ Fortress Rollback uses a hybrid test organization following Rust best practices:
 | **Integration Tests** | `tests/` | ~314 | Test public API and module interactions |
 | **Property Tests** | `src/**/*.rs` + `tests/verification/` | ~150 | Random input verification |
 | **Loom Tests** | `loom-tests/` | Separate | Concurrency correctness |
-| **Fuzz Tests** | `fuzz/` | 7 targets | Security and edge cases |
+| **Fuzz Tests** | `fuzz/` | 8 targets | Security and edge cases |
 
 ## Why Hybrid Organization?
 
@@ -135,6 +135,7 @@ Cargo-fuzz targets for security testing:
 - `fuzz_input_queue` - Input queue operations
 - `fuzz_input_queue_direct` - Direct input queue fuzzing
 - `fuzz_message_parsing` - Message parsing
+- `fuzz_protocol_input_packet` - Protocol input packet acceptance
 - `fuzz_rle` - RLE encoding
 - `fuzz_session_config` - Session configuration
 - `fuzz_sync_layer_direct` - Direct sync layer fuzzing

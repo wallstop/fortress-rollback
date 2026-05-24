@@ -38,11 +38,6 @@ use web_time::{Duration, Instant};
 use crate::input_queue::INPUT_QUEUE_LENGTH;
 use crate::{FortressError, InvalidRequestKind};
 
-const SPECTATOR_MAX_STREAM_DELAY: usize = 2_147_483_647;
-const SPECTATOR_MAX_BUFFER_SIZE: usize = 2_147_483_648;
-const SPECTATOR_MAX_STREAM_DELAY_U64: u64 = 2_147_483_647;
-const SPECTATOR_MAX_BUFFER_SIZE_U64: u64 = 2_147_483_648;
-
 fn usize_to_u64_saturating(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
@@ -800,82 +795,78 @@ impl ProtocolConfig {
     ///
     /// Returns a [`FortressError`] if any configuration value is out of range.
     pub fn validate(&self) -> Result<(), FortressError> {
-        // Validate quality_report_interval: 1ms to 10000ms
-        if self.quality_report_interval < Duration::from_millis(1)
-            || self.quality_report_interval > Duration::from_secs(10)
-        {
+        // Validate quality_report_interval: must be non-zero.
+        if self.quality_report_interval < Duration::from_millis(1) {
             return Err(InvalidRequestKind::DurationConfigOutOfRange {
                 field: "quality_report_interval",
                 min_ms: 1,
-                max_ms: 10000,
+                max_ms: u64::MAX,
                 actual_ms: self.quality_report_interval.as_millis() as u64,
             }
             .into());
         }
 
-        // Validate shutdown_delay: 1ms to 300000ms (5 minutes)
-        if self.shutdown_delay < Duration::from_millis(1)
-            || self.shutdown_delay > Duration::from_secs(300)
-        {
+        // Validate shutdown_delay: must be non-zero.
+        if self.shutdown_delay < Duration::from_millis(1) {
             return Err(InvalidRequestKind::DurationConfigOutOfRange {
                 field: "shutdown_delay",
                 min_ms: 1,
-                max_ms: 300000,
+                max_ms: u64::MAX,
                 actual_ms: self.shutdown_delay.as_millis() as u64,
             }
             .into());
         }
 
-        // Validate max_checksum_history: 1 to 1024
-        if self.max_checksum_history < 1 || self.max_checksum_history > 1024 {
+        // Validate max_checksum_history: must keep at least one checksum.
+        if self.max_checksum_history < 1 {
             return Err(InvalidRequestKind::ConfigValueOutOfRange {
                 field: "max_checksum_history",
                 min: 1,
-                max: 1024,
+                max: u64::MAX,
                 actual: self.max_checksum_history as u64,
             }
             .into());
         }
 
-        // Validate pending_output_limit: 1 to 4096
-        if self.pending_output_limit < 1 || self.pending_output_limit > 4096 {
+        // Validate pending_output_limit: must allow at least one pending frame.
+        if self.pending_output_limit < 1 {
             return Err(InvalidRequestKind::ConfigValueOutOfRange {
                 field: "pending_output_limit",
                 min: 1,
-                max: 4096,
+                max: u64::MAX,
                 actual: self.pending_output_limit as u64,
             }
             .into());
         }
 
-        // Validate sync_retry_warning_threshold: 1 to 1000
-        if self.sync_retry_warning_threshold < 1 || self.sync_retry_warning_threshold > 1000 {
+        // Validate sync_retry_warning_threshold: must be non-zero.
+        if self.sync_retry_warning_threshold < 1 {
             return Err(InvalidRequestKind::ConfigValueOutOfRange {
                 field: "sync_retry_warning_threshold",
                 min: 1,
-                max: 1000,
+                max: u64::MAX,
                 actual: self.sync_retry_warning_threshold as u64,
             }
             .into());
         }
 
-        // Validate sync_duration_warning_ms: 1 to 300000 (5 minutes)
-        if self.sync_duration_warning_ms < 1 || self.sync_duration_warning_ms > 300000 {
+        // Validate sync_duration_warning_ms: must be non-zero.
+        if self.sync_duration_warning_ms < 1 {
             return Err(InvalidRequestKind::ConfigValueOutOfRange {
                 field: "sync_duration_warning_ms",
                 min: 1,
-                max: 300000,
+                max: u64::MAX,
                 actual: self.sync_duration_warning_ms as u64,
             }
             .into());
         }
 
-        // Validate input_history_multiplier: 1 to 16
-        if self.input_history_multiplier < 1 || self.input_history_multiplier > 16 {
+        // Validate input_history_multiplier: must retain some input history.
+        if self.input_history_multiplier < 1 {
             return Err(InvalidRequestKind::ConfigValueOutOfRange {
                 field: "input_history_multiplier",
                 min: 1,
-                max: 16,
+                max: u64::MAX,
                 actual: self.input_history_multiplier as u64,
             }
             .into());
@@ -933,8 +924,8 @@ pub struct SpectatorConfig {
     ///
     /// A larger buffer allows the spectator to tolerate more latency
     /// or jitter, but uses more memory.
-    /// Must be between `1` and `2_147_483_648` inclusive so every ring slot
-    /// can be addressed from the non-negative [`Frame`](crate::Frame) domain.
+    /// Must be at least `1`. Startup uses fallible allocation, so very large
+    /// values return an error if the required buffers cannot be reserved.
     ///
     /// Default: 60 (1 second at 60 FPS)
     pub buffer_size: usize,
@@ -971,9 +962,9 @@ pub struct SpectatorConfig {
     ///
     /// Default: 0 (follow the live edge)
     ///
-    /// Must fit in the [`Frame`](crate::Frame) domain and be less than
-    /// [`buffer_size`](Self::buffer_size). A delay greater than or equal to the
-    /// buffer size would make every buffered frame unviewable.
+    /// Must be less than [`buffer_size`](Self::buffer_size). A delay greater
+    /// than or equal to the buffer size would make every buffered frame
+    /// unviewable.
     pub stream_delay: usize,
 
     /// Whether the spectator records game state every frame to support
@@ -1035,68 +1026,14 @@ impl SpectatorConfig {
     ///
     /// Returns a [`FortressError`] if:
     /// - [`buffer_size`](Self::buffer_size) is `0`.
-    /// - [`buffer_size`](Self::buffer_size) is too large to index with
-    ///   [`Frame`](crate::Frame) values.
-    /// - [`stream_delay`](Self::stream_delay) is too large to represent in the
-    ///   [`Frame`](crate::Frame) domain.
     /// - [`stream_delay`](Self::stream_delay) is greater than or equal to
     ///   [`buffer_size`](Self::buffer_size).
-    /// - [`catchup_speed`](Self::catchup_speed) exceeds the maximum buffer size.
-    /// - [`max_frames_behind`](Self::max_frames_behind) exceeds the maximum
-    ///   buffer size.
     ///
     /// [`catchup_speed`](Self::catchup_speed) may be `0` to preserve the
     /// historical "no catch-up advance is attempted" behavior.
     pub fn validate(&self) -> Result<(), FortressError> {
         if self.buffer_size == 0 {
             return Err(InvalidRequestKind::ZeroBufferSize.into());
-        }
-
-        if self.stream_delay > SPECTATOR_MAX_STREAM_DELAY {
-            return Err(InvalidRequestKind::ConfigValueOutOfRange {
-                field: "stream_delay",
-                min: 0,
-                max: SPECTATOR_MAX_STREAM_DELAY_U64,
-                actual: usize_to_u64_saturating(self.stream_delay),
-            }
-            .into());
-        }
-
-        // These `<= SPECTATOR_MAX_BUFFER_SIZE` checks are a frame-domain sanity
-        // bound only; they do NOT bound the catchup allocation directly. The
-        // actual allocation protection is `advance_capacity`'s clamp of the
-        // request batch to `buffer_size` at the call site. `catchup_speed == 0`
-        // stays valid (documented compat), and we deliberately do not impose
-        // the stricter `< buffer_size` relationship here (the builder methods do
-        // that) so previously-accepted direct configs keep working.
-        if self.catchup_speed > SPECTATOR_MAX_BUFFER_SIZE {
-            return Err(InvalidRequestKind::ConfigValueOutOfRange {
-                field: "catchup_speed",
-                min: 0,
-                max: SPECTATOR_MAX_BUFFER_SIZE_U64,
-                actual: usize_to_u64_saturating(self.catchup_speed),
-            }
-            .into());
-        }
-
-        if self.max_frames_behind > SPECTATOR_MAX_BUFFER_SIZE {
-            return Err(InvalidRequestKind::ConfigValueOutOfRange {
-                field: "max_frames_behind",
-                min: 0,
-                max: SPECTATOR_MAX_BUFFER_SIZE_U64,
-                actual: usize_to_u64_saturating(self.max_frames_behind),
-            }
-            .into());
-        }
-
-        if self.buffer_size > SPECTATOR_MAX_BUFFER_SIZE {
-            return Err(InvalidRequestKind::ConfigValueOutOfRange {
-                field: "buffer_size",
-                min: 1,
-                max: SPECTATOR_MAX_BUFFER_SIZE_U64,
-                actual: usize_to_u64_saturating(self.buffer_size),
-            }
-            .into());
         }
 
         if self.stream_delay >= self.buffer_size {
@@ -1213,6 +1150,8 @@ impl SpectatorConfig {
 /// # Constraints
 ///
 /// - `queue_length` must be at least 2 (minimum for circular buffer operation)
+/// - Session startup uses fallible allocation, so very large queues return a
+///   structured allocation error if they cannot be reserved
 /// - `queue_length` should be a power of 2 for optimal modulo performance (not enforced)
 /// - `frame_delay` must be less than `queue_length` (enforced at session creation)
 ///
@@ -1665,6 +1604,11 @@ mod tests {
         // Valid configs
         assert!(InputQueueConfig { queue_length: 2 }.validate().is_ok());
         assert!(InputQueueConfig { queue_length: 128 }.validate().is_ok());
+        assert!(InputQueueConfig {
+            queue_length: usize::MAX,
+        }
+        .validate()
+        .is_ok());
 
         // Invalid configs
         assert!(InputQueueConfig { queue_length: 0 }.validate().is_err());
@@ -2056,7 +2000,7 @@ mod tests {
         };
         config.validate().unwrap();
 
-        // Valid: maximum boundary (10000ms)
+        // Valid: larger user-configured value
         let config = ProtocolConfig {
             quality_report_interval: Duration::from_secs(10),
             ..ProtocolConfig::default()
@@ -2087,7 +2031,7 @@ mod tests {
                 kind: InvalidRequestKind::DurationConfigOutOfRange {
                     field: "quality_report_interval",
                     min_ms: 1,
-                    max_ms: 10000,
+                    max_ms: u64::MAX,
                     ..
                 }
             }
@@ -2095,26 +2039,12 @@ mod tests {
     }
 
     #[test]
-    fn test_protocol_config_validate_quality_report_interval_too_high() {
-        // Invalid: 10001ms (above maximum)
+    fn test_protocol_config_validate_quality_report_interval_accepts_large_values() {
         let config = ProtocolConfig {
             quality_report_interval: Duration::from_millis(10001),
             ..ProtocolConfig::default()
         };
-        let result = config.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(
-            err,
-            FortressError::InvalidRequestStructured {
-                kind: InvalidRequestKind::DurationConfigOutOfRange {
-                    field: "quality_report_interval",
-                    min_ms: 1,
-                    max_ms: 10000,
-                    ..
-                }
-            }
-        ));
+        config.validate().unwrap();
     }
 
     #[test]
@@ -2126,7 +2056,7 @@ mod tests {
         };
         config.validate().unwrap();
 
-        // Valid: maximum boundary (300000ms)
+        // Valid: larger user-configured value
         let config = ProtocolConfig {
             shutdown_delay: Duration::from_secs(300),
             ..ProtocolConfig::default()
@@ -2157,7 +2087,7 @@ mod tests {
                 kind: InvalidRequestKind::DurationConfigOutOfRange {
                     field: "shutdown_delay",
                     min_ms: 1,
-                    max_ms: 300000,
+                    max_ms: u64::MAX,
                     ..
                 }
             }
@@ -2165,26 +2095,12 @@ mod tests {
     }
 
     #[test]
-    fn test_protocol_config_validate_shutdown_delay_too_high() {
-        // Invalid: 300001ms (above maximum)
+    fn test_protocol_config_validate_shutdown_delay_accepts_large_values() {
         let config = ProtocolConfig {
             shutdown_delay: Duration::from_millis(300001),
             ..ProtocolConfig::default()
         };
-        let result = config.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(
-            err,
-            FortressError::InvalidRequestStructured {
-                kind: InvalidRequestKind::DurationConfigOutOfRange {
-                    field: "shutdown_delay",
-                    min_ms: 1,
-                    max_ms: 300000,
-                    ..
-                }
-            }
-        ));
+        config.validate().unwrap();
     }
 
     #[test]
@@ -2196,7 +2112,7 @@ mod tests {
         };
         config.validate().unwrap();
 
-        // Valid: maximum boundary (1024)
+        // Valid: larger user-configured value
         let config = ProtocolConfig {
             max_checksum_history: 1024,
             ..ProtocolConfig::default()
@@ -2227,7 +2143,7 @@ mod tests {
                 kind: InvalidRequestKind::ConfigValueOutOfRange {
                     field: "max_checksum_history",
                     min: 1,
-                    max: 1024,
+                    max: u64::MAX,
                     ..
                 }
             }
@@ -2235,26 +2151,12 @@ mod tests {
     }
 
     #[test]
-    fn test_protocol_config_validate_max_checksum_history_too_high() {
-        // Invalid: 1025 (above maximum)
+    fn test_protocol_config_validate_max_checksum_history_accepts_large_values() {
         let config = ProtocolConfig {
-            max_checksum_history: 1025,
+            max_checksum_history: usize::MAX,
             ..ProtocolConfig::default()
         };
-        let result = config.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(
-            err,
-            FortressError::InvalidRequestStructured {
-                kind: InvalidRequestKind::ConfigValueOutOfRange {
-                    field: "max_checksum_history",
-                    min: 1,
-                    max: 1024,
-                    ..
-                }
-            }
-        ));
+        config.validate().unwrap();
     }
 
     #[test]
@@ -2266,7 +2168,7 @@ mod tests {
         };
         config.validate().unwrap();
 
-        // Valid: maximum boundary (4096)
+        // Valid: larger user-configured value
         let config = ProtocolConfig {
             pending_output_limit: 4096,
             ..ProtocolConfig::default()
@@ -2297,7 +2199,7 @@ mod tests {
                 kind: InvalidRequestKind::ConfigValueOutOfRange {
                     field: "pending_output_limit",
                     min: 1,
-                    max: 4096,
+                    max: u64::MAX,
                     ..
                 }
             }
@@ -2305,26 +2207,12 @@ mod tests {
     }
 
     #[test]
-    fn test_protocol_config_validate_pending_output_limit_too_high() {
-        // Invalid: 4097 (above maximum)
+    fn test_protocol_config_validate_pending_output_limit_accepts_large_values() {
         let config = ProtocolConfig {
-            pending_output_limit: 4097,
+            pending_output_limit: usize::MAX,
             ..ProtocolConfig::default()
         };
-        let result = config.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(
-            err,
-            FortressError::InvalidRequestStructured {
-                kind: InvalidRequestKind::ConfigValueOutOfRange {
-                    field: "pending_output_limit",
-                    min: 1,
-                    max: 4096,
-                    ..
-                }
-            }
-        ));
+        config.validate().unwrap();
     }
 
     #[test]
@@ -2336,7 +2224,7 @@ mod tests {
         };
         config.validate().unwrap();
 
-        // Valid: maximum boundary (1000)
+        // Valid: larger user-configured value
         let config = ProtocolConfig {
             sync_retry_warning_threshold: 1000,
             ..ProtocolConfig::default()
@@ -2367,7 +2255,7 @@ mod tests {
                 kind: InvalidRequestKind::ConfigValueOutOfRange {
                     field: "sync_retry_warning_threshold",
                     min: 1,
-                    max: 1000,
+                    max: u64::MAX,
                     ..
                 }
             }
@@ -2375,26 +2263,12 @@ mod tests {
     }
 
     #[test]
-    fn test_protocol_config_validate_sync_retry_warning_threshold_too_high() {
-        // Invalid: 1001 (above maximum)
+    fn test_protocol_config_validate_sync_retry_warning_threshold_accepts_large_values() {
         let config = ProtocolConfig {
-            sync_retry_warning_threshold: 1001,
+            sync_retry_warning_threshold: u32::MAX,
             ..ProtocolConfig::default()
         };
-        let result = config.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(
-            err,
-            FortressError::InvalidRequestStructured {
-                kind: InvalidRequestKind::ConfigValueOutOfRange {
-                    field: "sync_retry_warning_threshold",
-                    min: 1,
-                    max: 1000,
-                    ..
-                }
-            }
-        ));
+        config.validate().unwrap();
     }
 
     #[test]
@@ -2406,7 +2280,7 @@ mod tests {
         };
         config.validate().unwrap();
 
-        // Valid: maximum boundary (300000)
+        // Valid: larger user-configured value
         let config = ProtocolConfig {
             sync_duration_warning_ms: 300000,
             ..ProtocolConfig::default()
@@ -2437,7 +2311,7 @@ mod tests {
                 kind: InvalidRequestKind::ConfigValueOutOfRange {
                     field: "sync_duration_warning_ms",
                     min: 1,
-                    max: 300000,
+                    max: u64::MAX,
                     ..
                 }
             }
@@ -2445,26 +2319,12 @@ mod tests {
     }
 
     #[test]
-    fn test_protocol_config_validate_sync_duration_warning_ms_too_high() {
-        // Invalid: 300001 (above maximum)
+    fn test_protocol_config_validate_sync_duration_warning_ms_accepts_large_values() {
         let config = ProtocolConfig {
-            sync_duration_warning_ms: 300001,
+            sync_duration_warning_ms: u128::MAX,
             ..ProtocolConfig::default()
         };
-        let result = config.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(
-            err,
-            FortressError::InvalidRequestStructured {
-                kind: InvalidRequestKind::ConfigValueOutOfRange {
-                    field: "sync_duration_warning_ms",
-                    min: 1,
-                    max: 300000,
-                    ..
-                }
-            }
-        ));
+        config.validate().unwrap();
     }
 
     #[test]
@@ -2476,7 +2336,7 @@ mod tests {
         };
         config.validate().unwrap();
 
-        // Valid: maximum boundary (16)
+        // Valid: larger user-configured value
         let config = ProtocolConfig {
             input_history_multiplier: 16,
             ..ProtocolConfig::default()
@@ -2507,7 +2367,7 @@ mod tests {
                 kind: InvalidRequestKind::ConfigValueOutOfRange {
                     field: "input_history_multiplier",
                     min: 1,
-                    max: 16,
+                    max: u64::MAX,
                     ..
                 }
             }
@@ -2515,26 +2375,12 @@ mod tests {
     }
 
     #[test]
-    fn test_protocol_config_validate_input_history_multiplier_too_high() {
-        // Invalid: 17 (above maximum)
+    fn test_protocol_config_validate_input_history_multiplier_accepts_large_values() {
         let config = ProtocolConfig {
-            input_history_multiplier: 17,
+            input_history_multiplier: usize::MAX,
             ..ProtocolConfig::default()
         };
-        let result = config.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(
-            err,
-            FortressError::InvalidRequestStructured {
-                kind: InvalidRequestKind::ConfigValueOutOfRange {
-                    field: "input_history_multiplier",
-                    min: 1,
-                    max: 16,
-                    ..
-                }
-            }
-        ));
+        config.validate().unwrap();
     }
 
     #[test]
@@ -2578,15 +2424,15 @@ mod tests {
         };
         config.validate().unwrap();
 
-        // Test a config with all fields at their maximum valid values
+        // Test a config with large user-configured values
         let config = ProtocolConfig {
-            quality_report_interval: Duration::from_secs(10),
-            shutdown_delay: Duration::from_secs(300),
-            max_checksum_history: 1024,
-            pending_output_limit: 4096,
-            sync_retry_warning_threshold: 1000,
-            sync_duration_warning_ms: 300000,
-            input_history_multiplier: 16,
+            quality_report_interval: Duration::from_secs(u64::MAX),
+            shutdown_delay: Duration::from_secs(u64::MAX),
+            max_checksum_history: usize::MAX,
+            pending_output_limit: usize::MAX,
+            sync_retry_warning_threshold: u32::MAX,
+            sync_duration_warning_ms: u128::MAX,
+            input_history_multiplier: usize::MAX,
             protocol_rng_seed: None,
             clock: None,
         };
@@ -2681,100 +2527,16 @@ mod tests {
     }
 
     #[test]
-    fn spectator_config_validate_accepts_frame_domain_boundaries() {
+    fn spectator_config_validate_accepts_large_user_configured_values() {
         let config = SpectatorConfig {
-            buffer_size: SPECTATOR_MAX_BUFFER_SIZE,
-            stream_delay: SPECTATOR_MAX_STREAM_DELAY,
+            buffer_size: usize::MAX,
+            stream_delay: usize::MAX - 1,
+            catchup_speed: usize::MAX,
+            max_frames_behind: usize::MAX,
             ..SpectatorConfig::default()
         };
 
         config.validate().unwrap();
-    }
-
-    #[test]
-    fn spectator_config_validate_rejects_buffer_size_outside_frame_domain() {
-        let config = SpectatorConfig {
-            buffer_size: SPECTATOR_MAX_BUFFER_SIZE + 1,
-            stream_delay: 0,
-            ..SpectatorConfig::default()
-        };
-
-        let err = config.validate().unwrap_err();
-        assert!(matches!(
-            err,
-            FortressError::InvalidRequestStructured {
-                kind: InvalidRequestKind::ConfigValueOutOfRange {
-                    field: "buffer_size",
-                    min: 1,
-                    max: SPECTATOR_MAX_BUFFER_SIZE_U64,
-                    actual,
-                }
-            } if actual == SPECTATOR_MAX_BUFFER_SIZE_U64 + 1
-        ));
-    }
-
-    #[test]
-    fn spectator_config_validate_rejects_stream_delay_outside_frame_domain() {
-        let config = SpectatorConfig {
-            buffer_size: SPECTATOR_MAX_BUFFER_SIZE,
-            stream_delay: SPECTATOR_MAX_STREAM_DELAY + 1,
-            ..SpectatorConfig::default()
-        };
-
-        let err = config.validate().unwrap_err();
-        assert!(matches!(
-            err,
-            FortressError::InvalidRequestStructured {
-                kind: InvalidRequestKind::ConfigValueOutOfRange {
-                    field: "stream_delay",
-                    min: 0,
-                    max: SPECTATOR_MAX_STREAM_DELAY_U64,
-                    actual,
-                }
-            } if actual == SPECTATOR_MAX_STREAM_DELAY_U64 + 1
-        ));
-    }
-
-    #[test]
-    fn spectator_config_validate_rejects_oversized_catchup_speed() {
-        let config = SpectatorConfig {
-            catchup_speed: SPECTATOR_MAX_BUFFER_SIZE + 1,
-            ..SpectatorConfig::default()
-        };
-
-        let err = config.validate().unwrap_err();
-        assert!(matches!(
-            err,
-            FortressError::InvalidRequestStructured {
-                kind: InvalidRequestKind::ConfigValueOutOfRange {
-                    field: "catchup_speed",
-                    min: 0,
-                    max: SPECTATOR_MAX_BUFFER_SIZE_U64,
-                    actual,
-                }
-            } if actual == SPECTATOR_MAX_BUFFER_SIZE_U64 + 1
-        ));
-    }
-
-    #[test]
-    fn spectator_config_validate_rejects_oversized_max_frames_behind() {
-        let config = SpectatorConfig {
-            max_frames_behind: SPECTATOR_MAX_BUFFER_SIZE + 1,
-            ..SpectatorConfig::default()
-        };
-
-        let err = config.validate().unwrap_err();
-        assert!(matches!(
-            err,
-            FortressError::InvalidRequestStructured {
-                kind: InvalidRequestKind::ConfigValueOutOfRange {
-                    field: "max_frames_behind",
-                    min: 0,
-                    max: SPECTATOR_MAX_BUFFER_SIZE_U64,
-                    actual,
-                }
-            } if actual == SPECTATOR_MAX_BUFFER_SIZE_U64 + 1
-        ));
     }
 
     #[test]
@@ -2803,18 +2565,6 @@ mod tests {
                 .validate()
                 .unwrap_or_else(|e| panic!("preset {:?} should validate: {:?}", config, e));
         }
-    }
-
-    #[test]
-    fn spectator_config_validate_accepts_catchup_speed_at_maximum() {
-        let config = SpectatorConfig {
-            buffer_size: SPECTATOR_MAX_BUFFER_SIZE,
-            catchup_speed: SPECTATOR_MAX_BUFFER_SIZE,
-            max_frames_behind: SPECTATOR_MAX_BUFFER_SIZE,
-            ..SpectatorConfig::default()
-        };
-
-        config.validate().unwrap();
     }
 
     #[test]

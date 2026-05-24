@@ -242,18 +242,23 @@ pub enum RleDecodeReason {
         /// The buffer length.
         buffer_len: usize,
     },
-    /// The declared decoded length exceeded the safety bound.
+    /// The declared decoded length exceeded the configured limit.
     ///
     /// The RLE format encodes run lengths as varints that are not backed by
     /// buffer bytes, so malformed (e.g. malicious) input can claim an enormous
     /// decoded length. To avoid an unbounded allocation that would abort the
     /// process, decoding rejects any input whose decoded length would exceed
-    /// the internal maximum.
+    /// the configured maximum.
     DecodedLengthExceedsMaximum {
         /// The decoded length the input declared (saturated at `usize::MAX`).
         decoded_len: usize,
         /// The maximum decoded length permitted.
         max: usize,
+    },
+    /// The decoder could not reserve memory for the decoded output.
+    AllocationFailed {
+        /// The number of decoded bytes requested.
+        requested_len: usize,
     },
     /// An unknown or unexpected error occurred during RLE decoding.
     ///
@@ -284,6 +289,13 @@ impl Display for RleDecodeReason {
             },
             Self::DecodedLengthExceedsMaximum { decoded_len, max } => {
                 write!(f, "decoded length {} exceeds maximum {}", decoded_len, max)
+            },
+            Self::AllocationFailed { requested_len } => {
+                write!(
+                    f,
+                    "failed to reserve {} bytes for RLE decoded output",
+                    requested_len
+                )
             },
             Self::Unknown => {
                 write!(f, "unknown RLE decode error")
@@ -321,6 +333,13 @@ pub enum DeltaDecodeReason {
         /// The length of the data buffer.
         length: usize,
     },
+    /// The decoder could not reserve memory for decoded delta output.
+    AllocationFailed {
+        /// Static context for the allocation site.
+        context: &'static str,
+        /// Number of elements requested at the allocation site.
+        requested_elements: usize,
+    },
     /// An unknown or unexpected error occurred during delta decoding.
     ///
     /// This variant exists for forward compatibility and as a fallback
@@ -351,6 +370,16 @@ impl Display for DeltaDecodeReason {
             },
             Self::DataIndexOutOfBounds { index, length } => {
                 write!(f, "data index {} out of bounds (length: {})", index, length)
+            },
+            Self::AllocationFailed {
+                context,
+                requested_elements,
+            } => {
+                write!(
+                    f,
+                    "failed to reserve {} elements for {}",
+                    requested_elements, context
+                )
             },
             Self::Unknown => {
                 write!(f, "unknown delta decode error")
@@ -562,6 +591,13 @@ pub enum InvalidRequestKind {
         max: u64,
         /// The actual value that was provided.
         actual: u64,
+    },
+    /// A requested allocation could not be reserved.
+    AllocationFailed {
+        /// The allocation context.
+        context: &'static str,
+        /// The requested number of elements.
+        requested_elements: u64,
     },
     /// A Duration configuration value is outside the allowed range.
     DurationConfigOutOfRange {
@@ -805,6 +841,16 @@ impl Display for InvalidRequestKind {
                     f,
                     "configuration value '{}' is out of range: {} not in [{}, {}]",
                     field, actual, min, max
+                )
+            },
+            Self::AllocationFailed {
+                context,
+                requested_elements,
+            } => {
+                write!(
+                    f,
+                    "allocation for '{}' failed while reserving {} elements",
+                    context, requested_elements
                 )
             },
             Self::DurationConfigOutOfRange {
@@ -1067,6 +1113,13 @@ pub enum FortressError {
     NotSynchronized,
     /// The spectator got so far behind the host that catching up is impossible.
     SpectatorTooFarBehind,
+    /// Redundant spectator hosts reported different inputs for the same player and frame.
+    SpectatorDivergence {
+        /// The frame where redundant hosts disagreed.
+        frame: Frame,
+        /// The player whose input differed between hosts.
+        player: PlayerHandle,
+    },
     /// An invalid frame number was provided. Frames must be non-negative and within valid ranges.
     InvalidFrame {
         /// The frame that was invalid.
@@ -1208,6 +1261,13 @@ impl Display for FortressError {
                     "The spectator got so far behind the host that catching up is impossible."
                 )
             },
+            Self::SpectatorDivergence { frame, player } => {
+                write!(
+                    f,
+                    "Spectator hosts diverged for player {} at frame {}.",
+                    player, frame
+                )
+            },
             Self::InvalidFrame { frame, reason } => {
                 write!(f, "Invalid frame {}: {}", frame, reason)
             },
@@ -1306,6 +1366,15 @@ impl From<SerializationErrorKind> for FortressError {
     }
 }
 
+pub(crate) fn allocation_failed(context: &'static str, requested_elements: usize) -> FortressError {
+    FortressError::InvalidRequestStructured {
+        kind: InvalidRequestKind::AllocationFailed {
+            context,
+            requested_elements: u64::try_from(requested_elements).unwrap_or(u64::MAX),
+        },
+    }
+}
+
 impl From<SocketErrorKind> for FortressError {
     fn from(kind: SocketErrorKind) -> Self {
         Self::SocketErrorStructured { kind }
@@ -1364,6 +1433,18 @@ mod tests {
         let display = format!("{}", err);
         assert!(display.contains("spectator"));
         assert!(display.contains("behind"));
+    }
+
+    #[test]
+    fn test_spectator_divergence_display() {
+        let err = FortressError::SpectatorDivergence {
+            frame: Frame::new(12),
+            player: PlayerHandle::new(1),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("diverged"));
+        assert!(display.contains("12"));
+        assert!(display.contains("PlayerHandle(1)"));
     }
 
     #[test]
@@ -1706,6 +1787,14 @@ mod tests {
         assert!(display.contains("exceeds maximum"));
         assert!(display.contains("100000"));
         assert!(display.contains("64"));
+    }
+
+    #[test]
+    fn test_rle_decode_reason_allocation_failed() {
+        let reason = RleDecodeReason::AllocationFailed { requested_len: 42 };
+        let display = format!("{}", reason);
+        assert!(display.contains("failed to reserve"));
+        assert!(display.contains("42"));
     }
 
     #[test]

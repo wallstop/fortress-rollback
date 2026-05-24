@@ -59,7 +59,7 @@ use std::fmt;
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::error::InvalidRequestKind;
+use crate::error::{allocation_failed, InvalidRequestKind};
 use crate::network::codec::{self, CodecResult};
 use crate::FortressResult;
 
@@ -119,9 +119,66 @@ pub struct Replay<I> {
     pub metadata: ReplayMetadata,
 }
 
+/// Caller-configurable replay decode options.
+///
+/// The default configuration imposes no replay-size cap beyond the byte slice
+/// provided by the caller. Applications that load replay files from untrusted
+/// locations can set [`max_bytes`](Self::max_bytes) to their own policy limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReplayDecodeConfig {
+    /// Maximum encoded replay size accepted by the decoder.
+    ///
+    /// `None` means no caller policy limit; allocation sizes are still validated
+    /// against the actual byte slice before reserving memory.
+    pub max_bytes: Option<usize>,
+    /// Whether to run [`Replay::validate`] after decoding.
+    pub validate: bool,
+}
+
+impl Default for ReplayDecodeConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes: None,
+            validate: true,
+        }
+    }
+}
+
+impl ReplayDecodeConfig {
+    /// Creates the default replay decode configuration.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            max_bytes: None,
+            validate: true,
+        }
+    }
+
+    /// Sets a caller-defined encoded byte limit.
+    #[must_use]
+    pub const fn max_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_bytes = Some(max_bytes);
+        self
+    }
+
+    /// Clears any caller-defined encoded byte limit.
+    #[must_use]
+    pub const fn without_byte_limit(mut self) -> Self {
+        self.max_bytes = None;
+        self
+    }
+
+    /// Enables or disables post-decode replay validation.
+    #[must_use]
+    pub const fn validate(mut self, validate: bool) -> Self {
+        self.validate = validate;
+        self
+    }
+}
+
 impl<I> Replay<I>
 where
-    I: Serialize + DeserializeOwned,
+    I: Serialize,
 {
     /// Serializes this replay to bytes using the deterministic bincode codec.
     ///
@@ -154,7 +211,12 @@ where
     pub fn to_bytes(&self) -> CodecResult<Vec<u8>> {
         codec::encode(self)
     }
+}
 
+impl<I> Replay<I>
+where
+    I: Copy + DeserializeOwned,
+{
     /// Deserializes a replay from bytes using the deterministic bincode codec.
     ///
     /// # Errors
@@ -185,8 +247,204 @@ where
     ///
     /// [`CodecError`]: crate::network::codec::CodecError
     pub fn from_bytes(bytes: &[u8]) -> CodecResult<Self> {
-        codec::decode_value(bytes)
+        Self::from_bytes_with_config(bytes, ReplayDecodeConfig::default())
     }
+
+    /// Deserializes a replay with caller-configured decode options.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CodecError`] if the byte stream is malformed, fails the
+    /// caller's configured policy, or fails replay validation.
+    ///
+    /// [`CodecError`]: crate::network::codec::CodecError
+    pub fn from_bytes_with_config(bytes: &[u8], config: ReplayDecodeConfig) -> CodecResult<Self> {
+        decode_replay(bytes, config)
+    }
+}
+
+fn replay_decode_error(message: impl Into<String>) -> codec::CodecError {
+    codec::CodecError::decode(message, codec::CodecOperation::Decode)
+}
+
+fn read_replay_array<const N: usize>(
+    bytes: &[u8],
+    cursor: &mut usize,
+    field: &'static str,
+) -> CodecResult<[u8; N]> {
+    let end = cursor
+        .checked_add(N)
+        .ok_or_else(|| replay_decode_error(format!("replay {field} offset overflow")))?;
+    let slice = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| replay_decode_error(format!("truncated replay {field}")))?;
+    let mut out = [0_u8; N];
+    out.copy_from_slice(slice);
+    *cursor = end;
+    Ok(out)
+}
+
+fn read_replay_u8(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<u8> {
+    Ok(read_replay_array::<1>(bytes, cursor, field)?[0])
+}
+
+fn read_replay_u128(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<u128> {
+    Ok(u128::from_le_bytes(read_replay_array(
+        bytes, cursor, field,
+    )?))
+}
+
+fn read_replay_usize(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<usize> {
+    let value = u64::from_le_bytes(read_replay_array(bytes, cursor, field)?);
+    usize::try_from(value)
+        .map_err(|_err| replay_decode_error(format!("replay {field} length exceeds usize")))
+}
+
+fn take_replay_bytes<'a>(
+    bytes: &'a [u8],
+    cursor: &mut usize,
+    len: usize,
+    field: &'static str,
+) -> CodecResult<&'a [u8]> {
+    let end = cursor
+        .checked_add(len)
+        .ok_or_else(|| replay_decode_error(format!("replay {field} offset overflow")))?;
+    let slice = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| replay_decode_error(format!("truncated replay {field}")))?;
+    *cursor = end;
+    Ok(slice)
+}
+
+fn read_replay_string(
+    bytes: &[u8],
+    cursor: &mut usize,
+    field: &'static str,
+) -> CodecResult<String> {
+    let len = read_replay_usize(bytes, cursor, field)?;
+    let raw = take_replay_bytes(bytes, cursor, len, field)?;
+    let utf8 = std::str::from_utf8(raw)
+        .map_err(|err| replay_decode_error(format!("invalid UTF-8 in replay {field}: {err}")))?;
+    let mut out = String::new();
+    out.try_reserve_exact(utf8.len())
+        .map_err(|_err| replay_decode_error(format!("failed to reserve replay {field}")))?;
+    out.push_str(utf8);
+    Ok(out)
+}
+
+fn reserve_replay_vec<T>(vec: &mut Vec<T>, len: usize, field: &'static str) -> CodecResult<()> {
+    vec.try_reserve_exact(len).map_err(|_err| {
+        replay_decode_error(format!(
+            "failed to reserve replay {field} with {len} element(s)"
+        ))
+    })
+}
+
+fn decode_replay<I>(bytes: &[u8], config: ReplayDecodeConfig) -> CodecResult<Replay<I>>
+where
+    I: Copy + DeserializeOwned,
+{
+    if let Some(max_bytes) = config.max_bytes {
+        if bytes.len() > max_bytes {
+            return Err(replay_decode_error(format!(
+                "encoded replay length {} exceeds configured limit {}",
+                bytes.len(),
+                max_bytes
+            )));
+        }
+    }
+
+    let mut cursor = 0;
+    let num_players = read_replay_usize(bytes, &mut cursor, "num_players")?;
+    let frame_count = read_replay_usize(bytes, &mut cursor, "frames.len")?;
+
+    let mut frames = Vec::new();
+    reserve_replay_vec(&mut frames, frame_count, "frames")?;
+    for frame_index in 0..frame_count {
+        let frame_inputs_len = read_replay_usize(bytes, &mut cursor, "frame.inputs.len")?;
+        if frame_inputs_len != num_players {
+            return Err(replay_decode_error(format!(
+                "replay frame {frame_index} has {frame_inputs_len} input(s), expected {num_players}"
+            )));
+        }
+
+        let mut frame = Vec::new();
+        reserve_replay_vec(&mut frame, frame_inputs_len, "frame.inputs")?;
+        for player_index in 0..frame_inputs_len {
+            let remaining = bytes
+                .get(cursor..)
+                .ok_or_else(|| replay_decode_error("replay input cursor out of bounds"))?;
+            let (input, consumed) = codec::decode::<I>(remaining).map_err(|err| {
+                replay_decode_error(format!(
+                    "failed to decode replay input at frame {frame_index}, player {player_index}: {err}"
+                ))
+            })?;
+            cursor = cursor
+                .checked_add(consumed)
+                .ok_or_else(|| replay_decode_error("replay input cursor overflow"))?;
+            frame.push(input);
+        }
+        frames.push(frame);
+    }
+
+    let checksum_count = read_replay_usize(bytes, &mut cursor, "checksums.len")?;
+    if checksum_count != frame_count {
+        return Err(replay_decode_error(format!(
+            "replay has {checksum_count} checksum(s), expected {frame_count}"
+        )));
+    }
+
+    let mut checksums = Vec::new();
+    reserve_replay_vec(&mut checksums, checksum_count, "checksums")?;
+    for checksum_index in 0..checksum_count {
+        let tag = read_replay_u8(bytes, &mut cursor, "checksum.option")?;
+        let checksum = match tag {
+            0 => None,
+            1 => Some(read_replay_u128(bytes, &mut cursor, "checksum.value")?),
+            other => {
+                return Err(replay_decode_error(format!(
+                    "invalid replay checksum option tag {other} at index {checksum_index}"
+                )));
+            },
+        };
+        checksums.push(checksum);
+    }
+
+    let metadata_library_version =
+        read_replay_string(bytes, &mut cursor, "metadata.library_version")?;
+    let metadata_num_players = read_replay_usize(bytes, &mut cursor, "metadata.num_players")?;
+    let metadata_total_frames = read_replay_usize(bytes, &mut cursor, "metadata.total_frames")?;
+    let metadata_skipped_frames = if cursor == bytes.len() {
+        0
+    } else {
+        read_replay_usize(bytes, &mut cursor, "metadata.skipped_frames")?
+    };
+    let metadata = ReplayMetadata {
+        library_version: metadata_library_version,
+        num_players: metadata_num_players,
+        total_frames: metadata_total_frames,
+        skipped_frames: metadata_skipped_frames,
+    };
+
+    if cursor != bytes.len() {
+        return Err(replay_decode_error(format!(
+            "replay has {} trailing byte(s)",
+            bytes.len() - cursor
+        )));
+    }
+
+    let replay = Replay {
+        num_players,
+        frames,
+        checksums,
+        metadata,
+    };
+    if config.validate {
+        replay.validate().map_err(|err| {
+            replay_decode_error(format!("decoded replay failed validation: {err}"))
+        })?;
+    }
+    Ok(replay)
 }
 
 impl<I> Replay<I> {
@@ -393,14 +651,21 @@ impl<I> ReplayRecorder<I> {
     /// This maintains frame index alignment in the replay when the real
     /// inputs for a frame could not be retrieved. The `skipped_frames`
     /// counter is incremented so consumers can detect recording gaps.
-    pub(crate) fn record_skipped_frame(&mut self)
+    pub(crate) fn record_skipped_frame(&mut self) -> FortressResult<()>
     where
         I: Default + Clone,
     {
-        // alloc-bound: self.num_players is the recording's player count fixed at construction
-        self.frames.push(vec![I::default(); self.num_players]);
+        let mut inputs = Vec::new();
+        inputs
+            .try_reserve_exact(self.num_players)
+            .map_err(|_err| allocation_failed("replay.skipped_frame_inputs", self.num_players))?;
+        for _ in 0..self.num_players {
+            inputs.push(I::default());
+        }
+        self.frames.push(inputs);
         self.checksums.push(None);
         self.skipped_frames = self.skipped_frames.saturating_add(1);
+        Ok(())
     }
 
     /// Returns the number of frames recorded so far.
@@ -512,6 +777,83 @@ mod tests {
     fn replay_from_invalid_bytes_fails() {
         let result = Replay::<u8>::from_bytes(&[0xFF, 0xFF, 0xFF]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn replay_from_bytes_rejects_configured_byte_limit() {
+        let replay = Replay::<u8> {
+            num_players: 1,
+            frames: vec![vec![7]],
+            checksums: vec![None],
+            metadata: ReplayMetadata {
+                library_version: "test".to_string(),
+                num_players: 1,
+                total_frames: 1,
+                skipped_frames: 0,
+            },
+        };
+        let bytes = replay.to_bytes().unwrap();
+
+        let result = Replay::<u8>::from_bytes_with_config(
+            &bytes,
+            ReplayDecodeConfig::new().max_bytes(bytes.len() - 1),
+        );
+
+        assert!(result.is_err());
+        let restored = Replay::<u8>::from_bytes_with_config(
+            &bytes,
+            ReplayDecodeConfig::new().max_bytes(bytes.len()),
+        )
+        .unwrap();
+        assert_eq!(restored, replay);
+    }
+
+    #[test]
+    fn replay_from_bytes_rejects_pathological_frame_count_without_allocating() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // frames.len
+
+        let result = Replay::<u8>::from_bytes(&bytes);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn replay_from_bytes_validates_decoded_replay_by_default() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // frames.len
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // checksums.len
+        bytes.extend_from_slice(&4_u64.to_le_bytes()); // metadata.library_version.len
+        bytes.extend_from_slice(b"test");
+        bytes.extend_from_slice(&1_u64.to_le_bytes()); // metadata.num_players
+        bytes.extend_from_slice(&99_u64.to_le_bytes()); // metadata.total_frames mismatch
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // metadata.skipped_frames
+
+        let result = Replay::<u8>::from_bytes(&bytes);
+
+        assert!(result.is_err());
+        let decoded =
+            Replay::<u8>::from_bytes_with_config(&bytes, ReplayDecodeConfig::new().validate(false))
+                .unwrap();
+        assert_eq!(decoded.metadata.total_frames, 99);
+    }
+
+    #[test]
+    fn replay_from_bytes_supports_pre_skipped_frames_metadata() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // frames.len
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // checksums.len
+        bytes.extend_from_slice(&4_u64.to_le_bytes()); // metadata.library_version.len
+        bytes.extend_from_slice(b"test");
+        bytes.extend_from_slice(&1_u64.to_le_bytes()); // metadata.num_players
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // metadata.total_frames
+
+        let decoded = Replay::<u8>::from_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded.metadata.skipped_frames, 0);
     }
 
     #[test]

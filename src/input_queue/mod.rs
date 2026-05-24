@@ -170,9 +170,28 @@ impl<T: Config> InputQueue<T> {
     /// * `queue_length` - The size of the circular buffer. Must be at least 2.
     ///
     /// # Returns
-    /// Returns `None` if `queue_length < 2`.
+    /// Returns `None` if `queue_length < 2` or the requested buffer cannot be reserved.
     #[must_use]
     pub fn with_queue_length(player_index: usize, queue_length: usize) -> Option<Self> {
+        match Self::try_with_queue_length(player_index, queue_length) {
+            Ok(queue) => Some(queue),
+            Err(error) => {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InputQueue,
+                    "Failed to create input queue for player {}: {}",
+                    player_index,
+                    error
+                );
+                None
+            },
+        }
+    }
+
+    pub(crate) fn try_with_queue_length(
+        player_index: usize,
+        queue_length: usize,
+    ) -> Result<Self, FortressError> {
         if queue_length < 2 {
             report_violation!(
                 ViolationSeverity::Error,
@@ -180,9 +199,21 @@ impl<T: Config> InputQueue<T> {
                 "Queue length must be at least 2, got {}",
                 queue_length
             );
-            return None;
+            return Err(InvalidRequestKind::QueueLengthTooSmall {
+                length: queue_length,
+            }
+            .into());
         }
-        Some(Self {
+
+        let mut inputs = Vec::new();
+        inputs
+            .try_reserve_exact(queue_length)
+            .map_err(|_err| crate::error::allocation_failed("input_queue.inputs", queue_length))?;
+        for _ in 0..queue_length {
+            inputs.push(PlayerInput::blank_input(Frame::NULL));
+        }
+
+        Ok(Self {
             head: 0,
             tail: 0,
             length: 0,
@@ -192,8 +223,7 @@ impl<T: Config> InputQueue<T> {
             first_incorrect_frame: Frame::NULL,
             last_requested_frame: Frame::NULL,
             prediction: PlayerInput::blank_input(Frame::NULL),
-            // alloc-bound: queue_length is a trusted local InputQueueConfig value (validated only `>= 2` above), not wire-derived data
-            inputs: vec![PlayerInput::blank_input(Frame::NULL); queue_length],
+            inputs,
             player_index,
             queue_length,
             last_confirmed_input: None,
@@ -1979,6 +2009,21 @@ mod input_queue_tests {
         // Queue length of 0 should fail
         let queue = InputQueue::<TestConfig>::with_queue_length(0, 0);
         assert!(queue.is_none());
+    }
+
+    #[test]
+    fn try_with_queue_length_reports_allocation_failure_for_impossible_length() {
+        let err = InputQueue::<TestConfig>::try_with_queue_length(0, usize::MAX).unwrap_err();
+
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::AllocationFailed {
+                    context: "input_queue.inputs",
+                    requested_elements: u64::MAX,
+                }
+            }
+        ));
     }
 
     #[test]

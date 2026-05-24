@@ -247,6 +247,8 @@ TIER1_PROOFS=(
     "proof_clone_is_independent"
     "proof_null_frame_detection"
     "proof_divisibility_check"
+    "proof_try_to_player_inputs_rejects_zero_players"
+    "proof_try_to_player_inputs_rejects_non_divisible_lengths"
     "proof_empty_input_bytes_valid"
     "proof_extreme_frame_values"
     # SyncLayer construction preconditions (src/sync_layer/mod.rs)

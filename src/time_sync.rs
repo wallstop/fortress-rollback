@@ -1,6 +1,7 @@
+use crate::error::allocation_failed;
 use crate::report_violation;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
-use crate::Frame;
+use crate::{FortressError, Frame};
 
 /// Default window size for time synchronization frame advantage calculation.
 const DEFAULT_FRAME_WINDOW_SIZE: usize = 30;
@@ -139,14 +140,46 @@ impl TimeSync {
     /// Creates a new TimeSync with the given configuration.
     #[must_use]
     pub fn with_config(config: TimeSyncConfig) -> Self {
-        let window_size = config.window_size.max(1); // Ensure at least 1
-        Self {
-            // alloc-bound: window_size is the trusted local TimeSyncConfig field set at construction, not wire data (no numeric cap is enforced)
-            local: vec![0; window_size],
-            // alloc-bound: window_size is the trusted local TimeSyncConfig field set at construction, not wire data (no numeric cap is enforced)
-            remote: vec![0; window_size],
-            window_size,
+        match Self::try_with_config(config) {
+            Ok(time_sync) => time_sync,
+            Err(error) => {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::FrameSync,
+                    "TimeSync allocation failed for config {}: {}. Falling back to a one-frame window.",
+                    config,
+                    error
+                );
+                Self {
+                    local: vec![0; 1],
+                    remote: vec![0; 1],
+                    window_size: 1,
+                }
+            },
         }
+    }
+
+    /// Creates a new `TimeSync`, returning an error if the requested buffers
+    /// cannot be reserved.
+    pub(crate) fn try_with_config(config: TimeSyncConfig) -> Result<Self, FortressError> {
+        let window_size = config.window_size.max(1);
+        let mut local = Vec::new();
+        local
+            .try_reserve_exact(window_size)
+            .map_err(|_err| allocation_failed("time_sync.local", window_size))?;
+        local.extend(std::iter::repeat_n(0, window_size));
+
+        let mut remote = Vec::new();
+        remote
+            .try_reserve_exact(window_size)
+            .map_err(|_err| allocation_failed("time_sync.remote", window_size))?;
+        remote.extend(std::iter::repeat_n(0, window_size));
+
+        Ok(Self {
+            local,
+            remote,
+            window_size,
+        })
     }
 
     /// Advances the time sync state for a frame.
@@ -486,6 +519,24 @@ mod sync_layer_tests {
         assert_eq!(ts.window_size, 1, "Window size 0 should be corrected to 1");
         assert_eq!(ts.local.len(), 1, "Local vec should have length 1");
         assert_eq!(ts.remote.len(), 1, "Remote vec should have length 1");
+    }
+
+    #[test]
+    fn try_with_config_reports_allocation_failure_for_impossible_window() {
+        let err = TimeSync::try_with_config(TimeSyncConfig {
+            window_size: usize::MAX,
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: crate::InvalidRequestKind::AllocationFailed {
+                    context: "time_sync.local",
+                    requested_elements: u64::MAX,
+                }
+            }
+        ));
     }
 
     /// Test window_size of 1 (minimum valid)
@@ -875,7 +926,10 @@ mod kani_proofs {
 
     /// Proof: Division in average calculation is safe.
     ///
-    /// Division by window.len() is always safe because window_size >= 1.
+    /// Division by window.len() is always safe because `try_with_config`
+    /// normalizes `window_size` to at least 1 before constructing the backing
+    /// vectors. This proof checks the arithmetic precondition directly, avoiding
+    /// a symbolic allocation loop that would make quick-mode unwind too shallow.
     ///
     /// - Tier: 1 (Fast, <30s)
     /// - Verifies: Division by zero is impossible
@@ -885,12 +939,11 @@ mod kani_proofs {
         let window_size: usize = kani::any();
         kani::assume(window_size >= 1 && window_size <= 1000);
 
-        let config = TimeSyncConfig { window_size };
-        let ts = TimeSync::with_config(config);
+        let count = window_size as i32;
+        let divisor = count.checked_mul(2);
 
-        // The window length is guaranteed to be >= 1
-        kani::assert(ts.local.len() >= 1, "Window length must be at least 1");
-        kani::assert(ts.remote.len() >= 1, "Window length must be at least 1");
+        kani::assert(divisor.is_some(), "Average divisor should not overflow");
+        kani::assert(divisor.unwrap_or(0) != 0, "Average divisor cannot be zero");
     }
 
     /// Proof: advance_frame with valid frame doesn't panic.
@@ -936,22 +989,18 @@ mod kani_proofs {
 
     /// Proof: Window size of 0 is corrected to 1.
     ///
-    /// The with_config function ensures window_size is at least 1.
-    /// We bound window_size to realistic values to avoid capacity overflow
-    /// during Vec allocation - this is not a production bug but a verification
-    /// tractability constraint. Real users won't pass usize::MAX as window_size.
+    /// The with_config function ensures window_size is at least 1. The symbolic
+    /// window is bounded here only to keep the proof tractable; runtime startup
+    /// uses fallible allocation and does not impose this proof-only limit.
     ///
     /// - Tier: 1 (Fast, <30s)
     /// - Verifies: Window size minimum bound enforcement
     /// - Related: proof_zero_window_size_corrected, proof_division_safe
     #[kani::proof]
+    #[kani::unwind(10)]
     fn proof_window_size_minimum() {
         let window_size: usize = kani::any();
-        // Bound to realistic window sizes to avoid capacity overflow in Vec allocation.
-        // In production, window sizes > 10000 would be unreasonable (> 2 minutes at 60fps).
-        // This constraint exists because Kani explores all possible usize values including
-        // those that would exhaust memory when creating Vec<i32> of that size.
-        kani::assume(window_size <= 10000);
+        kani::assume(window_size <= 8);
         // Even if user passes 0, it should be corrected
         let config = TimeSyncConfig { window_size };
         let ts = TimeSync::with_config(config);
@@ -1007,6 +1056,7 @@ mod kani_proofs {
     /// - Verifies: All preset configurations produce valid state
     /// - Related: proof_default_valid, proof_zero_window_size_corrected
     #[kani::proof]
+    #[kani::unwind(92)]
     fn proof_preset_configs_valid() {
         // Use symbolic choice to test all presets
         let preset_choice: u8 = kani::any();

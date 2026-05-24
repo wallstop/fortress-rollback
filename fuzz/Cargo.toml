@@ -79,3 +79,12 @@ path = "fuzz_targets/fuzz_rle.rs"
 test = false
 doc = false
 bench = false
+
+# Fuzz target: Protocol input packet acceptance
+# Tests arbitrary input packet fields against the atomic receive path
+[[bin]]
+name = "fuzz_protocol_input_packet"
+path = "fuzz_targets/fuzz_protocol_input_packet.rs"
+test = false
+doc = false
+bench = false

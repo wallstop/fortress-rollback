@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 
-use crate::error::{FortressError, InternalErrorKind, InvalidRequestKind};
+use crate::error::{allocation_failed, FortressError, InternalErrorKind, InvalidRequestKind};
 use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::report_violation;
@@ -75,11 +75,59 @@ impl<T: Config> SyncTestSession<T> {
         violation_observer: Option<Arc<dyn ViolationObserver>>,
         queue_length: usize,
     ) -> Self {
-        // alloc-bound: num_players is the session player count fixed at construction
-        let dummy_connect_status = vec![ConnectionStatus::default(); num_players];
+        match Self::try_with_queue_length(
+            num_players,
+            max_prediction,
+            check_distance,
+            input_delay,
+            violation_observer,
+            queue_length,
+        ) {
+            Ok(session) => session,
+            Err(error) => {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InternalError,
+                    "Failed to create SyncTestSession: {}. Falling back to an empty internal session.",
+                    error
+                );
+                Self {
+                    num_players: 0,
+                    max_prediction: 0,
+                    check_distance,
+                    sync_layer: SyncLayer::with_queue_length(
+                        0,
+                        0,
+                        crate::input_queue::INPUT_QUEUE_LENGTH,
+                    ),
+                    dummy_connect_status: Vec::new(),
+                    checksum_history: BTreeMap::new(),
+                    local_inputs: BTreeMap::new(),
+                    event_queue: VecDeque::new(),
+                    violation_observer: None,
+                }
+            },
+        }
+    }
+
+    pub(crate) fn try_with_queue_length(
+        num_players: usize,
+        max_prediction: usize,
+        check_distance: usize,
+        input_delay: usize,
+        violation_observer: Option<Arc<dyn ViolationObserver>>,
+        queue_length: usize,
+    ) -> Result<Self, FortressError> {
+        let mut dummy_connect_status = Vec::new();
+        dummy_connect_status
+            .try_reserve_exact(num_players)
+            .map_err(|_err| allocation_failed("synctest.dummy_connect_status", num_players))?;
+        for _ in 0..num_players {
+            dummy_connect_status.push(ConnectionStatus::default());
+        }
 
         let mut sync_layer =
-            SyncLayer::with_queue_length(num_players, max_prediction, queue_length);
+            SyncLayer::try_with_queue_length(num_players, max_prediction, queue_length)?;
         for i in 0..num_players {
             // This should never fail during construction as player handles are sequential and valid
             if let Err(e) = sync_layer.set_frame_delay(PlayerHandle::new(i), input_delay) {
@@ -93,7 +141,7 @@ impl<T: Config> SyncTestSession<T> {
             }
         }
 
-        Self {
+        Ok(Self {
             num_players,
             max_prediction,
             check_distance,
@@ -103,7 +151,7 @@ impl<T: Config> SyncTestSession<T> {
             local_inputs: BTreeMap::new(),
             event_queue: VecDeque::new(),
             violation_observer,
-        }
+        })
     }
 
     /// Registers local input for a player for the current frame. This should be successfully called for every local player before calling [`advance_frame()`].

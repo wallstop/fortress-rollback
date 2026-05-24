@@ -11,6 +11,32 @@ use crate::report_violation;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::{Config, Frame, PlayerHandle};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InputBytesDecodeError {
+    AllocationFailed {
+        requested_players: usize,
+    },
+    ZeroPlayers,
+    ByteLengthNotDivisible {
+        byte_len: usize,
+        num_players: usize,
+    },
+    PlayerByteRangeOutOfBounds {
+        player: usize,
+        start: usize,
+        end: usize,
+        byte_len: usize,
+    },
+    PlayerDecodeFailed {
+        player: usize,
+    },
+    PlayerDecodeTrailingBytes {
+        player: usize,
+        consumed: usize,
+        slice_len: usize,
+    },
+}
+
 /// Byte-encoded data representing the inputs of a client, possibly for multiple players at the same time.
 #[derive(Clone)]
 pub(super) struct InputBytes {
@@ -21,23 +47,51 @@ pub(super) struct InputBytes {
 }
 
 impl InputBytes {
+    fn player_input_byte_partition_size(
+        byte_len: usize,
+        num_players: usize,
+    ) -> Result<usize, InputBytesDecodeError> {
+        if num_players == 0 {
+            return Err(InputBytesDecodeError::ZeroPlayers);
+        }
+
+        if byte_len % num_players != 0 {
+            return Err(InputBytesDecodeError::ByteLengthNotDivisible {
+                byte_len,
+                num_players,
+            });
+        }
+
+        Ok(byte_len / num_players)
+    }
+
     /// Creates a zeroed InputBytes for the given number of players.
     ///
     /// # Returns
     /// Returns `None` if serialization of the default Input type fails, which indicates
     /// a fundamental issue with the Config::Input type's serialization implementation.
     pub fn zeroed<T: Config>(num_players: usize) -> Option<Self> {
-        // Serialize once to get the size of the default input
-        match codec::encode(&T::Input::default()) {
-            Ok(encoded) => {
-                let input_size = encoded.len();
+        // Measure once to get the size of the default input without allocating
+        // an intermediate serialized buffer.
+        match codec::encoded_len(&T::Input::default()) {
+            Ok(input_size) => {
                 // saturating_mul matches the sibling `from_inputs` and avoids an
                 // overflow panic under release `overflow-checks`.
                 let size = input_size.saturating_mul(num_players);
+                let mut bytes = Vec::new();
+                if bytes.try_reserve_exact(size).is_err() {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "Failed to reserve {} bytes for zeroed input buffer",
+                        size
+                    );
+                    return None;
+                }
+                bytes.extend(std::iter::repeat_n(0, size));
                 Some(Self {
                     frame: Frame::NULL,
-                    // alloc-bound: size = serialized-input size * num_players (saturating); num_players is the session player count fixed at construction, not wire data
-                    bytes: vec![0; size],
+                    bytes,
                 })
             },
             Err(e) => {
@@ -63,8 +117,15 @@ impl InputBytes {
         // Pre-allocate based on expected size: each input is serialized once
         // Estimate 8 bytes per input as reasonable starting capacity
         let estimated_size = num_players.saturating_mul(8);
-        // alloc-bound: estimated_size = num_players * 8; num_players is the session player count fixed at construction
-        let mut bytes = Vec::with_capacity(estimated_size);
+        let mut bytes = Vec::new();
+        if bytes.try_reserve(estimated_size).is_err() {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "Failed to pre-reserve {} bytes for input serialization; continuing without preallocation",
+                estimated_size
+            );
+        }
         let mut frame = Frame::NULL;
         // in ascending order
         for handle in 0..num_players {
@@ -107,65 +168,133 @@ impl InputBytes {
         Self { frame, bytes }
     }
 
+    /// Converts InputBytes to a vector of PlayerInput, rejecting malformed data
+    /// without returning partial results.
+    pub fn try_to_player_inputs_exact<T: Config>(
+        &self,
+        num_players: usize,
+    ) -> Result<Vec<PlayerInput<T::Input>>, InputBytesDecodeError> {
+        let size = Self::player_input_byte_partition_size(self.bytes.len(), num_players)?;
+
+        let mut player_inputs = Vec::new();
+        if player_inputs.try_reserve(num_players).is_err() {
+            return Err(InputBytesDecodeError::AllocationFailed {
+                requested_players: num_players,
+            });
+        }
+
+        for p in 0..num_players {
+            let start = p * size;
+            let end = start + size;
+            let Some(player_byte_slice) = self.bytes.get(start..end) else {
+                return Err(InputBytesDecodeError::PlayerByteRangeOutOfBounds {
+                    player: p,
+                    start,
+                    end,
+                    byte_len: self.bytes.len(),
+                });
+            };
+            match codec::decode::<T::Input>(player_byte_slice) {
+                Ok((input, consumed)) if consumed == player_byte_slice.len() => {
+                    player_inputs.push(PlayerInput::new(self.frame, input));
+                },
+                Ok((_input, consumed)) => {
+                    return Err(InputBytesDecodeError::PlayerDecodeTrailingBytes {
+                        player: p,
+                        consumed,
+                        slice_len: player_byte_slice.len(),
+                    });
+                },
+                Err(_e) => {
+                    return Err(InputBytesDecodeError::PlayerDecodeFailed { player: p });
+                },
+            }
+        }
+        Ok(player_inputs)
+    }
+
     /// Converts InputBytes to a vector of PlayerInput.
     ///
     /// If the data is malformed or deserialization fails, returns an empty vector and logs an error.
+    #[cfg(test)]
     pub fn to_player_inputs<T: Config>(&self, num_players: usize) -> Vec<PlayerInput<T::Input>> {
-        // alloc-bound: num_players is the session player count fixed at construction
-        let mut player_inputs = Vec::with_capacity(num_players);
+        match self.try_to_player_inputs_exact::<T>(num_players) {
+            Ok(player_inputs) => player_inputs,
+            Err(err) => {
+                log_input_decode_error(err);
+                Vec::new()
+            },
+        }
+    }
+}
 
-        // Validate inputs before processing
-        if num_players == 0 {
+pub(super) fn log_input_decode_error(err: InputBytesDecodeError) {
+    match err {
+        InputBytesDecodeError::AllocationFailed { requested_players } => {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "Failed to reserve {} player inputs for deserialization",
+                requested_players
+            );
+        },
+        InputBytesDecodeError::ZeroPlayers => {
             report_violation!(
                 ViolationSeverity::Error,
                 ViolationKind::NetworkProtocol,
                 "Cannot convert InputBytes with num_players=0"
             );
-            return player_inputs;
-        }
-
-        if self.bytes.len() % num_players != 0 {
+        },
+        InputBytesDecodeError::ByteLengthNotDivisible {
+            byte_len,
+            num_players,
+        } => {
             report_violation!(
                 ViolationSeverity::Error,
                 ViolationKind::NetworkProtocol,
                 "InputBytes length {} is not divisible by num_players {}",
-                self.bytes.len(),
+                byte_len,
                 num_players
             );
-            return player_inputs;
-        }
-
-        let size = self.bytes.len() / num_players;
-        for p in 0..num_players {
-            let start = p * size;
-            let end = start + size;
-            let Some(player_byte_slice) = self.bytes.get(start..end) else {
-                report_violation!(
-                    ViolationSeverity::Error,
-                    ViolationKind::NetworkProtocol,
-                    "Invalid byte range for player {}: {}..{} (total length: {})",
-                    p,
-                    start,
-                    end,
-                    self.bytes.len()
-                );
-                return player_inputs;
-            };
-            match codec::decode::<T::Input>(player_byte_slice) {
-                Ok((input, _)) => player_inputs.push(PlayerInput::new(self.frame, input)),
-                Err(e) => {
-                    report_violation!(
-                        ViolationSeverity::Error,
-                        ViolationKind::NetworkProtocol,
-                        "Failed to deserialize input for player {}: {}. This may indicate network corruption or a bug in your Config::Input deserialization.",
-                        p,
-                        e
-                    );
-                    return player_inputs;
-                },
-            }
-        }
-        player_inputs
+        },
+        InputBytesDecodeError::PlayerByteRangeOutOfBounds {
+            player,
+            start,
+            end,
+            byte_len,
+        } => {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "Invalid byte range for player {}: {}..{} (total length: {})",
+                player,
+                start,
+                end,
+                byte_len
+            );
+        },
+        InputBytesDecodeError::PlayerDecodeFailed { player } => {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "Failed to deserialize input for player {}. This may indicate network corruption or a bug in your Config::Input deserialization.",
+                player
+            );
+        },
+        InputBytesDecodeError::PlayerDecodeTrailingBytes {
+            player,
+            consumed,
+            slice_len,
+        } => {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "Input for player {} consumed {} byte(s) from a {} byte slice",
+                player,
+                consumed,
+                slice_len
+            );
+        },
     }
 }
 
@@ -374,6 +503,49 @@ mod tests {
         // Should return empty because bytes not divisible by num_players
         let player_inputs = input_bytes.to_player_inputs::<TestConfig>(2);
         assert!(player_inputs.is_empty());
+    }
+
+    #[test]
+    fn to_player_inputs_rejects_padded_per_player_slices() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&123_u32.to_le_bytes());
+        bytes.push(0xAA);
+        bytes.extend_from_slice(&456_u32.to_le_bytes());
+        bytes.push(0xBB);
+        let input_bytes = InputBytes {
+            frame: Frame::new(10),
+            bytes,
+        };
+
+        let player_inputs = input_bytes.to_player_inputs::<TestConfig>(2);
+
+        assert!(player_inputs.is_empty());
+    }
+
+    #[test]
+    fn try_to_player_inputs_exact_rejects_padded_per_player_slices() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&123_u32.to_le_bytes());
+        bytes.push(0xAA);
+        bytes.extend_from_slice(&456_u32.to_le_bytes());
+        bytes.push(0xBB);
+        let input_bytes = InputBytes {
+            frame: Frame::new(10),
+            bytes,
+        };
+
+        let err = input_bytes
+            .try_to_player_inputs_exact::<TestConfig>(2)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            InputBytesDecodeError::PlayerDecodeTrailingBytes {
+                player: 0,
+                consumed: 4,
+                slice_len: 5,
+            }
+        ));
     }
 
     // ==========================================
@@ -842,6 +1014,47 @@ mod kani_proofs {
             );
         }
         // If not divisible, to_player_inputs would return empty vec (error case)
+    }
+
+    /// Proof: exact protocol-input decoding rejects zero players.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: malformed player count is rejected before per-player decode
+    /// - Related: proof_try_to_player_inputs_rejects_non_divisible_lengths
+    #[kani::proof]
+    fn proof_try_to_player_inputs_rejects_zero_players() {
+        let bytes_len: usize = kani::any();
+        kani::assume(bytes_len <= 8);
+
+        let result = InputBytes::player_input_byte_partition_size(bytes_len, 0);
+        kani::assert(
+            matches!(result, Err(InputBytesDecodeError::ZeroPlayers)),
+            "zero players should be rejected",
+        );
+    }
+
+    /// Proof: exact protocol-input decoding rejects non-divisible byte lengths.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: malformed byte/player partitioning is rejected atomically
+    /// - Related: proof_divisibility_check, proof_player_slice_bounds_valid
+    #[kani::proof]
+    fn proof_try_to_player_inputs_rejects_non_divisible_lengths() {
+        for (byte_len, num_players) in [
+            (1_usize, 2_usize),
+            (2_usize, 3_usize),
+            (5_usize, 4_usize),
+            (7_usize, 8_usize),
+        ] {
+            let result = InputBytes::player_input_byte_partition_size(byte_len, num_players);
+            kani::assert(
+                matches!(
+                    result,
+                    Err(InputBytesDecodeError::ByteLengthNotDivisible { .. })
+                ),
+                "non-divisible input byte lengths should be rejected",
+            );
+        }
     }
 
     // =========================================================================

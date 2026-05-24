@@ -106,7 +106,7 @@
 //! [`UdpNonBlockingSocket`]: crate::UdpNonBlockingSocket
 //! [`NonBlockingSocket`]: crate::NonBlockingSocket
 
-use std::net::SocketAddr;
+use std::{io::Error, net::SocketAddr};
 
 use tokio::net::UdpSocket;
 
@@ -159,9 +159,9 @@ const IDEAL_MAX_UDP_PACKET_SIZE: usize = 508;
 pub struct TokioUdpSocket {
     socket: UdpSocket,
     /// Receive buffer - reused across recv_from calls
-    recv_buffer: [u8; RECV_BUFFER_SIZE],
+    recv_buffer: Vec<u8>,
     /// Send buffer - reused across send_to calls to avoid allocation
-    send_buffer: [u8; SEND_BUFFER_SIZE],
+    send_buffer: Vec<u8>,
 }
 
 impl TokioUdpSocket {
@@ -184,11 +184,48 @@ impl TokioUdpSocket {
     /// ```
     #[must_use]
     pub fn new(socket: UdpSocket) -> Self {
+        let recv_buffer =
+            zeroed_buffer(RECV_BUFFER_SIZE, "tokio udp recv buffer").unwrap_or_else(|err| {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::NetworkProtocol,
+                    "Failed to allocate default Tokio UDP receive buffer: {}",
+                    err
+                );
+                Vec::new()
+            });
+        let send_buffer =
+            zeroed_buffer(SEND_BUFFER_SIZE, "tokio udp send buffer").unwrap_or_else(|err| {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::NetworkProtocol,
+                    "Failed to allocate default Tokio UDP send buffer: {}",
+                    err
+                );
+                Vec::new()
+            });
         Self {
             socket,
-            recv_buffer: [0; RECV_BUFFER_SIZE],
-            send_buffer: [0; SEND_BUFFER_SIZE],
+            recv_buffer,
+            send_buffer,
         }
+    }
+
+    /// Creates a `TokioUdpSocket` with caller-configured receive and send buffers.
+    ///
+    /// The default [`new`](Self::new) constructor uses 4 KiB receive and 1 KiB
+    /// send buffers. Applications with larger serialized inputs can raise either
+    /// value without implementing a custom socket.
+    pub fn with_buffer_sizes(
+        socket: UdpSocket,
+        recv_buffer_size: usize,
+        send_buffer_size: usize,
+    ) -> Result<Self, std::io::Error> {
+        Ok(Self {
+            socket,
+            recv_buffer: zeroed_buffer(recv_buffer_size, "tokio udp recv buffer")?,
+            send_buffer: zeroed_buffer(send_buffer_size, "tokio udp send buffer")?,
+        })
     }
 
     /// Binds a new `TokioUdpSocket` to the specified port on all interfaces (0.0.0.0).
@@ -222,9 +259,18 @@ impl TokioUdpSocket {
     /// # }
     /// ```
     pub async fn bind_to_port(port: u16) -> Result<Self, std::io::Error> {
+        Self::bind_to_port_with_buffer_sizes(port, RECV_BUFFER_SIZE, SEND_BUFFER_SIZE).await
+    }
+
+    /// Binds a new `TokioUdpSocket` with caller-configured receive and send buffers.
+    pub async fn bind_to_port_with_buffer_sizes(
+        port: u16,
+        recv_buffer_size: usize,
+        send_buffer_size: usize,
+    ) -> Result<Self, std::io::Error> {
         let addr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port);
         let socket = UdpSocket::bind(addr).await?;
-        Ok(Self::new(socket))
+        Self::with_buffer_sizes(socket, recv_buffer_size, send_buffer_size)
     }
 
     /// Returns the local address that this socket is bound to.
@@ -332,7 +378,7 @@ impl TokioUdpSocket {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// use fortress_rollback::tokio_socket::TokioUdpSocket;
     /// use fortress_rollback::NonBlockingSocket;
     /// use fortress_rollback::network::messages::{Message, MessageBody, MessageHeader};
@@ -383,7 +429,19 @@ impl TokioUdpSocket {
     pub async fn send_to_async(&mut self, msg: &Message, addr: &SocketAddr) {
         // Serialize into the pre-allocated send buffer to avoid allocation.
         let buf = match codec::encode_into(msg, &mut self.send_buffer) {
-            Ok(len) => &self.send_buffer[..len],
+            Ok(len) => {
+                let Some(buf) = self.send_buffer.get(..len) else {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "send_buffer slice [..{}] out of bounds (buffer size: {})",
+                        len,
+                        self.send_buffer.len()
+                    );
+                    return;
+                };
+                buf
+            },
             Err(codec::CodecError::BufferTooSmall { provided, .. }) => {
                 report_violation!(
                     ViolationSeverity::Warning,
@@ -531,7 +589,17 @@ impl NonBlockingSocket<SocketAddr> for TokioUdpSocket {
             },
         };
 
-        self.send_encoded_packet(&self.send_buffer[..len], addr);
+        let Some(buf) = self.send_buffer.get(..len) else {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "send_buffer slice [..{}] out of bounds (buffer size: {})",
+                len,
+                self.send_buffer.len()
+            );
+            return;
+        };
+        self.send_encoded_packet(buf, addr);
     }
 
     fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
@@ -543,18 +611,20 @@ impl NonBlockingSocket<SocketAddr> for TokioUdpSocket {
             match self.socket.try_recv_from(&mut self.recv_buffer) {
                 Ok((number_of_bytes, src_addr)) => {
                     // Defensive check
-                    if number_of_bytes > RECV_BUFFER_SIZE {
+                    if number_of_bytes > self.recv_buffer.len() {
                         report_violation!(
                             ViolationSeverity::Error,
                             ViolationKind::NetworkProtocol,
                             "Received {} bytes but buffer is only {} bytes",
                             number_of_bytes,
-                            RECV_BUFFER_SIZE
+                            self.recv_buffer.len()
                         );
                         continue;
                     }
-                    if let Ok(msg) = codec::decode_value(&self.recv_buffer[0..number_of_bytes]) {
-                        received_messages.push((src_addr, msg));
+                    if let Some(buf_slice) = self.recv_buffer.get(..number_of_bytes) {
+                        if let Ok((msg, _consumed)) = codec::decode_message(buf_slice) {
+                            received_messages.push((src_addr, msg));
+                        }
                     }
                 },
                 // No more messages available (non-blocking behavior)
@@ -577,6 +647,16 @@ impl NonBlockingSocket<SocketAddr> for TokioUdpSocket {
             }
         }
     }
+}
+
+fn zeroed_buffer(size: usize, name: &'static str) -> Result<Vec<u8>, Error> {
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(size)
+        .map_err(|_err| Error::other(format!("failed to reserve {name} of {size} bytes")))?;
+    // alloc-bound: exact size was reserved fallibly above; resize only initializes that capacity
+    buffer.resize(size, 0);
+    Ok(buffer)
 }
 
 #[cfg(test)]
@@ -642,6 +722,16 @@ mod tests {
         let local_addr = socket.local_addr().unwrap();
         // OS should have assigned a non-zero port
         assert_ne!(local_addr.port(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_tokio_socket_bind_with_custom_buffer_sizes() {
+        let socket = TokioUdpSocket::bind_to_port_with_buffer_sizes(0, 8192, 2048)
+            .await
+            .unwrap();
+
+        assert_eq!(socket.recv_buffer.len(), 8192);
+        assert_eq!(socket.send_buffer.len(), 2048);
     }
 
     #[tokio::test]

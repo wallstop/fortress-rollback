@@ -59,6 +59,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 
+use crate::error::allocation_failed;
 use crate::replay::Replay;
 use crate::sessions::session_trait::Session;
 use crate::sync_layer::GameStateCell;
@@ -658,7 +659,10 @@ impl<T: Config> ReplaySession<T> {
                     },
                 })?;
 
-        let mut inputs = InputVec::with_capacity(frame_inputs.len());
+        let mut inputs = InputVec::new();
+        inputs
+            .try_reserve(frame_inputs.len())
+            .map_err(|_err| allocation_failed("replay_session.inputs", frame_inputs.len()))?;
         for input in frame_inputs {
             inputs.push((*input, InputStatus::Confirmed));
         }

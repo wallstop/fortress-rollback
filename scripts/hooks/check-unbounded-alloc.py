@@ -86,6 +86,14 @@ _DOC_OR_BLANK = re.compile(r"^\s*(?://.*|/\*.*|\*.*)?$")
 
 # The justification marker that exempts a flagged construct.
 _ALLOC_BOUND_MARKER = "// alloc-bound:"
+_WEAK_ALLOC_BOUND_PHRASES = (
+    "no numeric cap",
+    "trusted local",
+    "trusted/local",
+    "trusted config",
+    "unvalidated",
+    "not validated",
+)
 
 # Capacity-reserving / resizing calls (preceded by `.` or `::`). `reserve` and
 # `reserve_exact` are anchored on a non-word boundary so `try_reserve` /
@@ -267,13 +275,22 @@ def _size_expr_is_exempt(expr: str) -> bool:
     return False
 
 
-def _has_marker(lines: list[str], line_index: int) -> bool:
-    """Return True if an `// alloc-bound:` marker is on this or the prior line."""
+def _marker_text(lines: list[str], line_index: int) -> str | None:
+    """Return the `// alloc-bound:` marker on this or the prior line."""
     if 0 <= line_index < len(lines) and _ALLOC_BOUND_MARKER in lines[line_index]:
-        return True
+        return lines[line_index]
     if line_index > 0 and _ALLOC_BOUND_MARKER in lines[line_index - 1]:
-        return True
-    return False
+        return lines[line_index - 1]
+    return None
+
+
+def _weak_marker_reason(marker: str) -> str | None:
+    """Return a diagnostic reason if an alloc-bound marker is too weak."""
+    lowered = marker.lower()
+    for phrase in _WEAK_ALLOC_BOUND_PHRASES:
+        if phrase in lowered:
+            return f"marker says '{phrase}' instead of naming a concrete cap or fallible bound"
+    return None
 
 
 def _match_argument(text: str, open_paren: int) -> tuple[str, int] | None:
@@ -543,9 +560,15 @@ def check_file(path: Path) -> list[str]:
 
     errors: list[str] = []
     for finding in sorted(findings, key=lambda f: (f.line, f.construct)):
-        # `_has_marker` reads the ORIGINAL lines so a same-line trailing comment
-        # still counts (it was stripped from `joined`).
-        if _has_marker(raw_lines, finding.line - 1):
+        # `_marker_text` reads the ORIGINAL lines so a same-line trailing
+        # comment still counts (it was stripped from `joined`).
+        marker = _marker_text(raw_lines, finding.line - 1)
+        if marker is not None:
+            if weak_reason := _weak_marker_reason(marker):
+                errors.append(
+                    f"{display_path}:{finding.line}: {finding.construct} has a weak "
+                    f"'// alloc-bound:' justification: {weak_reason}"
+                )
             continue
         errors.append(
             f"{display_path}:{finding.line}: {finding.construct} requires an "

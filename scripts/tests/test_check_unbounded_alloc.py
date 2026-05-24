@@ -271,18 +271,30 @@ def test_vec_macro_var_size_is_flagged(tmp_path: Path) -> None:
 
 
 def test_vec_macro_with_same_line_marker_is_not_flagged(tmp_path: Path) -> None:
-    body = "fn f(n: usize) { let _ = vec![0u8; n]; } // alloc-bound: n is local\n"
+    body = "fn f(n: usize) { let _ = vec![0u8; n]; } // alloc-bound: n <= MAX_BYTES checked by caller\n"
     assert not _is_flagged(tmp_path, body)
 
 
 def test_vec_macro_with_prior_line_marker_is_not_flagged(tmp_path: Path) -> None:
     body = (
         "fn f(n: usize) {\n"
-        "    // alloc-bound: n is a trusted local config value\n"
+        "    // alloc-bound: n is validated by Config::validate before allocation\n"
         "    let _ = vec![0u8; n];\n"
         "}\n"
     )
     assert not _is_flagged(tmp_path, body)
+
+
+def test_weak_alloc_bound_marker_is_flagged(tmp_path: Path) -> None:
+    body = (
+        "fn f(n: usize) {\n"
+        "    // alloc-bound: n is trusted local config\n"
+        "    let _ = vec![0u8; n];\n"
+        "}\n"
+    )
+    findings = check_file(_write_rs(tmp_path, body))
+    assert findings
+    assert any("marker says 'trusted local'" in finding for finding in findings)
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +421,7 @@ def test_resize_len_size_is_exempt(tmp_path: Path) -> None:
 def test_resize_with_marker_is_not_flagged(tmp_path: Path) -> None:
     body = (
         "fn f(v: &mut Vec<u8>, n: usize) {\n"
-        "    // alloc-bound: n is trusted local config\n"
+        "    // alloc-bound: n was reserved fallibly before resize\n"
         "    v.resize(n, 0);\n"
         "}\n"
     )
