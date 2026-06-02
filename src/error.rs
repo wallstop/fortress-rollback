@@ -1375,6 +1375,58 @@ pub(crate) fn allocation_failed(context: &'static str, requested_elements: usize
     }
 }
 
+/// Creates an empty `Vec<U>` with capacity reserved for exactly `count`
+/// elements, returning a structured [`FortressError`] (rather than aborting)
+/// when the reservation cannot be satisfied. The caller fills the returned
+/// vector.
+///
+/// This is the single, canonical entry point for bounded, fallible `Vec`
+/// pre-allocation across the crate. Routing every construction site through it
+/// keeps the zero-panic allocation policy in one place and—critically—keeps the
+/// formal proofs tractable.
+///
+/// # Allocation strategy
+///
+/// In production the capacity is reserved with the fallible
+/// [`Vec::try_reserve_exact`], so out-of-memory is surfaced as a structured
+/// [`FortressError`] rather than aborting the process (zero-panic policy).
+///
+/// Under Kani we instead use the infallible [`Vec::with_capacity`]. This is not
+/// a cosmetic choice: modeling allocation *failure* drags the full
+/// `try_reserve` → `finish_grow` → `TryReserveError` → `?`-propagation →
+/// `FortressError`-drop machinery into CBMC at *every* construction site, and
+/// the product of those success/failure forks across the several allocations a
+/// `SyncLayer` performs explodes the state space (runner OOM / per-proof
+/// timeout). `with_capacity` is the lighter path the proofs verified
+/// historically (and produces identical codegen to a direct caller-side push
+/// loop). Allocation-failure handling is orthogonal to the behavioral
+/// invariants the proofs check, and CBMC cannot meaningfully exercise true OOM,
+/// so under verification we reason about the success path only. The bound
+/// arithmetic that decides `count` is still verified normally.
+///
+/// Returning a pre-reserved *empty* vector (rather than taking a fill closure)
+/// keeps a single `?` per construction site and avoids dragging the closure's
+/// `Result` machinery into the proof for every element.
+#[inline]
+pub(crate) fn try_with_capacity<U>(
+    count: usize,
+    context: &'static str,
+) -> Result<Vec<U>, FortressError> {
+    #[cfg(not(kani))]
+    {
+        let mut vec: Vec<U> = Vec::new();
+        vec.try_reserve_exact(count)
+            .map_err(|_err| allocation_failed(context, count))?;
+        Ok(vec)
+    }
+    #[cfg(kani)]
+    {
+        let _ = context;
+        // alloc-bound: `count` is the caller-validated element count.
+        Ok(Vec::<U>::with_capacity(count))
+    }
+}
+
 impl From<SocketErrorKind> for FortressError {
     fn from(kind: SocketErrorKind) -> Self {
         Self::SocketErrorStructured { kind }

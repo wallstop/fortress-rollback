@@ -205,10 +205,7 @@ impl<T: Config> InputQueue<T> {
             .into());
         }
 
-        let mut inputs = Vec::new();
-        inputs
-            .try_reserve_exact(queue_length)
-            .map_err(|_err| crate::error::allocation_failed("input_queue.inputs", queue_length))?;
+        let mut inputs = crate::error::try_with_capacity(queue_length, "input_queue.inputs")?;
         for _ in 0..queue_length {
             inputs.push(PlayerInput::blank_input(Frame::NULL));
         }

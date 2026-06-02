@@ -33,10 +33,12 @@
 //    - Auto-sync preset selection via `with_auto_sync_preset()`
 //    - Parameterized, table-driven, easier to extend
 //
-// Hostile real-UDP tests are smoke coverage. Tests may use `NetworkScenario`
-// with `with_auto_sync_preset()` and `run_test_with_retry()` only when they
-// still require zero retries for acceptance. Direct peer config tests that use
-// significant packet loss or burst loss must set an explicit robust sync preset.
+// Hostile real-UDP tests are smoke coverage. Tests use `NetworkScenario` with
+// `with_auto_sync_preset()` and run a single attempt via `run_test()`; there is
+// no retry mechanism, so a failure is a real failure. Determinism under extreme
+// chaos is covered deterministically in `tests/network/in_process_chaos.rs`.
+// Direct peer config tests that use significant packet loss or burst loss must
+// set an explicit robust sync preset.
 //
 // See: `.llm/skills/testing/network-chaos-testing.md` for chaos testing best practices
 // =============================================================================
@@ -155,260 +157,6 @@ impl EventSummary {
             self.peer_dropped,
             self.replay_desync,
         )
-    }
-}
-
-/// Checks if a test result failed due to a retryable peer timeout.
-///
-/// This is used by the retry logic to determine if a retry is appropriate.
-/// We only retry on timeout failures (which can happen with unlucky burst patterns)
-/// and not on other types of failures (which may indicate real bugs).
-fn is_retryable_timeout_error(result: &TestResult) -> bool {
-    if result.success {
-        return false;
-    }
-
-    match result.error_kind.as_deref() {
-        Some("timeout") => return true,
-        Some(_) => return false,
-        None => {},
-    }
-
-    result.error.as_deref().is_some_and(|error| {
-        error.starts_with("Timeout (") || error.starts_with("Process timed out after ")
-    })
-}
-
-fn should_retry_failed_results(result1: &TestResult, result2: &TestResult) -> bool {
-    let results = [result1, result2];
-    let mut saw_failure = false;
-
-    for result in results {
-        if result.success {
-            continue;
-        }
-
-        saw_failure = true;
-        if !is_retryable_timeout_error(result) {
-            return false;
-        }
-    }
-
-    saw_failure
-}
-
-/// Unit tests for the `is_retryable_timeout_error` helper function.
-#[test]
-fn test_is_retryable_timeout_error_helper() {
-    let cases = [
-        (
-            "success",
-            TestResult {
-                success: true,
-                final_frame: 100,
-                final_value: 42,
-                checksum: 0x1234,
-                rollbacks: 5,
-                error_kind: None,
-                error: None,
-                runtime: None,
-            },
-            false,
-        ),
-        (
-            "startup timeout",
-            TestResult {
-                success: false,
-                final_frame: 0,
-                final_value: 0,
-                checksum: 0,
-                rollbacks: 0,
-                error_kind: Some("timeout".to_string()),
-                error: Some(
-                    "Timeout (current_frame=0, confirmed_frame=-1, target=100)".to_string(),
-                ),
-                runtime: None,
-            },
-            true,
-        ),
-        (
-            "mid-game timeout",
-            TestResult {
-                success: false,
-                final_frame: 50,
-                final_value: 123,
-                checksum: 0xABCD,
-                rollbacks: 3,
-                error_kind: None,
-                error: Some(
-                    "Timeout (current_frame=50, confirmed_frame=48, target=100)".to_string(),
-                ),
-                runtime: None,
-            },
-            true,
-        ),
-        (
-            "harness process timeout",
-            TestResult {
-                success: false,
-                final_frame: 0,
-                final_value: 0,
-                checksum: 0,
-                rollbacks: 0,
-                error_kind: Some("timeout".to_string()),
-                error: Some("Process timed out after 210.0s (limit: 210s)".to_string()),
-                runtime: None,
-            },
-            true,
-        ),
-        (
-            "structured non-timeout with timeout-looking message",
-            TestResult {
-                success: false,
-                final_frame: 12,
-                final_value: 0,
-                checksum: 0,
-                rollbacks: 0,
-                error_kind: Some("session".to_string()),
-                error: Some(
-                    "Timeout (current_frame=12, confirmed_frame=8, target=100)".to_string(),
-                ),
-                runtime: None,
-            },
-            false,
-        ),
-        (
-            "non-timeout error",
-            TestResult {
-                success: false,
-                final_frame: 0,
-                final_value: 0,
-                checksum: 0,
-                rollbacks: 0,
-                error_kind: Some("io".to_string()),
-                error: Some("Connection refused".to_string()),
-                runtime: None,
-            },
-            false,
-        ),
-        (
-            "no error message",
-            TestResult {
-                success: false,
-                final_frame: 0,
-                final_value: 0,
-                checksum: 0,
-                rollbacks: 0,
-                error_kind: None,
-                error: None,
-                runtime: None,
-            },
-            false,
-        ),
-    ];
-
-    for (name, result, expected) in cases {
-        assert_eq!(
-            is_retryable_timeout_error(&result),
-            expected,
-            "case {name}: {}",
-            result.diagnostic_summary()
-        );
-    }
-}
-
-/// Unit tests for retry eligibility across both peers.
-#[test]
-fn test_should_retry_failed_results_requires_all_failures_retryable() {
-    struct Case {
-        name: &'static str,
-        peer1: ResultShape,
-        peer2: ResultShape,
-        expected: bool,
-    }
-
-    #[derive(Clone, Copy)]
-    struct ResultShape {
-        success: bool,
-        error_kind: Option<&'static str>,
-        error: Option<&'static str>,
-    }
-
-    impl ResultShape {
-        fn result(self) -> TestResult {
-            TestResult {
-                success: self.success,
-                final_frame: if self.success { 100 } else { 0 },
-                final_value: 0,
-                checksum: 0,
-                rollbacks: 0,
-                error_kind: self.error_kind.map(str::to_string),
-                error: self.error.map(str::to_string),
-                runtime: None,
-            }
-        }
-    }
-
-    let success = ResultShape {
-        success: true,
-        error_kind: None,
-        error: None,
-    };
-    let timeout = ResultShape {
-        success: false,
-        error_kind: Some("timeout"),
-        error: Some("Process timed out after 120.0s (limit: 120s)"),
-    };
-    let session_error = ResultShape {
-        success: false,
-        error_kind: Some("session"),
-        error: Some("desync detected"),
-    };
-
-    let cases = [
-        Case {
-            name: "both passed",
-            peer1: success,
-            peer2: success,
-            expected: false,
-        },
-        Case {
-            name: "one timeout one passed",
-            peer1: timeout,
-            peer2: success,
-            expected: true,
-        },
-        Case {
-            name: "both timeout",
-            peer1: timeout,
-            peer2: timeout,
-            expected: true,
-        },
-        Case {
-            name: "timeout plus non-timeout",
-            peer1: timeout,
-            peer2: session_error,
-            expected: false,
-        },
-        Case {
-            name: "one non-timeout one passed",
-            peer1: session_error,
-            peer2: success,
-            expected: false,
-        },
-    ];
-
-    for case in cases {
-        let peer1 = case.peer1.result();
-        let peer2 = case.peer2.result();
-        assert_eq!(
-            should_retry_failed_results(&peer1, &peer2),
-            case.expected,
-            "case {}: peer1={}, peer2={}",
-            case.name,
-            peer1.diagnostic_summary(),
-            peer2.diagnostic_summary()
-        );
     }
 }
 
@@ -1067,122 +815,6 @@ impl NetworkScenario {
         (result1, result2)
     }
 
-    /// Runs the test with retry logic for flaky network scenarios (default retries).
-    ///
-    /// This is a convenience method that calls `run_test_with_retry_config` with the
-    /// default maximum retry count.
-    ///
-    /// # Arguments
-    ///
-    /// * `port_base` - The base port number to use for the first attempt
-    ///
-    /// # Returns
-    ///
-    /// A tuple of `(TestResult, TestResult, retry_count)` where `retry_count` is
-    /// 0 if the test passed on the first attempt, or a positive number if retries were needed.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the test fails on all attempts (via `verify_determinism`).
-    fn run_test_with_retry(&self, port_base: u16) -> (TestResult, TestResult, u32) {
-        self.run_test_with_retry_config(port_base, DEFAULT_MAX_RETRIES)
-    }
-
-    /// Runs the test with retry logic for flaky network smoke scenarios.
-    ///
-    /// This method will retry the test up to `max_retries` times if it fails due
-    /// to a sync timeout, which can occasionally happen with aggressive burst loss
-    /// parameters even when using the `stress_test` sync preset. Each retry uses
-    /// different ports (offset by `RETRY_PORT_OFFSET`) to avoid any potential port
-    /// reuse issues. A successful final attempt still fails the test if any retry
-    /// was required, so real UDP smoke tests cannot hide acceptance failures.
-    ///
-    /// # Arguments
-    ///
-    /// * `port_base` - The base port number to use for the first attempt
-    /// * `max_retries` - Maximum number of retry attempts after initial failure
-    ///
-    /// # Returns
-    ///
-    /// A tuple of `(TestResult, TestResult, retry_count)` where `retry_count` is
-    /// 0 if the test passed on the first attempt, or a positive number if retries were needed.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the test fails on all attempts (via `verify_determinism`) or if
-    /// the final success required at least one retry.
-    fn run_test_with_retry_config(
-        &self,
-        port_base: u16,
-        max_retries: u32,
-    ) -> (TestResult, TestResult, u32) {
-        self.validate_sync_preset();
-
-        let (peer1, peer2) = self.to_peer_configs(port_base);
-        let (mut result1, mut result2) = run_two_peer_test(peer1, peer2);
-
-        let mut retry_count = 0;
-
-        while retry_count < max_retries {
-            // Only retry when every failing peer failed with a retryable timeout.
-            let needs_retry = should_retry_failed_results(&result1, &result2);
-
-            if !needs_retry {
-                if !result1.success || !result2.success {
-                    eprintln!(
-                        "=== {} failed with at least one non-retryable peer result; not retrying ===",
-                        self.name
-                    );
-                    eprintln!("Peer 1 attempt summary: {}", result1.diagnostic_summary());
-                    eprintln!("Peer 2 attempt summary: {}", result2.diagnostic_summary());
-                }
-                break;
-            }
-
-            retry_count += 1;
-            eprintln!(
-                "=== {} failed on attempt {} due to timeout, retrying ({}/{})... ===",
-                self.name, retry_count, retry_count, max_retries
-            );
-            eprintln!("Peer 1 attempt summary: {}", result1.diagnostic_summary());
-            eprintln!("Peer 2 attempt summary: {}", result2.diagnostic_summary());
-
-            // Small delay between attempts
-            thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
-
-            // Retry with different ports to avoid any port reuse issues
-            let retry_port_base = port_base + RETRY_PORT_OFFSET * (retry_count as u16);
-            let (retry_peer1, retry_peer2) = self.to_peer_configs(retry_port_base);
-            (result1, result2) = run_two_peer_test(retry_peer1, retry_peer2);
-        }
-
-        // Verify determinism on final attempt (will panic if it still fails)
-        verify_determinism(&result1, &result2, self.name);
-        assert_eq!(
-            retry_count, 0,
-            "{} succeeded only after {} retry attempt(s); real UDP smoke tests must not hide failures behind retries",
-            self.name, retry_count
-        );
-
-        // Log scenario results
-        let suffix = if retry_count > 0 {
-            format!(" (after {} retries)", retry_count)
-        } else {
-            String::new()
-        };
-        println!(
-            "{}{}: peer1(frames={}, rollbacks={}), peer2(frames={}, rollbacks={})",
-            self.name,
-            suffix,
-            result1.final_frame,
-            result1.rollbacks,
-            result2.final_frame,
-            result2.rollbacks
-        );
-
-        (result1, result2, retry_count)
-    }
-
     /// Returns a diagnostic summary of this scenario.
     fn summary(&self) -> String {
         format!(
@@ -1237,17 +869,8 @@ const PEER_BINARY_NAME: &str = if cfg!(windows) {
     "network_test_peer"
 };
 
-/// Default delay between retry attempts in milliseconds.
-const RETRY_DELAY_MS: u64 = 500;
-
-/// Port offset for retry attempts to avoid port reuse issues.
-const RETRY_PORT_OFFSET: u16 = 100;
-
 /// Port offset between test cases in parameter sweeps.
 const SWEEP_PORT_OFFSET: u16 = 200;
-
-/// Default maximum number of retry attempts for flaky tests.
-const DEFAULT_MAX_RETRIES: u32 = 1;
 
 /// Finds the network_test_peer binary path.
 ///
@@ -1972,6 +1595,7 @@ fn test_poor_network_combined() {
 /// Test asymmetric conditions - one peer has much worse network.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_asymmetric_network() {
     skip_if_no_peer_binary!();
     let bad_network = NetworkProfile {
@@ -2000,15 +1624,15 @@ fn test_asymmetric_network() {
         .with_timeout(120)
         .with_auto_sync_preset();
 
-    let (result1, result2, retry_count) = scenario.run_test_with_retry(10015);
+    let (result1, result2) = scenario.run_test(10015);
 
     // Verify both peers succeeded - this means sync_health() returned InSync
     verify_determinism(&result1, &result2, "asymmetric_network");
 
     // Peer 1 should have more rollbacks due to bad network
     println!(
-        "Rollbacks - Peer 1 (bad network): {}, Peer 2 (good network): {}, retries={}",
-        result1.rollbacks, result2.rollbacks, retry_count
+        "Rollbacks - Peer 1 (bad network): {}, Peer 2 (good network): {}",
+        result1.rollbacks, result2.rollbacks
     );
 }
 
@@ -2022,6 +1646,7 @@ fn test_asymmetric_network() {
 /// it typically completes in ~2-3 seconds.
 #[test]
 #[serial]
+#[ignore = "long-running endurance or high-latency real-UDP session; runs in the nightly network suite (ci-network-nightly.yml), not per-PR CI"]
 fn test_stress_long_session_with_loss() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -2154,6 +1779,7 @@ fn test_mobile_network_simulation() {
 /// Test heavily asymmetric conditions - one peer on great network, one on terrible.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_heavily_asymmetric_network() {
     skip_if_no_peer_binary!();
     let terrible_network = NetworkProfile {
@@ -2186,14 +1812,14 @@ fn test_heavily_asymmetric_network() {
     .with_timeout(180)
     .with_auto_sync_preset();
 
-    let (result1, result2, retry_count) = scenario.run_test_with_retry(10023);
+    let (result1, result2) = scenario.run_test(10023);
 
     // Verify both peers succeeded - this means sync_health() returned InSync
     verify_determinism(&result1, &result2, "heavily_asymmetric_network");
 
     println!(
-        "Asymmetric test - Rollbacks: bad_peer={}, good_peer={}, retries={}",
-        result1.rollbacks, result2.rollbacks, retry_count
+        "Asymmetric test - Rollbacks: bad_peer={}, good_peer={}",
+        result1.rollbacks, result2.rollbacks
     );
 }
 
@@ -2237,6 +1863,7 @@ fn test_higher_input_delay() {
 /// Test with zero latency but high packet loss.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_zero_latency_high_loss() {
     skip_if_no_peer_binary!();
     let profile = NetworkProfile {
@@ -2255,14 +1882,14 @@ fn test_zero_latency_high_loss() {
         .with_timeout(120)
         .with_auto_sync_preset();
 
-    let (result1, result2, retry_count) = scenario.run_test_with_retry(10027);
+    let (result1, result2) = scenario.run_test(10027);
 
     // Verify both peers succeeded - this means sync_health() returned InSync
     verify_determinism(&result1, &result2, "zero_latency_high_loss");
 
     println!(
-        "Zero latency high loss - Rollbacks: peer1={}, peer2={}, retries={}",
-        result1.rollbacks, result2.rollbacks, retry_count
+        "Zero latency high loss - Rollbacks: peer1={}, peer2={}",
+        result1.rollbacks, result2.rollbacks
     );
 }
 
@@ -2322,6 +1949,7 @@ fn test_medium_session_300_frames() {
 /// In release mode, it typically completes in ~7-8 seconds.
 #[test]
 #[serial]
+#[ignore = "long-running endurance or high-latency real-UDP session; runs in the nightly network suite (ci-network-nightly.yml), not per-PR CI"]
 fn test_stress_very_long_session() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -2447,6 +2075,7 @@ fn test_staggered_peer_startup() {
 /// This tests connection timeout handling and retry logic.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_heavily_staggered_startup() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -2610,6 +2239,7 @@ fn test_high_input_delay_8_frames() {
 /// (5 packets, 200ms retry) which is insufficient for 36% effective packet loss.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_high_uniform_packet_loss_with_extreme_sync() {
     skip_if_no_peer_binary!();
     let profile = NetworkProfile {
@@ -2629,7 +2259,7 @@ fn test_high_uniform_packet_loss_with_extreme_sync() {
             .with_timeout(180)
             .with_sync_preset("extreme");
 
-    let (result1, result2, retry_count) = scenario.run_test_with_retry(10045);
+    let (result1, result2) = scenario.run_test(10045);
 
     // Verify both peers succeeded - this means sync_health() returned InSync
     verify_determinism(
@@ -2639,8 +2269,8 @@ fn test_high_uniform_packet_loss_with_extreme_sync() {
     );
 
     println!(
-        "High loss rollbacks - Peer 1: {}, Peer 2: {}, retries={}",
-        result1.rollbacks, result2.rollbacks, retry_count
+        "High loss rollbacks - Peer 1: {}, Peer 2: {}",
+        result1.rollbacks, result2.rollbacks
     );
 }
 
@@ -2653,6 +2283,7 @@ fn test_high_uniform_packet_loss_with_extreme_sync() {
 /// Uses mobile sync preset for the combination of baseline + burst loss.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_burst_loss_recovery() {
     skip_if_no_peer_binary!();
     let profile = NetworkProfile {
@@ -2672,14 +2303,14 @@ fn test_burst_loss_recovery() {
         .with_input_delay(3)
         .with_auto_sync_preset();
 
-    let (result1, result2, retry_count) = scenario.run_test_with_retry(10750);
+    let (result1, result2) = scenario.run_test(10750);
 
     // Verify both peers succeeded - this means sync_health() returned InSync
     verify_determinism(&result1, &result2, "burst_loss_recovery");
 
     println!(
-        "Burst loss rollbacks - Peer 1: {}, Peer 2: {}, retries={}",
-        result1.rollbacks, result2.rollbacks, retry_count
+        "Burst loss rollbacks - Peer 1: {}, Peer 2: {}",
+        result1.rollbacks, result2.rollbacks
     );
 }
 
@@ -2687,6 +2318,7 @@ fn test_burst_loss_recovery() {
 /// This represents "worst case realistic" network conditions.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_worst_case_realistic_network() {
     skip_if_no_peer_binary!();
     let profile = NetworkProfile {
@@ -2705,14 +2337,14 @@ fn test_worst_case_realistic_network() {
         .with_timeout(180)
         .with_auto_sync_preset();
 
-    let (result1, result2, retry_count) = scenario.run_test_with_retry(10047);
+    let (result1, result2) = scenario.run_test(10047);
 
     // Verify both peers succeeded - this means sync_health() returned InSync
     verify_determinism(&result1, &result2, "worst_case_realistic_network");
 
     println!(
-        "Worst case rollbacks - Peer 1: {}, Peer 2: {}, retries={}",
-        result1.rollbacks, result2.rollbacks, retry_count
+        "Worst case rollbacks - Peer 1: {}, Peer 2: {}",
+        result1.rollbacks, result2.rollbacks
     );
 }
 
@@ -2761,6 +2393,7 @@ fn test_rapid_short_session() {
 /// Tests the asymmetric resilience to the extreme.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_extreme_asymmetric_one_perfect_one_terrible() {
     skip_if_no_peer_binary!();
     let terrible_profile = NetworkProfile {
@@ -2783,7 +2416,7 @@ fn test_extreme_asymmetric_one_perfect_one_terrible() {
     .with_timeout(180)
     .with_auto_sync_preset();
 
-    let (result1, result2, retry_count) = scenario.run_test_with_retry(10051);
+    let (result1, result2) = scenario.run_test(10051);
 
     // Verify both peers succeeded - this means sync_health() returned InSync
     verify_determinism(
@@ -2793,8 +2426,8 @@ fn test_extreme_asymmetric_one_perfect_one_terrible() {
     );
 
     println!(
-        "Extreme asymmetric - Perfect: {} rollbacks, Terrible: {} rollbacks, retries={}",
-        result1.rollbacks, result2.rollbacks, retry_count
+        "Extreme asymmetric - Perfect: {} rollbacks, Terrible: {} rollbacks",
+        result1.rollbacks, result2.rollbacks
     );
 }
 
@@ -2802,6 +2435,7 @@ fn test_extreme_asymmetric_one_perfect_one_terrible() {
 /// Simulates intercontinental connection.
 #[test]
 #[serial]
+#[ignore = "long-running endurance or high-latency real-UDP session; runs in the nightly network suite (ci-network-nightly.yml), not per-PR CI"]
 fn test_intercontinental_latency() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -2842,6 +2476,7 @@ fn test_intercontinental_latency() {
 /// Tests sustained operation under moderate adversity.
 #[test]
 #[serial]
+#[ignore = "long-running endurance or high-latency real-UDP session; runs in the nightly network suite (ci-network-nightly.yml), not per-PR CI"]
 fn test_sustained_moderate_adversity() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -3035,6 +2670,7 @@ fn test_wifi_interference_simulation() {
 /// Cross-ocean connections have consistent high latency with low loss.
 #[test]
 #[serial]
+#[ignore = "long-running endurance or high-latency real-UDP session; runs in the nightly network suite (ci-network-nightly.yml), not per-PR CI"]
 fn test_intercontinental_simulation() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -3188,16 +2824,15 @@ impl NetworkConditionCase {
     }
 
     fn run_and_verify(&self) -> (TestResult, TestResult) {
-        let (result1, result2, retry_count) = self.scenario().run_test_with_retry(self.port_base);
+        let (result1, result2) = self.scenario().run_test(self.port_base);
 
         println!(
-            "{}: peer1(frame={}, rollbacks={}), peer2(frame={}, rollbacks={}), retries={}",
+            "{}: peer1(frame={}, rollbacks={}), peer2(frame={}, rollbacks={})",
             self.name,
             result1.final_frame,
             result1.rollbacks,
             result2.final_frame,
             result2.rollbacks,
-            retry_count
         );
 
         if self.expect_success {
@@ -3290,6 +2925,7 @@ fn test_input_delay_vs_rollbacks_data_driven() {
 /// both peers eventually reach the same game state through rollbacks.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_packet_loss_determinism_data_driven() {
     skip_if_no_peer_binary!();
     let test_cases = [
@@ -3445,6 +3081,7 @@ fn test_timing_sensitive_edge_cases_data_driven() {
 /// Each scenario encapsulates realistic network conditions.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_network_scenario_suite() {
     skip_if_no_peer_binary!();
     println!("=== Network Scenario Suite ===");
@@ -3476,13 +3113,7 @@ fn test_network_scenario_suite() {
 
     for (port, scenario) in scenarios {
         println!("Testing scenario: {}", scenario.summary());
-        let (result1, result2, retry_count) = scenario.run_test_with_retry(port);
-        if retry_count > 0 {
-            println!(
-                "  Scenario {} succeeded after {} retry attempt(s)",
-                scenario.name, retry_count
-            );
-        }
+        let (result1, result2) = scenario.run_test(port);
 
         // Verify frame targets are met
         assert!(
@@ -3510,6 +3141,7 @@ fn test_network_scenario_suite() {
 /// and another is on mobile, or one has a better ISP than the other.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_asymmetric_scenarios() {
     skip_if_no_peer_binary!();
     println!("=== Asymmetric Network Scenarios ===");
@@ -3563,13 +3195,7 @@ fn test_asymmetric_scenarios() {
 
     for (port, scenario) in scenarios {
         println!("Testing scenario: {}", scenario.summary());
-        let (result1, result2, retry_count) = scenario.run_test_with_retry(port);
-        if retry_count > 0 {
-            println!(
-                "  Scenario {} succeeded after {} retry attempt(s)",
-                scenario.name, retry_count
-            );
-        }
+        let (result1, result2) = scenario.run_test(port);
 
         // The peer with worse network typically has more rollbacks
         // Log this for analysis
@@ -3612,11 +3238,7 @@ fn test_scenario_local_perfect() {
         .with_input_delay(0);
 
     println!("Testing perfect local scenario: {}", scenario.summary());
-    let (result1, result2, retry_count) = scenario.run_test_with_retry(10340);
-    assert_eq!(
-        retry_count, 0,
-        "local_perfect should pass over real UDP without retry; a retry would hide a baseline transport regression"
-    );
+    let (result1, result2) = scenario.run_test(10340);
 
     // With perfect conditions and no input delay, rollbacks are possible
     // due to process scheduling, but should be minimal
@@ -4537,6 +4159,7 @@ fn test_heavy_packet_duplication() {
 /// establishment under these conditions.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_burst_packet_loss() {
     skip_if_no_peer_binary!();
     let profile = NetworkProfile {
@@ -4556,12 +4179,12 @@ fn test_burst_packet_loss() {
         .with_input_delay(3)
         .with_auto_sync_preset();
 
-    let (result1, result2, retry_count) = scenario.run_test_with_retry(10408);
+    let (result1, result2) = scenario.run_test(10408);
     verify_determinism(&result1, &result2, "burst_packet_loss");
 
     println!(
-        "Burst loss test - Rollbacks: peer1={}, peer2={}, retries={}",
-        result1.rollbacks, result2.rollbacks, retry_count
+        "Burst loss test - Rollbacks: peer1={}, peer2={}",
+        result1.rollbacks, result2.rollbacks
     );
 }
 
@@ -4590,11 +4213,12 @@ fn test_burst_packet_loss() {
 /// which is still aggressively hostile but has a much higher success probability
 /// (>99.99%) with the `stress_test` preset's 40 sync packets and 60s timeout.
 ///
-/// ## Retry mechanism
+/// ## Single attempt, no retries
 ///
-/// This test uses `run_test_with_retry` to retry once on sync timeout failures.
-/// This provides resilience against truly unlucky burst patterns while still
-/// failing deterministically if there's a real bug.
+/// This test runs a single attempt via `run_test`; a sync timeout here is a real
+/// failure. Determinism under burst loss is covered deterministically in
+/// `tests/network/in_process_chaos.rs`. This real-UDP variant runs in the nightly
+/// network suite (it is `#[ignore]`d in the per-PR lane).
 ///
 /// ## Separate stress test for original bursty profile
 ///
@@ -4602,6 +4226,7 @@ fn test_burst_packet_loss() {
 /// test suite, but those tests are marked as potentially flaky or skipped in CI.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_heavy_burst_loss() {
     skip_if_no_peer_binary!();
     // Use bursty_survivable profile which is aggressive but reliable with stress_test preset.
@@ -4612,16 +4237,7 @@ fn test_heavy_burst_loss() {
         .with_timeout(180) // Generous timeout for slow CI environments
         .with_sync_preset("stress_test");
 
-    // Use retry mechanism to handle truly unlucky burst patterns
-    let (result1, result2, retry_count) = scenario.run_test_with_retry(10410);
-
-    if retry_count > 0 {
-        let retry_word = if retry_count == 1 { "retry" } else { "retries" };
-        println!(
-            "Heavy burst loss - Test passed after {} {}",
-            retry_count, retry_word
-        );
-    }
+    let (result1, result2) = scenario.run_test(10410);
 
     println!(
         "Heavy burst loss - Rollbacks: peer1={}, peer2={}",
@@ -4629,7 +4245,7 @@ fn test_heavy_burst_loss() {
     );
 }
 
-/// Test case for burst loss parameter sweep testing with retry support.
+/// Test case for burst loss parameter sweep testing.
 struct BurstSweepTestCase {
     name: &'static str,
     burst_loss_prob: f64,
@@ -4658,15 +4274,17 @@ impl BurstSweepTestCase {
 ///
 /// This test validates that various burst loss configurations behave as expected:
 /// - Conservative parameters should pass reliably
-/// - Aggressive parameters may require retries
+/// - Aggressive parameters exercise the edge of reliability
 ///
 /// This helps catch regressions if the burst loss handling degrades and provides
 /// coverage across the parameter space without manually writing many separate tests.
 ///
-/// Each test case uses the retry mechanism and reports whether retries were needed,
-/// helping identify parameter combinations that are on the edge of reliability.
+/// Each test case runs a single attempt (no retries); failures are real failures.
+/// This real-UDP sweep runs in the nightly network suite (it is `#[ignore]`d in
+/// the per-PR lane). Determinism is covered by `tests/network/in_process_chaos.rs`.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_burst_loss_parameter_sweep() {
     skip_if_no_peer_binary!();
 
@@ -4679,11 +4297,11 @@ fn test_burst_loss_parameter_sweep() {
         // Moderate: should pass reliably with stress_test preset
         BurstSweepTestCase::new("burst_4pct_4pkt", 0.04, 4, true),
         BurstSweepTestCase::new("burst_5pct_5pkt", 0.05, 5, true),
-        // Aggressive: may need retry occasionally
+        // Aggressive: exercises the edge of reliability
         BurstSweepTestCase::new("burst_6pct_4pkt", 0.06, 4, true),
     ];
 
-    let mut results: Vec<(&str, bool, u32)> = Vec::new();
+    let mut results: Vec<(&str, bool)> = Vec::new();
     let mut port_base = 10500;
 
     for case in &test_cases {
@@ -4710,16 +4328,15 @@ fn test_burst_loss_parameter_sweep() {
             .with_timeout(120)
             .with_sync_preset("stress_test");
 
-        // Use retry mechanism
-        let (result1, result2, retry_count) = scenario.run_test_with_retry(port_base);
+        let (result1, result2) = scenario.run_test(port_base);
         port_base += SWEEP_PORT_OFFSET; // Ensure non-overlapping ports between test cases
 
         let passed = result1.success && result2.success;
-        results.push((case.name, passed, retry_count));
+        results.push((case.name, passed));
 
         println!(
-            "{}: passed={}, retries={}, rollbacks=({}, {})",
-            case.name, passed, retry_count, result1.rollbacks, result2.rollbacks
+            "{}: passed={}, rollbacks=({}, {})",
+            case.name, passed, result1.rollbacks, result2.rollbacks
         );
 
         assert!(
@@ -4731,16 +4348,8 @@ fn test_burst_loss_parameter_sweep() {
 
     // Print summary
     println!("\n=== Burst Loss Parameter Sweep Summary ===");
-    for (name, passed, retries) in &results {
-        let status = if *passed {
-            if *retries > 0 {
-                "PASS (with retry)"
-            } else {
-                "PASS"
-            }
-        } else {
-            "FAIL"
-        };
+    for (name, passed) in &results {
+        let status = if *passed { "PASS" } else { "FAIL" };
         println!("  {}: {}", name, status);
     }
     println!("==========================================\n");
@@ -4749,6 +4358,7 @@ fn test_burst_loss_parameter_sweep() {
 /// Test combining all chaos types: loss, latency, jitter, reorder, duplicate, burst.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_all_chaos_combined() {
     skip_if_no_peer_binary!();
     let profile = NetworkProfile {
@@ -4768,12 +4378,12 @@ fn test_all_chaos_combined() {
         .with_timeout(180)
         .with_auto_sync_preset();
 
-    let (result1, result2, retry_count) = scenario.run_test_with_retry(10412);
+    let (result1, result2) = scenario.run_test(10412);
     verify_determinism(&result1, &result2, "all_chaos_combined");
 
     println!(
-        "All chaos combined - Rollbacks: peer1={}, peer2={}, retries={}",
-        result1.rollbacks, result2.rollbacks, retry_count
+        "All chaos combined - Rollbacks: peer1={}, peer2={}",
+        result1.rollbacks, result2.rollbacks
     );
 }
 
@@ -4784,6 +4394,7 @@ fn test_all_chaos_combined() {
 /// Stress test: 5000 frames - very long session.
 #[test]
 #[serial]
+#[ignore = "long-running endurance or high-latency real-UDP session; runs in the nightly network suite (ci-network-nightly.yml), not per-PR CI"]
 fn test_stress_5000_frames() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -4833,6 +4444,7 @@ fn test_stress_5000_frames() {
 /// Stress test: 3000 frames with moderate chaos.
 #[test]
 #[serial]
+#[ignore = "long-running endurance or high-latency real-UDP session; runs in the nightly network suite (ci-network-nightly.yml), not per-PR CI"]
 fn test_stress_3000_frames_moderate_chaos() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -4952,6 +4564,7 @@ fn test_minimal_session_5_frames() {
 /// Test with asymmetric chaos settings on each peer.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_asymmetric_chaos_settings() {
     skip_if_no_peer_binary!();
     let high_reorder = NetworkProfile {
@@ -4982,12 +4595,12 @@ fn test_asymmetric_chaos_settings() {
             .with_timeout(120)
             .with_auto_sync_preset();
 
-    let (result1, result2, retry_count) = scenario.run_test_with_retry(10604);
+    let (result1, result2) = scenario.run_test(10604);
     verify_determinism(&result1, &result2, "asymmetric_chaos_settings");
 
     println!(
-        "Asymmetric chaos - Rollbacks: peer1={}, peer2={}, retries={}",
-        result1.rollbacks, result2.rollbacks, retry_count
+        "Asymmetric chaos - Rollbacks: peer1={}, peer2={}",
+        result1.rollbacks, result2.rollbacks
     );
 }
 
@@ -5001,6 +4614,7 @@ fn test_asymmetric_chaos_settings() {
 /// to ensure reliable completion while still exercising the burst loss handling code.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_one_sided_burst_loss() {
     skip_if_no_peer_binary!();
     let burst_profile = NetworkProfile {
@@ -5031,22 +4645,19 @@ fn test_one_sided_burst_loss() {
             .with_timeout(120)
             .with_auto_sync_preset();
 
-    let (result1, result2, retry_count) = scenario.run_test_with_retry(10606);
-    assert_eq!(
-        retry_count, 0,
-        "one_sided_burst_loss acceptance must not depend on UDP retries"
-    );
+    let (result1, result2) = scenario.run_test(10606);
     verify_determinism(&result1, &result2, "one_sided_burst_loss");
 
     println!(
-        "One-sided burst loss - Rollbacks: peer1={}, peer2={}, retries={}",
-        result1.rollbacks, result2.rollbacks, retry_count
+        "One-sided burst loss - Rollbacks: peer1={}, peer2={}",
+        result1.rollbacks, result2.rollbacks
     );
 }
 
 /// Test recovery from very long staggered startup (5 seconds).
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_very_long_staggered_startup() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -5138,16 +4749,7 @@ fn test_rapid_frame_rate() {
 
 fn run_extended_chaos_scenario(port: u16, scenario: NetworkScenario) {
     println!("Testing scenario: {}", scenario.summary());
-    let (result1, result2, retry_count) = scenario.run_test_with_retry(port);
-
-    if retry_count > 0 {
-        println!(
-            "  {} passed after {} {}",
-            scenario.name,
-            retry_count,
-            if retry_count == 1 { "retry" } else { "retries" }
-        );
-    }
+    let (result1, result2) = scenario.run_test(port);
 
     assert!(
         result1.final_frame >= scenario.frames,
@@ -5182,6 +4784,7 @@ fn test_extended_chaos_wifi_average() {
 /// Mobile 3G conditions with high effective packet loss and burst loss.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_extended_chaos_mobile_3g() {
     skip_if_no_peer_binary!();
     run_extended_chaos_scenario(
@@ -5197,6 +4800,7 @@ fn test_extended_chaos_mobile_3g() {
 /// Heavy packet reordering should not break determinism.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_extended_chaos_heavy_reorder() {
     skip_if_no_peer_binary!();
     run_extended_chaos_scenario(
@@ -5212,6 +4816,7 @@ fn test_extended_chaos_heavy_reorder() {
 /// Packet duplication should be tolerated by the protocol.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_extended_chaos_duplicating() {
     skip_if_no_peer_binary!();
     run_extended_chaos_scenario(
@@ -5226,6 +4831,7 @@ fn test_extended_chaos_duplicating() {
 /// Survivable burst loss profile for required CI coverage.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_extended_chaos_bursty_survivable() {
     skip_if_no_peer_binary!();
     run_extended_chaos_scenario(
@@ -5241,6 +4847,7 @@ fn test_extended_chaos_bursty_survivable() {
 /// Test asymmetric scenarios with extended chaos.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_asymmetric_extended_chaos() {
     skip_if_no_peer_binary!();
     println!("=== Asymmetric Extended Chaos ===");
@@ -5290,11 +4897,11 @@ fn test_asymmetric_extended_chaos() {
 
     for (port, scenario) in scenarios {
         println!("Testing scenario: {}", scenario.summary());
-        let (result1, result2, retry_count) = scenario.run_test_with_retry(port);
+        let (result1, result2) = scenario.run_test(port);
 
         println!(
-            "  {} - Rollbacks: p1={}, p2={}, retries={}",
-            scenario.name, result1.rollbacks, result2.rollbacks, retry_count
+            "  {} - Rollbacks: p1={}, p2={}",
+            scenario.name, result1.rollbacks, result2.rollbacks
         );
     }
 
@@ -5342,6 +4949,7 @@ struct BurstLossTestCase {
 /// | >10%       | >8        | stress_test       | Low (flaky) |
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_burst_loss_parameter_validation() {
     skip_if_no_peer_binary!();
     println!("=== Burst Loss Parameter Validation Suite ===");
@@ -5407,7 +5015,7 @@ fn test_burst_loss_parameter_validation() {
             .with_timeout(180)
             .with_sync_preset(case.sync_preset);
 
-        let (result1, result2, retry_count) = scenario.run_test_with_retry(port_base);
+        let (result1, result2) = scenario.run_test(port_base);
 
         // For expected reliable cases, verify success
         assert!(
@@ -5422,13 +5030,12 @@ fn test_burst_loss_parameter_validation() {
         );
 
         println!(
-            "  {} PASSED: frames p1={}, p2={}, rollbacks p1={}, p2={}, retries={}",
+            "  {} PASSED: frames p1={}, p2={}, rollbacks p1={}, p2={}",
             case.name,
             result1.final_frame,
             result2.final_frame,
             result1.rollbacks,
             result2.rollbacks,
-            retry_count
         );
 
         port_base += 2;

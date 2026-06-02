@@ -10,6 +10,7 @@ mod common;
 
 // Network test modules
 mod network {
+    pub mod in_process_chaos;
     pub mod multi_process;
     pub mod resilience;
 }

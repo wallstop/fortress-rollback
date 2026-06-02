@@ -49,10 +49,7 @@ impl<T> SavedStates<T> {
         let num_cells = max_pred
             .checked_add(1)
             .ok_or_else(|| allocation_failed("saved_states.states", usize::MAX))?;
-        let mut states = Vec::new();
-        states
-            .try_reserve_exact(num_cells)
-            .map_err(|_err| allocation_failed("saved_states.states", num_cells))?;
+        let mut states = crate::error::try_with_capacity(num_cells, "saved_states.states")?;
         for _ in 0..num_cells {
             states.push(GameStateCell::default());
         }

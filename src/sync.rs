@@ -88,10 +88,16 @@ pub(crate) mod inner {
 ///    due to optimized spinning and smaller size (1 byte vs platform-dependent).
 #[cfg(not(loom))]
 pub(crate) mod inner {
+    // Under Kani, `GameStateCell` swaps to an `Rc<RefCell<..>>` representation,
+    // so the parking_lot `MappedMutexGuard` and the `Arc` re-export are no longer
+    // referenced via `crate::sync`. They remain used in production / tests, so we
+    // only relax the unused-import lint under `cfg(kani)`.
+    #[cfg_attr(kani, allow(unused_imports))]
     pub use parking_lot::MappedMutexGuard;
     pub use parking_lot::Mutex;
     #[allow(unused_imports)] // Used for loom compatibility abstraction
     pub use parking_lot::MutexGuard;
+    #[cfg_attr(kani, allow(unused_imports))]
     pub use std::sync::Arc;
     #[allow(unused_imports)] // Used for loom compatibility abstraction
     pub use std::thread;

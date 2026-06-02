@@ -1,0 +1,124 @@
+name: CI - Network Tests (Nightly)
+
+# Nightly "does it survive real sockets" lane.
+#
+# The extreme / flaky real-UDP chaos scenarios in tests/network/multi_process.rs
+# are marked `#[ignore]` so they do NOT gate every PR (they are slow and
+# contention-flaky on shared CI runners). Determinism under those conditions is
+# covered deterministically and in-process by tests/network/in_process_chaos.rs.
+#
+# This workflow runs the ignored real-UDP extreme tests on a daily schedule (and
+# on demand) to confirm they still survive real sockets + real wall-clock.
+
+on:
+  # Daily at 3 AM UTC
+  schedule:
+    - cron: '0 3 * * *'
+  # Manual trigger
+  workflow_dispatch:
+
+concurrency:
+  group: network-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  network-nightly:
+    name: Network Tests Nightly (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Install cargo-nextest
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-nextest
+
+      - name: Configure sccache
+        id: sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        continue-on-error: true
+
+      - name: Verify sccache is working (Unix)
+        id: sccache-check-unix
+        if: steps.sccache.outcome == 'success' && runner.os != 'Windows'
+        run: ./scripts/ci/verify-sccache.sh
+        continue-on-error: true
+
+      - name: Verify sccache is working (Windows)
+        id: sccache-check-windows
+        if: steps.sccache.outcome == 'success' && runner.os == 'Windows'
+        shell: bash
+        run: ./scripts/ci/verify-sccache.sh
+        continue-on-error: true
+
+      - name: Set sccache working status
+        id: sccache-check
+        shell: bash
+        run: |
+          # Assign GitHub expressions to variables (avoids shellcheck SC2193)
+          unix_working="${{ steps['sccache-check-unix'].outputs.working }}"
+          windows_working="${{ steps['sccache-check-windows'].outputs.working }}"
+          if [ "$unix_working" == "true" ] || [ "$windows_working" == "true" ]; then
+            echo "working=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "working=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Clear sccache env on failure
+        if: steps.sccache.outcome != 'success' || steps.sccache-check.outputs.working != 'true'
+        shell: bash
+        run: |
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        timeout-minutes: 5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: network-nightly-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            network-nightly-${{ runner.os }}-cargo-
+            network-${{ runner.os }}-cargo-
+
+      - name: Build network test peer
+        uses: nick-fields/retry@v4
+        with:
+          timeout_minutes: 15
+          max_attempts: 2
+          retry_wait_seconds: 30
+          retry_on_exit_code: 143
+          command: cargo build --release -p network-test-peer
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Run ignored extreme real-UDP network tests (nextest)
+        run: cargo nextest run --profile ci-network-nightly --release --run-ignored ignored-only -E 'test(multi_process)' --test network
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"

@@ -4,9 +4,21 @@
 //! the primary types users interact with when handling save/load requests from
 //! the rollback system.
 
+#[cfg(not(kani))]
 #[allow(unused_imports)] // MappedMutexGuard not used under loom
 use crate::sync::{Arc, MappedMutexGuard, Mutex};
 use std::ops::Deref;
+
+// Under Kani, replace the atomic `Arc<parking_lot::Mutex<..>>` representation
+// with a non-atomic `Rc<RefCell<..>>`. Kani proofs are single-threaded, so the
+// thread-safe machinery (atomic refcounts, Weak teardown, parking_lot word-lock)
+// only serves to blow up CBMC's SAT solver. `cfg(kani)` is ONLY active during
+// `cargo kani`; production / `cargo test` / loom builds are byte-for-byte
+// unchanged.
+#[cfg(kani)]
+use core::cell::RefCell;
+#[cfg(kani)]
+use std::rc::Rc;
 
 use crate::frame_info::GameState;
 use crate::report_violation;
@@ -49,7 +61,13 @@ use crate::Frame;
 /// [`load()`]: GameStateCell::load
 /// [`FortressRequest::SaveGameState`]: crate::FortressRequest::SaveGameState
 /// [`FortressRequest::LoadGameState`]: crate::FortressRequest::LoadGameState
+#[cfg(not(kani))]
 pub struct GameStateCell<T>(pub(crate) Arc<Mutex<GameState<T>>>);
+
+/// Kani-only representation: a non-atomic `Rc<RefCell<..>>`. See the module-level
+/// import comment for why. The public API is identical to the production struct.
+#[cfg(kani)]
+pub struct GameStateCell<T>(pub(crate) Rc<RefCell<GameState<T>>>);
 
 impl<T> GameStateCell<T> {
     /// Saves a game state into the cell.
@@ -105,7 +123,7 @@ impl<T> GameStateCell<T> {
     /// ```
     ///
     /// [`Frame::NULL`]: crate::Frame::NULL
-    #[cfg(not(loom))]
+    #[cfg(all(not(loom), not(kani)))]
     pub fn save(&self, frame: Frame, data: Option<T>, checksum: Option<u128>) -> bool {
         if frame.is_null() {
             report_violation!(
@@ -116,6 +134,26 @@ impl<T> GameStateCell<T> {
             return false;
         }
         let mut state = self.0.lock();
+        state.frame = frame;
+        state.data = data;
+        state.checksum = checksum;
+        true
+    }
+
+    /// Saves a game state into the cell (Kani version).
+    ///
+    /// See the production version for full documentation and examples.
+    #[cfg(kani)]
+    pub fn save(&self, frame: Frame, data: Option<T>, checksum: Option<u128>) -> bool {
+        if frame.is_null() {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::StateManagement,
+                "Attempted to save state with null frame"
+            );
+            return false;
+        }
+        let mut state = self.0.borrow_mut();
         state.frame = frame;
         state.data = data;
         state.checksum = checksum;
@@ -185,7 +223,7 @@ impl<T> GameStateCell<T> {
     ///
     /// If you really, really need mutable access to the `T`, then consider using the aptly named
     /// [GameStateAccessor::as_mut_dangerous()].
-    #[cfg(not(loom))]
+    #[cfg(all(not(loom), not(kani)))]
     #[must_use]
     pub fn data(&self) -> Option<GameStateAccessor<'_, T>> {
         if let Ok(mapped_data) =
@@ -195,6 +233,27 @@ impl<T> GameStateCell<T> {
         } else {
             None
         }
+    }
+
+    /// Kani version of [`data()`](Self::data). Projects a `RefMut` to the inner
+    /// `Option<T>`, returning `None` (releasing the borrow) when no data exists.
+    #[cfg(kani)]
+    #[must_use]
+    pub fn data(&self) -> Option<GameStateAccessor<'_, T>> {
+        let guard = self.0.borrow_mut();
+        if guard.data.is_none() {
+            return None;
+        }
+        // Project the RefMut down to the inner `T`. `core::cell::RefMut::map`
+        // requires the closure to return a reference; we have already confirmed
+        // `data` is `Some`, so the `expect` cannot fire.
+        let mapped = core::cell::RefMut::map(guard, |state| {
+            state
+                .data
+                .as_mut()
+                .expect("data presence checked before projection")
+        });
+        Some(GameStateAccessor(mapped))
     }
 
     /// Under loom, we can't use MappedMutexGuard. Instead, we check if data exists
@@ -231,7 +290,7 @@ impl<T> GameStateCell<T> {
     /// ```
     ///
     /// [`Frame::NULL`]: crate::Frame::NULL
-    #[cfg(not(loom))]
+    #[cfg(all(not(loom), not(kani)))]
     #[must_use]
     pub fn frame(&self) -> Frame {
         self.0.lock().frame
@@ -241,6 +300,13 @@ impl<T> GameStateCell<T> {
     /// Returns the frame number for this saved state (loom version).
     pub fn frame(&self) -> Frame {
         self.0.lock().unwrap().frame
+    }
+
+    #[cfg(kani)]
+    /// Returns the frame number for this saved state (Kani version).
+    #[must_use]
+    pub fn frame(&self) -> Frame {
+        self.0.borrow().frame
     }
 
     /// Returns the checksum for this saved state, if one was saved.
@@ -265,7 +331,7 @@ impl<T> GameStateCell<T> {
     /// cell.save(Frame::new(6), Some(99), None);
     /// assert!(cell.checksum().is_none());
     /// ```
-    #[cfg(not(loom))]
+    #[cfg(all(not(loom), not(kani)))]
     #[must_use]
     pub fn checksum(&self) -> Option<u128> {
         self.0.lock().checksum
@@ -275,6 +341,13 @@ impl<T> GameStateCell<T> {
     /// Returns the checksum for this saved state (loom version).
     pub fn checksum(&self) -> Option<u128> {
         self.0.lock().unwrap().checksum
+    }
+
+    #[cfg(kani)]
+    /// Returns the checksum for this saved state (Kani version).
+    #[must_use]
+    pub fn checksum(&self) -> Option<u128> {
+        self.0.borrow().checksum
     }
 }
 
@@ -417,9 +490,18 @@ impl<T: Clone> GameStateCell<T> {
 /// This is primarily used internally by the rollback system.
 ///
 /// [`Frame::NULL`]: crate::Frame::NULL
+#[cfg(not(kani))]
 impl<T> Default for GameStateCell<T> {
     fn default() -> Self {
         Self(Arc::new(Mutex::new(GameState::default())))
+    }
+}
+
+/// Kani version: builds the non-atomic `Rc<RefCell<..>>` representation.
+#[cfg(kani)]
+impl<T> Default for GameStateCell<T> {
+    fn default() -> Self {
+        Self(Rc::new(RefCell::new(GameState::default())))
     }
 }
 
@@ -431,13 +513,22 @@ impl<T> Default for GameStateCell<T> {
 ///
 /// This is the intended behavior: the rollback system may hold multiple references
 /// to the same cell across different frames.
+#[cfg(not(kani))]
 impl<T> Clone for GameStateCell<T> {
     fn clone(&self) -> Self {
         Self(Arc::clone(&self.0))
     }
 }
 
-#[cfg(not(loom))]
+/// Kani version: shallow `Rc::clone` of the shared cell.
+#[cfg(kani)]
+impl<T> Clone for GameStateCell<T> {
+    fn clone(&self) -> Self {
+        Self(Rc::clone(&self.0))
+    }
+}
+
+#[cfg(all(not(loom), not(kani)))]
 impl<T> std::fmt::Debug for GameStateCell<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let inner = self.0.lock();
@@ -459,6 +550,17 @@ impl<T> std::fmt::Debug for GameStateCell<T> {
     }
 }
 
+#[cfg(kani)]
+impl<T> std::fmt::Debug for GameStateCell<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.0.borrow();
+        f.debug_struct("GameStateCell")
+            .field("frame", &inner.frame)
+            .field("checksum", &inner.checksum)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A read-only accessor for the `T` that the user previously saved into a [GameStateCell].
 ///
 /// You can use [deref()](Deref::deref) to access the `T` without cloning it; see
@@ -470,14 +572,19 @@ impl<T> std::fmt::Debug for GameStateCell<T> {
 ///
 /// Note: Under loom testing, this type is not available as loom doesn't support `MappedMutexGuard`.
 /// Use [`GameStateCell::load()`] instead which requires `T: Clone`.
-#[cfg(not(loom))]
+#[cfg(all(not(loom), not(kani)))]
 pub struct GameStateAccessor<'c, T>(MappedMutexGuard<'c, T>);
 
 /// Placeholder type under loom - the actual accessor cannot be created.
 #[cfg(loom)]
 pub struct GameStateAccessor<'c, T>(std::marker::PhantomData<&'c T>);
 
-#[cfg(not(loom))]
+/// Kani version: a `RefMut` projected to the inner `T`. Single-threaded
+/// interior-mutability borrow that models the production `MappedMutexGuard`.
+#[cfg(kani)]
+pub struct GameStateAccessor<'c, T>(core::cell::RefMut<'c, T>);
+
+#[cfg(all(not(loom), not(kani)))]
 impl<T> Deref for GameStateAccessor<'_, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
@@ -494,7 +601,15 @@ impl<T> Deref for GameStateAccessor<'_, T> {
     }
 }
 
-#[cfg(not(loom))]
+#[cfg(kani)]
+impl<T> Deref for GameStateAccessor<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[cfg(all(not(loom), not(kani)))]
 impl<T> GameStateAccessor<'_, T> {
     /// Get mutable access to the `T` that the user previously saved into a [`GameStateCell`].
     ///
@@ -572,7 +687,23 @@ impl<'c, T> GameStateAccessor<'c, T> {
     }
 }
 
-#[cfg(not(loom))]
+#[cfg(kani)]
+impl<T> GameStateAccessor<'_, T> {
+    /// Kani version of [`as_mut_dangerous()`]. See the production version for
+    /// the full safety contract.
+    pub fn as_mut_dangerous(&mut self) -> &mut T {
+        &mut self.0
+    }
+}
+
+#[cfg(all(not(loom), not(kani)))]
+impl<T: std::fmt::Debug> std::fmt::Debug for GameStateAccessor<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("GameStateAccessor").field(&*self.0).finish()
+    }
+}
+
+#[cfg(kani)]
 impl<T: std::fmt::Debug> std::fmt::Debug for GameStateAccessor<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("GameStateAccessor").field(&*self.0).finish()

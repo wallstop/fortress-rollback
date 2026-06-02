@@ -3245,13 +3245,25 @@ mod tests {
     fn millis_since_epoch_advances_over_time() {
         let first = millis_since_epoch().expect("Should return Some");
 
-        // Sleep for a tiny bit
-        std::thread::sleep(std::time::Duration::from_millis(2));
-
-        let second = millis_since_epoch().expect("Should return Some");
-
-        // Should have advanced
-        assert!(second > first, "Time should advance after sleep");
+        // `millis_since_epoch` reads the real system clock at millisecond
+        // resolution, so a fixed `sleep` + strict `>` is flaky: two reads can
+        // legitimately land in the same millisecond on a coarse-resolution
+        // clock or a heavily loaded CI runner. Instead, poll (bounded) until
+        // the clock actually ticks — guaranteed to happen on any real clock,
+        // so this asserts the "advances over time" property without depending
+        // on a single sleep being long enough.
+        let mut second = first;
+        for _ in 0..1000 {
+            second = millis_since_epoch().expect("Should return Some");
+            if second > first {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            second > first,
+            "millis_since_epoch should advance within ~1s (first={first}, second={second})"
+        );
     }
 
     /// Test documentation: The `millis_since_epoch` function gracefully handles
