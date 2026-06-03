@@ -12,7 +12,7 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::error::allocation_failed;
+use crate::error::{allocation_failed, try_reserve_hint};
 use crate::report_violation;
 use crate::rle;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
@@ -128,6 +128,17 @@ pub(crate) fn try_delta_encode<'a>(
 ) -> Result<Vec<u8>, FortressError> {
     let mut bytes = Vec::new();
 
+    // Bind the iterator before reading its size hint (`size_hint` borrows it).
+    // Each ACCEPTED input contributes exactly `ref_bytes.len()` bytes, so the
+    // common case is a single allocation of `upper * ref_bytes.len()`. The hint
+    // is untrusted, so `try_reserve_hint` is best-effort: it reserves with
+    // saturating arithmetic and silently ignores failure. The in-loop guard
+    // below is the load-bearing, panic-free growth path, so this pre-reservation
+    // can never make the output differ from pure incremental growth for any
+    // iterator (honest or adversarial) -- see `try_reserve_hint`'s docs.
+    let (_lower, upper) = pending_input.size_hint();
+    try_reserve_hint(&mut bytes, upper, ref_bytes.len());
+
     for input in pending_input {
         let input_bytes = input;
         // Validate input length matches reference - skip mismatched inputs with warning
@@ -142,10 +153,15 @@ pub(crate) fn try_delta_encode<'a>(
             continue;
         }
 
+        // The bulk pre-reservation above covers the common case in a single
+        // allocation; `Vec::try_reserve` is a documented no-op (returns `Ok`
+        // without reallocating) when capacity already suffices, so this guards
+        // only a hint that under-reported (or was absent) without re-checking
+        // spare capacity by hand.
         let requested = bytes.len().saturating_add(input_bytes.len());
-        bytes
-            .try_reserve(input_bytes.len())
-            .map_err(|_err| allocation_failed("compression.delta_encode", requested))?;
+        // reserve-in-loop: fallible guard that only fires when an untrusted size_hint under-reported (or was absent), keeping growth panic-free.
+        let reserved = bytes.try_reserve(input_bytes.len());
+        reserved.map_err(|_err| allocation_failed("compression.delta_encode", requested))?;
         for (reference_byte, input_byte) in ref_bytes.iter().zip(input_bytes.iter()) {
             bytes.push(reference_byte ^ input_byte);
         }
@@ -251,6 +267,7 @@ pub fn delta_decode(ref_bytes: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, Compr
 
     for output_index in 0..out_size {
         let mut buffer = Vec::new();
+        // reserve-in-loop: one fresh decoded-input buffer per output slot, reserved once to its exact bounded size (`ref_bytes.len()`).
         buffer.try_reserve_exact(ref_bytes.len()).map_err(|_err| {
             CompressionError::DeltaDecode {
                 reason: DeltaDecodeReason::AllocationFailed {
@@ -291,6 +308,40 @@ pub fn delta_decode(ref_bytes: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, Compr
 } // #########
   // # TESTS #
   // #########
+
+/// Shared test-only adversarial-iterator scaffolding (single source of truth
+/// for both the unit-test and proptest modules below).
+#[cfg(test)]
+mod test_support {
+    /// An iterator wrapper that reports an arbitrary (possibly false)
+    /// `size_hint` upper bound while yielding the underlying items unchanged.
+    pub(super) struct LyingHint<'a> {
+        inner: std::slice::Iter<'a, Vec<u8>>,
+        fake_upper: Option<usize>,
+    }
+
+    impl<'a> Iterator for LyingHint<'a> {
+        type Item = &'a Vec<u8>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.inner.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            // Lower bound stays 0 (always valid); the upper bound is the lie.
+            (0, self.fake_upper)
+        }
+    }
+
+    /// Build a [`LyingHint`] over `items` that reports `fake_upper` as its
+    /// `size_hint` upper bound.
+    pub(super) fn lying(items: &[Vec<u8>], fake_upper: Option<usize>) -> LyingHint<'_> {
+        LyingHint {
+            inner: items.iter(),
+            fake_upper,
+        }
+    }
+}
 
 #[cfg(test)]
 #[allow(
@@ -753,6 +804,167 @@ mod compression_tests {
             },
         }
     }
+
+    // =========================================================================
+    // try_delta_encode: bulk-reservation + untrusted size_hint hardening
+    // =========================================================================
+
+    use super::test_support::lying;
+
+    #[test]
+    fn try_delta_encode_multi_input_output_is_byte_identical_and_preallocated() {
+        // Arrange
+        let ref_bytes = vec![0x01, 0x02, 0x03, 0x04];
+        let inputs = vec![
+            vec![0x10, 0x20, 0x30, 0x40],
+            vec![0xFF, 0x00, 0xFF, 0x00],
+            vec![0x01, 0x02, 0x03, 0x04],
+        ];
+        // Expected output: per-input XOR against the reference, concatenated.
+        let mut expected = Vec::new();
+        for input in &inputs {
+            for (r, i) in ref_bytes.iter().zip(input.iter()) {
+                expected.push(r ^ i);
+            }
+        }
+
+        // Act: an ExactSizeIterator (slice iter) gives a tight upper bound.
+        let encoded = try_delta_encode(&ref_bytes, inputs.iter())
+            .expect("encode should succeed for matching lengths");
+
+        // Assert: byte-identical output and a single up-front allocation that
+        // already covers the full output (no doubling re-grow needed).
+        assert_eq!(encoded, expected);
+        assert!(
+            encoded.capacity() >= expected.len(),
+            "expected capacity >= {}, got {}",
+            expected.len(),
+            encoded.capacity()
+        );
+    }
+
+    #[test]
+    fn try_delta_encode_underreporting_hint_still_correct() {
+        // Arrange: a size_hint that under-reports (claims 1 upper but yields 3).
+        let ref_bytes = vec![0xAA, 0xBB];
+        let inputs = vec![vec![0x01, 0x02], vec![0x03, 0x04], vec![0x05, 0x06]];
+        let mut expected = Vec::new();
+        for input in &inputs {
+            for (r, i) in ref_bytes.iter().zip(input.iter()) {
+                expected.push(r ^ i);
+            }
+        }
+
+        // Act
+        let encoded = try_delta_encode(&ref_bytes, lying(&inputs, Some(1)))
+            .expect("under-reporting hint must not break correctness");
+
+        // Assert: the in-loop fallible growth guard handled the extra inputs.
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn try_delta_encode_absent_hint_still_correct() {
+        // Arrange: size_hint upper bound is None.
+        let ref_bytes = vec![0x0F, 0xF0];
+        let inputs = vec![vec![0x11, 0x22], vec![0x33, 0x44]];
+        let mut expected = Vec::new();
+        for input in &inputs {
+            for (r, i) in ref_bytes.iter().zip(input.iter()) {
+                expected.push(r ^ i);
+            }
+        }
+
+        // Act
+        let encoded = try_delta_encode(&ref_bytes, lying(&inputs, None))
+            .expect("absent hint must rely on per-iteration growth");
+
+        // Assert
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn try_delta_encode_absurd_hint_still_encodes_correctly() {
+        // Arrange: an adversarial upper bound of usize::MAX would, multiplied by
+        // the reference length, request an impossible allocation. The bulk
+        // pre-reservation is best-effort, so this impossible request is silently
+        // discarded and the in-loop guard encodes correctly anyway.
+        let ref_bytes = vec![0x01, 0x02, 0x03, 0x04];
+        let inputs = vec![vec![0x10, 0x20, 0x30, 0x40]];
+
+        // Act
+        let result = try_delta_encode(&ref_bytes, lying(&inputs, Some(usize::MAX)));
+
+        // Assert: correct XOR output, never an abort or a spurious error.
+        assert_eq!(result, Ok(vec![0x11, 0x22, 0x33, 0x44]));
+    }
+
+    #[test]
+    fn delta_encode_absurd_hint_still_encodes_correctly() {
+        // Arrange: the infallible wrapper must produce the correct encoding even
+        // for an adversarial size_hint -- the best-effort bulk reservation
+        // cannot change the output, and growth stays panic-free.
+        let ref_bytes = vec![0x01, 0x02, 0x03, 0x04];
+        let inputs = vec![vec![0x10, 0x20, 0x30, 0x40]];
+
+        // Act
+        let encoded = delta_encode(&ref_bytes, lying(&inputs, Some(usize::MAX)));
+
+        // Assert
+        assert_eq!(encoded, vec![0x11, 0x22, 0x33, 0x44]);
+    }
+
+    #[test]
+    fn try_delta_encode_length_mismatched_inputs_are_skipped() {
+        // Arrange: a mismatched-length input is skipped; the matching one is
+        // encoded.
+        let ref_bytes = vec![0x01, 0x02, 0x03];
+        let inputs = [
+            vec![0x10, 0x20], // wrong length -> skipped
+            vec![0xAA, 0xBB, 0xCC],
+        ];
+        let expected: Vec<u8> = ref_bytes
+            .iter()
+            .zip(inputs[1].iter())
+            .map(|(r, i)| r ^ i)
+            .collect();
+
+        // Act
+        let encoded = try_delta_encode(&ref_bytes, inputs.iter())
+            .expect("encode should succeed and skip the mismatch");
+
+        // Assert
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn try_delta_encode_empty_iterator_yields_empty_output() {
+        // Arrange
+        let ref_bytes = vec![0x01, 0x02, 0x03, 0x04];
+        let inputs: Vec<Vec<u8>> = Vec::new();
+
+        // Act
+        let encoded = try_delta_encode(&ref_bytes, inputs.iter())
+            .expect("empty input must produce empty output");
+
+        // Assert
+        assert_eq!(encoded, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn try_delta_encode_empty_reference_yields_empty_output() {
+        // Arrange: an empty reference means every input length mismatches unless
+        // it is also empty; an empty input produces no bytes.
+        let ref_bytes: Vec<u8> = Vec::new();
+        let inputs = [Vec::<u8>::new()];
+
+        // Act
+        let encoded =
+            try_delta_encode(&ref_bytes, inputs.iter()).expect("empty reference must not error");
+
+        // Assert
+        assert_eq!(encoded, Vec::<u8>::new());
+    }
 }
 
 #[cfg(test)]
@@ -763,6 +975,7 @@ mod compression_tests {
     clippy::indexing_slicing
 )]
 mod property_tests {
+    use super::test_support::lying;
     use super::*;
     use crate::test_config::miri_case_count;
     use proptest::prelude::*;
@@ -874,6 +1087,38 @@ mod property_tests {
                     let encoded = encode(&ref_input, pend_inp.iter());
                     let decoded = decode(&ref_input, &encoded).expect("decode should succeed");
                     prop_assert!(decoded.is_empty());
+                    Ok(())
+                })?;
+        }
+
+        /// Property: `delta_decode(ref, delta_encode(ref, inputs))` round-trips
+        /// regardless of the (untrusted) iterator `size_hint` upper bound. The
+        /// bulk pre-reservation is a performance hint only; correctness must not
+        /// depend on it.
+        #[test]
+        fn prop_delta_roundtrip_independent_of_size_hint(
+            size in input_size(),
+            count in 1usize..=16,
+            // A lie that is too low (0), exact (count), or too high (but not
+            // absurd enough to fail allocation).
+            hint_choice in 0usize..3,
+        ) {
+            let ref_strategy = reference_buffer(size);
+            let pending_strategy = pending_inputs(size, count);
+
+            let combined = (ref_strategy, pending_strategy);
+            proptest::test_runner::TestRunner::default()
+                .run(&combined, |(ref_bytes, inputs)| {
+                    let fake_upper = match hint_choice {
+                        0 => Some(0),
+                        1 => Some(inputs.len()),
+                        _ => Some(inputs.len().saturating_add(64)),
+                    };
+                    let encoded =
+                        delta_encode(&ref_bytes, lying(&inputs, fake_upper));
+                    let decoded =
+                        delta_decode(&ref_bytes, &encoded).expect("decode should succeed");
+                    prop_assert_eq!(decoded, inputs);
                     Ok(())
                 })?;
         }

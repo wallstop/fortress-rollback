@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::error::allocation_failed;
+use crate::error::{allocation_failed, try_reserve_hint};
 use crate::{
     frame_info::PlayerInput,
     network::{
@@ -189,9 +189,9 @@ impl<T: Config> SpectatorSession<T> {
             .map_err(|_err| allocation_failed("spectator.inputs", actual_buffer_size))?;
         for _ in 0..actual_buffer_size {
             let mut frame_inputs = Vec::new();
-            frame_inputs
-                .try_reserve_exact(num_players)
-                .map_err(|_err| allocation_failed("spectator.frame_inputs", num_players))?;
+            // reserve-in-loop: one fresh per-player input buffer per frame slot, reserved once to its exact bounded size (`num_players`).
+            let reserved = frame_inputs.try_reserve_exact(num_players);
+            reserved.map_err(|_err| allocation_failed("spectator.frame_inputs", num_players))?;
             for _ in 0..num_players {
                 frame_inputs.push(PlayerInput::blank_input(Frame::NULL));
             }
@@ -204,11 +204,11 @@ impl<T: Config> SpectatorSession<T> {
             .map_err(|_err| allocation_failed("spectator.host_snapshots", hosts.len()))?;
         for _ in 0..hosts.len() {
             let mut frames = Vec::new();
-            frames
-                .try_reserve_exact(actual_buffer_size)
-                .map_err(|_err| {
-                    allocation_failed("spectator.host_snapshot_frames", actual_buffer_size)
-                })?;
+            // reserve-in-loop: one fresh snapshot-frame buffer per host, reserved once to its exact bounded size (`actual_buffer_size`).
+            let reserved = frames.try_reserve_exact(actual_buffer_size);
+            reserved.map_err(|_err| {
+                allocation_failed("spectator.host_snapshot_frames", actual_buffer_size)
+            })?;
             for _ in 0..actual_buffer_size {
                 frames.push(None);
             }
@@ -858,18 +858,19 @@ impl<T: Config> SpectatorSession<T> {
                 };
                 let addr = host.peer_addr();
                 let events = host.poll(&self.host_connect_status);
-                let (lower_bound, _upper_bound) = events.size_hint();
-                if host_events.try_reserve_exact(lower_bound).is_err() {
-                    report_violation_to!(
-                        &self.violation_observer,
-                        ViolationSeverity::Error,
-                        ViolationKind::InternalError,
-                        "spectator: failed to reserve {} host events",
-                        lower_bound
-                    );
-                    return;
-                }
+                // Best-effort single bulk reservation: prefer the (untrusted)
+                // upper bound, falling back to the lower bound when the upper is
+                // absent. `try_reserve_hint` reserves with saturating arithmetic
+                // and silently ignores failure, so it never aborts and never
+                // changes behavior; the per-event guard below is the load-bearing
+                // panic-free growth path.
+                let (lower_bound, upper_bound) = events.size_hint();
+                try_reserve_hint(&mut host_events, upper_bound.or(Some(lower_bound)), 1);
                 for event in events {
+                    // The bulk pre-reservation above covers the common case in a
+                    // single allocation; this fallible guard keeps growth
+                    // panic-free when the untrusted size_hint under-reported.
+                    // reserve-in-loop: guards an under-reporting/absent size_hint.
                     if host_events.try_reserve(1).is_err() {
                         report_violation_to!(
                             &self.violation_observer,

@@ -283,7 +283,8 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                 check_id="unbounded-alloc",
                 description=(
                     "require an '// alloc-bound:' justification on "
-                    "dynamically-sized allocations in src/ "
+                    "dynamically-sized allocations and a '// reserve-in-loop:' "
+                    "justification on per-iteration fallible reserves in src/ "
                     "(see .llm/skills/rust-language/defensive-programming.md)"
                 ),
                 command=unbounded_alloc_command,
@@ -291,7 +292,11 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                     "Add an '// alloc-bound: <why>' comment (same line or the "
                     "line above) stating why the size is bounded, or bound the "
                     "size if it is genuinely unbounded (e.g. a length read from "
-                    "the wire or an unvalidated config field)."
+                    "the wire or an unvalidated config field). For a "
+                    "try_reserve inside a loop, prefer a single bulk "
+                    "pre-reservation before the loop (e.g. error::try_reserve_hint "
+                    "from a size_hint), or mark the deliberate per-iteration "
+                    "reserve with '// reserve-in-loop: <why>'."
                 ),
             )
         )

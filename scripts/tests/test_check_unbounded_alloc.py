@@ -543,6 +543,508 @@ def test_vec_macro_list_form_is_not_flagged(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Sibling check: try_reserve / try_reserve_exact inside a loop body must carry
+# a `// reserve-in-loop:` justification.
+# ---------------------------------------------------------------------------
+
+
+def _reserve_loop_findings(tmp_path: Path, body: str) -> list[str]:
+    """Return only the reserve-in-loop findings for `body`."""
+    return [f for f in check_file(_write_rs(tmp_path, body)) if "reserve-in-loop" in f]
+
+
+def test_try_reserve_in_for_loop_without_marker_is_flagged(tmp_path: Path) -> None:
+    """A `try_reserve` inside a `for` loop with no marker is flagged."""
+    body = (
+        "fn f(v: &mut Vec<u8>, n: usize) {\n"
+        "    for _ in 0..n {\n"
+        "        let _ = v.try_reserve(1);\n"
+        "    }\n"
+        "}\n"
+    )
+    findings = _reserve_loop_findings(tmp_path, body)
+    assert findings, f"in-loop try_reserve must be flagged: {findings}"
+    assert any("try_reserve()" in f for f in findings)
+
+
+def test_try_reserve_exact_in_for_loop_without_marker_is_flagged(
+    tmp_path: Path,
+) -> None:
+    """A `try_reserve_exact` inside a `for` loop with no marker is flagged."""
+    body = (
+        "fn f(v: &mut Vec<u8>, n: usize) {\n"
+        "    for _ in 0..n {\n"
+        "        let _ = v.try_reserve_exact(4);\n"
+        "    }\n"
+        "}\n"
+    )
+    findings = _reserve_loop_findings(tmp_path, body)
+    assert any("try_reserve_exact()" in f for f in findings), findings
+
+
+def test_try_reserve_in_while_loop_without_marker_is_flagged(tmp_path: Path) -> None:
+    body = (
+        "fn f(v: &mut Vec<u8>, c: bool) {\n"
+        "    while c {\n"
+        "        let _ = v.try_reserve(1);\n"
+        "    }\n"
+        "}\n"
+    )
+    assert _reserve_loop_findings(tmp_path, body)
+
+
+def test_try_reserve_in_loop_keyword_without_marker_is_flagged(tmp_path: Path) -> None:
+    body = (
+        "fn f(v: &mut Vec<u8>) {\n"
+        "    loop {\n"
+        "        let _ = v.try_reserve(1);\n"
+        "    }\n"
+        "}\n"
+    )
+    assert _reserve_loop_findings(tmp_path, body)
+
+
+def test_try_reserve_in_loop_with_same_line_marker_is_ok(tmp_path: Path) -> None:
+    body = (
+        "fn f(v: &mut Vec<u8>, n: usize) {\n"
+        "    for _ in 0..n {\n"
+        "        let _ = v.try_reserve(1); // reserve-in-loop: bounded by n\n"
+        "    }\n"
+        "}\n"
+    )
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_try_reserve_in_loop_with_prior_line_marker_is_ok(tmp_path: Path) -> None:
+    body = (
+        "fn f(v: &mut Vec<u8>, n: usize) {\n"
+        "    for _ in 0..n {\n"
+        "        // reserve-in-loop: fresh buffer per iteration\n"
+        "        let _ = v.try_reserve(1);\n"
+        "    }\n"
+        "}\n"
+    )
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_try_reserve_not_in_loop_is_not_flagged(tmp_path: Path) -> None:
+    """A `try_reserve` in a plain function body (no loop) is never flagged."""
+    body = "fn f(v: &mut Vec<u8>, n: usize) {\n    let _ = v.try_reserve(n);\n}\n"
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_fn_containing_loop_elsewhere_does_not_flag_outer_reserve(
+    tmp_path: Path,
+) -> None:
+    """A reserve OUTSIDE the loop in a fn that also has a loop is not flagged."""
+    body = (
+        "fn f(v: &mut Vec<u8>, n: usize) {\n"
+        "    let _ = v.try_reserve(n);\n"
+        "    for _ in 0..n {\n"
+        "        let _ = 1;\n"
+        "    }\n"
+        "}\n"
+    )
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_impl_for_block_is_not_a_loop(tmp_path: Path) -> None:
+    """`impl Trait for Type {` contains `for` but is NOT a loop body."""
+    body = (
+        "impl Foo for Bar {\n"
+        "    fn f(&mut self, n: usize) {\n"
+        "        let _ = self.v.try_reserve(n);\n"
+        "    }\n"
+        "}\n"
+    )
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_write_impl_method_reserve_is_not_flagged(tmp_path: Path) -> None:
+    """A `Write::write` impl (the codec.rs shape) is not inside a loop -> ok."""
+    body = (
+        "impl Write for W {\n"
+        "    fn write(&mut self, buf: &[u8]) -> Result<usize> {\n"
+        "        self.buffer.try_reserve(buf.len())?;\n"
+        "        Ok(buf.len())\n"
+        "    }\n"
+        "}\n"
+    )
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_fn_defined_inside_loop_shields_its_reserve(tmp_path: Path) -> None:
+    """A `fn` defined inside a loop body shields its own reservations."""
+    body = (
+        "fn outer(n: usize) {\n"
+        "    for _ in 0..n {\n"
+        "        fn inner(v: &mut Vec<u8>, m: usize) {\n"
+        "            let _ = v.try_reserve(m);\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    )
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_closure_inside_loop_still_counts_as_in_loop(tmp_path: Path) -> None:
+    """A closure body inside a loop still counts as in-loop (no fn boundary)."""
+    body = (
+        "fn f(items: &[u8]) {\n"
+        "    for _ in items {\n"
+        "        let g = |v: &mut Vec<u8>| { let _ = v.try_reserve(1); };\n"
+        "        let _ = g;\n"
+        "    }\n"
+        "}\n"
+    )
+    assert _reserve_loop_findings(tmp_path, body)
+
+
+def test_match_arm_inside_loop_still_counts_as_in_loop(tmp_path: Path) -> None:
+    """A match arm block inside a loop still counts as in-loop."""
+    body = (
+        "fn f(items: &[u8], v: &mut Vec<u8>) {\n"
+        "    for x in items {\n"
+        "        match x {\n"
+        "            0 => {\n"
+        "                let _ = v.try_reserve(1);\n"
+        "            }\n"
+        "            _ => {}\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    )
+    assert _reserve_loop_findings(tmp_path, body)
+
+
+def test_nested_loops_inner_reserve_is_flagged(tmp_path: Path) -> None:
+    body = (
+        "fn f(v: &mut Vec<u8>, n: usize) {\n"
+        "    for _ in 0..n {\n"
+        "        for _ in 0..n {\n"
+        "            let _ = v.try_reserve(1);\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    )
+    assert _reserve_loop_findings(tmp_path, body)
+
+
+def test_reserve_in_loop_inside_cfg_test_is_excluded(tmp_path: Path) -> None:
+    """A `try_reserve` in a loop inside a `#[cfg(test)]` item is excluded."""
+    body = (
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    fn t(v: &mut Vec<u8>, n: usize) {\n"
+        "        for _ in 0..n {\n"
+        "            let _ = v.try_reserve(1);\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    )
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_reserve_in_loop_inside_cfg_kani_is_excluded(tmp_path: Path) -> None:
+    body = (
+        "#[cfg(kani)]\n"
+        "mod proofs {\n"
+        "    fn p(v: &mut Vec<u8>, n: usize) {\n"
+        "        for _ in 0..n {\n"
+        "            let _ = v.try_reserve(1);\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    )
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_reserve_token_inside_comment_is_not_flagged(tmp_path: Path) -> None:
+    """A `try_reserve` mention inside a comment in a loop is not flagged."""
+    body = (
+        "fn f(n: usize) {\n"
+        "    for _ in 0..n {\n"
+        "        // would call v.try_reserve(1) here\n"
+        "        let _ = 1;\n"
+        "    }\n"
+        "}\n"
+    )
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_reserve_token_inside_string_is_not_flagged(tmp_path: Path) -> None:
+    """A `try_reserve` token inside a string literal in a loop is not flagged."""
+    body = (
+        "fn f(n: usize) {\n"
+        "    for _ in 0..n {\n"
+        '        let _ = "v.try_reserve(1)";\n'
+        "    }\n"
+        "}\n"
+    )
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+# ---------------------------------------------------------------------------
+# Char-literal lexing (REVIEW-1 / REVIEW-4): a `{`/`}`/`;`/`"` inside a char
+# literal must NOT corrupt the brace-stack / string-state of the in-loop scan,
+# and a lifetime/label (`'a`, `'outer:`) must NOT be misparsed as a char literal.
+# ---------------------------------------------------------------------------
+
+
+def test_char_literal_close_brace_in_loop_still_flags_unmarked_reserve(
+    tmp_path: Path,
+) -> None:
+    """A `'}'` char literal inside a loop must not pop the loop block early."""
+    body = (
+        "fn f(v: &mut Vec<u8>, n: usize) {\n"
+        "    for _ in 0..n {\n"
+        "        let c = '}';\n"
+        "        let _ = c;\n"
+        "        let _ = v.try_reserve(1);\n"
+        "    }\n"
+        "}\n"
+    )
+    assert _reserve_loop_findings(tmp_path, body)
+
+
+def test_char_literal_open_brace_in_loop_no_phantom_block(tmp_path: Path) -> None:
+    """A `'{'` char literal must not push a phantom block (no post-loop FP)."""
+    body = (
+        "fn f(v: &mut Vec<u8>, n: usize) {\n"
+        "    for _ in 0..n {\n"
+        "        let _ = '{';\n"
+        "    }\n"
+        "    let _ = v.try_reserve(1);\n"  # AFTER the loop -> must NOT flag
+        "}\n"
+    )
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_char_literal_semicolon_in_loop_still_flags(tmp_path: Path) -> None:
+    """A `';'` char literal must not corrupt segment boundaries."""
+    body = (
+        "fn f(v: &mut Vec<u8>, n: usize) {\n"
+        "    for _ in 0..n {\n"
+        "        let c = ';';\n"
+        "        let _ = c;\n"
+        "        let _ = v.try_reserve(1);\n"
+        "    }\n"
+        "}\n"
+    )
+    assert _reserve_loop_findings(tmp_path, body)
+
+
+def test_char_literal_double_quote_does_not_blank_rest_of_file(
+    tmp_path: Path,
+) -> None:
+    """A `'"'` char literal must not be read as a string opener (would blank rest)."""
+    body = (
+        "fn f(v: &mut Vec<u8>, n: usize) {\n"
+        "    let q = '\"';\n"
+        "    let _ = q;\n"
+        "    for _ in 0..n {\n"
+        "        let _ = v.try_reserve(1);\n"
+        "    }\n"
+        "}\n"
+    )
+    assert _reserve_loop_findings(tmp_path, body)
+
+
+def test_escaped_char_literals_do_not_corrupt_scan(tmp_path: Path) -> None:
+    """`'\\''`, `'\\n'`, and `'\\u{7d}'` char literals must be blanked correctly."""
+    body = (
+        "fn f(v: &mut Vec<u8>, n: usize) {\n"
+        "    for _ in 0..n {\n"
+        "        let a = '\\'';\n"
+        "        let b = '\\n';\n"
+        "        let c = '\\u{7d}';\n"  # encodes '}' via unicode escape
+        "        let _ = (a, b, c);\n"
+        "        let _ = v.try_reserve(1);\n"
+        "    }\n"
+        "}\n"
+    )
+    assert _reserve_loop_findings(tmp_path, body)
+
+
+def test_lifetime_label_loop_not_misparsed_as_char_literal(tmp_path: Path) -> None:
+    """`'outer: loop { ... }` lifetime label must not be over-stripped."""
+    body = (
+        "fn f(v: &mut Vec<u8>) {\n"
+        "    'outer: loop {\n"
+        "        let _ = v.try_reserve(1);\n"
+        "        break 'outer;\n"
+        "    }\n"
+        "}\n"
+    )
+    assert _reserve_loop_findings(tmp_path, body)
+
+
+def test_lifetime_in_signature_does_not_break_vec_macro_scan(tmp_path: Path) -> None:
+    """A `'a` lifetime in a fn signature must not blank a following real alloc."""
+    body = (
+        "fn f<'a>(s: &'a [u8], n: usize) -> Vec<u8> {\n"
+        "    let _ = s;\n"
+        "    vec![0u8; n]\n"
+        "}\n"
+    )
+    # The real `vec![0u8; n]` must still be flagged (lifetime not misparsed).
+    assert _is_flagged(tmp_path, body)
+
+
+def test_char_literal_in_vec_macro_size_path_does_not_blank(tmp_path: Path) -> None:
+    """A `'x'` char literal before a real alloc must not blank the alloc."""
+    body = (
+        "fn f(n: usize) {\n"
+        "    let _delim = ',';\n"
+        "    let _ = Vec::<u8>::with_capacity(n);\n"
+        "}\n"
+    )
+    assert _is_flagged(tmp_path, body)
+
+
+# ---------------------------------------------------------------------------
+# Loop-header-with-embedded-braces (REVIEW-5): documented, tested limitation.
+# A loop whose HEADER embeds a brace block (a `match {}` or struct literal in
+# the iterable) classifies the body as "other", so an in-loop reserve there is
+# a known false NEGATIVE (defense-in-depth, never a false positive). These tests
+# PIN that behavior so it stays intentional.
+# ---------------------------------------------------------------------------
+
+
+def test_for_in_match_header_with_braces_is_known_limitation(tmp_path: Path) -> None:
+    """`for x in match v {} {` header braces hide the in-loop reserve (limitation)."""
+    body = (
+        "fn f(v: u8, items: &mut Vec<u8>) {\n"
+        "    for _x in match v { 0 => 0..1, _ => 0..2 } {\n"
+        "        let _ = items.try_reserve(1);\n"
+        "    }\n"
+        "}\n"
+    )
+    # Documented limitation: NOT flagged (false negative only).
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_for_in_struct_literal_header_is_known_limitation(tmp_path: Path) -> None:
+    """`for x in vec![Foo { a: 1 }].iter() {` header braces hide the reserve."""
+    body = (
+        "fn f(items: &mut Vec<u8>) {\n"
+        "    for _x in vec![Foo { a: 1 }].iter() {\n"
+        "        let _ = items.try_reserve(1);\n"
+        "    }\n"
+        "}\n"
+    )
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_plain_loop_header_without_inner_braces_is_flagged(tmp_path: Path) -> None:
+    """The common loop-header form (no inner braces) is correctly flagged."""
+    body = (
+        "fn f(v: u8, items: &mut Vec<u8>) {\n"
+        "    for _x in 0..(v as usize) {\n"
+        "        let _ = items.try_reserve(1);\n"
+        "    }\n"
+        "}\n"
+    )
+    assert _reserve_loop_findings(tmp_path, body)
+
+
+# ---------------------------------------------------------------------------
+# Bare-`fn`-pointer closure param (REVIEW-R2-1): a closure whose signature
+# embeds a bare `fn`-pointer TYPE is classified as a `fn` body, so an in-loop
+# reserve inside it is a known false NEGATIVE. Pinned so it stays intentional.
+# ---------------------------------------------------------------------------
+
+
+def test_fn_pointer_param_closure_in_loop_is_known_limitation(
+    tmp_path: Path,
+) -> None:
+    """`|cb: fn()| { reserve }` inside a loop is shielded (`\\bfn\\b` matches)."""
+    body = (
+        "fn f(v: &mut Vec<u8>, n: usize) {\n"
+        "    for _ in 0..n {\n"
+        "        let g = |cb: fn()| { let _ = v.try_reserve(1); cb(); };\n"
+        "        g(|| {});\n"
+        "    }\n"
+        "}\n"
+    )
+    # Documented limitation: NOT flagged (false negative only).
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_ordinary_closure_param_in_loop_is_still_flagged(tmp_path: Path) -> None:
+    """A closure whose param does NOT embed `fn` still counts as in-loop."""
+    body = (
+        "fn f(v: &mut Vec<u8>, n: usize) {\n"
+        "    for _ in 0..n {\n"
+        "        let g = |cb: u8| { let _ = v.try_reserve(1); let _ = cb; };\n"
+        "        g(0);\n"
+        "    }\n"
+        "}\n"
+    )
+    assert _reserve_loop_findings(tmp_path, body)
+
+
+# ---------------------------------------------------------------------------
+# Iterator-adapter closure (REVIEW-R2-2): a per-element reserve inside a
+# `.for_each`/`.map` adapter closure is NOT flagged because the iteration is the
+# closure, not a lexical `for`/`while`/`loop`. Known false NEGATIVE; pinned.
+# ---------------------------------------------------------------------------
+
+
+def test_for_each_closure_reserve_is_known_limitation(tmp_path: Path) -> None:
+    """`items.iter().for_each(|x| { reserve })` is not flagged (limitation)."""
+    body = (
+        "fn f(items: &[u8], v: &mut Vec<u8>) {\n"
+        "    items.iter().for_each(|x| {\n"
+        "        let _ = v.try_reserve(1);\n"
+        "        let _ = x;\n"
+        "    });\n"
+        "}\n"
+    )
+    # Documented limitation: NOT flagged (false negative only).
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_map_closure_reserve_is_known_limitation(tmp_path: Path) -> None:
+    """`.map(|x| { let mut o=Vec; o.try_reserve(1); o })` is not flagged."""
+    body = (
+        "fn f(items: &[u8]) -> Vec<Vec<u8>> {\n"
+        "    items\n"
+        "        .iter()\n"
+        "        .map(|x| {\n"
+        "            let mut o: Vec<u8> = Vec::new();\n"
+        "            let _ = o.try_reserve(1);\n"
+        "            let _ = x;\n"
+        "            o\n"
+        "        })\n"
+        "        .collect()\n"
+        "}\n"
+    )
+    assert not _reserve_loop_findings(tmp_path, body)
+
+
+def test_closure_lexically_inside_for_loop_is_flagged(tmp_path: Path) -> None:
+    """A closure LEXICALLY nested in a `for` loop DOES count as in-loop."""
+    body = (
+        "fn f(items: &[u8], v: &mut Vec<u8>) {\n"
+        "    for _x in items {\n"
+        "        let g = || { let _ = v.try_reserve(1); };\n"
+        "        g();\n"
+        "    }\n"
+        "}\n"
+    )
+    assert _reserve_loop_findings(tmp_path, body)
+
+
+def test_real_src_tree_reserve_in_loop_clean() -> None:
+    """The real src/ tree must be free of unjustified in-loop reservations."""
+    result = _run_hook()
+    assert result.returncode == 0, (
+        f"src/ tree should pass reserve-in-loop check; stderr=\n{result.stderr}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # End-to-end: subprocess over the real src/ tree and a planted violation
 # ---------------------------------------------------------------------------
 

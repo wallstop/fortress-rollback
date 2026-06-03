@@ -234,6 +234,7 @@ pub fn fuzz_protocol_input_packet(
             break;
         }
         let mut pending_bytes = Vec::new();
+        // reserve-in-loop: one fresh single-byte gap-fill buffer per pending frame (loop bounded by `pending_output_limit`).
         if pending_bytes.try_reserve_exact(1).is_err() {
             return;
         }

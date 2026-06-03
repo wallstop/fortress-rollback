@@ -1429,6 +1429,67 @@ pub(crate) fn try_with_capacity<U>(
     }
 }
 
+/// Best-effort bulk pre-reservation in `vec` from an UNTRUSTED iterator size
+/// hint.
+///
+/// This is the canonical way to pre-reserve a `Vec` from a size produced by
+/// [`Iterator::size_hint`]. Per the standard-library contract, `size_hint` is a
+/// performance hint ONLY: a buggy or adversarial iterator may report an upper
+/// bound that is too low OR too high (or `None`).
+///
+/// # This is a pure optimization — its failure is a no-op
+///
+/// The reservation collapses the common case into a single allocation instead
+/// of repeated doubling reallocations, but it is **best-effort and deliberately
+/// infallible**: an over-large or dishonest hint simply leaves `vec` unreserved.
+/// Callers MUST keep a fallible per-iteration growth path
+/// ([`Vec::try_reserve`]-based) as the load-bearing, panic-free growth guard.
+///
+/// Because a failed reservation here changes nothing, the observable behavior of
+/// the caller is **identical to pure incremental growth for every iterator** —
+/// honest or adversarial. Only the caller's real, incremental allocations can
+/// fail (recoverably); no value of `upper` can make a caller fail where
+/// incremental growth would have succeeded, and none can abort the process.
+///
+/// Accordingly this helper:
+///
+/// - Computes the requested count with **saturating** arithmetic
+///   (`upper.saturating_mul(per_item)`), so an absurd hint cannot overflow.
+/// - Reserves via [`Vec::try_reserve`] (never `reserve`), so a large request
+///   can never abort; on failure it is silently ignored.
+/// - Does nothing when `upper` is `None`; the caller's per-iteration growth path
+///   covers both the absent-hint and under-reporting-hint cases.
+///
+/// # Semantics and intended use
+///
+/// The reservation is `upper * per_item` **additional** capacity (matching
+/// [`Vec::try_reserve`], which reserves for `len + additional`, NOT an absolute
+/// target). This helper is therefore intended to be called BEFORE a loop on an
+/// **empty (or near-empty)** vector, where `additional == total`; calling it on
+/// a partially-filled vector would under-reserve relative to the intended total.
+/// Both current call sites pass a freshly-created `Vec::new()`.
+///
+/// This helper takes `&mut Vec<T>` directly (not a
+/// [`ProofVec`](crate::proof_vec::ProofVec)) because its call sites build a
+/// standard `Vec` and are not exercised on any `cargo kani` proof path, so the
+/// inline-buffer machinery in [`try_with_capacity`] is unnecessary here.
+#[inline]
+pub(crate) fn try_reserve_hint<T>(vec: &mut Vec<T>, upper: Option<usize>, per_item: usize) {
+    let Some(upper) = upper else {
+        return;
+    };
+    // Untrusted `size_hint` upper bound: compute with saturating arithmetic and
+    // reserve fallibly. This is a pure optimization, so a failed reservation
+    // (an over-large or dishonest hint) is intentionally discarded — the
+    // caller's in-loop fallible `try_reserve` is the panic-free growth path, and
+    // discarding here keeps caller behavior identical to incremental growth. (No
+    // `// alloc-bound:` marker: that token is reserved for the lines the
+    // unbounded-alloc hook actually scans; `try_reserve` is a recoverable
+    // allocation that the hook deliberately does not flag.)
+    let requested = upper.saturating_mul(per_item);
+    let _ = vec.try_reserve(requested);
+}
+
 impl From<SocketErrorKind> for FortressError {
     fn from(kind: SocketErrorKind) -> Self {
         Self::SocketErrorStructured { kind }
@@ -2491,5 +2552,65 @@ mod tests {
         let err2 = FortressError::FrameValueTooLarge { value: 999 };
         let err2_clone = err2.clone();
         assert_eq!(err2, err2_clone);
+    }
+
+    // =========================================================================
+    // try_reserve_hint
+    // =========================================================================
+
+    #[test]
+    fn try_reserve_hint_none_upper_is_noop() {
+        // Arrange
+        let mut vec: Vec<u8> = Vec::new();
+
+        // Act
+        try_reserve_hint(&mut vec, None, 4);
+
+        // Assert: no reservation requested, no capacity added.
+        assert_eq!(vec.capacity(), 0);
+    }
+
+    #[test]
+    fn try_reserve_hint_some_upper_reserves_at_least_upper_times_per_item() {
+        // Arrange
+        let mut vec: Vec<u32> = Vec::new();
+
+        // Act
+        try_reserve_hint(&mut vec, Some(10), 3);
+
+        // Assert: capacity covers upper * per_item = 30 elements.
+        assert!(
+            vec.capacity() >= 30,
+            "expected capacity >= 30, got {}",
+            vec.capacity()
+        );
+    }
+
+    #[test]
+    fn try_reserve_hint_per_item_zero_reserves_nothing() {
+        // Arrange
+        let mut vec: Vec<u8> = Vec::new();
+
+        // Act: per_item == 0 means a zero-byte request regardless of upper.
+        try_reserve_hint(&mut vec, Some(usize::MAX), 0);
+
+        // Assert
+        assert_eq!(vec.capacity(), 0);
+    }
+
+    #[test]
+    fn try_reserve_hint_saturating_overflow_is_silent_noop_not_panic() {
+        // Arrange: an adversarial size_hint that would overflow usize on
+        // multiply must saturate (never panic/abort). The resulting impossible
+        // reservation fails, and best-effort discards it silently.
+        let mut vec: Vec<u64> = Vec::new();
+
+        // Act: usize::MAX * 8 saturates to usize::MAX; the fallible reserve fails
+        // and is ignored, leaving the vector untouched.
+        try_reserve_hint(&mut vec, Some(usize::MAX), 8);
+
+        // Assert: no panic, no abort, no capacity gained.
+        assert_eq!(vec.capacity(), 0);
+        assert_eq!(vec.len(), 0);
     }
 }

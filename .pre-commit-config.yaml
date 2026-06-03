@@ -103,7 +103,7 @@ repos:
         types: [rust]
 
       - id: unbounded-alloc
-        name: check unbounded allocations have // alloc-bound justification
+        name: check // alloc-bound and // reserve-in-loop justifications
         entry: python scripts/hooks/check-unbounded-alloc.py
         language: python
         types: [rust]

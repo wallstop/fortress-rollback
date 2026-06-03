@@ -27,10 +27,24 @@ Detected constructs:
 - `.resize_with(` / `::resize_with(`  (size is the FIRST argument)
 - the `vec![ <expr> ; <size> ]` macro form (the size after the top-level `;`)
 
-Fallible reservations are NOT detected (they return `Result` rather than
-aborting): `try_reserve` / `try_reserve_exact` are intentionally excluded
-because the `reserve` / `reserve_exact` regex is anchored so the `try_` prefix
-does not match.
+Fallible reservations are NOT detected by the alloc-bound scan (they return
+`Result` rather than aborting): `try_reserve` / `try_reserve_exact` are
+intentionally excluded because the `reserve` / `reserve_exact` regex is anchored
+so the `try_` prefix does not match.
+
+Sibling scan -- reserve-in-loop:
+- A separate scan flags `try_reserve` / `try_reserve_exact` whose nearest
+  enclosing fn/loop block is a LOOP body (`for` / `while` / `loop`). Such
+  per-iteration fallible reserves are sometimes legitimate (guarding an
+  untrusted/absent `size_hint`) but should be a CONSCIOUS, justified choice, so
+  each must carry a `// reserve-in-loop: <why>` marker (same line or the line
+  immediately above), mirroring the `// alloc-bound:` convention. Prefer a
+  single bulk pre-reservation before the loop where the count is known.
+- "Nearest enclosing block" is resolved by walking outward: a closure or match
+  arm inside a loop still counts as in-loop, while a `fn` defined inside a loop
+  body shields its own reservations (its body is a fresh scope). `impl Trait
+  for Type {` contains the word `for` but is correctly NOT treated as a loop.
+  The same cfg(test)/cfg(kani) structural exclusion applies.
 
 Exempt (no marker needed):
 - a pure integer literal (e.g. `with_capacity(4)`, `vec![0u8; 16]`)
@@ -231,6 +245,51 @@ def _strip_comments_and_raw_strings(text: str) -> str:
             ch = '"'
             nxt = text[i + 1] if i + 1 < n else ""
 
+        # Char literal: `'x'`, `'\n'`, `'\''`, `'\u{7d}'`, `'{'`, `'}'`, `'"'`,
+        # `';'`. Blank the inner content so a brace / quote / semicolon inside a
+        # char literal cannot corrupt the brace-stack / string-state tracking the
+        # sibling reserve-in-loop scan relies on. A char literal is `'`, an
+        # escaped-or-single inner char, then a CLOSING `'`. A lifetime or label
+        # (`'a`, `'static`, `'outer:`) has NO closing `'` after a single char, so
+        # it must NOT be treated as a char literal -- leave it untouched.
+        if ch == "'":
+            if nxt == "\\":
+                # Escaped char literal: `'\<escape>'`. Find the closing quote.
+                # `\'` is an escaped quote whose `'` is part of the escape, so
+                # skip the backslash + the escaped char before hunting the close.
+                k = i + 2  # index just past the backslash
+                if k < n and text[k] == "u":
+                    # Unicode escape `'\u{...}'`: skip past the `}`.
+                    while k < n and text[k] != "}":
+                        k += 1
+                    if k < n:
+                        k += 1  # consume the `}`
+                else:
+                    k += 1  # consume the single escape char (incl. `'`)
+                # `k` now points at the expected closing quote.
+                if k < n and text[k] == "'":
+                    out.append("'")  # opening quote
+                    for idx in range(i + 1, k):
+                        out.append(blank(text[idx]))
+                    out.append("'")  # closing quote
+                    i = k + 1
+                    continue
+                # Not a well-formed char literal: emit `'` and continue.
+                out.append(ch)
+                i += 1
+                continue
+            # Unescaped: a char literal iff `text[i+2]` is the closing quote.
+            if i + 2 < n and text[i + 2] == "'":
+                out.append("'")  # opening quote
+                out.append(blank(text[i + 1]))  # inner char
+                out.append("'")  # closing quote
+                i += 3
+                continue
+            # Otherwise a lifetime/label (`'a`, `'static`, `'outer:`): leave it.
+            out.append(ch)
+            i += 1
+            continue
+
         # Ordinary string literal: blank out its CONTENTS (preserving the quotes
         # and any embedded newlines so offsets / line counts are unchanged) so
         # construct tokens inside a normal string are not flagged. Handle `\"`
@@ -282,6 +341,13 @@ def _marker_text(lines: list[str], line_index: int) -> str | None:
     if line_index > 0 and _ALLOC_BOUND_MARKER in lines[line_index - 1]:
         return lines[line_index - 1]
     return None
+
+
+def _has_reserve_in_loop_marker(lines: list[str], line_index: int) -> bool:
+    """Return True if a `// reserve-in-loop:` marker is on this or the prior line."""
+    if 0 <= line_index < len(lines) and _RESERVE_IN_LOOP_MARKER in lines[line_index]:
+        return True
+    return line_index > 0 and _RESERVE_IN_LOOP_MARKER in lines[line_index - 1]
 
 
 def _weak_marker_reason(marker: str) -> str | None:
@@ -393,6 +459,137 @@ def _scan_capacity_calls(joined: str, line_starts: list[int]) -> list[_Finding]:
             continue
         line_no = _offset_to_line(match.start(), line_starts)
         findings.append(_Finding(line=line_no, construct=f"{method}()"))
+    return findings
+
+
+# A fallible reservation call (`.try_reserve(` / `.try_reserve_exact(`).
+# Anchored on `(?:\.|::)` so it does not match an unrelated identifier suffix.
+_TRY_RESERVE_CALL = re.compile(r"(?:\.|::)(try_reserve_exact|try_reserve)\s*\(")
+
+# The justification marker that exempts an in-loop fallible reservation.
+_RESERVE_IN_LOOP_MARKER = "// reserve-in-loop:"
+
+# A `loop`/`while`/`for ... in` header that OPENS the block whose `{` we are
+# about to push. Applied to the text segment between the previous statement
+# boundary (`{`, `}`, or `;`) and the `{`. `impl Trait for Type {` contains the
+# word `for` but is NOT a loop, so a bare `for` without a following `in` (and
+# any segment mentioning `impl`) is rejected.
+_LOOP_HEADER = re.compile(r"(?:\bloop\b|\bwhile\b|\bfor\b[^;{}]*\bin\b)")
+_IMPL_HEADER = re.compile(r"\bimpl\b")
+
+# A `fn` header (free function, method, or `fn` pointer type position) that
+# opens the block whose `{` we are about to push. A `fn` body is its own scope:
+# a reservation inside a function defined within a loop body is NOT in-loop.
+_FN_HEADER = re.compile(r"\bfn\b")
+
+
+def _block_kind_for_segment(segment: str) -> str:
+    """Classify the brace-block opened after `segment`.
+
+    `segment` is the text between the previous statement boundary (`{`/`}`/`;`)
+    and the opening `{`. Returns one of:
+
+    - ``"loop"``  -- a `for`/`while`/`loop` header (loop body),
+    - ``"fn"``    -- a `fn` header (function/method body, a fresh scope),
+    - ``"other"`` -- anything else (closure, match arm, struct/impl, bare block).
+
+    The loop check is applied first but rejects `impl Trait for Type` (which
+    contains the word `for`); the `fn` check follows so a `fn` nested in a loop
+    body shields its own reservations.
+
+    KNOWN LIMITATIONS (all tested, intentional, all false NEGATIVE only -- this
+    classifier is a discipline aid, not a safety gate, and none of these shapes
+    occurs in the current `src/` tree):
+
+    1. BRACE-IN-LOOP-HEADER: the segment is the trailing fragment since the last
+       `{`/`}`/`;`, so a loop HEADER that itself embeds a brace block -- e.g.
+       `for x in match v { .. } {` or `for x in vec![Foo { a: 1 }] {` -- has its
+       loop keyword separated from the body `{` by that inner block and is
+       classified `"other"` (a missed in-loop reserve). Resolving it robustly
+       requires statement-aware reparsing that risks false positives across
+       sibling top-level items (which have no `;` separator), so the conservative
+       trailing-fragment rule is preferred.
+
+    2. BARE-`fn`-POINTER CLOSURE PARAM: `_FN_HEADER` is `\bfn\b`, so a closure
+       whose signature embeds a bare `fn`-pointer TYPE -- e.g.
+       `let g = |cb: fn()| { v.try_reserve(1); };` -- has the word `fn` in its
+       header segment and is classified `"fn"` (a fresh scope) rather than a
+       closure. An in-loop reserve inside such a closure is therefore shielded.
+       This is intentionally conservative: distinguishing a `fn` DECLARATION from
+       a `fn(` POINTER TYPE reliably needs deeper parsing, and the only effect is
+       a missed flag (defense-in-depth), never a false positive. No `src/`
+       closure currently takes a bare `fn`-pointer parameter (identifiers like
+       `clock_fn`/`checksum_fn` do not match `\bfn\b`).
+
+    3. ITERATOR-ADAPTER CLOSURE: this classifier only recognizes LEXICAL
+       `for`/`while`/`loop` headers, so the iteration-IS-the-closure idiom --
+       `items.iter().for_each(|x| { v.try_reserve(1); })` or
+       `.map(|x| { let mut o = Vec::new(); o.try_reserve(1); o }).collect()` --
+       is NOT flagged: the adapter closure block classifies as `"other"` and the
+       nearest enclosing fn/loop boundary is the surrounding `fn`. "A closure
+       inside a loop counts as in-loop" therefore means a closure LEXICALLY
+       NESTED within a `for`/`while`/`loop`, NOT a closure that IS the iteration
+       via `.for_each`/`.map`/etc. Detecting adapter closures reliably needs
+       receiver-chain analysis (is the `|...|` preceded by a known iterator
+       adapter?) that risks false positives, so it is documented and pinned
+       rather than implemented.
+
+    See the table-driven tests pinning each of these limitations.
+    """
+    if _LOOP_HEADER.search(segment) and not _IMPL_HEADER.search(segment):
+        return "loop"
+    if _FN_HEADER.search(segment):
+        return "fn"
+    return "other"
+
+
+def _scan_reserve_in_loop(joined: str, line_starts: list[int]) -> list[_Finding]:
+    """Find `try_reserve`/`try_reserve_exact` calls inside a loop body.
+
+    Walks the (comment/string-stripped) source tracking a stack of brace-block
+    kinds. A reservation counts as in-loop when, scanning OUTWARD from the call,
+    the nearest enclosing block opened by a `fn`/`loop` header is a loop body --
+    so a closure or match arm inside a loop still counts as in-loop, while a
+    `fn` defined inside a loop body shields its own reservations. Each match is
+    reported as a `_Finding`; the caller decides whether a
+    `// reserve-in-loop:` marker exempts it.
+    """
+    findings: list[_Finding] = []
+    block_kinds: list[str] = []
+    # Offset just past the previous statement boundary (`{`/`}`/`;`); the text
+    # from here to the next `{` is the block header used to classify the block.
+    segment_start = 0
+    # Precompute reservation-call start offsets for membership-free lookup.
+    reserve_offsets = {m.start(): m.group(1) for m in _TRY_RESERVE_CALL.finditer(joined)}
+
+    i = 0
+    n = len(joined)
+    while i < n:
+        ch = joined[i]
+        if i in reserve_offsets:
+            # Scan outward for the nearest enclosing fn/loop block.
+            in_loop = False
+            for kind in reversed(block_kinds):
+                if kind == "loop":
+                    in_loop = True
+                    break
+                if kind == "fn":
+                    break
+            if in_loop:
+                method = reserve_offsets[i]
+                line_no = _offset_to_line(i, line_starts)
+                findings.append(_Finding(line=line_no, construct=f"{method}()"))
+        if ch == "{":
+            segment = joined[segment_start:i]
+            block_kinds.append(_block_kind_for_segment(segment))
+            segment_start = i + 1
+        elif ch == "}":
+            if block_kinds:
+                block_kinds.pop()
+            segment_start = i + 1
+        elif ch == ";":
+            segment_start = i + 1
+        i += 1
     return findings
 
 
@@ -574,6 +771,21 @@ def check_file(path: Path) -> list[str]:
             f"{display_path}:{finding.line}: {finding.construct} requires an "
             f"'// alloc-bound: <why>' justification (size is not a literal "
             f"or .len())"
+        )
+
+    # Sibling check: fallible reservations inside a loop body. Per-iteration
+    # `try_reserve`/`try_reserve_exact` is sometimes legitimate (guarding an
+    # untrusted/absent size_hint) but must be a CONSCIOUS choice marked with
+    # `// reserve-in-loop: <why>`, mirroring the alloc-bound convention.
+    for finding in sorted(
+        _scan_reserve_in_loop(joined, line_starts), key=lambda f: (f.line, f.construct)
+    ):
+        if _has_reserve_in_loop_marker(raw_lines, finding.line - 1):
+            continue
+        errors.append(
+            f"{display_path}:{finding.line}: {finding.construct} inside a loop body "
+            f"requires a '// reserve-in-loop: <why>' justification (prefer a single "
+            f"bulk pre-reservation before the loop)"
         )
     return errors
 
