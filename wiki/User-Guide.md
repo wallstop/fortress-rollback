@@ -800,6 +800,44 @@ fn handle_event(event: FortressEvent<GameConfig>) {
             );
             // Session continues trying, but you may choose to abort
         }
+
+        FortressEvent::ReplayDesync {
+            frame,
+            expected_checksum,
+            actual_checksum,
+        } => {
+            eprintln!(
+                "Replay desync at frame {}! Expected: {}, Actual: {}",
+                frame, expected_checksum, actual_checksum
+            );
+        }
+
+        FortressEvent::PeerDropped { handle, addr } => {
+            println!("Peer {} at {} was dropped gracefully", handle, addr);
+        }
+
+        FortressEvent::InputDelayRecommendation {
+            player_handle,
+            current_delay,
+            suggested_delay,
+        } => {
+            println!(
+                "Input delay recommendation for {}: {} -> {}",
+                player_handle, current_delay, suggested_delay
+            );
+        }
+
+        FortressEvent::SpectatorDivergence {
+            frame,
+            player,
+            primary_addr,
+            conflicting_addr,
+        } => {
+            eprintln!(
+                "Spectator host divergence at frame {} for {}: {} disagreed with {}",
+                frame, player, conflicting_addr, primary_addr
+            );
+        }
     }
 }
 ```
@@ -1273,13 +1311,6 @@ use web_time::Duration;
 let host_session = SessionBuilder::<GameConfig>::new()
     .with_num_players(2)?
     .with_input_delay(2)?
-    // Spectator-friendly config: larger buffer for varied viewers
-    .with_spectator_config(SpectatorConfig {
-        buffer_size: 180,      // 3 seconds at 60 FPS
-        catchup_speed: 2,      // 2x speed when behind
-        max_frames_behind: 30, // Start catchup at 0.5s behind
-        ..Default::default()
-    })
     .with_sync_config(SyncConfig::default())
     .add_player(PlayerType::Local, PlayerHandle::new(0))?
     .add_player(PlayerType::Remote(player2_addr), PlayerHandle::new(1))?
@@ -1291,8 +1322,13 @@ let mut spectator_session = SessionBuilder::<GameConfig>::new()
     .with_num_players(2)?
     .with_sync_config(SyncConfig::high_latency())
     .with_protocol_config(ProtocolConfig::high_latency())
-    .with_max_frames_behind(30)?
-    .with_catchup_speed(2)?
+    .with_spectator_config(SpectatorConfig {
+        buffer_size: 180,      // 3 seconds at 60 FPS
+        catchup_speed: 2,      // 2x speed when behind
+        max_frames_behind: 30, // Start catchup at 0.5s behind
+        stream_delay: 6,       // Stay 100ms behind live at 60 FPS
+        ..Default::default()
+    })
     .start_spectator_session(host_addr, spectator_socket)
     .ok_or(FortressError::InvalidRequest {
         info: "spectator session initialization failed".into(),
@@ -1304,15 +1340,19 @@ the spectator configuration is invalid, or the host endpoint cannot be
 initialized. `SpectatorConfig::buffer_size` must be greater than zero, and
 `stream_delay` must be smaller than `buffer_size`.
 
-For failover spectators created with `start_spectator_session_multi`, confirmed
-inputs for a frame come from the first host that delivers them. Newer frames may
-replace older ring-slot contents, but duplicate data for the same player/frame
-uses first-writer-wins semantics: identical duplicates are ignored, and
-divergent duplicates report a frame-sync violation without overwriting the first
-value. If duplicate host addresses are supplied, inbound packets are routed to
-the first matching host endpoint. When every host disconnects, the spectator may
-still advance through frames that were already buffered; after those buffered
-frames are no longer viewable, `advance_frame` returns `PredictionThreshold`.
+For failover spectators created with `start_spectator_session_multi`, unresolved
+frames use the highest-priority currently connected host by builder order as the
+canonical source. Lower-priority host snapshots remain provisional while a
+higher-priority host is connected, and if that host disconnects before a frame
+resolves the next surviving host is promoted only for unresolved frames.
+Connection status comes from the selected host's whole-frame snapshot. Connected
+hosts that disagree on the same player/frame emit
+`FortressEvent::SpectatorDivergence` and make future `advance_frame` calls
+return `FortressError::SpectatorDivergence`. If duplicate host addresses are
+supplied, inbound packets are routed to the first matching host endpoint. When
+every host disconnects cleanly, the spectator may still advance through frames
+that were already buffered; after those buffered frames are no longer viewable,
+`advance_frame` returns `PredictionThreshold`.
 
 **SpectatorConfig presets:**
 
@@ -3543,6 +3583,7 @@ Fortress Rollback uses `FortressError` for all error conditions. The enum is exh
 | `MissingInput { player_handle, frame }`                   | Required input not available           | Ensure inputs are added before advancing                      |
 | `MismatchedChecksum { current_frame, mismatched_frames }` | Desync in SyncTestSession              | Debug non-determinism                                         |
 | `SpectatorTooFarBehind`                                   | Spectator can't catch up               | Reconnect spectator                                           |
+| `SpectatorDivergence { frame, player }`                   | Redundant spectator hosts disagreed    | Stop this spectator session; reconnect or inspect hosts       |
 | `SerializationError { context }`                          | Serialization failed                   | Check input/state serialization                               |
 | `SocketError { context }`                                 | Network socket error                   | Check network, retry connection                               |
 | `InternalError { context }`                               | Library bug                            | Please report!                                                |
@@ -3560,6 +3601,13 @@ fn handle_error(error: FortressError) -> Action {
 
         // Recoverable: reconnect
         FortressError::SpectatorTooFarBehind => Action::Reconnect,
+        FortressError::SpectatorDivergence { frame, player } => {
+            eprintln!(
+                "Spectator hosts diverged for player {} at frame {}",
+                player, frame
+            );
+            Action::Fatal
+        }
         FortressError::SocketError { .. } => Action::Reconnect,
 
         // Desync: log and investigate

@@ -241,6 +241,8 @@ pub mod sessions {
 }
 #[doc(hidden)]
 pub mod network {
+    /// Shared fail-closed allocation for socket receive/send buffers.
+    mod buffer;
     pub mod chaos_socket;
     /// Binary codec for network message serialization.
     ///

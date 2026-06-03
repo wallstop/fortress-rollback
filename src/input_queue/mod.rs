@@ -204,13 +204,13 @@ impl<T: Config> InputQueue<T> {
         player_index: usize,
         queue_length: usize,
     ) -> Result<Self, FortressError> {
+        // Return the structured error WITHOUT logging: this fallible constructor
+        // is wrapped by the infallible `with_queue_length`, which reports the
+        // violation. Logging here too would emit duplicate telemetry for the
+        // same invalid input. (Matches `SavedStates::try_new`,
+        // `TimeSync::try_with_config`, and `SyncLayer::try_with_queue_length`,
+        // which all stay silent and let their wrapper report.)
         if queue_length < 2 {
-            report_violation!(
-                ViolationSeverity::Error,
-                ViolationKind::InputQueue,
-                "Queue length must be at least 2, got {}",
-                queue_length
-            );
             return Err(InvalidRequestKind::QueueLengthTooSmall {
                 length: queue_length,
             }
@@ -2018,6 +2018,20 @@ mod input_queue_tests {
         // Queue length of 0 should fail
         let queue = InputQueue::<TestConfig>::with_queue_length(0, 0);
         assert!(queue.is_none());
+    }
+
+    #[test]
+    fn try_with_queue_length_below_minimum_returns_structured_error() {
+        // The fallible constructor returns the structured error directly (and
+        // does NOT log a violation itself — only its infallible wrapper does, so
+        // an invalid queue length produces a single violation, not duplicates).
+        let err = InputQueue::<TestConfig>::try_with_queue_length(0, 1).unwrap_err();
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::QueueLengthTooSmall { length: 1 }
+            }
+        ));
     }
 
     #[test]

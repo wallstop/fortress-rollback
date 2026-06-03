@@ -337,6 +337,34 @@ pub fn decode_with_max_len(buf: impl AsRef<[u8]>, max_decoded_len: usize) -> Rle
     decode_with_offset(buf.as_ref(), 0, max_decoded_len)
 }
 
+/// Extracts a single run length from a varint header, rejecting any value that
+/// exceeds `max_decoded_len` *before* narrowing the `u64` to `usize`.
+///
+/// The header is decoded as a `u64`; the run length lives in the high bits
+/// (`>> 2` for a compressed run, `>> 1` for a raw run). Casting that `u64`
+/// straight to `usize` would, on a 32-bit target (where `usize == u32`),
+/// truncate the high bits and could turn a huge declared length into a small
+/// one that slips past the decompression-bomb cap. Comparing against
+/// `max_decoded_len` while the value is still a `u64` closes that gap: a value
+/// over the cap is rejected outright, and any accepted value is
+/// `<= max_decoded_len <= usize::MAX`, so the final narrowing is exact on every
+/// target (32- and 64-bit alike).
+fn checked_run_len(next: u64, max_decoded_len: usize) -> RleResult<usize> {
+    let raw = if next & 1 > 0 { next >> 2 } else { next >> 1 };
+    if raw > max_decoded_len as u64 {
+        return Err(FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::RleDecodeError {
+                reason: RleDecodeReason::DecodedLengthExceedsMaximum {
+                    decoded_len: usize::try_from(raw).unwrap_or(usize::MAX),
+                    max: max_decoded_len,
+                },
+            },
+        });
+    }
+    // raw <= max_decoded_len <= usize::MAX, so this conversion never truncates.
+    Ok(usize::try_from(raw).unwrap_or(usize::MAX))
+}
+
 /// Decode an RLE-encoded bitfield starting at a specific offset.
 fn decode_with_offset(buf: &[u8], mut offset: usize, max_decoded_len: usize) -> RleResult<Vec<u8>> {
     let decoded_len = decode_len_with_offset(buf, offset, max_decoded_len)?;
@@ -359,11 +387,9 @@ fn decode_with_offset(buf: &[u8], mut offset: usize, max_decoded_len: usize) -> 
         offset += consumed;
 
         let repeat = next & 1;
-        let len = if repeat > 0 {
-            (next >> 2) as usize
-        } else {
-            (next >> 1) as usize
-        };
+        // Reject (and never silently truncate) an over-cap run length before it
+        // is used to fill/copy/advance; see `checked_run_len`.
+        let len = checked_run_len(next, max_decoded_len)?;
 
         if repeat > 0 {
             // Contiguous sequence
@@ -432,16 +458,16 @@ fn decode_len_with_offset(
         offset += consumed;
 
         let repeat = next & 1;
-        let slice = if repeat > 0 {
-            (next >> 2) as usize
-        } else {
-            (next >> 1) as usize
-        };
+        // `checked_run_len` rejects any single run whose length exceeds the cap
+        // *before* the `u64 -> usize` narrowing, so a 32-bit truncation cannot
+        // disguise a huge declared length as a small one (the accepted value is
+        // always `<= max_decoded_len`).
+        let slice = checked_run_len(next, max_decoded_len)?;
 
-        // Accumulate with checked arithmetic and the caller-provided cap. A contiguous-run
-        // `slice` comes straight from an untrusted varint, so an unchecked
-        // `+=` would both risk a usize overflow (panic under overflow-checks)
-        // and let a tiny packet drive an enormous `vec![0u8; len]` allocation.
+        // Accumulate with checked arithmetic and the caller-provided cap. Even
+        // though each `slice` is individually `<= max_decoded_len`, their sum
+        // across runs can still exceed the cap (or overflow `usize`), so the
+        // running total is bounded here too.
         len = len
             .checked_add(slice)
             .filter(|&l| l <= max_decoded_len)
@@ -958,6 +984,34 @@ mod tests {
 
         // Assert: rejected with the structured error rather than OOM/abort.
         assert_decoded_length_exceeds_maximum(result);
+    }
+
+    #[test]
+    fn decode_run_length_with_high_bits_set_is_rejected_not_truncated() {
+        // Regression for 32-bit truncation: choose a run length whose LOW 32
+        // bits are a small, in-cap value (7) but whose full u64 value is far
+        // above the cap (2^32 + 7). On a 32-bit target (`usize == u32`) the old
+        // `(next >> 2) as usize` would truncate this to 7 and slip past the cap;
+        // `checked_run_len` compares the full u64 against the cap first, so it is
+        // rejected on every target. Format: varint(length << 2 | 1) (repeat=1).
+        let length = (1u64 << 32) | 7;
+        assert!(length > DEFAULT_MAX_DECODED_LEN as u64);
+        assert_eq!(length as u32 as u64, 7); // truncates to an in-cap value
+        let header = (length << 2) | 1;
+        let bomb = varint::encode_to_vec(header);
+
+        assert_decoded_length_exceeds_maximum(decode(&bomb));
+    }
+
+    #[test]
+    fn decode_raw_run_length_with_high_bits_set_is_rejected_not_truncated() {
+        // Same truncation defense for the raw (non-repeat) run branch. Format:
+        // varint(length << 1 | 0) (repeat=0).
+        let length = (1u64 << 32) | 7;
+        let header = length << 1;
+        let bomb = varint::encode_to_vec(header);
+
+        assert_decoded_length_exceeds_maximum(decode(&bomb));
     }
 
     #[test]

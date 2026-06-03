@@ -4,7 +4,7 @@ use std::sync::Arc;
 use web_time::Duration;
 
 use crate::{
-    error::{InvalidRequestKind, SerializationErrorKind},
+    error::InvalidRequestKind,
     network::protocol::UdpProtocol,
     replay::Replay,
     sessions::player_registry::PlayerRegistry,
@@ -1051,25 +1051,19 @@ impl<T: Config> SessionBuilder<T> {
         for (player_type, handles) in addr_count.into_iter() {
             match player_type {
                 PlayerType::Remote(peer_addr) => {
-                    let endpoint = self
-                        .create_endpoint(handles, peer_addr.clone(), self.local_players)
-                        .map_err(|error| match error {
-                            FortressError::InvalidRequestStructured {
-                                kind: InvalidRequestKind::AllocationFailed { .. },
-                            } => error,
-                            _ => SerializationErrorKind::EndpointCreationFailed.into(),
-                        })?;
+                    // Propagate the original `create_endpoint` error verbatim so
+                    // callers can distinguish IO (socket), protocol, and config
+                    // failures (and `AllocationFailed`) instead of forcing every
+                    // cause to a single opaque endpoint-creation error.
+                    let endpoint =
+                        self.create_endpoint(handles, peer_addr.clone(), self.local_players)?;
                     self.player_reg.remotes.insert(peer_addr, endpoint);
                 },
                 PlayerType::Spectator(peer_addr) => {
-                    let endpoint = self
-                        .create_endpoint(handles, peer_addr.clone(), self.num_players) // the host of the spectator sends inputs for all players
-                        .map_err(|error| match error {
-                            FortressError::InvalidRequestStructured {
-                                kind: InvalidRequestKind::AllocationFailed { .. },
-                            } => error,
-                            _ => SerializationErrorKind::SpectatorEndpointCreationFailed.into(),
-                        })?;
+                    // the host of the spectator sends inputs for all players;
+                    // propagate the original error verbatim (see above).
+                    let endpoint =
+                        self.create_endpoint(handles, peer_addr.clone(), self.num_players)?;
                     self.player_reg.spectators.insert(peer_addr, endpoint);
                 },
                 PlayerType::Local => (),

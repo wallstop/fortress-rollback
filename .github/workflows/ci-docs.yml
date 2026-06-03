@@ -219,6 +219,16 @@ jobs:
       - name: Validate generated wiki format
         run: python scripts/docs/validate-wiki-output.py --wiki-dir wiki-test-output
 
+      - name: Verify committed wiki/ matches generated output
+        run: |
+          # The committed wiki/ mirror must equal what sync-wiki.py produces from
+          # docs/, so hand-edited or stale mirror content cannot drift from the
+          # docs source of truth (the source SYNC headers say "Edit docs source").
+          if ! diff -rq wiki/ wiki-test-output/; then
+            echo "::error::Committed wiki/ is out of sync with docs/. Run 'python scripts/docs/sync-wiki.py' and commit the regenerated wiki/."
+            exit 1
+          fi
+
   markdown-lint:
     name: Markdown Lint
     runs-on: ubuntu-latest

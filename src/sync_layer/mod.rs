@@ -215,6 +215,18 @@ impl<T: Config> SyncLayer<T> {
     /// configuration and failed reservations can be returned as structured
     /// errors. This compatibility wrapper reports the error and returns an
     /// empty internal layer rather than panicking or allocating unchecked.
+    ///
+    /// # Degraded fallback
+    ///
+    /// On error this returns a layer with `num_players == 0`, `max_prediction
+    /// == 0`, and no input queues — a valid-but-inert object that cannot
+    /// advance frames. This wrapper exists only for backward compatibility and
+    /// internal testing (`SyncLayer` is re-exported under
+    /// [`__internal`](crate::__internal) with no stability guarantees); the
+    /// production session path never hits this fallback because it constructs
+    /// via the fallible [`Self::try_with_queue_length`] and propagates the
+    /// structured error. Callers that need to distinguish or recover from
+    /// construction failures must use the fallible constructor directly.
     #[must_use]
     pub fn with_queue_length(
         num_players: usize,

@@ -213,7 +213,8 @@ while !session.is_complete() {
 | `checksums` | `Vec<Option<u128>>` -- per-frame checksums for validation |
 | `metadata` | `ReplayMetadata` -- version, player count, frame count |
 | `to_bytes()` | Serialize to bytes (deterministic bincode codec) |
-| `from_bytes(&[u8])` | Deserialize from bytes |
+| `from_bytes(&[u8])` | Deserialize from bytes and validate the result |
+| `from_bytes_with_config(&[u8], ReplayDecodeConfig)` | Deserialize with a caller-defined byte limit or validation setting |
 | `total_frames()` | Number of recorded frames |
 | `validate()` | Check internal consistency (frames/checksums/metadata) |
 
