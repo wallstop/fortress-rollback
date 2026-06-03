@@ -944,6 +944,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Slice bounds safety in to_player_inputs
     /// - Related: proof_divisibility_check
+    // kani::no-unwind-needed: vec![0u8; n] memset + scalar index check, no per-element loop
     #[kani::proof]
     fn proof_player_slice_bounds_valid() {
         let total_bytes: usize = kani::any();
@@ -1070,6 +1071,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Frame selection logic in from_inputs
     /// - Related: proof_null_frame_detection
+    // kani::no-unwind-needed: two-branch scalar frame selection, no loops
     #[kani::proof]
     fn proof_first_non_null_frame_selection() {
         let frame_val1: i32 = kani::any();

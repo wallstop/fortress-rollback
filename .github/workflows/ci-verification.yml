@@ -160,6 +160,22 @@ jobs:
             ~/.kani
           key: kani-${{ env.KANI_VERSION }}-${{ runner.os }}
 
+      # Cache the cargo registry + git deps + target dir. Each matrix job
+      # otherwise pays a full cold CBMC/codegen crate build, which dominates
+      # per-job time. Keyed on Cargo.lock so it invalidates on dependency
+      # changes; the restore-keys prefix lets a near-miss (same Kani version,
+      # different lockfile) restore a warm target as a starting point.
+      - name: Cache Kani build (cargo registry + target)
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: kani-build-${{ runner.os }}-${{ env.KANI_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            kani-build-${{ runner.os }}-${{ env.KANI_VERSION }}-
+
       - name: Install Kani with retry
         uses: nick-fields/retry@v4
         with:
@@ -225,6 +241,22 @@ jobs:
             ~/.kani
           key: kani-${{ env.KANI_VERSION }}-${{ runner.os }}
 
+      # Cache the cargo registry + git deps + target dir. Each matrix job
+      # otherwise pays a full cold CBMC/codegen crate build, which dominates
+      # per-job time. Keyed on Cargo.lock so it invalidates on dependency
+      # changes; the restore-keys prefix lets a near-miss (same Kani version,
+      # different lockfile) restore a warm target as a starting point.
+      - name: Cache Kani build (cargo registry + target)
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: kani-build-${{ runner.os }}-${{ env.KANI_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            kani-build-${{ runner.os }}-${{ env.KANI_VERSION }}-
+
       - name: Install Kani with retry
         uses: nick-fields/retry@v4
         with:
@@ -288,6 +320,22 @@ jobs:
             ~/.cargo/bin/kani-*
             ~/.kani
           key: kani-${{ env.KANI_VERSION }}-${{ runner.os }}
+
+      # Cache the cargo registry + git deps + target dir. Each matrix job
+      # otherwise pays a full cold CBMC/codegen crate build, which dominates
+      # per-job time. Keyed on Cargo.lock so it invalidates on dependency
+      # changes; the restore-keys prefix lets a near-miss (same Kani version,
+      # different lockfile) restore a warm target as a starting point.
+      - name: Cache Kani build (cargo registry + target)
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: kani-build-${{ runner.os }}-${{ env.KANI_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            kani-build-${{ runner.os }}-${{ env.KANI_VERSION }}-
 
       - name: Install Kani with retry
         uses: nick-fields/retry@v4

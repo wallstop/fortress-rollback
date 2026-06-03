@@ -5162,6 +5162,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Disconnect idempotence from Shutdown state
     /// - Related: proof_synchronize_precondition, proof_shutdown_is_terminal
+    // kani::no-unwind-needed: u8 state-index guard logic, no loops
     #[kani::proof]
     fn proof_disconnect_idempotent_from_shutdown() {
         // The disconnect() function at mod.rs:365-373 checks:
@@ -5203,6 +5204,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Synchronize precondition from Initializing only
     /// - Related: proof_initializing_is_initial, proof_transition_matrix_sync_required
+    // kani::no-unwind-needed: u8 state-index guard logic, no loops
     #[kani::proof]
     fn proof_synchronize_precondition() {
         let state_idx: u8 = kani::any();
@@ -5371,6 +5373,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Frame addition overflow safety (SAFE-6)
     /// - Related: proof_frame_ordering, proof_frame_gap_safe
+    // kani::no-unwind-needed: straight-line Frame + i32 arithmetic, no loops
     #[kani::proof]
     fn proof_frame_addition_safe() {
         let frame_val: i32 = kani::any();
@@ -5457,6 +5460,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Frame gap detection overflow safety
     /// - Related: proof_frame_addition_safe, proof_frame_null_detection
+    // kani::no-unwind-needed: scalar saturating i32 arithmetic, no loops
     #[kani::proof]
     fn proof_frame_gap_safe() {
         let last_recv: i32 = kani::any();
@@ -5559,6 +5563,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Sync counter bounds (INV-PROTO-2, INV-PROTO-3)
     /// - Related: proof_sync_counter_decrement_safe
+    // kani::no-unwind-needed: loop-free saturating_sub model, no loops
     #[kani::proof]
     fn proof_sync_remaining_bounds() {
         let num_sync_packets: u32 = kani::any();
@@ -5618,6 +5623,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Frame advantage calculation bounds
     /// - Related: proof_remote_frame_advantage_from_i8, proof_frame_advantage_null_guard
+    // kani::no-unwind-needed: single i32 subtraction, no loops
     #[kani::proof]
     fn proof_local_frame_advantage_bounds() {
         let local_frame: i32 = kani::any();
@@ -5651,6 +5657,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: i8 to i32 cast preserves value
     /// - Related: proof_local_frame_advantage_bounds
+    // kani::no-unwind-needed: single i8 -> i32 cast, no loops
     #[kani::proof]
     fn proof_remote_frame_advantage_from_i8() {
         let wire_value: i8 = kani::any();
@@ -5682,6 +5689,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: NULL frame guard prevents invalid calculations
     /// - Related: proof_local_frame_advantage_bounds, proof_frame_null_detection
+    // kani::no-unwind-needed: scalar NULL-frame guard logic, no loops
     #[kani::proof]
     fn proof_frame_advantage_null_guard() {
         let local_frame_val: i32 = kani::any();

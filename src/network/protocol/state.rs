@@ -619,6 +619,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: No backward state transitions allowed
     /// - Related: proof_transition_matrix_sequential, proof_transition_matrix_sync_required
+    // kani::no-unwind-needed: u8 match on transition matrix, no loops
     #[kani::proof]
     fn proof_transition_matrix_rejects_backwards() {
         let from_idx: u8 = kani::any();
@@ -652,6 +653,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Single-step forward progression only
     /// - Related: proof_transition_matrix_rejects_backwards, proof_transition_matrix_sync_required
+    // kani::no-unwind-needed: u8 match on transition matrix, no loops
     #[kani::proof]
     fn proof_transition_matrix_sequential() {
         let from_idx: u8 = kani::any();
@@ -682,6 +684,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Synchronization cannot be skipped
     /// - Related: proof_initializing_is_initial, proof_transition_matrix_sequential
+    // kani::no-unwind-needed: constant transition-matrix lookups, no loops
     #[kani::proof]
     fn proof_transition_matrix_sync_required() {
         // Cannot go directly from Initializing to Running (must sync first)

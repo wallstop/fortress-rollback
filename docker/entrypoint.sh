@@ -83,5 +83,5 @@ if [ "$DEBUG" = "1" ]; then
 fi
 
 # Run the test peer with all arguments passed to the container
-echo "Starting network_test_peer with args: $@"
+echo "Starting network_test_peer with args: $*"
 exec /usr/local/bin/network_test_peer "$@"

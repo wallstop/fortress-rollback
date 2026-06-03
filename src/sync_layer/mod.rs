@@ -110,6 +110,7 @@ pub use saved_states::SavedStates;
 use crate::frame_info::PlayerInput;
 use crate::input_queue::InputQueue;
 use crate::network::messages::ConnectionStatus;
+use crate::proof_vec::ProofVec;
 use crate::sessions::config::SaveMode;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
 use crate::{report_violation, safe_frame_add};
@@ -170,7 +171,7 @@ where
     /// - **TLA+**: `currentFrame` in `specs/tla/Rollback.tla`
     /// - **formal-spec.md**: INV-1 requires monotonic increase (except rollback)
     current_frame: Frame,
-    input_queues: Vec<InputQueue<T>>,
+    input_queues: ProofVec<InputQueue<T>>,
 }
 
 /// Builds an `InternalErrorStructured`/`IndexOutOfBounds` error tagged with
@@ -236,7 +237,7 @@ impl<T: Config> SyncLayer<T> {
                     last_saved_frame: Frame::NULL,
                     current_frame: Frame::new(0),
                     saved_states: SavedStates::new(0),
-                    input_queues: Vec::new(),
+                    input_queues: ProofVec::new(),
                 }
             },
         }
@@ -2321,23 +2322,27 @@ mod sync_layer_tests {
 ///    under Kani only (sound: proofs are single-threaded; zero production
 ///    impact because `cfg(kani)` is inactive in every normal build). Measured
 ///    effect on `proof_confirmed_frame_bounded`: symex 265s -> 8s.
-/// 2. **Propositional-reduction (SAT) memory** — dominated by modeling the
-///    `Vec` allocation path (`RawVec::try_allocate_in`, `Layout::array`,
-///    `handle_alloc_error`) reached via `SavedStates::try_new`,
+/// 2. **Propositional-reduction (SAT) memory** — dominated by modeling Rust's
+///    heap-`Vec` allocator (`RawVec`, `Layout::array`'s SAT-hard 64-bit
+///    `size_of::<U>() * count` multiply, plus the capacity-overflow / `grow` /
+///    `deallocate` paths) reached via `SavedStates::try_new`,
 ///    `InputQueue::try_with_queue_length`, and the `input_queues` vector — all
-///    routed through `crate::error::try_with_capacity`. The dominant cost is
-///    `Layout::array::<U>(count)`'s 64-bit `size_of::<U>() * count` multiply:
-///    when `count` is a *runtime* value CBMC bit-blasts it into a SAT-hard
-///    64x64 circuit. This is addressed by the `#[cfg(kani)]` arm of
-///    `try_with_capacity` (see `error.rs`), which reserves a *compile-time
-///    constant* capacity (chosen from a small ladder >= `count`) so CBMC
-///    constant-folds the multiply away. Kani-only; zero production impact.
+///    routed through `crate::error::try_with_capacity`. This is a *per-operation*
+///    cost, independent of the element count, so shrinking sizes does not help.
+///    It is addressed by backing those vectors with the `#[cfg(kani)]`
+///    [`InlineVec`](crate::proof_vec): a stack `[Option<T>; CAP]` with no heap
+///    allocation, so CBMC models a fixed-size object with no allocator circuit at
+///    all. Kani-only; zero production impact (`ProofVec<T>` is exactly `Vec<T>`
+///    in every real build). Measured: the rollback proofs went from ~20 GB / OOM
+///    to a few seconds each.
 ///
-/// Practical rule: concretize the construction parameters to the minimum that
-/// still exercises the asserted invariant, keep the unwind bound as low as the
-/// (now-tiny) construction loops allow, and ensure any new collection sized by
-/// a runtime count is built through `try_with_capacity` so it benefits from the
-/// constant-capacity path above.
+/// Practical rule: build every runtime-sized collection through
+/// `try_with_capacity` (so it gets the heap-free `InlineVec` backing under Kani),
+/// concretize construction parameters to the minimum that still exercises the
+/// asserted invariant, and `core::mem::forget` the constructed layer at the end
+/// of a proof when its only remaining cost is the `[Option<T>; CAP]` drop loop
+/// (orthogonal to the asserted property; needed when the proof's unwind bound is
+/// below `CAP + 1`).
 ///
 /// Critical anti-pattern (regression caught 2026-05-09): a `kani::any()` value
 /// that flows into a function and becomes a *loop bound* causes CBMC path
@@ -2397,7 +2402,8 @@ mod kani_sync_layer_proofs {
     // SyncLayer. Factored out so the per-num_players proofs share one assertion
     // body — keeping the harnesses CBMC-tractable by concretizing num_players
     // (which would otherwise drive a symbolic loop bound in
-    // SyncLayer::with_queue_length, see lines 2249-2270 for the policy).
+    // SyncLayer::with_queue_length; see the symbolic-loop-bound anti-pattern note
+    // in this module's `kani_sync_layer_proofs` docs).
     fn assert_initial_state(
         sync_layer: &SyncLayer<TestConfig>,
         expected_num_players: usize,
@@ -2436,11 +2442,12 @@ mod kani_sync_layer_proofs {
         );
     }
 
-    /// Proof: Minimal SyncLayer construction has valid initial state (1 player).
+    /// Proof: Minimal SyncLayer construction has valid initial state (0 players).
     ///
-    /// Concretizes num_players=1 to keep CBMC tractable. The {1, 2}-player axis is
-    /// covered by this proof and proof_minimal_sync_layer_initial_state_valid_2p
-    /// together; max_prediction is enumerated symbolically across {1, 2, 3}.
+    /// Uses the smallest config — num_players=0 and a concrete max_prediction=0.
+    /// The initial-state invariants are independent of the player/cell counts, so
+    /// this minimal case and proof_minimal_sync_layer_initial_state_valid_2p (2
+    /// players, symbolic max_prediction) together cover that independence.
     ///
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Initial SyncLayer state validity (INV-1, INV-7, INV-8)
@@ -2448,20 +2455,22 @@ mod kani_sync_layer_proofs {
     #[kani::proof]
     #[kani::unwind(3)]
     fn proof_minimal_sync_layer_initial_state_valid_1p() {
-        // 0 players + max_prediction 0 (one saved cell): each extra
-        // GameStateCell (Arc<Mutex>) and InputQueue grows CBMC's pointer model
-        // super-linearly. Scalar/length init is independent of both counts, so
-        // the minimal config verifies the same INV-1/7/8 init within budget.
+        // 0 players + max_prediction 0 (one saved cell): scalar/length init is
+        // independent of player/cell counts, so the minimal config verifies the
+        // same INV-1/7/8 init within budget.
         let max_prediction: usize = 0;
         let sync_layer = minimal_sync_layer(0, max_prediction);
         assert_initial_state(&sync_layer, 0, max_prediction);
+        // Skip the saved-state drop teardown (orthogonal to the init property).
+        core::mem::forget(sync_layer);
     }
 
     /// Proof: Minimal SyncLayer construction has valid initial state (2 players).
     ///
-    /// Concretizes num_players=2 to keep CBMC tractable. The {1, 2}-player axis is
-    /// covered by this proof and proof_minimal_sync_layer_initial_state_valid_1p
-    /// together; max_prediction is enumerated symbolically across {1, 2, 3}.
+    /// Uses num_players=2 with max_prediction enumerated symbolically across
+    /// {1, 2, 3}. Together with proof_minimal_sync_layer_initial_state_valid_1p
+    /// (the 0-player minimal config) this covers the initial-state invariants'
+    /// independence from the player/cell counts.
     ///
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Initial SyncLayer state validity (INV-1, INV-7, INV-8)
@@ -2473,6 +2482,9 @@ mod kani_sync_layer_proofs {
         kani::assume(max_prediction > 0 && max_prediction <= 3);
         let sync_layer = minimal_sync_layer(2, max_prediction);
         assert_initial_state(&sync_layer, 2, max_prediction);
+        // The asserted init invariants are checked; skip the saved-state drop
+        // teardown (orthogonal `[Option<GameStateCell>; CAP]` drop loop).
+        core::mem::forget(sync_layer);
     }
 
     /// Proof: advance_frame maintains INV-1 (monotonicity).
@@ -2504,6 +2516,11 @@ mod kani_sync_layer_proofs {
             new_frame == initial_frame + 1,
             "advance_frame should increment by exactly 1",
         );
+
+        // Skip the saved-state teardown (see proof_confirmed_frame_bounded): the
+        // `[Option<GameStateCell>; CAP]` drop loop is orthogonal to monotonicity
+        // and its unwinding assertion would exceed this proof's small unwind.
+        core::mem::forget(sync_layer);
     }
 
     /// Proof: Multiple advances maintain monotonicity.
@@ -2542,8 +2559,10 @@ mod kani_sync_layer_proofs {
     ///
     /// Verifies that after saving, last_saved_frame == current_frame.
     ///
-    /// Note: unwind(5) accounts for SyncLayer construction with 1 player, 1 prediction window,
-    /// and a minimal queue length of 2 (reducing vec construction overhead for CBMC).
+    /// Note: 0 players + max_prediction 0 (one saved cell). With the `forget`
+    /// below skipping the saved-state teardown, the harness models only
+    /// construction + advance + save; unwind(3) matches the identical
+    /// construction in proof_advance_frame_monotonic.
     ///
     /// - Tier: 3 (Slow, >2min)
     /// - Verifies: Save updates last_saved_frame (INV-8)
@@ -2551,7 +2570,7 @@ mod kani_sync_layer_proofs {
     ///   (proof_load_frame_validates_bounds and proof_load_frame_success_maintains_invariants
     ///   still exercise SyncLayer::new(2, 3) for broader multi-player coverage)
     #[kani::proof]
-    #[kani::unwind(5)]
+    #[kani::unwind(3)]
     fn proof_save_maintains_inv8() {
         // 0 players + max_prediction 0 (one saved cell): `save_current_state`
         // touches only `current_frame` and `saved_states`, never
@@ -2564,7 +2583,7 @@ mod kani_sync_layer_proofs {
         sync_layer.advance_frame();
 
         let frame_before_save = sync_layer.current_frame();
-        let _request = sync_layer.save_current_state();
+        let request = sync_layer.save_current_state();
         let saved_frame = sync_layer.last_saved_frame();
 
         kani::assert(
@@ -2575,6 +2594,15 @@ mod kani_sync_layer_proofs {
             saved_frame <= sync_layer.current_frame(),
             "INV-8: last_saved_frame <= current_frame",
         );
+
+        // INV-8 checked. Skip the drop teardown of the saved-state `Rc<RefCell>`
+        // cell (and the save request's cloned cell handle), whose
+        // `drop_in_place`/`Layout` dealloc circuit measured multi-GB peak cbmc
+        // RSS and is orthogonal to the save property (see
+        // proof_confirmed_frame_bounded). `#[cfg(kani)]`-only; production /
+        // `cargo test` / loom drop normally.
+        core::mem::forget(request);
+        core::mem::forget(sync_layer);
     }
 
     /// Proof: load_frame validates bounds correctly.
@@ -2744,8 +2772,10 @@ mod kani_sync_layer_proofs {
 
     /// Proof: reset_prediction doesn't affect frame state.
     ///
-    /// Note: unwind(5) accounts for SyncLayer construction with 1 player, 1 prediction window,
-    /// and a minimal queue length of 2 (reducing vec construction overhead for CBMC).
+    /// Note: 1 player, max_prediction 1, minimal queue length 2. With the
+    /// `forget` below skipping the input-queue + saved-state drop teardown, the
+    /// harness models only construction + save + advance + reset_prediction, so
+    /// unwind(4) covers the (length-2) construction loops with margin.
     ///
     /// - Tier: 3 (Slow, >2min)
     /// - Verifies: reset_prediction preserves frame invariants
@@ -2754,7 +2784,7 @@ mod kani_sync_layer_proofs {
     ///   (proof_load_frame_validates_bounds and proof_load_frame_success_maintains_invariants
     ///   still exercise SyncLayer::new(2, 3) for broader multi-player coverage)
     #[kani::proof]
-    #[kani::unwind(5)]
+    #[kani::unwind(4)]
     fn proof_reset_prediction_preserves_frames() {
         let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(1, 1, 2);
 
@@ -2780,6 +2810,14 @@ mod kani_sync_layer_proofs {
             sync_layer.last_saved_frame() == saved_before,
             "reset_prediction should not change last_saved_frame",
         );
+
+        // Frame invariants checked. Skip the drop teardown of the `InlineVec`-backed
+        // input queue and the `Rc<RefCell>` saved-state cells, whose
+        // `drop_in_place`/`Layout` dealloc circuit measured multi-GB peak cbmc
+        // RSS and is orthogonal to the reset property (see
+        // proof_confirmed_frame_bounded). `#[cfg(kani)]`-only; production /
+        // `cargo test` / loom drop normally.
+        core::mem::forget(sync_layer);
     }
 
     /// Proof: INV-7 holds after set_last_confirmed_frame.
@@ -2816,9 +2854,9 @@ mod kani_sync_layer_proofs {
         );
 
         // The invariant has been checked. Tearing the `SyncLayer` down here
-        // would force CBMC to model `drop_in_place` over the `Vec`-backed
-        // input queues and `Rc<RefCell>` saved-state cells (the fallible
-        // allocator's `Layout`/dealloc circuit), which measured ~3-4 GB of
+        // would force CBMC to model `drop_in_place` over the `InlineVec`-backed
+        // input queues and `Rc<RefCell>` saved-state cells (the
+        // `[Option<T>; CAP]` drop loop), which measured ~3-4 GB of
         // peak `cbmc` RSS on its own and is entirely orthogonal to the
         // frame-clamp property under test. `forget` is `#[cfg(kani)]`-only;
         // production / `cargo test` / loom drop normally.
@@ -2880,6 +2918,11 @@ mod kani_sync_layer_proofs {
             sync_layer.current_frame() == Frame::new(0),
             "failed freeze should not change current frame",
         );
+
+        // Skip the saved-state/input-queue teardown (see
+        // proof_confirmed_frame_bounded); the drop loop is orthogonal to the
+        // rejected-freeze property and exceeds this proof's unwind.
+        core::mem::forget(sync_layer);
     }
 
     /// Proof: freezing a player preserves frame-state fields.
@@ -2912,6 +2955,10 @@ mod kani_sync_layer_proofs {
             sync_layer.last_saved_frame() == saved_before,
             "freeze should preserve last_saved_frame",
         );
+
+        // Skip the saved-state/input-queue drop teardown (orthogonal to the
+        // preserve property), consistent with proof_freeze_player_rejects_invalid_handle.
+        core::mem::forget(sync_layer);
     }
 
     /// Proof: frozen disconnected players produce the same input for

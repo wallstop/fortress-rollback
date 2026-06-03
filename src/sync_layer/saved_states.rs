@@ -4,6 +4,7 @@
 //! [`GameStateCell`]s for rollback functionality.
 
 use crate::error::allocation_failed;
+use crate::proof_vec::ProofVec;
 use crate::report_violation;
 use crate::sync_layer::GameStateCell;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
@@ -17,7 +18,7 @@ use crate::{FortressError, Frame, IndexOutOfBounds, InternalErrorKind, InvalidFr
 /// It is not part of the stable public API.
 pub struct SavedStates<T> {
     /// The vector of game state cells.
-    pub states: Vec<GameStateCell<T>>,
+    pub states: ProofVec<GameStateCell<T>>,
 }
 
 impl<T> SavedStates<T> {
@@ -34,9 +35,18 @@ impl<T> SavedStates<T> {
                     max_pred,
                     error
                 );
-                Self {
-                    states: vec![GameStateCell::default()],
-                }
+                // One-cell fallback. In production `ProofVec` is `Vec` (use the
+                // `vec!` macro clippy expects); under Kani it is the stack-backed
+                // `InlineVec`, which has no `vec!` macro, so build it via `push`.
+                #[cfg(not(kani))]
+                let states = vec![GameStateCell::default()];
+                #[cfg(kani)]
+                let states = {
+                    let mut states = ProofVec::new();
+                    states.push(GameStateCell::default());
+                    states
+                };
+                Self { states }
             },
         }
     }

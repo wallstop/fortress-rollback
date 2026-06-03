@@ -187,6 +187,9 @@ pub mod frame_info;
 pub mod hash;
 #[doc(hidden)]
 pub mod input_queue;
+/// Internal `Vec` replacement that swaps to a stack-backed inline buffer under
+/// Kani to keep CBMC tractable (zero effect on non-Kani builds).
+pub(crate) mod proof_vec;
 /// Replay recording and playback for deterministic match replays.
 pub mod replay;
 /// Internal run-length encoding module for network compression.
@@ -3532,6 +3535,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Frame addition overflow safety (SAFE-6)
     /// - Related: proof_frame_add_assign_consistent, proof_frame_sub_frames_correct
+    // kani::no-unwind-needed: straight-line Frame + i32 arithmetic, no loops
     #[kani::proof]
     fn proof_frame_add_small_safe() {
         let frame_val: i32 = kani::any();
@@ -3559,6 +3563,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Frame subtraction correctness
     /// - Related: proof_frame_add_small_safe, proof_frame_sub_assign_consistent
+    // kani::no-unwind-needed: straight-line Frame - Frame arithmetic, no loops
     #[kani::proof]
     fn proof_frame_sub_frames_correct() {
         let a: i32 = kani::any();
@@ -3582,6 +3587,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Frame comparison operators consistency
     /// - Related: proof_frame_ordering
+    // kani::no-unwind-needed: scalar i32 comparisons, no loops
     #[kani::proof]
     fn proof_frame_ordering_consistent() {
         let a: i32 = kani::any();
@@ -3612,6 +3618,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Queue index bounds via modulo (INV-5)
     /// - Related: proof_queue_index_calculation, proof_head_wraparound
+    // kani::no-unwind-needed: single Frame % i32 modulo, no loops
     #[kani::proof]
     fn proof_frame_modulo_for_queue() {
         let frame_val: i32 = kani::any();
@@ -3679,6 +3686,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: AddAssign operator equivalence with Add
     /// - Related: proof_frame_add_small_safe, proof_frame_sub_assign_consistent
+    // kani::no-unwind-needed: scalar Add vs AddAssign, no loops
     #[kani::proof]
     fn proof_frame_add_assign_consistent() {
         let frame_val: i32 = kani::any();
@@ -3701,6 +3709,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: SubAssign operator equivalence with Sub
     /// - Related: proof_frame_sub_frames_correct, proof_frame_add_assign_consistent
+    // kani::no-unwind-needed: scalar Sub vs SubAssign, no loops
     #[kani::proof]
     fn proof_frame_sub_assign_consistent() {
         let frame_val: i32 = kani::any();
@@ -3723,6 +3732,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: PlayerHandle player vs spectator classification
     /// - Related: proof_player_handle_preservation, proof_player_handle_equality
+    // kani::no-unwind-needed: scalar usize comparisons, no loops
     #[kani::proof]
     fn proof_player_handle_validity() {
         let handle_val: usize = kani::any();

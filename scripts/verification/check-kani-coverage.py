@@ -113,10 +113,14 @@ def find_script_proof_tiers(project_root: Path) -> dict[str, int]:
 
         # Parse each TIER*_PROOFS array
         for tier in (1, 2, 3):
-            # Match TIER{N}_PROOFS=( ... ) spanning multiple lines
+            # Match TIER{N}_PROOFS=( ... ) spanning multiple lines, ending at the
+            # closing paren that sits at the START of a line. A naive `\((.*?)\)`
+            # would stop at the first ')' — which appears inside the array's
+            # leading comment (e.g. `# Core frame/handle proofs (src/lib.rs)`),
+            # silently capturing zero proofs and disabling Tier 2/3 enforcement.
             pattern = re.compile(
-                rf"TIER{tier}_PROOFS=\((.*?)\)",
-                re.DOTALL,
+                rf"TIER{tier}_PROOFS=\((.*?)^\)",
+                re.DOTALL | re.MULTILINE,
             )
             match = pattern.search(content)
             if match:

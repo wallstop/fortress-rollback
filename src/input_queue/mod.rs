@@ -17,6 +17,7 @@ mod prediction;
 pub use prediction::{BlankPrediction, PredictionStrategy, RepeatLastConfirmed};
 
 use crate::frame_info::PlayerInput;
+use crate::proof_vec::ProofVec;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
 use crate::{report_violation, safe_frame_add, safe_frame_sub};
 use crate::{
@@ -27,8 +28,19 @@ use std::cmp;
 
 /// The length of the input queue. This describes the number of inputs Fortress Rollback can hold at the same time per player.
 ///
-/// For Kani verification, we use a smaller queue (8 elements) to keep verification tractable.
+/// For Kani verification, we use a smaller queue (7 elements) to keep verification tractable.
 /// This is sufficient to prove the invariants hold for the circular buffer logic.
+///
+/// Why 7 (not 8): this constant also caps the Kani-only
+/// [`InlineVec`](crate::proof_vec) that backs the queue under verification. CBMC
+/// unwinds the `CAP`-element loops that initialize, and (for non-`Copy` elements
+/// such as `SavedStates`' cells) drop, a `[Option<T>; CAP]`; their unwinding
+/// assertion needs an unwind bound of `CAP + 1`. A proof carrying no explicit
+/// `#[kani::unwind]` runs at CI's `--default-unwind 8`, so `CAP <= 7` keeps those
+/// loops tractable. (Proofs whose explicit unwind is lower instead
+/// `core::mem::forget` the layer to skip the drop entirely.) The circular-buffer
+/// invariants are length-independent for any value `>= 2`, so 7 proves exactly
+/// what 8 would.
 ///
 /// # Note
 ///
@@ -38,10 +50,10 @@ use std::cmp;
 /// # Formal Specification Alignment
 /// - **TLA+**: `QUEUE_LENGTH` in `specs/tla/InputQueue.tla` (set to 3 for model checking)
 /// - **Z3**: `INPUT_QUEUE_LENGTH` in `tests/test_z3_verification.rs` (128)
-/// - **Kani**: Uses 8 for tractable verification, production uses 128
+/// - **Kani**: Uses 7 for tractable verification, production uses 128
 /// - **formal-spec.md**: INV-4 (queue length bounds), INV-5 (index validity)
 #[cfg(kani)]
-pub const INPUT_QUEUE_LENGTH: usize = 8;
+pub const INPUT_QUEUE_LENGTH: usize = 7;
 
 /// The length of the input queue. This describes the number of inputs Fortress Rollback can hold at the same time per player.
 /// At 60fps, 128 frames = ~2.1 seconds of input history.
@@ -130,7 +142,7 @@ where
     queue_length: usize,
 
     /// Our cyclic input queue
-    inputs: Vec<PlayerInput<T::Input>>,
+    inputs: ProofVec<PlayerInput<T::Input>>,
     /// A pre-allocated prediction we are going to use to return predictions from.
     prediction: PlayerInput<T::Input>,
 
@@ -2634,14 +2646,14 @@ mod property_tests {
 /// - `InputQueueConfig::high_latency()` - 256 frames
 /// - `InputQueueConfig::minimal()` - 32 frames
 ///
-/// Kani uses `INPUT_QUEUE_LENGTH = 8` (via `#[cfg(kani)]`) for tractable verification.
+/// Kani uses `INPUT_QUEUE_LENGTH = 7` (via `#[cfg(kani)]`) for tractable verification.
 /// The invariants verified here are **size-independent** - they hold for any queue
 /// length >= 2. The proofs verify:
 /// - Circular buffer arithmetic correctness (wraparound at any boundary)
 /// - Index bounds checking (always < queue_length)
 /// - Length bounds (always <= queue_length)
 ///
-/// Therefore, proofs passing for queue_length=8 imply correctness for 32, 128, 256.
+/// Therefore, proofs passing for queue_length=7 imply correctness for 32, 128, 256.
 ///
 /// Note: Requires Kani verifier. Install with:
 ///   cargo install --locked kani-verifier
@@ -2654,9 +2666,11 @@ mod property_tests {
 ///
 /// Kani proofs require sufficient unwind bounds to verify loops. Key considerations:
 ///
-/// 1. **Vec initialization**: Creating `InputQueue` via `test_queue()` initializes a
-///    `Vec<PlayerInput>` with `INPUT_QUEUE_LENGTH` (8 under Kani) elements. This requires
-///    unwind >= 10 (8 elements + buffer for Vec internal bookkeeping).
+/// 1. **Buffer initialization**: Creating `InputQueue` via `test_queue()` fills its
+///    backing buffer (a `#[cfg(kani)]` heap-free [`ProofVec`](crate::proof_vec)) with
+///    `INPUT_QUEUE_LENGTH` (7 under Kani) blank inputs via a `0..queue_length` push
+///    loop, so the harness needs unwind >= 8 (7 fill iterations + 1 for the
+///    unwinding-assertion check). The proofs here use 10 for margin.
 ///
 /// 2. **Additional loops**: Add the maximum loop iterations to the base unwind:
 ///    - `for i in 0..N` requires +N iterations
@@ -2742,8 +2756,8 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies that adding a single input maintains INV-4 and INV-5.
     ///
-    /// Note: unwind(10) is needed because Vec initialization requires iterating
-    /// over INPUT_QUEUE_LENGTH (8 under Kani) elements.
+    /// Note: unwind(10) covers the construction loop that fills the queue's
+    /// backing buffer with INPUT_QUEUE_LENGTH (7 under Kani) blank inputs.
     ///
     /// - Tier: 3 (Slow, >2min)
     /// - Verifies: Single add_input preserves invariants (INV-4, INV-5)

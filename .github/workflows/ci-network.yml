@@ -137,16 +137,42 @@ jobs:
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
 
-  # Docker-based network tests with tc/netem
+  # Docker-based network tests with tc/netem.
+  #
+  # This job ONLY adds Linux tc/netem kernel chaos on top of the multi-process
+  # tests; the three native-OS `network-tests` jobs above are the real
+  # correctness gate (they run the same multi_process suite on ubuntu/windows/
+  # macos). A transient Docker Hub registry blip (e.g. run 588:
+  # `Get "https://registry-1.docker.io/v2/": context deadline exceeded`) must
+  # never block a PR, so this job is best-effort: `continue-on-error` lets a
+  # registry flake go yellow instead of red while the native gates still fail
+  # hard on real regressions.
   docker-network-tests:
     name: Network Tests (Docker)
     runs-on: ubuntu-latest
+    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+
+      # Pull the pinned base images up front with retry. The build below resolves
+      # `rust:1.86-slim-bookworm` and `debian:bookworm-slim` from Docker Hub,
+      # which intermittently times out (`registry-1.docker.io/v2/`: context
+      # deadline exceeded). `docker compose build` has no built-in registry
+      # retry, so we pre-pull here; cached layers make the subsequent build a
+      # no-op pull.
+      - name: Pre-pull base images (retry on registry flake)
+        uses: nick-fields/retry@v4
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 15
+          command: |
+            docker pull rust:1.86-slim-bookworm
+            docker pull debian:bookworm-slim
 
       - name: Build Docker image
         run: docker compose -f docker/docker-compose.yml build

@@ -1375,34 +1375,34 @@ pub(crate) fn allocation_failed(context: &'static str, requested_elements: usize
     }
 }
 
-/// Creates an empty `Vec<U>` with capacity reserved for exactly `count`
-/// elements, returning a structured [`FortressError`] (rather than aborting)
-/// when the reservation cannot be satisfied. The caller fills the returned
-/// vector.
+/// Creates an empty [`ProofVec<U>`](crate::proof_vec::ProofVec) with capacity
+/// reserved for `count` elements (in production), returning a structured
+/// [`FortressError`] (rather than aborting) when the reservation cannot be
+/// satisfied. The caller fills the returned vector.
 ///
-/// This is the single, canonical entry point for bounded, fallible `Vec`
+/// This is the single, canonical entry point for bounded, fallible vector
 /// pre-allocation across the crate. Routing every construction site through it
 /// keeps the zero-panic allocation policy in one place and—critically—keeps the
 /// formal proofs tractable.
 ///
 /// # Allocation strategy
 ///
-/// In production the capacity is reserved with the fallible
-/// [`Vec::try_reserve_exact`], so out-of-memory is surfaced as a structured
-/// [`FortressError`] rather than aborting the process (zero-panic policy).
+/// In production [`ProofVec`](crate::proof_vec::ProofVec) is [`Vec`] and the
+/// capacity is reserved with the fallible [`Vec::try_reserve_exact`], so
+/// out-of-memory is surfaced as a structured [`FortressError`] rather than
+/// aborting the process (zero-panic policy).
 ///
-/// Under Kani we instead use the infallible [`Vec::with_capacity`]. This is not
-/// a cosmetic choice: modeling allocation *failure* drags the full
-/// `try_reserve` → `finish_grow` → `TryReserveError` → `?`-propagation →
-/// `FortressError`-drop machinery into CBMC at *every* construction site, and
-/// the product of those success/failure forks across the several allocations a
-/// `SyncLayer` performs explodes the state space (runner OOM / per-proof
-/// timeout). `with_capacity` is the lighter path the proofs verified
-/// historically (and produces identical codegen to a direct caller-side push
-/// loop). Allocation-failure handling is orthogonal to the behavioral
-/// invariants the proofs check, and CBMC cannot meaningfully exercise true OOM,
-/// so under verification we reason about the success path only. The bound
-/// arithmetic that decides `count` is still verified normally.
+/// Under Kani [`ProofVec`](crate::proof_vec::ProofVec) is the stack-backed
+/// `InlineVec`, which performs no heap allocation. Modeling Rust's
+/// `Vec`/`RawVec`/`Layout` allocator in CBMC is what drove the rollback proofs
+/// to ~20 GB / OOM — the `size_of::<U>() * count` multiply plus the
+/// capacity-overflow, `grow`, and `deallocate` paths, a cost paid per operation
+/// rather than per element. The inline buffer removes that machinery entirely:
+/// `count` is ignored here (the capacity is a compile-time constant and a `push`
+/// past it trips a `kani::assert`). Allocation-failure handling is orthogonal to
+/// the behavioral invariants the proofs check, and CBMC cannot meaningfully
+/// exercise true OOM, so under verification we reason about the success path
+/// only. The bound arithmetic that decides `count` is still verified normally.
 ///
 /// Returning a pre-reserved *empty* vector (rather than taking a fill closure)
 /// keeps a single `?` per construction site and avoids dragging the closure's
@@ -1411,7 +1411,7 @@ pub(crate) fn allocation_failed(context: &'static str, requested_elements: usize
 pub(crate) fn try_with_capacity<U>(
     count: usize,
     context: &'static str,
-) -> Result<Vec<U>, FortressError> {
+) -> Result<crate::proof_vec::ProofVec<U>, FortressError> {
     #[cfg(not(kani))]
     {
         let mut vec: Vec<U> = Vec::new();
@@ -1421,32 +1421,11 @@ pub(crate) fn try_with_capacity<U>(
     }
     #[cfg(kani)]
     {
-        let _ = context;
-        // CBMC SAT-explosion avoidance (Kani only; never compiled in production).
-        //
-        // `Vec::with_capacity(count)` and `try_reserve_exact(count)` both reach
-        // `RawVec::try_allocate_in` -> `Layout::array::<U>(count)`, whose
-        // `size_of::<U>() * count` is a 64-bit multiply. When `count` is a
-        // *runtime* value CBMC bit-blasts that multiply into a SAT-hard 64x64
-        // circuit (plus the capacity-overflow / alloc-error machinery), which
-        // dominated the propositional-reduction phase of the SyncLayer proofs
-        // and drove them toward ~18 GB / OOM. Passing a *compile-time constant*
-        // to `with_capacity` lets CBMC constant-fold the multiply, removing the
-        // circuit. We pick the smallest fixed capacity >= `count` from a short
-        // ladder so each arm's argument is a literal constant AND the backing
-        // buffer is not over-modeled. Every Kani proof requests a tiny count;
-        // the final arm preserves correctness (it merely reallocates once) for
-        // any hypothetical larger proof.
-        let v: Vec<U> = match count {
-            0 => Vec::new(),
-            1 => Vec::with_capacity(1),
-            2 => Vec::with_capacity(2),
-            n if n <= 4 => Vec::with_capacity(4),
-            n if n <= 8 => Vec::with_capacity(8),
-            n if n <= 16 => Vec::with_capacity(16),
-            _ => Vec::with_capacity(count),
-        };
-        Ok(v)
+        // The inline buffer is fixed-capacity and heap-free, so neither `count`
+        // nor `context` is needed; a `push` past the capacity trips a
+        // `kani::assert` in `InlineVec::push`.
+        let _ = (count, context);
+        Ok(crate::proof_vec::ProofVec::new())
     }
 }
 

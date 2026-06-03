@@ -1190,7 +1190,7 @@ pub struct InputQueueConfig {
     ///
     /// # Formal Specification Alignment
     /// - **TLA+**: `QUEUE_LENGTH` in `specs/tla/InputQueue.tla` (uses 3 for model checking)
-    /// - **Kani**: `INPUT_QUEUE_LENGTH` in `src/input_queue.rs` (uses 8 for tractable verification)
+    /// - **Kani**: `INPUT_QUEUE_LENGTH` in `src/input_queue.rs` (uses 7 for tractable verification)
     /// - **Z3**: `INPUT_QUEUE_LENGTH` in `tests/test_z3_verification.rs` (uses 128)
     /// - **formal-spec.md**: INV-4 (queue length bounds), INV-5 (index validity)
     /// - **spec-divergences.md**: Documents why different values are used
@@ -1510,7 +1510,7 @@ mod tests {
     /// Test that standard() explicitly equals INPUT_QUEUE_LENGTH.
     ///
     /// This test catches any accidental hardcoding of the queue length value.
-    /// Under Kani, INPUT_QUEUE_LENGTH is 8; in production it's 128.
+    /// Under Kani, INPUT_QUEUE_LENGTH is 7; in production it's 128.
     /// The test should pass in both environments.
     #[test]
     fn test_standard_preset_uses_input_queue_length_constant() {
