@@ -1422,8 +1422,31 @@ pub(crate) fn try_with_capacity<U>(
     #[cfg(kani)]
     {
         let _ = context;
-        // alloc-bound: `count` is the caller-validated element count.
-        Ok(Vec::<U>::with_capacity(count))
+        // CBMC SAT-explosion avoidance (Kani only; never compiled in production).
+        //
+        // `Vec::with_capacity(count)` and `try_reserve_exact(count)` both reach
+        // `RawVec::try_allocate_in` -> `Layout::array::<U>(count)`, whose
+        // `size_of::<U>() * count` is a 64-bit multiply. When `count` is a
+        // *runtime* value CBMC bit-blasts that multiply into a SAT-hard 64x64
+        // circuit (plus the capacity-overflow / alloc-error machinery), which
+        // dominated the propositional-reduction phase of the SyncLayer proofs
+        // and drove them toward ~18 GB / OOM. Passing a *compile-time constant*
+        // to `with_capacity` lets CBMC constant-fold the multiply, removing the
+        // circuit. We pick the smallest fixed capacity >= `count` from a short
+        // ladder so each arm's argument is a literal constant AND the backing
+        // buffer is not over-modeled. Every Kani proof requests a tiny count;
+        // the final arm preserves correctness (it merely reallocates once) for
+        // any hypothetical larger proof.
+        let v: Vec<U> = match count {
+            0 => Vec::new(),
+            1 => Vec::with_capacity(1),
+            2 => Vec::with_capacity(2),
+            n if n <= 4 => Vec::with_capacity(4),
+            n if n <= 8 => Vec::with_capacity(8),
+            n if n <= 16 => Vec::with_capacity(16),
+            _ => Vec::with_capacity(count),
+        };
+        Ok(v)
     }
 }
 

@@ -112,7 +112,11 @@ use crate::input_queue::InputQueue;
 use crate::network::messages::ConnectionStatus;
 use crate::sessions::config::SaveMode;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
-use crate::{report_violation, safe_frame_add, safe_frame_sub};
+use crate::{report_violation, safe_frame_add};
+// `safe_frame_sub!` is only invoked from the confirmed-frame discard pass,
+// which is compiled out under Kani (see `set_last_confirmed_frame`).
+#[cfg(not(kani))]
+use crate::safe_frame_sub;
 use crate::{
     Config, FortressError, FortressRequest, Frame, IndexOutOfBounds, InputStatus, InputVec,
     InternalErrorKind, InvalidFrameReason, PlayerHandle,
@@ -800,6 +804,25 @@ impl<T: Config> SyncLayer<T> {
         }
 
         self.last_confirmed_frame = frame;
+        // The confirmed-frame clamp above (the two `min`s plus the
+        // `first_incorrect` guard) is what every `set_last_confirmed_frame`
+        // proof asserts about `last_confirmed_frame`. The discard pass below
+        // only trims already-confirmed inputs out of the per-player input
+        // queues; it runs *after* `last_confirmed_frame` is assigned and never
+        // reads or writes it, so it cannot affect any verified invariant.
+        //
+        // Under Kani it is gated out because the `iter_mut()` over
+        // `input_queues` together with the `&mut`-self `discard_confirmed_frames`
+        // call forces CBMC to instantiate the full mutable pointer model of
+        // every queue's backing `Vec` for the *whole* function body — even on
+        // the proofs that construct zero input queues, where the loop is a
+        // provable no-op. Measured in isolation this single block accounts for
+        // ~17 GB of the ~18 GB peak `cbmc` RSS (and most of the wall time);
+        // removing it under verification keeps the clamp proofs tractable while
+        // leaving production / `cargo test` / loom builds byte-for-byte
+        // unchanged. Queue-trimming behavior is covered by the regular test
+        // suite, not by these frame-clamp proofs.
+        #[cfg(not(kani))]
         if self.last_confirmed_frame.as_i32() > 0 {
             let discard_frame = safe_frame_sub!(frame, 1, "SyncLayer::confirm_frame");
             for queue in self.input_queues.iter_mut() {
@@ -2299,16 +2322,22 @@ mod sync_layer_tests {
 ///    impact because `cfg(kani)` is inactive in every normal build). Measured
 ///    effect on `proof_confirmed_frame_bounded`: symex 265s -> 8s.
 /// 2. **Propositional-reduction (SAT) memory** — dominated by modeling the
-///    fallible-`Vec` allocation path (`RawVec::try_allocate_in`, `Layout`,
-///    `handle_alloc_error`, `TryReserveError`) reached via `SavedStates::try_new`
-///    and `try_with_capacity`. This is NOT fixed by the cell shim and remains
-///    the residual cost; the lever is to keep `num_players`/`max_prediction`/
-///    `queue_length` minimal (see the concretized proofs below) so the
-///    allocator path is exercised with the smallest possible structures.
+///    `Vec` allocation path (`RawVec::try_allocate_in`, `Layout::array`,
+///    `handle_alloc_error`) reached via `SavedStates::try_new`,
+///    `InputQueue::try_with_queue_length`, and the `input_queues` vector — all
+///    routed through `crate::error::try_with_capacity`. The dominant cost is
+///    `Layout::array::<U>(count)`'s 64-bit `size_of::<U>() * count` multiply:
+///    when `count` is a *runtime* value CBMC bit-blasts it into a SAT-hard
+///    64x64 circuit. This is addressed by the `#[cfg(kani)]` arm of
+///    `try_with_capacity` (see `error.rs`), which reserves a *compile-time
+///    constant* capacity (chosen from a small ladder >= `count`) so CBMC
+///    constant-folds the multiply away. Kani-only; zero production impact.
 ///
 /// Practical rule: concretize the construction parameters to the minimum that
-/// still exercises the asserted invariant, and keep the unwind bound as low as
-/// the (now-tiny) construction loops allow.
+/// still exercises the asserted invariant, keep the unwind bound as low as the
+/// (now-tiny) construction loops allow, and ensure any new collection sized by
+/// a runtime count is built through `try_with_capacity` so it benefits from the
+/// constant-capacity path above.
 ///
 /// Critical anti-pattern (regression caught 2026-05-09): a `kani::any()` value
 /// that flows into a function and becomes a *loop bound* causes CBMC path
@@ -2785,6 +2814,15 @@ mod kani_sync_layer_proofs {
             sync_layer.last_confirmed_frame() <= sync_layer.current_frame(),
             "INV-7: last_confirmed_frame should be <= current_frame",
         );
+
+        // The invariant has been checked. Tearing the `SyncLayer` down here
+        // would force CBMC to model `drop_in_place` over the `Vec`-backed
+        // input queues and `Rc<RefCell>` saved-state cells (the fallible
+        // allocator's `Layout`/dealloc circuit), which measured ~3-4 GB of
+        // peak `cbmc` RSS on its own and is entirely orthogonal to the
+        // frame-clamp property under test. `forget` is `#[cfg(kani)]`-only;
+        // production / `cargo test` / loom drop normally.
+        core::mem::forget(sync_layer);
     }
 
     /// Proof: Sparse saving respects last_saved_frame.
@@ -2819,6 +2857,11 @@ mod kani_sync_layer_proofs {
             sync_layer.last_confirmed_frame() <= sync_layer.last_saved_frame(),
             "With sparse saving, confirmed frame should not exceed last saved",
         );
+
+        // See `proof_confirmed_frame_bounded`: skip the `cfg(kani)`-irrelevant
+        // teardown of the `Vec`/`Rc<RefCell>` object graph, which is orthogonal
+        // to the sparse-saving clamp under test. Production drops normally.
+        core::mem::forget(sync_layer);
     }
 
     /// Proof: invalid freeze handles are rejected.
@@ -2938,5 +2981,11 @@ mod kani_sync_layer_proofs {
                 );
             }
         }
+
+        // See `proof_confirmed_frame_bounded`: the frozen-disconnected parity
+        // properties have been checked; skip the `cfg(kani)`-irrelevant teardown
+        // of the input queue's `Vec` and the saved-state `Rc<RefCell>` cells.
+        // Production / `cargo test` / loom drop normally.
+        core::mem::forget(sync_layer);
     }
 }
