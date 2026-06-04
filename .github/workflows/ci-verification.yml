@@ -47,6 +47,7 @@ jobs:
   kani-coverage-check:
     name: Kani Proof Coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - uses: actions/checkout@v6
@@ -59,6 +60,8 @@ jobs:
   tla-verification:
     name: TLA+ Model Checking
     runs-on: ubuntu-latest
+    # Job budget must exceed the 30-min verification step plus Java/TLA setup.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v6
@@ -71,6 +74,7 @@ jobs:
 
       - name: Cache TLA+ tools
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: .tla-tools
           key: tla-tools-${{ hashFiles('.tla-tools-version') }}
@@ -83,6 +87,7 @@ jobs:
   z3-verification:
     name: Z3 SMT Verification
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v6
@@ -97,33 +102,10 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - name: Configure sccache
-        id: sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-        continue-on-error: true
-
-      - name: Verify sccache is working
-        id: sccache-check
-        if: steps.sccache.outcome == 'success'
-        run: ./scripts/ci/verify-sccache.sh
-        continue-on-error: true
-
-      - name: Clear sccache env on failure
-        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
-        run: |
-          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
-
-      - name: Cache cargo registry and build
-        uses: actions/cache@v5
+      - name: Setup Rust cache
+        uses: ./.github/actions/setup-rust-cache
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: z3-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            z3-${{ runner.os }}-cargo-
+          cache-key: z3
 
       - name: Install Z3 library
         run: sudo apt-get update && sudo apt-get install -y libz3-dev
@@ -131,17 +113,12 @@ jobs:
       - name: Run Z3 verification tests (nextest)
         run: cargo nextest run --profile ci --test verification --features z3-verification -E 'test(z3)'
         timeout-minutes: 10
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
-          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
-          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
-          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
-          SCCACHE_IDLE_TIMEOUT: "0"
 
   # Kani Formal Verification (Tier 1 - Fast proofs)
   kani-tier1:
     name: Kani Tier 1 (Fast)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v6
@@ -153,6 +130,7 @@ jobs:
 
       - name: Cache Kani
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/bin/cargo-kani
@@ -167,6 +145,7 @@ jobs:
       # different lockfile) restore a warm target as a starting point.
       - name: Cache Kani build (cargo registry + target)
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
@@ -219,6 +198,7 @@ jobs:
   kani-tier2:
     name: Kani Tier 2 (${{ matrix.part }}/6)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -234,6 +214,7 @@ jobs:
 
       - name: Cache Kani
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/bin/cargo-kani
@@ -248,6 +229,7 @@ jobs:
       # different lockfile) restore a warm target as a starting point.
       - name: Cache Kani build (cargo registry + target)
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
@@ -299,6 +281,7 @@ jobs:
   kani-tier3:
     name: Kani Tier 3 (${{ matrix.part }}/5)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -314,6 +297,7 @@ jobs:
 
       - name: Cache Kani
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/bin/cargo-kani
@@ -328,6 +312,7 @@ jobs:
       # different lockfile) restore a warm target as a starting point.
       - name: Cache Kani build (cargo registry + target)
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
@@ -391,6 +376,7 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry

@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-04
+
 ### Added
 
 - Spectator failover via `SessionBuilder::start_spectator_session_multi(&[T::Address], socket)`: a spectator can connect to multiple redundant game peers ("hosts") at once. Unresolved frames use the highest-priority currently connected host by builder order as the canonical source; lower-priority host snapshots stay provisional while a higher-priority host is connected, and if the canonical host disconnects before a frame resolves the next surviving host is promoted only for unresolved frames. Connection status is taken from the selected host's whole-frame snapshot rather than merged player-by-player across hosts. Redundant hosts that disagree on the same player/frame now fail closed: the spectator records a frame-sync violation, emits `FortressEvent::SpectatorDivergence`, and future `advance_frame` calls return `FortressError::SpectatorDivergence` without rewriting frames that already advanced. A clean all-host disconnect with no divergence or malformed canonical data releases the stream-delay boundary so already-buffered frames can drain before `PredictionThreshold`. `SpectatorSession::num_hosts()` reports the current number of connected hosts. The existing single-host `start_spectator_session` delegates to the same construction path and now also rejects invalid `SpectatorConfig` values. If duplicate host addresses are supplied, inbound packets are routed to the first matching host endpoint.
@@ -434,7 +436,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.8"
+fortress-rollback = "0.9"
 ```
 
 ### Import Path Change
@@ -494,7 +496,8 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/wallstop/fortress-rollback/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/wallstop/fortress-rollback/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0

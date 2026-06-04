@@ -55,6 +55,7 @@ jobs:
   vale-lint:
     name: Vale Prose Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     continue-on-error: true # Advisory, not blocking initially
 
     steps:
@@ -62,6 +63,7 @@ jobs:
 
       - name: Cache Vale styles
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: .vale/styles
           key: vale-styles-${{ hashFiles('.vale.ini') }}
@@ -180,6 +182,7 @@ jobs:
   wiki-consistency:
     name: Wiki Consistency
     runs-on: ubuntu-latest
+    timeout-minutes: 8
 
     steps:
       - uses: actions/checkout@v6
@@ -198,6 +201,7 @@ jobs:
   wiki-sync-dry-run:
     name: Script Tests & Wiki Dry-Run
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v6
@@ -232,6 +236,7 @@ jobs:
   markdown-lint:
     name: Markdown Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 8
 
     steps:
       - uses: actions/checkout@v6
@@ -253,6 +258,7 @@ jobs:
   code-fence-syntax:
     name: Code Fence Syntax
     runs-on: ubuntu-latest
+    timeout-minutes: 8
 
     steps:
       - uses: actions/checkout@v6
@@ -296,6 +302,7 @@ jobs:
   doc-claims:
     name: Doc Claims Check
     runs-on: ubuntu-latest
+    timeout-minutes: 8
 
     steps:
       - uses: actions/checkout@v6
@@ -309,6 +316,7 @@ jobs:
   link-check:
     name: Link Check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v6
@@ -383,6 +391,7 @@ jobs:
   lychee-link-check:
     name: Lychee Link Check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     continue-on-error: true # Advisory initially, may find different issues
 
     steps:
@@ -390,6 +399,7 @@ jobs:
 
       - name: Restore lychee cache
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: .lycheecache
           key: lychee-cache-${{ github.sha }}
@@ -479,6 +489,7 @@ jobs:
   rustdoc-links:
     name: Rustdoc Link Check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     # Note: We intentionally don't use sccache for doc builds because:
     # 1. Doc builds are fast and don't benefit much from compilation caching
@@ -495,6 +506,7 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
@@ -526,6 +538,7 @@ jobs:
   rustdoc-deadlinks:
     name: Rustdoc Dead Links
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v6
@@ -540,6 +553,7 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
@@ -589,6 +603,7 @@ jobs:
   doc-tests:
     name: Documentation Examples
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v6
@@ -598,6 +613,7 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
@@ -645,6 +661,7 @@ jobs:
   doc-coverage:
     name: Documentation Coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v6
@@ -699,6 +716,7 @@ jobs:
   markdown-code-verify:
     name: Markdown Code Samples
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v6
@@ -708,6 +726,7 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry

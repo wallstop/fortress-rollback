@@ -9,6 +9,7 @@ on:
 jobs:
   llm-lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       # Both scripts use stdlib only (pathlib, re, sys) — no pip install needed

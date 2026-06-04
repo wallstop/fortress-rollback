@@ -109,6 +109,7 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
+        continue-on-error: true
         timeout-minutes: 5
         with:
           path: |

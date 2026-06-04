@@ -2061,7 +2061,7 @@ When enabled, the `Config` and `NonBlockingSocket` traits require their associat
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["sync-send"] }
+fortress-rollback = { version = "0.9", features = ["sync-send"] }
 ```
 
 **Without `sync-send`:**
@@ -2090,7 +2090,7 @@ Enables `TokioUdpSocket`, an adapter that wraps a Tokio async UDP socket and imp
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["tokio"] }
+fortress-rollback = { version = "0.9", features = ["tokio"] }
 ```
 
 **Example usage:**
@@ -2127,7 +2127,7 @@ Enables JSON serialization methods (`to_json()` and `to_json_pretty()`) on telem
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["json"] }
+fortress-rollback = { version = "0.9", features = ["json"] }
 ```
 
 **Example usage:**
@@ -2157,7 +2157,7 @@ Enables runtime invariant checking in release builds. Normally, invariant checks
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["paranoid"] }
+fortress-rollback = { version = "0.9", features = ["paranoid"] }
 ```
 
 **Use cases:**
@@ -2255,19 +2255,19 @@ Most features are independent and can be combined freely. Here's a matrix showin
 ```toml
 # Standard multi-threaded game
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["sync-send"] }
+fortress-rollback = { version = "0.9", features = ["sync-send"] }
 
 # Async server with Tokio
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["sync-send", "tokio"] }
+fortress-rollback = { version = "0.9", features = ["sync-send", "tokio"] }
 
 # Debugging production issues
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["sync-send", "paranoid"] }
+fortress-rollback = { version = "0.9", features = ["sync-send", "paranoid"] }
 
 # Development with examples
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["sync-send", "graphical-examples"] }
+fortress-rollback = { version = "0.9", features = ["sync-send", "graphical-examples"] }
 ```
 
 ### Web / WASM Integration
@@ -2289,7 +2289,7 @@ Browsers don't support raw UDP sockets. For browser games, you need WebRTC or We
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["sync-send"] }
+fortress-rollback = { version = "0.9", features = ["sync-send"] }
 matchbox_socket = { version = "0.13", features = ["ggrs"] }
 ```
 

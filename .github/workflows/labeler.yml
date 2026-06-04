@@ -11,6 +11,7 @@ jobs:
   label-areas:
     name: Label PR by area
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: write
@@ -24,6 +25,7 @@ jobs:
   label-size:
     name: Label PR by size
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: write

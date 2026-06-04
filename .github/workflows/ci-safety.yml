@@ -64,6 +64,7 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
@@ -108,7 +109,7 @@ jobs:
   strict-build:
     name: Strict Build (${{ matrix.check }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -132,6 +133,7 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
@@ -198,6 +200,7 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
@@ -366,7 +369,7 @@ jobs:
   doc-verification:
     name: Documentation Verification
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout code
@@ -377,6 +380,7 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
@@ -438,6 +442,9 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        # Best-effort, consistent with every other cache step in CI: a
+        # Cache-service outage degrades to an uncached build, never a hard fail.
+        continue-on-error: true
         with:
           shared-key: rust-ci
           cache-on-failure: false
@@ -513,6 +520,7 @@ jobs:
   safety-summary:
     name: Safety Check Summary
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs: [careful, strict-build, strict-clippy, panic-patterns, doc-verification, no-panics]
     if: always()
 

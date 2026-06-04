@@ -140,7 +140,7 @@ For networking in the browser, use **[Matchbox](https://github.com/johanhelsing/
 
 ```toml
 [dependencies]
-fortress-rollback = "0.8"
+fortress-rollback = "0.9"
 matchbox_socket = { version = "0.13", features = ["ggrs"] }
 ```
 
