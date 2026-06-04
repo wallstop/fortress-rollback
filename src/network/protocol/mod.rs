@@ -13,11 +13,13 @@ pub use state::ProtocolState;
 
 use crate::error::{allocation_failed, SerializationErrorKind};
 use crate::frame_info::PlayerInput;
+use crate::network::codec;
 use crate::network::compression::{decode_with_max_len, try_encode};
 use crate::network::messages::{
     ChecksumReport, ConnectionStatus, Input, InputAck, Message, MessageBody, MessageHeader,
     QualityReply, QualityReport, SyncReply, SyncRequest,
 };
+use crate::rle;
 use crate::rng::{random, Pcg32, Rng, SeedableRng};
 use crate::sessions::config::{ProtocolConfig, SyncConfig};
 use crate::telemetry::{ViolationKind, ViolationSeverity};
@@ -303,6 +305,99 @@ enum AckDisposition {
     Ignore,
 }
 
+fn input_batch_decoded_byte_limit_with_cap(
+    reference_len: usize,
+    pending_output_limit: usize,
+    decoded_byte_cap: usize,
+) -> Option<usize> {
+    reference_len
+        .checked_mul(pending_output_limit)
+        .map(|configured_limit| configured_limit.min(decoded_byte_cap))
+}
+
+fn input_batch_decoded_byte_limit(
+    reference_len: usize,
+    pending_output_limit: usize,
+) -> Option<usize> {
+    input_batch_decoded_byte_limit_with_cap(
+        reference_len,
+        pending_output_limit,
+        rle::DEFAULT_MAX_DECODED_LEN,
+    )
+}
+
+fn input_batch_len_for_limits(
+    pending_len: usize,
+    reference_len: usize,
+    pending_output_limit: usize,
+    decoded_byte_cap: usize,
+) -> Option<usize> {
+    if reference_len == 0 {
+        return Some(0);
+    }
+
+    let max_decoded_input_bytes = input_batch_decoded_byte_limit_with_cap(
+        reference_len,
+        pending_output_limit,
+        decoded_byte_cap,
+    )?;
+    let byte_limited_frames = max_decoded_input_bytes / reference_len;
+
+    Some(
+        pending_len
+            .min(pending_output_limit)
+            .min(byte_limited_frames),
+    )
+}
+
+fn validate_default_input_wire_size<T: Config>() -> Result<usize, FortressError> {
+    let input_size = codec::encoded_len(&T::Input::default()).map_err(|err| {
+        report_violation!(
+            ViolationSeverity::Critical,
+            ViolationKind::InternalError,
+            "Failed to measure default input type serialization: {}",
+            err
+        );
+        SerializationErrorKind::EndpointCreationFailed
+    })?;
+    if input_size == 0 {
+        return Err(SerializationErrorKind::InputSerializedSizeZero.into());
+    }
+    Ok(input_size)
+}
+
+fn validate_input_frame_wire_size(
+    input_size: usize,
+    player_count: usize,
+) -> Result<usize, FortressError> {
+    let frame_len = input_size.checked_mul(player_count).ok_or({
+        FortressError::SerializationErrorStructured {
+            kind: SerializationErrorKind::InputSerializedFrameTooLarge {
+                frame_len: usize::MAX,
+                max: rle::DEFAULT_MAX_DECODED_LEN,
+            },
+        }
+    })?;
+    if frame_len > rle::DEFAULT_MAX_DECODED_LEN {
+        return Err(SerializationErrorKind::InputSerializedFrameTooLarge {
+            frame_len,
+            max: rle::DEFAULT_MAX_DECODED_LEN,
+        }
+        .into());
+    }
+    Ok(frame_len)
+}
+
+fn validate_protocol_input_wire_sizes<T: Config>(
+    recv_player_num: usize,
+    local_players: usize,
+) -> Result<(), FortressError> {
+    let input_size = validate_default_input_wire_size::<T>()?;
+    validate_input_frame_wire_size(input_size, recv_player_num)?;
+    validate_input_frame_wire_size(input_size, local_players)?;
+    Ok(())
+}
+
 impl<T: Config> UdpProtocol<T> {
     /// Internal constructor for UDP protocol handler.
     ///
@@ -332,6 +427,10 @@ impl<T: Config> UdpProtocol<T> {
             None => Instant::now(),
         };
 
+        handles.sort_unstable();
+        let recv_player_num = handles.len();
+        validate_protocol_input_wire_sizes::<T>(recv_player_num, local_players)?;
+
         // Initialize protocol RNG if a deterministic seed is provided
         let mut protocol_rng = protocol_config.protocol_rng_seed.map(Pcg32::seed_from_u64);
 
@@ -347,8 +446,6 @@ impl<T: Config> UdpProtocol<T> {
             };
         }
 
-        handles.sort_unstable();
-        let recv_player_num = handles.len();
         // Convert Vec to Arc<[PlayerHandle]> for cheap cloning in hot path
         let handles: Arc<[PlayerHandle]> = handles.into();
 
@@ -450,15 +547,38 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     pub(crate) fn update_local_frame_advantage(&mut self, local_frame: Frame) {
-        if local_frame == Frame::NULL || self.last_recv_frame() == Frame::NULL {
+        let last_recv_frame = self.last_recv_frame();
+        if local_frame == Frame::NULL || last_recv_frame == Frame::NULL {
             return;
         }
-        // Estimate which frame the other client is on by looking at the last frame they gave us plus some delta for the packet roundtrip time.
-        // Use saturating conversion to avoid panic if round_trip_time is extremely large
-        let ping = i32::try_from(self.round_trip_time / 2).unwrap_or(i32::MAX);
-        let remote_frame = self.last_recv_frame() + ((ping * self.fps as i32) / 1000);
+
+        if !local_frame.is_valid() || !last_recv_frame.is_valid() {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "update_local_frame_advantage received invalid frame(s)"
+            );
+            return;
+        }
+
+        // Estimate which frame the other client is on by looking at the last frame they gave us
+        // plus some delta for the packet roundtrip time. RTT is peer-influenced, so every step
+        // uses checked or saturating arithmetic before narrowing back to frame units.
+        let remote_frame_delta = self
+            .round_trip_time
+            .checked_div(2)
+            .and_then(|half_rtt| half_rtt.checked_mul(self.fps as u128))
+            .map(|frame_ms| frame_ms / 1000)
+            .and_then(|frames| i32::try_from(frames).ok())
+            .unwrap_or(i32::MAX);
+        let remote_frame = safe_frame_add!(
+            last_recv_frame,
+            remote_frame_delta,
+            "UdpProtocol::update_local_frame_advantage"
+        );
+
         // Our frame "advantage" is how many frames behind the remote client we are. (It's an advantage because they will have to predict more often)
-        self.local_frame_advantage = remote_frame - local_frame;
+        self.local_frame_advantage = remote_frame.as_i32().saturating_sub(local_frame.as_i32());
     }
 
     pub(crate) fn network_stats(&self) -> Result<NetworkStats, FortressError> {
@@ -733,7 +853,29 @@ impl<T: Config> UdpProtocol<T> {
             return;
         }
 
-        let endpoint_data = InputBytes::from_inputs::<T>(self.num_players, inputs);
+        // We should never have so much pending input for a remote player. If
+        // they are no longer acking our input, disconnect before mutating the
+        // local send sequence.
+        if self.pending_output.len() >= self.protocol_config.pending_output_limit {
+            self.event_queue.push_back(Event::Disconnected);
+            return;
+        }
+
+        let endpoint_data = match InputBytes::try_from_inputs::<T>(self.num_players, inputs) {
+            Ok(endpoint_data) => endpoint_data,
+            Err(err) => {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::NetworkProtocol,
+                    "send_input failed to serialize input bytes: {:?}",
+                    err
+                );
+                return;
+            },
+        };
+        if !self.pending_input_matches_reference_len(&endpoint_data, "send_input") {
+            return;
+        }
 
         // register the input and advantages in the time sync layer
         self.time_sync_layer.advance_frame(
@@ -743,12 +885,6 @@ impl<T: Config> UdpProtocol<T> {
         );
 
         self.pending_output.push_back(endpoint_data);
-
-        // we should never have so much pending input for a remote player (if they didn't ack, we should stop at MAX_PREDICTION_THRESHOLD)
-        // this is a spectator that didn't ack our input, we just disconnect them
-        if self.pending_output.len() > self.protocol_config.pending_output_limit {
-            self.event_queue.push_back(Event::Disconnected);
-        }
 
         self.send_pending_output(connect_status);
     }
@@ -796,7 +932,21 @@ impl<T: Config> UdpProtocol<T> {
             );
             return;
         }
-        let endpoint_data = InputBytes::from_inputs::<T>(self.num_players, inputs);
+        let endpoint_data = match InputBytes::try_from_inputs::<T>(self.num_players, inputs) {
+            Ok(endpoint_data) => endpoint_data,
+            Err(err) => {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::NetworkProtocol,
+                    "enqueue_replicated_input failed to serialize input bytes: {:?}",
+                    err
+                );
+                return;
+            },
+        };
+        if !self.pending_input_matches_reference_len(&endpoint_data, "enqueue_replicated_input") {
+            return;
+        }
         self.pending_output.push_back(endpoint_data);
     }
 
@@ -812,6 +962,22 @@ impl<T: Config> UdpProtocol<T> {
             .saturating_sub(self.pending_output.len())
     }
 
+    fn pending_input_matches_reference_len(&self, input: &InputBytes, context: &str) -> bool {
+        let reference_len = self.last_acked_input.bytes.len();
+        if reference_len == 0 || input.bytes.len() != reference_len {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "{} refused pending input: input bytes {}, reference bytes {}",
+                context,
+                input.bytes.len(),
+                reference_len
+            );
+            return false;
+        }
+        true
+    }
+
     /// Flushes any queued `pending_output` entries through the wire by
     /// triggering a `send_pending_output` call. Used in tandem with
     /// [`enqueue_replicated_input`] when bulk-pushing gap-fill frames after a
@@ -823,7 +989,27 @@ impl<T: Config> UdpProtocol<T> {
         self.send_pending_output(connect_status);
     }
 
+    fn pending_output_batch_len_with_cap(&self, decoded_byte_cap: usize) -> Option<usize> {
+        input_batch_len_for_limits(
+            self.pending_output.len(),
+            self.last_acked_input.bytes.len(),
+            self.protocol_config.pending_output_limit,
+            decoded_byte_cap,
+        )
+    }
+
     fn send_pending_output(&mut self, connect_status: &[ConnectionStatus]) {
+        self.send_pending_output_with_decoded_byte_cap(
+            connect_status,
+            rle::DEFAULT_MAX_DECODED_LEN,
+        );
+    }
+
+    fn send_pending_output_with_decoded_byte_cap(
+        &mut self,
+        connect_status: &[ConnectionStatus],
+        decoded_byte_cap: usize,
+    ) {
         let mut body = Input::default();
 
         if let Some(input) = self.pending_output.front() {
@@ -845,10 +1031,38 @@ impl<T: Config> UdpProtocol<T> {
             }
             body.start_frame = input.frame;
 
+            let batch_len = match self.pending_output_batch_len_with_cap(decoded_byte_cap) {
+                Some(batch_len) => batch_len,
+                None => {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "Input encode limit overflow: reference bytes {} * pending output limit {}",
+                        self.last_acked_input.bytes.len(),
+                        self.protocol_config.pending_output_limit
+                    );
+                    return;
+                },
+            };
+            if batch_len == 0 {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::NetworkProtocol,
+                    "Cannot encode pending inputs: reference bytes {}, pending output limit {}, pending len {}",
+                    self.last_acked_input.bytes.len(),
+                    self.protocol_config.pending_output_limit,
+                    self.pending_output.len()
+                );
+                return;
+            }
+
             // encode all pending inputs to a byte buffer
             body.bytes = match try_encode(
                 &self.last_acked_input.bytes,
-                self.pending_output.iter().map(|gi| &gi.bytes),
+                self.pending_output
+                    .iter()
+                    .take(batch_len)
+                    .map(|gi| &gi.bytes),
             ) {
                 Ok(bytes) => bytes,
                 Err(err) => {
@@ -862,14 +1076,15 @@ impl<T: Config> UdpProtocol<T> {
                 },
             };
             trace!(
-                "Encoded {} bytes from {} pending output(s) into {} bytes",
+                "Encoded {} bytes from {} of {} pending output(s) into {} bytes",
                 {
                     let mut sum = 0;
-                    for gi in self.pending_output.iter() {
+                    for gi in self.pending_output.iter().take(batch_len) {
                         sum += gi.bytes.len();
                     }
                     sum
                 },
+                batch_len,
                 self.pending_output.len(),
                 body.bytes.len()
             );
@@ -1137,11 +1352,10 @@ impl<T: Config> UdpProtocol<T> {
 
         // if we have the necessary input saved, we decode
         if let Some(decode_inp) = self.recv_inputs.get(&decode_frame) {
-            let max_decoded_input_bytes = match decode_inp
-                .bytes
-                .len()
-                .checked_mul(self.protocol_config.pending_output_limit)
-            {
+            let max_decoded_input_bytes = match input_batch_decoded_byte_limit(
+                decode_inp.bytes.len(),
+                self.protocol_config.pending_output_limit,
+            ) {
                 Some(max) => max,
                 None => {
                     report_violation!(
@@ -1400,6 +1614,53 @@ mod tests {
         type Address = SocketAddr;
     }
 
+    #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
+    struct UnitInput;
+
+    struct UnitInputConfig;
+
+    impl Config for UnitInputConfig {
+        type Input = UnitInput;
+        type State = TestState;
+        type Address = SocketAddr;
+    }
+
+    #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
+    enum VariableInput {
+        #[default]
+        Idle,
+        Active(u32),
+    }
+
+    struct VariableInputConfig;
+
+    impl Config for VariableInputConfig {
+        type Input = VariableInput;
+        type State = TestState;
+        type Address = SocketAddr;
+    }
+
+    #[derive(Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
+    enum BalancedVariableInput {
+        Short,
+        Medium(u32),
+        Long(u64),
+    }
+
+    impl Default for BalancedVariableInput {
+        fn default() -> Self {
+            Self::Medium(0)
+        }
+    }
+
+    struct BalancedVariableInputConfig;
+
+    impl Config for BalancedVariableInputConfig {
+        type Input = BalancedVariableInput;
+        type State = TestState;
+        type Address = SocketAddr;
+    }
+
     fn test_addr() -> SocketAddr {
         "127.0.0.1:7000".parse().unwrap()
     }
@@ -1457,6 +1718,18 @@ mod tests {
                     random_reply: random,
                 },
             );
+        }
+    }
+
+    fn queued_input_body(protocol: &UdpProtocol<TestConfig>) -> &Input {
+        match &protocol
+            .send_queue
+            .front()
+            .expect("input message should be queued")
+            .body
+        {
+            MessageBody::Input(body) => body,
+            other => panic!("expected input message, got {other:?}"),
         }
     }
 
@@ -2333,6 +2606,25 @@ mod tests {
     }
 
     #[test]
+    fn update_local_frame_advantage_saturates_peer_influenced_rtt() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        let remote_frame = Frame::new(i32::MAX - 1);
+        protocol.recv_inputs.insert(
+            remote_frame,
+            InputBytes {
+                frame: remote_frame,
+                bytes: vec![0; std::mem::size_of::<TestInput>()],
+            },
+        );
+        protocol.round_trip_time = u128::MAX;
+
+        protocol.update_local_frame_advantage(Frame::new(0));
+
+        assert_eq!(protocol.local_frame_advantage, i32::MAX);
+    }
+
+    #[test]
     fn average_frame_advantage_delegates_to_time_sync() {
         let protocol: UdpProtocol<TestConfig> =
             create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
@@ -2700,18 +2992,17 @@ mod tests {
 
     #[test]
     fn on_input_drops_packet_when_configured_decode_limit_overflows() {
-        let config = ProtocolConfig {
-            pending_output_limit: usize::MAX,
-            ..ProtocolConfig::default()
-        };
         let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
             vec![PlayerHandle::new(0)],
             2,
             1,
             8,
             SyncConfig::default(),
-            config,
+            ProtocolConfig::default(),
         );
+        // Public config validation rejects this value; keep the receive path
+        // defensive against internal mutation or future construction changes.
+        protocol.protocol_config.pending_output_limit = usize::MAX;
         protocol.synchronize().unwrap();
 
         for _ in 0..TEST_NUM_SYNC_PACKETS {
@@ -2737,6 +3028,54 @@ mod tests {
             start_frame: Frame::new(1),
             ack_frame: Frame::NULL,
             bytes: vec![1, 2, 3],
+            disconnect_requested: false,
+            peer_connect_status: vec![ConnectionStatus::default(); 2],
+        };
+        let inputs_before = protocol.recv_inputs.len();
+
+        protocol.on_input(&input);
+
+        assert_eq!(protocol.recv_inputs.len(), inputs_before);
+        assert!(!protocol.recv_inputs.contains_key(&Frame::new(1)));
+    }
+
+    #[test]
+    fn on_input_clamps_configured_decode_limit_to_rle_default_cap() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::default(),
+        );
+        // Public config validation rejects this value; keep the receive path
+        // defensive against internal mutation or future construction changes.
+        protocol.protocol_config.pending_output_limit = usize::MAX;
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+
+        protocol.recv_inputs.insert(
+            Frame::new(0),
+            InputBytes {
+                frame: Frame::new(0),
+                bytes: vec![0],
+            },
+        );
+
+        let bomb_len = (rle::DEFAULT_MAX_DECODED_LEN as u64) + 1;
+        let mut header = (bomb_len << 2) | 1; // repeat=1, bit=0 (zero fill)
+        let mut bomb = Vec::new();
+        while header >= 0x80 {
+            bomb.push((header as u8) | 0x80);
+            header >>= 7;
+        }
+        bomb.push(header as u8);
+
+        let input = Input {
+            start_frame: Frame::new(1),
+            ack_frame: Frame::NULL,
+            bytes: bomb,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
         };
@@ -3385,6 +3724,84 @@ mod tests {
     }
 
     #[test]
+    fn protocol_new_rejects_zero_byte_input_type() {
+        let result = UdpProtocol::<UnitInputConfig>::new(
+            vec![PlayerHandle::new(0)],
+            test_addr(),
+            2,
+            1,
+            8,
+            Duration::from_secs(5),
+            Duration::from_secs(3),
+            60,
+            DesyncDetection::Off,
+            SyncConfig::default(),
+            ProtocolConfig::default(),
+            TimeSyncConfig::default(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(FortressError::SerializationErrorStructured {
+                kind: SerializationErrorKind::InputSerializedSizeZero
+            })
+        ));
+    }
+
+    #[test]
+    fn protocol_input_frame_wire_size_rejects_frame_larger_than_decode_cap() {
+        assert!(matches!(
+            validate_input_frame_wire_size(rle::DEFAULT_MAX_DECODED_LEN + 1, 1),
+            Err(FortressError::SerializationErrorStructured {
+                kind: SerializationErrorKind::InputSerializedFrameTooLarge {
+                    frame_len,
+                    max
+                }
+            }) if frame_len == rle::DEFAULT_MAX_DECODED_LEN + 1
+                && max == rle::DEFAULT_MAX_DECODED_LEN
+        ));
+
+        assert!(matches!(
+            validate_input_frame_wire_size(2, usize::MAX),
+            Err(FortressError::SerializationErrorStructured {
+                kind: SerializationErrorKind::InputSerializedFrameTooLarge {
+                    frame_len: usize::MAX,
+                    max
+                }
+            }) if max == rle::DEFAULT_MAX_DECODED_LEN
+        ));
+    }
+
+    #[test]
+    fn protocol_new_rejects_local_input_frame_larger_than_decode_cap() {
+        let local_players = (rle::DEFAULT_MAX_DECODED_LEN / 4) + 1;
+        let result = UdpProtocol::<TestConfig>::new(
+            vec![PlayerHandle::new(0)],
+            test_addr(),
+            local_players,
+            local_players,
+            8,
+            Duration::from_secs(5),
+            Duration::from_secs(3),
+            60,
+            DesyncDetection::Off,
+            SyncConfig::default(),
+            ProtocolConfig::default(),
+            TimeSyncConfig::default(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(FortressError::SerializationErrorStructured {
+                kind: SerializationErrorKind::InputSerializedFrameTooLarge {
+                    frame_len,
+                    max
+                }
+            }) if frame_len == local_players * 4 && max == rle::DEFAULT_MAX_DECODED_LEN
+        ));
+    }
+
+    #[test]
     fn protocol_magic_is_never_zero() {
         // Test that the magic number generation loop correctly handles
         // the case where the first random value might be zero
@@ -3506,6 +3923,270 @@ mod tests {
             small_limit,
             "enqueue_replicated_input must not push past pending_output_limit"
         );
+    }
+
+    #[test]
+    fn send_input_disconnects_without_mutating_when_pending_output_full() {
+        let small_limit: usize = 2;
+        let config = ProtocolConfig {
+            pending_output_limit: small_limit,
+            ..ProtocolConfig::default()
+        };
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+        protocol.send_queue.clear();
+        protocol.event_queue.clear();
+
+        for i in 0..small_limit {
+            protocol.pending_output.push_back(InputBytes {
+                frame: Frame::new(i32::try_from(i).unwrap()),
+                bytes: vec![u8::try_from(i).unwrap(); 4],
+            });
+        }
+
+        let mut inputs: BTreeMap<PlayerHandle, PlayerInput<TestInput>> = BTreeMap::new();
+        inputs.insert(
+            PlayerHandle::new(0),
+            PlayerInput::new(
+                Frame::new(i32::try_from(small_limit).unwrap()),
+                TestInput { inp: 99 },
+            ),
+        );
+        let connect_status = vec![ConnectionStatus::default(); 2];
+
+        protocol.send_input(&inputs, &connect_status);
+
+        assert_eq!(protocol.pending_output.len(), small_limit);
+        assert!(protocol.send_queue.is_empty());
+        assert!(protocol
+            .event_queue
+            .iter()
+            .any(|event| matches!(event, Event::Disconnected)));
+    }
+
+    #[test]
+    fn send_pending_output_encodes_only_configured_frame_prefix() {
+        let small_limit: usize = 3;
+        let pending_count: usize = 6;
+        let config = ProtocolConfig {
+            pending_output_limit: small_limit,
+            ..ProtocolConfig::default()
+        };
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+        protocol.send_queue.clear();
+
+        for i in 0..pending_count {
+            protocol.pending_output.push_back(InputBytes {
+                frame: Frame::new(i32::try_from(i).unwrap()),
+                bytes: u32::try_from(i + 1).unwrap().to_le_bytes().to_vec(),
+            });
+        }
+        let expected: Vec<_> = protocol
+            .pending_output
+            .iter()
+            .take(small_limit)
+            .map(|input| input.bytes.clone())
+            .collect();
+        let connect_status = vec![ConnectionStatus::default(); 2];
+
+        protocol.send_pending_output(&connect_status);
+
+        assert_eq!(protocol.send_queue.len(), 1);
+        let body = queued_input_body(&protocol);
+        assert_eq!(body.start_frame, Frame::new(0));
+        let max_decoded_input_bytes = input_batch_decoded_byte_limit(
+            protocol.last_acked_input.bytes.len(),
+            protocol.protocol_config.pending_output_limit,
+        )
+        .unwrap();
+        let decoded = crate::network::compression::decode_with_max_len(
+            &protocol.last_acked_input.bytes,
+            &body.bytes,
+            max_decoded_input_bytes,
+        )
+        .unwrap();
+
+        assert_eq!(decoded, expected);
+        assert_eq!(decoded.len(), small_limit);
+        assert_eq!(protocol.pending_output.len(), pending_count);
+    }
+
+    #[test]
+    fn send_pending_output_encodes_only_decoded_byte_cap_prefix() {
+        let pending_limit: usize = 10;
+        let decoded_byte_cap: usize = 18;
+        let expected_batch_len: usize = decoded_byte_cap / std::mem::size_of::<TestInput>();
+        let config = ProtocolConfig {
+            pending_output_limit: pending_limit,
+            ..ProtocolConfig::default()
+        };
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+        protocol.send_queue.clear();
+
+        for i in 0..pending_limit {
+            protocol.pending_output.push_back(InputBytes {
+                frame: Frame::new(i32::try_from(i).unwrap()),
+                bytes: u32::try_from(i + 1).unwrap().to_le_bytes().to_vec(),
+            });
+        }
+        let expected: Vec<_> = protocol
+            .pending_output
+            .iter()
+            .take(expected_batch_len)
+            .map(|input| input.bytes.clone())
+            .collect();
+        let connect_status = vec![ConnectionStatus::default(); 2];
+
+        protocol.send_pending_output_with_decoded_byte_cap(&connect_status, decoded_byte_cap);
+
+        assert_eq!(protocol.send_queue.len(), 1);
+        let body = queued_input_body(&protocol);
+        let decoded = crate::network::compression::decode_with_max_len(
+            &protocol.last_acked_input.bytes,
+            &body.bytes,
+            decoded_byte_cap,
+        )
+        .unwrap();
+
+        assert_eq!(decoded, expected);
+        assert_eq!(decoded.len(), expected_batch_len);
+        assert!(
+            expected_batch_len < pending_limit,
+            "test must exercise the byte-cap prefix, not the frame limit"
+        );
+    }
+
+    #[test]
+    fn input_batch_len_for_limits_clamps_to_decoded_byte_cap() {
+        assert_eq!(
+            input_batch_len_for_limits(10, 4, 10, 18),
+            Some(4),
+            "18 decoded bytes can carry only four 4-byte input frames"
+        );
+        assert_eq!(
+            input_batch_len_for_limits(10, 4, 3, 18),
+            Some(3),
+            "the configured pending frame limit still applies first"
+        );
+        assert_eq!(
+            input_batch_len_for_limits(10, 4, 10, 3),
+            Some(0),
+            "a cap smaller than one input frame must not encode a packet"
+        );
+        assert_eq!(
+            input_batch_len_for_limits(10, 2, usize::MAX, usize::MAX),
+            None,
+            "overflowing the configured byte budget must be rejected"
+        );
+    }
+
+    #[test]
+    fn send_input_rejects_variable_width_serialized_input_without_queueing() {
+        let mut protocol = UdpProtocol::<VariableInputConfig>::new(
+            vec![PlayerHandle::new(0)],
+            test_addr(),
+            2,
+            1,
+            8,
+            Duration::from_secs(5),
+            Duration::from_secs(3),
+            60,
+            DesyncDetection::Off,
+            SyncConfig::default(),
+            ProtocolConfig::default(),
+            TimeSyncConfig::default(),
+        )
+        .expect("variable-width protocol should construct; active input fails on send");
+        protocol.force_running_for_tests();
+
+        let default_len = codec::encoded_len(&VariableInput::Idle).unwrap();
+        let active_len = codec::encoded_len(&VariableInput::Active(7)).unwrap();
+        assert_ne!(
+            default_len, active_len,
+            "test requires variants with different serialized lengths"
+        );
+
+        let mut inputs: BTreeMap<PlayerHandle, PlayerInput<VariableInput>> = BTreeMap::new();
+        inputs.insert(
+            PlayerHandle::new(0),
+            PlayerInput::new(Frame::new(0), VariableInput::Active(7)),
+        );
+        let connect_status = vec![ConnectionStatus::default(); 2];
+
+        protocol.send_input(&inputs, &connect_status);
+
+        assert!(protocol.pending_output.is_empty());
+        assert!(protocol.send_queue.is_empty());
+    }
+
+    #[test]
+    fn send_input_rejects_per_player_width_mismatch_even_when_aggregate_matches() {
+        let mut protocol = UdpProtocol::<BalancedVariableInputConfig>::new(
+            Vec::new(),
+            test_addr(),
+            2,
+            2,
+            8,
+            Duration::from_secs(5),
+            Duration::from_secs(3),
+            60,
+            DesyncDetection::Off,
+            SyncConfig::default(),
+            ProtocolConfig::default(),
+            TimeSyncConfig::default(),
+        )
+        .expect("balanced variable-width protocol should construct");
+        protocol.force_running_for_tests();
+
+        let default_len = codec::encoded_len(&BalancedVariableInput::default()).unwrap();
+        let short_len = codec::encoded_len(&BalancedVariableInput::Short).unwrap();
+        let long_len = codec::encoded_len(&BalancedVariableInput::Long(7)).unwrap();
+        assert_eq!(short_len + long_len, default_len * 2);
+        assert_ne!(short_len, default_len);
+        assert_ne!(long_len, default_len);
+
+        let mut inputs: BTreeMap<PlayerHandle, PlayerInput<BalancedVariableInput>> =
+            BTreeMap::new();
+        inputs.insert(
+            PlayerHandle::new(0),
+            PlayerInput::new(Frame::new(0), BalancedVariableInput::Short),
+        );
+        inputs.insert(
+            PlayerHandle::new(1),
+            PlayerInput::new(Frame::new(0), BalancedVariableInput::Long(7)),
+        );
+        let connect_status = vec![ConnectionStatus::default(); 2];
+
+        protocol.send_input(&inputs, &connect_status);
+
+        assert!(protocol.pending_output.is_empty());
+        assert!(protocol.send_queue.is_empty());
     }
 }
 
@@ -5604,47 +6285,35 @@ mod kani_proofs {
 
     /// Proof: local_frame_advantage calculation stays within bounds.
     ///
-    /// Verifies the calculation at mod.rs:307:
-    /// `self.local_frame_advantage = remote_frame - local_frame;`
+    /// Verifies the calculation used by `update_local_frame_advantage`:
+    /// `remote_frame.as_i32().saturating_sub(local_frame.as_i32())`
     ///
     /// The frame advantage is bounded by the maximum frame difference possible
     /// during normal gameplay (limited by round trip time and frame rate).
     ///
     /// ## Modeling Note
     ///
-    /// Production code uses direct subtraction (`remote_frame - local_frame`), which
-    /// this proof mirrors exactly. The assumed bounds prevent overflow:
-    /// - Frames are non-negative (start at 0)
-    /// - Maximum frame value of 3M represents ~14 hours at 60 FPS
-    /// - Under these bounds, the difference fits in i32 (-3M to +3M range)
-    ///
-    /// The proof verifies that within realistic session bounds, the subtraction
-    /// is well-defined and produces a value within the expected range.
+    /// Production code uses saturating subtraction because both RTT and remote
+    /// frame estimates can be peer-influenced. The proof mirrors that operation
+    /// directly and verifies it stays inside the `i32` domain for all inputs.
     ///
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Frame advantage calculation bounds
     /// - Related: proof_remote_frame_advantage_from_i8, proof_frame_advantage_null_guard
-    // kani::no-unwind-needed: single i32 subtraction, no loops
+    // kani::no-unwind-needed: single i32 saturating subtraction, no loops
     #[kani::proof]
     fn proof_local_frame_advantage_bounds() {
         let local_frame: i32 = kani::any();
         let remote_frame: i32 = kani::any();
 
-        // Realistic bounds: ~14 hour session at 60 fps = ~3M frames
-        // These bounds ensure subtraction cannot overflow i32
-        kani::assume(local_frame >= 0 && local_frame < 3_000_000);
-        kani::assume(remote_frame >= 0 && remote_frame < 3_000_000);
+        // Mirror production code: hostile RTT can push the remote estimate to
+        // either bound, so subtraction saturates instead of panicking.
+        let advantage = remote_frame.saturating_sub(local_frame);
 
-        // Mirror production code at mod.rs:307 exactly: direct subtraction
-        // Under the assumed bounds, this cannot overflow:
-        //   min result: 0 - 2_999_999 = -2_999_999 (fits in i32)
-        //   max result: 2_999_999 - 0 = 2_999_999 (fits in i32)
-        let advantage = remote_frame - local_frame;
-
-        // Verify the result is within the expected range for the assumed bounds
+        // Verify the result is within the i32 domain for all symbolic inputs.
         kani::assert(
-            advantage >= -3_000_000 && advantage <= 3_000_000,
-            "Frame advantage within session bounds",
+            advantage >= i32::MIN && advantage <= i32::MAX,
+            "Frame advantage remains within i32 bounds",
         );
     }
 
@@ -5682,7 +6351,7 @@ mod kani_proofs {
 
     /// Proof: update_local_frame_advantage NULL guard works correctly.
     ///
-    /// Verifies the guard at mod.rs:299:
+    /// Verifies the guard in `update_local_frame_advantage`:
     /// `if local_frame == Frame::NULL || self.last_recv_frame() == Frame::NULL { return; }`
     ///
     /// This ensures we don't compute frame advantage with invalid frames.

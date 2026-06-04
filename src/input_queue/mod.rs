@@ -90,6 +90,24 @@ pub const INPUT_QUEUE_LENGTH: usize = 128;
 #[allow(dead_code)]
 pub const MAX_FRAME_DELAY: usize = INPUT_QUEUE_LENGTH - 1;
 
+fn circular_index_add(index: usize, offset: usize, modulus: usize) -> Option<usize> {
+    if modulus == 0 || index >= modulus {
+        return None;
+    }
+
+    let offset = offset % modulus;
+    let distance_to_wrap = modulus - index;
+    Some(if offset >= distance_to_wrap {
+        offset - distance_to_wrap
+    } else {
+        index + offset
+    })
+}
+
+fn frame_distance_usize(from: Frame, to: Frame) -> Option<usize> {
+    usize::try_from(from.distance_to(to)?).ok()
+}
+
 /// `InputQueue` handles inputs for a single player and saves them in a circular array.
 /// Valid inputs are between `head` and `tail`.
 ///
@@ -504,9 +522,40 @@ impl<T: Config> InputQueue<T> {
                 // Discard frames from tail up to (but not including) 'frame'
                 // After this, 'frame' becomes the new tail
                 let tail_frame = tail_input.frame;
-                let offset = (frame - tail_frame) as usize;
-                self.tail = (self.tail + offset) % self.queue_length;
-                self.length -= offset;
+                let Some(offset) = frame_distance_usize(tail_frame, frame) else {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::InputQueue,
+                        "Discard frame distance from {} to {} overflowed",
+                        tail_frame,
+                        frame
+                    );
+                    return;
+                };
+                let Some(new_length) = self.length.checked_sub(offset) else {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::InputQueue,
+                        "Discard offset {} exceeds queue length {}",
+                        offset,
+                        self.length
+                    );
+                    return;
+                };
+                let Some(new_tail) = circular_index_add(self.tail, offset, self.queue_length)
+                else {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::InputQueue,
+                        "Failed to advance tail {} by {} within queue length {}",
+                        self.tail,
+                        offset,
+                        self.queue_length
+                    );
+                    return;
+                };
+                self.tail = new_tail;
+                self.length = new_length;
             }
         }
     }
@@ -562,10 +611,30 @@ impl<T: Config> InputQueue<T> {
         // We currently don't have a prediction frame
         if self.prediction.frame.as_i32() < 0 {
             //  If the frame requested is in our range, fetch it out of the queue and return it.
-            let mut offset: usize = (requested_frame - tail_input.frame) as usize;
+            let Some(mut offset) = frame_distance_usize(tail_input.frame, requested_frame) else {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InputQueue,
+                    "Requested frame distance from {} to {} overflowed",
+                    tail_input.frame,
+                    requested_frame
+                );
+                return None;
+            };
 
             if offset < self.length {
-                offset = (offset + self.tail) % self.queue_length;
+                let Some(index) = circular_index_add(self.tail, offset, self.queue_length) else {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::InputQueue,
+                        "Failed to map requested-frame offset {} from tail {} within queue length {}",
+                        offset,
+                        self.tail,
+                        self.queue_length
+                    );
+                    return None;
+                };
+                offset = index;
                 // Verify circular buffer indexing correctness
                 let input_at_offset = self.inputs.get(offset)?;
                 if input_at_offset.frame != requested_frame {
@@ -732,8 +801,28 @@ impl<T: Config> InputQueue<T> {
             );
             return false;
         }
-        self.head = (self.head + 1) % self.queue_length;
-        self.length += 1;
+        let Some(next_head) = circular_index_add(self.head, 1, self.queue_length) else {
+            report_violation!(
+                ViolationSeverity::Critical,
+                ViolationKind::InputQueue,
+                "Failed to advance head {} within queue length {}",
+                self.head,
+                self.queue_length
+            );
+            return false;
+        };
+        let Some(next_length) = self.length.checked_add(1) else {
+            report_violation!(
+                ViolationSeverity::Critical,
+                ViolationKind::InputQueue,
+                "Queue length overflow while adding input (length={}, capacity={})",
+                self.length,
+                self.queue_length
+            );
+            return false;
+        };
+        self.head = next_head;
+        self.length = next_length;
 
         // Verify queue doesn't overflow
         if self.length > self.queue_length {
@@ -1097,6 +1186,48 @@ mod input_queue_tests {
         assert_eq!(queue.prediction, before.prediction);
         assert_eq!(queue.last_confirmed_input, before.last_confirmed_input);
         assert_eq!(queue.frozen, before.frozen);
+    }
+
+    #[test]
+    fn circular_index_add_advances_without_wrap() {
+        assert_eq!(circular_index_add(2, 3, 8), Some(5));
+    }
+
+    #[test]
+    fn circular_index_add_wraps_without_overflow() {
+        assert_eq!(circular_index_add(6, 5, 8), Some(3));
+    }
+
+    #[test]
+    fn circular_index_add_handles_huge_offset() {
+        assert_eq!(
+            circular_index_add(usize::MAX - 2, usize::MAX - 1, usize::MAX),
+            Some(usize::MAX - 3)
+        );
+    }
+
+    #[test]
+    fn circular_index_add_rejects_invalid_modulus_or_index() {
+        assert_eq!(circular_index_add(0, 1, 0), None);
+        assert_eq!(circular_index_add(8, 1, 8), None);
+    }
+
+    #[test]
+    fn frame_distance_usize_rejects_overflow_or_negative_distance() {
+        assert_eq!(
+            frame_distance_usize(Frame::NULL, Frame::new(i32::MAX)),
+            None
+        );
+        assert_eq!(frame_distance_usize(Frame::new(10), Frame::new(5)), None);
+    }
+
+    #[test]
+    fn input_rejects_overflowing_request_distance_without_panic() {
+        let mut queue = test_queue(0);
+
+        let result = queue.input(Frame::new(i32::MAX));
+
+        assert!(result.is_none());
     }
 
     #[test]

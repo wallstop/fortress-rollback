@@ -54,7 +54,8 @@ Rules: always `bat --paging=never` (bare `bat` blocks); never redirect to `/dev/
 - **Public items documented** -- Rustdoc with examples
 - **Overflow checks in release** -- Integer overflow caught at runtime
 - **Deterministic behavior** -- Same inputs must always produce same outputs
-- **Bounded allocation** -- Never trust a length from the wire; validate config at the boundary. Dynamically-sized allocs in `src/` need an `// alloc-bound:` justification (enforced by `check-unbounded-alloc`); see [defensive-programming.md](skills/rust-language/defensive-programming.md#bounded-allocation)
+- **Bounded allocation** -- Never trust a length from the wire; validate config at the boundary. Bound total bytes, element counts, raw receive attempts, and socket receive-poll batches before allocation (for example, decoded bytes split into many `Vec` buffers need a frame/count cap too; built-in sockets cap receive polls at 256 raw attempts and 256 decoded messages). Dynamically-sized allocs in `src/` need an `// alloc-bound:` justification (enforced by `check-unbounded-alloc`); see [defensive-programming.md](skills/rust-language/defensive-programming.md#bounded-allocation)
+- **Network input width** -- `Config::Input` for network sessions must serialize to at least one byte and should serialize to the same byte length for every value. Prefer fixed-width structs of integers/bools; variable-length enums, strings, vectors, maps, and similar payloads can collapse delta-compressed frame streams and must be rejected or encoded through a fixed-width wrapper.
 
 ```rust
 // FORBIDDEN in production:  value.unwrap(), .expect(), array[i], panic!(), todo!()

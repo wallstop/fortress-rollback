@@ -203,12 +203,17 @@ Your input type must:
 - Be `Copy + Clone + PartialEq + Eq`
 - Implement `Default` (used for disconnected players)
 - Implement `Serialize + Deserialize` (for network transmission)
+- Serialize to at least one byte for network sessions
+- Serialize every value to the same byte length under Fortress Rollback's codec
 
 **Tips:**
 
 - Keep inputs small; they're sent every frame
 - Use bitflags for button states
 - Consider `#[repr(C)]` for consistent serialization
+- Prefer fixed-width integer/bool fields. Variable-length enums, strings,
+  vectors, maps, and similar payloads are rejected or dropped because the
+  network protocol splits compressed input streams by fixed byte width.
 
 ### State Type Requirements
 
@@ -1552,7 +1557,9 @@ With sparse saving:
 Implement `NonBlockingSocket` for custom networking:
 
 ```text
-use fortress_rollback::{Message, NonBlockingSocket};
+use fortress_rollback::{network::codec, Message, NonBlockingSocket};
+
+const MAX_MESSAGES_PER_POLL: usize = 64;
 
 struct MyCustomSocket { /* ... */ }
 
@@ -1562,7 +1569,12 @@ impl NonBlockingSocket<MyAddress> for MyCustomSocket {
     }
 
     fn receive_all_messages(&mut self) -> Vec<(MyAddress, Message)> {
-        // Return all received messages since last call
+        // Return a bounded batch and leave excess packets for a future poll
+        self.drain_received_messages_bounded(MAX_MESSAGES_PER_POLL)
+            .filter_map(|(addr, bytes)| {
+                codec::decode_message(&bytes).ok().map(|(msg, _consumed)| (addr, msg))
+            })
+            .collect()
     }
 }
 ```
@@ -2084,6 +2096,12 @@ pub trait Config: 'static + Send + Sync {
 }
 ```
 
+For network sessions, `Config::Input::default()` must serialize to at least one
+byte, and every `Config::Input` value should serialize to the same byte length
+under Fortress Rollback's codec. Fixed-width structs of integers and booleans
+are the intended shape. Avoid variable-length enums, strings, vectors, maps, or
+other payloads whose encoded size can change from frame to frame.
+
 #### `tokio`
 
 Enables `TokioUdpSocket`, an adapter that wraps a Tokio async UDP socket and implements `NonBlockingSocket` for use with Fortress Rollback sessions in async Tokio applications.
@@ -2329,7 +2347,9 @@ let session = SessionBuilder::<GameConfig>::new()
 For other transports, implement `NonBlockingSocket`:
 
 ```text
-use fortress_rollback::{Message, NonBlockingSocket};
+use fortress_rollback::{network::codec, Message, NonBlockingSocket};
+
+const MAX_MESSAGES_PER_POLL: usize = 64;
 
 struct MyWebSocketTransport {
     // Your WebSocket implementation
@@ -2338,15 +2358,15 @@ struct MyWebSocketTransport {
 impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
     fn send_to(&mut self, msg: &Message, addr: &MyPeerId) {
         // Serialize msg and send via WebSocket
-        let Ok(bytes) = bincode::serialize(msg) else { return };
+        let Ok(bytes) = codec::encode(msg) else { return };
         self.send_to_peer(addr, &bytes);
     }
 
     fn receive_all_messages(&mut self) -> Vec<(MyPeerId, Message)> {
-        // Return all messages received since last call
-        self.drain_received_messages()
+        // Return a bounded batch and leave excess packets for a future poll
+        self.drain_received_messages_bounded(MAX_MESSAGES_PER_POLL)
             .filter_map(|(peer, bytes)| {
-                bincode::deserialize(&bytes).ok().map(|msg| (peer, msg))
+                codec::decode_message(&bytes).ok().map(|(msg, _consumed)| (peer, msg))
             })
             .collect()
     }
@@ -3434,7 +3454,7 @@ let config = ProtocolConfig {
     quality_report_interval: Duration::from_millis(200), // RTT measurement interval
     shutdown_delay: Duration::from_millis(5000),         // Cleanup delay after disconnect
     max_checksum_history: 32,                            // Checksums retained for desync
-    pending_output_limit: 128,                           // Warning threshold for output queue
+    pending_output_limit: 128,                           // Output queue warning + decode cap
     sync_retry_warning_threshold: 10,                    // Warn after N sync retries
     sync_duration_warning_ms: 3000,                      // Warn if sync takes longer
     clock: None,                                         // None = system clock (see below)
@@ -3443,6 +3463,8 @@ let config = ProtocolConfig {
 ```
 
 The `clock` field accepts an `Option<ClockFn>` for injecting a custom time source. When `None` (the default), the protocol uses `Instant::now()`. See [Custom Clock (Time Control)](#custom-clock-time-control) for details and test examples.
+
+`pending_output_limit` also caps how many input frames a received packet may decode into. Values above `ProtocolConfig::MAX_PENDING_OUTPUT_LIMIT` are rejected during configuration validation.
 
 **Presets:**
 

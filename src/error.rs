@@ -242,6 +242,11 @@ pub enum RleDecodeReason {
         /// The buffer length.
         buffer_len: usize,
     },
+    /// A varint length prefix was malformed.
+    MalformedVarint {
+        /// The offset of the malformed varint.
+        offset: usize,
+    },
     /// The declared decoded length exceeded the configured limit.
     ///
     /// The RLE format encodes run lengths as varints that are not backed by
@@ -286,6 +291,9 @@ impl Display for RleDecodeReason {
                     "truncated data: offset {} exceeds buffer length {}",
                     offset, buffer_len
                 )
+            },
+            Self::MalformedVarint { offset } => {
+                write!(f, "malformed varint at offset {}", offset)
             },
             Self::DecodedLengthExceedsMaximum { decoded_len, max } => {
                 write!(f, "decoded length {} exceeds maximum {}", decoded_len, max)
@@ -333,6 +341,13 @@ pub enum DeltaDecodeReason {
         /// The length of the data buffer.
         length: usize,
     },
+    /// The delta-decoded byte stream would produce too many per-frame buffers.
+    DecodedFrameCountExceedsMaximum {
+        /// Number of decoded frame buffers declared by the byte stream.
+        frame_count: usize,
+        /// Maximum allowed number of decoded frame buffers.
+        max: usize,
+    },
     /// The decoder could not reserve memory for decoded delta output.
     AllocationFailed {
         /// Static context for the allocation site.
@@ -370,6 +385,13 @@ impl Display for DeltaDecodeReason {
             },
             Self::DataIndexOutOfBounds { index, length } => {
                 write!(f, "data index {} out of bounds (length: {})", index, length)
+            },
+            Self::DecodedFrameCountExceedsMaximum { frame_count, max } => {
+                write!(
+                    f,
+                    "decoded frame count {} exceeds maximum {}",
+                    frame_count, max
+                )
             },
             Self::AllocationFailed {
                 context,
@@ -435,6 +457,26 @@ pub enum InternalErrorKind {
         /// The specific reason for the delta decode failure.
         reason: DeltaDecodeReason,
     },
+    /// Delta encode operation failed because the reference frame was empty.
+    DeltaEncodeEmptyReference,
+    /// Delta encode operation failed because an input frame did not match the
+    /// reference frame's serialized byte length.
+    DeltaEncodeInputLengthMismatch {
+        /// Serialized length of the input frame being encoded.
+        input_len: usize,
+        /// Serialized length of the reference frame.
+        reference_len: usize,
+    },
+    /// Input serialization produced a per-player byte width different from
+    /// `Config::Input::default()`.
+    InputEncodeLengthMismatch {
+        /// Player slot whose input width differed.
+        player: usize,
+        /// Serialized length of the input value.
+        input_len: usize,
+        /// Expected serialized length for one player input.
+        expected_len: usize,
+    },
     /// Input queue gap-fill failed while replicating a previous input to fill
     /// the gap created by a mid-session frame-delay increase. This indicates an
     /// internal invariant violation in the input queue.
@@ -488,6 +530,30 @@ impl Display for InternalErrorKind {
             },
             Self::DeltaDecodeError { reason } => {
                 write!(f, "delta decode failed: {}", reason)
+            },
+            Self::DeltaEncodeEmptyReference => {
+                write!(f, "delta encode failed: reference bytes is empty")
+            },
+            Self::DeltaEncodeInputLengthMismatch {
+                input_len,
+                reference_len,
+            } => {
+                write!(
+                    f,
+                    "delta encode failed: input length {} does not match reference length {}",
+                    input_len, reference_len
+                )
+            },
+            Self::InputEncodeLengthMismatch {
+                player,
+                input_len,
+                expected_len,
+            } => {
+                write!(
+                    f,
+                    "input encode failed: player {} input length {} does not match expected length {}",
+                    player, input_len, expected_len
+                )
             },
             Self::InputQueueGapFillFailed { frame } => {
                 write!(
@@ -1011,6 +1077,17 @@ pub enum SerializationErrorKind {
     EndpointCreationFailed,
     /// Failed to create a protocol endpoint for spectators.
     SpectatorEndpointCreationFailed,
+    /// The configured input type serializes to zero bytes, which the network
+    /// delta codec cannot encode as a frame stream.
+    InputSerializedSizeZero,
+    /// The configured input type's aggregate per-frame byte width exceeds the
+    /// network decompression cap, so even one input frame would be undecodable.
+    InputSerializedFrameTooLarge {
+        /// Aggregate serialized length of one input frame.
+        frame_len: usize,
+        /// Maximum decodable byte length.
+        max: usize,
+    },
     /// Custom error (fallback for API compatibility).
     Custom(&'static str),
 }
@@ -1023,6 +1100,19 @@ impl Display for SerializationErrorKind {
             },
             Self::SpectatorEndpointCreationFailed => {
                 write!(f, "failed to create protocol endpoint for spectators")
+            },
+            Self::InputSerializedSizeZero => {
+                write!(
+                    f,
+                    "Config::Input must serialize to at least one byte for network sessions"
+                )
+            },
+            Self::InputSerializedFrameTooLarge { frame_len, max } => {
+                write!(
+                    f,
+                    "serialized input frame length {} exceeds maximum decodable length {}",
+                    frame_len, max
+                )
             },
             Self::Custom(s) => write!(f, "{}", s),
         }
@@ -1892,6 +1982,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rle_decode_reason_malformed_varint() {
+        let reason = RleDecodeReason::MalformedVarint { offset: 10 };
+        let display = format!("{}", reason);
+        assert!(display.contains("malformed varint"));
+        assert!(display.contains("10"));
+    }
+
+    #[test]
     fn test_rle_decode_reason_decoded_length_exceeds_maximum() {
         let reason = RleDecodeReason::DecodedLengthExceedsMaximum {
             decoded_len: 100_000,
@@ -1920,6 +2018,18 @@ mod tests {
     }
 
     #[test]
+    fn test_delta_decode_reason_decoded_frame_count_exceeds_maximum() {
+        let reason = DeltaDecodeReason::DecodedFrameCountExceedsMaximum {
+            frame_count: 4097,
+            max: 4096,
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("decoded frame count"));
+        assert!(display.contains("4097"));
+        assert!(display.contains("4096"));
+    }
+
+    #[test]
     fn test_internal_error_kind_rle_decode_error() {
         let kind = InternalErrorKind::RleDecodeError {
             reason: RleDecodeReason::BitfieldIndexOutOfBounds,
@@ -1927,6 +2037,40 @@ mod tests {
         let display = format!("{}", kind);
         assert!(display.contains("RLE decode failed"));
         assert!(display.contains("bitfield index out of bounds"));
+    }
+
+    #[test]
+    fn test_internal_error_kind_delta_encode_empty_reference() {
+        let kind = InternalErrorKind::DeltaEncodeEmptyReference;
+        let display = format!("{}", kind);
+        assert!(display.contains("delta encode failed"));
+        assert!(display.contains("reference bytes is empty"));
+    }
+
+    #[test]
+    fn test_internal_error_kind_delta_encode_input_length_mismatch() {
+        let kind = InternalErrorKind::DeltaEncodeInputLengthMismatch {
+            input_len: 7,
+            reference_len: 4,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("delta encode failed"));
+        assert!(display.contains("input length 7"));
+        assert!(display.contains("reference length 4"));
+    }
+
+    #[test]
+    fn test_internal_error_kind_input_encode_length_mismatch() {
+        let kind = InternalErrorKind::InputEncodeLengthMismatch {
+            player: 2,
+            input_len: 12,
+            expected_len: 8,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("input encode failed"));
+        assert!(display.contains("player 2"));
+        assert!(display.contains("input length 12"));
+        assert!(display.contains("expected length 8"));
     }
 
     #[test]
@@ -2232,6 +2376,25 @@ mod tests {
         assert!(display.contains("failed to create"));
         assert!(display.contains("endpoint"));
         assert!(display.contains("spectators"));
+    }
+
+    #[test]
+    fn test_serialization_error_kind_input_serialized_size_zero() {
+        let kind = SerializationErrorKind::InputSerializedSizeZero;
+        let display = format!("{}", kind);
+        assert!(display.contains("Config::Input"));
+        assert!(display.contains("at least one byte"));
+    }
+
+    #[test]
+    fn test_serialization_error_kind_input_serialized_frame_too_large() {
+        let kind = SerializationErrorKind::InputSerializedFrameTooLarge {
+            frame_len: 100,
+            max: 64,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("serialized input frame length 100"));
+        assert!(display.contains("maximum decodable length 64"));
     }
 
     #[test]

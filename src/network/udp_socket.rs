@@ -1,10 +1,8 @@
-use std::{
-    io::ErrorKind,
-    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
-};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
 use crate::network::buffer::zeroed_buffer;
 use crate::network::codec;
+use crate::network::socket_receive;
 use crate::report_violation;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::{network::messages::Message, NonBlockingSocket};
@@ -162,54 +160,10 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
     }
 
     fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
-        // Pre-allocate for typical case of 1-4 messages per poll
-        let mut received_messages = Vec::with_capacity(4);
-        loop {
-            match self.socket.recv_from(&mut self.recv_buffer) {
-                Ok((number_of_bytes, src_addr)) => {
-                    // Defensive check: if we received more bytes than buffer allows,
-                    // something is seriously wrong - skip this packet
-                    if number_of_bytes > self.recv_buffer.len() {
-                        report_violation!(
-                            ViolationSeverity::Error,
-                            ViolationKind::NetworkProtocol,
-                            "Received {} bytes but buffer is only {} bytes",
-                            number_of_bytes,
-                            self.recv_buffer.len()
-                        );
-                        continue;
-                    }
-                    if let Some(buf_slice) = self.recv_buffer.get(0..number_of_bytes) {
-                        if let Ok((msg, _consumed)) = codec::decode_message(buf_slice) {
-                            received_messages.push((src_addr, msg));
-                        }
-                    } else {
-                        report_violation!(
-                            ViolationSeverity::Error,
-                            ViolationKind::NetworkProtocol,
-                            "recv_buffer slice [0..{}] out of bounds (buffer size: {})",
-                            number_of_bytes,
-                            self.recv_buffer.len()
-                        );
-                    }
-                },
-                // there are no more messages
-                Err(ref err) if err.kind() == ErrorKind::WouldBlock => return received_messages,
-                // datagram socket sometimes get this error as a result of calling the send_to method
-                Err(ref err) if err.kind() == ErrorKind::ConnectionReset => continue,
-                // For other errors, log and stop receiving (don't panic)
-                Err(err) => {
-                    report_violation!(
-                        ViolationSeverity::Error,
-                        ViolationKind::NetworkProtocol,
-                        "Unexpected socket error: {:?}: {}",
-                        err.kind(),
-                        err
-                    );
-                    return received_messages;
-                },
-            }
-        }
+        let socket = &self.socket;
+        socket_receive::receive_all_messages_from(&mut self.recv_buffer, "UDP", |buffer| {
+            socket.recv_from(buffer)
+        })
     }
 }
 
@@ -266,6 +220,8 @@ mod tests {
     use super::*;
     #[cfg(not(miri))]
     use crate::network::messages::{MessageBody, MessageHeader};
+    #[cfg(not(miri))]
+    use std::io::ErrorKind;
 
     // Helper function to wait for messages with retry logic
     // This is necessary because UDP packet delivery timing can vary across platforms

@@ -427,11 +427,13 @@ pub struct ProtocolConfig {
     /// Default: 32
     pub max_checksum_history: usize,
 
-    /// Maximum pending output messages before warning.
+    /// Maximum pending output messages before warning and input batch decode cap.
     ///
     /// When pending outputs exceed this limit, it indicates the peer
     /// isn't acknowledging inputs quickly enough. This may suggest
-    /// network congestion or peer disconnection.
+    /// network congestion or peer disconnection. This also bounds how many
+    /// input frames a peer packet may decode into, so values above
+    /// [`ProtocolConfig::MAX_PENDING_OUTPUT_LIMIT`] are rejected.
     ///
     /// Default: 128
     pub pending_output_limit: usize,
@@ -667,6 +669,15 @@ impl std::fmt::Display for ProtocolConfig {
 }
 
 impl ProtocolConfig {
+    /// Maximum allowed [`ProtocolConfig::pending_output_limit`].
+    ///
+    /// The compression layer has an independent decoded-frame cap to prevent a
+    /// bounded byte stream from fanning out into too many per-frame buffers.
+    /// Keep protocol configuration aligned with that cap so a valid sender never
+    /// emits a batch that a valid receiver must reject.
+    pub const MAX_PENDING_OUTPUT_LIMIT: usize =
+        crate::network::compression::MAX_DELTA_DECODED_FRAMES;
+
     /// Creates a new `ProtocolConfig` with default values.
     pub fn new() -> Self {
         Self::default()
@@ -828,12 +839,13 @@ impl ProtocolConfig {
             .into());
         }
 
-        // Validate pending_output_limit: must allow at least one pending frame.
-        if self.pending_output_limit < 1 {
+        // Validate pending_output_limit: must allow at least one pending frame
+        // and must not exceed the compression output-frame cap.
+        if !(1..=Self::MAX_PENDING_OUTPUT_LIMIT).contains(&self.pending_output_limit) {
             return Err(InvalidRequestKind::ConfigValueOutOfRange {
                 field: "pending_output_limit",
                 min: 1,
-                max: u64::MAX,
+                max: Self::MAX_PENDING_OUTPUT_LIMIT as u64,
                 actual: self.pending_output_limit as u64,
             }
             .into());
@@ -2168,9 +2180,9 @@ mod tests {
         };
         config.validate().unwrap();
 
-        // Valid: larger user-configured value
+        // Valid: maximum user-configured value
         let config = ProtocolConfig {
-            pending_output_limit: 4096,
+            pending_output_limit: ProtocolConfig::MAX_PENDING_OUTPUT_LIMIT,
             ..ProtocolConfig::default()
         };
         config.validate().unwrap();
@@ -2199,20 +2211,39 @@ mod tests {
                 kind: InvalidRequestKind::ConfigValueOutOfRange {
                     field: "pending_output_limit",
                     min: 1,
-                    max: u64::MAX,
+                    max,
                     ..
                 }
-            }
+            } if max == ProtocolConfig::MAX_PENDING_OUTPUT_LIMIT as u64
         ));
     }
 
     #[test]
-    fn test_protocol_config_validate_pending_output_limit_accepts_large_values() {
+    fn test_protocol_config_validate_pending_output_limit_too_high() {
+        let config = ProtocolConfig {
+            pending_output_limit: ProtocolConfig::MAX_PENDING_OUTPUT_LIMIT + 1,
+            ..ProtocolConfig::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "pending_output_limit",
+                    min: 1,
+                    max,
+                    actual,
+                }
+            }) if max == ProtocolConfig::MAX_PENDING_OUTPUT_LIMIT as u64
+                && actual == (ProtocolConfig::MAX_PENDING_OUTPUT_LIMIT + 1) as u64
+        ));
+
         let config = ProtocolConfig {
             pending_output_limit: usize::MAX,
             ..ProtocolConfig::default()
         };
-        config.validate().unwrap();
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -2429,7 +2460,7 @@ mod tests {
             quality_report_interval: Duration::from_secs(u64::MAX),
             shutdown_delay: Duration::from_secs(u64::MAX),
             max_checksum_history: usize::MAX,
-            pending_output_limit: usize::MAX,
+            pending_output_limit: ProtocolConfig::MAX_PENDING_OUTPUT_LIMIT,
             sync_retry_warning_threshold: u32::MAX,
             sync_duration_warning_ms: u128::MAX,
             input_history_multiplier: usize::MAX,

@@ -112,6 +112,7 @@ use tokio::net::UdpSocket;
 
 use crate::network::buffer::zeroed_buffer;
 use crate::network::codec;
+use crate::network::socket_receive;
 use crate::report_violation;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::{network::messages::Message, NonBlockingSocket};
@@ -614,59 +615,10 @@ impl NonBlockingSocket<SocketAddr> for TokioUdpSocket {
     }
 
     fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
-        // A zero-length receive buffer can only arise from the [`new`](Self::new)
-        // last-resort fallback after the allocator refused even a minimal
-        // buffer (the configurable constructors reject `0` up front). Bail out
-        // instead of calling `try_recv_from` with an empty buffer, which would
-        // read zero bytes and busy-loop, silently discarding datagrams. The
-        // constructor already reported the allocation failure.
-        if self.recv_buffer.is_empty() {
-            return Vec::new();
-        }
-
-        // Pre-allocate for typical case of 1-4 messages per poll
-        let mut received_messages = Vec::with_capacity(4);
-
-        loop {
-            // Use try_recv_from for non-blocking receive
-            match self.socket.try_recv_from(&mut self.recv_buffer) {
-                Ok((number_of_bytes, src_addr)) => {
-                    // Defensive check
-                    if number_of_bytes > self.recv_buffer.len() {
-                        report_violation!(
-                            ViolationSeverity::Error,
-                            ViolationKind::NetworkProtocol,
-                            "Received {} bytes but buffer is only {} bytes",
-                            number_of_bytes,
-                            self.recv_buffer.len()
-                        );
-                        continue;
-                    }
-                    if let Some(buf_slice) = self.recv_buffer.get(..number_of_bytes) {
-                        if let Ok((msg, _consumed)) = codec::decode_message(buf_slice) {
-                            received_messages.push((src_addr, msg));
-                        }
-                    }
-                },
-                // No more messages available (non-blocking behavior)
-                Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    return received_messages
-                },
-                // Connection reset - continue trying
-                Err(ref err) if err.kind() == std::io::ErrorKind::ConnectionReset => continue,
-                // Other errors - log and stop
-                Err(err) => {
-                    report_violation!(
-                        ViolationSeverity::Error,
-                        ViolationKind::NetworkProtocol,
-                        "Unexpected socket error: {:?}: {}",
-                        err.kind(),
-                        err
-                    );
-                    return received_messages;
-                },
-            }
-        }
+        let socket = &self.socket;
+        socket_receive::receive_all_messages_from(&mut self.recv_buffer, "Tokio UDP", |buffer| {
+            socket.try_recv_from(buffer)
+        })
     }
 }
 

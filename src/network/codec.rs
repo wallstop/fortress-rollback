@@ -12,7 +12,9 @@
 //!   buffers, reducing allocations in hot paths.
 //! - **Clear Error Handling**: All functions return `Result` types with descriptive
 //!   error variants.
-//! - **Type Safety**: Generic over serde types, but specialized for our `Message` type.
+//! - **Type Safety**: Generic over serde types, with
+//!   [`decode_message()`](crate::network::codec::decode_message) for bounded
+//!   decoding of peer-controlled [`Message`](crate::Message) bytes.
 //!
 //! # Examples
 //!
@@ -21,16 +23,17 @@
 //!
 //! // Encode any serializable type
 //! let data: u32 = 42;
-//! let bytes = encode(&data).expect("encoding should succeed");
+//! let bytes = encode(&data)?;
 //!
 //! // Decode from bytes
-//! let (decoded, _bytes_read): (u32, _) = decode(&bytes).expect("decoding should succeed");
+//! let (decoded, _bytes_read): (u32, _) = decode(&bytes)?;
 //! assert_eq!(data, decoded);
 //!
 //! // Encode into a pre-allocated buffer (zero allocation)
 //! let mut buffer = [0u8; 256];
-//! let len = encode_into(&data, &mut buffer).expect("encoding should succeed");
-//! let encoded_slice = &buffer[..len];
+//! let len = encode_into(&data, &mut buffer)?;
+//! assert!(len <= buffer.len());
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 use serde::{de::DeserializeOwned, Serialize};
@@ -236,20 +239,30 @@ fn decode_message_error(message: impl Into<String>) -> CodecError {
     CodecError::decode(message, CodecOperation::DecodeMessage)
 }
 
+fn take_bytes<'a>(
+    bytes: &'a [u8],
+    cursor: &mut usize,
+    len: usize,
+    field: &'static str,
+) -> CodecResult<&'a [u8]> {
+    let end = cursor
+        .checked_add(len)
+        .ok_or_else(|| decode_message_error(format!("{} offset overflow", field)))?;
+    let slice = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| decode_message_error(format!("truncated {}", field)))?;
+    *cursor = end;
+    Ok(slice)
+}
+
 fn read_array<const N: usize>(
     bytes: &[u8],
     cursor: &mut usize,
     field: &'static str,
 ) -> CodecResult<[u8; N]> {
-    let end = cursor
-        .checked_add(N)
-        .ok_or_else(|| decode_message_error(format!("{} offset overflow", field)))?;
-    let slice = bytes
-        .get(*cursor..end)
-        .ok_or_else(|| decode_message_error(format!("truncated {}", field)))?;
+    let slice = take_bytes(bytes, cursor, N, field)?;
     let mut out = [0_u8; N];
     out.copy_from_slice(slice);
-    *cursor = end;
     Ok(out)
 }
 
@@ -366,16 +379,12 @@ fn decode_input(bytes: &[u8], cursor: &mut usize) -> CodecResult<Input> {
     let ack_frame = Frame::new(read_i32(bytes, cursor, "input.ack_frame")?);
 
     let byte_len = read_usize(bytes, cursor, "input.bytes.len")?;
-    ensure_length_within_remaining(bytes, *cursor, byte_len, 1, "input.bytes")?;
-    let byte_slice = bytes
-        .get(*cursor..*cursor + byte_len)
-        .ok_or_else(|| decode_message_error("input.bytes slice out of bounds"))?;
+    let byte_slice = take_bytes(bytes, cursor, byte_len, "input.bytes")?;
     let mut input_bytes = Vec::new();
     input_bytes.try_reserve_exact(byte_len).map_err(|_err| {
         decode_message_error(format!("failed to reserve {} input bytes", byte_len))
     })?;
     input_bytes.extend_from_slice(byte_slice);
-    *cursor += byte_len;
 
     Ok(Input {
         peer_connect_status,
@@ -505,7 +514,18 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<(T, usize)> {
 /// This mirrors the crate's bincode configuration for the fixed network message
 /// schema, but checks every variable-length field against the remaining packet
 /// bytes before reserving memory.
-pub(crate) fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
+///
+/// Custom [`NonBlockingSocket`](crate::NonBlockingSocket) implementations should
+/// use this for received peer bytes instead of generic bincode decoding. Generic
+/// serde decoding cannot validate the `Message` schema's length-prefixed fields
+/// before allocating for them.
+///
+/// # Errors
+///
+/// Returns [`CodecError::DecodeError`] when the message is truncated, contains an
+/// invalid variant or boolean, has trailing bytes, or declares a length that
+/// cannot fit in the remaining packet.
+pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
     let mut cursor = 0;
     let header = MessageHeader {
         magic: read_u16(bytes, &mut cursor, "message.header.magic")?,
@@ -735,6 +755,17 @@ mod tests {
         let result = decode_message(&bytes);
 
         assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    #[test]
+    fn take_bytes_rejects_offset_overflow_and_preserves_cursor() {
+        let bytes = [0_u8];
+        let mut cursor = usize::MAX;
+
+        let result = take_bytes(&bytes, &mut cursor, 1, "overflowing.field");
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+        assert_eq!(cursor, usize::MAX);
     }
 
     #[test]

@@ -59,6 +59,9 @@ pub const DEFAULT_MAX_DECODED_LEN: usize = 64 * 1024 * 1024;
 ///
 /// Uses LEB128 (Little Endian Base 128) variable-length encoding.
 mod varint {
+    use super::{rle_decode_error, truncated_data, RleResult};
+    use crate::RleDecodeReason;
+
     /// Returns the number of bytes needed to encode a value.
     #[inline]
     pub fn encoded_len(value: u64) -> usize {
@@ -106,7 +109,7 @@ mod varint {
     /// Returns (decoded_value, bytes_consumed).
     #[inline]
     #[allow(clippy::while_let_loop)] // Multiple break conditions make while-let less clear
-    pub fn decode(buf: &[u8], offset: usize) -> (u64, usize) {
+    pub fn decode(buf: &[u8], offset: usize) -> RleResult<(u64, usize)> {
         let mut value: u64 = 0;
         let mut shift = 0;
         let mut i = offset;
@@ -114,8 +117,13 @@ mod varint {
         loop {
             let byte = match buf.get(i) {
                 Some(&b) => b,
-                None => break, // Truncated varint - return what we have
+                None => return Err(truncated_data(i, buf.len())),
             };
+            if shift == 63 && byte > 1 {
+                return Err(rle_decode_error(RleDecodeReason::MalformedVarint {
+                    offset,
+                }));
+            }
             value |= ((byte & 0x7F) as u64) << shift;
             i += 1;
 
@@ -124,12 +132,13 @@ mod varint {
             }
             shift += 7;
             if shift >= 64 {
-                // Overflow - return what we have
-                break;
+                return Err(rle_decode_error(RleDecodeReason::MalformedVarint {
+                    offset,
+                }));
             }
         }
 
-        (value, i - offset)
+        Ok((value, i - offset))
     }
 }
 
@@ -337,6 +346,32 @@ pub fn decode_with_max_len(buf: impl AsRef<[u8]>, max_decoded_len: usize) -> Rle
     decode_with_offset(buf.as_ref(), 0, max_decoded_len)
 }
 
+fn rle_decode_error(reason: RleDecodeReason) -> FortressError {
+    FortressError::InternalErrorStructured {
+        kind: InternalErrorKind::RleDecodeError { reason },
+    }
+}
+
+fn truncated_data(offset: usize, buffer_len: usize) -> FortressError {
+    rle_decode_error(RleDecodeReason::TruncatedData { offset, buffer_len })
+}
+
+fn checked_buffer_end(offset: usize, len: usize, buffer_len: usize) -> RleResult<usize> {
+    let end = offset
+        .checked_add(len)
+        .ok_or_else(|| truncated_data(offset.saturating_add(len), buffer_len))?;
+    if end > buffer_len {
+        return Err(truncated_data(end, buffer_len));
+    }
+    Ok(end)
+}
+
+fn checked_decoded_end(ptr: usize, len: usize, decoded_len: usize) -> RleResult<usize> {
+    ptr.checked_add(len)
+        .filter(|&end| end <= decoded_len)
+        .ok_or_else(|| rle_decode_error(RleDecodeReason::BitfieldIndexOutOfBounds))
+}
+
 /// Extracts a single run length from a varint header, rejecting any value that
 /// exceeds `max_decoded_len` *before* narrowing the `u64` to `usize`.
 ///
@@ -383,58 +418,39 @@ fn decode_with_offset(buf: &[u8], mut offset: usize, max_decoded_len: usize) -> 
     let mut ptr = 0;
 
     while offset < buf.len() {
-        let (next, consumed) = varint::decode(buf, offset);
-        offset += consumed;
+        let (next, consumed) = varint::decode(buf, offset)?;
+        offset = checked_buffer_end(offset, consumed, buf.len())?;
 
         let repeat = next & 1;
         // Reject (and never silently truncate) an over-cap run length before it
         // is used to fill/copy/advance; see `checked_run_len`.
         let len = checked_run_len(next, max_decoded_len)?;
+        let next_ptr = checked_decoded_end(ptr, len, bitfield.len())?;
 
         if repeat > 0 {
             // Contiguous sequence
             if next & 2 > 0 {
                 // Fill with 0xFF
-                for i in 0..len {
-                    if ptr + i < bitfield.len() {
-                        *bitfield.get_mut(ptr + i).ok_or(
-                            FortressError::InternalErrorStructured {
-                                kind: InternalErrorKind::RleDecodeError {
-                                    reason: RleDecodeReason::BitfieldIndexOutOfBounds,
-                                },
-                            },
-                        )? = 255;
-                    }
-                }
+                let dst_slice = bitfield
+                    .get_mut(ptr..next_ptr)
+                    .ok_or_else(|| rle_decode_error(RleDecodeReason::BitfieldIndexOutOfBounds))?;
+                dst_slice.fill(255);
             }
             // If bit is 0, the bytes are already 0 from vec initialization
         } else {
             // Non-contiguous sequence - copy raw bytes
-            let end = (len + offset).min(buf.len());
-            let src_len = end - offset;
-            let dst_end = (ptr + src_len).min(bitfield.len());
-            let actual_len = dst_end - ptr;
-            if actual_len > 0 && offset + actual_len <= buf.len() {
-                let dst_slice = bitfield.get_mut(ptr..dst_end).ok_or(
-                    FortressError::InternalErrorStructured {
-                        kind: InternalErrorKind::RleDecodeError {
-                            reason: RleDecodeReason::DestinationSliceOutOfBounds,
-                        },
-                    },
-                )?;
-                let src_slice = buf.get(offset..offset + actual_len).ok_or(
-                    FortressError::InternalErrorStructured {
-                        kind: InternalErrorKind::RleDecodeError {
-                            reason: RleDecodeReason::SourceSliceOutOfBounds,
-                        },
-                    },
-                )?;
-                dst_slice.copy_from_slice(src_slice);
-            }
-            offset += len;
+            let source_end = checked_buffer_end(offset, len, buf.len())?;
+            let dst_slice = bitfield
+                .get_mut(ptr..next_ptr)
+                .ok_or_else(|| rle_decode_error(RleDecodeReason::DestinationSliceOutOfBounds))?;
+            let src_slice = buf
+                .get(offset..source_end)
+                .ok_or_else(|| rle_decode_error(RleDecodeReason::SourceSliceOutOfBounds))?;
+            dst_slice.copy_from_slice(src_slice);
+            offset = source_end;
         }
 
-        ptr += len;
+        ptr = next_ptr;
     }
 
     Ok(bitfield)
@@ -454,8 +470,8 @@ fn decode_len_with_offset(
     let mut len: usize = 0;
 
     while offset < buf.len() {
-        let (next, consumed) = varint::decode(buf, offset);
-        offset += consumed;
+        let (next, consumed) = varint::decode(buf, offset)?;
+        offset = checked_buffer_end(offset, consumed, buf.len())?;
 
         let repeat = next & 1;
         // `checked_run_len` rejects any single run whose length exceeds the cap
@@ -485,28 +501,12 @@ fn decode_len_with_offset(
             // and is effectively unreachable. Keep `checked_add` for 32-bit
             // `usize` safety, and report the buffer-position overflow as the
             // semantically-correct truncation rather than a decoded-length cap.
-            offset = offset
-                .checked_add(slice)
-                .ok_or(FortressError::InternalErrorStructured {
-                    kind: InternalErrorKind::RleDecodeError {
-                        reason: RleDecodeReason::TruncatedData {
-                            offset: offset.saturating_add(slice),
-                            buffer_len: buf.len(),
-                        },
-                    },
-                })?;
+            offset = checked_buffer_end(offset, slice, buf.len())?;
         }
     }
 
     if offset > buf.len() {
-        return Err(FortressError::InternalErrorStructured {
-            kind: InternalErrorKind::RleDecodeError {
-                reason: RleDecodeReason::TruncatedData {
-                    offset,
-                    buffer_len: buf.len(),
-                },
-            },
-        });
+        return Err(truncated_data(offset, buf.len()));
     }
 
     Ok(len)
@@ -568,7 +568,7 @@ mod tests {
         assert_eq!(written, 1);
         assert_eq!(buf[0], 0);
 
-        let (decoded, consumed) = varint::decode(&buf, 0);
+        let (decoded, consumed) = varint::decode(&buf, 0).unwrap();
         assert_eq!(decoded, 0);
         assert_eq!(consumed, 1);
     }
@@ -580,7 +580,7 @@ mod tests {
             let written = varint::encode(value, &mut buf);
             assert_eq!(written, 1, "value {} should encode to 1 byte", value);
 
-            let (decoded, consumed) = varint::decode(&buf, 0);
+            let (decoded, consumed) = varint::decode(&buf, 0).unwrap();
             assert_eq!(decoded, value);
             assert_eq!(consumed, 1);
         }
@@ -590,7 +590,7 @@ mod tests {
     fn test_varint_encode_decode_medium() {
         for value in [128u64, 255, 256, 1000, 16383, 16384] {
             let encoded = varint::encode_to_vec(value);
-            let (decoded, consumed) = varint::decode(&encoded, 0);
+            let (decoded, consumed) = varint::decode(&encoded, 0).unwrap();
             assert_eq!(decoded, value, "Failed for value {}", value);
             assert_eq!(consumed, encoded.len());
         }
@@ -600,7 +600,7 @@ mod tests {
     fn test_varint_encode_decode_large() {
         for value in [u32::MAX as u64, u64::MAX / 2, u64::MAX] {
             let encoded = varint::encode_to_vec(value);
-            let (decoded, _consumed) = varint::decode(&encoded, 0);
+            let (decoded, _consumed) = varint::decode(&encoded, 0).unwrap();
             assert_eq!(decoded, value, "Failed for value {}", value);
         }
     }
@@ -908,7 +908,7 @@ mod tests {
         let encoded = varint::encode_to_vec(value);
         assert_eq!(encoded, vec![0x80, 0x01]);
 
-        let (decoded, consumed) = varint::decode(&encoded, 0);
+        let (decoded, consumed) = varint::decode(&encoded, 0).unwrap();
         assert_eq!(decoded, value);
         assert_eq!(consumed, 2);
 
@@ -917,9 +917,54 @@ mod tests {
         // High bits: 10 = 2
         let value2 = 300u64;
         let encoded2 = varint::encode_to_vec(value2);
-        let (decoded2, consumed2) = varint::decode(&encoded2, 0);
+        let (decoded2, consumed2) = varint::decode(&encoded2, 0).unwrap();
         assert_eq!(decoded2, value2);
         assert_eq!(consumed2, encoded2.len());
+    }
+
+    #[test]
+    fn varint_decode_rejects_truncated_continuation() {
+        let result = varint::decode(&[0x80], 0);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError {
+                    reason: RleDecodeReason::TruncatedData {
+                        offset: 1,
+                        buffer_len: 1,
+                    },
+                },
+            })
+        ));
+    }
+
+    #[test]
+    fn varint_decode_rejects_overflowing_header() {
+        let result = varint::decode(&[0xFF; 10], 0);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError {
+                    reason: RleDecodeReason::MalformedVarint { offset: 0 },
+                },
+            })
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_truncated_varint_header() {
+        let result = decode([0x80]);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError {
+                    reason: RleDecodeReason::TruncatedData { .. },
+                },
+            })
+        ));
     }
 
     #[test]
@@ -1028,6 +1073,34 @@ mod tests {
 
         // Assert: errors instead of panicking on overflow.
         assert_decoded_length_exceeds_maximum(result);
+    }
+
+    #[test]
+    fn checked_buffer_end_rejects_offset_overflow() {
+        let result = checked_buffer_end(usize::MAX, 1, usize::MAX);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError {
+                    reason: RleDecodeReason::TruncatedData { .. },
+                },
+            })
+        ));
+    }
+
+    #[test]
+    fn checked_decoded_end_rejects_pointer_overflow() {
+        let result = checked_decoded_end(usize::MAX, 1, usize::MAX);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError {
+                    reason: RleDecodeReason::BitfieldIndexOutOfBounds,
+                },
+            })
+        ));
     }
 
     #[test]
@@ -1247,20 +1320,20 @@ mod tests {
         let value = 256u64;
         let encoded = varint::encode_to_vec(value);
 
-        let (decoded, consumed) = varint::decode(&encoded, 0);
+        let (decoded, consumed) = varint::decode(&encoded, 0).unwrap();
         assert_eq!(decoded, value);
         assert_eq!(consumed, encoded.len());
 
         // Another test: 0x3FFF (16383) - max 2-byte value
         let value2 = 16383u64;
         let encoded2 = varint::encode_to_vec(value2);
-        let (decoded2, _) = varint::decode(&encoded2, 0);
+        let (decoded2, _) = varint::decode(&encoded2, 0).unwrap();
         assert_eq!(decoded2, value2);
 
         // Test 0x4000 (16384) - first 3-byte value
         let value3 = 16384u64;
         let encoded3 = varint::encode_to_vec(value3);
-        let (decoded3, _) = varint::decode(&encoded3, 0);
+        let (decoded3, _) = varint::decode(&encoded3, 0).unwrap();
         assert_eq!(decoded3, value3);
     }
 
@@ -1495,7 +1568,7 @@ mod property_tests {
         #[test]
         fn prop_varint_roundtrip(value in any::<u64>()) {
             let encoded = varint::encode_to_vec(value);
-            let (decoded, consumed) = varint::decode(&encoded, 0);
+            let (decoded, consumed) = varint::decode(&encoded, 0).unwrap();
             prop_assert_eq!(
                 value, decoded,
                 "Varint roundtrip failed: {} != {}",
@@ -1646,10 +1719,10 @@ mod kani_proofs {
         kani::assert(buf[0] & 0x80 == 0, "Continuation bit should not be set");
     }
 
-    /// Proof: varint::decode terminates and returns valid consumed count.
+    /// Proof: varint::decode terminates and returns valid consumed count on success.
     ///
-    /// This proves that the decode loop always terminates and returns a valid
-    /// number of consumed bytes.
+    /// This proves that the decode loop always terminates and, for valid inputs,
+    /// returns a valid number of consumed bytes.
     ///
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Decode loop termination and bounds safety
@@ -1663,21 +1736,23 @@ mod kani_proofs {
         let b2: u8 = kani::any();
         let buf = [b0, b1, b2];
 
-        let (value, consumed) = varint::decode(&buf, 0);
+        let result = varint::decode(&buf, 0);
 
-        // Consumed must be in valid range (consumed is usize, always non-negative)
-        kani::assert(
-            consumed <= buf.len(),
-            "consumed must not exceed buffer length",
-        );
-
-        // If first byte has continuation bit clear, should consume exactly 1
-        if b0 & 0x80 == 0 {
-            kani::assert(consumed == 1, "No continuation bit means 1 byte consumed");
+        if let Ok((value, consumed)) = result {
+            // Consumed must be in valid range (consumed is usize, always non-negative)
             kani::assert(
-                value == b0 as u64,
-                "Single byte decode should equal byte value",
+                consumed <= buf.len(),
+                "consumed must not exceed buffer length",
             );
+
+            // If first byte has continuation bit clear, should consume exactly 1
+            if b0 & 0x80 == 0 {
+                kani::assert(consumed == 1, "No continuation bit means 1 byte consumed");
+                kani::assert(
+                    value == b0 as u64,
+                    "Single byte decode should equal byte value",
+                );
+            }
         }
     }
 
@@ -1698,13 +1773,15 @@ mod kani_proofs {
         let offset: usize = kani::any();
         kani::assume(offset <= buf.len());
 
-        let (_value, consumed) = varint::decode(&buf, offset);
+        let result = varint::decode(&buf, offset);
 
-        // Consumed bytes should not exceed remaining buffer
-        kani::assert(
-            consumed <= buf.len() - offset,
-            "Should not consume more than available",
-        );
+        if let Ok((_value, consumed)) = result {
+            // Consumed bytes should not exceed remaining buffer
+            kani::assert(
+                consumed <= buf.len() - offset,
+                "Should not consume more than available",
+            );
+        }
     }
 
     /// Proof: varint roundtrip is correct for small values.
@@ -1721,7 +1798,7 @@ mod kani_proofs {
         kani::assume(value < 16384); // Keep proof tractable
 
         let encoded = varint::encode_to_vec(value);
-        let (decoded, consumed) = varint::decode(&encoded, 0);
+        let (decoded, consumed) = varint::decode(&encoded, 0).unwrap();
 
         kani::assert(decoded == value, "Roundtrip should preserve value");
         kani::assert(
@@ -1750,7 +1827,7 @@ mod kani_proofs {
 
     /// Proof: Empty buffer decode is safe.
     ///
-    /// Decoding from an empty buffer should return (0, 0) without panicking.
+    /// Decoding from an empty buffer should return an error without panicking.
     ///
     /// - Tier: 1 (Fast, <30s)
     /// - Verifies: Empty input handling safety
@@ -1758,10 +1835,9 @@ mod kani_proofs {
     #[kani::proof]
     fn proof_varint_decode_empty_safe() {
         let buf: [u8; 0] = [];
-        let (value, consumed) = varint::decode(&buf, 0);
+        let result = varint::decode(&buf, 0);
 
-        kani::assert(consumed == 0, "Empty buffer should consume 0 bytes");
-        kani::assert(value == 0, "Empty buffer should decode to 0");
+        kani::assert(result.is_err(), "Empty buffer should return an error");
     }
 
     /// Proof: Continuation bit handling is correct.
@@ -1782,7 +1858,7 @@ mod kani_proofs {
         kani::assume(byte2 & 0x80 == 0); // Second doesn't
 
         let buf = [byte1, byte2];
-        let (value, consumed) = varint::decode(&buf, 0);
+        let (value, consumed) = varint::decode(&buf, 0).unwrap();
 
         kani::assert(consumed == 2, "Should consume both bytes");
 

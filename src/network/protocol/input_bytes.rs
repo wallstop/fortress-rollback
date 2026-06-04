@@ -9,7 +9,9 @@ use crate::frame_info::PlayerInput;
 use crate::network::codec;
 use crate::report_violation;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
-use crate::{Config, Frame, PlayerHandle};
+use crate::{
+    Config, FortressError, Frame, InternalErrorKind, PlayerHandle, SerializationErrorKind,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InputBytesDecodeError {
@@ -65,6 +67,40 @@ impl InputBytes {
         Ok(byte_len / num_players)
     }
 
+    fn player_byte_range(
+        player: usize,
+        size: usize,
+        byte_len: usize,
+    ) -> Result<std::ops::Range<usize>, InputBytesDecodeError> {
+        let start =
+            player
+                .checked_mul(size)
+                .ok_or(InputBytesDecodeError::PlayerByteRangeOutOfBounds {
+                    player,
+                    start: player.saturating_mul(size),
+                    end: usize::MAX,
+                    byte_len,
+                })?;
+        let end =
+            start
+                .checked_add(size)
+                .ok_or(InputBytesDecodeError::PlayerByteRangeOutOfBounds {
+                    player,
+                    start,
+                    end: usize::MAX,
+                    byte_len,
+                })?;
+        if end > byte_len {
+            return Err(InputBytesDecodeError::PlayerByteRangeOutOfBounds {
+                player,
+                start,
+                end,
+                byte_len,
+            });
+        }
+        Ok(start..end)
+    }
+
     /// Creates a zeroed InputBytes for the given number of players.
     ///
     /// # Returns
@@ -106,30 +142,73 @@ impl InputBytes {
         }
     }
 
-    /// Creates an InputBytes from the given inputs.
-    ///
-    /// If serialization fails (which should never happen with a properly implemented Config::Input),
-    /// returns an empty InputBytes and logs an error via the violation reporter.
-    pub fn from_inputs<T: Config>(
+    /// Creates an InputBytes from the given inputs, rejecting per-player values
+    /// whose serialized length differs from `Config::Input::default()`.
+    pub fn try_from_inputs<T: Config>(
         num_players: usize,
         inputs: &BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
-    ) -> Self {
-        // Pre-allocate based on expected size: each input is serialized once
-        // Estimate 8 bytes per input as reasonable starting capacity
-        let estimated_size = num_players.saturating_mul(8);
-        let mut bytes = Vec::new();
-        if bytes.try_reserve(estimated_size).is_err() {
+    ) -> Result<Self, FortressError> {
+        let input_size = codec::encoded_len(&T::Input::default()).map_err(|err| {
             report_violation!(
-                ViolationSeverity::Warning,
-                ViolationKind::NetworkProtocol,
-                "Failed to pre-reserve {} bytes for input serialization; continuing without preallocation",
-                estimated_size
+                ViolationSeverity::Critical,
+                ViolationKind::InternalError,
+                "Failed to measure default input type serialization: {}",
+                err
             );
+            SerializationErrorKind::EndpointCreationFailed
+        })?;
+        if input_size == 0 {
+            return Err(SerializationErrorKind::InputSerializedSizeZero.into());
         }
+
+        let serializable_inputs = inputs
+            .keys()
+            .filter(|handle| handle.as_usize() < num_players)
+            .count();
+        let estimated_size = input_size.checked_mul(serializable_inputs).ok_or({
+            FortressError::SerializationErrorStructured {
+                kind: SerializationErrorKind::InputSerializedFrameTooLarge {
+                    frame_len: usize::MAX,
+                    max: crate::rle::DEFAULT_MAX_DECODED_LEN,
+                },
+            }
+        })?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(estimated_size).map_err(|_err| {
+            crate::error::allocation_failed("input_bytes.from_inputs", estimated_size)
+        })?;
         let mut frame = Frame::NULL;
         // in ascending order
         for handle in 0..num_players {
             if let Some(input) = inputs.get(&PlayerHandle::new(handle)) {
+                let input_len = codec::encoded_len(&input.input).map_err(|err| {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "Failed to measure input serialization for player {}: {}",
+                        handle,
+                        err
+                    );
+                    SerializationErrorKind::EndpointCreationFailed
+                })?;
+                if input_len != input_size {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "Serialized input for player {} is {} byte(s), expected {}",
+                        handle,
+                        input_len,
+                        input_size
+                    );
+                    return Err(FortressError::InternalErrorStructured {
+                        kind: InternalErrorKind::InputEncodeLengthMismatch {
+                            player: handle,
+                            input_len,
+                            expected_len: input_size,
+                        },
+                    });
+                }
+
                 // Track the frame - use the first non-NULL frame we see.
                 // All inputs in a single send *should* have the same frame, but if not,
                 // log it and continue with the first frame (the data is still valid).
@@ -158,14 +237,37 @@ impl InputBytes {
                         handle,
                         e
                     );
-                    return Self {
-                        frame: Frame::NULL,
-                        bytes: Vec::new(),
-                    };
+                    return Err(SerializationErrorKind::EndpointCreationFailed.into());
                 }
             }
         }
-        Self { frame, bytes }
+        Ok(Self { frame, bytes })
+    }
+
+    /// Creates an InputBytes from the given inputs.
+    ///
+    /// If serialization fails (which should never happen with a properly implemented Config::Input),
+    /// returns an empty InputBytes and logs an error via the violation reporter.
+    #[cfg(test)]
+    pub fn from_inputs<T: Config>(
+        num_players: usize,
+        inputs: &BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
+    ) -> Self {
+        match Self::try_from_inputs::<T>(num_players, inputs) {
+            Ok(input_bytes) => input_bytes,
+            Err(err) => {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::NetworkProtocol,
+                    "Failed to serialize input bytes: {:?}",
+                    err
+                );
+                Self {
+                    frame: Frame::NULL,
+                    bytes: Vec::new(),
+                }
+            },
+        }
     }
 
     /// Converts InputBytes to a vector of PlayerInput, rejecting malformed data
@@ -184,13 +286,12 @@ impl InputBytes {
         }
 
         for p in 0..num_players {
-            let start = p * size;
-            let end = start + size;
-            let Some(player_byte_slice) = self.bytes.get(start..end) else {
+            let range = Self::player_byte_range(p, size, self.bytes.len())?;
+            let Some(player_byte_slice) = self.bytes.get(range.clone()) else {
                 return Err(InputBytesDecodeError::PlayerByteRangeOutOfBounds {
                     player: p,
-                    start,
-                    end,
+                    start: range.start,
+                    end: range.end,
                     byte_len: self.bytes.len(),
                 });
             };
@@ -332,6 +433,27 @@ mod tests {
         type Address = SocketAddr;
     }
 
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    enum BalancedVariableInput {
+        Short,
+        Medium(u32),
+        Long(u64),
+    }
+
+    impl Default for BalancedVariableInput {
+        fn default() -> Self {
+            Self::Medium(0)
+        }
+    }
+
+    struct BalancedVariableInputConfig;
+
+    impl Config for BalancedVariableInputConfig {
+        type Input = BalancedVariableInput;
+        type State = TestState;
+        type Address = SocketAddr;
+    }
+
     // ==========================================
     // Constructor Tests
     // ==========================================
@@ -437,6 +559,40 @@ mod tests {
         let input_bytes = InputBytes::from_inputs::<TestConfig>(2, &inputs);
         // Only serializes inputs that exist - results in 4 bytes for player 0
         assert_eq!(input_bytes.bytes.len(), 4);
+    }
+
+    #[test]
+    fn try_from_inputs_rejects_variable_width_per_player_input() {
+        let default_len = codec::encoded_len(&BalancedVariableInput::default()).unwrap();
+        let short_len = codec::encoded_len(&BalancedVariableInput::Short).unwrap();
+        let long_len = codec::encoded_len(&BalancedVariableInput::Long(7)).unwrap();
+        assert_eq!(
+            short_len + long_len,
+            default_len * 2,
+            "test fixture must keep the aggregate width balanced"
+        );
+
+        let mut inputs = BTreeMap::new();
+        inputs.insert(
+            PlayerHandle::new(0),
+            PlayerInput::new(Frame::new(50), BalancedVariableInput::Short),
+        );
+        inputs.insert(
+            PlayerHandle::new(1),
+            PlayerInput::new(Frame::new(50), BalancedVariableInput::Long(7)),
+        );
+
+        let result = InputBytes::try_from_inputs::<BalancedVariableInputConfig>(2, &inputs);
+        assert!(matches!(
+            result,
+            Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::InputEncodeLengthMismatch {
+                    player: 0,
+                    input_len,
+                    expected_len
+                }
+            }) if input_len == short_len && expected_len == default_len
+        ));
     }
 
     // ==========================================
@@ -545,6 +701,20 @@ mod tests {
                 consumed: 4,
                 slice_len: 5,
             }
+        ));
+    }
+
+    #[test]
+    fn player_byte_range_rejects_arithmetic_overflow() {
+        let result = InputBytes::player_byte_range(usize::MAX, 2, usize::MAX);
+
+        assert!(matches!(
+            result,
+            Err(InputBytesDecodeError::PlayerByteRangeOutOfBounds {
+                player: usize::MAX,
+                end: usize::MAX,
+                ..
+            })
         ));
     }
 
@@ -968,17 +1138,26 @@ mod kani_proofs {
         let player: usize = kani::any();
         kani::assume(player < num_players);
 
-        let start = player * size_per_player;
-        let end = start + size_per_player;
+        let range =
+            match InputBytes::player_byte_range(player, size_per_player, input_bytes.bytes.len()) {
+                Ok(range) => range,
+                Err(_err) => {
+                    kani::assert(false, "Checked player byte range should be valid");
+                    return;
+                },
+            };
 
         // Bounds should be valid
-        kani::assert(start <= input_bytes.bytes.len(), "Start within bounds");
-        kani::assert(end <= input_bytes.bytes.len(), "End within bounds");
-        kani::assert(start <= end, "Start <= end");
+        kani::assert(
+            range.start <= input_bytes.bytes.len(),
+            "Start within bounds",
+        );
+        kani::assert(range.end <= input_bytes.bytes.len(), "End within bounds");
+        kani::assert(range.start <= range.end, "Start <= end");
 
         // Should be able to slice (get would return Some)
         kani::assert(
-            input_bytes.bytes.get(start..end).is_some(),
+            input_bytes.bytes.get(range).is_some(),
             "Slice should be valid",
         );
     }

@@ -241,6 +241,8 @@ pub mod sessions {
 }
 #[doc(hidden)]
 pub mod network {
+    pub(crate) const MAX_RECEIVE_MESSAGES_PER_POLL: usize = 256;
+
     /// Shared fail-closed allocation for socket receive/send buffers.
     mod buffer;
     pub mod chaos_socket;
@@ -257,6 +259,7 @@ pub mod network {
     pub mod network_stats;
     #[doc(hidden)]
     pub mod protocol;
+    mod socket_receive;
     #[cfg(feature = "tokio")]
     pub mod tokio_socket;
     #[doc(hidden)]
@@ -2033,6 +2036,14 @@ pub trait Config: 'static + Send + Sync {
     ///
     /// The implementation of [Default] is used for representing "no input" for
     /// a player, including when a player is disconnected.
+    ///
+    /// Network sessions require this type to serialize to at least one byte,
+    /// every value must serialize to the same byte length under Fortress
+    /// Rollback's codec, and each local or remote aggregate input frame must
+    /// fit the protocol receive decode cap. Prefer structs of fixed-width
+    /// numeric and boolean fields; avoid variable-length enums, strings,
+    /// vectors, maps, or other payloads whose encoded size can change from
+    /// frame to frame.
     type Input: Copy + Clone + PartialEq + Eq + Default + Serialize + DeserializeOwned + Send + Sync;
 
     /// The save state type for the session.
@@ -2056,7 +2067,14 @@ pub trait Config: 'static + Send + Sync {
 /// fallible reservation when buffering packets internally. If an implementation
 /// has more packets ready than its configured cap, it should return a bounded
 /// prefix and keep or drop the remainder according to that transport's normal
-/// backpressure policy rather than risking allocator abort.
+/// backpressure policy rather than risking allocator abort. Built-in UDP,
+/// Tokio UDP, and chaos sockets cap each receive poll at 256 raw attempts
+/// and 256 decoded messages.
+///
+/// When converting received peer bytes into [`Message`], use
+/// [`crate::network::codec::decode_message`]. It validates every `Message`
+/// length prefix against the remaining packet before allocating; generic
+/// bincode decoding does not.
 #[cfg(feature = "sync-send")]
 pub trait NonBlockingSocket<A>: Send + Sync
 where
@@ -2084,6 +2102,14 @@ pub trait Config: 'static {
     ///
     /// The implementation of [Default] is used for representing "no input" for
     /// a player, including when a player is disconnected.
+    ///
+    /// Network sessions require this type to serialize to at least one byte,
+    /// every value must serialize to the same byte length under Fortress
+    /// Rollback's codec, and each local or remote aggregate input frame must
+    /// fit the protocol receive decode cap. Prefer structs of fixed-width
+    /// numeric and boolean fields; avoid variable-length enums, strings,
+    /// vectors, maps, or other payloads whose encoded size can change from
+    /// frame to frame.
     type Input: Copy + Clone + PartialEq + Eq + Default + Serialize + DeserializeOwned;
 
     /// The save state type for the session.
@@ -2107,7 +2133,14 @@ pub trait Config: 'static {
 /// fallible reservation when buffering packets internally. If an implementation
 /// has more packets ready than its configured cap, it should return a bounded
 /// prefix and keep or drop the remainder according to that transport's normal
-/// backpressure policy rather than risking allocator abort.
+/// backpressure policy rather than risking allocator abort. Built-in UDP,
+/// Tokio UDP, and chaos sockets cap each receive poll at 256 raw attempts
+/// and 256 decoded messages.
+///
+/// When converting received peer bytes into [`Message`], use
+/// [`crate::network::codec::decode_message`]. It validates every `Message`
+/// length prefix against the remaining packet before allocating; generic
+/// bincode decoding does not.
 #[cfg(not(feature = "sync-send"))]
 pub trait NonBlockingSocket<A>
 where

@@ -7,8 +7,8 @@
 //! # Safety Properties Tested
 //! - No panics on arbitrary byte sequences in Input messages
 //! - Safe handling of edge cases (empty, very long, all zeros, all ones)
-//! - The decode path (including the RLE decompression-bomb guard) never
-//!   panics or over-allocates on arbitrary attacker-controlled bytes
+//! - The decode path (including RLE byte caps and delta frame-count caps)
+//!   never panics or over-allocates on arbitrary attacker-controlled bytes
 
 #![no_main]
 
@@ -75,10 +75,9 @@ fuzz_target!(|input: CompressionInput| {
         .collect();
     let _ = codec::encode(&alternating);
 
-    // Fuzz the DECODE path on arbitrary attacker-controlled bytes. This is the
-    // network-reachable path (UdpProtocol::on_input -> compression::decode ->
-    // rle::decode). It must never panic or over-allocate; if it returns Ok, the
-    // total decoded byte count is bounded by the RLE safety cap.
+    // Fuzz the convenience DECODE path on arbitrary attacker-controlled bytes.
+    // It must never panic or over-allocate; if it returns Ok, the total decoded
+    // byte count is bounded by the default RLE safety cap.
     if let Ok(decoded) = compression::decode(&input.reference, &input.decode_data) {
         let total: usize = decoded.iter().map(Vec::len).sum();
         assert!(
@@ -86,6 +85,33 @@ fuzz_target!(|input: CompressionInput| {
             "decoded {} bytes exceeds DEFAULT_MAX_DECODED_LEN {}",
             total,
             DEFAULT_MAX_DECODED_LEN
+        );
+        assert!(
+            decoded.len() <= compression::MAX_DELTA_DECODED_FRAMES,
+            "decoded {} frames exceeds MAX_DELTA_DECODED_FRAMES {}",
+            decoded.len(),
+            compression::MAX_DELTA_DECODED_FRAMES
+        );
+    }
+
+    // Protocol receive paths use an explicit cap derived from configuration and
+    // reference input size. Exercise that stricter API too.
+    let configured_limit = input.reference.len().saturating_mul(4).max(1);
+    if let Ok(decoded) =
+        compression::decode_with_max_len(&input.reference, &input.decode_data, configured_limit)
+    {
+        let total: usize = decoded.iter().map(Vec::len).sum();
+        assert!(
+            total <= configured_limit,
+            "decoded {} bytes exceeds configured limit {}",
+            total,
+            configured_limit
+        );
+        assert!(
+            decoded.len() <= compression::MAX_DELTA_DECODED_FRAMES,
+            "decoded {} frames exceeds MAX_DELTA_DECODED_FRAMES {}",
+            decoded.len(),
+            compression::MAX_DELTA_DECODED_FRAMES
         );
     }
 });

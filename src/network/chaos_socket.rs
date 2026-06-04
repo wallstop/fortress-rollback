@@ -41,7 +41,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::network::messages::Message;
+use crate::network::MAX_RECEIVE_MESSAGES_PER_POLL;
+use crate::report_violation;
 use crate::rng::{Pcg32, Rng, SeedableRng};
+use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::NonBlockingSocket;
 
 /// Configuration for network chaos simulation.
@@ -667,9 +670,35 @@ where
     fn deliver_ready_packets(&mut self) -> Vec<(A, Message)> {
         let now = self.now();
         let mut ready = Vec::new();
+        if ready.try_reserve_exact(4).is_err() {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "Failed to reserve ChaosSocket ready packet batch"
+            );
+            return ready;
+        }
 
         while let Some(packet) = self.in_flight.front() {
             if packet.deliver_at <= now {
+                if ready.len() >= MAX_RECEIVE_MESSAGES_PER_POLL {
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::NetworkProtocol,
+                        "ChaosSocket ready batch reached per-poll cap of {} packet(s)",
+                        MAX_RECEIVE_MESSAGES_PER_POLL
+                    );
+                    break;
+                }
+                // reserve-in-loop: guarded by MAX_RECEIVE_MESSAGES_PER_POLL ready-packet cap.
+                if ready.try_reserve(1).is_err() {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "Failed to reserve ChaosSocket ready packet slot"
+                    );
+                    break;
+                }
                 // Safe: front() returned Some, so pop_front() will return Some
                 if let Some(packet) = self.in_flight.pop_front() {
                     ready.push((packet.addr, packet.msg));
@@ -696,16 +725,40 @@ where
             return;
         }
 
-        // Track if we received new messages in this batch
+        if self.reorder_buffer.len().saturating_add(messages.len()) > MAX_RECEIVE_MESSAGES_PER_POLL
+        {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "ChaosSocket reorder buffer reached cap of {} packet(s)",
+                MAX_RECEIVE_MESSAGES_PER_POLL
+            );
+            self.add_receive_drops(messages.len());
+            messages.clear();
+        }
+
+        // Track if we received new messages in this batch.
         let received_new_messages = !messages.is_empty();
 
         // Add messages to reorder buffer
+        if self.reorder_buffer.try_reserve(messages.len()).is_err() {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "Failed to reserve ChaosSocket reorder buffer"
+            );
+            return;
+        }
         self.reorder_buffer.append(messages);
 
         // Determine if we should release packets:
         // 1. Buffer is full enough for meaningful reordering, OR
         // 2. No new messages arrived and buffer has packets (prevent indefinite holding)
-        let should_release = self.reorder_buffer.len() >= self.config.reorder_buffer_size
+        let reorder_threshold = self
+            .config
+            .reorder_buffer_size
+            .min(MAX_RECEIVE_MESSAGES_PER_POLL);
+        let should_release = self.reorder_buffer.len() >= reorder_threshold
             || (!received_new_messages && !self.reorder_buffer.is_empty());
 
         if should_release && !self.reorder_buffer.is_empty() {
@@ -736,6 +789,86 @@ where
         } else {
             self.rng.gen::<f64>() < self.config.reorder_rate
         }
+    }
+
+    fn add_receive_drops(&mut self, count: usize) {
+        self.stats.packets_dropped_receive = self
+            .stats
+            .packets_dropped_receive
+            .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+    }
+
+    fn queue_new_messages(&mut self, new_messages: Vec<(A, Message)>) {
+        let mut accepted_this_poll = 0usize;
+        for (addr, msg) in new_messages {
+            if accepted_this_poll >= MAX_RECEIVE_MESSAGES_PER_POLL {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "ChaosSocket receive batch reached per-poll cap of {} message(s)",
+                    MAX_RECEIVE_MESSAGES_PER_POLL
+                );
+                self.add_receive_drops(1);
+                continue;
+            }
+
+            // Apply receive-side packet loss before queueing.
+            if self.should_drop(self.config.receive_loss_rate) {
+                self.stats.packets_dropped_receive += 1;
+                continue;
+            }
+
+            if self.in_flight.len() >= MAX_RECEIVE_MESSAGES_PER_POLL {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "ChaosSocket in-flight queue reached cap of {} packet(s)",
+                    MAX_RECEIVE_MESSAGES_PER_POLL
+                );
+                self.stats.packets_dropped_receive += 1;
+                continue;
+            }
+
+            // reserve-in-loop: guarded by MAX_RECEIVE_MESSAGES_PER_POLL accepted-message and in-flight caps.
+            if self.in_flight.try_reserve(1).is_err() {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::NetworkProtocol,
+                    "Failed to reserve ChaosSocket in-flight packet slot"
+                );
+                self.stats.packets_dropped_receive += 1;
+                return;
+            }
+
+            let deliver_at = self.calculate_delivery_time();
+            self.in_flight.push_back(InFlightPacket {
+                addr,
+                msg,
+                deliver_at,
+            });
+            accepted_this_poll += 1;
+        }
+    }
+
+    fn receive_all_messages_impl(&mut self) -> Vec<(A, Message)> {
+        let new_messages = self.inner.receive_all_messages();
+        self.queue_new_messages(new_messages);
+
+        // Sort by delivery time to maintain order (unless reordering is enabled).
+        if self.config.reorder_rate <= 0.0 {
+            self.in_flight
+                .make_contiguous()
+                .sort_by_key(|p| p.deliver_at);
+        }
+
+        // Deliver packets that have completed their latency delay.
+        let mut ready = self.deliver_ready_packets();
+        self.stats.packets_received += u64::try_from(ready.len()).unwrap_or(u64::MAX);
+
+        // Apply reordering to ready packets.
+        self.apply_reordering(&mut ready);
+
+        ready
     }
 }
 
@@ -771,40 +904,7 @@ where
     }
 
     fn receive_all_messages(&mut self) -> Vec<(A, Message)> {
-        // Receive new messages from the inner socket
-        let new_messages = self.inner.receive_all_messages();
-
-        // Queue new messages with latency
-        for (addr, msg) in new_messages {
-            // Apply receive-side packet loss before queueing
-            if self.should_drop(self.config.receive_loss_rate) {
-                self.stats.packets_dropped_receive += 1;
-                continue;
-            }
-
-            let deliver_at = self.calculate_delivery_time();
-            self.in_flight.push_back(InFlightPacket {
-                addr,
-                msg,
-                deliver_at,
-            });
-        }
-
-        // Sort by delivery time to maintain order (unless reordering is enabled)
-        if self.config.reorder_rate <= 0.0 {
-            self.in_flight
-                .make_contiguous()
-                .sort_by_key(|p| p.deliver_at);
-        }
-
-        // Deliver packets that have completed their latency delay
-        let mut ready = self.deliver_ready_packets();
-        self.stats.packets_received += ready.len() as u64;
-
-        // Apply reordering to ready packets
-        self.apply_reordering(&mut ready);
-
-        ready
+        self.receive_all_messages_impl()
     }
 }
 
@@ -840,40 +940,7 @@ where
     }
 
     fn receive_all_messages(&mut self) -> Vec<(A, Message)> {
-        // Receive new messages from the inner socket
-        let new_messages = self.inner.receive_all_messages();
-
-        // Queue new messages with latency
-        for (addr, msg) in new_messages {
-            // Apply receive-side packet loss before queueing
-            if self.should_drop(self.config.receive_loss_rate) {
-                self.stats.packets_dropped_receive += 1;
-                continue;
-            }
-
-            let deliver_at = self.calculate_delivery_time();
-            self.in_flight.push_back(InFlightPacket {
-                addr,
-                msg,
-                deliver_at,
-            });
-        }
-
-        // Sort by delivery time to maintain order (unless reordering is enabled)
-        if self.config.reorder_rate <= 0.0 {
-            self.in_flight
-                .make_contiguous()
-                .sort_by_key(|p| p.deliver_at);
-        }
-
-        // Deliver packets that have completed their latency delay
-        let mut ready = self.deliver_ready_packets();
-        self.stats.packets_received += ready.len() as u64;
-
-        // Apply reordering to ready packets
-        self.apply_reordering(&mut ready);
-
-        ready
+        self.receive_all_messages_impl()
     }
 }
 
@@ -1301,6 +1368,60 @@ mod tests {
             5,
             "All packets should be delivered immediately"
         );
+    }
+
+    #[test]
+    fn receive_all_messages_caps_passthrough_batch() {
+        let mut inner = TestSocket::default();
+        let addr = test_addr();
+        let msg = test_message();
+        let overflow = 10usize;
+        let cap = crate::network::MAX_RECEIVE_MESSAGES_PER_POLL;
+
+        for _ in 0..cap + overflow {
+            inner.to_receive.push((addr, msg.clone()));
+        }
+
+        let mut socket = ChaosSocket::new(inner, ChaosConfig::passthrough());
+        let received = socket.receive_all_messages();
+
+        assert_eq!(received.len(), cap);
+        assert_eq!(socket.packets_in_flight(), 0);
+        assert_eq!(
+            socket.stats().packets_dropped_receive,
+            u64::try_from(overflow).unwrap()
+        );
+    }
+
+    #[test]
+    fn receive_all_messages_caps_in_flight_queue() {
+        let mut inner = TestSocket::default();
+        let addr = test_addr();
+        let msg = test_message();
+        let overflow = 10usize;
+        let cap = crate::network::MAX_RECEIVE_MESSAGES_PER_POLL;
+
+        for _ in 0..cap + overflow {
+            inner.to_receive.push((addr, msg.clone()));
+        }
+
+        let clock = TestClock::new();
+        let config = ChaosConfig::builder().latency_ms(1_000).build();
+        let mut socket = ChaosSocket::new(inner, config).with_clock(clock.as_clock_fn());
+
+        let received = socket.receive_all_messages();
+
+        assert_eq!(received.len(), 0);
+        assert_eq!(socket.packets_in_flight(), cap);
+        assert_eq!(
+            socket.stats().packets_dropped_receive,
+            u64::try_from(overflow).unwrap()
+        );
+
+        clock.advance(Duration::from_secs(1));
+        let received = socket.receive_all_messages();
+        assert_eq!(received.len(), cap);
+        assert_eq!(socket.packets_in_flight(), 0);
     }
 
     #[test]
