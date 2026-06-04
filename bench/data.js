@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778947389605,
+  "lastUpdate": 1780605272302,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "f4529bf7679bb02bcc6ce7dbba9aa8b3bed8757a",
-          "message": "chore(deps): bump tracing from 0.1.43 to 0.1.44 in /loom-tests (#64)\n\nBumps [tracing](https://github.com/tokio-rs/tracing) from 0.1.43 to\n0.1.44.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/tokio-rs/tracing/releases\">tracing's\nreleases</a>.</em></p>\n<blockquote>\n<h2>tracing 0.1.44</h2>\n<h3>Fixed</h3>\n<ul>\n<li>Fix <code>record_all</code> panic (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3432\">#3432</a>)</li>\n</ul>\n<h3>Changed</h3>\n<ul>\n<li><code>tracing-core</code>: updated to 0.1.36 (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3440\">#3440</a>)</li>\n</ul>\n<p><a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3432\">#3432</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/pull/3432\">tokio-rs/tracing#3432</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3440\">#3440</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/pull/3440\">tokio-rs/tracing#3440</a></p>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/2d55f6faf9be83e7e4634129fb96813241aac2b8\"><code>2d55f6f</code></a>\nchore: prepare tracing 0.1.44 (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3439\">#3439</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/10a9e838a35e6ded79d66af246be2ee05417136d\"><code>10a9e83</code></a>\nchore: prepare tracing-core 0.1.36 (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3440\">#3440</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/ee82cf92a8c750f98cfb7a417cc8defb37e26a00\"><code>ee82cf9</code></a>\ntracing: fix record_all panic (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3432\">#3432</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/9978c3663bcd58de14b3cf089ad24cb63d00a922\"><code>9978c36</code></a>\nchore: prepare tracing-mock 0.1.0-beta.3 (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3429\">#3429</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/cc44064b3a41cb586bd633f8a024354928e25819\"><code>cc44064</code></a>\nchore: prepare tracing-subscriber 0.3.22 (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3428\">#3428</a>)</li>\n<li>See full diff in <a\nhref=\"https://github.com/tokio-rs/tracing/compare/tracing-0.1.43...tracing-0.1.44\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=tracing&package-manager=cargo&previous-version=0.1.43&new-version=0.1.44)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot merge` will merge this PR after your CI passes on it\n- `@dependabot squash and merge` will squash and merge this PR after\nyour CI passes on it\n- `@dependabot cancel merge` will cancel a previously requested merge\nand block automerging\n- `@dependabot reopen` will reopen this PR if it is closed\n- `@dependabot close` will close this PR and stop Dependabot recreating\nit. You can achieve the same result by closing it manually\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-01-22T20:39:15-08:00",
-          "tree_id": "db8ca30f238d6d39f73a986311f1142f582817bf",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/f4529bf7679bb02bcc6ce7dbba9aa8b3bed8757a"
-        },
-        "date": 1769143426745,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 98,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 145,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 500,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 741,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1094,
-            "range": "± 22",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 101992,
-            "range": "± 519",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27407,
-            "range": "± 873",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1243,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1554,
-            "range": "± 104",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1556,
             "range": "± 99",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "123fa9ed3270ca99ca713877d327a8167dc99fed",
+          "message": "Spectator tech (#164)\n\n## Description\n\nThis PR upgrades spectator capabilities with failover, stream delay, and\nrewind support.\n\n- Adds failover spectator startup via\n`SessionBuilder::start_spectator_session_multi(&[T::Address], socket)`.\n- Spectators can connect to multiple hosts at once and continue while at\nleast one host stays connected.\n- Adds `SpectatorConfig::stream_delay` to hold playback behind the live\nedge.\n- Adds `SpectatorConfig::enable_rewind` with seek support through\n`SpectatorSession::seek_to_frame(Frame)`.\n- Adds spectator config validation (`buffer_size > 0` and `stream_delay\n< buffer_size`) and applies it to spectator startup.\n- Improves duplicate frame/input handling and host disconnect behavior\nin multi-host scenarios.\n- Updates user-facing docs and API contracts to document the new\nbehavior and edge cases.\n\n## Type of Change\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] ✨ New feature (non-breaking change that adds functionality)\n- [x] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n\t- No `unwrap()` in production code\n\t- No `expect()` in production code\n\t- No `panic!()` or `todo!()`\n\t- All fallible operations return `Result`\n- [ ] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --all-targets --features\ntokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- Updated spectator session coverage in `tests/sessions/spectator.rs`\n- Added/updated spectator config coverage in `src/sessions/config.rs`\n\n**Manual testing performed:**\n\n- (None)\n\n## Related Issues\n\n- (None)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Breaking public API (spectator config fields, new error/event/reason\nvariants), security-sensitive network decode limits, and broad CI\nworkflow changes that alter release gates and test timing.\n> \n> **Overview**\n> This PR **releases 0.9.0** and documents a large user-facing surface:\n**multi-host spectator failover** (`start_spectator_session_multi`),\n**stream delay** and **rewind/seek**, and **fail-closed handling** when\nredundant hosts disagree (`FortressEvent` /\n`FortressError::SpectatorDivergence`). It also documents **network\nhardening**—fixed-width `Config::Input`, capped RLE/delta/replay\ndecoding, bounded socket receive batches, configurable UDP buffer sizes,\nand clearer endpoint-creation errors.\n> \n> **CI and tooling** change heavily: a shared **`setup-rust-cache`**\ncomposite action (best-effort sccache + `actions/cache`),\n**`--workspace`** for clippy/build aliases, a **`ci-network-nightly`**\nnextest profile and scheduled workflow for ignored real-UDP tests,\n**serial `network-multi-process`** nextest group (180s PR / 720s\nnightly), **enforced semver** on PRs with a failure summary, Docker\nnetem as **continue-on-error** with image pre-pull retries, job\n**timeouts** and **`continue-on-error`** on caches, and a **wiki/\ndry-run sync check**. New **fuzz targets** (protocol input packet,\nreplay decode) and hooks (**`advance_frame` error handling**,\n**`alloc-bound` / `reserve-in-loop`**) tighten safety gates; docs,\nexamples, and LLM guidance are aligned with the new APIs and policies.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\na1952be117d3ecfccd52702b0016c9a6b61fd12d. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-06-04T13:29:30-07:00",
+          "tree_id": "28e3c653a7941012372bf546a910da4d08e1b8c9",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/123fa9ed3270ca99ca713877d327a8167dc99fed"
+        },
+        "date": 1780605271660,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 115,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 163,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 446,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 727,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1040,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 133290,
+            "range": "± 4926",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 44813,
+            "range": "± 305",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 84",
             "unit": "ns/iter"
           },
           {
