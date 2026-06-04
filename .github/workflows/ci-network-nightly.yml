@@ -29,7 +29,28 @@ jobs:
   network-nightly:
     name: Network Tests Nightly (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # Timeout budget (worst case, derived from the source of truth):
+    #   * Test phase: every ignored multi_process test runs SERIALLY (the
+    #     network-multi-process nextest group pins max-threads=1) -- ~34 of them
+    #     today. Each is killed by the in-test harness at max(peer1,peer2)+30 s
+    #     (run_two_peer_test in tests/network/multi_process.rs), and the 720 s
+    #     per-test nextest budget (.config/nextest.toml) sits above that. Per-peer
+    #     timeouts span 90-600 s (the 600 s endurance run dominates), so if EVERY
+    #     test wedged to its deadline the serial sum (sum of peer_max+30 s) is
+    #     roughly 2 h.
+    #   * Build phase: the build step is timeout_minutes 15 x max_attempts 2
+    #     (+30 s retry_wait) = up to ~30 min on a cold cache.
+    #   * Setup overhead: checkout + toolchain + nextest install + sccache +
+    #     cache restore (the cache step alone caps at 5 min) = ~10 min.
+    # Absolute worst case ~= 2 h + 30 + 10 = ~160 min; a realistic-pessimistic run
+    # is ~110 min. fail-fast=false means every test always runs, so the job must
+    # budget the WHOLE serial sum -- one wedged test does not cancel the rest.
+    # 180 min keeps even a fully-wedged cold-build run from being SIGKILLed
+    # mid-suite (failures are then reported by the in-test harness with
+    # diagnostics), while still bounding a wedged runner far below GitHub's 6 h
+    # (360 min) hosted-runner hard cap (and below the 240 min precedent already
+    # used by ci-mutation.yml).
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:

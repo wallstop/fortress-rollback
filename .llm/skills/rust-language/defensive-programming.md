@@ -201,6 +201,21 @@ Two rules:
 2. **Do not invent arbitrary caps for user configuration.** Validate true semantic invariants at the boundary (for example `queue_length >= 2` or `stream_delay < buffer_size`), then use `try_reserve*`/checked arithmetic at construction so huge but user-requested sizes return a structured allocation error instead of aborting the process.
 3. **A zero size is non-functional, not just abort-prone.** A size that is *too small* can silently break an object without any allocation failure: a zero-length socket receive buffer reads zero bytes forever (silently dropping every datagram and able to spin), and a zero-length send buffer can never encode. Reject a zero size at the boundary with `io::ErrorKind::InvalidInput` (or the structured equivalent), and centralize the check in one constructor helper so every entry point inherits it (e.g. `network::buffer::zeroed_buffer`, used by every socket-buffer constructor). Where an infallible constructor must degrade rather than fail, fall back to a *non-empty* buffer and guard the consumer against an empty one — never leave it to spin.
 
+### Bound the length BEFORE reserving, even when the reserve is fallible
+
+`try_reserve` / `try_reserve_exact` prevent the allocator *abort*, but they do **not** prevent a huge speculative allocation that *succeeds*: a `try_reserve_exact(len)` driven by an attacker-chosen `len` can still exhaust memory (a DoS) even though it never aborts. So an **untrusted length must be bounded against the remaining input bytes BEFORE the reserve**, never relying on fallibility alone. The canonical primitive is `network::codec::ensure_length_within_remaining(bytes, cursor, len, min_encoded_len, field)`, which rejects a length prefix whose minimum wire footprint (`len * min_encoded_len`, via `checked_mul`) exceeds the unread bytes.
+
+```rust
+// Decoding a length-prefixed vector from an untrusted &[u8]:
+let len = read_len(bytes, &mut cursor)?;
+// Reject a count that cannot fit in the unread bytes, BEFORE reserving.
+// `min_encoded_len` is the smallest wire footprint of one element (>= 1 byte).
+ensure_length_within_remaining(bytes, cursor, len, min_encoded_len, "frames")?;
+let mut out = Vec::new();
+out.try_reserve_exact(len) // fallible: still cannot abort
+    .map_err(|_| allocation_failed("frames", len))?;
+```
+
 Every dynamically-sized infallible allocation in `src/` must carry an `// alloc-bound: <why>` comment (same line or the line above) stating why its size is concretely bounded. Pure integer literals (`with_capacity(4)`, `vec![0u8; 16]`), exact `.len()`/`.count()` sizes, and fallible `try_reserve*` reservations are exempt. Weak markers such as "trusted local config" or "no numeric cap" are rejected by the hook. Tests/proofs in trailing `#[cfg(test)]` / `#[cfg(kani)]` modules are skipped.
 
 ```rust

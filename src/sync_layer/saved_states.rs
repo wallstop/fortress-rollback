@@ -18,6 +18,10 @@ use crate::{FortressError, Frame, IndexOutOfBounds, InternalErrorKind, InvalidFr
 /// It is not part of the stable public API.
 pub struct SavedStates<T> {
     /// The vector of game state cells.
+    ///
+    /// The element type ProofVec is a transparent alias to the public Vec in
+    /// every non-Kani build (and to the public InlineVec under Kani), so this
+    /// field exposes no private type.
     pub states: ProofVec<GameStateCell<T>>,
 }
 

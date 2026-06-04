@@ -128,8 +128,11 @@ pub struct Replay<I> {
 pub struct ReplayDecodeConfig {
     /// Maximum encoded replay size accepted by the decoder.
     ///
-    /// `None` means no caller policy limit; allocation sizes are still validated
-    /// against the actual byte slice before reserving memory.
+    /// `None` means no caller policy limit. Allocation sizes are still bounded:
+    /// every length-prefixed vector (frames, per-frame inputs, checksums) is
+    /// checked against the remaining byte slice before any memory is reserved,
+    /// so a malformed replay cannot drive an out-of-proportion allocation
+    /// regardless of this setting.
     pub max_bytes: Option<usize>,
     /// Whether to run [`Replay::validate`] after decoding.
     pub validate: bool,
@@ -332,7 +335,63 @@ fn read_replay_string(
     Ok(out)
 }
 
-fn reserve_replay_vec<T>(vec: &mut Vec<T>, len: usize, field: &'static str) -> CodecResult<()> {
+/// Minimum wire footprint of one encoded frame: each frame begins with its
+/// own inputs.len u64 length prefix (8 bytes), so a frame can never encode in
+/// fewer bytes than that.
+const MIN_FRAME_ENCODED_LEN: usize = core::mem::size_of::<u64>();
+
+/// Minimum wire footprint of one encoded checksum entry: each is at least its
+/// 1-byte Option tag.
+const MIN_CHECKSUM_ENCODED_LEN: usize = 1;
+
+/// Minimum wire footprint of one encoded input: under fixed-int bincode every
+/// non-zero-sized input occupies at least 1 byte. (Every derived `Serialize`
+/// satisfies this; a hand-rolled impl that writes nothing for a non-zero-sized
+/// input would be lossy and already breaks the determinism contract required of
+/// `Config::Input`, and the decode loop's forward-progress guard rejects it.)
+const MIN_INPUT_ENCODED_LEN: usize = 1;
+
+/// Reserves space in a replay vector after first bounding the element count
+/// against the unread input bytes.
+///
+/// This mirrors the network codec decode discipline: a hostile length prefix
+/// cannot drive a large speculative allocation because the count is first
+/// bounded by `remaining_bytes / min_encoded_len` via
+/// [`codec::ensure_length_within_remaining`]. Folding the bound into the
+/// reservation makes an unbounded allocation impossible for every element type
+/// that occupies wire space. `cursor` is the current local cursor value (a
+/// `Copy` `usize`) taken after reading the length prefix, so `remaining` is
+/// measured correctly.
+///
+/// The byte bound is deliberately *skipped* for a zero-sized `T`. Such an
+/// element occupies no wire bytes and never allocates (`try_reserve_exact` is a
+/// no-op for it), so there is nothing to bound; and its count is intrinsically
+/// independent of the encoded size -- a valid replay of zero-sized inputs can
+/// declare any per-frame count within a fixed number of bytes. Applying a byte
+/// bound to it would therefore reject a replay that [`Replay::validate`] accepts
+/// and [`Replay::to_bytes`] produced, breaking round-trip self-consistency. The
+/// only residual cost is that a crafted huge per-frame count for a zero-sized
+/// input type spins the decode loop; that requires a zero-sized `Config::Input`
+/// (a degenerate game with no per-player input that no real configuration uses),
+/// allocates nothing, and cannot occur for any input that carries data -- every
+/// byte-carrying input is bounded here, and the decode loop additionally guards
+/// forward progress for non-zero-sized inputs.
+///
+/// [`Config::Input`]: crate::Config::Input
+fn reserve_replay_vec<T>(
+    vec: &mut Vec<T>,
+    bytes: &[u8],
+    cursor: usize,
+    len: usize,
+    min_encoded_len: usize,
+    field: &'static str,
+) -> CodecResult<()> {
+    // Skip the byte bound for a zero-sized `T`: it allocates nothing and its
+    // count has no byte-proportional bound, so bounding it would reject valid
+    // (`validate`-passing) zero-sized replays. See this fn's docs.
+    if core::mem::size_of::<T>() != 0 {
+        codec::ensure_length_within_remaining(bytes, cursor, len, min_encoded_len, field)?;
+    }
     vec.try_reserve_exact(len).map_err(|_err| {
         replay_decode_error(format!(
             "failed to reserve replay {field} with {len} element(s)"
@@ -359,7 +418,14 @@ where
     let frame_count = read_replay_usize(bytes, &mut cursor, "frames.len")?;
 
     let mut frames = Vec::new();
-    reserve_replay_vec(&mut frames, frame_count, "frames")?;
+    reserve_replay_vec(
+        &mut frames,
+        bytes,
+        cursor,
+        frame_count,
+        MIN_FRAME_ENCODED_LEN,
+        "frames",
+    )?;
     for frame_index in 0..frame_count {
         let frame_inputs_len = read_replay_usize(bytes, &mut cursor, "frame.inputs.len")?;
         if frame_inputs_len != num_players {
@@ -369,7 +435,14 @@ where
         }
 
         let mut frame = Vec::new();
-        reserve_replay_vec(&mut frame, frame_inputs_len, "frame.inputs")?;
+        reserve_replay_vec(
+            &mut frame,
+            bytes,
+            cursor,
+            frame_inputs_len,
+            MIN_INPUT_ENCODED_LEN,
+            "frame.inputs",
+        )?;
         for player_index in 0..frame_inputs_len {
             let remaining = bytes
                 .get(cursor..)
@@ -379,6 +452,16 @@ where
                     "failed to decode replay input at frame {frame_index}, player {player_index}: {err}"
                 ))
             })?;
+            // Forward-progress guard: a non-zero-sized input must consume at
+            // least one wire byte, so the loop can run at most `remaining` times
+            // regardless of the declared count. A zero-sized input legitimately
+            // consumes nothing; its iteration count is bounded instead by the
+            // `reserve_replay_vec` byte check above.
+            if core::mem::size_of::<I>() != 0 && consumed == 0 {
+                return Err(replay_decode_error(format!(
+                    "replay input at frame {frame_index}, player {player_index} decoded zero bytes"
+                )));
+            }
             cursor = cursor
                 .checked_add(consumed)
                 .ok_or_else(|| replay_decode_error("replay input cursor overflow"))?;
@@ -395,7 +478,14 @@ where
     }
 
     let mut checksums = Vec::new();
-    reserve_replay_vec(&mut checksums, checksum_count, "checksums")?;
+    reserve_replay_vec(
+        &mut checksums,
+        bytes,
+        cursor,
+        checksum_count,
+        MIN_CHECKSUM_ENCODED_LEN,
+        "checksums",
+    )?;
     for checksum_index in 0..checksum_count {
         let tag = read_replay_u8(bytes, &mut cursor, "checksum.option")?;
         let checksum = match tag {
@@ -706,6 +796,7 @@ impl<I> ReplayRecorder<I> {
 )]
 mod tests {
     use super::*;
+    use serde::{Deserialize, Serialize};
 
     #[test]
     fn replay_construction_basic() {
@@ -817,6 +908,113 @@ mod tests {
         let result = Replay::<u8>::from_bytes(&bytes);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn replay_from_bytes_rejects_huge_frame_count_via_byte_bound() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&1_000_000_000_u64.to_le_bytes()); // frames.len
+
+        let err = match Replay::<u8>::from_bytes(&bytes) {
+            Ok(_) => panic!("huge frame count must be rejected before allocating"),
+            Err(err) => err.to_string(),
+        };
+
+        // The byte bound fired before any large reservation was attempted.
+        assert!(err.contains("frames"), "message was: {err}");
+        assert!(err.contains("exceeds"), "message was: {err}");
+    }
+
+    #[test]
+    fn replay_from_bytes_rejects_huge_frame_inputs_len_via_byte_bound() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1_000_000_000_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&1_u64.to_le_bytes()); // frames.len
+        bytes.extend_from_slice(&1_000_000_000_u64.to_le_bytes()); // frame0.inputs.len
+
+        let err = match Replay::<u8>::from_bytes(&bytes) {
+            Ok(_) => panic!("huge per-frame input count must be rejected before allocating"),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(err.contains("frame.inputs"), "message was: {err}");
+        assert!(err.contains("exceeds"), "message was: {err}");
+    }
+
+    #[test]
+    fn replay_from_bytes_rejects_truncated_checksums_via_byte_bound() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&2_u64.to_le_bytes()); // frames.len
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // frame0.inputs.len
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // frame1.inputs.len
+        bytes.extend_from_slice(&2_u64.to_le_bytes()); // checksums.len (no payload follows)
+
+        let err = match Replay::<u8>::from_bytes(&bytes) {
+            Ok(_) => panic!("truncated checksums must be rejected before allocating"),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(err.contains("checksums"), "message was: {err}");
+        assert!(err.contains("exceeds"), "message was: {err}");
+    }
+
+    #[test]
+    fn replay_from_bytes_accepts_zero_sized_inputs() {
+        // A zero-sized input occupies no wire bytes and `try_reserve_exact` is a
+        // no-op for it, so the byte bound is skipped for it (see
+        // `reserve_replay_vec`). A valid zero-sized replay round-trips unchanged.
+        #[derive(Copy, Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
+        struct Zst;
+
+        let replay = Replay::<Zst> {
+            num_players: 2,
+            frames: vec![vec![Zst, Zst]; 5],
+            checksums: vec![None; 5],
+            metadata: ReplayMetadata {
+                library_version: "test".to_string(),
+                num_players: 2,
+                total_frames: 5,
+                skipped_frames: 0,
+            },
+        };
+
+        let bytes = replay.to_bytes().unwrap();
+        let restored = Replay::<Zst>::from_bytes(&bytes).unwrap();
+        assert_eq!(restored, replay);
+    }
+
+    #[test]
+    fn replay_roundtrips_zero_sized_inputs_with_many_players() {
+        // Regression guard for the zero-sized-input bound exemption. A replay of
+        // zero-sized inputs encodes its per-frame input count in a fixed number
+        // of bytes no matter how large that count is, so the count can legitimately
+        // exceed the bytes that follow it. Here num_players (64) far exceeds the
+        // few tens of trailing bytes: applying the byte bound to a zero-sized
+        // element (as a byte-carrying one is bounded) would reject this replay
+        // even though `validate` accepts it and `to_bytes` produced it -- a
+        // round-trip/self-consistency break. The bound is skipped for zero-sized
+        // elements, so the round-trip holds.
+        #[derive(Copy, Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
+        struct Zst;
+
+        let replay = Replay::<Zst> {
+            num_players: 64,
+            frames: vec![vec![Zst; 64]; 1],
+            checksums: vec![None; 1],
+            metadata: ReplayMetadata {
+                library_version: "test".to_string(),
+                num_players: 64,
+                total_frames: 1,
+                skipped_frames: 0,
+            },
+        };
+
+        replay.validate().unwrap();
+        let bytes = replay.to_bytes().unwrap();
+        let restored = Replay::<Zst>::from_bytes(&bytes).unwrap();
+        assert_eq!(restored, replay);
     }
 
     #[test]

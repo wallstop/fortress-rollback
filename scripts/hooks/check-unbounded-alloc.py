@@ -30,7 +30,13 @@ Detected constructs:
 Fallible reservations are NOT detected by the alloc-bound scan (they return
 `Result` rather than aborting): `try_reserve` / `try_reserve_exact` are
 intentionally excluded because the `reserve` / `reserve_exact` regex is anchored
-so the `try_` prefix does not match.
+so the `try_` prefix does not match. This exclusion is about ABORT-safety, not
+memory-BOUND-safety: a fallible reserve cannot abort, but a fallible reserve
+sized from an UNTRUSTED length can still SUCCEED at a huge speculative
+allocation (a memory-exhaustion DoS). Such a reserve still needs a
+remaining-bytes bound BEFORE it -- see
+`network::codec::ensure_length_within_remaining`, the reference primitive that
+rejects a length prefix which cannot fit in the unread input bytes.
 
 Sibling scan -- reserve-in-loop:
 - A separate scan flags `try_reserve` / `try_reserve_exact` whose nearest

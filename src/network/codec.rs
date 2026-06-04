@@ -298,18 +298,55 @@ fn decode_connection_status(bytes: &[u8], cursor: &mut usize) -> CodecResult<Con
     })
 }
 
-fn decode_input(bytes: &[u8], cursor: &mut usize) -> CodecResult<Input> {
-    let status_len = read_usize(bytes, cursor, "input.peer_connect_status.len")?;
-    let status_bytes = status_len
-        .checked_mul(5)
-        .ok_or_else(|| decode_message_error("input.peer_connect_status byte length overflow"))?;
-    let remaining = bytes.len().saturating_sub(*cursor);
-    if status_bytes > remaining {
+/// The fixed wire footprint, in bytes, of one encoded [`ConnectionStatus`].
+//
+// 1-byte bool + 4-byte fixed-int i32.
+const CONNECTION_STATUS_WIRE_LEN: usize = 5;
+
+/// Rejects a length prefix that cannot possibly fit in the unread input bytes,
+/// *before* any memory is reserved for it.
+///
+/// Decoders read an element count from an untrusted `&[u8]`, then reserve a
+/// `Vec` sized by that count. Even fallible reservation (`try_reserve_exact`)
+/// only prevents an allocator *abort*; it can still *succeed* at a huge
+/// speculative allocation when the count is attacker-chosen, which is the
+/// memory-exhaustion DoS of the RUSTSEC-2022-0035 class. Calling this first
+/// makes that impossible: a count whose minimum wire footprint exceeds the
+/// remaining bytes is rejected outright.
+///
+/// `min_encoded_len` is the smallest wire footprint of a single element -- a
+/// length prefix, an option/tag byte, or a fixed-size record -- so
+/// `len * min_encoded_len` is a lower bound on the bytes the count *claims* to
+/// describe. The multiplication is `checked_mul`, so the bound itself is
+/// overflow-safe and a pathological count is rejected rather than wrapping.
+pub(crate) fn ensure_length_within_remaining(
+    bytes: &[u8],
+    cursor: usize,
+    len: usize,
+    min_encoded_len: usize,
+    field: &'static str,
+) -> CodecResult<()> {
+    let remaining = bytes.len().saturating_sub(cursor);
+    let min_bytes = len.checked_mul(min_encoded_len).ok_or_else(|| {
+        decode_message_error(format!("{field} length {len} overflows the byte bound"))
+    })?;
+    if min_bytes > remaining {
         return Err(decode_message_error(format!(
-            "input.peer_connect_status length {} exceeds remaining packet bytes {}",
-            status_len, remaining
+            "{field} length {len} exceeds the {remaining} remaining byte(s)"
         )));
     }
+    Ok(())
+}
+
+fn decode_input(bytes: &[u8], cursor: &mut usize) -> CodecResult<Input> {
+    let status_len = read_usize(bytes, cursor, "input.peer_connect_status.len")?;
+    ensure_length_within_remaining(
+        bytes,
+        *cursor,
+        status_len,
+        CONNECTION_STATUS_WIRE_LEN,
+        "input.peer_connect_status",
+    )?;
 
     let mut peer_connect_status = Vec::new();
     peer_connect_status
@@ -329,13 +366,7 @@ fn decode_input(bytes: &[u8], cursor: &mut usize) -> CodecResult<Input> {
     let ack_frame = Frame::new(read_i32(bytes, cursor, "input.ack_frame")?);
 
     let byte_len = read_usize(bytes, cursor, "input.bytes.len")?;
-    let remaining = bytes.len().saturating_sub(*cursor);
-    if byte_len > remaining {
-        return Err(decode_message_error(format!(
-            "input.bytes length {} exceeds remaining packet bytes {}",
-            byte_len, remaining
-        )));
-    }
+    ensure_length_within_remaining(bytes, *cursor, byte_len, 1, "input.bytes")?;
     let byte_slice = bytes
         .get(*cursor..*cursor + byte_len)
         .ok_or_else(|| decode_message_error("input.bytes slice out of bounds"))?;
