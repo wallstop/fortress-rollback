@@ -438,7 +438,7 @@ The forthcoming release introduces fail-closed redundant spectator divergence pl
 
 ### Breaking-change implications for exhaustive matches
 
-`FortressEvent`, `FortressError`, `InvalidRequestKind`, and `InternalErrorKind` are **not** `#[non_exhaustive]`. Code that exhaustively matches on these enums must add arms for the new variants:
+`FortressEvent`, `FortressError`, `InvalidRequestKind`, `InternalErrorKind`, and `SerializationErrorKind` are **not** `#[non_exhaustive]`. Code that exhaustively matches on these enums must add arms for the new variants:
 
 #### `FortressEvent` — new variants
 
@@ -553,12 +553,29 @@ match err_kind {
 }
 ```
 
-#### `InternalErrorKind` — new variant
+#### `InternalErrorKind` — new variants
 
 ```rust
 // After
 match internal_kind {
     // ... existing variants ...
+    InternalErrorKind::DeltaEncodeEmptyReference => {
+        eprintln!("internal: tried to delta-encode an empty reference frame");
+    },
+    InternalErrorKind::DeltaEncodeInputLengthMismatch { input_len, reference_len } => {
+        eprintln!(
+            "internal: input frame width {input_len} did not match reference width {reference_len}"
+        );
+    },
+    InternalErrorKind::InputEncodeLengthMismatch {
+        player,
+        input_len,
+        expected_len,
+    } => {
+        eprintln!(
+            "internal: player {player} input encoded to {input_len} bytes, expected {expected_len}"
+        );
+    },
     InternalErrorKind::InputQueueGapFillFailed { frame } => {
         // Library invariant violation while replicating gap-fill bytes during
         // a mid-session input-delay increase. Treat as a bug and report.
@@ -569,18 +586,52 @@ match internal_kind {
 
 If you currently use `_ =>` wildcard arms, no changes are required — but consider replacing the wildcard with explicit arms so future additions are caught at compile time.
 
+#### `SerializationErrorKind` — new variants
+
+Network sessions now require `Config::Input::default()` to serialize to at
+least one byte. Zero-byte input types cannot be represented by the input delta
+stream because the receiver splits decoded bytes into fixed-width frames. Start
+methods return `SerializationErrorKind::InputSerializedSizeZero` instead of
+constructing an endpoint that can never send or receive input frames.
+They also reject local or remote aggregate input frames larger than
+`fortress_rollback::rle::DEFAULT_MAX_DECODED_LEN`, returning
+`SerializationErrorKind::InputSerializedFrameTooLarge`.
+
+```rust
+// After
+match serialization_kind {
+    // ... existing variants ...
+    SerializationErrorKind::InputSerializedSizeZero => {
+        eprintln!("Config::Input must serialize to at least one byte");
+    },
+    SerializationErrorKind::InputSerializedFrameTooLarge { frame_len, max } => {
+        eprintln!(
+            "Config::Input aggregate frame is {frame_len} bytes, above receive cap {max}"
+        );
+    },
+}
+```
+
+`Config::Input` values used in network sessions should also serialize to the
+same byte length for every player and every value. Prefer structs of fixed-width
+numeric and boolean fields. Avoid variable-length enums, strings, vectors, maps,
+and other payloads whose encoded size can change per frame.
+
 #### `Replay::from_bytes` validation and bounds
 
 `Replay::from_bytes()` now uses a replay-specific checked decoder instead of generic bincode container decoding. It requires `I: Copy`, matching the `Config::Input` contract, validates the decoded replay before returning, and rejects trailing bytes. Use `Replay::from_bytes_with_config(bytes, ReplayDecodeConfig::new().max_bytes(limit))` if your application wants to enforce its own replay file-size policy.
 
-#### `RleDecodeReason` — new variant
+#### `RleDecodeReason` — new variants
 
-`RleDecodeReason` (reported via `FortressError::InternalErrorStructured` / `CompressionError::RleDecode`) gains `DecodedLengthExceedsMaximum` and `AllocationFailed` variants. `DecodedLengthExceedsMaximum` is returned when received-input decompression rejects a malformed packet that declares a decoded length above the configured/default limit, instead of attempting an unbounded allocation. `AllocationFailed` is returned when reserving decoded output fails. Exhaustive matches must add arms:
+`RleDecodeReason` (reported via `FortressError::InternalErrorStructured` / `CompressionError::RleDecode`) gains `MalformedVarint`, `DecodedLengthExceedsMaximum`, and `AllocationFailed` variants. `MalformedVarint` is returned when an encoded run-length prefix cannot be decoded as a valid varint. `DecodedLengthExceedsMaximum` is returned when received-input decompression rejects a malformed packet that declares a decoded length above the configured/default limit, instead of attempting an unbounded allocation. `AllocationFailed` is returned when reserving decoded output fails. Exhaustive matches must add arms:
 
 ```rust
 // After
 match reason {
     // ... existing variants ...
+    RleDecodeReason::MalformedVarint { offset } => {
+        eprintln!("malformed RLE varint at offset {offset}");
+    },
     RleDecodeReason::DecodedLengthExceedsMaximum { decoded_len, max } => {
         // A peer sent a decompression bomb: the declared decoded length
         // exceeds the configured/default limit. The packet was dropped; no allocation
@@ -593,14 +644,17 @@ match reason {
 }
 ```
 
-#### `DeltaDecodeReason` — new variant
+#### `DeltaDecodeReason` — new variants
 
-`DeltaDecodeReason` (reported via `FortressError::InternalErrorStructured` / `CompressionError::DeltaDecode`) gains an `AllocationFailed` variant. It is returned when reserving decoded delta output fails. Exhaustive matches must add an arm:
+`DeltaDecodeReason` (reported via `FortressError::InternalErrorStructured` / `CompressionError::DeltaDecode`) gains `DecodedFrameCountExceedsMaximum` and `AllocationFailed` variants. `DecodedFrameCountExceedsMaximum` is returned when delta decoding would split a decoded byte stream into too many per-frame buffers. `AllocationFailed` is returned when reserving decoded delta output fails. Exhaustive matches must add arms:
 
 ```rust
 // After
 match reason {
     // ... existing variants ...
+    DeltaDecodeReason::DecodedFrameCountExceedsMaximum { frame_count, max } => {
+        eprintln!("decoded too many frames: {frame_count} > {max}");
+    },
     DeltaDecodeReason::AllocationFailed { context, requested_elements } => {
         eprintln!("could not reserve {requested_elements} elements for {context}");
     },
@@ -608,6 +662,14 @@ match reason {
 ```
 
 If you currently use `_ =>` wildcard arms, no changes are required — but explicit arms catch future additions at compile time.
+
+#### `ProtocolConfig::pending_output_limit` — maximum value
+
+`ProtocolConfig::pending_output_limit` now has a hard maximum:
+`ProtocolConfig::MAX_PENDING_OUTPUT_LIMIT`. Larger values return
+`InvalidRequestKind::ConfigValueOutOfRange` during configuration validation.
+The limit keeps valid send batches aligned with the compression decoder's
+per-frame output cap.
 
 ### Before / After: dynamically adjusting input delay
 
