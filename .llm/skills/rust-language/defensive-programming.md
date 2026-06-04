@@ -116,6 +116,10 @@ Operations must succeed completely or leave state unchanged (prepare-then-commit
 
 Include `Unknown` variant in error reason enums for safe fallback in mapping functions. Never use existing variants with placeholder values.
 
+### Fallible / Infallible Constructor Pairs
+
+When a fallible `try_*` constructor is wrapped by an infallible `new`/`with_*` that reports a violation on error, the `try_*` layer returns the structured error **silently** — only the wrapper calls `report_violation!`. Logging in both layers emits duplicate telemetry for one invalid input. The infallible wrapper should also document its degraded fallback (the exact shape it returns on error) so the behavioral contract is explicit. Pattern source: `SavedStates`, `TimeSync`, `SyncLayer`, `InputQueue`. Also: when one error path must be preserved (e.g. propagating `AllocationFailed`), prefer propagating the original `FortressError` over collapsing every cause into a single opaque variant.
+
 ## Safe Collection Access
 
 ```rust
@@ -187,8 +191,72 @@ fallible_impl_from = "deny"
 must_use_candidate = "warn"
 ```
 
+## Bounded Allocation
+
+The default allocator **aborts the process** on allocation failure (uncatchable, cf. RUSTSEC-2022-0035). So any `Vec::with_capacity(n)`, `vec![x; n]`, or `reserve(n)` whose `n` comes from an unbounded source (a length read from the wire, a user-configurable size) is a DoS/abort vector unless the allocation is made fallible first.
+
+Two rules:
+
+1. **Never trust a length from the wire.** Bound any size derived from network input against a caller-configured limit or explicit default *before* allocating, and use `checked_add` while accumulating so a crafted packet cannot overflow `usize`. Return a structured error on the bomb path instead of allocating. When a wire length is decoded into a wider type (e.g. a `u64` varint), range-check it against the limit *while it is still `u64`*, before any `as usize` narrowing: on a 32-bit target (`usize == u32`) the cast truncates the high bits and could turn a huge declared length into a small one that slips past the check (see `rle::checked_run_len`). Example: protocol input decode derives its RLE decoded-length limit from `ProtocolConfig::pending_output_limit` and the reference input size; standalone `rle::decode` uses `rle::DEFAULT_MAX_DECODED_LEN`. Avoid generic serde/bincode container decoding for untrusted bytes when the schema has `Vec`, `String`, or similar length-prefixed fields; parse those lengths explicitly, validate them against the actual input/config, reserve fallibly, and then copy/decode the bounded payload.
+2. **Do not invent arbitrary caps for user configuration.** Validate true semantic invariants at the boundary (for example `queue_length >= 2` or `stream_delay < buffer_size`), then use `try_reserve*`/checked arithmetic at construction so huge but user-requested sizes return a structured allocation error instead of aborting the process.
+3. **A zero size is non-functional, not just abort-prone.** A size that is *too small* can silently break an object without any allocation failure: a zero-length socket receive buffer reads zero bytes forever (silently dropping every datagram and able to spin), and a zero-length send buffer can never encode. Reject a zero size at the boundary with `io::ErrorKind::InvalidInput` (or the structured equivalent), and centralize the check in one constructor helper so every entry point inherits it (e.g. `network::buffer::zeroed_buffer`, used by every socket-buffer constructor). Where an infallible constructor must degrade rather than fail, fall back to a *non-empty* buffer and guard the consumer against an empty one — never leave it to spin.
+
+### Bound the length BEFORE reserving, even when the reserve is fallible
+
+`try_reserve` / `try_reserve_exact` prevent the allocator *abort*, but they do **not** prevent a huge speculative allocation that *succeeds*: a `try_reserve_exact(len)` driven by an attacker-chosen `len` can still exhaust memory (a DoS) even though it never aborts. So an **untrusted length must be bounded against the remaining input bytes BEFORE the reserve**, never relying on fallibility alone. The canonical primitive is `network::codec::ensure_length_within_remaining(bytes, cursor, len, min_encoded_len, field)`, which rejects a length prefix whose minimum wire footprint (`len * min_encoded_len`, via `checked_mul`) exceeds the unread bytes.
+
+```rust
+// Decoding a length-prefixed vector from an untrusted &[u8]:
+let len = read_len(bytes, &mut cursor)?;
+// Reject a count that cannot fit in the unread bytes, BEFORE reserving.
+// `min_encoded_len` is the smallest wire footprint of one element (>= 1 byte).
+ensure_length_within_remaining(bytes, cursor, len, min_encoded_len, "frames")?;
+let mut out = Vec::new();
+out.try_reserve_exact(len) // fallible: still cannot abort
+    .map_err(|_| allocation_failed("frames", len))?;
+```
+
+Every dynamically-sized infallible allocation in `src/` must carry an `// alloc-bound: <why>` comment (same line or the line above) stating why its size is concretely bounded. Pure integer literals (`with_capacity(4)`, `vec![0u8; 16]`), exact `.len()`/`.count()` sizes, and fallible `try_reserve*` reservations are exempt. Weak markers such as "trusted local config" or "no numeric cap" are rejected by the hook. Tests/proofs in trailing `#[cfg(test)]` / `#[cfg(kani)]` modules are skipped.
+
+```rust
+let mut queues = Vec::new();
+queues.try_reserve_exact(num_players)?;
+for player in 0..num_players {
+    queues.push(InputQueue::try_with_queue_length(player, queue_length)?);
+}
+```
+
+### Bulk-reserving from an untrusted `size_hint`
+
+`Iterator::size_hint` is a performance hint only -- a buggy/adversarial iterator may report an upper bound that is too low, too high, or `None`. Never trust it for correctness. Use `error::try_reserve_hint(&mut vec, upper, per_item)` (the canonical helper) to bulk-reserve ONCE before a loop. It is **best-effort and infallible**: it multiplies with saturating arithmetic, reserves via `try_reserve`, and **silently ignores failure** (an over-large or dishonest hint simply leaves the vector unreserved). It never aborts and never returns an error.
+
+Because a failed reservation here is a no-op, it is a pure optimization that **cannot change behavior** for any iterator (honest or adversarial). The load-bearing, panic-free growth path is the caller's per-iteration fallible `try_reserve`, which always runs and covers the `None`/under-reporting/over-large cases identically to pure incremental growth. The reservation is `upper * per_item` **additional** capacity (`Vec::try_reserve` semantics: reserves for `len + additional`, not an absolute target), so call it on an **empty/near-empty** vector before the loop — on a partially-filled vector it would under-reserve.
+
+```rust
+let (_lower, upper) = pending_input.size_hint();
+try_reserve_hint(&mut bytes, upper, ref_bytes.len()); // best-effort; no `?`
+for input in pending_input {
+    // `Vec::try_reserve` is a documented no-op (returns `Ok` without
+    // reallocating) when capacity already suffices, so the bulk reservation
+    // above keeps this a single allocation in the common case; this call only
+    // grows when the hint under-reported (or was absent). No hand-written
+    // spare-capacity guard is needed -- std performs that check internally.
+    let requested = bytes.len().saturating_add(input.len());
+    // reserve-in-loop: guards an under-reporting/absent size_hint.
+    let reserved = bytes.try_reserve(input.len());
+    reserved.map_err(|_| allocation_failed("compression.delta_encode", requested))?;
+    // ... push the XOR bytes ...
+}
+```
+
+### The `// reserve-in-loop:` marker
+
+A `try_reserve` / `try_reserve_exact` whose nearest enclosing block is a loop body (`for`/`while`/`loop`) is flagged by `check-unbounded-alloc` unless it carries a `// reserve-in-loop: <why>` justification (same line or the line above). Per-iteration fallible reserves are sometimes correct -- guarding an untrusted/absent `size_hint`, or allocating one fresh bounded buffer per iteration -- but must be a CONSCIOUS choice, not an accident: prefer a single bulk pre-reservation before the loop where the count is known. A closure or match arm LEXICALLY NESTED within a `for`/`while`/`loop` still counts as in-loop; a `fn` defined inside a loop body shields its own reserves. `impl Trait for Type {` is not treated as a loop. Known tested limitations (all defense-in-depth only, all false negative, never false positive; none occurs in `src/`): (1) a loop whose HEADER embeds a brace block (`for x in match v {} {`, `for x in vec![Foo { a: 1 }] {`) is classified as a non-loop body; (2) a closure whose signature embeds a bare `fn`-pointer TYPE (`|cb: fn()| { ... }`) is conservatively classified as a `fn` body, so an in-loop reserve inside it is shielded; (3) the iteration-IS-the-closure idiom (`items.iter().for_each(|x| { ... })`, `.map(|x| { ... }).collect()`) is NOT flagged — "closure inside a loop counts as in-loop" means a closure lexically nested in a `for`/`while`/`loop`, NOT an iterator-adapter closure that performs the iteration itself.
+
 ## Checklist
 
+- [ ] Dynamically-sized allocations bounded + `// alloc-bound:` justified
+- [ ] In-loop `try_reserve` / `try_reserve_exact` marked `// reserve-in-loop:`
 - [ ] No `unwrap()`, `expect()`, `panic!()`, `todo!()`
 - [ ] No direct `[]` indexing -- use `.get()` with error handling
 - [ ] No `as` for lossy numeric conversions

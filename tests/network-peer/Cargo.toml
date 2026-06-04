@@ -10,9 +10,13 @@ description = "Headless network test peer for multi-process testing of fortress-
 # in the main fortress-rollback crate (binaries force Cargo.lock inclusion)
 
 [lints.clippy]
-# Allow print macros for test output and error reporting
+# Allow print macros for test output and error reporting. This headless peer
+# writes its JSON results and diagnostics to stdout/stderr by contract, so the
+# print-family lints (including the workspace-wide `disallowed-macros` rule from
+# the root `clippy.toml`) are intentionally permitted for this internal tool.
 print_stdout = "allow"
 print_stderr = "allow"
+disallowed_macros = "allow"
 
 [dependencies]
 fortress-rollback = { path = "../.." }

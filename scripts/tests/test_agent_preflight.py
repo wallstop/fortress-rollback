@@ -37,6 +37,7 @@ CHECK_TRIGGER_CASES: list[tuple[str, str]] = [
     ("actionlint", ".github/workflows/ci.yml"),
     ("changelog-unreleased-rule", "CHANGELOG.md"),
     ("vale-advisory", "docs/index.md"),
+    ("advance-frame-error-handling", "tests/sessions/spectator.rs"),
     ("kani-violation-cost", "src/lib.rs"),
 ]
 
@@ -199,6 +200,20 @@ def test_plan_checks_runs_vale_advisory_for_docs_files() -> None:
 def test_plan_checks_skips_vale_advisory_when_no_docs_files() -> None:
     checks = plan_checks({"src/lib.rs"})
     assert "vale-advisory" not in _ids(checks)
+
+
+def test_plan_checks_passes_rust_files_to_advance_frame_check() -> None:
+    checks = plan_checks({"tests/sessions/spectator.rs", "src/lib.rs"})
+    advance_check = next(
+        check for check in checks if check.check_id == "advance-frame-error-handling"
+    )
+
+    assert advance_check.command == [
+        PYTHON_EXECUTABLE,
+        "scripts/hooks/check-advance-frame-error-handling.py",
+        "src/lib.rs",
+        "tests/sessions/spectator.rs",
+    ]
 
 
 def test_collect_changed_files_merges_all_git_sources(monkeypatch) -> None:

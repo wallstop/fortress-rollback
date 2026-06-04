@@ -12,10 +12,18 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::error::{allocation_failed, try_reserve_hint};
 use crate::report_violation;
 use crate::rle;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::{DeltaDecodeReason, FortressError, InternalErrorKind, RleDecodeReason};
+
+/// Maximum number of per-frame buffers [`delta_decode`] will produce.
+///
+/// The RLE byte cap bounds decoded bytes, but a tiny reference (for example one byte)
+/// can otherwise fan that into millions of `Vec<u8>` frame buffers. Keep the frame
+/// count separately bounded before reserving the outer `Vec<Vec<u8>>`.
+pub const MAX_DELTA_DECODED_FRAMES: usize = 4096;
 
 // =============================================================================
 // Compression Error Types
@@ -76,10 +84,29 @@ impl From<CompressionError> for FortressError {
 
 /// Encodes input bytes using XOR delta encoding followed by RLE compression.
 pub fn encode<'a>(reference: &[u8], pending_input: impl Iterator<Item = &'a Vec<u8>>) -> Vec<u8> {
+    match try_encode(reference, pending_input) {
+        Ok(encoded) => encoded,
+        Err(err) => {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "encode: failed to compress input batch: {:?}",
+                err
+            );
+            Vec::new()
+        },
+    }
+}
+
+/// Encodes input bytes using fallible delta-buffer allocation.
+pub(crate) fn try_encode<'a>(
+    reference: &[u8],
+    pending_input: impl Iterator<Item = &'a Vec<u8>>,
+) -> Result<Vec<u8>, FortressError> {
     // first, do a XOR encoding to the reference input (will probably lead to a lot of same bits in sequence)
-    let buf = delta_encode(reference, pending_input);
+    let buf = try_delta_encode(reference, pending_input)?;
     // then, RLE encode the buffer (making use of the property mentioned above)
-    rle::encode(buf)
+    rle::try_encode(buf)
 }
 
 /// Performs XOR delta encoding against a reference.
@@ -87,29 +114,84 @@ pub fn delta_encode<'a>(
     ref_bytes: &[u8],
     pending_input: impl Iterator<Item = &'a Vec<u8>>,
 ) -> Vec<u8> {
-    let (lower, upper) = pending_input.size_hint();
-    let capacity = upper.unwrap_or(lower) * ref_bytes.len();
-    let mut bytes = Vec::with_capacity(capacity);
+    match try_delta_encode(ref_bytes, pending_input) {
+        Ok(encoded) => encoded,
+        Err(err) => {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "delta_encode: failed to encode input batch: {:?}",
+                err
+            );
+            Vec::new()
+        },
+    }
+}
+
+/// Performs XOR delta encoding against a reference with fallible allocation.
+pub(crate) fn try_delta_encode<'a>(
+    ref_bytes: &[u8],
+    pending_input: impl Iterator<Item = &'a Vec<u8>>,
+) -> Result<Vec<u8>, FortressError> {
+    if ref_bytes.is_empty() {
+        report_violation!(
+            ViolationSeverity::Error,
+            ViolationKind::NetworkProtocol,
+            "delta_encode: reference bytes is empty"
+        );
+        return Err(FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::DeltaEncodeEmptyReference,
+        });
+    }
+
+    let mut bytes = Vec::new();
+
+    // Bind the iterator before reading its size hint (`size_hint` borrows it).
+    // Each ACCEPTED input contributes exactly `ref_bytes.len()` bytes, so the
+    // common case is a single allocation of `upper * ref_bytes.len()`. The hint
+    // is untrusted, so `try_reserve_hint` is best-effort: it reserves with
+    // saturating arithmetic and silently ignores failure. The in-loop guard
+    // below is the load-bearing, panic-free growth path, so this pre-reservation
+    // can never make the output differ from pure incremental growth for any
+    // iterator (honest or adversarial) -- see `try_reserve_hint`'s docs.
+    let (_lower, upper) = pending_input.size_hint();
+    try_reserve_hint(&mut bytes, upper, ref_bytes.len());
 
     for input in pending_input {
         let input_bytes = input;
-        // Validate input length matches reference - skip mismatched inputs with warning
+        // Each pending frame must represent exactly one reference-sized input
+        // chunk. Skipping mismatches would collapse the frame stream and make
+        // receivers assign later bytes to the wrong sequential frames.
         if input_bytes.len() != ref_bytes.len() {
             report_violation!(
-                ViolationSeverity::Warning,
+                ViolationSeverity::Error,
                 ViolationKind::NetworkProtocol,
-                "delta_encode: input length {} doesn't match reference length {} - skipping",
+                "delta_encode: input length {} does not match reference length {}",
                 input_bytes.len(),
                 ref_bytes.len()
             );
-            continue;
+            return Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::DeltaEncodeInputLengthMismatch {
+                    input_len: input_bytes.len(),
+                    reference_len: ref_bytes.len(),
+                },
+            });
         }
 
+        // The bulk pre-reservation above covers the common case in a single
+        // allocation; `Vec::try_reserve` is a documented no-op (returns `Ok`
+        // without reallocating) when capacity already suffices, so this guards
+        // only a hint that under-reported (or was absent) without re-checking
+        // spare capacity by hand.
+        let requested = bytes.len().saturating_add(input_bytes.len());
+        // reserve-in-loop: fallible guard that only fires when an untrusted size_hint under-reported (or was absent), keeping growth panic-free.
+        let reserved = bytes.try_reserve(input_bytes.len());
+        reserved.map_err(|_err| allocation_failed("compression.delta_encode", requested))?;
         for (reference_byte, input_byte) in ref_bytes.iter().zip(input_bytes.iter()) {
             bytes.push(reference_byte ^ input_byte);
         }
     }
-    bytes
+    Ok(bytes)
 }
 
 /// Maps an RLE error to a `CompressionError`.
@@ -138,14 +220,30 @@ fn map_rle_error(e: FortressError) -> CompressionError {
 
 /// Decodes RLE-compressed XOR delta-encoded data.
 ///
+/// This convenience wrapper uses [`rle::DEFAULT_MAX_DECODED_LEN`] as the
+/// decoded RLE cap. Network protocol receive paths and other untrusted callers
+/// with a tighter semantic limit should use [`decode_with_max_len`] instead.
+///
 /// # Errors
 ///
 /// Returns a `CompressionError` if:
 /// - RLE decoding fails (e.g., truncated or malformed data)
-/// - Delta decoding fails (e.g., empty reference, length mismatch)
+/// - Delta decoding fails (e.g., empty reference, length mismatch, too many output frames)
 pub fn decode(reference: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, CompressionError> {
+    decode_with_max_len(reference, data, rle::DEFAULT_MAX_DECODED_LEN)
+}
+
+/// Decodes RLE-compressed XOR delta-encoded data with a caller-provided decoded-length limit.
+///
+/// Prefer this over [`decode`] for peer-controlled bytes when the caller can
+/// derive a smaller maximum decoded size from protocol configuration.
+pub fn decode_with_max_len(
+    reference: &[u8],
+    data: &[u8],
+    max_decoded_len: usize,
+) -> Result<Vec<Vec<u8>>, CompressionError> {
     // decode the RLE encoding first
-    let buf = rle::decode(data).map_err(map_rle_error)?;
+    let buf = rle::decode_with_max_len(data, max_decoded_len).map_err(map_rle_error)?;
 
     // decode the delta-encoding
     delta_decode(reference, &buf)
@@ -189,11 +287,43 @@ pub fn delta_decode(ref_bytes: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, Compr
     }
 
     let out_size = data.len() / ref_bytes.len();
-    let mut output = Vec::with_capacity(out_size);
+    if out_size > MAX_DELTA_DECODED_FRAMES {
+        report_violation!(
+            ViolationSeverity::Error,
+            ViolationKind::NetworkProtocol,
+            "delta_decode: decoded frame count {} exceeds maximum {}",
+            out_size,
+            MAX_DELTA_DECODED_FRAMES
+        );
+        return Err(CompressionError::DeltaDecode {
+            reason: DeltaDecodeReason::DecodedFrameCountExceedsMaximum {
+                frame_count: out_size,
+                max: MAX_DELTA_DECODED_FRAMES,
+            },
+        });
+    }
+
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(out_size)
+        .map_err(|_err| CompressionError::DeltaDecode {
+            reason: DeltaDecodeReason::AllocationFailed {
+                context: "compression.delta_decode.output",
+                requested_elements: out_size,
+            },
+        })?;
 
     for output_index in 0..out_size {
-        // Pre-allocate buffer capacity to reduce reallocations in hot path
-        let mut buffer = Vec::with_capacity(ref_bytes.len());
+        let mut buffer = Vec::new();
+        // reserve-in-loop: one fresh decoded-input buffer per output slot, reserved once to its exact bounded size (`ref_bytes.len()`).
+        buffer.try_reserve_exact(ref_bytes.len()).map_err(|_err| {
+            CompressionError::DeltaDecode {
+                reason: DeltaDecodeReason::AllocationFailed {
+                    context: "compression.delta_decode.buffer",
+                    requested_elements: ref_bytes.len(),
+                },
+            }
+        })?;
         for byte_index in 0..ref_bytes.len() {
             let data_idx = ref_bytes.len() * output_index + byte_index;
             // Use .copied() to convert Option<&u8> to Option<u8> for clearer XOR semantics
@@ -226,6 +356,40 @@ pub fn delta_decode(ref_bytes: &[u8], data: &[u8]) -> Result<Vec<Vec<u8>>, Compr
 } // #########
   // # TESTS #
   // #########
+
+/// Shared test-only adversarial-iterator scaffolding (single source of truth
+/// for both the unit-test and proptest modules below).
+#[cfg(test)]
+mod test_support {
+    /// An iterator wrapper that reports an arbitrary (possibly false)
+    /// `size_hint` upper bound while yielding the underlying items unchanged.
+    pub(super) struct LyingHint<'a> {
+        inner: std::slice::Iter<'a, Vec<u8>>,
+        fake_upper: Option<usize>,
+    }
+
+    impl<'a> Iterator for LyingHint<'a> {
+        type Item = &'a Vec<u8>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.inner.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            // Lower bound stays 0 (always valid); the upper bound is the lie.
+            (0, self.fake_upper)
+        }
+    }
+
+    /// Build a [`LyingHint`] over `items` that reports `fake_upper` as its
+    /// `size_hint` upper bound.
+    pub(super) fn lying(items: &[Vec<u8>], fake_upper: Option<usize>) -> LyingHint<'_> {
+        LyingHint {
+            inner: items.iter(),
+            fake_upper,
+        }
+    }
+}
 
 #[cfg(test)]
 #[allow(
@@ -324,7 +488,25 @@ mod compression_tests {
     }
 
     #[test]
-    fn test_delta_encode_skips_mismatched_inputs() {
+    fn delta_decode_rejects_frame_count_above_cap() {
+        let ref_bytes = vec![0];
+        let data = vec![0; MAX_DELTA_DECODED_FRAMES + 1];
+
+        let result = delta_decode(&ref_bytes, &data);
+
+        assert_eq!(
+            result,
+            Err(CompressionError::DeltaDecode {
+                reason: DeltaDecodeReason::DecodedFrameCountExceedsMaximum {
+                    frame_count: MAX_DELTA_DECODED_FRAMES + 1,
+                    max: MAX_DELTA_DECODED_FRAMES,
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_delta_encode_mismatched_input_returns_empty_batch() {
         let ref_bytes = vec![1, 2, 3, 4];
         let good_input = vec![5, 6, 7, 8];
         let bad_input = vec![1, 2]; // Wrong length
@@ -332,9 +514,9 @@ mod compression_tests {
 
         let encoded = delta_encode(&ref_bytes, inputs.iter());
 
-        // Should only have encoded the two good inputs (8 bytes total)
-        // Each good input XORs with ref to produce 4 bytes
-        assert_eq!(encoded.len(), 8);
+        // The infallible convenience wrapper reports the violation and returns
+        // an empty batch rather than silently dropping the mismatched frame.
+        assert!(encoded.is_empty());
     }
 
     // =========================================================================
@@ -405,6 +587,30 @@ mod compression_tests {
     }
 
     #[test]
+    fn test_delta_decode_reason_allocation_failed() {
+        let reason = DeltaDecodeReason::AllocationFailed {
+            context: "test",
+            requested_elements: 42,
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("failed to reserve"));
+        assert!(display.contains("test"));
+        assert!(display.contains("42"));
+    }
+
+    #[test]
+    fn test_delta_decode_reason_decoded_frame_count_exceeds_maximum() {
+        let reason = DeltaDecodeReason::DecodedFrameCountExceedsMaximum {
+            frame_count: 4097,
+            max: 4096,
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("decoded frame count"));
+        assert!(display.contains("4097"));
+        assert!(display.contains("4096"));
+    }
+
+    #[test]
     fn test_delta_decode_reason_unknown() {
         let reason = DeltaDecodeReason::Unknown;
         let display = format!("{}", reason);
@@ -423,6 +629,13 @@ mod compression_tests {
         };
         let reason_with_data2 = reason_with_data;
         assert_eq!(reason_with_data, reason_with_data2);
+
+        let reason_with_cap = DeltaDecodeReason::DecodedFrameCountExceedsMaximum {
+            frame_count: 4097,
+            max: 4096,
+        };
+        let reason_with_cap2 = reason_with_cap;
+        assert_eq!(reason_with_cap, reason_with_cap2);
     }
 
     #[test]
@@ -573,6 +786,12 @@ mod compression_tests {
                 offset: 5,
                 buffer_len: 3,
             },
+            RleDecodeReason::MalformedVarint { offset: 2 },
+            RleDecodeReason::DecodedLengthExceedsMaximum {
+                decoded_len: 999,
+                max: 64,
+            },
+            RleDecodeReason::AllocationFailed { requested_len: 42 },
             RleDecodeReason::Unknown,
         ];
 
@@ -583,6 +802,62 @@ mod compression_tests {
             let result = map_rle_error(error);
             assert_eq!(result, CompressionError::RleDecode { reason });
         }
+    }
+
+    /// Verifies that `decode()` rejects an RLE decompression bomb (a tiny
+    /// packet claiming a huge decoded length) rather than attempting an
+    /// unbounded allocation that would abort the process.
+    #[test]
+    fn decode_rle_bomb_through_compression_returns_rle_error() {
+        // Arrange: a single contiguous-run header claiming a length far above
+        // the cap. Reuse the public rle internals to build the varint.
+        let bomb_len = (crate::rle::DEFAULT_MAX_DECODED_LEN as u64) + 1;
+        let header = (bomb_len << 2) | 1; // repeat=1, bit=0 (zero fill)
+        let bomb = {
+            // LEB128-encode the header inline (varint module is private to rle).
+            let mut buf = Vec::new();
+            let mut value = header;
+            while value >= 0x80 {
+                buf.push((value as u8) | 0x80);
+                value >>= 7;
+            }
+            buf.push(value as u8);
+            buf
+        };
+        let reference = &[0x01, 0x02, 0x03, 0x04];
+
+        // Act
+        let result = decode(reference, &bomb);
+
+        // Assert: surfaced as the structured RLE bound error.
+        match result {
+            Err(CompressionError::RleDecode { reason }) => {
+                assert!(
+                    matches!(reason, RleDecodeReason::DecodedLengthExceedsMaximum { .. }),
+                    "expected DecodedLengthExceedsMaximum, got: {:?}",
+                    reason
+                );
+            },
+            other => panic!("expected RleDecode error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_with_max_len_uses_caller_configured_limit() {
+        let reference = vec![1, 2];
+        let inputs = [vec![3, 4], vec![5, 6]];
+        let encoded = try_encode(&reference, inputs.iter()).unwrap();
+
+        let low_limit_result = decode_with_max_len(&reference, &encoded, 3);
+
+        assert!(matches!(
+            low_limit_result,
+            Err(CompressionError::RleDecode {
+                reason: RleDecodeReason::DecodedLengthExceedsMaximum { .. }
+            })
+        ));
+        let decoded = decode_with_max_len(&reference, &encoded, 4).unwrap();
+        assert_eq!(decoded, inputs.to_vec());
     }
 
     /// Integration test: verifies that `decode()` returns the expected error
@@ -615,6 +890,175 @@ mod compression_tests {
             },
         }
     }
+
+    // =========================================================================
+    // try_delta_encode: bulk-reservation + untrusted size_hint hardening
+    // =========================================================================
+
+    use super::test_support::lying;
+
+    #[test]
+    fn try_delta_encode_multi_input_output_is_byte_identical_and_preallocated() {
+        // Arrange
+        let ref_bytes = vec![0x01, 0x02, 0x03, 0x04];
+        let inputs = vec![
+            vec![0x10, 0x20, 0x30, 0x40],
+            vec![0xFF, 0x00, 0xFF, 0x00],
+            vec![0x01, 0x02, 0x03, 0x04],
+        ];
+        // Expected output: per-input XOR against the reference, concatenated.
+        let mut expected = Vec::new();
+        for input in &inputs {
+            for (r, i) in ref_bytes.iter().zip(input.iter()) {
+                expected.push(r ^ i);
+            }
+        }
+
+        // Act: an ExactSizeIterator (slice iter) gives a tight upper bound.
+        let encoded = try_delta_encode(&ref_bytes, inputs.iter())
+            .expect("encode should succeed for matching lengths");
+
+        // Assert: byte-identical output and a single up-front allocation that
+        // already covers the full output (no doubling re-grow needed).
+        assert_eq!(encoded, expected);
+        assert!(
+            encoded.capacity() >= expected.len(),
+            "expected capacity >= {}, got {}",
+            expected.len(),
+            encoded.capacity()
+        );
+    }
+
+    #[test]
+    fn try_delta_encode_underreporting_hint_still_correct() {
+        // Arrange: a size_hint that under-reports (claims 1 upper but yields 3).
+        let ref_bytes = vec![0xAA, 0xBB];
+        let inputs = vec![vec![0x01, 0x02], vec![0x03, 0x04], vec![0x05, 0x06]];
+        let mut expected = Vec::new();
+        for input in &inputs {
+            for (r, i) in ref_bytes.iter().zip(input.iter()) {
+                expected.push(r ^ i);
+            }
+        }
+
+        // Act
+        let encoded = try_delta_encode(&ref_bytes, lying(&inputs, Some(1)))
+            .expect("under-reporting hint must not break correctness");
+
+        // Assert: the in-loop fallible growth guard handled the extra inputs.
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn try_delta_encode_absent_hint_still_correct() {
+        // Arrange: size_hint upper bound is None.
+        let ref_bytes = vec![0x0F, 0xF0];
+        let inputs = vec![vec![0x11, 0x22], vec![0x33, 0x44]];
+        let mut expected = Vec::new();
+        for input in &inputs {
+            for (r, i) in ref_bytes.iter().zip(input.iter()) {
+                expected.push(r ^ i);
+            }
+        }
+
+        // Act
+        let encoded = try_delta_encode(&ref_bytes, lying(&inputs, None))
+            .expect("absent hint must rely on per-iteration growth");
+
+        // Assert
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn try_delta_encode_absurd_hint_still_encodes_correctly() {
+        // Arrange: an adversarial upper bound of usize::MAX would, multiplied by
+        // the reference length, request an impossible allocation. The bulk
+        // pre-reservation is best-effort, so this impossible request is silently
+        // discarded and the in-loop guard encodes correctly anyway.
+        let ref_bytes = vec![0x01, 0x02, 0x03, 0x04];
+        let inputs = vec![vec![0x10, 0x20, 0x30, 0x40]];
+
+        // Act
+        let result = try_delta_encode(&ref_bytes, lying(&inputs, Some(usize::MAX)));
+
+        // Assert: correct XOR output, never an abort or a spurious error.
+        assert_eq!(result, Ok(vec![0x11, 0x22, 0x33, 0x44]));
+    }
+
+    #[test]
+    fn delta_encode_absurd_hint_still_encodes_correctly() {
+        // Arrange: the infallible wrapper must produce the correct encoding even
+        // for an adversarial size_hint -- the best-effort bulk reservation
+        // cannot change the output, and growth stays panic-free.
+        let ref_bytes = vec![0x01, 0x02, 0x03, 0x04];
+        let inputs = vec![vec![0x10, 0x20, 0x30, 0x40]];
+
+        // Act
+        let encoded = delta_encode(&ref_bytes, lying(&inputs, Some(usize::MAX)));
+
+        // Assert
+        assert_eq!(encoded, vec![0x11, 0x22, 0x33, 0x44]);
+    }
+
+    #[test]
+    fn try_delta_encode_length_mismatched_inputs_are_rejected() {
+        // Arrange: a mismatched-length input must reject the whole batch.
+        // Silently skipping it would collapse the frame stream.
+        let ref_bytes = vec![0x01, 0x02, 0x03];
+        let inputs = [
+            vec![0x10, 0x20], // wrong length -> reject
+            vec![0xAA, 0xBB, 0xCC],
+        ];
+
+        // Act
+        let err = try_delta_encode(&ref_bytes, inputs.iter())
+            .expect_err("mismatched input length must reject the batch");
+
+        // Assert
+        assert!(matches!(
+            err,
+            FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::DeltaEncodeInputLengthMismatch {
+                    input_len: 2,
+                    reference_len: 3
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn try_delta_encode_empty_iterator_yields_empty_output() {
+        // Arrange
+        let ref_bytes = vec![0x01, 0x02, 0x03, 0x04];
+        let inputs: Vec<Vec<u8>> = Vec::new();
+
+        // Act
+        let encoded = try_delta_encode(&ref_bytes, inputs.iter())
+            .expect("empty input must produce empty output");
+
+        // Assert
+        assert_eq!(encoded, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn try_delta_encode_empty_reference_is_rejected() {
+        // Arrange: receivers reject empty references, so senders must not emit
+        // batches based on one.
+        let ref_bytes: Vec<u8> = Vec::new();
+        let inputs = [Vec::<u8>::new()];
+
+        // Act
+        let err = try_delta_encode(&ref_bytes, inputs.iter())
+            .expect_err("empty reference must reject the batch");
+
+        // Assert
+        assert!(matches!(
+            err,
+            FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::DeltaEncodeEmptyReference
+            }
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -625,6 +1069,7 @@ mod compression_tests {
     clippy::indexing_slicing
 )]
 mod property_tests {
+    use super::test_support::lying;
     use super::*;
     use crate::test_config::miri_case_count;
     use proptest::prelude::*;
@@ -736,6 +1181,38 @@ mod property_tests {
                     let encoded = encode(&ref_input, pend_inp.iter());
                     let decoded = decode(&ref_input, &encoded).expect("decode should succeed");
                     prop_assert!(decoded.is_empty());
+                    Ok(())
+                })?;
+        }
+
+        /// Property: `delta_decode(ref, delta_encode(ref, inputs))` round-trips
+        /// regardless of the (untrusted) iterator `size_hint` upper bound. The
+        /// bulk pre-reservation is a performance hint only; correctness must not
+        /// depend on it.
+        #[test]
+        fn prop_delta_roundtrip_independent_of_size_hint(
+            size in input_size(),
+            count in 1usize..=16,
+            // A lie that is too low (0), exact (count), or too high (but not
+            // absurd enough to fail allocation).
+            hint_choice in 0usize..3,
+        ) {
+            let ref_strategy = reference_buffer(size);
+            let pending_strategy = pending_inputs(size, count);
+
+            let combined = (ref_strategy, pending_strategy);
+            proptest::test_runner::TestRunner::default()
+                .run(&combined, |(ref_bytes, inputs)| {
+                    let fake_upper = match hint_choice {
+                        0 => Some(0),
+                        1 => Some(inputs.len()),
+                        _ => Some(inputs.len().saturating_add(64)),
+                    };
+                    let encoded =
+                        delta_encode(&ref_bytes, lying(&inputs, fake_upper));
+                    let decoded =
+                        delta_decode(&ref_bytes, &encoded).expect("decode should succeed");
+                    prop_assert_eq!(decoded, inputs);
                     Ok(())
                 })?;
         }

@@ -249,6 +249,7 @@ jobs:
   mutation-summary:
     name: Mutation Testing Summary
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs: [mutation-testing]
     if: always()
 

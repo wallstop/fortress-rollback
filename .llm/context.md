@@ -17,15 +17,13 @@
 ## Quick Commands
 
 ```bash
-cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run --no-capture  # Full local validation
+cargo fmt && cargo clippy --workspace --all-targets --features tokio,json && cargo nextest run --no-capture  # Full local validation
 cargo c && cargo t                        # Aliases from .cargo/config.toml
 typos                                     # Spell check (CI enforced)
 cargo test --features z3-verification -- --nocapture  # Z3 proofs (slow)
 ```
 
-Always use `--no-capture` (nextest) or `-- --nocapture` (cargo test) so test output is visible on failure.
-
-**Test output rule:** NEVER pipe test output through `tail`/`head`. Redirect to a temp file instead:
+**Test output rule:** Always use `--no-capture` (nextest) / `-- --nocapture` (cargo test) so output is visible on failure, and NEVER pipe test output through `tail`/`head` -- redirect to a temp file instead:
 
 ```bash
 cargo nextest run --no-capture > /tmp/test-results.txt 2>&1  # Then read the file
@@ -56,6 +54,8 @@ Rules: always `bat --paging=never` (bare `bat` blocks); never redirect to `/dev/
 - **Public items documented** -- Rustdoc with examples
 - **Overflow checks in release** -- Integer overflow caught at runtime
 - **Deterministic behavior** -- Same inputs must always produce same outputs
+- **Bounded allocation** -- Never trust a length from the wire; validate config at the boundary. Bound total bytes, element counts, raw receive attempts, and socket receive-poll batches before allocation (for example, decoded bytes split into many `Vec` buffers need a frame/count cap too; built-in sockets cap receive polls at 256 raw attempts and 256 decoded messages). Dynamically-sized allocs in `src/` need an `// alloc-bound:` justification (enforced by `check-unbounded-alloc`); see [defensive-programming.md](skills/rust-language/defensive-programming.md#bounded-allocation)
+- **Network input width** -- `Config::Input` for network sessions must serialize to at least one byte and should serialize to the same byte length for every value. Prefer fixed-width structs of integers/bools; variable-length enums, strings, vectors, maps, and similar payloads can collapse delta-compressed frame streams and must be rejected or encoded through a fixed-width wrapper.
 
 ```rust
 // FORBIDDEN in production:  value.unwrap(), .expect(), array[i], panic!(), todo!()
@@ -209,7 +209,7 @@ fn check_parse(input: &str, expected: Option<Ast>) {
 }
 ```
 
-Consolidate integration tests into a single crate (`tests/it/main.rs`). Anti-patterns: `assert!(result.is_ok())` (use `assert_eq!`), sleep-based synchronization, testing implementation details.
+Consolidate integration tests into a single crate (`tests/it/main.rs`). Anti-patterns: `assert!(result.is_ok())` (use `assert_eq!`), sleep-based synchronization, testing implementation details, and `if let Ok(..) = session.advance_frame()` patterns that swallow all frame-advance errors instead of matching only expected errors.
 
 For protocol tests that poll in loops (`poll_remote_clients()` / protocol `poll()`), always inject `TestClock` via `ProtocolConfig.clock` and advance it each poll iteration (for example with `POLL_INTERVAL_DETERMINISTIC`). Interval-gated sends (retries, quality reports, keepalives, pending output) will not fire reliably if wall-clock time does not advance.
 
@@ -234,7 +234,7 @@ Validate locally: `python3 scripts/hooks/check-changelog-unreleased.py`. Also ru
 
 ## Mandatory Linting
 
-- **After Rust changes:** `cargo fmt && cargo clippy --all-targets --features tokio,json` (or `cargo c`)
+- **After Rust changes:** `cargo fmt && cargo clippy --workspace --all-targets --features tokio,json` (or `cargo c`)
 - **After workflow changes:** `actionlint` (no exceptions)
 - **After doc changes:** `cargo doc --no-deps`
 - **After markdown changes:** `npx markdownlint 'file.md' --config .markdownlint.json --fix`
@@ -245,7 +245,7 @@ Validate locally: `python3 scripts/hooks/check-changelog-unreleased.py`. Also ru
 - **Link validation:** `./scripts/docs/check-links.sh`
 - **Spell check:** `typos`
 - **Vale (advisory):** `vale docs/` -- checks prose quality, non-blocking in CI. Cheat-sheet of recurring swaps and weasel words: [`.llm/skills/workflows/user-facing-docs.md`](skills/workflows/user-facing-docs.md#prose-conventions). Agent preflight surfaces per-file counts via the `vale-advisory` check.
-- **Full local validation:** `cargo fmt && cargo clippy --all-targets --features tokio,json && cargo nextest run --no-capture`
+- **Full local validation:** `cargo fmt && cargo clippy --workspace --all-targets --features tokio,json && cargo nextest run --no-capture`
 
 Shell regex portability rule: avoid PCRE-style escapes in `grep -E`/`sed -E` (`\b`, `\s`, `\w`, etc.). Use POSIX-safe classes like `[[:space:]]`, `[[:alnum:]_]`, and token boundaries `(^|[^[:alnum:]_])word([^[:alnum:]_]|$)`.
 
@@ -280,7 +280,7 @@ For docs/wiki mirrors, use a first-line `<!-- SYNC: ... -->` header with explici
 ## Quality Checklist
 
 - [ ] `cargo fmt` run
-- [ ] `cargo clippy --all-targets --features tokio,json` passes
+- [ ] `cargo clippy --workspace --all-targets --features tokio,json` passes
 - [ ] All tests pass (`cargo nextest run`)
 - [ ] Tests for new functionality included
 - [ ] Rustdoc comments with examples
@@ -292,7 +292,7 @@ For docs/wiki mirrors, use a first-line `<!-- SYNC: ... -->` header with explici
 
 ## For Agents
 
-When spawning sub-agents or using Task tools: the sub-agent MUST run `cargo fmt` and verify `cargo clippy --all-targets --features tokio,json` passes on any modified files. If the sub-agent cannot run these, the parent agent must run them after receiving changes.
+When spawning sub-agents or using Task tools: the sub-agent MUST run `cargo fmt` and verify `cargo clippy --workspace --all-targets --features tokio,json` passes on any modified files. If the sub-agent cannot run these, the parent agent must run them after receiving changes.
 
 ---
 

@@ -1,9 +1,8 @@
-use std::{
-    io::ErrorKind,
-    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
-};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
+use crate::network::buffer::zeroed_buffer;
 use crate::network::codec;
+use crate::network::socket_receive;
 use crate::report_violation;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::{network::messages::Message, NonBlockingSocket};
@@ -30,21 +29,55 @@ const IDEAL_MAX_UDP_PACKET_SIZE: usize = 508;
 pub struct UdpNonBlockingSocket {
     socket: UdpSocket,
     /// Receive buffer - reused across recv_from calls
-    recv_buffer: [u8; RECV_BUFFER_SIZE],
+    recv_buffer: Vec<u8>,
     /// Send buffer - reused across send_to calls to avoid allocation
-    send_buffer: [u8; SEND_BUFFER_SIZE],
+    send_buffer: Vec<u8>,
 }
 
 impl UdpNonBlockingSocket {
     /// Binds an UDP Socket to 0.0.0.0:port and set it to non-blocking mode.
     pub fn bind_to_port(port: u16) -> Result<Self, std::io::Error> {
+        Self::bind_to_port_with_buffer_sizes(port, RECV_BUFFER_SIZE, SEND_BUFFER_SIZE)
+    }
+
+    /// Binds a UDP socket with caller-configured receive and send buffer sizes.
+    ///
+    /// The default [`bind_to_port`](Self::bind_to_port) constructor uses 4 KiB
+    /// receive and 1 KiB send buffers. Applications with larger serialized
+    /// inputs can raise either value without implementing a custom socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`std::io::ErrorKind::InvalidInput`] if
+    /// either size is `0` (a zero-length socket buffer can never send or
+    /// receive), and propagates any error from binding the underlying socket.
+    pub fn bind_to_port_with_buffer_sizes(
+        port: u16,
+        recv_buffer_size: usize,
+        send_buffer_size: usize,
+    ) -> Result<Self, std::io::Error> {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
         let socket = UdpSocket::bind(addr)?;
         socket.set_nonblocking(true)?;
+        Self::from_socket_with_buffer_sizes(socket, recv_buffer_size, send_buffer_size)
+    }
+
+    /// Wraps an existing UDP socket with caller-configured buffers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`std::io::ErrorKind::InvalidInput`] if
+    /// either size is `0` (a zero-length socket buffer can never send or
+    /// receive).
+    pub fn from_socket_with_buffer_sizes(
+        socket: UdpSocket,
+        recv_buffer_size: usize,
+        send_buffer_size: usize,
+    ) -> Result<Self, std::io::Error> {
         Ok(Self {
             socket,
-            recv_buffer: [0; RECV_BUFFER_SIZE],
-            send_buffer: [0; SEND_BUFFER_SIZE],
+            recv_buffer: zeroed_buffer(recv_buffer_size, "udp recv buffer")?,
+            send_buffer: zeroed_buffer(send_buffer_size, "udp send buffer")?,
         })
     }
 
@@ -127,54 +160,10 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
     }
 
     fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
-        // Pre-allocate for typical case of 1-4 messages per poll
-        let mut received_messages = Vec::with_capacity(4);
-        loop {
-            match self.socket.recv_from(&mut self.recv_buffer) {
-                Ok((number_of_bytes, src_addr)) => {
-                    // Defensive check: if we received more bytes than buffer allows,
-                    // something is seriously wrong - skip this packet
-                    if number_of_bytes > RECV_BUFFER_SIZE {
-                        report_violation!(
-                            ViolationSeverity::Error,
-                            ViolationKind::NetworkProtocol,
-                            "Received {} bytes but buffer is only {} bytes",
-                            number_of_bytes,
-                            RECV_BUFFER_SIZE
-                        );
-                        continue;
-                    }
-                    if let Some(buf_slice) = self.recv_buffer.get(0..number_of_bytes) {
-                        if let Ok(msg) = codec::decode_value(buf_slice) {
-                            received_messages.push((src_addr, msg));
-                        }
-                    } else {
-                        report_violation!(
-                            ViolationSeverity::Error,
-                            ViolationKind::NetworkProtocol,
-                            "recv_buffer slice [0..{}] out of bounds (buffer size: {})",
-                            number_of_bytes,
-                            RECV_BUFFER_SIZE
-                        );
-                    }
-                },
-                // there are no more messages
-                Err(ref err) if err.kind() == ErrorKind::WouldBlock => return received_messages,
-                // datagram socket sometimes get this error as a result of calling the send_to method
-                Err(ref err) if err.kind() == ErrorKind::ConnectionReset => continue,
-                // For other errors, log and stop receiving (don't panic)
-                Err(err) => {
-                    report_violation!(
-                        ViolationSeverity::Error,
-                        ViolationKind::NetworkProtocol,
-                        "Unexpected socket error: {:?}: {}",
-                        err.kind(),
-                        err
-                    );
-                    return received_messages;
-                },
-            }
-        }
+        let socket = &self.socket;
+        socket_receive::receive_all_messages_from(&mut self.recv_buffer, "UDP", |buffer| {
+            socket.recv_from(buffer)
+        })
     }
 }
 
@@ -231,6 +220,8 @@ mod tests {
     use super::*;
     #[cfg(not(miri))]
     use crate::network::messages::{MessageBody, MessageHeader};
+    #[cfg(not(miri))]
+    use std::io::ErrorKind;
 
     // Helper function to wait for messages with retry logic
     // This is necessary because UDP packet delivery timing can vary across platforms
@@ -274,6 +265,40 @@ mod tests {
             "Failed to bind to ephemeral port 0: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    #[cfg(not(miri))] // Miri cannot execute foreign functions like socket()
+    fn test_udp_socket_bind_with_custom_buffer_sizes() {
+        let socket = UdpNonBlockingSocket::bind_to_port_with_buffer_sizes(0, 8192, 2048).unwrap();
+
+        assert_eq!(socket.recv_buffer.len(), 8192);
+        assert_eq!(socket.send_buffer.len(), 2048);
+    }
+
+    #[test]
+    #[cfg(not(miri))] // Miri cannot execute foreign functions like socket()
+    fn bind_with_zero_recv_buffer_size_returns_invalid_input() {
+        let err = UdpNonBlockingSocket::bind_to_port_with_buffer_sizes(0, 0, 2048)
+            .expect_err("zero recv buffer size must be rejected");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    #[cfg(not(miri))] // Miri cannot execute foreign functions like socket()
+    fn bind_with_zero_send_buffer_size_returns_invalid_input() {
+        let err = UdpNonBlockingSocket::bind_to_port_with_buffer_sizes(0, 4096, 0)
+            .expect_err("zero send buffer size must be rejected");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    #[cfg(not(miri))] // Miri cannot execute foreign functions like socket()
+    fn from_socket_with_zero_buffer_size_returns_invalid_input() {
+        let inner = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let err = UdpNonBlockingSocket::from_socket_with_buffer_sizes(inner, 0, 1024)
+            .expect_err("zero recv buffer size must be rejected");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
     }
 
     #[test]

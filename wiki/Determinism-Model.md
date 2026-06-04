@@ -170,6 +170,9 @@ pub trait Config: 'static {
 
 ```rust
 // Be explicit about overflow handling
+let old_value: u32 = 100;
+let delta: u32 = 7;
+
 let new_value = old_value.wrapping_add(delta); // Explicit wrapping
 let new_value = old_value.saturating_add(delta); // Saturating
 ```

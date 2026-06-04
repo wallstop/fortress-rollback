@@ -9,6 +9,7 @@
 //! 1. **Transport-agnostic**: Fortress Rollback doesn't care how messages are delivered
 //! 2. **UDP-like semantics**: Messages should be unordered and unreliable (the library handles retries)
 //! 3. **Non-blocking**: `receive_all_messages()` must return immediately, never block
+//! 4. **Bounded receive batches**: return a capped batch each poll and leave excess queued
 //!
 //! ## Included Examples
 //!
@@ -30,10 +31,13 @@
     clippy::use_self
 )]
 
-use fortress_rollback::{Message, NonBlockingSocket};
+use fortress_rollback::{network::codec, Message, NonBlockingSocket};
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
+
+const MAX_WEBSOCKET_MESSAGES_PER_POLL: usize = 64;
+const MAX_CHANNEL_MESSAGES_PER_POLL: usize = 64;
 
 // =============================================================================
 // Example 1: Channel-Based Socket (for local testing)
@@ -120,9 +124,15 @@ impl NonBlockingSocket<ChannelPeerId> for ChannelSocket {
 
     fn receive_all_messages(&mut self) -> Vec<(ChannelPeerId, Message)> {
         let mut messages = Vec::new();
+        if messages
+            .try_reserve_exact(MAX_CHANNEL_MESSAGES_PER_POLL)
+            .is_err()
+        {
+            return messages;
+        }
 
-        // Drain all available messages without blocking
-        loop {
+        // Drain a bounded batch without blocking; excess remains queued.
+        while messages.len() < MAX_CHANNEL_MESSAGES_PER_POLL {
             match self.receiver.try_recv() {
                 Ok(msg) => messages.push(msg),
                 Err(TryRecvError::Empty) => break,
@@ -194,11 +204,21 @@ impl WebSocketAdapter {
     pub fn poll(&mut self) {
         // Example pseudocode:
         //
+        // let mut attempts = 0;
         // for (peer_id, ws_connection) in &mut self.connections {
-        //     while let Some(ws_msg) = ws_connection.try_recv() {
-        //         if let Ok(msg) = bincode::deserialize(&ws_msg.into_data()) {
+        //     while attempts < MAX_WEBSOCKET_MESSAGES_PER_POLL
+        //         && self.incoming.len() < MAX_WEBSOCKET_MESSAGES_PER_POLL
+        //     {
+        //         let Some(ws_msg) = ws_connection.try_recv() else { break };
+        //         attempts += 1;
+        //         if let Ok((msg, _consumed)) = codec::decode_message(&ws_msg.into_data()) {
         //             self.incoming.push_back((peer_id.clone(), msg));
         //         }
+        //     }
+        //     if attempts >= MAX_WEBSOCKET_MESSAGES_PER_POLL
+        //         || self.incoming.len() >= MAX_WEBSOCKET_MESSAGES_PER_POLL
+        //     {
+        //         break;
         //     }
         // }
     }
@@ -212,8 +232,8 @@ impl Default for WebSocketAdapter {
 
 impl NonBlockingSocket<WebSocketPeerId> for WebSocketAdapter {
     fn send_to(&mut self, msg: &Message, addr: &WebSocketPeerId) {
-        // Serialize the message using bincode (same format Fortress Rollback uses internally)
-        let Ok(bytes) = bincode::serde::encode_to_vec(msg, bincode::config::standard()) else {
+        // Serialize the message using Fortress Rollback's deterministic codec.
+        let Ok(bytes) = codec::encode(msg) else {
             eprintln!("Failed to serialize message");
             return;
         };
@@ -228,8 +248,9 @@ impl NonBlockingSocket<WebSocketPeerId> for WebSocketAdapter {
     }
 
     fn receive_all_messages(&mut self) -> Vec<(WebSocketPeerId, Message)> {
-        // Drain all queued messages
-        self.incoming.drain(..).collect()
+        // Drain a bounded batch and leave any excess queued for the next poll.
+        let batch_len = self.incoming.len().min(MAX_WEBSOCKET_MESSAGES_PER_POLL);
+        self.incoming.drain(..batch_len).collect()
     }
 }
 
@@ -287,7 +308,7 @@ fn main() {
     println!("To implement NonBlockingSocket for your transport:");
     println!("1. Define an address type (impl Clone + PartialEq + Eq + Ord + Hash + Debug)");
     println!("2. Implement send_to() - serialize and send the Message");
-    println!("3. Implement receive_all_messages() - return all pending messages without blocking");
+    println!("3. Implement receive_all_messages() - return a bounded batch without blocking");
     println!("\nFor browser games, use Matchbox which handles all of this for you!");
 }
 

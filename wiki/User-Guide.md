@@ -203,12 +203,17 @@ Your input type must:
 - Be `Copy + Clone + PartialEq + Eq`
 - Implement `Default` (used for disconnected players)
 - Implement `Serialize + Deserialize` (for network transmission)
+- Serialize to at least one byte for network sessions
+- Serialize every value to the same byte length under Fortress Rollback's codec
 
 **Tips:**
 
 - Keep inputs small; they're sent every frame
 - Use bitflags for button states
 - Consider `#[repr(C)]` for consistent serialization
+- Prefer fixed-width integer/bool fields. Variable-length enums, strings,
+  vectors, maps, and similar payloads are rejected or dropped because the
+  network protocol splits compressed input streams by fixed byte width.
 
 ### State Type Requirements
 
@@ -800,6 +805,44 @@ fn handle_event(event: FortressEvent<GameConfig>) {
             );
             // Session continues trying, but you may choose to abort
         }
+
+        FortressEvent::ReplayDesync {
+            frame,
+            expected_checksum,
+            actual_checksum,
+        } => {
+            eprintln!(
+                "Replay desync at frame {}! Expected: {}, Actual: {}",
+                frame, expected_checksum, actual_checksum
+            );
+        }
+
+        FortressEvent::PeerDropped { handle, addr } => {
+            println!("Peer {} at {} was dropped gracefully", handle, addr);
+        }
+
+        FortressEvent::InputDelayRecommendation {
+            player_handle,
+            current_delay,
+            suggested_delay,
+        } => {
+            println!(
+                "Input delay recommendation for {}: {} -> {}",
+                player_handle, current_delay, suggested_delay
+            );
+        }
+
+        FortressEvent::SpectatorDivergence {
+            frame,
+            player,
+            primary_addr,
+            conflicting_addr,
+        } => {
+            eprintln!(
+                "Spectator host divergence at frame {} for {}: {} disagreed with {}",
+                frame, player, conflicting_addr, primary_addr
+            );
+        }
     }
 }
 ```
@@ -1273,13 +1316,6 @@ use web_time::Duration;
 let host_session = SessionBuilder::<GameConfig>::new()
     .with_num_players(2)?
     .with_input_delay(2)?
-    // Spectator-friendly config: larger buffer for varied viewers
-    .with_spectator_config(SpectatorConfig {
-        buffer_size: 180,      // 3 seconds at 60 FPS
-        catchup_speed: 2,      // 2x speed when behind
-        max_frames_behind: 30, // Start catchup at 0.5s behind
-        ..Default::default()
-    })
     .with_sync_config(SyncConfig::default())
     .add_player(PlayerType::Local, PlayerHandle::new(0))?
     .add_player(PlayerType::Remote(player2_addr), PlayerHandle::new(1))?
@@ -1291,13 +1327,37 @@ let mut spectator_session = SessionBuilder::<GameConfig>::new()
     .with_num_players(2)?
     .with_sync_config(SyncConfig::high_latency())
     .with_protocol_config(ProtocolConfig::high_latency())
-    .with_max_frames_behind(30)?
-    .with_catchup_speed(2)?
+    .with_spectator_config(SpectatorConfig {
+        buffer_size: 180,      // 3 seconds at 60 FPS
+        catchup_speed: 2,      // 2x speed when behind
+        max_frames_behind: 30, // Start catchup at 0.5s behind
+        stream_delay: 6,       // Stay 100ms behind live at 60 FPS
+        ..Default::default()
+    })
     .start_spectator_session(host_addr, spectator_socket)
     .ok_or(FortressError::InvalidRequest {
         info: "spectator session initialization failed".into(),
     })?;
 ```
+
+Spectator startup returns `None` when the protocol configuration is invalid,
+the spectator configuration is invalid, or the host endpoint cannot be
+initialized. `SpectatorConfig::buffer_size` must be greater than zero, and
+`stream_delay` must be smaller than `buffer_size`.
+
+For failover spectators created with `start_spectator_session_multi`, unresolved
+frames use the highest-priority currently connected host by builder order as the
+canonical source. Lower-priority host snapshots remain provisional while a
+higher-priority host is connected, and if that host disconnects before a frame
+resolves the next surviving host is promoted only for unresolved frames.
+Connection status comes from the selected host's whole-frame snapshot. Connected
+hosts that disagree on the same player/frame emit
+`FortressEvent::SpectatorDivergence` and make future `advance_frame` calls
+return `FortressError::SpectatorDivergence`. If duplicate host addresses are
+supplied, inbound packets are routed to the first matching host endpoint. When
+every host disconnects cleanly, the spectator may still advance through frames
+that were already buffered; after those buffered frames are no longer viewable,
+`advance_frame` returns `PredictionThreshold`.
 
 **SpectatorConfig presets:**
 
@@ -1497,7 +1557,9 @@ With sparse saving:
 Implement `NonBlockingSocket` for custom networking:
 
 ```text
-use fortress_rollback::{Message, NonBlockingSocket};
+use fortress_rollback::{network::codec, Message, NonBlockingSocket};
+
+const MAX_MESSAGES_PER_POLL: usize = 64;
 
 struct MyCustomSocket { /* ... */ }
 
@@ -1507,7 +1569,12 @@ impl NonBlockingSocket<MyAddress> for MyCustomSocket {
     }
 
     fn receive_all_messages(&mut self) -> Vec<(MyAddress, Message)> {
-        // Return all received messages since last call
+        // Return a bounded batch and leave excess packets for a future poll
+        self.drain_received_messages_bounded(MAX_MESSAGES_PER_POLL)
+            .filter_map(|(addr, bytes)| {
+                codec::decode_message(&bytes).ok().map(|(msg, _consumed)| (addr, msg))
+            })
+            .collect()
     }
 }
 ```
@@ -2006,7 +2073,7 @@ When enabled, the `Config` and `NonBlockingSocket` traits require their associat
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["sync-send"] }
+fortress-rollback = { version = "0.9", features = ["sync-send"] }
 ```
 
 **Without `sync-send`:**
@@ -2029,13 +2096,19 @@ pub trait Config: 'static + Send + Sync {
 }
 ```
 
+For network sessions, `Config::Input::default()` must serialize to at least one
+byte, and every `Config::Input` value should serialize to the same byte length
+under Fortress Rollback's codec. Fixed-width structs of integers and booleans
+are the intended shape. Avoid variable-length enums, strings, vectors, maps, or
+other payloads whose encoded size can change from frame to frame.
+
 #### `tokio`
 
 Enables `TokioUdpSocket`, an adapter that wraps a Tokio async UDP socket and implements `NonBlockingSocket` for use with Fortress Rollback sessions in async Tokio applications.
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["tokio"] }
+fortress-rollback = { version = "0.9", features = ["tokio"] }
 ```
 
 **Example usage:**
@@ -2072,7 +2145,7 @@ Enables JSON serialization methods (`to_json()` and `to_json_pretty()`) on telem
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["json"] }
+fortress-rollback = { version = "0.9", features = ["json"] }
 ```
 
 **Example usage:**
@@ -2102,7 +2175,7 @@ Enables runtime invariant checking in release builds. Normally, invariant checks
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["paranoid"] }
+fortress-rollback = { version = "0.9", features = ["paranoid"] }
 ```
 
 **Use cases:**
@@ -2200,19 +2273,19 @@ Most features are independent and can be combined freely. Here's a matrix showin
 ```toml
 # Standard multi-threaded game
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["sync-send"] }
+fortress-rollback = { version = "0.9", features = ["sync-send"] }
 
 # Async server with Tokio
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["sync-send", "tokio"] }
+fortress-rollback = { version = "0.9", features = ["sync-send", "tokio"] }
 
 # Debugging production issues
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["sync-send", "paranoid"] }
+fortress-rollback = { version = "0.9", features = ["sync-send", "paranoid"] }
 
 # Development with examples
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["sync-send", "graphical-examples"] }
+fortress-rollback = { version = "0.9", features = ["sync-send", "graphical-examples"] }
 ```
 
 ### Web / WASM Integration
@@ -2234,7 +2307,7 @@ Browsers don't support raw UDP sockets. For browser games, you need WebRTC or We
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.8", features = ["sync-send"] }
+fortress-rollback = { version = "0.9", features = ["sync-send"] }
 matchbox_socket = { version = "0.13", features = ["ggrs"] }
 ```
 
@@ -2274,7 +2347,9 @@ let session = SessionBuilder::<GameConfig>::new()
 For other transports, implement `NonBlockingSocket`:
 
 ```text
-use fortress_rollback::{Message, NonBlockingSocket};
+use fortress_rollback::{network::codec, Message, NonBlockingSocket};
+
+const MAX_MESSAGES_PER_POLL: usize = 64;
 
 struct MyWebSocketTransport {
     // Your WebSocket implementation
@@ -2283,15 +2358,15 @@ struct MyWebSocketTransport {
 impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
     fn send_to(&mut self, msg: &Message, addr: &MyPeerId) {
         // Serialize msg and send via WebSocket
-        let Ok(bytes) = bincode::serialize(msg) else { return };
+        let Ok(bytes) = codec::encode(msg) else { return };
         self.send_to_peer(addr, &bytes);
     }
 
     fn receive_all_messages(&mut self) -> Vec<(MyPeerId, Message)> {
-        // Return all messages received since last call
-        self.drain_received_messages()
+        // Return a bounded batch and leave excess packets for a future poll
+        self.drain_received_messages_bounded(MAX_MESSAGES_PER_POLL)
             .filter_map(|(peer, bytes)| {
-                bincode::deserialize(&bytes).ok().map(|msg| (peer, msg))
+                codec::decode_message(&bytes).ok().map(|(msg, _consumed)| (peer, msg))
             })
             .collect()
     }
@@ -3379,7 +3454,7 @@ let config = ProtocolConfig {
     quality_report_interval: Duration::from_millis(200), // RTT measurement interval
     shutdown_delay: Duration::from_millis(5000),         // Cleanup delay after disconnect
     max_checksum_history: 32,                            // Checksums retained for desync
-    pending_output_limit: 128,                           // Warning threshold for output queue
+    pending_output_limit: 128,                           // Output queue warning + decode cap
     sync_retry_warning_threshold: 10,                    // Warn after N sync retries
     sync_duration_warning_ms: 3000,                      // Warn if sync takes longer
     clock: None,                                         // None = system clock (see below)
@@ -3388,6 +3463,8 @@ let config = ProtocolConfig {
 ```
 
 The `clock` field accepts an `Option<ClockFn>` for injecting a custom time source. When `None` (the default), the protocol uses `Instant::now()`. See [Custom Clock (Time Control)](#custom-clock-time-control) for details and test examples.
+
+`pending_output_limit` also caps how many input frames a received packet may decode into. Values above `ProtocolConfig::MAX_PENDING_OUTPUT_LIMIT` are rejected during configuration validation.
 
 **Presets:**
 
@@ -3430,9 +3507,24 @@ let config = SpectatorConfig {
     buffer_size: 60,       // Input buffer size in frames (default: 60)
     catchup_speed: 1,      // Frames per step when catching up (default: 1)
     max_frames_behind: 10, // When to start catching up (default: 10)
+    stream_delay: 0,       // Frames to stay behind the live edge (default: 0)
+    enable_rewind: false,  // Save state for seek_to_frame (default: false)
     ..Default::default()
 };
 ```
+
+`buffer_size` must be greater than zero, and `stream_delay` must be less than
+`buffer_size`; invalid spectator configs make spectator startup return `None`.
+`catchup_speed == 0` is allowed for compatibility. If catch-up mode is
+triggered with zero speed, no frame is attempted and `advance_frame` returns
+`Ok(<empty>)`.
+
+When `enable_rewind` is true, each spectator advance emits a `SaveGameState`
+immediately before the matching `AdvanceFrame`, and `seek_to_frame(frame)` can
+load any saved state still in the ring. Seeking without rewind enabled returns
+`NotSupported`; negative targets return `MustBeNonNegative`; `target + 1`
+overflow returns `FrameArithmeticOverflow`; missing or overwritten states return
+`MissingState`.
 
 **Presets:**
 
@@ -3513,6 +3605,7 @@ Fortress Rollback uses `FortressError` for all error conditions. The enum is exh
 | `MissingInput { player_handle, frame }`                   | Required input not available           | Ensure inputs are added before advancing                      |
 | `MismatchedChecksum { current_frame, mismatched_frames }` | Desync in SyncTestSession              | Debug non-determinism                                         |
 | `SpectatorTooFarBehind`                                   | Spectator can't catch up               | Reconnect spectator                                           |
+| `SpectatorDivergence { frame, player }`                   | Redundant spectator hosts disagreed    | Stop this spectator session; reconnect or inspect hosts       |
 | `SerializationError { context }`                          | Serialization failed                   | Check input/state serialization                               |
 | `SocketError { context }`                                 | Network socket error                   | Check network, retry connection                               |
 | `InternalError { context }`                               | Library bug                            | Please report!                                                |
@@ -3530,6 +3623,13 @@ fn handle_error(error: FortressError) -> Action {
 
         // Recoverable: reconnect
         FortressError::SpectatorTooFarBehind => Action::Reconnect,
+        FortressError::SpectatorDivergence { frame, player } => {
+            eprintln!(
+                "Spectator hosts diverged for player {} at frame {}",
+                player, frame
+            );
+            Action::Fatal
+        }
         FortressError::SocketError { .. } => Action::Reconnect,
 
         // Desync: log and investigate

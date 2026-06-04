@@ -35,15 +35,33 @@
 //! These functions are re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
 //! They are not part of the stable public API.
 
+use crate::error::allocation_failed;
+use crate::report_violation;
+use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::{FortressError, InternalErrorKind, RleDecodeReason};
 
 /// Result type for RLE operations.
 pub type RleResult<T> = Result<T, FortressError>;
 
+/// Default decoded-length limit used by [`decode`].
+///
+/// RLE input arrives from untrusted peers over the network (see
+/// `UdpProtocol::on_input` in `network/protocol/mod.rs`). A contiguous-run
+/// header encodes its length as a varint that is *not* backed by buffer bytes,
+/// so a tiny malicious packet can claim a decoded length up to ~2^62.
+///
+/// Protocol receive paths should call [`decode_with_max_len`] with a limit
+/// derived from user configuration. This default is retained for direct helper
+/// callers that do not provide a protocol-specific bound.
+pub const DEFAULT_MAX_DECODED_LEN: usize = 64 * 1024 * 1024;
+
 /// Varint encoding/decoding utilities.
 ///
 /// Uses LEB128 (Little Endian Base 128) variable-length encoding.
 mod varint {
+    use super::{rle_decode_error, truncated_data, RleResult};
+    use crate::RleDecodeReason;
+
     /// Returns the number of bytes needed to encode a value.
     #[inline]
     pub fn encoded_len(value: u64) -> usize {
@@ -81,6 +99,7 @@ mod varint {
     #[inline]
     #[allow(dead_code)]
     pub fn encode_to_vec(value: u64) -> Vec<u8> {
+        // alloc-bound: encoded_len(value) is at most 10 (max LEB128 bytes for a u64)
         let mut buf = vec![0u8; encoded_len(value)];
         encode(value, &mut buf);
         buf
@@ -90,7 +109,7 @@ mod varint {
     /// Returns (decoded_value, bytes_consumed).
     #[inline]
     #[allow(clippy::while_let_loop)] // Multiple break conditions make while-let less clear
-    pub fn decode(buf: &[u8], offset: usize) -> (u64, usize) {
+    pub fn decode(buf: &[u8], offset: usize) -> RleResult<(u64, usize)> {
         let mut value: u64 = 0;
         let mut shift = 0;
         let mut i = offset;
@@ -98,8 +117,13 @@ mod varint {
         loop {
             let byte = match buf.get(i) {
                 Some(&b) => b,
-                None => break, // Truncated varint - return what we have
+                None => return Err(truncated_data(i, buf.len())),
             };
+            if shift == 63 && byte > 1 {
+                return Err(rle_decode_error(RleDecodeReason::MalformedVarint {
+                    offset,
+                }));
+            }
             value |= ((byte & 0x7F) as u64) << shift;
             i += 1;
 
@@ -108,12 +132,13 @@ mod varint {
             }
             shift += 7;
             if shift >= 64 {
-                // Overflow - return what we have
-                break;
+                return Err(rle_decode_error(RleDecodeReason::MalformedVarint {
+                    offset,
+                }));
             }
         }
 
-        (value, i - offset)
+        Ok((value, i - offset))
     }
 }
 
@@ -141,60 +166,61 @@ mod varint {
 /// assert!(encoded.len() < data.len());
 /// ```
 pub fn encode(buf: impl AsRef<[u8]>) -> Vec<u8> {
-    encode_with_offset(buf.as_ref(), 0)
+    match try_encode(buf) {
+        Ok(encoded) => encoded,
+        Err(err) => {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "RLE encode failed: {:?}",
+                err
+            );
+            Vec::new()
+        },
+    }
+}
+
+/// Encode a bitfield using run-length encoding with fallible allocation.
+///
+/// # Errors
+///
+/// Returns [`InvalidRequestKind::AllocationFailed`](crate::InvalidRequestKind::AllocationFailed)
+/// if the encoded output buffer cannot be reserved.
+pub fn try_encode(buf: impl AsRef<[u8]>) -> RleResult<Vec<u8>> {
+    try_encode_with_offset(buf.as_ref(), 0)
 }
 
 /// Encode a bitfield starting at a specific offset.
-fn encode_with_offset(buf: &[u8], offset: usize) -> Vec<u8> {
-    let mut enc = Vec::with_capacity(encode_len_with_offset(buf, offset));
-    let mut contiguous_len: u64 = 0;
-    let mut contiguous = false;
-    let mut prev_bits: u8 = 0;
-    // Pre-allocate for typical non-contiguous runs (16 bytes is a reasonable estimate)
-    let mut noncontiguous_bits: Vec<u8> = Vec::with_capacity(16);
+fn try_encode_with_offset(buf: &[u8], offset: usize) -> RleResult<Vec<u8>> {
+    let encoded_len = encode_len_with_offset(buf, offset);
+    let mut enc = Vec::new();
+    enc.try_reserve_exact(encoded_len)
+        .map_err(|_err| allocation_failed("rle.encode", encoded_len))?;
 
     let slice = match buf.get(offset..) {
         Some(s) => s,
-        None => return enc, // Invalid offset, return empty
+        None => return Ok(enc), // Invalid offset, return empty
     };
 
-    for (i, &byte) in slice.iter().enumerate() {
-        if contiguous && byte == prev_bits {
-            // Continue the contiguous run
-            contiguous_len += 1;
-            continue;
-        } else if contiguous {
-            // End the contiguous run, write it out
-            write_contiguous(&mut enc, contiguous_len, prev_bits);
-        }
-
+    let mut cursor = 0;
+    while cursor < slice.len() {
+        let byte = slice[cursor];
+        let start = cursor;
+        cursor += 1;
         if byte == 0 || byte == 255 {
-            // Start a new contiguous run
-            if !contiguous && i > 0 {
-                // Write out any pending non-contiguous bytes
-                write_noncontiguous(&mut enc, &mut noncontiguous_bits);
+            while cursor < slice.len() && slice[cursor] == byte {
+                cursor += 1;
             }
-            contiguous_len = 1;
-            prev_bits = byte;
-            contiguous = true;
-        } else if !contiguous {
-            // Continue non-contiguous sequence
-            noncontiguous_bits.push(byte);
+            write_contiguous(&mut enc, (cursor - start) as u64, byte);
         } else {
-            // End contiguous, start non-contiguous
-            contiguous = false;
-            noncontiguous_bits.push(byte);
+            while cursor < slice.len() && slice[cursor] != 0 && slice[cursor] != 255 {
+                cursor += 1;
+            }
+            write_noncontiguous_slice(&mut enc, &slice[start..cursor]);
         }
     }
 
-    // Write final segment
-    if contiguous {
-        write_contiguous(&mut enc, contiguous_len, prev_bits);
-    } else {
-        write_noncontiguous(&mut enc, &mut noncontiguous_bits);
-    }
-
-    enc
+    Ok(enc)
 }
 
 /// Write a contiguous (compressed) sequence to the output.
@@ -215,7 +241,7 @@ fn write_contiguous(enc: &mut Vec<u8>, len: u64, prev_bits: u8) {
 
 /// Write a non-contiguous (uncompressed) sequence to the output.
 #[inline]
-fn write_noncontiguous(enc: &mut Vec<u8>, noncontiguous_bits: &mut Vec<u8>) {
+fn write_noncontiguous_slice(enc: &mut Vec<u8>, noncontiguous_bits: &[u8]) {
     if noncontiguous_bits.is_empty() {
         return;
     }
@@ -225,7 +251,7 @@ fn write_noncontiguous(enc: &mut Vec<u8>, noncontiguous_bits: &mut Vec<u8>) {
     let mut temp_buf = [0u8; 10]; // Max varint size for u64
     let written = varint::encode(value, &mut temp_buf);
     enc.extend_from_slice(&temp_buf[..written]);
-    enc.append(noncontiguous_bits);
+    enc.extend_from_slice(noncontiguous_bits);
 }
 
 /// Returns the length of the encoded output for a given input.
@@ -303,105 +329,184 @@ fn encode_len_with_offset(buf: &[u8], offset: usize) -> usize {
 /// # Ok::<(), fortress_rollback::FortressError>(())
 /// ```
 pub fn decode(buf: impl AsRef<[u8]>) -> RleResult<Vec<u8>> {
-    decode_with_offset(buf.as_ref(), 0)
+    decode_with_max_len(buf, DEFAULT_MAX_DECODED_LEN)
+}
+
+/// Decode an RLE-encoded bitfield with a caller-provided decoded-length limit.
+///
+/// Use this for network receive paths where the accepted decoded length should
+/// be derived from user configuration rather than the module default.
+///
+/// # Errors
+///
+/// Returns a structured RLE error if the encoded data is malformed, if the
+/// declared decoded length exceeds `max_decoded_len`, or if the output
+/// allocation cannot be reserved.
+pub fn decode_with_max_len(buf: impl AsRef<[u8]>, max_decoded_len: usize) -> RleResult<Vec<u8>> {
+    decode_with_offset(buf.as_ref(), 0, max_decoded_len)
+}
+
+fn rle_decode_error(reason: RleDecodeReason) -> FortressError {
+    FortressError::InternalErrorStructured {
+        kind: InternalErrorKind::RleDecodeError { reason },
+    }
+}
+
+fn truncated_data(offset: usize, buffer_len: usize) -> FortressError {
+    rle_decode_error(RleDecodeReason::TruncatedData { offset, buffer_len })
+}
+
+fn checked_buffer_end(offset: usize, len: usize, buffer_len: usize) -> RleResult<usize> {
+    let end = offset
+        .checked_add(len)
+        .ok_or_else(|| truncated_data(offset.saturating_add(len), buffer_len))?;
+    if end > buffer_len {
+        return Err(truncated_data(end, buffer_len));
+    }
+    Ok(end)
+}
+
+fn checked_decoded_end(ptr: usize, len: usize, decoded_len: usize) -> RleResult<usize> {
+    ptr.checked_add(len)
+        .filter(|&end| end <= decoded_len)
+        .ok_or_else(|| rle_decode_error(RleDecodeReason::BitfieldIndexOutOfBounds))
+}
+
+/// Extracts a single run length from a varint header, rejecting any value that
+/// exceeds `max_decoded_len` *before* narrowing the `u64` to `usize`.
+///
+/// The header is decoded as a `u64`; the run length lives in the high bits
+/// (`>> 2` for a compressed run, `>> 1` for a raw run). Casting that `u64`
+/// straight to `usize` would, on a 32-bit target (where `usize == u32`),
+/// truncate the high bits and could turn a huge declared length into a small
+/// one that slips past the decompression-bomb cap. Comparing against
+/// `max_decoded_len` while the value is still a `u64` closes that gap: a value
+/// over the cap is rejected outright, and any accepted value is
+/// `<= max_decoded_len <= usize::MAX`, so the final narrowing is exact on every
+/// target (32- and 64-bit alike).
+fn checked_run_len(next: u64, max_decoded_len: usize) -> RleResult<usize> {
+    let raw = if next & 1 > 0 { next >> 2 } else { next >> 1 };
+    if raw > max_decoded_len as u64 {
+        return Err(FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::RleDecodeError {
+                reason: RleDecodeReason::DecodedLengthExceedsMaximum {
+                    decoded_len: usize::try_from(raw).unwrap_or(usize::MAX),
+                    max: max_decoded_len,
+                },
+            },
+        });
+    }
+    // raw <= max_decoded_len <= usize::MAX, so this conversion never truncates.
+    Ok(usize::try_from(raw).unwrap_or(usize::MAX))
 }
 
 /// Decode an RLE-encoded bitfield starting at a specific offset.
-fn decode_with_offset(buf: &[u8], mut offset: usize) -> RleResult<Vec<u8>> {
-    let decoded_len = decode_len_with_offset(buf, offset)?;
-    let mut bitfield = vec![0u8; decoded_len];
+fn decode_with_offset(buf: &[u8], mut offset: usize, max_decoded_len: usize) -> RleResult<Vec<u8>> {
+    let decoded_len = decode_len_with_offset(buf, offset, max_decoded_len)?;
+    let mut bitfield = Vec::new();
+    bitfield.try_reserve_exact(decoded_len).map_err(|_err| {
+        FortressError::InternalErrorStructured {
+            kind: InternalErrorKind::RleDecodeError {
+                reason: RleDecodeReason::AllocationFailed {
+                    requested_len: decoded_len,
+                },
+            },
+        }
+    })?;
+    // alloc-bound: exact decoded_len was reserved fallibly above; resize only initializes that capacity
+    bitfield.resize(decoded_len, 0);
     let mut ptr = 0;
 
     while offset < buf.len() {
-        let (next, consumed) = varint::decode(buf, offset);
-        offset += consumed;
+        let (next, consumed) = varint::decode(buf, offset)?;
+        offset = checked_buffer_end(offset, consumed, buf.len())?;
 
         let repeat = next & 1;
-        let len = if repeat > 0 {
-            (next >> 2) as usize
-        } else {
-            (next >> 1) as usize
-        };
+        // Reject (and never silently truncate) an over-cap run length before it
+        // is used to fill/copy/advance; see `checked_run_len`.
+        let len = checked_run_len(next, max_decoded_len)?;
+        let next_ptr = checked_decoded_end(ptr, len, bitfield.len())?;
 
         if repeat > 0 {
             // Contiguous sequence
             if next & 2 > 0 {
                 // Fill with 0xFF
-                for i in 0..len {
-                    if ptr + i < bitfield.len() {
-                        *bitfield.get_mut(ptr + i).ok_or(
-                            FortressError::InternalErrorStructured {
-                                kind: InternalErrorKind::RleDecodeError {
-                                    reason: RleDecodeReason::BitfieldIndexOutOfBounds,
-                                },
-                            },
-                        )? = 255;
-                    }
-                }
+                let dst_slice = bitfield
+                    .get_mut(ptr..next_ptr)
+                    .ok_or_else(|| rle_decode_error(RleDecodeReason::BitfieldIndexOutOfBounds))?;
+                dst_slice.fill(255);
             }
             // If bit is 0, the bytes are already 0 from vec initialization
         } else {
             // Non-contiguous sequence - copy raw bytes
-            let end = (len + offset).min(buf.len());
-            let src_len = end - offset;
-            let dst_end = (ptr + src_len).min(bitfield.len());
-            let actual_len = dst_end - ptr;
-            if actual_len > 0 && offset + actual_len <= buf.len() {
-                let dst_slice = bitfield.get_mut(ptr..dst_end).ok_or(
-                    FortressError::InternalErrorStructured {
-                        kind: InternalErrorKind::RleDecodeError {
-                            reason: RleDecodeReason::DestinationSliceOutOfBounds,
-                        },
-                    },
-                )?;
-                let src_slice = buf.get(offset..offset + actual_len).ok_or(
-                    FortressError::InternalErrorStructured {
-                        kind: InternalErrorKind::RleDecodeError {
-                            reason: RleDecodeReason::SourceSliceOutOfBounds,
-                        },
-                    },
-                )?;
-                dst_slice.copy_from_slice(src_slice);
-            }
-            offset += len;
+            let source_end = checked_buffer_end(offset, len, buf.len())?;
+            let dst_slice = bitfield
+                .get_mut(ptr..next_ptr)
+                .ok_or_else(|| rle_decode_error(RleDecodeReason::DestinationSliceOutOfBounds))?;
+            let src_slice = buf
+                .get(offset..source_end)
+                .ok_or_else(|| rle_decode_error(RleDecodeReason::SourceSliceOutOfBounds))?;
+            dst_slice.copy_from_slice(src_slice);
+            offset = source_end;
         }
 
-        ptr += len;
+        ptr = next_ptr;
     }
 
     Ok(bitfield)
 }
 
 /// Returns the decoded length for an RLE-encoded bitfield.
-fn decode_len_with_offset(buf: &[u8], mut offset: usize) -> RleResult<usize> {
+///
+/// Returns [`RleDecodeReason::DecodedLengthExceedsMaximum`] as soon as the
+/// running decoded length would exceed the caller-provided limit (or overflow
+/// `usize`), without finishing the sum. This bounds the allocation in
+/// [`decode_with_offset`] for malformed input claiming a huge length.
+fn decode_len_with_offset(
+    buf: &[u8],
+    mut offset: usize,
+    max_decoded_len: usize,
+) -> RleResult<usize> {
     let mut len: usize = 0;
 
     while offset < buf.len() {
-        let (next, consumed) = varint::decode(buf, offset);
-        offset += consumed;
+        let (next, consumed) = varint::decode(buf, offset)?;
+        offset = checked_buffer_end(offset, consumed, buf.len())?;
 
         let repeat = next & 1;
-        let slice = if repeat > 0 {
-            (next >> 2) as usize
-        } else {
-            (next >> 1) as usize
-        };
+        // `checked_run_len` rejects any single run whose length exceeds the cap
+        // *before* the `u64 -> usize` narrowing, so a 32-bit truncation cannot
+        // disguise a huge declared length as a small one (the accepted value is
+        // always `<= max_decoded_len`).
+        let slice = checked_run_len(next, max_decoded_len)?;
 
-        len += slice;
+        // Accumulate with checked arithmetic and the caller-provided cap. Even
+        // though each `slice` is individually `<= max_decoded_len`, their sum
+        // across runs can still exceed the cap (or overflow `usize`), so the
+        // running total is bounded here too.
+        len = len
+            .checked_add(slice)
+            .filter(|&l| l <= max_decoded_len)
+            .ok_or(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError {
+                    reason: RleDecodeReason::DecodedLengthExceedsMaximum {
+                        decoded_len: len.saturating_add(slice),
+                        max: max_decoded_len,
+                    },
+                },
+            })?;
         if repeat == 0 {
-            offset += slice;
+            // Guards 32-bit targets: `slice` is at most max_decoded_len (the
+            // `len` check above bounds it), so on 64-bit this never overflows
+            // and is effectively unreachable. Keep `checked_add` for 32-bit
+            // `usize` safety, and report the buffer-position overflow as the
+            // semantically-correct truncation rather than a decoded-length cap.
+            offset = checked_buffer_end(offset, slice, buf.len())?;
         }
     }
 
     if offset > buf.len() {
-        return Err(FortressError::InternalErrorStructured {
-            kind: InternalErrorKind::RleDecodeError {
-                reason: RleDecodeReason::TruncatedData {
-                    offset,
-                    buffer_len: buf.len(),
-                },
-            },
-        });
+        return Err(truncated_data(offset, buf.len()));
     }
 
     Ok(len)
@@ -463,7 +568,7 @@ mod tests {
         assert_eq!(written, 1);
         assert_eq!(buf[0], 0);
 
-        let (decoded, consumed) = varint::decode(&buf, 0);
+        let (decoded, consumed) = varint::decode(&buf, 0).unwrap();
         assert_eq!(decoded, 0);
         assert_eq!(consumed, 1);
     }
@@ -475,7 +580,7 @@ mod tests {
             let written = varint::encode(value, &mut buf);
             assert_eq!(written, 1, "value {} should encode to 1 byte", value);
 
-            let (decoded, consumed) = varint::decode(&buf, 0);
+            let (decoded, consumed) = varint::decode(&buf, 0).unwrap();
             assert_eq!(decoded, value);
             assert_eq!(consumed, 1);
         }
@@ -485,7 +590,7 @@ mod tests {
     fn test_varint_encode_decode_medium() {
         for value in [128u64, 255, 256, 1000, 16383, 16384] {
             let encoded = varint::encode_to_vec(value);
-            let (decoded, consumed) = varint::decode(&encoded, 0);
+            let (decoded, consumed) = varint::decode(&encoded, 0).unwrap();
             assert_eq!(decoded, value, "Failed for value {}", value);
             assert_eq!(consumed, encoded.len());
         }
@@ -495,7 +600,7 @@ mod tests {
     fn test_varint_encode_decode_large() {
         for value in [u32::MAX as u64, u64::MAX / 2, u64::MAX] {
             let encoded = varint::encode_to_vec(value);
-            let (decoded, _consumed) = varint::decode(&encoded, 0);
+            let (decoded, _consumed) = varint::decode(&encoded, 0).unwrap();
             assert_eq!(decoded, value, "Failed for value {}", value);
         }
     }
@@ -803,7 +908,7 @@ mod tests {
         let encoded = varint::encode_to_vec(value);
         assert_eq!(encoded, vec![0x80, 0x01]);
 
-        let (decoded, consumed) = varint::decode(&encoded, 0);
+        let (decoded, consumed) = varint::decode(&encoded, 0).unwrap();
         assert_eq!(decoded, value);
         assert_eq!(consumed, 2);
 
@@ -812,9 +917,54 @@ mod tests {
         // High bits: 10 = 2
         let value2 = 300u64;
         let encoded2 = varint::encode_to_vec(value2);
-        let (decoded2, consumed2) = varint::decode(&encoded2, 0);
+        let (decoded2, consumed2) = varint::decode(&encoded2, 0).unwrap();
         assert_eq!(decoded2, value2);
         assert_eq!(consumed2, encoded2.len());
+    }
+
+    #[test]
+    fn varint_decode_rejects_truncated_continuation() {
+        let result = varint::decode(&[0x80], 0);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError {
+                    reason: RleDecodeReason::TruncatedData {
+                        offset: 1,
+                        buffer_len: 1,
+                    },
+                },
+            })
+        ));
+    }
+
+    #[test]
+    fn varint_decode_rejects_overflowing_header() {
+        let result = varint::decode(&[0xFF; 10], 0);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError {
+                    reason: RleDecodeReason::MalformedVarint { offset: 0 },
+                },
+            })
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_truncated_varint_header() {
+        let result = decode([0x80]);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError {
+                    reason: RleDecodeReason::TruncatedData { .. },
+                },
+            })
+        ));
     }
 
     #[test]
@@ -837,8 +987,160 @@ mod tests {
         // Test that decode_len_with_offset returns error for invalid data
         // Create data that claims more bytes than available
         let invalid = vec![100u8]; // Claims 50 bytes (100 >> 1 = 50), but none available
-        let result = decode_len_with_offset(&invalid, 0);
+        let result = decode_len_with_offset(&invalid, 0, DEFAULT_MAX_DECODED_LEN);
         assert!(result.is_err(), "Should error on truncated data");
+    }
+
+    // ======================================
+    // Decompression-bomb / allocation bounds
+    // ======================================
+
+    /// Asserts the given error is the `DecodedLengthExceedsMaximum` RLE reason.
+    #[track_caller]
+    fn assert_decoded_length_exceeds_maximum(result: RleResult<Vec<u8>>) {
+        match result {
+            Err(FortressError::InternalErrorStructured {
+                kind:
+                    InternalErrorKind::RleDecodeError {
+                        reason: RleDecodeReason::DecodedLengthExceedsMaximum { max, .. },
+                    },
+            }) => {
+                assert_eq!(
+                    max, DEFAULT_MAX_DECODED_LEN,
+                    "reported max should be the default limit"
+                );
+            },
+            other => panic!("expected DecodedLengthExceedsMaximum, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_tiny_input_claiming_huge_contiguous_run_returns_error() {
+        // Arrange: a single contiguous-run header that claims a length far
+        // larger than the cap. Format: varint(length << 2 | bit << 1 | 1).
+        // The length is NOT backed by buffer bytes, so this tiny packet would
+        // drive an enormous `vec![0u8; len]` without the cap.
+        let bomb_len = (DEFAULT_MAX_DECODED_LEN as u64) + 1;
+        let header = (bomb_len << 2) | 1; // repeat=1, bit=0 (zero fill)
+        let bomb = varint::encode_to_vec(header);
+
+        // Act
+        let result = decode(&bomb);
+
+        // Assert: rejected with the structured error rather than OOM/abort.
+        assert_decoded_length_exceeds_maximum(result);
+    }
+
+    #[test]
+    fn decode_run_length_with_high_bits_set_is_rejected_not_truncated() {
+        // Regression for 32-bit truncation: choose a run length whose LOW 32
+        // bits are a small, in-cap value (7) but whose full u64 value is far
+        // above the cap (2^32 + 7). On a 32-bit target (`usize == u32`) the old
+        // `(next >> 2) as usize` would truncate this to 7 and slip past the cap;
+        // `checked_run_len` compares the full u64 against the cap first, so it is
+        // rejected on every target. Format: varint(length << 2 | 1) (repeat=1).
+        let length = (1u64 << 32) | 7;
+        assert!(length > DEFAULT_MAX_DECODED_LEN as u64);
+        assert_eq!(length as u32 as u64, 7); // truncates to an in-cap value
+        let header = (length << 2) | 1;
+        let bomb = varint::encode_to_vec(header);
+
+        assert_decoded_length_exceeds_maximum(decode(&bomb));
+    }
+
+    #[test]
+    fn decode_raw_run_length_with_high_bits_set_is_rejected_not_truncated() {
+        // Same truncation defense for the raw (non-repeat) run branch. Format:
+        // varint(length << 1 | 0) (repeat=0).
+        let length = (1u64 << 32) | 7;
+        let header = length << 1;
+        let bomb = varint::encode_to_vec(header);
+
+        assert_decoded_length_exceeds_maximum(decode(&bomb));
+    }
+
+    #[test]
+    fn decode_len_accumulation_overflow_returns_error() {
+        // Arrange: two maximal contiguous-run headers. Each claims a length of
+        // u64::MAX >> 2; summed (and even individually) they exceed the cap, and
+        // the accumulation would overflow usize without checked arithmetic.
+        let huge = (u64::MAX << 2) | 1; // repeat=1, length = u64::MAX >> 2
+        let mut data = varint::encode_to_vec(huge);
+        data.extend(varint::encode_to_vec(huge));
+
+        // Act
+        let result = decode(&data);
+
+        // Assert: errors instead of panicking on overflow.
+        assert_decoded_length_exceeds_maximum(result);
+    }
+
+    #[test]
+    fn checked_buffer_end_rejects_offset_overflow() {
+        let result = checked_buffer_end(usize::MAX, 1, usize::MAX);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError {
+                    reason: RleDecodeReason::TruncatedData { .. },
+                },
+            })
+        ));
+    }
+
+    #[test]
+    fn checked_decoded_end_rejects_pointer_overflow() {
+        let result = checked_decoded_end(usize::MAX, 1, usize::MAX);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::RleDecodeError {
+                    reason: RleDecodeReason::BitfieldIndexOutOfBounds,
+                },
+            })
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // 300K-element loop + roundtrip is too heavy under Miri
+    fn decode_large_but_valid_buffer_roundtrips_under_cap() {
+        // Arrange: a few hundred KB of mixed data well under the default limit.
+        let mut data = Vec::with_capacity(300 * 1024);
+        for i in 0..(300 * 1024) {
+            // Mix runs of zeros/0xFF with arbitrary bytes so both code paths run.
+            data.push(match i % 7 {
+                0 | 1 => 0u8,
+                2 | 3 => 255u8,
+                other => (other * 31 + 1) as u8,
+            });
+        }
+        assert!(data.len() < DEFAULT_MAX_DECODED_LEN);
+
+        // Act
+        let encoded = encode(&data);
+        let decoded = decode(&encoded).unwrap();
+
+        // Assert: roundtrip succeeds and stays within the bound.
+        assert_eq!(data, decoded);
+        assert!(decoded.len() <= DEFAULT_MAX_DECODED_LEN);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // allocates default 64 MiB + scans 64M bytes; too heavy under Miri
+    fn decode_at_exactly_default_max_decoded_len_is_accepted() {
+        // Arrange: a contiguous run claiming exactly the default limit in zeros.
+        // This is the boundary case (<=) and must be accepted, not rejected.
+        let header = ((DEFAULT_MAX_DECODED_LEN as u64) << 2) | 1; // repeat=1, bit=0
+        let encoded = varint::encode_to_vec(header);
+
+        // Act
+        let decoded = decode(&encoded).unwrap();
+
+        // Assert: exactly the cap, all zero-filled.
+        assert_eq!(decoded.len(), DEFAULT_MAX_DECODED_LEN);
+        assert!(decoded.iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -874,10 +1176,10 @@ mod tests {
 
     #[test]
     fn test_encode_decode_with_offset_consistency() {
-        // Test that encode_with_offset and decode_with_offset maintain consistency
+        // Test that try_encode_with_offset and decode_with_offset maintain consistency
         let data = vec![0, 0, 1, 2, 255, 255, 3, 4, 0, 0];
-        let encoded = encode_with_offset(&data, 0);
-        let decoded = decode_with_offset(&encoded, 0).unwrap();
+        let encoded = try_encode_with_offset(&data, 0).unwrap();
+        let decoded = decode_with_offset(&encoded, 0, DEFAULT_MAX_DECODED_LEN).unwrap();
         assert_eq!(data, decoded);
     }
 
@@ -1018,20 +1320,20 @@ mod tests {
         let value = 256u64;
         let encoded = varint::encode_to_vec(value);
 
-        let (decoded, consumed) = varint::decode(&encoded, 0);
+        let (decoded, consumed) = varint::decode(&encoded, 0).unwrap();
         assert_eq!(decoded, value);
         assert_eq!(consumed, encoded.len());
 
         // Another test: 0x3FFF (16383) - max 2-byte value
         let value2 = 16383u64;
         let encoded2 = varint::encode_to_vec(value2);
-        let (decoded2, _) = varint::decode(&encoded2, 0);
+        let (decoded2, _) = varint::decode(&encoded2, 0).unwrap();
         assert_eq!(decoded2, value2);
 
         // Test 0x4000 (16384) - first 3-byte value
         let value3 = 16384u64;
         let encoded3 = varint::encode_to_vec(value3);
-        let (decoded3, _) = varint::decode(&encoded3, 0);
+        let (decoded3, _) = varint::decode(&encoded3, 0).unwrap();
         assert_eq!(decoded3, value3);
     }
 
@@ -1266,7 +1568,7 @@ mod property_tests {
         #[test]
         fn prop_varint_roundtrip(value in any::<u64>()) {
             let encoded = varint::encode_to_vec(value);
-            let (decoded, consumed) = varint::decode(&encoded, 0);
+            let (decoded, consumed) = varint::decode(&encoded, 0).unwrap();
             prop_assert_eq!(
                 value, decoded,
                 "Varint roundtrip failed: {} != {}",
@@ -1417,10 +1719,10 @@ mod kani_proofs {
         kani::assert(buf[0] & 0x80 == 0, "Continuation bit should not be set");
     }
 
-    /// Proof: varint::decode terminates and returns valid consumed count.
+    /// Proof: varint::decode terminates and returns valid consumed count on success.
     ///
-    /// This proves that the decode loop always terminates and returns a valid
-    /// number of consumed bytes.
+    /// This proves that the decode loop always terminates and, for valid inputs,
+    /// returns a valid number of consumed bytes.
     ///
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Decode loop termination and bounds safety
@@ -1434,21 +1736,23 @@ mod kani_proofs {
         let b2: u8 = kani::any();
         let buf = [b0, b1, b2];
 
-        let (value, consumed) = varint::decode(&buf, 0);
+        let result = varint::decode(&buf, 0);
 
-        // Consumed must be in valid range (consumed is usize, always non-negative)
-        kani::assert(
-            consumed <= buf.len(),
-            "consumed must not exceed buffer length",
-        );
-
-        // If first byte has continuation bit clear, should consume exactly 1
-        if b0 & 0x80 == 0 {
-            kani::assert(consumed == 1, "No continuation bit means 1 byte consumed");
+        if let Ok((value, consumed)) = result {
+            // Consumed must be in valid range (consumed is usize, always non-negative)
             kani::assert(
-                value == b0 as u64,
-                "Single byte decode should equal byte value",
+                consumed <= buf.len(),
+                "consumed must not exceed buffer length",
             );
+
+            // If first byte has continuation bit clear, should consume exactly 1
+            if b0 & 0x80 == 0 {
+                kani::assert(consumed == 1, "No continuation bit means 1 byte consumed");
+                kani::assert(
+                    value == b0 as u64,
+                    "Single byte decode should equal byte value",
+                );
+            }
         }
     }
 
@@ -1469,13 +1773,15 @@ mod kani_proofs {
         let offset: usize = kani::any();
         kani::assume(offset <= buf.len());
 
-        let (_value, consumed) = varint::decode(&buf, offset);
+        let result = varint::decode(&buf, offset);
 
-        // Consumed bytes should not exceed remaining buffer
-        kani::assert(
-            consumed <= buf.len() - offset,
-            "Should not consume more than available",
-        );
+        if let Ok((_value, consumed)) = result {
+            // Consumed bytes should not exceed remaining buffer
+            kani::assert(
+                consumed <= buf.len() - offset,
+                "Should not consume more than available",
+            );
+        }
     }
 
     /// Proof: varint roundtrip is correct for small values.
@@ -1492,7 +1798,7 @@ mod kani_proofs {
         kani::assume(value < 16384); // Keep proof tractable
 
         let encoded = varint::encode_to_vec(value);
-        let (decoded, consumed) = varint::decode(&encoded, 0);
+        let (decoded, consumed) = varint::decode(&encoded, 0).unwrap();
 
         kani::assert(decoded == value, "Roundtrip should preserve value");
         kani::assert(
@@ -1521,7 +1827,7 @@ mod kani_proofs {
 
     /// Proof: Empty buffer decode is safe.
     ///
-    /// Decoding from an empty buffer should return (0, 0) without panicking.
+    /// Decoding from an empty buffer should return an error without panicking.
     ///
     /// - Tier: 1 (Fast, <30s)
     /// - Verifies: Empty input handling safety
@@ -1529,10 +1835,9 @@ mod kani_proofs {
     #[kani::proof]
     fn proof_varint_decode_empty_safe() {
         let buf: [u8; 0] = [];
-        let (value, consumed) = varint::decode(&buf, 0);
+        let result = varint::decode(&buf, 0);
 
-        kani::assert(consumed == 0, "Empty buffer should consume 0 bytes");
-        kani::assert(value == 0, "Empty buffer should decode to 0");
+        kani::assert(result.is_err(), "Empty buffer should return an error");
     }
 
     /// Proof: Continuation bit handling is correct.
@@ -1553,7 +1858,7 @@ mod kani_proofs {
         kani::assume(byte2 & 0x80 == 0); // Second doesn't
 
         let buf = [byte1, byte2];
-        let (value, consumed) = varint::decode(&buf, 0);
+        let (value, consumed) = varint::decode(&buf, 0).unwrap();
 
         kani::assert(consumed == 2, "Should consume both bytes");
 

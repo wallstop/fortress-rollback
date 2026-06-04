@@ -510,6 +510,22 @@ MessageBody =
 □(∀q ∈ InputQueue: q.length ≤ 128)
 ```
 
+### SAFE-1b: Network Input Batch Bounds
+
+```
+□(input_wire_len(Config::Input::default()) > 0)
+□(∀input ∈ NetworkInput: input_wire_len(input) = input_wire_len(Config::Input::default()))
+□(∀batch ∈ SentInputBatch:
+    decoded_bytes(batch) ≤ min(
+        pending_output_limit * input_wire_len(Config::Input::default()),
+        DEFAULT_MAX_DECODED_LEN
+    )
+    ∧ decoded_frame_count(batch) ≤ ProtocolConfig::MAX_PENDING_OUTPUT_LIMIT)
+□(∀poll ∈ SocketReceivePoll:
+    raw_receive_attempt_count(poll) ≤ MAX_RECEIVE_MESSAGES_PER_POLL
+    ∧ decoded_message_count(poll) ≤ MAX_RECEIVE_MESSAGES_PER_POLL)
+```
+
 ### SAFE-2: No Invalid Frame Access
 
 ```
@@ -598,7 +614,9 @@ MessageBody =
 | `INPUT_QUEUE_LENGTH`         | 128           | Max inputs per player queue                                     |
 | `NULL_FRAME`                 | -1            | Invalid/uninitialized frame sentinel                            |
 | `NUM_SYNC_PACKETS`           | 5             | Sync roundtrips before Running                                  |
-| `pending_output_limit`       | 128 (default) | Max pending output messages (configurable via `ProtocolConfig`) |
+| `pending_output_limit`       | 128 (default) | Max pending output messages and decoded input frames (bounded by `ProtocolConfig::MAX_PENDING_OUTPUT_LIMIT`) |
+| `DEFAULT_MAX_DECODED_LEN`    | 64 MiB        | Hard cap for RLE decoded bytes before delta frame splitting             |
+| `MAX_RECEIVE_MESSAGES_PER_POLL` | 256        | Built-in socket receive-poll raw attempt and decoded message cap        |
 | `UDP_SHUTDOWN_TIMER`         | 5000ms        | Disconnected → Shutdown delay                                   |
 | `SYNC_RETRY_INTERVAL`        | 200ms         | Sync packet retry interval                                      |
 | `KEEP_ALIVE_INTERVAL`        | 200ms         | Keep-alive interval                                             |

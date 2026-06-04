@@ -242,6 +242,29 @@ pub enum RleDecodeReason {
         /// The buffer length.
         buffer_len: usize,
     },
+    /// A varint length prefix was malformed.
+    MalformedVarint {
+        /// The offset of the malformed varint.
+        offset: usize,
+    },
+    /// The declared decoded length exceeded the configured limit.
+    ///
+    /// The RLE format encodes run lengths as varints that are not backed by
+    /// buffer bytes, so malformed (e.g. malicious) input can claim an enormous
+    /// decoded length. To avoid an unbounded allocation that would abort the
+    /// process, decoding rejects any input whose decoded length would exceed
+    /// the configured maximum.
+    DecodedLengthExceedsMaximum {
+        /// The decoded length the input declared (saturated at `usize::MAX`).
+        decoded_len: usize,
+        /// The maximum decoded length permitted.
+        max: usize,
+    },
+    /// The decoder could not reserve memory for the decoded output.
+    AllocationFailed {
+        /// The number of decoded bytes requested.
+        requested_len: usize,
+    },
     /// An unknown or unexpected error occurred during RLE decoding.
     ///
     /// This variant is used as a fallback when the underlying error cannot be
@@ -267,6 +290,19 @@ impl Display for RleDecodeReason {
                     f,
                     "truncated data: offset {} exceeds buffer length {}",
                     offset, buffer_len
+                )
+            },
+            Self::MalformedVarint { offset } => {
+                write!(f, "malformed varint at offset {}", offset)
+            },
+            Self::DecodedLengthExceedsMaximum { decoded_len, max } => {
+                write!(f, "decoded length {} exceeds maximum {}", decoded_len, max)
+            },
+            Self::AllocationFailed { requested_len } => {
+                write!(
+                    f,
+                    "failed to reserve {} bytes for RLE decoded output",
+                    requested_len
                 )
             },
             Self::Unknown => {
@@ -305,6 +341,20 @@ pub enum DeltaDecodeReason {
         /// The length of the data buffer.
         length: usize,
     },
+    /// The delta-decoded byte stream would produce too many per-frame buffers.
+    DecodedFrameCountExceedsMaximum {
+        /// Number of decoded frame buffers declared by the byte stream.
+        frame_count: usize,
+        /// Maximum allowed number of decoded frame buffers.
+        max: usize,
+    },
+    /// The decoder could not reserve memory for decoded delta output.
+    AllocationFailed {
+        /// Static context for the allocation site.
+        context: &'static str,
+        /// Number of elements requested at the allocation site.
+        requested_elements: usize,
+    },
     /// An unknown or unexpected error occurred during delta decoding.
     ///
     /// This variant exists for forward compatibility and as a fallback
@@ -335,6 +385,23 @@ impl Display for DeltaDecodeReason {
             },
             Self::DataIndexOutOfBounds { index, length } => {
                 write!(f, "data index {} out of bounds (length: {})", index, length)
+            },
+            Self::DecodedFrameCountExceedsMaximum { frame_count, max } => {
+                write!(
+                    f,
+                    "decoded frame count {} exceeds maximum {}",
+                    frame_count, max
+                )
+            },
+            Self::AllocationFailed {
+                context,
+                requested_elements,
+            } => {
+                write!(
+                    f,
+                    "failed to reserve {} elements for {}",
+                    requested_elements, context
+                )
             },
             Self::Unknown => {
                 write!(f, "unknown delta decode error")
@@ -390,6 +457,26 @@ pub enum InternalErrorKind {
         /// The specific reason for the delta decode failure.
         reason: DeltaDecodeReason,
     },
+    /// Delta encode operation failed because the reference frame was empty.
+    DeltaEncodeEmptyReference,
+    /// Delta encode operation failed because an input frame did not match the
+    /// reference frame's serialized byte length.
+    DeltaEncodeInputLengthMismatch {
+        /// Serialized length of the input frame being encoded.
+        input_len: usize,
+        /// Serialized length of the reference frame.
+        reference_len: usize,
+    },
+    /// Input serialization produced a per-player byte width different from
+    /// `Config::Input::default()`.
+    InputEncodeLengthMismatch {
+        /// Player slot whose input width differed.
+        player: usize,
+        /// Serialized length of the input value.
+        input_len: usize,
+        /// Expected serialized length for one player input.
+        expected_len: usize,
+    },
     /// Input queue gap-fill failed while replicating a previous input to fill
     /// the gap created by a mid-session frame-delay increase. This indicates an
     /// internal invariant violation in the input queue.
@@ -443,6 +530,30 @@ impl Display for InternalErrorKind {
             },
             Self::DeltaDecodeError { reason } => {
                 write!(f, "delta decode failed: {}", reason)
+            },
+            Self::DeltaEncodeEmptyReference => {
+                write!(f, "delta encode failed: reference bytes is empty")
+            },
+            Self::DeltaEncodeInputLengthMismatch {
+                input_len,
+                reference_len,
+            } => {
+                write!(
+                    f,
+                    "delta encode failed: input length {} does not match reference length {}",
+                    input_len, reference_len
+                )
+            },
+            Self::InputEncodeLengthMismatch {
+                player,
+                input_len,
+                expected_len,
+            } => {
+                write!(
+                    f,
+                    "input encode failed: player {} input length {} does not match expected length {}",
+                    player, input_len, expected_len
+                )
             },
             Self::InputQueueGapFillFailed { frame } => {
                 write!(
@@ -546,6 +657,13 @@ pub enum InvalidRequestKind {
         max: u64,
         /// The actual value that was provided.
         actual: u64,
+    },
+    /// A requested allocation could not be reserved.
+    AllocationFailed {
+        /// The allocation context.
+        context: &'static str,
+        /// The requested number of elements.
+        requested_elements: u64,
     },
     /// A Duration configuration value is outside the allowed range.
     DurationConfigOutOfRange {
@@ -791,6 +909,16 @@ impl Display for InvalidRequestKind {
                     field, actual, min, max
                 )
             },
+            Self::AllocationFailed {
+                context,
+                requested_elements,
+            } => {
+                write!(
+                    f,
+                    "allocation for '{}' failed while reserving {} elements",
+                    context, requested_elements
+                )
+            },
             Self::DurationConfigOutOfRange {
                 field,
                 min_ms,
@@ -949,6 +1077,17 @@ pub enum SerializationErrorKind {
     EndpointCreationFailed,
     /// Failed to create a protocol endpoint for spectators.
     SpectatorEndpointCreationFailed,
+    /// The configured input type serializes to zero bytes, which the network
+    /// delta codec cannot encode as a frame stream.
+    InputSerializedSizeZero,
+    /// The configured input type's aggregate per-frame byte width exceeds the
+    /// network decompression cap, so even one input frame would be undecodable.
+    InputSerializedFrameTooLarge {
+        /// Aggregate serialized length of one input frame.
+        frame_len: usize,
+        /// Maximum decodable byte length.
+        max: usize,
+    },
     /// Custom error (fallback for API compatibility).
     Custom(&'static str),
 }
@@ -961,6 +1100,19 @@ impl Display for SerializationErrorKind {
             },
             Self::SpectatorEndpointCreationFailed => {
                 write!(f, "failed to create protocol endpoint for spectators")
+            },
+            Self::InputSerializedSizeZero => {
+                write!(
+                    f,
+                    "Config::Input must serialize to at least one byte for network sessions"
+                )
+            },
+            Self::InputSerializedFrameTooLarge { frame_len, max } => {
+                write!(
+                    f,
+                    "serialized input frame length {} exceeds maximum decodable length {}",
+                    frame_len, max
+                )
             },
             Self::Custom(s) => write!(f, "{}", s),
         }
@@ -1051,6 +1203,13 @@ pub enum FortressError {
     NotSynchronized,
     /// The spectator got so far behind the host that catching up is impossible.
     SpectatorTooFarBehind,
+    /// Redundant spectator hosts reported different inputs for the same player and frame.
+    SpectatorDivergence {
+        /// The frame where redundant hosts disagreed.
+        frame: Frame,
+        /// The player whose input differed between hosts.
+        player: PlayerHandle,
+    },
     /// An invalid frame number was provided. Frames must be non-negative and within valid ranges.
     InvalidFrame {
         /// The frame that was invalid.
@@ -1192,6 +1351,13 @@ impl Display for FortressError {
                     "The spectator got so far behind the host that catching up is impossible."
                 )
             },
+            Self::SpectatorDivergence { frame, player } => {
+                write!(
+                    f,
+                    "Spectator hosts diverged for player {} at frame {}.",
+                    player, frame
+                )
+            },
             Self::InvalidFrame { frame, reason } => {
                 write!(f, "Invalid frame {}: {}", frame, reason)
             },
@@ -1290,6 +1456,130 @@ impl From<SerializationErrorKind> for FortressError {
     }
 }
 
+pub(crate) fn allocation_failed(context: &'static str, requested_elements: usize) -> FortressError {
+    FortressError::InvalidRequestStructured {
+        kind: InvalidRequestKind::AllocationFailed {
+            context,
+            requested_elements: u64::try_from(requested_elements).unwrap_or(u64::MAX),
+        },
+    }
+}
+
+/// Creates an empty [`ProofVec<U>`](crate::proof_vec::ProofVec) with capacity
+/// reserved for `count` elements (in production), returning a structured
+/// [`FortressError`] (rather than aborting) when the reservation cannot be
+/// satisfied. The caller fills the returned vector.
+///
+/// This is the single, canonical entry point for bounded, fallible vector
+/// pre-allocation across the crate. Routing every construction site through it
+/// keeps the zero-panic allocation policy in one place and—critically—keeps the
+/// formal proofs tractable.
+///
+/// # Allocation strategy
+///
+/// In production [`ProofVec`](crate::proof_vec::ProofVec) is [`Vec`] and the
+/// capacity is reserved with the fallible [`Vec::try_reserve_exact`], so
+/// out-of-memory is surfaced as a structured [`FortressError`] rather than
+/// aborting the process (zero-panic policy).
+///
+/// Under Kani [`ProofVec`](crate::proof_vec::ProofVec) is the stack-backed
+/// `InlineVec`, which performs no heap allocation. Modeling Rust's
+/// `Vec`/`RawVec`/`Layout` allocator in CBMC is what drove the rollback proofs
+/// to ~20 GB / OOM — the `size_of::<U>() * count` multiply plus the
+/// capacity-overflow, `grow`, and `deallocate` paths, a cost paid per operation
+/// rather than per element. The inline buffer removes that machinery entirely:
+/// `count` is ignored here (the capacity is a compile-time constant and a `push`
+/// past it trips a `kani::assert`). Allocation-failure handling is orthogonal to
+/// the behavioral invariants the proofs check, and CBMC cannot meaningfully
+/// exercise true OOM, so under verification we reason about the success path
+/// only. The bound arithmetic that decides `count` is still verified normally.
+///
+/// Returning a pre-reserved *empty* vector (rather than taking a fill closure)
+/// keeps a single `?` per construction site and avoids dragging the closure's
+/// `Result` machinery into the proof for every element.
+#[inline]
+pub(crate) fn try_with_capacity<U>(
+    count: usize,
+    context: &'static str,
+) -> Result<crate::proof_vec::ProofVec<U>, FortressError> {
+    #[cfg(not(kani))]
+    {
+        let mut vec: Vec<U> = Vec::new();
+        vec.try_reserve_exact(count)
+            .map_err(|_err| allocation_failed(context, count))?;
+        Ok(vec)
+    }
+    #[cfg(kani)]
+    {
+        // The inline buffer is fixed-capacity and heap-free, so neither `count`
+        // nor `context` is needed; a `push` past the capacity trips a
+        // `kani::assert` in `InlineVec::push`.
+        let _ = (count, context);
+        Ok(crate::proof_vec::ProofVec::new())
+    }
+}
+
+/// Best-effort bulk pre-reservation in `vec` from an UNTRUSTED iterator size
+/// hint.
+///
+/// This is the canonical way to pre-reserve a `Vec` from a size produced by
+/// [`Iterator::size_hint`]. Per the standard-library contract, `size_hint` is a
+/// performance hint ONLY: a buggy or adversarial iterator may report an upper
+/// bound that is too low OR too high (or `None`).
+///
+/// # This is a pure optimization — its failure is a no-op
+///
+/// The reservation collapses the common case into a single allocation instead
+/// of repeated doubling reallocations, but it is **best-effort and deliberately
+/// infallible**: an over-large or dishonest hint simply leaves `vec` unreserved.
+/// Callers MUST keep a fallible per-iteration growth path
+/// ([`Vec::try_reserve`]-based) as the load-bearing, panic-free growth guard.
+///
+/// Because a failed reservation here changes nothing, the observable behavior of
+/// the caller is **identical to pure incremental growth for every iterator** —
+/// honest or adversarial. Only the caller's real, incremental allocations can
+/// fail (recoverably); no value of `upper` can make a caller fail where
+/// incremental growth would have succeeded, and none can abort the process.
+///
+/// Accordingly this helper:
+///
+/// - Computes the requested count with **saturating** arithmetic
+///   (`upper.saturating_mul(per_item)`), so an absurd hint cannot overflow.
+/// - Reserves via [`Vec::try_reserve`] (never `reserve`), so a large request
+///   can never abort; on failure it is silently ignored.
+/// - Does nothing when `upper` is `None`; the caller's per-iteration growth path
+///   covers both the absent-hint and under-reporting-hint cases.
+///
+/// # Semantics and intended use
+///
+/// The reservation is `upper * per_item` **additional** capacity (matching
+/// [`Vec::try_reserve`], which reserves for `len + additional`, NOT an absolute
+/// target). This helper is therefore intended to be called BEFORE a loop on an
+/// **empty (or near-empty)** vector, where `additional == total`; calling it on
+/// a partially-filled vector would under-reserve relative to the intended total.
+/// Both current call sites pass a freshly-created `Vec::new()`.
+///
+/// This helper takes `&mut Vec<T>` directly (not a
+/// [`ProofVec`](crate::proof_vec::ProofVec)) because its call sites build a
+/// standard `Vec` and are not exercised on any `cargo kani` proof path, so the
+/// inline-buffer machinery in [`try_with_capacity`] is unnecessary here.
+#[inline]
+pub(crate) fn try_reserve_hint<T>(vec: &mut Vec<T>, upper: Option<usize>, per_item: usize) {
+    let Some(upper) = upper else {
+        return;
+    };
+    // Untrusted `size_hint` upper bound: compute with saturating arithmetic and
+    // reserve fallibly. This is a pure optimization, so a failed reservation
+    // (an over-large or dishonest hint) is intentionally discarded — the
+    // caller's in-loop fallible `try_reserve` is the panic-free growth path, and
+    // discarding here keeps caller behavior identical to incremental growth. (No
+    // `// alloc-bound:` marker: that token is reserved for the lines the
+    // unbounded-alloc hook actually scans; `try_reserve` is a recoverable
+    // allocation that the hook deliberately does not flag.)
+    let requested = upper.saturating_mul(per_item);
+    let _ = vec.try_reserve(requested);
+}
+
 impl From<SocketErrorKind> for FortressError {
     fn from(kind: SocketErrorKind) -> Self {
         Self::SocketErrorStructured { kind }
@@ -1348,6 +1638,18 @@ mod tests {
         let display = format!("{}", err);
         assert!(display.contains("spectator"));
         assert!(display.contains("behind"));
+    }
+
+    #[test]
+    fn test_spectator_divergence_display() {
+        let err = FortressError::SpectatorDivergence {
+            frame: Frame::new(12),
+            player: PlayerHandle::new(1),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("diverged"));
+        assert!(display.contains("12"));
+        assert!(display.contains("PlayerHandle(1)"));
     }
 
     #[test]
@@ -1680,10 +1982,51 @@ mod tests {
     }
 
     #[test]
+    fn test_rle_decode_reason_malformed_varint() {
+        let reason = RleDecodeReason::MalformedVarint { offset: 10 };
+        let display = format!("{}", reason);
+        assert!(display.contains("malformed varint"));
+        assert!(display.contains("10"));
+    }
+
+    #[test]
+    fn test_rle_decode_reason_decoded_length_exceeds_maximum() {
+        let reason = RleDecodeReason::DecodedLengthExceedsMaximum {
+            decoded_len: 100_000,
+            max: 64,
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("decoded length"));
+        assert!(display.contains("exceeds maximum"));
+        assert!(display.contains("100000"));
+        assert!(display.contains("64"));
+    }
+
+    #[test]
+    fn test_rle_decode_reason_allocation_failed() {
+        let reason = RleDecodeReason::AllocationFailed { requested_len: 42 };
+        let display = format!("{}", reason);
+        assert!(display.contains("failed to reserve"));
+        assert!(display.contains("42"));
+    }
+
+    #[test]
     fn test_rle_decode_reason_unknown() {
         let reason = RleDecodeReason::Unknown;
         let display = format!("{}", reason);
         assert!(display.contains("unknown RLE decode error"));
+    }
+
+    #[test]
+    fn test_delta_decode_reason_decoded_frame_count_exceeds_maximum() {
+        let reason = DeltaDecodeReason::DecodedFrameCountExceedsMaximum {
+            frame_count: 4097,
+            max: 4096,
+        };
+        let display = format!("{}", reason);
+        assert!(display.contains("decoded frame count"));
+        assert!(display.contains("4097"));
+        assert!(display.contains("4096"));
     }
 
     #[test]
@@ -1694,6 +2037,40 @@ mod tests {
         let display = format!("{}", kind);
         assert!(display.contains("RLE decode failed"));
         assert!(display.contains("bitfield index out of bounds"));
+    }
+
+    #[test]
+    fn test_internal_error_kind_delta_encode_empty_reference() {
+        let kind = InternalErrorKind::DeltaEncodeEmptyReference;
+        let display = format!("{}", kind);
+        assert!(display.contains("delta encode failed"));
+        assert!(display.contains("reference bytes is empty"));
+    }
+
+    #[test]
+    fn test_internal_error_kind_delta_encode_input_length_mismatch() {
+        let kind = InternalErrorKind::DeltaEncodeInputLengthMismatch {
+            input_len: 7,
+            reference_len: 4,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("delta encode failed"));
+        assert!(display.contains("input length 7"));
+        assert!(display.contains("reference length 4"));
+    }
+
+    #[test]
+    fn test_internal_error_kind_input_encode_length_mismatch() {
+        let kind = InternalErrorKind::InputEncodeLengthMismatch {
+            player: 2,
+            input_len: 12,
+            expected_len: 8,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("input encode failed"));
+        assert!(display.contains("player 2"));
+        assert!(display.contains("input length 12"));
+        assert!(display.contains("expected length 8"));
     }
 
     #[test]
@@ -1999,6 +2376,25 @@ mod tests {
         assert!(display.contains("failed to create"));
         assert!(display.contains("endpoint"));
         assert!(display.contains("spectators"));
+    }
+
+    #[test]
+    fn test_serialization_error_kind_input_serialized_size_zero() {
+        let kind = SerializationErrorKind::InputSerializedSizeZero;
+        let display = format!("{}", kind);
+        assert!(display.contains("Config::Input"));
+        assert!(display.contains("at least one byte"));
+    }
+
+    #[test]
+    fn test_serialization_error_kind_input_serialized_frame_too_large() {
+        let kind = SerializationErrorKind::InputSerializedFrameTooLarge {
+            frame_len: 100,
+            max: 64,
+        };
+        let display = format!("{}", kind);
+        assert!(display.contains("serialized input frame length 100"));
+        assert!(display.contains("maximum decodable length 64"));
     }
 
     #[test]
@@ -2319,5 +2715,65 @@ mod tests {
         let err2 = FortressError::FrameValueTooLarge { value: 999 };
         let err2_clone = err2.clone();
         assert_eq!(err2, err2_clone);
+    }
+
+    // =========================================================================
+    // try_reserve_hint
+    // =========================================================================
+
+    #[test]
+    fn try_reserve_hint_none_upper_is_noop() {
+        // Arrange
+        let mut vec: Vec<u8> = Vec::new();
+
+        // Act
+        try_reserve_hint(&mut vec, None, 4);
+
+        // Assert: no reservation requested, no capacity added.
+        assert_eq!(vec.capacity(), 0);
+    }
+
+    #[test]
+    fn try_reserve_hint_some_upper_reserves_at_least_upper_times_per_item() {
+        // Arrange
+        let mut vec: Vec<u32> = Vec::new();
+
+        // Act
+        try_reserve_hint(&mut vec, Some(10), 3);
+
+        // Assert: capacity covers upper * per_item = 30 elements.
+        assert!(
+            vec.capacity() >= 30,
+            "expected capacity >= 30, got {}",
+            vec.capacity()
+        );
+    }
+
+    #[test]
+    fn try_reserve_hint_per_item_zero_reserves_nothing() {
+        // Arrange
+        let mut vec: Vec<u8> = Vec::new();
+
+        // Act: per_item == 0 means a zero-byte request regardless of upper.
+        try_reserve_hint(&mut vec, Some(usize::MAX), 0);
+
+        // Assert
+        assert_eq!(vec.capacity(), 0);
+    }
+
+    #[test]
+    fn try_reserve_hint_saturating_overflow_is_silent_noop_not_panic() {
+        // Arrange: an adversarial size_hint that would overflow usize on
+        // multiply must saturate (never panic/abort). The resulting impossible
+        // reservation fails, and best-effort discards it silently.
+        let mut vec: Vec<u64> = Vec::new();
+
+        // Act: usize::MAX * 8 saturates to usize::MAX; the fallible reserve fails
+        // and is ignored, leaving the vector untouched.
+        try_reserve_hint(&mut vec, Some(usize::MAX), 8);
+
+        // Assert: no panic, no abort, no capacity gained.
+        assert_eq!(vec.capacity(), 0);
+        assert_eq!(vec.len(), 0);
     }
 }

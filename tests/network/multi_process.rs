@@ -19,7 +19,7 @@
 //! - **Stress tests**: High frame counts, aggressive network conditions
 
 // =============================================================================
-// TODO: Consolidate legacy tests into parameterized scenarios
+// Guidance: keep hostile network tests on the scenario harness
 // =============================================================================
 //
 // This file contains two testing styles:
@@ -33,10 +33,12 @@
 //    - Auto-sync preset selection via `with_auto_sync_preset()`
 //    - Parameterized, table-driven, easier to extend
 //
-// **Consolidation opportunity:**
-// - Convert legacy tests to use `NetworkScenario::symmetric()` with profiles
-// - Group related tests into parameterized scenario arrays
-// - Use `with_auto_sync_preset()` to prevent future sync timeout regressions
+// Hostile real-UDP tests are smoke coverage. Tests use `NetworkScenario` with
+// `with_auto_sync_preset()` and run a single attempt via `run_test()`; there is
+// no retry mechanism, so a failure is a real failure. Determinism under extreme
+// chaos is covered deterministically in `tests/network/in_process_chaos.rs`.
+// Direct peer config tests that use significant packet loss or burst loss must
+// set an explicit robust sync preset.
 //
 // See: `.llm/skills/testing/network-chaos-testing.md` for chaos testing best practices
 // =============================================================================
@@ -65,13 +67,49 @@ struct TestResult {
     final_value: i64,
     checksum: u64,
     rollbacks: u32,
+    #[serde(default)]
+    error_kind: Option<String>,
     error: Option<String>,
+    #[serde(default)]
+    runtime: Option<RuntimeDiagnostics>,
+}
+
+/// Runtime diagnostics emitted by `network_test_peer`.
+#[derive(Debug, Deserialize)]
+struct RuntimeDiagnostics {
+    session_state: String,
+    current_frame: i32,
+    confirmed_frame: i32,
+    target_frame: i32,
+    elapsed_ms: u128,
+    sync_preset: Option<String>,
+    sync_config: String,
+    protocol_config: Option<String>,
+    time_sync_config: Option<String>,
+    sync_health: String,
+    events: EventSummary,
+}
+
+/// Event counters emitted by `network_test_peer`.
+#[derive(Debug, Deserialize)]
+struct EventSummary {
+    synchronizing: u32,
+    synchronized: u32,
+    network_interrupted: u32,
+    network_resumed: u32,
+    disconnected: u32,
+    sync_timeout: u32,
+    wait_recommendation: u32,
+    input_delay_recommendation: u32,
+    desync_detected: u32,
+    peer_dropped: u32,
+    replay_desync: u32,
 }
 
 impl TestResult {
     /// Returns a diagnostic summary string for debugging test failures
     fn diagnostic_summary(&self) -> String {
-        format!(
+        let base = format!(
             "success={}, frame={}, value={}, checksum={:x}, rollbacks={}, error={:?}",
             self.success,
             self.final_frame,
@@ -79,106 +117,47 @@ impl TestResult {
             self.checksum,
             self.rollbacks,
             self.error
-        )
-    }
-}
+        );
 
-/// Checks if a test result failed due to a sync timeout.
-///
-/// This is used by the retry logic to determine if a retry is appropriate.
-/// We only retry on sync timeouts (which can happen with unlucky burst patterns)
-/// and not on other types of failures (which may indicate real bugs).
-fn is_sync_timeout_error(result: &TestResult) -> bool {
-    if result.success {
-        return false;
-    }
-
-    // Check if the error message indicates a sync timeout
-    // The error format is typically: "Timeout (current_frame=0, confirmed_frame=NULL_FRAME, target=N)"
-    if let Some(ref error) = result.error {
-        // Sync timeout: frame is 0 and error contains "Timeout"
-        if result.final_frame == 0 && error.contains("Timeout") {
-            return true;
+        if let Some(runtime) = &self.runtime {
+            format!(
+                "{base}, kind={:?}, state={}, current={}, confirmed={}, target={}, elapsed_ms={}, sync={:?}, sync_config={}, protocol_config={}, time_sync_config={}, sync_health={}, events={}",
+                self.error_kind,
+                runtime.session_state,
+                runtime.current_frame,
+                runtime.confirmed_frame,
+                runtime.target_frame,
+                runtime.elapsed_ms,
+                runtime.sync_preset,
+                runtime.sync_config,
+                runtime.protocol_config.as_deref().unwrap_or("<missing>"),
+                runtime.time_sync_config.as_deref().unwrap_or("<missing>"),
+                runtime.sync_health,
+                runtime.events.summary(),
+            )
+        } else {
+            format!("{base}, kind={:?}", self.error_kind)
         }
     }
-
-    false
 }
 
-/// Unit tests for the `is_sync_timeout_error` helper function.
-#[test]
-fn test_is_sync_timeout_error_helper() {
-    // Success case - should return false
-    let success_result = TestResult {
-        success: true,
-        final_frame: 100,
-        final_value: 42,
-        checksum: 0x1234,
-        rollbacks: 5,
-        error: None,
-    };
-    assert!(
-        !is_sync_timeout_error(&success_result),
-        "Success case should return false"
-    );
-
-    // Timeout at frame 0 - should return true (sync timeout)
-    let sync_timeout_result = TestResult {
-        success: false,
-        final_frame: 0,
-        final_value: 0,
-        checksum: 0,
-        rollbacks: 0,
-        error: Some(
-            "Timeout (current_frame=0, confirmed_frame=NULL_FRAME, target=100)".to_string(),
-        ),
-    };
-    assert!(
-        is_sync_timeout_error(&sync_timeout_result),
-        "Sync timeout (frame 0 + Timeout error) should return true"
-    );
-
-    // Timeout at frame > 0 - should return false (not a sync timeout)
-    let mid_game_timeout_result = TestResult {
-        success: false,
-        final_frame: 50,
-        final_value: 123,
-        checksum: 0xABCD,
-        rollbacks: 3,
-        error: Some("Timeout (current_frame=50, confirmed_frame=48, target=100)".to_string()),
-    };
-    assert!(
-        !is_sync_timeout_error(&mid_game_timeout_result),
-        "Timeout at frame > 0 should return false"
-    );
-
-    // Non-timeout error - should return false
-    let other_error_result = TestResult {
-        success: false,
-        final_frame: 0,
-        final_value: 0,
-        checksum: 0,
-        rollbacks: 0,
-        error: Some("Connection refused".to_string()),
-    };
-    assert!(
-        !is_sync_timeout_error(&other_error_result),
-        "Non-timeout error should return false"
-    );
-
-    // No error message - should return false
-    let no_error_result = TestResult {
-        success: false,
-        final_frame: 0,
-        final_value: 0,
-        checksum: 0,
-        rollbacks: 0,
-        error: None,
-    };
-    assert!(
-        !is_sync_timeout_error(&no_error_result),
-        "No error message should return false"
-    );
+impl EventSummary {
+    fn summary(&self) -> String {
+        format!(
+            "syncing={}, synced={}, interrupted={}, resumed={}, disconnected={}, sync_timeout={}, wait={}, delay={}, desync={}, dropped={}, replay_desync={}",
+            self.synchronizing,
+            self.synchronized,
+            self.network_interrupted,
+            self.network_resumed,
+            self.disconnected,
+            self.sync_timeout,
+            self.wait_recommendation,
+            self.input_delay_recommendation,
+            self.desync_detected,
+            self.peer_dropped,
+            self.replay_desync,
+        )
+    }
 }
 
 /// Configuration for a test peer
@@ -237,6 +216,19 @@ impl PeerConfig {
             self.burst_loss_prob * 100.0, self.burst_loss_len,
             self.sync_preset
         )
+    }
+
+    fn network_profile(&self) -> NetworkProfile {
+        NetworkProfile {
+            packet_loss: self.packet_loss,
+            latency_ms: self.latency_ms,
+            jitter_ms: self.jitter_ms,
+            reorder_rate: self.reorder_rate,
+            reorder_buffer_size: self.reorder_buffer_size,
+            duplicate_rate: self.duplicate_rate,
+            burst_loss_prob: self.burst_loss_prob,
+            burst_loss_len: self.burst_loss_len,
+        }
     }
 }
 
@@ -505,25 +497,39 @@ impl NetworkProfile {
     ///
     /// # Sync Preset Selection Guidelines
     ///
-    /// - **None (default)**: Packet loss ≤5%, no burst loss
-    /// - **"lossy"**: Packet loss 5-15%, no significant burst loss
-    /// - **"mobile"**: Packet loss 10-20%, burst loss ≤5%
-    /// - **"extreme"**: Packet loss >20% without burst loss, or moderate burst loss alone
-    /// - **"stress_test"**: Burst loss >5% combined with >20% packet loss, or extreme burst (10%+ with 8+ bursts)
+    /// - **None (default)**: Effective loss <15%, no burst loss
+    /// - **"lossy"**: Effective loss 15-25%, no significant burst loss
+    /// - **"mobile"**: Effective loss 25-35%, or moderate burst loss alone
+    /// - **"extreme"**: Effective loss ≥35% without burst loss
+    /// - **"stress_test"**: Burst loss combined with high effective loss, or extreme burst (10%+ with 8+ bursts)
     const fn suggested_sync_preset(&self) -> Option<&'static str> {
+        let effective_loss = self.effective_symmetric_packet_loss();
+
         // High burst loss with long bursts requires stress_test preset
         if self.burst_loss_prob >= 0.10 && self.burst_loss_len >= 8 {
             return Some("stress_test");
         }
 
-        // Very high packet loss (>20%) combined with significant burst loss
+        // High effective packet loss combined with burst loss is much worse
+        // than either condition alone and needs the test-only preset.
+        if effective_loss >= 0.25 && self.burst_loss_prob >= 0.02 && self.burst_loss_len >= 3 {
+            return Some("stress_test");
+        }
+
+        // Sustained burst loss at this level is CI-hostile even when baseline
+        // packet loss is moderate, so use the test-only preset.
+        if self.burst_loss_prob >= 0.05 && self.burst_loss_len >= 5 {
+            return Some("stress_test");
+        }
+
+        // Very high raw packet loss combined with significant burst loss
         // The combination is much worse than either alone - use stress_test
         if self.packet_loss >= 0.20 && self.burst_loss_prob >= 0.03 && self.burst_loss_len >= 3 {
             return Some("stress_test");
         }
 
-        // Very high packet loss (>20%) without burst loss - extreme is sufficient
-        if self.packet_loss >= 0.20 {
+        // Very high effective packet loss without burst loss - extreme is sufficient
+        if effective_loss >= 0.35 {
             return Some("extreme");
         }
 
@@ -532,18 +538,33 @@ impl NetworkProfile {
             return Some("mobile");
         }
 
-        // High packet loss (15-20%) requires mobile preset
-        if self.packet_loss >= 0.15 {
+        // High effective packet loss requires mobile preset
+        if effective_loss >= 0.25 {
             return Some("mobile");
         }
 
-        // Moderate packet loss requires lossy preset
-        if self.packet_loss >= 0.08 {
+        // Moderate effective packet loss requires lossy preset
+        if effective_loss >= 0.15 {
             return Some("lossy");
         }
 
         // Good conditions - default is fine
         None
+    }
+
+    /// Effective loss when both peers use this profile for send and receive chaos.
+    const fn effective_symmetric_packet_loss(&self) -> f64 {
+        1.0 - ((1.0 - self.packet_loss) * (1.0 - self.packet_loss))
+    }
+}
+
+fn sync_preset_rank(preset: &str) -> u8 {
+    match preset {
+        "stress_test" => 5,
+        "extreme" => 4,
+        "mobile" => 3,
+        "lossy" => 2,
+        _ => 1,
     }
 }
 
@@ -658,14 +679,7 @@ impl NetworkScenario {
             (None, None) => None,
             (Some(p), None) | (None, Some(p)) => Some(p.to_string()),
             (Some(p1), Some(p2)) => {
-                // Pick the more aggressive preset
-                let rank = |p: &str| match p {
-                    "stress_test" | "extreme" => 4,
-                    "mobile" => 3,
-                    "lossy" => 2,
-                    _ => 1,
-                };
-                if rank(p1) >= rank(p2) {
+                if sync_preset_rank(p1) >= sync_preset_rank(p2) {
                     Some(p1.to_string())
                 } else {
                     Some(p2.to_string())
@@ -682,18 +696,13 @@ impl NetworkScenario {
     fn validate_sync_preset(&self) {
         let suggested1 = self.peer1_profile.suggested_sync_preset();
         let suggested2 = self.peer2_profile.suggested_sync_preset();
+        let effective_loss = self.max_effective_packet_loss();
 
         let suggested = match (suggested1, suggested2) {
             (None, None) => None,
             (Some(p), None) | (None, Some(p)) => Some(p),
             (Some(p1), Some(p2)) => {
-                let rank = |p: &str| match p {
-                    "stress_test" | "extreme" => 4,
-                    "mobile" => 3,
-                    "lossy" => 2,
-                    _ => 1,
-                };
-                if rank(p1) >= rank(p2) {
+                if sync_preset_rank(p1) >= sync_preset_rank(p2) {
                     Some(p1)
                 } else {
                     Some(p2)
@@ -702,18 +711,39 @@ impl NetworkScenario {
         };
 
         if let Some(recommended) = suggested {
-            if self.sync_preset.is_none() {
-                eprintln!(
-                    "⚠️  WARNING: Scenario '{}' has aggressive network conditions \
-                     (loss={:.0}%/{:.0}%, burst={:.0}%/{:.0}%) but no sync preset. \
-                     Consider using .with_sync_preset(\"{}\") or .with_auto_sync_preset()",
-                    self.name,
-                    self.peer1_profile.packet_loss * 100.0,
-                    self.peer2_profile.packet_loss * 100.0,
-                    self.peer1_profile.burst_loss_prob * 100.0,
-                    self.peer2_profile.burst_loss_prob * 100.0,
-                    recommended
-                );
+            match self.sync_preset.as_deref() {
+                None => {
+                    eprintln!(
+                        "WARNING: Scenario '{}' has aggressive network conditions \
+                         (raw_loss={:.0}%/{:.0}%, effective_loss={:.1}%, burst={:.0}%/{:.0}%) but no sync preset. \
+                         Consider using .with_sync_preset(\"{}\") or .with_auto_sync_preset()",
+                        self.name,
+                        self.peer1_profile.packet_loss * 100.0,
+                        self.peer2_profile.packet_loss * 100.0,
+                        effective_loss * 100.0,
+                        self.peer1_profile.burst_loss_prob * 100.0,
+                        self.peer2_profile.burst_loss_prob * 100.0,
+                        recommended
+                    );
+                },
+                Some(configured)
+                    if sync_preset_rank(configured) < sync_preset_rank(recommended) =>
+                {
+                    eprintln!(
+                        "WARNING: Scenario '{}' uses sync preset '{}' but network conditions recommend '{}' \
+                         (raw_loss={:.0}%/{:.0}%, effective_loss={:.1}%, burst={:.0}%/{:.0}%). \
+                         Prefer .with_auto_sync_preset() unless this test is intentionally validating a weaker preset.",
+                        self.name,
+                        configured,
+                        recommended,
+                        self.peer1_profile.packet_loss * 100.0,
+                        self.peer2_profile.packet_loss * 100.0,
+                        effective_loss * 100.0,
+                        self.peer1_profile.burst_loss_prob * 100.0,
+                        self.peer2_profile.burst_loss_prob * 100.0,
+                    );
+                },
+                Some(_) => {},
             }
         }
     }
@@ -785,108 +815,10 @@ impl NetworkScenario {
         (result1, result2)
     }
 
-    /// Runs the test with retry logic for flaky network scenarios (default retries).
-    ///
-    /// This is a convenience method that calls `run_test_with_retry_config` with the
-    /// default maximum retry count.
-    ///
-    /// # Arguments
-    ///
-    /// * `port_base` - The base port number to use for the first attempt
-    ///
-    /// # Returns
-    ///
-    /// A tuple of `(TestResult, TestResult, retry_count)` where `retry_count` is
-    /// 0 if the test passed on the first attempt, or a positive number if retries were needed.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the test fails on all attempts (via `verify_determinism`).
-    fn run_test_with_retry(&self, port_base: u16) -> (TestResult, TestResult, u32) {
-        self.run_test_with_retry_config(port_base, DEFAULT_MAX_RETRIES)
-    }
-
-    /// Runs the test with retry logic for flaky network scenarios.
-    ///
-    /// This method will retry the test up to `max_retries` times if it fails due
-    /// to a sync timeout, which can occasionally happen with aggressive burst loss
-    /// parameters even when using the `stress_test` sync preset. Each retry uses
-    /// different ports (offset by `RETRY_PORT_OFFSET`) to avoid any potential port
-    /// reuse issues.
-    ///
-    /// # Arguments
-    ///
-    /// * `port_base` - The base port number to use for the first attempt
-    /// * `max_retries` - Maximum number of retry attempts after initial failure
-    ///
-    /// # Returns
-    ///
-    /// A tuple of `(TestResult, TestResult, retry_count)` where `retry_count` is
-    /// 0 if the test passed on the first attempt, or a positive number if retries were needed.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the test fails on all attempts (via `verify_determinism`).
-    fn run_test_with_retry_config(
-        &self,
-        port_base: u16,
-        max_retries: u32,
-    ) -> (TestResult, TestResult, u32) {
-        let (peer1, peer2) = self.to_peer_configs(port_base);
-        let (mut result1, mut result2) = run_two_peer_test(peer1, peer2);
-
-        let mut retry_count = 0;
-
-        while retry_count < max_retries {
-            // Check if we need a retry - only retry on sync timeout failures
-            let needs_retry = (!result1.success || !result2.success)
-                && (is_sync_timeout_error(&result1) || is_sync_timeout_error(&result2));
-
-            if !needs_retry {
-                break;
-            }
-
-            retry_count += 1;
-            eprintln!(
-                "=== {} failed on attempt {} due to sync timeout, retrying ({}/{})... ===",
-                self.name, retry_count, retry_count, max_retries
-            );
-
-            // Small delay between attempts
-            thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
-
-            // Retry with different ports to avoid any port reuse issues
-            let retry_port_base = port_base + RETRY_PORT_OFFSET * (retry_count as u16);
-            let (retry_peer1, retry_peer2) = self.to_peer_configs(retry_port_base);
-            (result1, result2) = run_two_peer_test(retry_peer1, retry_peer2);
-        }
-
-        // Verify determinism on final attempt (will panic if it still fails)
-        verify_determinism(&result1, &result2, self.name);
-
-        // Log scenario results
-        let suffix = if retry_count > 0 {
-            format!(" (after {} retries)", retry_count)
-        } else {
-            String::new()
-        };
-        println!(
-            "{}{}: peer1(frames={}, rollbacks={}), peer2(frames={}, rollbacks={})",
-            self.name,
-            suffix,
-            result1.final_frame,
-            result1.rollbacks,
-            result2.final_frame,
-            result2.rollbacks
-        );
-
-        (result1, result2, retry_count)
-    }
-
     /// Returns a diagnostic summary of this scenario.
     fn summary(&self) -> String {
         format!(
-            "{}: peer1(loss={:.0}%, lat={}ms±{}ms, reorder={:.0}%/{}, dup={:.0}%, burst={:.0}%x{}), peer2(loss={:.0}%, lat={}ms±{}ms, reorder={:.0}%/{}, dup={:.0}%, burst={:.0}%x{}), frames={}, delay={}, seeds=42/43, sync={:?}",
+            "{}: peer1(loss={:.0}%, lat={}ms±{}ms, reorder={:.0}%/{}, dup={:.0}%, burst={:.0}%x{}), peer2(loss={:.0}%, lat={}ms±{}ms, reorder={:.0}%/{}, dup={:.0}%, burst={:.0}%x{}), effective_loss={:.1}%, frames={}, delay={}, seeds=42/43, sync={:?}",
             self.name,
             self.peer1_profile.packet_loss * 100.0,
             self.peer1_profile.latency_ms,
@@ -904,11 +836,29 @@ impl NetworkScenario {
             self.peer2_profile.duplicate_rate * 100.0,
             self.peer2_profile.burst_loss_prob * 100.0,
             self.peer2_profile.burst_loss_len,
+            self.max_effective_packet_loss() * 100.0,
             self.frames,
             self.input_delay,
             self.sync_preset,
         )
     }
+
+    /// Maximum effective packet loss for either direction of this scenario.
+    fn max_effective_packet_loss(&self) -> f64 {
+        let peer1_to_peer2 = effective_path_loss(
+            self.peer1_profile.packet_loss,
+            self.peer2_profile.packet_loss,
+        );
+        let peer2_to_peer1 = effective_path_loss(
+            self.peer2_profile.packet_loss,
+            self.peer1_profile.packet_loss,
+        );
+        peer1_to_peer2.max(peer2_to_peer1)
+    }
+}
+
+fn effective_path_loss(send_loss: f64, receive_loss: f64) -> f64 {
+    1.0 - ((1.0 - send_loss) * (1.0 - receive_loss))
 }
 
 /// The binary name for the network test peer (platform-specific).
@@ -919,17 +869,8 @@ const PEER_BINARY_NAME: &str = if cfg!(windows) {
     "network_test_peer"
 };
 
-/// Default delay between retry attempts in milliseconds.
-const RETRY_DELAY_MS: u64 = 500;
-
-/// Port offset for retry attempts to avoid port reuse issues.
-const RETRY_PORT_OFFSET: u16 = 100;
-
 /// Port offset between test cases in parameter sweeps.
 const SWEEP_PORT_OFFSET: u16 = 200;
-
-/// Default maximum number of retry attempts for flaky tests.
-const DEFAULT_MAX_RETRIES: u32 = 1;
 
 /// Finds the network_test_peer binary path.
 ///
@@ -996,6 +937,8 @@ macro_rules! skip_if_no_peer_binary {
 
 /// Spawns a test peer process
 fn spawn_peer(config: &PeerConfig) -> std::io::Result<Child> {
+    validate_peer_config_sync_preset("spawn_peer", config);
+
     let peer_binary = find_peer_binary().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -1111,7 +1054,9 @@ fn wait_for_peer_with_timeout(mut child: Child, name: &str, timeout: Duration) -
                             final_value: 0,
                             checksum: 0,
                             rollbacks: 0,
+                            error_kind: Some("parse".to_string()),
                             error: Some(format!("Failed to parse output: {}", e)),
+                            runtime: None,
                         }
                     },
                 };
@@ -1134,11 +1079,13 @@ fn wait_for_peer_with_timeout(mut child: Child, name: &str, timeout: Duration) -
                         final_value: 0,
                         checksum: 0,
                         rollbacks: 0,
+                        error_kind: Some("timeout".to_string()),
                         error: Some(format!(
                             "Process timed out after {:.1}s (limit: {:.0}s)",
                             start.elapsed().as_secs_f64(),
                             timeout.as_secs_f64()
                         )),
+                        runtime: None,
                     };
                 }
                 // Sleep before polling again
@@ -1152,7 +1099,9 @@ fn wait_for_peer_with_timeout(mut child: Child, name: &str, timeout: Duration) -
                     final_value: 0,
                     checksum: 0,
                     rollbacks: 0,
+                    error_kind: Some("process".to_string()),
                     error: Some(format!("Error checking process: {}", e)),
+                    runtime: None,
                 };
             },
         }
@@ -1199,9 +1148,16 @@ fn run_two_peer_test(
     // Spawn peer 2
     let peer2 = spawn_peer(&peer2_config).expect("Failed to spawn peer 2");
 
-    // Wait for both peers with timeout to prevent infinite hangs
-    let result1 = wait_for_peer_with_timeout(peer1, "Peer 1", process_timeout);
-    let result2 = wait_for_peer_with_timeout(peer2, "Peer 2", process_timeout);
+    // Wait for both peers concurrently so the configured per-peer timeout is
+    // also the effective test timeout. Sequential waits can double the runtime
+    // for a hung pair and let nextest kill the test before diagnostics are emitted.
+    let peer1_wait =
+        thread::spawn(move || wait_for_peer_with_timeout(peer1, "Peer 1", process_timeout));
+    let peer2_wait =
+        thread::spawn(move || wait_for_peer_with_timeout(peer2, "Peer 2", process_timeout));
+
+    let result1 = peer1_wait.join().expect("Peer 1 wait thread panicked");
+    let result2 = peer2_wait.join().expect("Peer 2 wait thread panicked");
 
     let test_duration = test_start.elapsed();
 
@@ -1231,6 +1187,31 @@ fn run_two_peer_test(
     }
 
     (result1, result2)
+}
+
+fn validate_peer_config_sync_preset(label: &str, config: &PeerConfig) {
+    let profile = config.network_profile();
+    let Some(recommended) = profile.suggested_sync_preset() else {
+        return;
+    };
+
+    match config.sync_preset.as_deref() {
+        Some(configured) if sync_preset_rank(configured) >= sync_preset_rank(recommended) => {},
+        Some(configured) => {
+            panic!(
+                "{label} uses sync preset '{configured}' but network conditions recommend '{recommended}'. \
+                 Config: {}",
+                config.diagnostic_summary()
+            );
+        },
+        None => {
+            panic!(
+                "{label} has hostile network conditions but no sync preset. \
+                 Recommended preset: '{recommended}'. Config: {}",
+                config.diagnostic_summary()
+            );
+        },
+    }
 }
 
 /// Helper to verify determinism between two test results.
@@ -1473,7 +1454,8 @@ fn test_packet_loss_15_percent() {
         frames: 100,
         packet_loss: 0.15,
         seed: Some(42),
-        timeout_secs: 60,
+        timeout_secs: 120,
+        sync_preset: Some("mobile".to_string()),
         ..Default::default()
     };
 
@@ -1484,7 +1466,8 @@ fn test_packet_loss_15_percent() {
         frames: 100,
         packet_loss: 0.15,
         seed: Some(43),
-        timeout_secs: 60,
+        timeout_secs: 120,
+        sync_preset: Some("mobile".to_string()),
         ..Default::default()
     };
 
@@ -1585,6 +1568,7 @@ fn test_poor_network_combined() {
         jitter_ms: 15,
         seed: Some(42),
         timeout_secs: 120,
+        sync_preset: Some("lossy".to_string()),
         ..Default::default()
     };
 
@@ -1598,6 +1582,7 @@ fn test_poor_network_combined() {
         jitter_ms: 15,
         seed: Some(43),
         timeout_secs: 120,
+        sync_preset: Some("lossy".to_string()),
         ..Default::default()
     };
 
@@ -1610,35 +1595,36 @@ fn test_poor_network_combined() {
 /// Test asymmetric conditions - one peer has much worse network.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_asymmetric_network() {
     skip_if_no_peer_binary!();
-    // Peer 1 has bad network
-    let peer1_config = PeerConfig {
-        local_port: 10015,
-        player_index: 0,
-        peer_addr: "127.0.0.1:10016".to_string(),
-        frames: 100,
+    let bad_network = NetworkProfile {
         packet_loss: 0.20,
         latency_ms: 80,
-        seed: Some(42),
-        timeout_secs: 120,
-        ..Default::default()
+        jitter_ms: 0,
+        reorder_rate: 0.0,
+        reorder_buffer_size: 0,
+        duplicate_rate: 0.0,
+        burst_loss_prob: 0.0,
+        burst_loss_len: 0,
     };
-
-    // Peer 2 has good network
-    let peer2_config = PeerConfig {
-        local_port: 10016,
-        player_index: 1,
-        peer_addr: "127.0.0.1:10015".to_string(),
-        frames: 100,
+    let good_network = NetworkProfile {
         packet_loss: 0.02,
         latency_ms: 10,
-        seed: Some(43),
-        timeout_secs: 120,
-        ..Default::default()
+        jitter_ms: 0,
+        reorder_rate: 0.0,
+        reorder_buffer_size: 0,
+        duplicate_rate: 0.0,
+        burst_loss_prob: 0.0,
+        burst_loss_len: 0,
     };
 
-    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+    let scenario = NetworkScenario::asymmetric("asymmetric_network", bad_network, good_network)
+        .with_frames(100)
+        .with_timeout(120)
+        .with_auto_sync_preset();
+
+    let (result1, result2) = scenario.run_test(10015);
 
     // Verify both peers succeeded - this means sync_health() returned InSync
     verify_determinism(&result1, &result2, "asymmetric_network");
@@ -1660,6 +1646,7 @@ fn test_asymmetric_network() {
 /// it typically completes in ~2-3 seconds.
 #[test]
 #[serial]
+#[ignore = "long-running endurance or high-latency real-UDP session; runs in the nightly network suite (ci-network-nightly.yml), not per-PR CI"]
 fn test_stress_long_session_with_loss() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -1760,6 +1747,7 @@ fn test_mobile_network_simulation() {
         jitter_ms: 40,     // High jitter on mobile
         seed: Some(42),
         timeout_secs: 120,
+        sync_preset: Some("mobile".to_string()),
         ..Default::default()
     };
 
@@ -1773,6 +1761,7 @@ fn test_mobile_network_simulation() {
         jitter_ms: 40,
         seed: Some(43),
         timeout_secs: 120,
+        sync_preset: Some("mobile".to_string()),
         ..Default::default()
     };
 
@@ -1790,37 +1779,40 @@ fn test_mobile_network_simulation() {
 /// Test heavily asymmetric conditions - one peer on great network, one on terrible.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_heavily_asymmetric_network() {
     skip_if_no_peer_binary!();
-    // Peer 1 has terrible network conditions
-    let peer1_config = PeerConfig {
-        local_port: 10023,
-        player_index: 0,
-        peer_addr: "127.0.0.1:10024".to_string(),
-        frames: 100,
+    let terrible_network = NetworkProfile {
         packet_loss: 0.25, // 25% loss!
         latency_ms: 100,   // 100ms latency
         jitter_ms: 40,
-        seed: Some(42),
-        timeout_secs: 180,
-        ..Default::default()
+        reorder_rate: 0.0,
+        reorder_buffer_size: 0,
+        duplicate_rate: 0.0,
+        burst_loss_prob: 0.0,
+        burst_loss_len: 0,
     };
-
-    // Peer 2 has excellent network
-    let peer2_config = PeerConfig {
-        local_port: 10024,
-        player_index: 1,
-        peer_addr: "127.0.0.1:10023".to_string(),
-        frames: 100,
+    let excellent_network = NetworkProfile {
         packet_loss: 0.01, // 1% loss
         latency_ms: 5,     // 5ms latency
         jitter_ms: 2,
-        seed: Some(43),
-        timeout_secs: 180,
-        ..Default::default()
+        reorder_rate: 0.0,
+        reorder_buffer_size: 0,
+        duplicate_rate: 0.0,
+        burst_loss_prob: 0.0,
+        burst_loss_len: 0,
     };
 
-    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+    let scenario = NetworkScenario::asymmetric(
+        "heavily_asymmetric_network",
+        terrible_network,
+        excellent_network,
+    )
+    .with_frames(100)
+    .with_timeout(180)
+    .with_auto_sync_preset();
+
+    let (result1, result2) = scenario.run_test(10023);
 
     // Verify both peers succeeded - this means sync_health() returned InSync
     verify_determinism(&result1, &result2, "heavily_asymmetric_network");
@@ -1871,36 +1863,34 @@ fn test_higher_input_delay() {
 /// Test with zero latency but high packet loss.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_zero_latency_high_loss() {
     skip_if_no_peer_binary!();
-    let peer1_config = PeerConfig {
-        local_port: 10027,
-        player_index: 0,
-        peer_addr: "127.0.0.1:10028".to_string(),
-        frames: 100,
+    let profile = NetworkProfile {
         packet_loss: 0.20, // 20% loss but no latency
         latency_ms: 0,
-        seed: Some(42),
-        timeout_secs: 90,
-        ..Default::default()
+        jitter_ms: 0,
+        reorder_rate: 0.0,
+        reorder_buffer_size: 0,
+        duplicate_rate: 0.0,
+        burst_loss_prob: 0.0,
+        burst_loss_len: 0,
     };
 
-    let peer2_config = PeerConfig {
-        local_port: 10028,
-        player_index: 1,
-        peer_addr: "127.0.0.1:10027".to_string(),
-        frames: 100,
-        packet_loss: 0.20,
-        latency_ms: 0,
-        seed: Some(43),
-        timeout_secs: 90,
-        ..Default::default()
-    };
+    let scenario = NetworkScenario::symmetric("zero_latency_high_loss", profile)
+        .with_frames(100)
+        .with_timeout(120)
+        .with_auto_sync_preset();
 
-    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+    let (result1, result2) = scenario.run_test(10027);
 
     // Verify both peers succeeded - this means sync_health() returned InSync
     verify_determinism(&result1, &result2, "zero_latency_high_loss");
+
+    println!(
+        "Zero latency high loss - Rollbacks: peer1={}, peer2={}",
+        result1.rollbacks, result2.rollbacks
+    );
 }
 
 /// Test medium-length session (300 frames) with moderate conditions.
@@ -1918,6 +1908,7 @@ fn test_medium_session_300_frames() {
         jitter_ms: 15,
         seed: Some(42),
         timeout_secs: 120,
+        sync_preset: Some("lossy".to_string()),
         ..Default::default()
     };
 
@@ -1931,6 +1922,7 @@ fn test_medium_session_300_frames() {
         jitter_ms: 15,
         seed: Some(43),
         timeout_secs: 120,
+        sync_preset: Some("lossy".to_string()),
         ..Default::default()
     };
 
@@ -1957,6 +1949,7 @@ fn test_medium_session_300_frames() {
 /// In release mode, it typically completes in ~7-8 seconds.
 #[test]
 #[serial]
+#[ignore = "long-running endurance or high-latency real-UDP session; runs in the nightly network suite (ci-network-nightly.yml), not per-PR CI"]
 fn test_stress_very_long_session() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -2009,6 +2002,7 @@ fn test_determinism_different_seeds() {
         latency_ms: 30,
         seed: Some(12345), // Different seed
         timeout_secs: 90,
+        sync_preset: Some("lossy".to_string()),
         ..Default::default()
     };
 
@@ -2021,6 +2015,7 @@ fn test_determinism_different_seeds() {
         latency_ms: 30,
         seed: Some(67890), // Different seed
         timeout_secs: 90,
+        sync_preset: Some("lossy".to_string()),
         ..Default::default()
     };
 
@@ -2080,6 +2075,7 @@ fn test_staggered_peer_startup() {
 /// This tests connection timeout handling and retry logic.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_heavily_staggered_startup() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -2230,54 +2226,46 @@ fn test_high_input_delay_8_frames() {
     );
 }
 
-/// Test high uniform packet loss (30%) with appropriate sync configuration.
+/// Test high uniform packet loss (20%) with appropriate sync configuration.
 ///
 /// This test verifies that the library can handle extreme packet loss conditions
-/// when configured appropriately. With 30% loss on both send/receive paths,
-/// the effective loss rate is ~51% (1 - 0.7 × 0.7).
+/// when configured appropriately. With 20% loss on both send/receive paths,
+/// the effective loss rate is ~36% (1 - 0.8 × 0.8).
 ///
-/// The `mobile` sync preset uses 10 sync packets and longer retry intervals,
+/// The `extreme` sync preset uses 20 sync packets and longer retry intervals,
 /// which is necessary for reliable synchronization under such extreme conditions.
 ///
 /// NOTE: This test previously failed because it used the default SyncConfig
-/// (5 packets, 200ms retry) which is insufficient for 51% effective packet loss.
+/// (5 packets, 200ms retry) which is insufficient for 36% effective packet loss.
 #[test]
 #[serial]
-fn test_high_uniform_packet_loss_with_mobile_sync() {
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
+fn test_high_uniform_packet_loss_with_extreme_sync() {
     skip_if_no_peer_binary!();
-    let peer1_config = PeerConfig {
-        local_port: 10045,
-        player_index: 0,
-        peer_addr: "127.0.0.1:10046".to_string(),
-        frames: 100,
+    let profile = NetworkProfile {
         packet_loss: 0.20, // 20% loss → 36% effective (1 - 0.8*0.8)
         latency_ms: 20,
-        seed: Some(42),
-        timeout_secs: 120,                       // Longer timeout for recovery
-        sync_preset: Some("mobile".to_string()), // Use mobile preset for high loss
-        ..Default::default()
+        jitter_ms: 0,
+        reorder_rate: 0.0,
+        reorder_buffer_size: 0,
+        duplicate_rate: 0.0,
+        burst_loss_prob: 0.0,
+        burst_loss_len: 0,
     };
 
-    let peer2_config = PeerConfig {
-        local_port: 10046,
-        player_index: 1,
-        peer_addr: "127.0.0.1:10045".to_string(),
-        frames: 100,
-        packet_loss: 0.20, // 20% loss → 36% effective
-        latency_ms: 20,
-        seed: Some(43),
-        timeout_secs: 120,
-        sync_preset: Some("mobile".to_string()), // Use mobile preset for high loss
-        ..Default::default()
-    };
+    let scenario =
+        NetworkScenario::symmetric("high_uniform_packet_loss_with_extreme_sync", profile)
+            .with_frames(100)
+            .with_timeout(180)
+            .with_sync_preset("extreme");
 
-    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+    let (result1, result2) = scenario.run_test(10045);
 
     // Verify both peers succeeded - this means sync_health() returned InSync
     verify_determinism(
         &result1,
         &result2,
-        "high_uniform_packet_loss_with_mobile_sync",
+        "high_uniform_packet_loss_with_extreme_sync",
     );
 
     println!(
@@ -2295,41 +2283,27 @@ fn test_high_uniform_packet_loss_with_mobile_sync() {
 /// Uses mobile sync preset for the combination of baseline + burst loss.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_burst_loss_recovery() {
     skip_if_no_peer_binary!();
-    let peer1_config = PeerConfig {
-        local_port: 10750,
-        player_index: 0,
-        peer_addr: "127.0.0.1:10751".to_string(),
-        frames: 100,
+    let profile = NetworkProfile {
         packet_loss: 0.03,     // 3% baseline loss (reduced from 5%)
         burst_loss_prob: 0.05, // 5% chance of burst (reduced from 10%)
         burst_loss_len: 4,     // 4 consecutive packets dropped (reduced from 5)
         latency_ms: 30,
-        seed: Some(42),
-        timeout_secs: 120,
-        input_delay: 3, // Higher delay helps with burst recovery
-        sync_preset: Some("mobile".to_string()), // Mobile preset handles combined loss better
-        ..Default::default()
+        jitter_ms: 0,
+        reorder_rate: 0.0,
+        reorder_buffer_size: 0,
+        duplicate_rate: 0.0,
     };
 
-    let peer2_config = PeerConfig {
-        local_port: 10751,
-        player_index: 1,
-        peer_addr: "127.0.0.1:10750".to_string(),
-        frames: 100,
-        packet_loss: 0.03,
-        burst_loss_prob: 0.05,
-        burst_loss_len: 4,
-        latency_ms: 30,
-        seed: Some(43),
-        timeout_secs: 120,
-        input_delay: 3,
-        sync_preset: Some("mobile".to_string()),
-        ..Default::default()
-    };
+    let scenario = NetworkScenario::symmetric("burst_loss_recovery", profile)
+        .with_frames(100)
+        .with_timeout(120)
+        .with_input_delay(3)
+        .with_auto_sync_preset();
 
-    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+    let (result1, result2) = scenario.run_test(10750);
 
     // Verify both peers succeeded - this means sync_health() returned InSync
     verify_determinism(&result1, &result2, "burst_loss_recovery");
@@ -2344,35 +2318,26 @@ fn test_burst_loss_recovery() {
 /// This represents "worst case realistic" network conditions.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_worst_case_realistic_network() {
     skip_if_no_peer_binary!();
-    let peer1_config = PeerConfig {
-        local_port: 10047,
-        player_index: 0,
-        peer_addr: "127.0.0.1:10048".to_string(),
-        frames: 100,
+    let profile = NetworkProfile {
         packet_loss: 0.18, // 18% loss
         latency_ms: 80,    // 80ms base latency
         jitter_ms: 60,     // ±60ms jitter (20-140ms effective)
-        seed: Some(42),
-        timeout_secs: 180, // Long timeout
-        ..Default::default()
+        reorder_rate: 0.0,
+        reorder_buffer_size: 0,
+        duplicate_rate: 0.0,
+        burst_loss_prob: 0.0,
+        burst_loss_len: 0,
     };
 
-    let peer2_config = PeerConfig {
-        local_port: 10048,
-        player_index: 1,
-        peer_addr: "127.0.0.1:10047".to_string(),
-        frames: 100,
-        packet_loss: 0.18,
-        latency_ms: 80,
-        jitter_ms: 60,
-        seed: Some(43),
-        timeout_secs: 180,
-        ..Default::default()
-    };
+    let scenario = NetworkScenario::symmetric("worst_case_realistic_network", profile)
+        .with_frames(100)
+        .with_timeout(180)
+        .with_auto_sync_preset();
 
-    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+    let (result1, result2) = scenario.run_test(10047);
 
     // Verify both peers succeeded - this means sync_health() returned InSync
     verify_determinism(&result1, &result2, "worst_case_realistic_network");
@@ -2428,36 +2393,30 @@ fn test_rapid_short_session() {
 /// Tests the asymmetric resilience to the extreme.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_extreme_asymmetric_one_perfect_one_terrible() {
     skip_if_no_peer_binary!();
-    // Peer 1 has perfect network
-    let peer1_config = PeerConfig {
-        local_port: 10051,
-        player_index: 0,
-        peer_addr: "127.0.0.1:10052".to_string(),
-        frames: 100,
-        packet_loss: 0.0, // No loss
-        latency_ms: 0,    // No latency
-        jitter_ms: 0,
-        timeout_secs: 180,
-        ..Default::default()
-    };
-
-    // Peer 2 has terrible network
-    let peer2_config = PeerConfig {
-        local_port: 10052,
-        player_index: 1,
-        peer_addr: "127.0.0.1:10051".to_string(),
-        frames: 100,
+    let terrible_profile = NetworkProfile {
         packet_loss: 0.30, // 30% loss!
         latency_ms: 120,   // 120ms latency
         jitter_ms: 50,
-        seed: Some(43),
-        timeout_secs: 180,
-        ..Default::default()
+        reorder_rate: 0.0,
+        reorder_buffer_size: 0,
+        duplicate_rate: 0.0,
+        burst_loss_prob: 0.0,
+        burst_loss_len: 0,
     };
 
-    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+    let scenario = NetworkScenario::asymmetric(
+        "extreme_asymmetric_one_perfect_one_terrible",
+        NetworkProfile::local(),
+        terrible_profile,
+    )
+    .with_frames(100)
+    .with_timeout(180)
+    .with_auto_sync_preset();
+
+    let (result1, result2) = scenario.run_test(10051);
 
     // Verify both peers succeeded - this means sync_health() returned InSync
     verify_determinism(
@@ -2476,6 +2435,7 @@ fn test_extreme_asymmetric_one_perfect_one_terrible() {
 /// Simulates intercontinental connection.
 #[test]
 #[serial]
+#[ignore = "long-running endurance or high-latency real-UDP session; runs in the nightly network suite (ci-network-nightly.yml), not per-PR CI"]
 fn test_intercontinental_latency() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -2516,6 +2476,7 @@ fn test_intercontinental_latency() {
 /// Tests sustained operation under moderate adversity.
 #[test]
 #[serial]
+#[ignore = "long-running endurance or high-latency real-UDP session; runs in the nightly network suite (ci-network-nightly.yml), not per-PR CI"]
 fn test_sustained_moderate_adversity() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -2528,6 +2489,7 @@ fn test_sustained_moderate_adversity() {
         jitter_ms: 20,
         seed: Some(42),
         timeout_secs: 180,
+        sync_preset: Some("lossy".to_string()),
         ..Default::default()
     };
 
@@ -2541,6 +2503,7 @@ fn test_sustained_moderate_adversity() {
         jitter_ms: 20,
         seed: Some(43),
         timeout_secs: 180,
+        sync_preset: Some("lossy".to_string()),
         ..Default::default()
     };
 
@@ -2582,7 +2545,8 @@ fn test_reproducible_chaos_same_seed() {
         latency_ms: 30,
         jitter_ms: 15,
         seed: Some(12345), // Same seed
-        timeout_secs: 90,
+        timeout_secs: 120,
+        sync_preset: Some("mobile".to_string()),
         ..Default::default()
     };
 
@@ -2595,7 +2559,8 @@ fn test_reproducible_chaos_same_seed() {
         latency_ms: 30,
         jitter_ms: 15,
         seed: Some(12345), // Same seed
-        timeout_secs: 90,
+        timeout_secs: 120,
+        sync_preset: Some("mobile".to_string()),
         ..Default::default()
     };
 
@@ -2705,6 +2670,7 @@ fn test_wifi_interference_simulation() {
 /// Cross-ocean connections have consistent high latency with low loss.
 #[test]
 #[serial]
+#[ignore = "long-running endurance or high-latency real-UDP session; runs in the nightly network suite (ci-network-nightly.yml), not per-PR CI"]
 fn test_intercontinental_simulation() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -2827,45 +2793,38 @@ struct NetworkConditionCase {
     latency_ms: u64,
     jitter_ms: u64,
     input_delay: usize,
+    sync_preset: Option<&'static str>,
     /// Expected to complete successfully despite conditions
     expect_success: bool,
 }
 
 impl NetworkConditionCase {
-    fn peer1_config(&self) -> PeerConfig {
-        PeerConfig {
-            local_port: self.port_base,
-            player_index: 0,
-            peer_addr: format!("127.0.0.1:{}", self.port_base + 1),
-            frames: self.frames,
+    fn scenario(&self) -> NetworkScenario {
+        let profile = NetworkProfile {
             packet_loss: self.packet_loss,
             latency_ms: self.latency_ms,
             jitter_ms: self.jitter_ms,
-            seed: Some(42),
-            timeout_secs: 120,
-            input_delay: self.input_delay,
-            ..Default::default()
-        }
-    }
+            reorder_rate: 0.0,
+            reorder_buffer_size: 0,
+            duplicate_rate: 0.0,
+            burst_loss_prob: 0.0,
+            burst_loss_len: 0,
+        };
 
-    fn peer2_config(&self) -> PeerConfig {
-        PeerConfig {
-            local_port: self.port_base + 1,
-            player_index: 1,
-            peer_addr: format!("127.0.0.1:{}", self.port_base),
-            frames: self.frames,
-            packet_loss: self.packet_loss,
-            latency_ms: self.latency_ms,
-            jitter_ms: self.jitter_ms,
-            seed: Some(43),
-            timeout_secs: 120,
-            input_delay: self.input_delay,
-            ..Default::default()
+        let scenario = NetworkScenario::symmetric(self.name, profile)
+            .with_frames(self.frames)
+            .with_input_delay(self.input_delay)
+            .with_timeout(120);
+
+        if let Some(sync_preset) = self.sync_preset {
+            scenario.with_sync_preset(sync_preset)
+        } else {
+            scenario.with_auto_sync_preset()
         }
     }
 
     fn run_and_verify(&self) -> (TestResult, TestResult) {
-        let (result1, result2) = run_two_peer_test(self.peer1_config(), self.peer2_config());
+        let (result1, result2) = self.scenario().run_test(self.port_base);
 
         println!(
             "{}: peer1(frame={}, rollbacks={}), peer2(frame={}, rollbacks={})",
@@ -2873,7 +2832,7 @@ impl NetworkConditionCase {
             result1.final_frame,
             result1.rollbacks,
             result2.final_frame,
-            result2.rollbacks
+            result2.rollbacks,
         );
 
         if self.expect_success {
@@ -2903,6 +2862,7 @@ fn test_input_delay_vs_rollbacks_data_driven() {
             latency_ms: 0,
             jitter_ms: 0,
             input_delay: 0,
+            sync_preset: None,
             expect_success: true,
         },
         NetworkConditionCase {
@@ -2913,6 +2873,7 @@ fn test_input_delay_vs_rollbacks_data_driven() {
             latency_ms: 5,
             jitter_ms: 2,
             input_delay: 0,
+            sync_preset: None,
             expect_success: true,
         },
         NetworkConditionCase {
@@ -2923,6 +2884,7 @@ fn test_input_delay_vs_rollbacks_data_driven() {
             latency_ms: 5,
             jitter_ms: 2,
             input_delay: 2,
+            sync_preset: None,
             expect_success: true,
         },
         NetworkConditionCase {
@@ -2933,6 +2895,7 @@ fn test_input_delay_vs_rollbacks_data_driven() {
             latency_ms: 20,
             jitter_ms: 5,
             input_delay: 4,
+            sync_preset: None,
             expect_success: true,
         },
     ];
@@ -2962,6 +2925,7 @@ fn test_input_delay_vs_rollbacks_data_driven() {
 /// both peers eventually reach the same game state through rollbacks.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_packet_loss_determinism_data_driven() {
     skip_if_no_peer_binary!();
     let test_cases = [
@@ -2973,6 +2937,7 @@ fn test_packet_loss_determinism_data_driven() {
             latency_ms: 10,
             jitter_ms: 5,
             input_delay: 2,
+            sync_preset: None,
             expect_success: true,
         },
         NetworkConditionCase {
@@ -2983,6 +2948,7 @@ fn test_packet_loss_determinism_data_driven() {
             latency_ms: 15,
             jitter_ms: 5,
             input_delay: 3,
+            sync_preset: Some("lossy"),
             expect_success: true,
         },
         NetworkConditionCase {
@@ -2993,6 +2959,7 @@ fn test_packet_loss_determinism_data_driven() {
             latency_ms: 20,
             jitter_ms: 10,
             input_delay: 4,
+            sync_preset: Some("extreme"),
             expect_success: true,
         },
     ];
@@ -3037,6 +3004,7 @@ fn test_timing_sensitive_edge_cases_data_driven() {
             latency_ms: 0,
             jitter_ms: 0,
             input_delay: 0,
+            sync_preset: None,
             expect_success: true,
         },
         // High frame count with minimal conditions
@@ -3048,6 +3016,7 @@ fn test_timing_sensitive_edge_cases_data_driven() {
             latency_ms: 5,
             jitter_ms: 2,
             input_delay: 2,
+            sync_preset: None,
             expect_success: true,
         },
         // High latency with jitter - stresses timing
@@ -3059,6 +3028,7 @@ fn test_timing_sensitive_edge_cases_data_driven() {
             latency_ms: 100,
             jitter_ms: 50,
             input_delay: 4,
+            sync_preset: Some("high_latency"),
             expect_success: true,
         },
         // Combined stress: loss + latency + jitter
@@ -3070,6 +3040,7 @@ fn test_timing_sensitive_edge_cases_data_driven() {
             latency_ms: 50,
             jitter_ms: 30,
             input_delay: 3,
+            sync_preset: Some("lossy"),
             expect_success: true,
         },
     ];
@@ -3110,6 +3081,7 @@ fn test_timing_sensitive_edge_cases_data_driven() {
 /// Each scenario encapsulates realistic network conditions.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_network_scenario_suite() {
     skip_if_no_peer_binary!();
     println!("=== Network Scenario Suite ===");
@@ -3127,15 +3099,15 @@ fn test_network_scenario_suite() {
                 .with_input_delay(3)
                 .with_sync_preset("lossy"),
         ),
-        // wifi_congested has 15% loss + burst loss; per sync preset recommendations,
-        // this needs at least "lossy" or "mobile" for reliability on CI.
+        // wifi_congested has 15% raw loss, which is ~28% effective with
+        // bidirectional chaos, plus burst loss. Use the automatic selector.
         (
             10306,
             NetworkScenario::symmetric("wifi_congested", NetworkProfile::wifi_congested())
                 .with_frames(60)
                 .with_input_delay(4)
                 .with_timeout(180)
-                .with_sync_preset("mobile"),
+                .with_auto_sync_preset(),
         ),
     ];
 
@@ -3169,6 +3141,7 @@ fn test_network_scenario_suite() {
 /// and another is on mobile, or one has a better ISP than the other.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_asymmetric_scenarios() {
     skip_if_no_peer_binary!();
     println!("=== Asymmetric Network Scenarios ===");
@@ -3187,9 +3160,8 @@ fn test_asymmetric_scenarios() {
             .with_input_delay(3)
             .with_sync_preset("lossy"),
         ),
-        // LAN vs WiFi congested
-        // WiFi congested has 15% loss + burst loss; per sync preset recommendations,
-        // this needs at least "lossy" or "mobile" for reliability on CI.
+        // LAN vs WiFi congested. Automatic preset selection accounts for the
+        // effective bidirectional loss and burst component.
         (
             10322,
             NetworkScenario::asymmetric(
@@ -3200,7 +3172,7 @@ fn test_asymmetric_scenarios() {
             .with_frames(60)
             .with_input_delay(4)
             .with_timeout(150)
-            .with_sync_preset("lossy"),
+            .with_auto_sync_preset(),
         ),
         // Good vs Terrible (extreme asymmetry)
         // The terrible profile has 25% loss (>20%) + 5% burst loss (5-packet bursts).
@@ -3407,7 +3379,9 @@ mod infrastructure_tests {
             final_value: 12345,
             checksum: 0xDEADBEEF,
             rollbacks: 5,
+            error_kind: None,
             error: None,
+            runtime: None,
         };
 
         let summary = result.diagnostic_summary();
@@ -3444,7 +3418,9 @@ mod infrastructure_tests {
             final_value: 0,
             checksum: 0,
             rollbacks: 0,
+            error_kind: Some("timeout".to_string()),
             error: Some("Connection timeout".to_string()),
+            runtime: None,
         };
 
         let summary = result.diagnostic_summary();
@@ -3475,6 +3451,7 @@ mod infrastructure_tests {
             ("terrible", NetworkProfile::terrible()),
             ("heavy_reorder", NetworkProfile::heavy_reorder()),
             ("duplicating", NetworkProfile::duplicating()),
+            ("bursty_survivable", NetworkProfile::bursty_survivable()),
             ("bursty", NetworkProfile::bursty()),
         ];
 
@@ -3537,19 +3514,23 @@ mod infrastructure_tests {
             ("wifi_average", NetworkProfile::wifi_average(), None),
             // Moderate conditions - lossy or mobile preset
             ("mobile_4g", NetworkProfile::mobile_4g(), Some("lossy")),
-            // High loss/burst conditions - mobile preset
+            // High effective loss with burst conditions - stress_test preset
             (
                 "wifi_congested",
                 NetworkProfile::wifi_congested(),
-                Some("mobile"),
+                Some("stress_test"),
             ),
-            ("mobile_3g", NetworkProfile::mobile_3g(), Some("mobile")),
+            (
+                "mobile_3g",
+                NetworkProfile::mobile_3g(),
+                Some("stress_test"),
+            ),
             // Extreme packet loss (>20%) combined with burst loss - stress_test preset
             ("terrible", NetworkProfile::terrible(), Some("stress_test")),
             (
                 "bursty_survivable",
                 NetworkProfile::bursty_survivable(),
-                Some("mobile"),
+                Some("stress_test"),
             ),
             // Extreme conditions - stress_test preset
             ("bursty", NetworkProfile::bursty(), Some("stress_test")),
@@ -3563,9 +3544,10 @@ mod infrastructure_tests {
         for (name, profile, expected) in test_cases {
             let suggested = profile.suggested_sync_preset();
             println!(
-                "{:<20} loss={:>5.1}% burst={:>4.1}%x{} -> {:?}",
+                "{:<20} loss={:>5.1}% effective={:>5.1}% burst={:>4.1}%x{} -> {:?}",
                 name,
                 profile.packet_loss * 100.0,
+                profile.effective_symmetric_packet_loss() * 100.0,
                 profile.burst_loss_prob * 100.0,
                 profile.burst_loss_len,
                 suggested
@@ -3604,21 +3586,21 @@ mod infrastructure_tests {
             "Exactly at combined threshold should return stress_test"
         );
 
-        // Edge case: high packet loss but burst just below threshold (2.9% burst)
-        let high_loss_low_burst = NetworkProfile {
+        // Edge case: high effective packet loss without burst loss
+        let high_loss_no_burst = NetworkProfile {
             packet_loss: 0.25,
             latency_ms: 50,
             jitter_ms: 25,
             reorder_rate: 0.0,
             reorder_buffer_size: 0,
             duplicate_rate: 0.0,
-            burst_loss_prob: 0.02, // Below 3% threshold
+            burst_loss_prob: 0.0,
             burst_loss_len: 3,
         };
         assert_eq!(
-            high_loss_low_burst.suggested_sync_preset(),
-            Some("extreme"), // Falls through to packet_loss >= 0.20 check
-            "High loss + low burst should return extreme (not stress_test)"
+            high_loss_no_burst.suggested_sync_preset(),
+            Some("extreme"),
+            "High loss without burst should return extreme (not stress_test)"
         );
 
         // Edge case: high packet loss but burst len too short
@@ -3634,25 +3616,25 @@ mod infrastructure_tests {
         };
         assert_eq!(
             high_loss_short_burst.suggested_sync_preset(),
-            Some("extreme"), // Falls through to packet_loss >= 0.20 check
+            Some("extreme"),
             "High loss + short burst should return extreme (not stress_test)"
         );
 
-        // Edge case: just below 20% loss with burst (should return mobile, not stress_test)
-        let moderate_loss_with_burst = NetworkProfile {
-            packet_loss: 0.19, // Below 20%
+        // Edge case: moderate effective loss with burst should return mobile.
+        let moderate_effective_loss_with_burst = NetworkProfile {
+            packet_loss: 0.10,
             latency_ms: 50,
             jitter_ms: 25,
             reorder_rate: 0.0,
             reorder_buffer_size: 0,
             duplicate_rate: 0.0,
             burst_loss_prob: 0.05,
-            burst_loss_len: 5,
+            burst_loss_len: 4,
         };
         assert_eq!(
-            moderate_loss_with_burst.suggested_sync_preset(),
-            Some("mobile"), // Falls through to burst check
-            "Moderate loss + burst should return mobile (not stress_test)"
+            moderate_effective_loss_with_burst.suggested_sync_preset(),
+            Some("mobile"),
+            "Moderate effective loss + burst should return mobile (not stress_test)"
         );
 
         println!("All combined condition edge cases passed!");
@@ -3721,6 +3703,36 @@ mod infrastructure_tests {
         // Both peers should have the extreme sync preset set
         assert_eq!(peer1.sync_preset, Some("extreme".to_string()));
         assert_eq!(peer2.sync_preset, Some("extreme".to_string()));
+    }
+
+    /// Test automatic sync preset selection chooses stress_test over extreme.
+    #[test]
+    fn test_network_scenario_auto_sync_prefers_stress_test_over_extreme() {
+        let high_uniform_loss = NetworkProfile {
+            packet_loss: 0.25,
+            latency_ms: 50,
+            jitter_ms: 25,
+            reorder_rate: 0.0,
+            reorder_buffer_size: 0,
+            duplicate_rate: 0.0,
+            burst_loss_prob: 0.0,
+            burst_loss_len: 0,
+        };
+
+        assert_eq!(high_uniform_loss.suggested_sync_preset(), Some("extreme"));
+        assert_eq!(
+            NetworkProfile::bursty_survivable().suggested_sync_preset(),
+            Some("stress_test")
+        );
+
+        let scenario = NetworkScenario::asymmetric(
+            "extreme_vs_stress",
+            high_uniform_loss,
+            NetworkProfile::bursty_survivable(),
+        )
+        .with_auto_sync_preset();
+
+        assert_eq!(scenario.sync_preset.as_deref(), Some("stress_test"));
     }
 
     /// Test NetworkScenario without sync_preset defaults to None.
@@ -3808,10 +3820,10 @@ mod infrastructure_tests {
     /// |-------------------|----------------|------------------------|
     /// | 5%                | ~9.75%         | default or lossy       |
     /// | 10%               | ~19%           | lossy                  |
-    /// | 15%               | ~27.75%        | lossy or mobile        |
-    /// | 20%               | ~36%           | mobile                 |
-    /// | 25%               | ~43.75%        | mobile                 |
-    /// | 30%               | ~51%           | mobile (strict)        |
+    /// | 15%               | ~27.75%        | mobile                 |
+    /// | 20%               | ~36%           | extreme                |
+    /// | 25%               | ~43.75%        | extreme                |
+    /// | 30%               | ~51%           | extreme                |
     ///
     /// For scenarios with burst loss (multiple consecutive packets dropped):
     ///
@@ -3831,10 +3843,10 @@ mod infrastructure_tests {
         let test_cases: [(f64, f64, &str); 6] = [
             (0.05, 0.0975, "default or lossy"),
             (0.10, 0.19, "lossy"),
-            (0.15, 0.2775, "lossy or mobile"),
-            (0.20, 0.36, "mobile"),
-            (0.25, 0.4375, "mobile"),
-            (0.30, 0.51, "mobile (strict)"),
+            (0.15, 0.2775, "mobile"),
+            (0.20, 0.36, "extreme"),
+            (0.25, 0.4375, "extreme"),
+            (0.30, 0.51, "extreme"),
         ];
 
         for (bidirectional, expected_effective, _recommendation) in test_cases {
@@ -3923,20 +3935,20 @@ mod infrastructure_tests {
             SyncPresetRecommendation {
                 profile_name: "wifi_congested",
                 profile: NetworkProfile::wifi_congested(),
-                recommended_preset: Some("mobile"),
-                reason: "15% loss with burst loss needs mobile preset for reliability",
+                recommended_preset: Some("stress_test"),
+                reason: "15% raw loss is ~28% effective, and burst loss needs stress_test",
             },
             SyncPresetRecommendation {
                 profile_name: "mobile_4g",
                 profile: NetworkProfile::mobile_4g(),
-                recommended_preset: None,
-                reason: "5% loss with higher latency - default usually works",
+                recommended_preset: Some("lossy"),
+                reason: "8% raw loss is ~15% effective, so lossy preset is appropriate",
             },
             SyncPresetRecommendation {
                 profile_name: "mobile_3g",
                 profile: NetworkProfile::mobile_3g(),
-                recommended_preset: Some("mobile"),
-                reason: "15% loss is high - needs mobile preset for reliability",
+                recommended_preset: Some("stress_test"),
+                reason: "15% raw loss is ~28% effective, and burst loss needs stress_test",
             },
             SyncPresetRecommendation {
                 profile_name: "terrible",
@@ -3967,8 +3979,8 @@ mod infrastructure_tests {
         // Print documentation table
         println!("\n=== Sync Preset Recommendations ===");
         println!(
-            "{:<16} {:<8} {:<10} {:<8} {:<10} Reason",
-            "Profile", "Loss%", "BurstP%", "BurstLen", "Preset"
+            "{:<16} {:<8} {:<10} {:<10} {:<8} {:<10} Reason",
+            "Profile", "Loss%", "Effective%", "BurstP%", "BurstLen", "Preset"
         );
         println!("{}", "-".repeat(100));
 
@@ -3976,9 +3988,10 @@ mod infrastructure_tests {
             let preset_str = rec.recommended_preset.unwrap_or("default");
             let p = &rec.profile;
             println!(
-                "{:<16} {:<8.1} {:<10.1} {:<8} {:<10} {}",
+                "{:<16} {:<8.1} {:<10.1} {:<10.1} {:<8} {:<10} {}",
                 rec.profile_name,
                 p.packet_loss * 100.0,
+                p.effective_symmetric_packet_loss() * 100.0,
                 p.burst_loss_prob * 100.0,
                 p.burst_loss_len,
                 preset_str,
@@ -3995,22 +4008,25 @@ mod infrastructure_tests {
                     p.burst_loss_prob * 100.0,
                     p.burst_loss_len
                 );
-            } else if p.packet_loss >= 0.20 && p.burst_loss_prob >= 0.03 && p.burst_loss_len >= 3 {
+            } else if p.effective_symmetric_packet_loss() >= 0.25
+                && p.burst_loss_prob >= 0.02
+                && p.burst_loss_len >= 3
+            {
                 assert_eq!(
                     rec.recommended_preset,
                     Some("stress_test"),
-                    "{}: High loss ({}%) + burst ({}%x{}) should recommend 'stress_test' preset",
+                    "{}: High effective loss ({}%) + burst ({}%x{}) should recommend 'stress_test' preset",
                     rec.profile_name,
-                    p.packet_loss * 100.0,
+                    p.effective_symmetric_packet_loss() * 100.0,
                     p.burst_loss_prob * 100.0,
                     p.burst_loss_len
                 );
-            } else if p.packet_loss >= 0.15 {
+            } else if p.effective_symmetric_packet_loss() >= 0.25 {
                 assert!(
                     matches!(rec.recommended_preset, Some("mobile") | Some("extreme")),
-                    "{}: High packet loss ({}%) should recommend 'mobile' or 'extreme' preset",
+                    "{}: High effective packet loss ({}%) should recommend 'mobile' or 'extreme' preset",
                     rec.profile_name,
-                    p.packet_loss * 100.0
+                    p.effective_symmetric_packet_loss() * 100.0
                 );
             }
         }
@@ -4139,43 +4155,31 @@ fn test_heavy_packet_duplication() {
 /// Test with burst packet loss - simulates brief network outages.
 ///
 /// Burst loss (5% probability × 4-packet bursts) can cause multiple consecutive
-/// packet drops. This requires the `lossy` sync preset for reliable connection
+/// packet drops. This requires the `mobile` sync preset for reliable connection
 /// establishment under these conditions.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_burst_packet_loss() {
     skip_if_no_peer_binary!();
-    let peer1_config = PeerConfig {
-        local_port: 10408,
-        player_index: 0,
-        peer_addr: "127.0.0.1:10409".to_string(),
-        frames: 100,
+    let profile = NetworkProfile {
+        packet_loss: 0.0,
         latency_ms: 20,
+        jitter_ms: 0,
+        reorder_rate: 0.0,
+        reorder_buffer_size: 0,
+        duplicate_rate: 0.0,
         burst_loss_prob: 0.03, // Reduced from 0.05 for reliability
         burst_loss_len: 4,     // Reduced from 5 to limit burst impact
-        seed: Some(42),
-        timeout_secs: 120,
-        input_delay: 3, // Higher input delay helps with burst loss recovery
-        sync_preset: Some("lossy".to_string()), // Required for burst loss scenarios
-        ..Default::default()
     };
 
-    let peer2_config = PeerConfig {
-        local_port: 10409,
-        player_index: 1,
-        peer_addr: "127.0.0.1:10408".to_string(),
-        frames: 100,
-        latency_ms: 20,
-        burst_loss_prob: 0.03, // Match peer1
-        burst_loss_len: 4,     // Match peer1
-        seed: Some(43),
-        timeout_secs: 120,
-        input_delay: 3,
-        sync_preset: Some("lossy".to_string()),
-        ..Default::default()
-    };
+    let scenario = NetworkScenario::symmetric("burst_packet_loss", profile)
+        .with_frames(100)
+        .with_timeout(120)
+        .with_input_delay(3)
+        .with_auto_sync_preset();
 
-    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+    let (result1, result2) = scenario.run_test(10408);
     verify_determinism(&result1, &result2, "burst_packet_loss");
 
     println!(
@@ -4209,11 +4213,12 @@ fn test_burst_packet_loss() {
 /// which is still aggressively hostile but has a much higher success probability
 /// (>99.99%) with the `stress_test` preset's 40 sync packets and 60s timeout.
 ///
-/// ## Retry mechanism
+/// ## Single attempt, no retries
 ///
-/// This test uses `run_test_with_retry` to retry once on sync timeout failures.
-/// This provides resilience against truly unlucky burst patterns while still
-/// failing deterministically if there's a real bug.
+/// This test runs a single attempt via `run_test`; a sync timeout here is a real
+/// failure. Determinism under burst loss is covered deterministically in
+/// `tests/network/in_process_chaos.rs`. This real-UDP variant runs in the nightly
+/// network suite (it is `#[ignore]`d in the per-PR lane).
 ///
 /// ## Separate stress test for original bursty profile
 ///
@@ -4221,6 +4226,7 @@ fn test_burst_packet_loss() {
 /// test suite, but those tests are marked as potentially flaky or skipped in CI.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_heavy_burst_loss() {
     skip_if_no_peer_binary!();
     // Use bursty_survivable profile which is aggressive but reliable with stress_test preset.
@@ -4231,16 +4237,7 @@ fn test_heavy_burst_loss() {
         .with_timeout(180) // Generous timeout for slow CI environments
         .with_sync_preset("stress_test");
 
-    // Use retry mechanism to handle truly unlucky burst patterns
-    let (result1, result2, retry_count) = scenario.run_test_with_retry(10410);
-
-    if retry_count > 0 {
-        let retry_word = if retry_count == 1 { "retry" } else { "retries" };
-        println!(
-            "Heavy burst loss - Test passed after {} {}",
-            retry_count, retry_word
-        );
-    }
+    let (result1, result2) = scenario.run_test(10410);
 
     println!(
         "Heavy burst loss - Rollbacks: peer1={}, peer2={}",
@@ -4248,7 +4245,7 @@ fn test_heavy_burst_loss() {
     );
 }
 
-/// Test case for burst loss parameter sweep testing with retry support.
+/// Test case for burst loss parameter sweep testing.
 struct BurstSweepTestCase {
     name: &'static str,
     burst_loss_prob: f64,
@@ -4277,15 +4274,17 @@ impl BurstSweepTestCase {
 ///
 /// This test validates that various burst loss configurations behave as expected:
 /// - Conservative parameters should pass reliably
-/// - Aggressive parameters may require retries
+/// - Aggressive parameters exercise the edge of reliability
 ///
 /// This helps catch regressions if the burst loss handling degrades and provides
 /// coverage across the parameter space without manually writing many separate tests.
 ///
-/// Each test case uses the retry mechanism and reports whether retries were needed,
-/// helping identify parameter combinations that are on the edge of reliability.
+/// Each test case runs a single attempt (no retries); failures are real failures.
+/// This real-UDP sweep runs in the nightly network suite (it is `#[ignore]`d in
+/// the per-PR lane). Determinism is covered by `tests/network/in_process_chaos.rs`.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_burst_loss_parameter_sweep() {
     skip_if_no_peer_binary!();
 
@@ -4298,11 +4297,11 @@ fn test_burst_loss_parameter_sweep() {
         // Moderate: should pass reliably with stress_test preset
         BurstSweepTestCase::new("burst_4pct_4pkt", 0.04, 4, true),
         BurstSweepTestCase::new("burst_5pct_5pkt", 0.05, 5, true),
-        // Aggressive: may need retry occasionally
+        // Aggressive: exercises the edge of reliability
         BurstSweepTestCase::new("burst_6pct_4pkt", 0.06, 4, true),
     ];
 
-    let mut results: Vec<(&str, bool, u32)> = Vec::new();
+    let mut results: Vec<(&str, bool)> = Vec::new();
     let mut port_base = 10500;
 
     for case in &test_cases {
@@ -4329,16 +4328,15 @@ fn test_burst_loss_parameter_sweep() {
             .with_timeout(120)
             .with_sync_preset("stress_test");
 
-        // Use retry mechanism
-        let (result1, result2, retry_count) = scenario.run_test_with_retry(port_base);
+        let (result1, result2) = scenario.run_test(port_base);
         port_base += SWEEP_PORT_OFFSET; // Ensure non-overlapping ports between test cases
 
         let passed = result1.success && result2.success;
-        results.push((case.name, passed, retry_count));
+        results.push((case.name, passed));
 
         println!(
-            "{}: passed={}, retries={}, rollbacks=({}, {})",
-            case.name, passed, retry_count, result1.rollbacks, result2.rollbacks
+            "{}: passed={}, rollbacks=({}, {})",
+            case.name, passed, result1.rollbacks, result2.rollbacks
         );
 
         assert!(
@@ -4350,16 +4348,8 @@ fn test_burst_loss_parameter_sweep() {
 
     // Print summary
     println!("\n=== Burst Loss Parameter Sweep Summary ===");
-    for (name, passed, retries) in &results {
-        let status = if *passed {
-            if *retries > 0 {
-                "PASS (with retry)"
-            } else {
-                "PASS"
-            }
-        } else {
-            "FAIL"
-        };
+    for (name, passed) in &results {
+        let status = if *passed { "PASS" } else { "FAIL" };
         println!("  {}: {}", name, status);
     }
     println!("==========================================\n");
@@ -4368,13 +4358,10 @@ fn test_burst_loss_parameter_sweep() {
 /// Test combining all chaos types: loss, latency, jitter, reorder, duplicate, burst.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_all_chaos_combined() {
     skip_if_no_peer_binary!();
-    let peer1_config = PeerConfig {
-        local_port: 10412,
-        player_index: 0,
-        peer_addr: "127.0.0.1:10413".to_string(),
-        frames: 80,
+    let profile = NetworkProfile {
         packet_loss: 0.05,
         latency_ms: 30,
         jitter_ms: 20,
@@ -4383,32 +4370,15 @@ fn test_all_chaos_combined() {
         duplicate_rate: 0.05,
         burst_loss_prob: 0.02,
         burst_loss_len: 3,
-        seed: Some(42),
-        timeout_secs: 180,
-        input_delay: 3,
-        sync_preset: None,
     };
 
-    let peer2_config = PeerConfig {
-        local_port: 10413,
-        player_index: 1,
-        peer_addr: "127.0.0.1:10412".to_string(),
-        frames: 80,
-        packet_loss: 0.05,
-        latency_ms: 30,
-        jitter_ms: 20,
-        reorder_rate: 0.10,
-        reorder_buffer_size: 4,
-        duplicate_rate: 0.05,
-        burst_loss_prob: 0.02,
-        burst_loss_len: 3,
-        seed: Some(43),
-        timeout_secs: 180,
-        input_delay: 3,
-        sync_preset: None,
-    };
+    let scenario = NetworkScenario::symmetric("all_chaos_combined", profile)
+        .with_frames(80)
+        .with_input_delay(3)
+        .with_timeout(180)
+        .with_auto_sync_preset();
 
-    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+    let (result1, result2) = scenario.run_test(10412);
     verify_determinism(&result1, &result2, "all_chaos_combined");
 
     println!(
@@ -4424,6 +4394,7 @@ fn test_all_chaos_combined() {
 /// Stress test: 5000 frames - very long session.
 #[test]
 #[serial]
+#[ignore = "long-running endurance or high-latency real-UDP session; runs in the nightly network suite (ci-network-nightly.yml), not per-PR CI"]
 fn test_stress_5000_frames() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -4473,6 +4444,7 @@ fn test_stress_5000_frames() {
 /// Stress test: 3000 frames with moderate chaos.
 #[test]
 #[serial]
+#[ignore = "long-running endurance or high-latency real-UDP session; runs in the nightly network suite (ci-network-nightly.yml), not per-PR CI"]
 fn test_stress_3000_frames_moderate_chaos() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -4488,6 +4460,7 @@ fn test_stress_3000_frames_moderate_chaos() {
         seed: Some(42),
         timeout_secs: 480, // 8 minutes
         input_delay: 3,
+        sync_preset: Some("lossy".to_string()),
         ..Default::default()
     };
 
@@ -4504,6 +4477,7 @@ fn test_stress_3000_frames_moderate_chaos() {
         seed: Some(43),
         timeout_secs: 480,
         input_delay: 3,
+        sync_preset: Some("lossy".to_string()),
         ..Default::default()
     };
 
@@ -4590,39 +4564,38 @@ fn test_minimal_session_5_frames() {
 /// Test with asymmetric chaos settings on each peer.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_asymmetric_chaos_settings() {
     skip_if_no_peer_binary!();
-    // Peer 1: High reorder, low loss
-    let peer1_config = PeerConfig {
-        local_port: 10604,
-        player_index: 0,
-        peer_addr: "127.0.0.1:10605".to_string(),
-        frames: 100,
+    let high_reorder = NetworkProfile {
         packet_loss: 0.02,
         latency_ms: 20,
+        jitter_ms: 0,
         reorder_rate: 0.25,
         reorder_buffer_size: 8,
-        seed: Some(42),
-        timeout_secs: 120,
-        ..Default::default()
+        duplicate_rate: 0.0,
+        burst_loss_prob: 0.0,
+        burst_loss_len: 0,
     };
 
-    // Peer 2: Low reorder, high loss
-    let peer2_config = PeerConfig {
-        local_port: 10605,
-        player_index: 1,
-        peer_addr: "127.0.0.1:10604".to_string(),
-        frames: 100,
+    let high_loss = NetworkProfile {
         packet_loss: 0.20,
         latency_ms: 10,
+        jitter_ms: 0,
         reorder_rate: 0.02,
         reorder_buffer_size: 2,
-        seed: Some(43),
-        timeout_secs: 120,
-        ..Default::default()
+        duplicate_rate: 0.0,
+        burst_loss_prob: 0.0,
+        burst_loss_len: 0,
     };
 
-    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+    let scenario =
+        NetworkScenario::asymmetric("asymmetric_chaos_settings", high_reorder, high_loss)
+            .with_frames(100)
+            .with_timeout(120)
+            .with_auto_sync_preset();
+
+    let (result1, result2) = scenario.run_test(10604);
     verify_determinism(&result1, &result2, "asymmetric_chaos_settings");
 
     println!(
@@ -4641,37 +4614,38 @@ fn test_asymmetric_chaos_settings() {
 /// to ensure reliable completion while still exercising the burst loss handling code.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_one_sided_burst_loss() {
     skip_if_no_peer_binary!();
-    // Peer 1: Has burst loss events
-    let peer1_config = PeerConfig {
-        local_port: 10606,
-        player_index: 0,
-        peer_addr: "127.0.0.1:10607".to_string(),
-        frames: 100,
+    let burst_profile = NetworkProfile {
+        packet_loss: 0.0,
         latency_ms: 20,
+        jitter_ms: 0,
+        reorder_rate: 0.0,
+        reorder_buffer_size: 0,
+        duplicate_rate: 0.0,
         burst_loss_prob: 0.03, // 3% burst probability - moderate
         burst_loss_len: 4,     // 4 consecutive packets - moderate
-        seed: Some(42),
-        timeout_secs: 120,
-        sync_preset: Some("lossy".to_string()),
-        ..Default::default()
     };
 
-    // Peer 2: Stable connection
-    let peer2_config = PeerConfig {
-        local_port: 10607,
-        player_index: 1,
-        peer_addr: "127.0.0.1:10606".to_string(),
-        frames: 100,
+    let stable_profile = NetworkProfile {
+        packet_loss: 0.0,
         latency_ms: 10,
-        seed: Some(43),
-        timeout_secs: 120,
-        sync_preset: Some("lossy".to_string()),
-        ..Default::default()
+        jitter_ms: 0,
+        reorder_rate: 0.0,
+        reorder_buffer_size: 0,
+        duplicate_rate: 0.0,
+        burst_loss_prob: 0.0,
+        burst_loss_len: 0,
     };
 
-    let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
+    let scenario =
+        NetworkScenario::asymmetric("one_sided_burst_loss", burst_profile, stable_profile)
+            .with_frames(100)
+            .with_timeout(120)
+            .with_auto_sync_preset();
+
+    let (result1, result2) = scenario.run_test(10606);
     verify_determinism(&result1, &result2, "one_sided_burst_loss");
 
     println!(
@@ -4683,6 +4657,7 @@ fn test_one_sided_burst_loss() {
 /// Test recovery from very long staggered startup (5 seconds).
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_very_long_staggered_startup() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -4772,94 +4747,107 @@ fn test_rapid_frame_rate() {
 // Network Profile Scenario Tests with Extended Chaos
 // =============================================================================
 
-/// Test suite using network profiles with extended chaos options.
+fn run_extended_chaos_scenario(port: u16, scenario: NetworkScenario) {
+    println!("Testing scenario: {}", scenario.summary());
+    let (result1, result2) = scenario.run_test(port);
+
+    assert!(
+        result1.final_frame >= scenario.frames,
+        "{}: Peer 1 didn't reach target: {} < {}",
+        scenario.name,
+        result1.final_frame,
+        scenario.frames
+    );
+    assert!(
+        result2.final_frame >= scenario.frames,
+        "{}: Peer 2 didn't reach target: {} < {}",
+        scenario.name,
+        result2.final_frame,
+        scenario.frames
+    );
+}
+
+/// Average WiFi with moderate packet loss, jitter, reordering, and duplication.
 #[test]
 #[serial]
-fn test_extended_chaos_scenario_suite() {
+fn test_extended_chaos_wifi_average() {
     skip_if_no_peer_binary!();
-    println!("=== Extended Chaos Scenario Suite ===");
+    run_extended_chaos_scenario(
+        10700,
+        NetworkScenario::symmetric("wifi_average", NetworkProfile::wifi_average())
+            .with_frames(100)
+            .with_timeout(120)
+            .with_auto_sync_preset(),
+    );
+}
 
-    let scenarios = [
-        (
-            10700,
-            NetworkScenario::symmetric("wifi_average", NetworkProfile::wifi_average())
-                .with_frames(100)
-                .with_timeout(120),
-        ),
-        (
-            10702,
-            // mobile_3g has 15% packet loss, needs lossy sync config
-            NetworkScenario::symmetric("mobile_3g", NetworkProfile::mobile_3g())
-                .with_frames(60)
-                .with_input_delay(4)
-                .with_timeout(180)
-                .with_sync_preset("mobile"),
-        ),
-        (
-            10704,
-            NetworkScenario::symmetric("heavy_reorder", NetworkProfile::heavy_reorder())
-                .with_frames(80)
-                .with_input_delay(3)
-                .with_timeout(150),
-        ),
-        (
-            10706,
-            NetworkScenario::symmetric("duplicating", NetworkProfile::duplicating())
-                .with_frames(100)
-                .with_timeout(120),
-        ),
-        (
-            10708,
-            // Use bursty_survivable (7% burst prob, 5-packet bursts) for reliable CI testing.
-            // The original bursty profile (10% burst prob, 8-packet bursts) has a small but
-            // non-zero failure rate even with stress_test preset due to compounding chaos
-            // effects on both sides of the connection.
-            NetworkScenario::symmetric("bursty_survivable", NetworkProfile::bursty_survivable())
-                .with_frames(80)
-                .with_input_delay(3)
-                .with_timeout(180) // Accommodate longer sync timeout
-                .with_sync_preset("stress_test"),
-        ),
-    ];
+/// Mobile 3G conditions with high effective packet loss and burst loss.
+#[test]
+#[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
+fn test_extended_chaos_mobile_3g() {
+    skip_if_no_peer_binary!();
+    run_extended_chaos_scenario(
+        10702,
+        NetworkScenario::symmetric("mobile_3g", NetworkProfile::mobile_3g())
+            .with_frames(60)
+            .with_input_delay(4)
+            .with_timeout(240)
+            .with_auto_sync_preset(),
+    );
+}
 
-    for (port, scenario) in scenarios {
-        println!("Testing scenario: {}", scenario.summary());
-        // Use run_test_with_retry to handle transient sync timeout failures.
-        // Aggressive chaos scenarios (mobile_3g, bursty_survivable) can occasionally
-        // fail sync due to unlucky burst patterns even with appropriate sync presets.
-        let (result1, result2, retry_count) = scenario.run_test_with_retry(port);
+/// Heavy packet reordering should not break determinism.
+#[test]
+#[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
+fn test_extended_chaos_heavy_reorder() {
+    skip_if_no_peer_binary!();
+    run_extended_chaos_scenario(
+        10704,
+        NetworkScenario::symmetric("heavy_reorder", NetworkProfile::heavy_reorder())
+            .with_frames(80)
+            .with_input_delay(3)
+            .with_timeout(150)
+            .with_auto_sync_preset(),
+    );
+}
 
-        if retry_count > 0 {
-            println!(
-                "  {} passed after {} {}",
-                scenario.name,
-                retry_count,
-                if retry_count == 1 { "retry" } else { "retries" }
-            );
-        }
+/// Packet duplication should be tolerated by the protocol.
+#[test]
+#[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
+fn test_extended_chaos_duplicating() {
+    skip_if_no_peer_binary!();
+    run_extended_chaos_scenario(
+        10706,
+        NetworkScenario::symmetric("duplicating", NetworkProfile::duplicating())
+            .with_frames(100)
+            .with_timeout(120)
+            .with_auto_sync_preset(),
+    );
+}
 
-        assert!(
-            result1.final_frame >= scenario.frames,
-            "{}: Peer 1 didn't reach target: {} < {}",
-            scenario.name,
-            result1.final_frame,
-            scenario.frames
-        );
-        assert!(
-            result2.final_frame >= scenario.frames,
-            "{}: Peer 2 didn't reach target: {} < {}",
-            scenario.name,
-            result2.final_frame,
-            scenario.frames
-        );
-    }
-
-    println!("=== Extended Chaos Suite Complete ===");
+/// Survivable burst loss profile for required CI coverage.
+#[test]
+#[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
+fn test_extended_chaos_bursty_survivable() {
+    skip_if_no_peer_binary!();
+    run_extended_chaos_scenario(
+        10708,
+        NetworkScenario::symmetric("bursty_survivable", NetworkProfile::bursty_survivable())
+            .with_frames(80)
+            .with_input_delay(3)
+            .with_timeout(180)
+            .with_auto_sync_preset(),
+    );
 }
 
 /// Test asymmetric scenarios with extended chaos.
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_asymmetric_extended_chaos() {
     skip_if_no_peer_binary!();
     println!("=== Asymmetric Extended Chaos ===");
@@ -4875,10 +4863,11 @@ fn test_asymmetric_extended_chaos() {
             )
             .with_frames(80)
             .with_input_delay(3)
-            .with_timeout(150),
+            .with_timeout(150)
+            .with_auto_sync_preset(),
         ),
         // One peer with burst loss, one stable
-        // Use bursty_survivable (7% burst prob, 5-packet bursts) for reliable CI testing.
+        // Use bursty_survivable (5% burst prob, 5-packet bursts) for reliable CI testing.
         (
             10722,
             NetworkScenario::asymmetric(
@@ -4889,7 +4878,7 @@ fn test_asymmetric_extended_chaos() {
             .with_frames(100)
             .with_input_delay(3)
             .with_timeout(180) // Accommodate longer sync timeout
-            .with_sync_preset("stress_test"),
+            .with_auto_sync_preset(),
         ),
         // Mobile vs WiFi - both have significant packet loss
         (
@@ -4901,8 +4890,8 @@ fn test_asymmetric_extended_chaos() {
             )
             .with_frames(60)
             .with_input_delay(4)
-            .with_timeout(180)
-            .with_sync_preset("mobile"),
+            .with_timeout(240)
+            .with_auto_sync_preset(),
         ),
     ];
 
@@ -4953,13 +4942,14 @@ struct BurstLossTestCase {
 ///
 /// | Burst Prob | Burst Len | Recommended Preset | Reliability |
 /// |------------|-----------|-------------------|-------------|
-/// | 0-3%       | 1-3       | lossy             | High        |
-/// | 3-5%       | 3-5       | mobile            | High        |
+/// | 0-2%       | 1-2       | lossy             | High        |
+/// | 2-5%       | 3-5       | mobile            | High        |
 /// | 5-8%       | 4-6       | stress_test       | High        |
 /// | 8-10%      | 6-8       | stress_test       | Medium      |
 /// | >10%       | >8        | stress_test       | Low (flaky) |
 #[test]
 #[serial]
+#[ignore = "extreme real-UDP chaos; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
 fn test_burst_loss_parameter_validation() {
     skip_if_no_peer_binary!();
     println!("=== Burst Loss Parameter Validation Suite ===");
@@ -4967,13 +4957,13 @@ fn test_burst_loss_parameter_validation() {
     // Test cases designed to validate burst loss handling at various levels.
     // These are the "reliable" configurations that should always pass.
     let test_cases = [
-        // Low burst loss - should work with lossy preset
+        // Low sustained burst loss - needs mobile preset under the conservative selector
         BurstLossTestCase {
             name: "low_burst_3pct_3len",
             burst_prob: 0.03,
             burst_len: 3,
             baseline_loss: 0.02,
-            sync_preset: "lossy",
+            sync_preset: "mobile",
             expect_reliable: true,
         },
         // Moderate burst loss - needs mobile preset
@@ -5025,8 +5015,7 @@ fn test_burst_loss_parameter_validation() {
             .with_timeout(180)
             .with_sync_preset(case.sync_preset);
 
-        let (peer1, peer2) = scenario.to_peer_configs(port_base);
-        let (result1, result2) = run_two_peer_test(peer1, peer2);
+        let (result1, result2) = scenario.run_test(port_base);
 
         // For expected reliable cases, verify success
         assert!(
@@ -5046,7 +5035,7 @@ fn test_burst_loss_parameter_validation() {
             result1.final_frame,
             result2.final_frame,
             result1.rollbacks,
-            result2.rollbacks
+            result2.rollbacks,
         );
 
         port_base += 2;

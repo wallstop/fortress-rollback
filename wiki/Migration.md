@@ -14,7 +14,7 @@ Fortress Rollback is the correctness-first, verified fork of the original `ggrs`
 - Ensure your `Config::Address` type implements `Ord` + `PartialOrd` (in addition to `Clone + Eq + Hash`).
 - Rename types: `GgrsError` → `FortressError`, `GgrsEvent` → `FortressEvent`, `GgrsRequest` → `FortressRequest`.
 - All examples/tests now import `fortress_rollback`; mirror that pattern in your code.
-- **New in Unreleased:** runtime input-delay adjustment (`set_input_delay`/`input_delay`), opt-in graceful peer drop (`DisconnectBehavior::ContinueWithout`, `with_disconnect_behavior`), and explicit graceful removal (`remove_player`); exhaustive matches on `FortressEvent`, `InvalidRequestKind`, and `InternalErrorKind` need new arms — see [Unreleased section](#unreleased-runtime-input-delay-disconnect-behavior-and-graceful-peer-removal).
+- **New in Unreleased:** runtime input-delay adjustment (`set_input_delay`/`input_delay`), opt-in graceful peer drop (`DisconnectBehavior::ContinueWithout`, `with_disconnect_behavior`), explicit graceful removal (`remove_player`), and fail-closed redundant spectator divergence; exhaustive matches on `FortressEvent`, `FortressError`, `InvalidRequestKind`, and `InternalErrorKind` need new arms — see [Unreleased section](#unreleased-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
 
 ## Dependency Changes
 
@@ -25,7 +25,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.8"  # current version
+fortress-rollback = "0.9"  # current version
 ```
 
 If you were using a git/path dependency, point it to the new repository:
@@ -426,9 +426,9 @@ The trait is available in the prelude: `use fortress_rollback::prelude::*;`
 
 For comprehensive examples including a generic game loop, see the [User Guide — Using the Session Trait](User-Guide#using-the-session-trait).
 
-## Unreleased: Runtime Input Delay, Disconnect Behavior, and Graceful Peer Removal
+## Unreleased: Runtime Input Delay, Disconnect Behavior, Graceful Peer Removal, and Spectator Divergence
 
-The forthcoming release introduces three closely related capabilities for `P2PSession`: runtime input-delay adjustment, configurable disconnect behavior, and explicit graceful peer removal. The features are **additive**: existing applications that build sessions with [`SessionBuilder::with_input_delay`](User-Guide#complete-configuration-reference) — see also [Understanding Input Delay](User-Guide#understanding-input-delay) for the conceptual background — default `DisconnectBehavior::Halt`, and the legacy `disconnect_player` continue to work unchanged. The breaking-change implications are limited to **exhaustive matches** on a small set of public enums.
+The forthcoming release introduces fail-closed redundant spectator divergence plus three `P2PSession` capabilities: runtime input-delay adjustment, configurable disconnect behavior, and explicit graceful peer removal. The `P2PSession` behavior is **additive or compatibility-preserving**: existing applications that set input delay at construction time via [`SessionBuilder::with_input_delay`](User-Guide#complete-configuration-reference) keep working, sessions default to `DisconnectBehavior::Halt`, and the legacy `disconnect_player` continues to work unchanged. The spectator divergence behavior affects only failover spectators connected to redundant hosts that disagree. The breaking-change implications are limited to **exhaustive matches** on the public enums listed below.
 
 ### Backwards compatibility at a glance
 
@@ -438,7 +438,7 @@ The forthcoming release introduces three closely related capabilities for `P2PSe
 
 ### Breaking-change implications for exhaustive matches
 
-`FortressEvent`, `InvalidRequestKind`, and `InternalErrorKind` are **not** `#[non_exhaustive]`. Code that exhaustively matches on these enums must add arms for the new variants:
+`FortressEvent`, `FortressError`, `InvalidRequestKind`, `InternalErrorKind`, and `SerializationErrorKind` are **not** `#[non_exhaustive]`. Code that exhaustively matches on these enums must add arms for the new variants:
 
 #### `FortressEvent` — new variants
 
@@ -485,8 +485,46 @@ match event {
     } => {
         let _ = (player_handle, current_delay, suggested_delay);
     },
+    // NEW: emitted by failover spectators when connected redundant hosts
+    // disagree on the input for the same player/frame. Treat this as a
+    // terminal spectator integrity failure and reconnect or abort spectating.
+    FortressEvent::SpectatorDivergence {
+        frame,
+        player,
+        primary_addr,
+        conflicting_addr,
+    } => {
+        let _ = (frame, player, primary_addr, conflicting_addr);
+    },
 }
 ```
+
+#### `FortressError` — new variant
+
+```rust
+// After
+match err {
+    // ... existing variants ...
+    FortressError::SpectatorDivergence { frame, player } => {
+        eprintln!(
+            "Redundant spectator hosts disagreed for player {player} at frame {frame}"
+        );
+        // Fail closed: do not keep advancing this spectator session.
+    },
+}
+```
+
+Failover spectators created with `start_spectator_session_multi` no longer use
+first-arrival wins for unresolved frames. The canonical source is the
+highest-priority currently connected host by the order supplied to
+`start_spectator_session_multi`; lower-priority host data is provisional while a
+higher-priority host remains connected. If the canonical host disconnects before
+a frame resolves, the next surviving host is promoted for unresolved frames only.
+Connection status is copied from the chosen host's whole-frame snapshot rather
+than merged across hosts. Connected hosts that provide conflicting input for the
+same player/frame emit `FortressEvent::SpectatorDivergence`, record a
+frame-sync violation, and make future `advance_frame` calls return
+`FortressError::SpectatorDivergence`.
 
 #### `InvalidRequestKind` — new variants
 
@@ -515,12 +553,29 @@ match err_kind {
 }
 ```
 
-#### `InternalErrorKind` — new variant
+#### `InternalErrorKind` — new variants
 
 ```rust
 // After
 match internal_kind {
     // ... existing variants ...
+    InternalErrorKind::DeltaEncodeEmptyReference => {
+        eprintln!("internal: tried to delta-encode an empty reference frame");
+    },
+    InternalErrorKind::DeltaEncodeInputLengthMismatch { input_len, reference_len } => {
+        eprintln!(
+            "internal: input frame width {input_len} did not match reference width {reference_len}"
+        );
+    },
+    InternalErrorKind::InputEncodeLengthMismatch {
+        player,
+        input_len,
+        expected_len,
+    } => {
+        eprintln!(
+            "internal: player {player} input encoded to {input_len} bytes, expected {expected_len}"
+        );
+    },
     InternalErrorKind::InputQueueGapFillFailed { frame } => {
         // Library invariant violation while replicating gap-fill bytes during
         // a mid-session input-delay increase. Treat as a bug and report.
@@ -530,6 +585,91 @@ match internal_kind {
 ```
 
 If you currently use `_ =>` wildcard arms, no changes are required — but consider replacing the wildcard with explicit arms so future additions are caught at compile time.
+
+#### `SerializationErrorKind` — new variants
+
+Network sessions now require `Config::Input::default()` to serialize to at
+least one byte. Zero-byte input types cannot be represented by the input delta
+stream because the receiver splits decoded bytes into fixed-width frames. Start
+methods return `SerializationErrorKind::InputSerializedSizeZero` instead of
+constructing an endpoint that can never send or receive input frames.
+They also reject local or remote aggregate input frames larger than
+`fortress_rollback::rle::DEFAULT_MAX_DECODED_LEN`, returning
+`SerializationErrorKind::InputSerializedFrameTooLarge`.
+
+```rust
+// After
+match serialization_kind {
+    // ... existing variants ...
+    SerializationErrorKind::InputSerializedSizeZero => {
+        eprintln!("Config::Input must serialize to at least one byte");
+    },
+    SerializationErrorKind::InputSerializedFrameTooLarge { frame_len, max } => {
+        eprintln!(
+            "Config::Input aggregate frame is {frame_len} bytes, above receive cap {max}"
+        );
+    },
+}
+```
+
+`Config::Input` values used in network sessions should also serialize to the
+same byte length for every player and every value. Prefer structs of fixed-width
+numeric and boolean fields. Avoid variable-length enums, strings, vectors, maps,
+and other payloads whose encoded size can change per frame.
+
+#### `Replay::from_bytes` validation and bounds
+
+`Replay::from_bytes()` now uses a replay-specific checked decoder instead of generic bincode container decoding. It requires `I: Copy`, matching the `Config::Input` contract, validates the decoded replay before returning, and rejects trailing bytes. Use `Replay::from_bytes_with_config(bytes, ReplayDecodeConfig::new().max_bytes(limit))` if your application wants to enforce its own replay file-size policy.
+
+#### `RleDecodeReason` — new variants
+
+`RleDecodeReason` (reported via `FortressError::InternalErrorStructured` / `CompressionError::RleDecode`) gains `MalformedVarint`, `DecodedLengthExceedsMaximum`, and `AllocationFailed` variants. `MalformedVarint` is returned when an encoded run-length prefix cannot be decoded as a valid varint. `DecodedLengthExceedsMaximum` is returned when received-input decompression rejects a malformed packet that declares a decoded length above the configured/default limit, instead of attempting an unbounded allocation. `AllocationFailed` is returned when reserving decoded output fails. Exhaustive matches must add arms:
+
+```rust
+// After
+match reason {
+    // ... existing variants ...
+    RleDecodeReason::MalformedVarint { offset } => {
+        eprintln!("malformed RLE varint at offset {offset}");
+    },
+    RleDecodeReason::DecodedLengthExceedsMaximum { decoded_len, max } => {
+        // A peer sent a decompression bomb: the declared decoded length
+        // exceeds the configured/default limit. The packet was dropped; no allocation
+        // was attempted. Usually indicates corruption or a malicious peer.
+        eprintln!("rejected oversized decode: {decoded_len} > {max}");
+    },
+    RleDecodeReason::AllocationFailed { requested_len } => {
+        eprintln!("could not reserve decoded output: {requested_len}");
+    },
+}
+```
+
+#### `DeltaDecodeReason` — new variants
+
+`DeltaDecodeReason` (reported via `FortressError::InternalErrorStructured` / `CompressionError::DeltaDecode`) gains `DecodedFrameCountExceedsMaximum` and `AllocationFailed` variants. `DecodedFrameCountExceedsMaximum` is returned when delta decoding would split a decoded byte stream into too many per-frame buffers. `AllocationFailed` is returned when reserving decoded delta output fails. Exhaustive matches must add arms:
+
+```rust
+// After
+match reason {
+    // ... existing variants ...
+    DeltaDecodeReason::DecodedFrameCountExceedsMaximum { frame_count, max } => {
+        eprintln!("decoded too many frames: {frame_count} > {max}");
+    },
+    DeltaDecodeReason::AllocationFailed { context, requested_elements } => {
+        eprintln!("could not reserve {requested_elements} elements for {context}");
+    },
+}
+```
+
+If you currently use `_ =>` wildcard arms, no changes are required — but explicit arms catch future additions at compile time.
+
+#### `ProtocolConfig::pending_output_limit` — maximum value
+
+`ProtocolConfig::pending_output_limit` now has a hard maximum:
+`ProtocolConfig::MAX_PENDING_OUTPUT_LIMIT`. Larger values return
+`InvalidRequestKind::ConfigValueOutOfRange` during configuration validation.
+The limit keeps valid send batches aligned with the compression decoder's
+per-frame output cap.
 
 ### Before / After: dynamically adjusting input delay
 

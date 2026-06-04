@@ -17,6 +17,7 @@ mod prediction;
 pub use prediction::{BlankPrediction, PredictionStrategy, RepeatLastConfirmed};
 
 use crate::frame_info::PlayerInput;
+use crate::proof_vec::ProofVec;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
 use crate::{report_violation, safe_frame_add, safe_frame_sub};
 use crate::{
@@ -27,8 +28,19 @@ use std::cmp;
 
 /// The length of the input queue. This describes the number of inputs Fortress Rollback can hold at the same time per player.
 ///
-/// For Kani verification, we use a smaller queue (8 elements) to keep verification tractable.
+/// For Kani verification, we use a smaller queue (7 elements) to keep verification tractable.
 /// This is sufficient to prove the invariants hold for the circular buffer logic.
+///
+/// Why 7 (not 8): this constant also caps the Kani-only
+/// [`InlineVec`](crate::proof_vec) that backs the queue under verification. CBMC
+/// unwinds the `CAP`-element loops that initialize, and (for non-`Copy` elements
+/// such as `SavedStates`' cells) drop, a `[Option<T>; CAP]`; their unwinding
+/// assertion needs an unwind bound of `CAP + 1`. A proof carrying no explicit
+/// `#[kani::unwind]` runs at CI's `--default-unwind 8`, so `CAP <= 7` keeps those
+/// loops tractable. (Proofs whose explicit unwind is lower instead
+/// `core::mem::forget` the layer to skip the drop entirely.) The circular-buffer
+/// invariants are length-independent for any value `>= 2`, so 7 proves exactly
+/// what 8 would.
 ///
 /// # Note
 ///
@@ -38,10 +50,10 @@ use std::cmp;
 /// # Formal Specification Alignment
 /// - **TLA+**: `QUEUE_LENGTH` in `specs/tla/InputQueue.tla` (set to 3 for model checking)
 /// - **Z3**: `INPUT_QUEUE_LENGTH` in `tests/test_z3_verification.rs` (128)
-/// - **Kani**: Uses 8 for tractable verification, production uses 128
+/// - **Kani**: Uses 7 for tractable verification, production uses 128
 /// - **formal-spec.md**: INV-4 (queue length bounds), INV-5 (index validity)
 #[cfg(kani)]
-pub const INPUT_QUEUE_LENGTH: usize = 8;
+pub const INPUT_QUEUE_LENGTH: usize = 7;
 
 /// The length of the input queue. This describes the number of inputs Fortress Rollback can hold at the same time per player.
 /// At 60fps, 128 frames = ~2.1 seconds of input history.
@@ -77,6 +89,24 @@ pub const INPUT_QUEUE_LENGTH: usize = 128;
 /// the configurable `max_frame_delay()` method on `InputQueueConfig` or `InputQueue`.
 #[allow(dead_code)]
 pub const MAX_FRAME_DELAY: usize = INPUT_QUEUE_LENGTH - 1;
+
+fn circular_index_add(index: usize, offset: usize, modulus: usize) -> Option<usize> {
+    if modulus == 0 || index >= modulus {
+        return None;
+    }
+
+    let offset = offset % modulus;
+    let distance_to_wrap = modulus - index;
+    Some(if offset >= distance_to_wrap {
+        offset - distance_to_wrap
+    } else {
+        index + offset
+    })
+}
+
+fn frame_distance_usize(from: Frame, to: Frame) -> Option<usize> {
+    usize::try_from(from.distance_to(to)?).ok()
+}
 
 /// `InputQueue` handles inputs for a single player and saves them in a circular array.
 /// Valid inputs are between `head` and `tail`.
@@ -130,7 +160,7 @@ where
     queue_length: usize,
 
     /// Our cyclic input queue
-    inputs: Vec<PlayerInput<T::Input>>,
+    inputs: ProofVec<PlayerInput<T::Input>>,
     /// A pre-allocated prediction we are going to use to return predictions from.
     prediction: PlayerInput<T::Input>,
 
@@ -170,19 +200,47 @@ impl<T: Config> InputQueue<T> {
     /// * `queue_length` - The size of the circular buffer. Must be at least 2.
     ///
     /// # Returns
-    /// Returns `None` if `queue_length < 2`.
+    /// Returns `None` if `queue_length < 2` or the requested buffer cannot be reserved.
     #[must_use]
     pub fn with_queue_length(player_index: usize, queue_length: usize) -> Option<Self> {
-        if queue_length < 2 {
-            report_violation!(
-                ViolationSeverity::Error,
-                ViolationKind::InputQueue,
-                "Queue length must be at least 2, got {}",
-                queue_length
-            );
-            return None;
+        match Self::try_with_queue_length(player_index, queue_length) {
+            Ok(queue) => Some(queue),
+            Err(error) => {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InputQueue,
+                    "Failed to create input queue for player {}: {}",
+                    player_index,
+                    error
+                );
+                None
+            },
         }
-        Some(Self {
+    }
+
+    pub(crate) fn try_with_queue_length(
+        player_index: usize,
+        queue_length: usize,
+    ) -> Result<Self, FortressError> {
+        // Return the structured error WITHOUT logging: this fallible constructor
+        // is wrapped by the infallible `with_queue_length`, which reports the
+        // violation. Logging here too would emit duplicate telemetry for the
+        // same invalid input. (Matches `SavedStates::try_new`,
+        // `TimeSync::try_with_config`, and `SyncLayer::try_with_queue_length`,
+        // which all stay silent and let their wrapper report.)
+        if queue_length < 2 {
+            return Err(InvalidRequestKind::QueueLengthTooSmall {
+                length: queue_length,
+            }
+            .into());
+        }
+
+        let mut inputs = crate::error::try_with_capacity(queue_length, "input_queue.inputs")?;
+        for _ in 0..queue_length {
+            inputs.push(PlayerInput::blank_input(Frame::NULL));
+        }
+
+        Ok(Self {
             head: 0,
             tail: 0,
             length: 0,
@@ -192,7 +250,7 @@ impl<T: Config> InputQueue<T> {
             first_incorrect_frame: Frame::NULL,
             last_requested_frame: Frame::NULL,
             prediction: PlayerInput::blank_input(Frame::NULL),
-            inputs: vec![PlayerInput::blank_input(Frame::NULL); queue_length],
+            inputs,
             player_index,
             queue_length,
             last_confirmed_input: None,
@@ -464,9 +522,40 @@ impl<T: Config> InputQueue<T> {
                 // Discard frames from tail up to (but not including) 'frame'
                 // After this, 'frame' becomes the new tail
                 let tail_frame = tail_input.frame;
-                let offset = (frame - tail_frame) as usize;
-                self.tail = (self.tail + offset) % self.queue_length;
-                self.length -= offset;
+                let Some(offset) = frame_distance_usize(tail_frame, frame) else {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::InputQueue,
+                        "Discard frame distance from {} to {} overflowed",
+                        tail_frame,
+                        frame
+                    );
+                    return;
+                };
+                let Some(new_length) = self.length.checked_sub(offset) else {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::InputQueue,
+                        "Discard offset {} exceeds queue length {}",
+                        offset,
+                        self.length
+                    );
+                    return;
+                };
+                let Some(new_tail) = circular_index_add(self.tail, offset, self.queue_length)
+                else {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::InputQueue,
+                        "Failed to advance tail {} by {} within queue length {}",
+                        self.tail,
+                        offset,
+                        self.queue_length
+                    );
+                    return;
+                };
+                self.tail = new_tail;
+                self.length = new_length;
             }
         }
     }
@@ -522,10 +611,30 @@ impl<T: Config> InputQueue<T> {
         // We currently don't have a prediction frame
         if self.prediction.frame.as_i32() < 0 {
             //  If the frame requested is in our range, fetch it out of the queue and return it.
-            let mut offset: usize = (requested_frame - tail_input.frame) as usize;
+            let Some(mut offset) = frame_distance_usize(tail_input.frame, requested_frame) else {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InputQueue,
+                    "Requested frame distance from {} to {} overflowed",
+                    tail_input.frame,
+                    requested_frame
+                );
+                return None;
+            };
 
             if offset < self.length {
-                offset = (offset + self.tail) % self.queue_length;
+                let Some(index) = circular_index_add(self.tail, offset, self.queue_length) else {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::InputQueue,
+                        "Failed to map requested-frame offset {} from tail {} within queue length {}",
+                        offset,
+                        self.tail,
+                        self.queue_length
+                    );
+                    return None;
+                };
+                offset = index;
                 // Verify circular buffer indexing correctness
                 let input_at_offset = self.inputs.get(offset)?;
                 if input_at_offset.frame != requested_frame {
@@ -692,8 +801,28 @@ impl<T: Config> InputQueue<T> {
             );
             return false;
         }
-        self.head = (self.head + 1) % self.queue_length;
-        self.length += 1;
+        let Some(next_head) = circular_index_add(self.head, 1, self.queue_length) else {
+            report_violation!(
+                ViolationSeverity::Critical,
+                ViolationKind::InputQueue,
+                "Failed to advance head {} within queue length {}",
+                self.head,
+                self.queue_length
+            );
+            return false;
+        };
+        let Some(next_length) = self.length.checked_add(1) else {
+            report_violation!(
+                ViolationSeverity::Critical,
+                ViolationKind::InputQueue,
+                "Queue length overflow while adding input (length={}, capacity={})",
+                self.length,
+                self.queue_length
+            );
+            return false;
+        };
+        self.head = next_head;
+        self.length = next_length;
 
         // Verify queue doesn't overflow
         if self.length > self.queue_length {
@@ -1057,6 +1186,48 @@ mod input_queue_tests {
         assert_eq!(queue.prediction, before.prediction);
         assert_eq!(queue.last_confirmed_input, before.last_confirmed_input);
         assert_eq!(queue.frozen, before.frozen);
+    }
+
+    #[test]
+    fn circular_index_add_advances_without_wrap() {
+        assert_eq!(circular_index_add(2, 3, 8), Some(5));
+    }
+
+    #[test]
+    fn circular_index_add_wraps_without_overflow() {
+        assert_eq!(circular_index_add(6, 5, 8), Some(3));
+    }
+
+    #[test]
+    fn circular_index_add_handles_huge_offset() {
+        assert_eq!(
+            circular_index_add(usize::MAX - 2, usize::MAX - 1, usize::MAX),
+            Some(usize::MAX - 3)
+        );
+    }
+
+    #[test]
+    fn circular_index_add_rejects_invalid_modulus_or_index() {
+        assert_eq!(circular_index_add(0, 1, 0), None);
+        assert_eq!(circular_index_add(8, 1, 8), None);
+    }
+
+    #[test]
+    fn frame_distance_usize_rejects_overflow_or_negative_distance() {
+        assert_eq!(
+            frame_distance_usize(Frame::NULL, Frame::new(i32::MAX)),
+            None
+        );
+        assert_eq!(frame_distance_usize(Frame::new(10), Frame::new(5)), None);
+    }
+
+    #[test]
+    fn input_rejects_overflowing_request_distance_without_panic() {
+        let mut queue = test_queue(0);
+
+        let result = queue.input(Frame::new(i32::MAX));
+
+        assert!(result.is_none());
     }
 
     #[test]
@@ -1981,6 +2152,35 @@ mod input_queue_tests {
     }
 
     #[test]
+    fn try_with_queue_length_below_minimum_returns_structured_error() {
+        // The fallible constructor returns the structured error directly (and
+        // does NOT log a violation itself — only its infallible wrapper does, so
+        // an invalid queue length produces a single violation, not duplicates).
+        let err = InputQueue::<TestConfig>::try_with_queue_length(0, 1).unwrap_err();
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::QueueLengthTooSmall { length: 1 }
+            }
+        ));
+    }
+
+    #[test]
+    fn try_with_queue_length_reports_allocation_failure_for_impossible_length() {
+        let err = InputQueue::<TestConfig>::try_with_queue_length(0, usize::MAX).unwrap_err();
+
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::AllocationFailed {
+                    context: "input_queue.inputs",
+                    requested_elements: u64::MAX,
+                }
+            }
+        ));
+    }
+
+    #[test]
     fn test_with_queue_length_custom() {
         let queue = InputQueue::<TestConfig>::with_queue_length(0, 64);
         assert!(queue.is_some());
@@ -2591,14 +2791,14 @@ mod property_tests {
 /// - `InputQueueConfig::high_latency()` - 256 frames
 /// - `InputQueueConfig::minimal()` - 32 frames
 ///
-/// Kani uses `INPUT_QUEUE_LENGTH = 8` (via `#[cfg(kani)]`) for tractable verification.
+/// Kani uses `INPUT_QUEUE_LENGTH = 7` (via `#[cfg(kani)]`) for tractable verification.
 /// The invariants verified here are **size-independent** - they hold for any queue
 /// length >= 2. The proofs verify:
 /// - Circular buffer arithmetic correctness (wraparound at any boundary)
 /// - Index bounds checking (always < queue_length)
 /// - Length bounds (always <= queue_length)
 ///
-/// Therefore, proofs passing for queue_length=8 imply correctness for 32, 128, 256.
+/// Therefore, proofs passing for queue_length=7 imply correctness for 32, 128, 256.
 ///
 /// Note: Requires Kani verifier. Install with:
 ///   cargo install --locked kani-verifier
@@ -2611,9 +2811,11 @@ mod property_tests {
 ///
 /// Kani proofs require sufficient unwind bounds to verify loops. Key considerations:
 ///
-/// 1. **Vec initialization**: Creating `InputQueue` via `test_queue()` initializes a
-///    `Vec<PlayerInput>` with `INPUT_QUEUE_LENGTH` (8 under Kani) elements. This requires
-///    unwind >= 10 (8 elements + buffer for Vec internal bookkeeping).
+/// 1. **Buffer initialization**: Creating `InputQueue` via `test_queue()` fills its
+///    backing buffer (a `#[cfg(kani)]` heap-free [`ProofVec`](crate::proof_vec)) with
+///    `INPUT_QUEUE_LENGTH` (7 under Kani) blank inputs via a `0..queue_length` push
+///    loop, so the harness needs unwind >= 8 (7 fill iterations + 1 for the
+///    unwinding-assertion check). The proofs here use 10 for margin.
 ///
 /// 2. **Additional loops**: Add the maximum loop iterations to the base unwind:
 ///    - `for i in 0..N` requires +N iterations
@@ -2699,8 +2901,8 @@ mod kani_input_queue_proofs {
     ///
     /// Verifies that adding a single input maintains INV-4 and INV-5.
     ///
-    /// Note: unwind(10) is needed because Vec initialization requires iterating
-    /// over INPUT_QUEUE_LENGTH (8 under Kani) elements.
+    /// Note: unwind(10) covers the construction loop that fills the queue's
+    /// backing buffer with INPUT_QUEUE_LENGTH (7 under Kani) blank inputs.
     ///
     /// - Tier: 3 (Slow, >2min)
     /// - Verifies: Single add_input preserves invariants (INV-4, INV-5)

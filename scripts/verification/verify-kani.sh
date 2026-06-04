@@ -9,8 +9,12 @@
 #   - Rust nightly toolchain
 #
 # Environment Variables:
-#   KANI_TIMEOUT     - Timeout per proof in seconds (default: 300)
-#   KANI_UNWIND      - Default unwind bound (default: use Kani defaults)
+#   KANI_TIMEOUT       - Timeout per proof in seconds (default: 300)
+#   KANI_UNWIND        - Default unwind bound (default: use Kani defaults)
+#   KANI_MEM_FLOOR_MB  - Memory watchdog floor in MB (default: dynamic, see
+#                        compute_mem_floor_mb). When MemAvailable drops below
+#                        this, the running cargo kani/cbmc process group is
+#                        killed and the harness is flagged as memory_exceeded.
 #
 # IMPORTANT: When adding new #[kani::proof] functions, you must also add them
 # to the appropriate TIER*_PROOFS array below. Use ./scripts/verification/check-kani-coverage.sh
@@ -30,6 +34,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 KANI_TIMEOUT="${KANI_TIMEOUT:-300}"
 KANI_UNWIND="${KANI_UNWIND:-}"
+# Memory watchdog floor in MB. Empty => compute_mem_floor_mb derives a
+# dynamic default from /proc/meminfo MemTotal. See run_kani_with_mem_watchdog.
+KANI_MEM_FLOOR_MB="${KANI_MEM_FLOOR_MB:-}"
+# Poll interval (seconds) for the memory sampler. ~2s is frequent enough to
+# catch a fast CBMC/CaDiCaL allocation spike before the OS OOM-killer fires,
+# while being light enough that the sampler itself is negligible overhead.
+KANI_MEM_POLL_SECONDS="${KANI_MEM_POLL_SECONDS:-2}"
 
 # Colors
 RED='\033[0;31m'
@@ -43,18 +54,63 @@ PASSED=0
 FAILED=0
 TOTAL=0
 
+# PIDs of the in-flight memory-watchdog sampler and the cargo-kani child it
+# guards (0 = none). The EXIT/signal trap below reaps BOTH so neither can
+# outlive the script, even if the runner sends SIGTERM/SIGINT mid-proof (the
+# requirement: clean up the background sampler on every exit path -- normal,
+# timeout, signal). The normal path reaps them inline in run_kani_invocation;
+# these traps are the belt-and-suspenders for the signal path.
+MEM_WATCHDOG_SAMPLER_PID=0
+MEM_WATCHDOG_CHILD_PID=0
+
+cleanup_mem_watchdog_sampler() {
+    if [[ "${MEM_WATCHDOG_SAMPLER_PID:-0}" -gt 0 ]]; then
+        kill "$MEM_WATCHDOG_SAMPLER_PID" 2>/dev/null || true
+        MEM_WATCHDOG_SAMPLER_PID=0
+    fi
+    # Kill the cargo-kani child's whole process group (it ran under setsid, so
+    # PGID == child PID) so cbmc/cadical don't survive a script-level signal.
+    # Fall back to the bare PID if the group form fails.
+    if [[ "${MEM_WATCHDOG_CHILD_PID:-0}" -gt 0 ]]; then
+        kill -- "-${MEM_WATCHDOG_CHILD_PID}" 2>/dev/null \
+            || kill "$MEM_WATCHDOG_CHILD_PID" 2>/dev/null || true
+        MEM_WATCHDOG_CHILD_PID=0
+    fi
+}
+# EXIT covers normal/error returns; the signal traps re-raise after cleanup so
+# the script's exit status still reflects the signal (preserving the existing
+# 130/143-style propagation the workflow relies on).
+trap 'cleanup_mem_watchdog_sampler' EXIT
+trap 'cleanup_mem_watchdog_sampler; trap - INT; kill -INT $$' INT
+trap 'cleanup_mem_watchdog_sampler; trap - TERM; kill -TERM $$' TERM
+
 # Cross-platform timeout wrapper
-# Uses GNU timeout if available, gtimeout on macOS, or runs without timeout as fallback
+# Uses GNU timeout if available, gtimeout on macOS, or runs without timeout as fallback.
+#
+# When the internal env var _KANI_TIMEOUT_FOREGROUND=1 is set (only the memory
+# watchdog path sets it), pass GNU timeout's `--foreground` flag. Rationale:
+# WITHOUT --foreground, GNU timeout puts the monitored command in its OWN new
+# process group so it can signal that group on timeout. That defeats our
+# watchdog, which runs cargo kani under setsid and kills the SETSID group --
+# timeout's private sub-group (containing cbmc/cadical) would survive. With
+# --foreground, timeout keeps the command in the existing (setsid) group, so a
+# single `kill -- -PGID` reaps the whole tree. --foreground is GNU/gtimeout-
+# only; the watchdog path already requires GNU coreutils (Linux + setsid), and
+# default (non-watchdog) callers never set the flag, so behaviour is unchanged
+# for them.
 run_with_timeout() {
     local timeout_seconds="$1"
     shift
 
+    local fg_flag=()
+    [[ "${_KANI_TIMEOUT_FOREGROUND:-}" == "1" ]] && fg_flag=(--foreground)
+
     if [[ "${OSTYPE:-}" == msys* ]] || [[ "${OSTYPE:-}" == cygwin* ]] || [[ -n "${WINDIR:-}" ]]; then
         "$@"
     elif command -v timeout &>/dev/null; then
-        timeout "$timeout_seconds" "$@"
+        timeout "${fg_flag[@]}" "$timeout_seconds" "$@"
     elif command -v gtimeout &>/dev/null; then
-        gtimeout "$timeout_seconds" "$@"
+        gtimeout "${fg_flag[@]}" "$timeout_seconds" "$@"
     else
         "$@"
     fi
@@ -64,6 +120,16 @@ run_with_timeout() {
 # specific diagnostic instead of a generic "Kani failed".
 #
 # Echoes one of:
+#   memory_exceeded    - Our per-proof MEMORY WATCHDOG killed the cargo
+#                        kani/cbmc process group because MemAvailable dropped
+#                        below the floor (machine about to OOM). This takes
+#                        PRECEDENCE over the raw exit code: a watchdog SIGKILL
+#                        surfaces to the shell as exit 137, which is otherwise
+#                        indistinguishable from an external SIGKILL. Callers
+#                        pass watchdog_fired="true" (arg 2) when the sentinel
+#                        was set so we attribute the kill to THIS harness's
+#                        state-space explosion rather than to runner
+#                        preemption.
 #   per_proof_timeout  - GNU timeout(1) fired its own KANI_TIMEOUT (exit 124).
 #                        The harness genuinely ran too long for our budget.
 #   external_terminate - The runner sent SIGTERM/SIGKILL to the child
@@ -72,13 +138,167 @@ run_with_timeout() {
 #                        fired, the workflow was cancelled, or (very common
 #                        on GitHub-hosted runners) the runner was preempted.
 #   ""                 - Not a timeout-class exit; treat as a normal failure.
+#
+# Args:
+#   $1 - exit_code        (required)
+#   $2 - watchdog_fired   (optional; "true" when the memory watchdog killed
+#                          the process group for this harness). Defaults to
+#                          empty so existing single-arg callers are unaffected.
 classify_exit_code() {
     local exit_code="$1"
+    local watchdog_fired="${2:-}"
+    # The watchdog verdict overrides the raw exit code: the kill it issues
+    # looks like a generic SIGKILL (137) to the shell, but its root cause is
+    # a proof-tractability / state-space-explosion problem, NOT runner
+    # preemption. Decide on the sentinel, not the ambiguous exit code.
+    if [[ "$watchdog_fired" == "true" ]]; then
+        echo "memory_exceeded"
+        return 0
+    fi
     case "$exit_code" in
         124) echo "per_proof_timeout" ;;
         137|143) echo "external_terminate" ;;
         *) echo "" ;;
     esac
+}
+
+# ----------------------------------------------------------------------------
+# Per-proof MEMORY WATCHDOG
+# ----------------------------------------------------------------------------
+#
+# Why this exists: a few Kani proofs drive CBMC/CaDiCaL into a state-space
+# explosion that allocates RAM faster than GNU timeout's wall-clock budget can
+# catch. On a 16 GB GitHub `ubuntu-latest` runner the OS OOM-killer then
+# reaps the *runner agent itself*, producing the opaque "The runner has
+# received a shutdown signal" with no clue which harness was at fault.
+#
+# The watchdog samples /proc/meminfo MemAvailable while cargo kani runs. If it
+# drops below a floor (machine about to thrash/OOM), we SIGKILL the kani/cbmc
+# *process group* -- not the runner -- and record that THIS harness blew the
+# memory budget. That turns an unattributable runner death into a clean,
+# per-proof "memory_exceeded" diagnostic naming the harness.
+#
+# Portability: Linux /proc only. On macOS/BSD (no /proc/meminfo) the watchdog
+# no-ops and the script behaves exactly as before (plain cargo kani under
+# run_with_timeout).
+
+# Read a kB-valued field from /proc/meminfo (e.g. MemTotal, MemAvailable) and
+# echo the integer kB. Echoes nothing and returns 1 if /proc/meminfo or the
+# field is unavailable. POSIX-class regex only (no \d/\s PCRE escapes) so the
+# shell-portability checker stays green.
+read_meminfo_kb() {
+    local field="$1"
+    [[ -r /proc/meminfo ]] || return 1
+    # Lines look like: "MemAvailable:   14436764 kB". Anchor on the field name
+    # followed by ':' and grab the first run of digits. grep -E / sed -E with
+    # POSIX classes only.
+    local line
+    line=$(grep -E "^${field}:" /proc/meminfo 2>/dev/null | head -1) || return 1
+    [[ -n "$line" ]] || return 1
+    local kb
+    kb=$(echo "$line" | sed -E 's/^[^0-9]*([0-9][0-9]*).*/\1/')
+    [[ "$kb" =~ ^[0-9]+$ ]] || return 1
+    echo "$kb"
+}
+
+# Compute the memory floor (in MB) below which MemAvailable triggers a kill.
+#
+# Default formula: max(1024 MB, ~8% of MemTotal). Reasoning:
+#   - Anchoring near runner capacity (8% headroom) means the watchdog fires
+#     ONLY on a true explosion that is consuming essentially all of RAM, never
+#     on a legitimately heavy proof that still leaves comfortable headroom.
+#     On a 16 GB runner, 8% ~= 1.3 GB; on a 7 GB runner the 1024 MB floor
+#     dominates so we still leave a safety margin on small machines.
+#   - The 1024 MB absolute floor guards tiny machines where 8% would be too
+#     small to react before the OOM-killer beats us.
+# Operators can override via KANI_MEM_FLOOR_MB (e.g. lower it on a constrained
+# runner, or raise it to be more aggressive). Echoes nothing + returns 1 when
+# MemTotal is unavailable (the caller treats that as "watchdog disabled").
+compute_mem_floor_mb() {
+    # Explicit override always wins (validated as a positive integer).
+    if [[ -n "${KANI_MEM_FLOOR_MB:-}" ]]; then
+        if [[ "$KANI_MEM_FLOOR_MB" =~ ^[1-9][0-9]*$ ]]; then
+            echo "$KANI_MEM_FLOOR_MB"
+            return 0
+        fi
+        echo "Warning: KANI_MEM_FLOOR_MB='${KANI_MEM_FLOOR_MB}' is not a positive integer; using dynamic default." >&2
+    fi
+
+    local total_kb
+    total_kb=$(read_meminfo_kb "MemTotal") || return 1
+    local total_mb=$(( total_kb / 1024 ))
+    # ~8% of MemTotal (integer math), clamped to a 1024 MB absolute minimum.
+    local pct_mb=$(( total_mb * 8 / 100 ))
+    if [[ "$pct_mb" -lt 1024 ]]; then
+        echo 1024
+    else
+        echo "$pct_mb"
+    fi
+}
+
+# Background sampler. Polls MemAvailable every KANI_MEM_POLL_SECONDS; when it
+# drops below floor_mb, SIGKILLs the target process GROUP and records the
+# breach into sentinel_file, then exits.
+#
+# Args:
+#   $1 - target_pid   (the cargo-kani child PID. setsid made it a process
+#                      group leader, so its PGID == its PID; we kill the GROUP
+#                      via `kill -- -PID` but check LIVENESS via the bare PID.)
+#   $2 - floor_mb     (trigger threshold, MB)
+#   $3 - sentinel_file (written with a one-line breach record on trigger)
+#
+# Liveness is checked with `kill -0 PID` (the PID exists the instant `&`
+# returns) rather than `kill -0 -- -PID` (the process GROUP only exists once
+# setsid has actually called setsid(2) and become a group leader -- a brief
+# window during which a group-existence check spuriously reports "finished"
+# and the sampler would exit before ever sampling). The KILL still targets the
+# whole group so cbmc/cadilcal children die too.
+#
+# Runs as a detached background job; the parent reaps it on every exit path
+# (see run_kani_invocation's cleanup). Self-terminates once it has triggered
+# or once the child exits. The sampler NEVER touches the runner: it only
+# signals the target process group.
+mem_watchdog_sampler() {
+    local target_pid="$1"
+    local floor_mb="$2"
+    local sentinel_file="$3"
+
+    local poll="${KANI_MEM_POLL_SECONDS:-2}"
+    [[ "$poll" =~ ^[1-9][0-9]*$ ]] || poll=2
+
+    local min_avail_kb=0
+    while :; do
+        # Stop once the cargo-kani child is gone (proof finished normally).
+        # Check the bare PID, not the group: the group may not exist yet in
+        # the first poll, but the PID always does.
+        kill -0 "$target_pid" 2>/dev/null || return 0
+
+        local avail_kb
+        if avail_kb=$(read_meminfo_kb "MemAvailable"); then
+            # Track the lowest MemAvailable seen, for the diagnostic.
+            if [[ "$min_avail_kb" -eq 0 ]] || [[ "$avail_kb" -lt "$min_avail_kb" ]]; then
+                min_avail_kb="$avail_kb"
+            fi
+            local avail_mb=$(( avail_kb / 1024 ))
+            if [[ "$avail_mb" -lt "$floor_mb" ]]; then
+                # Machine is about to OOM. Kill the whole kani/cbmc group so
+                # the runner survives. SIGKILL: CBMC ignores gentler signals
+                # under memory pressure and we cannot afford a grace window.
+                {
+                    echo "memory_exceeded floor_mb=${floor_mb} avail_mb_at_kill=${avail_mb} min_avail_mb=$(( min_avail_kb / 1024 ))"
+                } > "$sentinel_file" 2>/dev/null || true
+                # Kill the GROUP (negative PID) so cbmc/cadical children die
+                # too. Fall back to killing the bare PID if the group form
+                # fails (e.g. setsid not yet a group leader -- unlikely once
+                # we're consuming this much RAM, but belt-and-suspenders).
+                kill -KILL -- "-${target_pid}" 2>/dev/null \
+                    || kill -KILL "$target_pid" 2>/dev/null || true
+                return 0
+            fi
+        fi
+        # Sleep between samples. If sleep is interrupted we just loop again.
+        sleep "$poll" 2>/dev/null || true
+    done
 }
 
 # Print the canonical "misconfigured matrix" error to stderr.
@@ -247,6 +467,8 @@ TIER1_PROOFS=(
     "proof_clone_is_independent"
     "proof_null_frame_detection"
     "proof_divisibility_check"
+    "proof_try_to_player_inputs_rejects_zero_players"
+    "proof_try_to_player_inputs_rejects_non_divisible_lengths"
     "proof_empty_input_bytes_valid"
     "proof_extreme_frame_values"
     # SyncLayer construction preconditions (src/sync_layer/mod.rs)
@@ -362,8 +584,13 @@ print_usage() {
     echo "  --help             Show this help message"
     echo ""
     echo "Environment Variables:"
-    echo "  KANI_TIMEOUT    Timeout per proof in seconds (default: 300)"
-    echo "  KANI_UNWIND     Default unwind bound (default: use Kani defaults)"
+    echo "  KANI_TIMEOUT       Timeout per proof in seconds (default: 300)"
+    echo "  KANI_UNWIND        Default unwind bound (default: use Kani defaults)"
+    echo "  KANI_MEM_FLOOR_MB  Memory watchdog floor in MB. When MemAvailable"
+    echo "                     drops below this while a proof runs, the cargo"
+    echo "                     kani/cbmc process group is killed and the proof"
+    echo "                     is flagged 'memory_exceeded' (Linux /proc only;"
+    echo "                     default: max(1024, ~8% of MemTotal))"
     echo ""
     echo "Constraints:"
     echo "  --list             cannot combine with --harness, --tier, --part,"
@@ -579,6 +806,130 @@ print_partition() {
     fi
 }
 
+# Run a single cargo kani invocation under both the GNU timeout AND the
+# per-proof memory watchdog, capturing output and cleaning up the sampler on
+# every exit path.
+#
+# Args:
+#   $1  - verbose       ("true" => also tee output to the terminal)
+#   $2  - sentinel_file (the sampler writes a breach record here on trigger)
+#   $3  - output_file   (combined stdout+stderr captured here)
+#   $4+ - the cargo kani command + args
+#
+# Returns the exit code of the cargo kani invocation (124 on GNU timeout,
+# 137 on a watchdog SIGKILL, etc.). Composability: the watchdog and GNU
+# timeout coexist -- whichever fires first wins; the other becomes a no-op.
+#
+# Watchdog ENABLED requires Linux /proc/meminfo (so we can sample MemAvailable)
+# AND setsid (so cargo kani + cbmc run in their own killable process group).
+# When either is missing we fall back to plain run_with_timeout: identical
+# behaviour to before this watchdog existed.
+run_kani_invocation() {
+    local verbose="$1"
+    local sentinel_file="$2"
+    local output_file="$3"
+    shift 3
+    # Remaining args ("$@") are the cargo kani command.
+
+    local floor_mb=""
+    floor_mb=$(compute_mem_floor_mb) || floor_mb=""
+
+    # Watchdog requires both a memory floor (=> /proc/meminfo readable) and
+    # setsid (=> we can put the child in its own process group). Missing
+    # either => disabled, behave exactly as before.
+    if [[ -z "$floor_mb" ]] || ! command -v setsid &>/dev/null; then
+        local rc=0
+        if [[ "$verbose" == "true" ]]; then
+            run_with_timeout "$KANI_TIMEOUT" "$@" 2>&1 | tee "$output_file" || rc=$?
+        else
+            run_with_timeout "$KANI_TIMEOUT" "$@" > "$output_file" 2>&1 || rc=$?
+        fi
+        return "$rc"
+    fi
+
+    echo -e "${BLUE}Memory watchdog active: will kill this proof if MemAvailable drops below ${floor_mb} MB.${NC}"
+
+    # Tell run_with_timeout (inside the setsid'd subshell) to pass GNU
+    # timeout's --foreground so the monitored cargo/cbmc tree stays in the
+    # SETSID process group instead of timeout spawning its own sub-group.
+    # Without this, `kill -- -PGID` would miss timeout's private group and
+    # leave cbmc/cadical running. Exported so the subshell inherits it.
+    export _KANI_TIMEOUT_FOREGROUND=1
+
+    # Launch cargo kani (under the GNU timeout) in a NEW process group via
+    # setsid, so the sampler can kill the whole tree (cargo -> kani -> cbmc ->
+    # cadical) with a single `kill -- -PGID`. setsid makes the child a process
+    # group leader whose PGID equals its PID.
+    local child_pid
+    if [[ "$verbose" == "true" ]]; then
+        # Tee to terminal AND capture. The pipeline runs inside the setsid'd
+        # subshell so the whole group is killable. `set -o pipefail` inside
+        # the subshell ensures the pipeline's exit status is cargo kani's, not
+        # tee's (the subshell does NOT inherit the parent's `set` options).
+        setsid bash -c 'set -o pipefail; run_kani_cmd_under_timeout "$@" 2>&1 | tee "$0"' \
+            "$output_file" "$KANI_TIMEOUT" "$@" &
+        child_pid=$!
+    else
+        setsid bash -c 'run_kani_cmd_under_timeout "$@" > "$0" 2>&1' \
+            "$output_file" "$KANI_TIMEOUT" "$@" &
+        child_pid=$!
+    fi
+
+    # Start the sampler against the child PID (setsid made it a process group
+    # leader, so PGID == child_pid). The sampler checks liveness via the bare
+    # PID and kills the whole group; it self-exits when the child disappears
+    # or after it triggers.
+    # Publish the child PID to the script-global BEFORE starting the sampler so
+    # the EXIT/signal trap can reap the cargo-kani process group if the script
+    # is killed mid-proof (e.g. runner SIGTERM). Cleared below after the inline
+    # reap on the normal path.
+    MEM_WATCHDOG_CHILD_PID=$child_pid
+
+    mem_watchdog_sampler "$child_pid" "$floor_mb" "$sentinel_file" &
+    local sampler_pid=$!
+    # Likewise publish the sampler PID so the trap reaps it on a signal.
+    MEM_WATCHDOG_SAMPLER_PID=$sampler_pid
+
+    # Always reap the sampler, on every exit path (normal, timeout, watchdog
+    # kill, or signal). Killing a sampler that already self-exited is a
+    # harmless no-op.
+    #
+    # The `wait` is wrapped in a `{ ...; } 2>/dev/null` group so bash's
+    # job-control "Killed" notification (printed when it reaps a child that
+    # died from SIGKILL -- exactly the watchdog path) does not leak into the
+    # captured log. The exit status (137 on a SIGKILL) is preserved.
+    local rc=0
+    { wait "$child_pid"; } 2>/dev/null || rc=$?
+    kill "$sampler_pid" 2>/dev/null || true
+    { wait "$sampler_pid"; } 2>/dev/null || true
+    # Reaped inline; clear the globals so the EXIT trap has nothing to do. The
+    # child group is already gone here (it either finished, timed out, or was
+    # killed by the watchdog), so clearing CHILD_PID avoids a spurious kill of
+    # a recycled PID by a later trap.
+    MEM_WATCHDOG_SAMPLER_PID=0
+    MEM_WATCHDOG_CHILD_PID=0
+    # Scope the foreground flag to this invocation so a later fallback-path
+    # call doesn't inherit it.
+    unset _KANI_TIMEOUT_FOREGROUND
+
+    return "$rc"
+}
+
+# Helper executed inside the setsid'd subshell: runs the cargo kani command
+# under the GNU timeout. Exported (with run_with_timeout) so the `bash -c`
+# subshell spawned by setsid can call it.
+# Args: $1 = timeout seconds, $2+ = command.
+run_kani_cmd_under_timeout() {
+    local t="$1"
+    shift
+    run_with_timeout "$t" "$@"
+}
+# These two functions execute inside the `setsid bash -c ...` subshell, which
+# does NOT inherit shell functions unless they are exported. Export both so
+# the watchdog path works; harmless on the fallback path.
+export -f run_with_timeout
+export -f run_kani_cmd_under_timeout
+
 run_kani() {
     local harness="${1:-}"
     local quick="${2:-false}"
@@ -627,20 +978,59 @@ run_kani() {
     # Disable colors in Kani output to ensure reliable parsing
     export NO_COLOR=1
     export TERM=dumb
+
+    # Per-proof memory watchdog. On Linux (/proc/meminfo present + setsid
+    # available) we run cargo kani in its own process group and a background
+    # sampler kills that group if MemAvailable falls below the floor -- so a
+    # state-space explosion fails THIS harness cleanly instead of OOM-killing
+    # the runner. The sentinel file is written by the sampler on trigger.
+    # On platforms without /proc/meminfo, run_kani_invocation transparently
+    # falls back to plain run_with_timeout (watchdog disabled, no behaviour
+    # change). Cleanup of the sampler happens inside run_kani_invocation on
+    # every exit path.
+    local mem_sentinel
+    mem_sentinel=$(mktemp)
+    : > "$mem_sentinel"
+
     if [[ "$verbose" == "true" ]]; then
-        run_with_timeout "$KANI_TIMEOUT" "${kani_cmd[@]}" 2>&1 | tee "$output_file" || exit_code=$?
+        run_kani_invocation "true" "$mem_sentinel" "$output_file" "${kani_cmd[@]}" || exit_code=$?
     else
-        run_with_timeout "$KANI_TIMEOUT" "${kani_cmd[@]}" > "$output_file" 2>&1 || exit_code=$?
+        run_kani_invocation "false" "$mem_sentinel" "$output_file" "${kani_cmd[@]}" || exit_code=$?
     fi
+
+    # Did the memory watchdog fire for THIS harness? The sentinel is non-empty
+    # only when the sampler killed the process group. This decision overrides
+    # the raw exit code (a watchdog SIGKILL surfaces as 137, which is otherwise
+    # indistinguishable from an external SIGKILL).
+    local watchdog_fired="false"
+    local watchdog_record=""
+    if [[ -s "$mem_sentinel" ]]; then
+        watchdog_fired="true"
+        watchdog_record=$(head -1 "$mem_sentinel" 2>/dev/null || echo "")
+    fi
+    rm -f "$mem_sentinel"
 
     # Diagnose timeout-class exits. These look identical to "Kani failed"
     # without context, but they have very different root causes and remedies.
     # See classify_exit_code() above for the taxonomy.
     local exit_class
-    exit_class=$(classify_exit_code "$exit_code")
+    exit_class=$(classify_exit_code "$exit_code" "$watchdog_fired")
     if [[ -n "$exit_class" ]]; then
         local timed_out_harness="${harness:-all}"
         case "$exit_class" in
+            memory_exceeded)
+                echo -e "${RED}MEMORY EXCEEDED: '$timed_out_harness' was killed by the per-proof memory watchdog (machine about to OOM).${NC}"
+                echo "Command: ${kani_cmd[*]}"
+                [[ -n "$watchdog_record" ]] && echo "Watchdog: ${watchdog_record}"
+                echo "Hint: this is a *proof-tractability / state-space-explosion* problem -- NOT a CI flake."
+                echo "  - A symbolic kani::any() value is almost certainly driving an unbounded"
+                echo "    loop or data structure, blowing up CBMC/CaDiCaL memory."
+                echo "  - Concretize the parameter that flows into the symbolic loop, or"
+                echo "    lower #[kani::unwind(N)] / shrink symbolic input ranges."
+                echo "  - See the remediation policy at src/sync_layer/mod.rs:2249-2270."
+                echo "Without this watchdog the OS OOM-killer would have reaped the runner"
+                echo "('The runner has received a shutdown signal') with no attribution."
+                ;;
             per_proof_timeout)
                 echo -e "${RED}PER-PROOF TIMEOUT: '$timed_out_harness' exceeded KANI_TIMEOUT=${KANI_TIMEOUT}s (exit 124, GNU timeout fired).${NC}"
                 echo "Command: ${kani_cmd[*]}"

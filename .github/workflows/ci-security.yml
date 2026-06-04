@@ -32,6 +32,7 @@ jobs:
   supply-chain-security:
     name: Supply Chain Security
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v6
@@ -57,6 +58,7 @@ jobs:
   unsafe-audit:
     name: Unsafe Code Audit
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: |
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
@@ -95,6 +97,7 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
@@ -107,6 +110,7 @@ jobs:
       - name: Check cached geiger report
         id: geiger-cache
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: geiger-report.txt
           key: geiger-report-${{ hashFiles('**/Cargo.lock') }}
@@ -140,6 +144,7 @@ jobs:
   unused-deps:
     name: Unused Dependencies
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v6
@@ -173,6 +178,7 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
@@ -196,6 +202,7 @@ jobs:
   outdated:
     name: Dependency Freshness
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Only run on schedule or manual trigger (not on every PR)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
 
@@ -214,6 +221,7 @@ jobs:
 
       - name: Cache cargo registry
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry

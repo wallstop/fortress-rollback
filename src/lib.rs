@@ -77,7 +77,7 @@ pub use network::chaos_socket::{ChaosConfig, ChaosConfigBuilder, ChaosSocket, Ch
 pub use network::messages::Message;
 pub use network::network_stats::NetworkStats;
 pub use network::udp_socket::UdpNonBlockingSocket;
-pub use replay::{Replay, ReplayMetadata};
+pub use replay::{Replay, ReplayDecodeConfig, ReplayMetadata};
 use serde::{de::DeserializeOwned, Serialize};
 pub use sessions::builder::SessionBuilder;
 pub use sessions::config::{
@@ -115,7 +115,7 @@ pub use checksum::{compute_checksum, compute_checksum_fletcher16, fletcher16, ha
 ///
 /// ```toml
 /// [dependencies]
-/// fortress-rollback = { version = "0.8", features = ["tokio"] }
+/// fortress-rollback = { version = "0.9", features = ["tokio"] }
 /// ```
 ///
 /// # Example
@@ -187,6 +187,9 @@ pub mod frame_info;
 pub mod hash;
 #[doc(hidden)]
 pub mod input_queue;
+/// Internal `Vec` replacement that swaps to a stack-backed inline buffer under
+/// Kani to keep CBMC tractable (zero effect on non-Kani builds).
+pub(crate) mod proof_vec;
 /// Replay recording and playback for deterministic match replays.
 pub mod replay;
 /// Internal run-length encoding module for network compression.
@@ -238,6 +241,10 @@ pub mod sessions {
 }
 #[doc(hidden)]
 pub mod network {
+    pub(crate) const MAX_RECEIVE_MESSAGES_PER_POLL: usize = 256;
+
+    /// Shared fail-closed allocation for socket receive/send buffers.
+    mod buffer;
     pub mod chaos_socket;
     /// Binary codec for network message serialization.
     ///
@@ -252,6 +259,7 @@ pub mod network {
     pub mod network_stats;
     #[doc(hidden)]
     pub mod protocol;
+    mod socket_receive;
     #[cfg(feature = "tokio")]
     pub mod tokio_socket;
     #[doc(hidden)]
@@ -318,9 +326,13 @@ pub mod __internal {
     pub use crate::time_sync::TimeSync;
 
     // Network internals
-    pub use crate::network::compression::{decode, delta_decode, delta_encode, encode};
+    pub use crate::network::compression::{
+        decode, decode_with_max_len, delta_decode, delta_encode, encode,
+    };
     pub use crate::network::messages::ConnectionStatus;
-    pub use crate::network::protocol::{Event, ProtocolState, UdpProtocol};
+    pub use crate::network::protocol::{
+        fuzz_protocol_input_packet, Event, ProtocolState, UdpProtocol,
+    };
 
     // RLE compression (internal implementation)
     pub use crate::rle::{decode as rle_decode, encode as rle_encode};
@@ -1579,6 +1591,17 @@ where
         /// The checksum computed during replay playback.
         actual_checksum: u128,
     },
+    /// Redundant spectator hosts reported different inputs for the same player and frame.
+    SpectatorDivergence {
+        /// The frame where redundant hosts disagreed.
+        frame: Frame,
+        /// The player whose input differed between hosts.
+        player: PlayerHandle,
+        /// The canonical/highest-priority host address.
+        primary_addr: T::Address,
+        /// The lower-priority host address that supplied conflicting input.
+        conflicting_addr: T::Address,
+    },
     /// Recommends adjusting the input delay for a local player based on
     /// observed network conditions.
     ///
@@ -1683,6 +1706,19 @@ where
                 frame.as_i32(),
                 expected_checksum,
                 actual_checksum
+            ),
+            Self::SpectatorDivergence {
+                frame,
+                player,
+                primary_addr,
+                conflicting_addr,
+            } => write!(
+                f,
+                "SpectatorDivergence(frame={}, player={}, primary_addr={}, conflicting_addr={})",
+                frame.as_i32(),
+                player,
+                primary_addr,
+                conflicting_addr
             ),
             Self::InputDelayRecommendation {
                 player_handle,
@@ -2000,6 +2036,14 @@ pub trait Config: 'static + Send + Sync {
     ///
     /// The implementation of [Default] is used for representing "no input" for
     /// a player, including when a player is disconnected.
+    ///
+    /// Network sessions require this type to serialize to at least one byte,
+    /// every value must serialize to the same byte length under Fortress
+    /// Rollback's codec, and each local or remote aggregate input frame must
+    /// fit the protocol receive decode cap. Prefer structs of fixed-width
+    /// numeric and boolean fields; avoid variable-length enums, strings,
+    /// vectors, maps, or other payloads whose encoded size can change from
+    /// frame to frame.
     type Input: Copy + Clone + PartialEq + Eq + Default + Serialize + DeserializeOwned + Send + Sync;
 
     /// The save state type for the session.
@@ -2014,6 +2058,23 @@ pub trait Config: 'static + Send + Sync {
 /// However you wish to send and receive messages, it should be implemented through these two methods.
 /// Messages should be sent in an UDP-like fashion, unordered and unreliable.
 /// Fortress Rollback has an internal protocol on top of this to make sure all important information is sent and received.
+///
+/// # Allocation contract
+///
+/// [`NonBlockingSocket::receive_all_messages`] returns an owned batch, so custom
+/// socket implementations must keep that batch bounded. Do not grow the returned
+/// [`Vec`] from untrusted wire lengths without a protocol-level cap, and prefer
+/// fallible reservation when buffering packets internally. If an implementation
+/// has more packets ready than its configured cap, it should return a bounded
+/// prefix and keep or drop the remainder according to that transport's normal
+/// backpressure policy rather than risking allocator abort. Built-in UDP,
+/// Tokio UDP, and chaos sockets cap each receive poll at 256 raw attempts
+/// and 256 decoded messages.
+///
+/// When converting received peer bytes into [`Message`], use
+/// [`crate::network::codec::decode_message`]. It validates every `Message`
+/// length prefix against the remaining packet before allocating; generic
+/// bincode decoding does not.
 #[cfg(feature = "sync-send")]
 pub trait NonBlockingSocket<A>: Send + Sync
 where
@@ -2024,6 +2085,12 @@ where
 
     /// This method should return all messages received since the last time this method was called.
     /// The pairs `(A, Message)` indicate from which address each packet was received.
+    ///
+    /// Allocation contract: this existing trait shape drains into a `Vec`. Current
+    /// session code treats that as the socket-adapter boundary and performs
+    /// additional internal staging fallibly where practical. A future trait
+    /// redesign should add bounded draining so socket adapters can stream packets
+    /// without building an unbounded collection first.
     fn receive_all_messages(&mut self) -> Vec<(A, Message)>;
 }
 
@@ -2035,6 +2102,14 @@ pub trait Config: 'static {
     ///
     /// The implementation of [Default] is used for representing "no input" for
     /// a player, including when a player is disconnected.
+    ///
+    /// Network sessions require this type to serialize to at least one byte,
+    /// every value must serialize to the same byte length under Fortress
+    /// Rollback's codec, and each local or remote aggregate input frame must
+    /// fit the protocol receive decode cap. Prefer structs of fixed-width
+    /// numeric and boolean fields; avoid variable-length enums, strings,
+    /// vectors, maps, or other payloads whose encoded size can change from
+    /// frame to frame.
     type Input: Copy + Clone + PartialEq + Eq + Default + Serialize + DeserializeOwned;
 
     /// The save state type for the session.
@@ -2049,6 +2124,23 @@ pub trait Config: 'static {
 /// However you wish to send and receive messages, it should be implemented through these two methods.
 /// Messages should be sent in an UDP-like fashion, unordered and unreliable.
 /// Fortress Rollback has an internal protocol on top of this to make sure all important information is sent and received.
+///
+/// # Allocation contract
+///
+/// [`NonBlockingSocket::receive_all_messages`] returns an owned batch, so custom
+/// socket implementations must keep that batch bounded. Do not grow the returned
+/// [`Vec`] from untrusted wire lengths without a protocol-level cap, and prefer
+/// fallible reservation when buffering packets internally. If an implementation
+/// has more packets ready than its configured cap, it should return a bounded
+/// prefix and keep or drop the remainder according to that transport's normal
+/// backpressure policy rather than risking allocator abort. Built-in UDP,
+/// Tokio UDP, and chaos sockets cap each receive poll at 256 raw attempts
+/// and 256 decoded messages.
+///
+/// When converting received peer bytes into [`Message`], use
+/// [`crate::network::codec::decode_message`]. It validates every `Message`
+/// length prefix against the remaining packet before allocating; generic
+/// bincode decoding does not.
 #[cfg(not(feature = "sync-send"))]
 pub trait NonBlockingSocket<A>
 where
@@ -2059,6 +2151,12 @@ where
 
     /// This method should return all messages received since the last time this method was called.
     /// The pairs `(A, Message)` indicate from which address each packet was received.
+    ///
+    /// Allocation contract: this existing trait shape drains into a `Vec`. Current
+    /// session code treats that as the socket-adapter boundary and performs
+    /// additional internal staging fallibly where practical. A future trait
+    /// redesign should add bounded draining so socket adapters can stream packets
+    /// without building an unbounded collection first.
     fn receive_all_messages(&mut self) -> Vec<(A, Message)>;
 }
 
@@ -2348,105 +2446,224 @@ mod tests {
     // FortressEvent Display Tests
     // ==========================================
 
-    #[test]
-    fn fortress_event_display_synchronizing() {
-        let event: FortressEvent<TestConfig> = FortressEvent::Synchronizing {
-            addr: test_addr(8080),
-            total: 5,
-            count: 2,
-            total_requests_sent: 3,
-            elapsed_ms: 100,
+    /// Asserts a [`FortressEvent`]'s `Display` output against substrings derived
+    /// from an **exhaustive** match over the variant.
+    ///
+    /// This is the Display-path drift detector that mirrors the exhaustive event
+    /// `match` in the network-test-peer: the `match self` below has no `_` arm, so
+    /// adding any new [`FortressEvent`] variant fails to compile until its expected
+    /// Display substrings are spelled out here. Each arm returns the leading
+    /// `"Variant("` prefix (checked with `starts_with`) followed by the labelled
+    /// field substrings that the [`Display`](std::fmt::Display) impl must emit
+    /// (each checked with `contains`).
+    ///
+    /// Every variant's Display ends with `)`, so the helper also asserts
+    /// `ends_with(')')`. Combined with the per-field substrings this rejects any
+    /// trailing garbage appended after the closing paren, keeping the strength of
+    /// the cases that were originally exact-string (`assert_eq!`) comparisons
+    /// without re-spelling each full row.
+    #[track_caller]
+    fn check_event_display(event: &FortressEvent<TestConfig>) {
+        // Exhaustive: no `_` arm. A new variant must be added here (and to the
+        // sample list in the test) before the suite will compile.
+        let expected: Vec<String> = match event {
+            FortressEvent::Synchronizing {
+                addr,
+                total,
+                count,
+                total_requests_sent,
+                elapsed_ms,
+            } => vec![
+                "Synchronizing(".to_string(),
+                format!("{count}/{total}"),
+                format!("addr={addr}"),
+                format!("requests_sent={total_requests_sent}"),
+                format!("elapsed={elapsed_ms}ms"),
+            ],
+            FortressEvent::Synchronized { addr } => {
+                vec!["Synchronized(".to_string(), format!("addr={addr}")]
+            },
+            FortressEvent::Disconnected { addr } => {
+                vec!["Disconnected(".to_string(), format!("addr={addr}")]
+            },
+            FortressEvent::NetworkInterrupted {
+                addr,
+                disconnect_timeout,
+            } => vec![
+                "NetworkInterrupted(".to_string(),
+                format!("addr={addr}"),
+                format!("timeout={disconnect_timeout}ms"),
+            ],
+            FortressEvent::NetworkResumed { addr } => {
+                vec!["NetworkResumed(".to_string(), format!("addr={addr}")]
+            },
+            FortressEvent::WaitRecommendation { skip_frames } => vec![
+                "WaitRecommendation(".to_string(),
+                format!("skip_frames={skip_frames}"),
+            ],
+            FortressEvent::DesyncDetected {
+                frame,
+                local_checksum,
+                remote_checksum,
+                addr,
+            } => vec![
+                "DesyncDetected(".to_string(),
+                format!("frame={}", frame.as_i32()),
+                format!("local={local_checksum:#x}"),
+                format!("remote={remote_checksum:#x}"),
+                format!("addr={addr}"),
+            ],
+            FortressEvent::SyncTimeout { addr, elapsed_ms } => vec![
+                "SyncTimeout(".to_string(),
+                format!("addr={addr}"),
+                format!("elapsed={elapsed_ms}ms"),
+            ],
+            FortressEvent::ReplayDesync {
+                frame,
+                expected_checksum,
+                actual_checksum,
+            } => vec![
+                "ReplayDesync(".to_string(),
+                format!("frame={}", frame.as_i32()),
+                format!("expected={expected_checksum:#x}"),
+                format!("actual={actual_checksum:#x}"),
+            ],
+            FortressEvent::SpectatorDivergence {
+                frame,
+                player,
+                primary_addr,
+                conflicting_addr,
+            } => vec![
+                "SpectatorDivergence(".to_string(),
+                format!("frame={}", frame.as_i32()),
+                format!("player={player}"),
+                format!("primary_addr={primary_addr}"),
+                format!("conflicting_addr={conflicting_addr}"),
+            ],
+            FortressEvent::InputDelayRecommendation {
+                player_handle,
+                current_delay,
+                suggested_delay,
+            } => vec![
+                "InputDelayRecommendation(".to_string(),
+                format!("player={player_handle}"),
+                format!("current={current_delay}"),
+                format!("suggested={suggested_delay}"),
+            ],
+            FortressEvent::PeerDropped { handle, addr } => vec![
+                "PeerDropped(".to_string(),
+                format!("handle={handle}"),
+                format!("addr={addr}"),
+            ],
         };
+
         let display = event.to_string();
-        assert!(display.starts_with("Synchronizing("));
-        assert!(display.contains("2/5"));
-        assert!(display.contains("127.0.0.1:8080"));
-        assert!(display.contains("requests_sent=3"));
-        assert!(display.contains("elapsed=100ms"));
+        let (prefix, substrings) = expected
+            .split_first()
+            .expect("each variant must supply at least the prefix");
+        assert!(
+            display.starts_with(prefix.as_str()),
+            "{display:?} should start with {prefix:?}"
+        );
+        assert!(
+            display.ends_with(')'),
+            "{display:?} should end with ')' (rejects trailing garbage)"
+        );
+        for needle in substrings {
+            assert!(
+                display.contains(needle.as_str()),
+                "{display:?} should contain {needle:?}"
+            );
+        }
     }
 
     #[test]
-    fn fortress_event_display_synchronized() {
-        let event: FortressEvent<TestConfig> = FortressEvent::Synchronized {
-            addr: test_addr(9000),
+    fn fortress_event_display_renders_every_variant() {
+        // One constructed sample per FortressEvent variant. The helper derives
+        // the expected substrings via an exhaustive match, so this list and the
+        // helper's match must both name every variant -- a missing variant fails
+        // to compile, guarding the Display path against silent drift.
+        let samples: &[FortressEvent<TestConfig>] = &[
+            FortressEvent::Synchronizing {
+                addr: test_addr(8080),
+                total: 5,
+                count: 2,
+                total_requests_sent: 3,
+                elapsed_ms: 100,
+            },
+            FortressEvent::Synchronized {
+                addr: test_addr(9000),
+            },
+            FortressEvent::Disconnected {
+                addr: test_addr(7000),
+            },
+            FortressEvent::NetworkInterrupted {
+                addr: test_addr(8080),
+                disconnect_timeout: 5000,
+            },
+            FortressEvent::NetworkResumed {
+                addr: test_addr(8080),
+            },
+            FortressEvent::WaitRecommendation { skip_frames: 3 },
+            FortressEvent::DesyncDetected {
+                frame: Frame::new(100),
+                local_checksum: 0x1234,
+                remote_checksum: 0x5678,
+                addr: test_addr(8080),
+            },
+            FortressEvent::SyncTimeout {
+                addr: test_addr(8080),
+                elapsed_ms: 10000,
+            },
+            FortressEvent::ReplayDesync {
+                frame: Frame::new(42),
+                expected_checksum: 0xAAAA,
+                actual_checksum: 0xBBBB,
+            },
+            FortressEvent::SpectatorDivergence {
+                frame: Frame::new(7),
+                player: PlayerHandle::new(1),
+                primary_addr: test_addr(7000),
+                conflicting_addr: test_addr(7001),
+            },
+            FortressEvent::InputDelayRecommendation {
+                player_handle: PlayerHandle::new(2),
+                current_delay: 3,
+                suggested_delay: 5,
+            },
+            FortressEvent::PeerDropped {
+                handle: PlayerHandle::new(4),
+                addr: test_addr(7002),
+            },
+        ];
+
+        for event in samples {
+            check_event_display(event);
+        }
+    }
+
+    #[test]
+    fn fortress_event_spectator_divergence_fields() {
+        let event: FortressEvent<TestConfig> = FortressEvent::SpectatorDivergence {
+            frame: Frame::new(9),
+            player: PlayerHandle::new(0),
+            primary_addr: test_addr(7100),
+            conflicting_addr: test_addr(7101),
         };
-        assert_eq!(event.to_string(), "Synchronized(addr=127.0.0.1:9000)");
-    }
-
-    #[test]
-    fn fortress_event_display_disconnected() {
-        let event: FortressEvent<TestConfig> = FortressEvent::Disconnected {
-            addr: test_addr(7000),
-        };
-        assert_eq!(event.to_string(), "Disconnected(addr=127.0.0.1:7000)");
-    }
-
-    #[test]
-    fn fortress_event_display_network_interrupted() {
-        let event: FortressEvent<TestConfig> = FortressEvent::NetworkInterrupted {
-            addr: test_addr(8080),
-            disconnect_timeout: 5000,
-        };
-        let display = event.to_string();
-        assert!(display.starts_with("NetworkInterrupted("));
-        assert!(display.contains("127.0.0.1:8080"));
-        assert!(display.contains("timeout=5000ms"));
-    }
-
-    #[test]
-    fn fortress_event_display_network_resumed() {
-        let event: FortressEvent<TestConfig> = FortressEvent::NetworkResumed {
-            addr: test_addr(8080),
-        };
-        assert_eq!(event.to_string(), "NetworkResumed(addr=127.0.0.1:8080)");
-    }
-
-    #[test]
-    fn fortress_event_display_wait_recommendation() {
-        let event: FortressEvent<TestConfig> = FortressEvent::WaitRecommendation { skip_frames: 3 };
-        assert_eq!(event.to_string(), "WaitRecommendation(skip_frames=3)");
-    }
-
-    #[test]
-    fn fortress_event_display_desync_detected() {
-        let event: FortressEvent<TestConfig> = FortressEvent::DesyncDetected {
-            frame: Frame::new(100),
-            local_checksum: 0x1234,
-            remote_checksum: 0x5678,
-            addr: test_addr(8080),
-        };
-        let display = event.to_string();
-        assert!(display.starts_with("DesyncDetected("));
-        assert!(display.contains("frame=100"));
-        assert!(display.contains("local=0x1234"));
-        assert!(display.contains("remote=0x5678"));
-        assert!(display.contains("127.0.0.1:8080"));
-    }
-
-    #[test]
-    fn fortress_event_display_sync_timeout() {
-        let event: FortressEvent<TestConfig> = FortressEvent::SyncTimeout {
-            addr: test_addr(8080),
-            elapsed_ms: 10000,
-        };
-        let display = event.to_string();
-        assert!(display.starts_with("SyncTimeout("));
-        assert!(display.contains("127.0.0.1:8080"));
-        assert!(display.contains("elapsed=10000ms"));
-    }
-
-    #[test]
-    fn fortress_event_display_replay_desync() {
-        let event: FortressEvent<TestConfig> = FortressEvent::ReplayDesync {
-            frame: Frame::new(42),
-            expected_checksum: 0xAAAA,
-            actual_checksum: 0xBBBB,
-        };
-        let display = event.to_string();
-        assert!(display.starts_with("ReplayDesync("));
-        assert!(display.contains("frame=42"));
-        assert!(display.contains("expected=0xaaaa"));
-        assert!(display.contains("actual=0xbbbb"));
+        if let FortressEvent::SpectatorDivergence {
+            frame,
+            player,
+            primary_addr,
+            conflicting_addr,
+        } = event
+        {
+            assert_eq!(frame, Frame::new(9));
+            assert_eq!(player, PlayerHandle::new(0));
+            assert_eq!(primary_addr, test_addr(7100));
+            assert_eq!(conflicting_addr, test_addr(7101));
+        } else {
+            panic!("Expected SpectatorDivergence");
+        }
     }
 
     #[test]
@@ -3353,6 +3570,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Frame addition overflow safety (SAFE-6)
     /// - Related: proof_frame_add_assign_consistent, proof_frame_sub_frames_correct
+    // kani::no-unwind-needed: straight-line Frame + i32 arithmetic, no loops
     #[kani::proof]
     fn proof_frame_add_small_safe() {
         let frame_val: i32 = kani::any();
@@ -3380,6 +3598,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Frame subtraction correctness
     /// - Related: proof_frame_add_small_safe, proof_frame_sub_assign_consistent
+    // kani::no-unwind-needed: straight-line Frame - Frame arithmetic, no loops
     #[kani::proof]
     fn proof_frame_sub_frames_correct() {
         let a: i32 = kani::any();
@@ -3403,6 +3622,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Frame comparison operators consistency
     /// - Related: proof_frame_ordering
+    // kani::no-unwind-needed: scalar i32 comparisons, no loops
     #[kani::proof]
     fn proof_frame_ordering_consistent() {
         let a: i32 = kani::any();
@@ -3433,6 +3653,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Queue index bounds via modulo (INV-5)
     /// - Related: proof_queue_index_calculation, proof_head_wraparound
+    // kani::no-unwind-needed: single Frame % i32 modulo, no loops
     #[kani::proof]
     fn proof_frame_modulo_for_queue() {
         let frame_val: i32 = kani::any();
@@ -3500,6 +3721,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: AddAssign operator equivalence with Add
     /// - Related: proof_frame_add_small_safe, proof_frame_sub_assign_consistent
+    // kani::no-unwind-needed: scalar Add vs AddAssign, no loops
     #[kani::proof]
     fn proof_frame_add_assign_consistent() {
         let frame_val: i32 = kani::any();
@@ -3522,6 +3744,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: SubAssign operator equivalence with Sub
     /// - Related: proof_frame_sub_frames_correct, proof_frame_add_assign_consistent
+    // kani::no-unwind-needed: scalar Sub vs SubAssign, no loops
     #[kani::proof]
     fn proof_frame_sub_assign_consistent() {
         let frame_val: i32 = kani::any();
@@ -3544,6 +3767,7 @@ mod kani_proofs {
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: PlayerHandle player vs spectator classification
     /// - Related: proof_player_handle_preservation, proof_player_handle_equality
+    // kani::no-unwind-needed: scalar usize comparisons, no loops
     #[kani::proof]
     fn proof_player_handle_validity() {
         let handle_val: usize = kani::any();

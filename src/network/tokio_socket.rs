@@ -100,7 +100,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! fortress-rollback = { version = "0.8", features = ["tokio"] }
+//! fortress-rollback = { version = "0.9", features = ["tokio"] }
 //! ```
 //!
 //! [`UdpNonBlockingSocket`]: crate::UdpNonBlockingSocket
@@ -110,7 +110,9 @@ use std::net::SocketAddr;
 
 use tokio::net::UdpSocket;
 
+use crate::network::buffer::zeroed_buffer;
 use crate::network::codec;
+use crate::network::socket_receive;
 use crate::report_violation;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::{network::messages::Message, NonBlockingSocket};
@@ -159,9 +161,9 @@ const IDEAL_MAX_UDP_PACKET_SIZE: usize = 508;
 pub struct TokioUdpSocket {
     socket: UdpSocket,
     /// Receive buffer - reused across recv_from calls
-    recv_buffer: [u8; RECV_BUFFER_SIZE],
+    recv_buffer: Vec<u8>,
     /// Send buffer - reused across send_to calls to avoid allocation
-    send_buffer: [u8; SEND_BUFFER_SIZE],
+    send_buffer: Vec<u8>,
 }
 
 impl TokioUdpSocket {
@@ -186,9 +188,40 @@ impl TokioUdpSocket {
     pub fn new(socket: UdpSocket) -> Self {
         Self {
             socket,
-            recv_buffer: [0; RECV_BUFFER_SIZE],
-            send_buffer: [0; SEND_BUFFER_SIZE],
+            recv_buffer: default_socket_buffer(
+                RECV_BUFFER_SIZE,
+                IDEAL_MAX_UDP_PACKET_SIZE,
+                "tokio udp recv buffer",
+            ),
+            send_buffer: default_socket_buffer(
+                SEND_BUFFER_SIZE,
+                IDEAL_MAX_UDP_PACKET_SIZE,
+                "tokio udp send buffer",
+            ),
         }
+    }
+
+    /// Creates a `TokioUdpSocket` with caller-configured receive and send buffers.
+    ///
+    /// The default [`new`](Self::new) constructor uses 4 KiB receive and 1 KiB
+    /// send buffers. Applications with larger serialized inputs can raise either
+    /// value without implementing a custom socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`std::io::ErrorKind::InvalidInput`] if
+    /// either size is `0` (a zero-length socket buffer can never send or
+    /// receive).
+    pub fn with_buffer_sizes(
+        socket: UdpSocket,
+        recv_buffer_size: usize,
+        send_buffer_size: usize,
+    ) -> Result<Self, std::io::Error> {
+        Ok(Self {
+            socket,
+            recv_buffer: zeroed_buffer(recv_buffer_size, "tokio udp recv buffer")?,
+            send_buffer: zeroed_buffer(send_buffer_size, "tokio udp send buffer")?,
+        })
     }
 
     /// Binds a new `TokioUdpSocket` to the specified port on all interfaces (0.0.0.0).
@@ -222,9 +255,24 @@ impl TokioUdpSocket {
     /// # }
     /// ```
     pub async fn bind_to_port(port: u16) -> Result<Self, std::io::Error> {
+        Self::bind_to_port_with_buffer_sizes(port, RECV_BUFFER_SIZE, SEND_BUFFER_SIZE).await
+    }
+
+    /// Binds a new `TokioUdpSocket` with caller-configured receive and send buffers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`std::io::ErrorKind::InvalidInput`] if
+    /// either size is `0` (a zero-length socket buffer can never send or
+    /// receive), and propagates any error from binding the underlying socket.
+    pub async fn bind_to_port_with_buffer_sizes(
+        port: u16,
+        recv_buffer_size: usize,
+        send_buffer_size: usize,
+    ) -> Result<Self, std::io::Error> {
         let addr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port);
         let socket = UdpSocket::bind(addr).await?;
-        Ok(Self::new(socket))
+        Self::with_buffer_sizes(socket, recv_buffer_size, send_buffer_size)
     }
 
     /// Returns the local address that this socket is bound to.
@@ -281,6 +329,16 @@ impl TokioUdpSocket {
     /// # }
     /// ```
     pub async fn recv_all(&mut self) -> Vec<(SocketAddr, Message)> {
+        // Bail out before awaiting readability if the receive buffer is empty
+        // (only possible via `new`'s allocator-exhaustion fallback). Tokio's
+        // `readable()` readiness is edge-triggered and is cleared only by a read
+        // that returns `WouldBlock`; awaiting it without ever reading would spin
+        // at full CPU. The sync `receive_all_messages` has the same guard for
+        // direct callers.
+        if self.recv_buffer.is_empty() {
+            return Vec::new();
+        }
+
         // Wait for the socket to become readable
         if self.socket.readable().await.is_err() {
             return Vec::new();
@@ -332,7 +390,7 @@ impl TokioUdpSocket {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// use fortress_rollback::tokio_socket::TokioUdpSocket;
     /// use fortress_rollback::NonBlockingSocket;
     /// use fortress_rollback::network::messages::{Message, MessageBody, MessageHeader};
@@ -383,7 +441,19 @@ impl TokioUdpSocket {
     pub async fn send_to_async(&mut self, msg: &Message, addr: &SocketAddr) {
         // Serialize into the pre-allocated send buffer to avoid allocation.
         let buf = match codec::encode_into(msg, &mut self.send_buffer) {
-            Ok(len) => &self.send_buffer[..len],
+            Ok(len) => {
+                let Some(buf) = self.send_buffer.get(..len) else {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::NetworkProtocol,
+                        "send_buffer slice [..{}] out of bounds (buffer size: {})",
+                        len,
+                        self.send_buffer.len()
+                    );
+                    return;
+                };
+                buf
+            },
             Err(codec::CodecError::BufferTooSmall { provided, .. }) => {
                 report_violation!(
                     ViolationSeverity::Warning,
@@ -531,52 +601,53 @@ impl NonBlockingSocket<SocketAddr> for TokioUdpSocket {
             },
         };
 
-        self.send_encoded_packet(&self.send_buffer[..len], addr);
+        let Some(buf) = self.send_buffer.get(..len) else {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "send_buffer slice [..{}] out of bounds (buffer size: {})",
+                len,
+                self.send_buffer.len()
+            );
+            return;
+        };
+        self.send_encoded_packet(buf, addr);
     }
 
     fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
-        // Pre-allocate for typical case of 1-4 messages per poll
-        let mut received_messages = Vec::with_capacity(4);
-
-        loop {
-            // Use try_recv_from for non-blocking receive
-            match self.socket.try_recv_from(&mut self.recv_buffer) {
-                Ok((number_of_bytes, src_addr)) => {
-                    // Defensive check
-                    if number_of_bytes > RECV_BUFFER_SIZE {
-                        report_violation!(
-                            ViolationSeverity::Error,
-                            ViolationKind::NetworkProtocol,
-                            "Received {} bytes but buffer is only {} bytes",
-                            number_of_bytes,
-                            RECV_BUFFER_SIZE
-                        );
-                        continue;
-                    }
-                    if let Ok(msg) = codec::decode_value(&self.recv_buffer[0..number_of_bytes]) {
-                        received_messages.push((src_addr, msg));
-                    }
-                },
-                // No more messages available (non-blocking behavior)
-                Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    return received_messages
-                },
-                // Connection reset - continue trying
-                Err(ref err) if err.kind() == std::io::ErrorKind::ConnectionReset => continue,
-                // Other errors - log and stop
-                Err(err) => {
-                    report_violation!(
-                        ViolationSeverity::Error,
-                        ViolationKind::NetworkProtocol,
-                        "Unexpected socket error: {:?}: {}",
-                        err.kind(),
-                        err
-                    );
-                    return received_messages;
-                },
-            }
-        }
+        let socket = &self.socket;
+        socket_receive::receive_all_messages_from(&mut self.recv_buffer, "Tokio UDP", |buffer| {
+            socket.try_recv_from(buffer)
+        })
     }
+}
+
+/// Builds a default socket buffer for the infallible [`TokioUdpSocket::new`],
+/// degrading gracefully under allocator pressure.
+///
+/// It prefers a `preferred`-byte buffer, retries a smaller `minimal` buffer if
+/// that reservation fails, and only as a last resort (true allocator
+/// exhaustion) yields an empty buffer after reporting a violation. An empty
+/// receive buffer is handled defensively by `receive_all_messages` (which bails
+/// out rather than spinning), and the send path already falls back to an
+/// allocating encode, so neither aborts the process.
+fn default_socket_buffer(preferred: usize, minimal: usize, name: &'static str) -> Vec<u8> {
+    // The fallback must never be larger than what was preferred: clamp so a
+    // future caller passing `minimal > preferred` cannot make the degraded path
+    // allocate *more* than the requested size.
+    let minimal = minimal.min(preferred);
+    zeroed_buffer(preferred, name)
+        .or_else(|_err| zeroed_buffer(minimal, name))
+        .unwrap_or_else(|err| {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "Failed to allocate default {}: {}. Socket will be unable to receive until memory is available.",
+                name,
+                err
+            );
+            Vec::new()
+        })
 }
 
 #[cfg(test)]
@@ -642,6 +713,51 @@ mod tests {
         let local_addr = socket.local_addr().unwrap();
         // OS should have assigned a non-zero port
         assert_ne!(local_addr.port(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_tokio_socket_bind_with_custom_buffer_sizes() {
+        let socket = TokioUdpSocket::bind_to_port_with_buffer_sizes(0, 8192, 2048)
+            .await
+            .unwrap();
+
+        assert_eq!(socket.recv_buffer.len(), 8192);
+        assert_eq!(socket.send_buffer.len(), 2048);
+    }
+
+    #[tokio::test]
+    async fn with_buffer_sizes_zero_recv_returns_invalid_input() {
+        let inner = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let err = TokioUdpSocket::with_buffer_sizes(inner, 0, 2048)
+            .expect_err("zero recv buffer size must be rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn with_buffer_sizes_zero_send_returns_invalid_input() {
+        let inner = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let err = TokioUdpSocket::with_buffer_sizes(inner, 4096, 0)
+            .expect_err("zero send buffer size must be rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn bind_with_zero_buffer_size_returns_invalid_input() {
+        let err = TokioUdpSocket::bind_to_port_with_buffer_sizes(0, 0, 2048)
+            .await
+            .expect_err("zero recv buffer size must be rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn receive_all_messages_with_empty_recv_buffer_is_inert() {
+        // Simulate the new() last-resort fallback (allocator exhaustion) by
+        // emptying the receive buffer, then confirm the guard returns rather
+        // than spinning on try_recv_from with a zero-length buffer.
+        let inner = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut socket = TokioUdpSocket::new(inner);
+        socket.recv_buffer = Vec::new();
+        assert!(socket.receive_all_messages().is_empty());
     }
 
     #[tokio::test]

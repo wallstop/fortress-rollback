@@ -3,7 +3,11 @@
 //! This module provides [`SavedStates`] which manages a circular buffer of
 //! [`GameStateCell`]s for rollback functionality.
 
+use crate::error::allocation_failed;
+use crate::proof_vec::ProofVec;
+use crate::report_violation;
 use crate::sync_layer::GameStateCell;
+use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::{FortressError, Frame, IndexOutOfBounds, InternalErrorKind, InvalidFrameReason};
 
 /// Container for saved game states used during rollback.
@@ -14,22 +18,57 @@ use crate::{FortressError, Frame, IndexOutOfBounds, InternalErrorKind, InvalidFr
 /// It is not part of the stable public API.
 pub struct SavedStates<T> {
     /// The vector of game state cells.
-    pub states: Vec<GameStateCell<T>>,
+    ///
+    /// The element type ProofVec is a transparent alias to the public Vec in
+    /// every non-Kani build (and to the public InlineVec under Kani), so this
+    /// field exposes no private type.
+    pub states: ProofVec<GameStateCell<T>>,
 }
 
 impl<T> SavedStates<T> {
     /// Creates a new SavedStates container with the given capacity.
     #[must_use]
     pub fn new(max_pred: usize) -> Self {
+        match Self::try_new(max_pred) {
+            Ok(saved_states) => saved_states,
+            Err(error) => {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::FrameSync,
+                    "SavedStates allocation failed for max_prediction {}: {}. Falling back to a one-cell buffer.",
+                    max_pred,
+                    error
+                );
+                // One-cell fallback. In production `ProofVec` is `Vec` (use the
+                // `vec!` macro clippy expects); under Kani it is the stack-backed
+                // `InlineVec`, which has no `vec!` macro, so build it via `push`.
+                #[cfg(not(kani))]
+                let states = vec![GameStateCell::default()];
+                #[cfg(kani)]
+                let states = {
+                    let mut states = ProofVec::new();
+                    states.push(GameStateCell::default());
+                    states
+                };
+                Self { states }
+            },
+        }
+    }
+
+    /// Creates a new SavedStates container, returning an error if the backing
+    /// vector cannot be reserved.
+    pub(crate) fn try_new(max_pred: usize) -> Result<Self, FortressError> {
         // we need to store the current frame plus the number of max predictions, so that we can
         // roll back to the very first frame even when we have predicted as far ahead as we can.
-        let num_cells = max_pred + 1;
-        let mut states = Vec::with_capacity(num_cells);
+        let num_cells = max_pred
+            .checked_add(1)
+            .ok_or_else(|| allocation_failed("saved_states.states", usize::MAX))?;
+        let mut states = crate::error::try_with_capacity(num_cells, "saved_states.states")?;
         for _ in 0..num_cells {
             states.push(GameStateCell::default());
         }
 
-        Self { states }
+        Ok(Self { states })
     }
 
     /// Gets the cell for a given frame.
@@ -86,6 +125,24 @@ mod tests {
     fn new_with_large_max_prediction() {
         let saved_states: SavedStates<u8> = SavedStates::new(100);
         assert_eq!(saved_states.states.len(), 101);
+    }
+
+    #[test]
+    fn try_new_reports_allocation_failure_for_prediction_overflow() {
+        let err = match SavedStates::<u8>::try_new(usize::MAX) {
+            Ok(_) => panic!("usize::MAX prediction should fail before allocation"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            FortressError::InvalidRequestStructured {
+                kind: crate::InvalidRequestKind::AllocationFailed {
+                    context: "saved_states.states",
+                    requested_elements: u64::MAX,
+                }
+            }
+        ));
     }
 
     #[test]

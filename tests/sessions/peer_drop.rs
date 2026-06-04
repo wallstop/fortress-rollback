@@ -844,8 +844,10 @@ fn p2p_continue_without_late_packets_after_freeze_do_not_mutate_input() -> Resul
                 inp: LATE_PACKET_MARKER + i,
             },
         )?;
-        if let Ok(requests) = sess2.advance_frame() {
-            stub2.handle_requests(requests);
+        match sess2.advance_frame() {
+            Ok(requests) => stub2.handle_requests(requests),
+            Err(FortressError::NotSynchronized) => {},
+            Err(err) => panic!("unexpected dropped-peer advance_frame error: {err:?}"),
         }
 
         poll_with_advance(&mut sess1, &mut sess2, &clock, 3);

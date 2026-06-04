@@ -1,4 +1,4 @@
-use crate::error::{FortressError, InternalErrorKind, InvalidRequestKind};
+use crate::error::{allocation_failed, FortressError, InternalErrorKind, InvalidRequestKind};
 use crate::frame_info::PlayerInput;
 use crate::network::messages::ConnectionStatus;
 use crate::network::network_stats::NetworkStats;
@@ -159,13 +159,19 @@ impl<T: Config> P2PSession<T> {
         recording: bool,
         telemetry: Option<Arc<dyn SessionTelemetry>>,
         disconnect_behavior: DisconnectBehavior,
-    ) -> Self {
+    ) -> Result<Self, FortressError> {
         // local connection status
-        let local_connect_status = vec![ConnectionStatus::default(); num_players];
+        let mut local_connect_status = Vec::new();
+        local_connect_status
+            .try_reserve_exact(num_players)
+            .map_err(|_err| allocation_failed("p2p.local_connect_status", num_players))?;
+        for _ in 0..num_players {
+            local_connect_status.push(ConnectionStatus::default());
+        }
 
         // sync layer & set input delay
         let mut sync_layer =
-            SyncLayer::with_queue_length(num_players, max_prediction, queue_length);
+            SyncLayer::try_with_queue_length(num_players, max_prediction, queue_length)?;
         for (player_handle, player_type) in players.handles.iter() {
             if matches!(player_type, PlayerType::Local) {
                 // This should never fail during construction as player handles are validated
@@ -202,7 +208,7 @@ impl<T: Config> P2PSession<T> {
             save_mode
         };
 
-        Self {
+        Ok(Self {
             state,
             num_players,
             max_prediction,
@@ -228,7 +234,7 @@ impl<T: Config> P2PSession<T> {
             recording: recording.then(|| ReplayRecorder::new(num_players)),
             last_recorded_frame: Frame::NULL,
             disconnect_behavior,
-        }
+        })
     }
 
     /// Registers local input for a player for the current frame. This should be successfully called for every local player before calling [`advance_frame()`].
@@ -928,7 +934,9 @@ impl<T: Config> P2PSession<T> {
         self.state
     }
 
-    /// Returns all events that happened since last queried for events. If the number of stored events exceeds `MAX_EVENT_QUEUE_SIZE`, the oldest events will be discarded.
+    /// Returns all events that happened since last queried for events. If the
+    /// number of stored events exceeds the configured event queue size, the
+    /// oldest events will be discarded.
     #[must_use = "events should be handled to react to session state changes"]
     pub fn events(&mut self) -> EventDrain<'_, T> {
         EventDrain::from_drain(self.event_queue.drain(..))
@@ -1114,7 +1122,15 @@ impl<T: Config> P2PSession<T> {
                         recorder.record_frame(inputs, checksum);
                     },
                     None => {
-                        recorder.record_skipped_frame();
+                        if let Err(error) = recorder.record_skipped_frame() {
+                            report_violation!(
+                                ViolationSeverity::Error,
+                                ViolationKind::InternalError,
+                                "Failed to record skipped replay frame {}: {}",
+                                frame,
+                                error
+                            );
+                        }
                     },
                 }
                 self.last_recorded_frame = frame;
@@ -2380,11 +2396,7 @@ impl<T: Config> P2PSession<T> {
                     self.num_players,
                     self.next_spectator_frame
                 );
-                self.next_spectator_frame = safe_frame_add!(
-                    self.next_spectator_frame,
-                    1,
-                    "P2PSession::send_confirmed_inputs skip"
-                );
+                self.next_spectator_frame = self.next_spectator_frame.try_add(1)?;
                 continue;
             }
 
@@ -2412,11 +2424,7 @@ impl<T: Config> P2PSession<T> {
             }
 
             // onto the next frame
-            self.next_spectator_frame = safe_frame_add!(
-                self.next_spectator_frame,
-                1,
-                "P2PSession::send_confirmed_inputs next"
-            );
+            self.next_spectator_frame = self.next_spectator_frame.try_add(1)?;
         }
 
         Ok(())
@@ -2787,7 +2795,7 @@ impl<T: Config> P2PSession<T> {
                     .push_back(FortressEvent::SyncTimeout { addr, elapsed_ms });
             },
             // add the input and all associated information
-            Event::Input { input, player } => {
+            Event::Input { input, player, .. } => {
                 // input only comes from remote players, not spectators
                 if !player.is_valid_player_for(self.num_players) {
                     report_violation!(
@@ -3400,7 +3408,7 @@ mod tests {
         session
             .add_local_input(PlayerHandle::new(0), 42u8)
             .expect("Input failed");
-        let _ = session.advance_frame();
+        let _requests = session.advance_frame().expect("Advance failed");
         assert_eq!(session.current_frame(), Frame::new(1));
     }
 
@@ -3410,7 +3418,7 @@ mod tests {
         session
             .add_local_input(PlayerHandle::new(0), 42u8)
             .expect("Input failed");
-        let _ = session.advance_frame();
+        let _requests = session.advance_frame().expect("Advance failed");
         // Now trying to advance again without input should fail
         let result = session.advance_frame();
         assert!(result.is_err());
@@ -3842,7 +3850,7 @@ mod tests {
             session
                 .add_local_input(PlayerHandle::new(0), (i * 10) as u8)
                 .expect("Input failed");
-            let _ = session.advance_frame();
+            let _requests = session.advance_frame().expect("Advance failed");
         }
 
         // After advancing, confirmed_frame should be at least 0
@@ -3871,7 +3879,7 @@ mod tests {
             session
                 .add_local_input(PlayerHandle::new(0), i as u8)
                 .expect("Input failed");
-            let _ = session.advance_frame();
+            let _requests = session.advance_frame().expect("Advance failed");
         }
 
         let confirmed = session.confirmed_frame();
@@ -3918,7 +3926,7 @@ mod tests {
             session
                 .add_local_input(PlayerHandle::new(0), (i % 256) as u8)
                 .expect("Input failed");
-            let _ = session.advance_frame();
+            let _requests = session.advance_frame().expect("Advance failed");
         }
 
         // Frame 0 should have been discarded by now (we're past INPUT_QUEUE_LENGTH)
@@ -3988,7 +3996,7 @@ mod tests {
                 session
                     .add_local_input(PlayerHandle::new(0), (i % 256) as u8)
                     .expect("Input failed");
-                let _ = session.advance_frame();
+                let _requests = session.advance_frame().expect("Advance failed");
             }
 
             let result = session.confirmed_inputs_for_frame(Frame::new(tc.frame_to_query));

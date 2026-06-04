@@ -96,6 +96,19 @@ repos:
         language: python
         types: [rust]
 
+      - id: check-advance-frame-error-handling
+        name: check advance_frame error handling
+        entry: python scripts/hooks/check-advance-frame-error-handling.py
+        language: python
+        types: [rust]
+
+      - id: unbounded-alloc
+        name: check // alloc-bound and // reserve-in-loop justifications
+        entry: python scripts/hooks/check-unbounded-alloc.py
+        language: python
+        types: [rust]
+        files: '^src/.*\.rs$'
+
       - id: cargo-clippy
         name: cargo clippy
         entry: python scripts/build/run-cargo-clippy.py

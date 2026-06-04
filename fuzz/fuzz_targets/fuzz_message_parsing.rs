@@ -20,10 +20,10 @@ use fortress_rollback::Message;
 fuzz_target!(|data: &[u8]| {
     // Test codec deserialization - should never panic
     // Even malformed data should return Err, not panic
-    let _result: Result<Message, _> = codec::decode_value(data);
+    let _result: Result<(Message, usize), _> = codec::decode_message(data);
 
     // If deserialization succeeded, ensure re-serialization works
-    if let Ok(msg) = codec::decode_value::<Message>(data) {
+    if let Ok((msg, _consumed)) = codec::decode_message(data) {
         // Round-trip should work without panicking
         let _serialized = codec::encode(&msg);
     }

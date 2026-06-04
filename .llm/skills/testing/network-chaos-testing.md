@@ -6,29 +6,50 @@
 ## Quick Reference
 
 ```rust
-// CORRECT: Use auto-sync preset for reliable testing
-let scenario = NetworkScenario::asymmetric(
-    "good_vs_terrible",
-    NetworkProfile::wifi_good(),
-    NetworkProfile::terrible(),
-)
-.with_auto_sync_preset()
-.with_timeout(180);
+// CORRECT: correctness regressions use deterministic in-memory sockets and TestClock.
+let clock = TestClock::new();
+let (left_socket, right_socket, left_addr, right_addr) = create_channel_pair();
+let config = ProtocolConfig {
+    clock: Some(clock.as_protocol_clock()),
+    ..ProtocolConfig::deterministic(42)
+};
+let _ = (left_socket, right_socket, left_addr, right_addr, config);
+clock.advance(Duration::from_millis(150));
 
-// WRONG: High loss + burst without sync preset = flaky sync failures
-let scenario = NetworkScenario::asymmetric(
-    "good_vs_terrible",
-    NetworkProfile::wifi_good(),
-    NetworkProfile::terrible(),
-);  // Missing sync preset = ~60% sync failure rate
+// WRONG: real UDP chaos is not an acceptance proof for a correctness fix.
+// Keep this as smoke coverage only; do not hide required behavior behind retries.
+let result = retry_real_udp_chaos_case(case);
+assert_eq!(result.retry_count, 0, "acceptance paths must not depend on retries");
 ```
 
 **Key principles:**
-1. Sync handshake is the vulnerability -- most chaos test failures occur during initial sync
-2. Bidirectional chaos compounds -- both peers apply chaos to outgoing packets
-3. Use `with_auto_sync_preset()` -- let the framework calculate appropriate resilience
-4. Use explicit `SyncConfig` construction, not presets, for chaos tests
-5. Use `sync_timeout: None` -- let iteration budget be the only limit
+1. Correctness regressions use deterministic channel sockets plus `TestClock`
+2. Real UDP chaos tests are smoke coverage only, never the required acceptance gate
+3. Any acceptance path that uses retry helpers must assert `retry_count == 0`
+4. Sync handshake is the vulnerability -- most chaos smoke failures occur during initial sync
+5. Bidirectional chaos compounds -- both peers apply chaos to outgoing packets
+6. Use explicit `SyncConfig` construction, not presets, for chaos smoke tests
+7. Use `sync_timeout: None` -- let iteration budget be the only limit
+
+## Correctness Regression Policy
+
+Network correctness bugs must be reproduced with deterministic virtual time.
+Build the test around in-memory/channel sockets and inject `TestClock` through
+`ProtocolConfig::clock`, advancing time explicitly instead of relying on
+`thread::sleep`, OS scheduling, or live UDP timing. Deterministic tests should
+be the required CI gate for packet ordering, sync-state transitions, malformed
+input rejection, stream-delay boundaries, and spectator failover.
+
+Real UDP chaos tests are useful for smoke coverage and environment validation,
+but they are not proof of correctness. If a real UDP smoke test needs a retry
+helper to tolerate machine load or port timing, the test must still assert that
+acceptance did not consume a retry:
+
+```rust
+let result = run_with_retries(case);
+assert_eq!(result.retry_count, 0);
+assert!(result.success);
+```
 
 ## Compounding Effect of Bidirectional Loss
 

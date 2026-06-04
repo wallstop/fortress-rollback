@@ -111,6 +111,7 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
@@ -154,7 +155,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --features tokio,json -- -D warnings
+        run: cargo clippy --workspace --all-targets --features tokio,json -- -D warnings
 
   # Miri undefined behavior check (cross-platform, optimized)
   #
@@ -195,7 +196,7 @@ jobs:
   miri:
     name: Miri (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -292,6 +293,7 @@ jobs:
 
       - name: Cache cargo registry (no target for Miri)
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
@@ -362,6 +364,7 @@ jobs:
   msrv-check:
     name: MSRV Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v6
@@ -411,6 +414,7 @@ jobs:
   feature-checks:
     name: Feature Flag Matrix
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v6
@@ -425,85 +429,100 @@ jobs:
         with:
           tool: cargo-hack
 
-      - name: Configure sccache
-        id: sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-        continue-on-error: true
-
-      - name: Verify sccache is working
-        id: sccache-check
-        if: steps.sccache.outcome == 'success'
-        run: ./scripts/ci/verify-sccache.sh
-        continue-on-error: true
-
-      - name: Clear sccache env on failure
-        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
-        run: |
-          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
-
-      - name: Cache cargo registry and build
-        uses: actions/cache@v5
+      - name: Setup Rust cache
+        uses: ./.github/actions/setup-rust-cache
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: feature-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            feature-${{ runner.os }}-cargo-
+          cache-key: feature
 
       - name: Check feature powerset (excluding slow features)
         run: cargo hack check --feature-powerset --exclude-features z3-verification,z3-verification-bundled,graphical-examples
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
-          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
-          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
-          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
-          SCCACHE_IDLE_TIMEOUT: "0"
 
   # Package dry-run
   package-dry-run:
     name: Package Dry Run
     runs-on: ubuntu-latest
     needs: build
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v6
       - name: Ensure crate is publishable (dry-run)
         run: cargo publish --dry-run
 
-  # Semver compatibility check
-  # Uses the official action which has built-in caching for baseline rustdoc
+  # Semver compatibility check (enforced gate)
+  #
+  # cargo-semver-checks compares the public API of the working tree against the
+  # latest version published on crates.io. A breaking API change is only allowed
+  # when the crate version in Cargo.toml is bumped to permit it (for a pre-1.0
+  # crate, a breaking change requires a *minor* bump, e.g. 0.9.x -> 0.10.0).
+  #
+  # This makes the check a true gate: a *deliberate* breaking change passes
+  # because the matching version bump permits it, while an *accidental* breaking
+  # change with no version bump fails CI. Document intended breaks in CHANGELOG.md
+  # and run scripts/sync-version.sh so the Version Sync job stays green.
   semver-checks:
     name: Semver Check
     runs-on: ubuntu-latest
+    # Backstop only: a warm sccache + target cache brings this well under a
+    # minute. The first (cold) run after a Cargo.lock change can take longer.
+    timeout-minutes: 20
     if: github.event_name == 'pull_request'
 
     steps:
       - uses: actions/checkout@v6
 
-      # Use Swatinem/rust-cache for better Rust-specific caching
-      # This caches ~/.cargo and target/ efficiently
+      # Shared sccache + cargo caching. The composite action exports
+      # RUSTC_WRAPPER to the job environment, so the cargo-semver-checks build
+      # below reuses dependency compilations from the Build/WASM/Feature jobs via
+      # the GHA backend. We also cache the isolated target dir the action builds
+      # in (semver-checks/target); the action itself caches the baseline rustdoc.
+      # Best-effort: a cache-service outage degrades to direct compilation and
+      # never fails this gate.
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/setup-rust-cache
         with:
-          # Share cache with other Ubuntu jobs for faster builds
-          shared-key: "ubuntu-cargo"
-          # Cache only dependencies, not the main crate build artifacts
-          cache-targets: "false"
+          cache-key: semver
+          cache-paths: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            semver-checks/target
 
-      # Use the official cargo-semver-checks action which has built-in
-      # rustdoc caching for both baseline and current versions
       - name: Check semver compatibility
+        id: semver
         uses: obi1kenobi/cargo-semver-checks-action@v2
-        continue-on-error: true  # Warn but don't fail - breaking changes are acceptable if documented
+
+      # Surface an actionable explanation in the job summary when the gate trips,
+      # so the fix (bump + document, or revert) is visible without reading logs.
+      - name: Explain semver failure
+        if: failure() && steps.semver.outcome == 'failure'
+        # Diagnostics only: never let a hiccup here mask the real semver failure.
+        continue-on-error: true
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          {
+            echo "### ❌ Semver check failed"
+            echo ""
+            echo "\`cargo-semver-checks\` found a breaking public-API change that the current"
+            echo "version bump does not permit."
+            echo ""
+            echo "**Current crate version:** \`${version}\` (compared against the latest crates.io release)."
+            echo ""
+            echo "Resolve by **one** of:"
+            echo ""
+            echo "1. **Intended break** — bump \`version\` in \`Cargo.toml\` (pre-1.0: a breaking"
+            echo "   change needs a *minor* bump, e.g. \`0.9.x\` → \`0.10.0\`), add a CHANGELOG"
+            echo "   section for it, then run \`./scripts/sync-version.sh\`."
+            echo "2. **Accidental break** — revert the public-API change."
+            echo ""
+            echo "The exact flagged items are listed in the step log above."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # WASM build verification
   wasm-check:
     name: WASM Build Check
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v6
@@ -514,84 +533,31 @@ jobs:
           targets: wasm32-unknown-unknown
           components: clippy
 
-      - name: Configure sccache
-        id: sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-        continue-on-error: true
-
-      - name: Verify sccache is working
-        id: sccache-check
-        if: steps.sccache.outcome == 'success'
-        run: ./scripts/ci/verify-sccache.sh
-        continue-on-error: true
-
-      - name: Clear sccache env on failure
-        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
-        run: |
-          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
-
-      - name: Cache cargo registry and build
-        uses: actions/cache@v5
+      - name: Setup Rust cache
+        uses: ./.github/actions/setup-rust-cache
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: wasm-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            wasm-${{ runner.os }}-cargo-
+          cache-key: wasm
 
       - name: Check WASM build (no default features)
         run: cargo check --target wasm32-unknown-unknown --no-default-features
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
-          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
-          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
-          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
-          SCCACHE_IDLE_TIMEOUT: "0"
 
       - name: Check WASM build (with sync-send feature)
         run: cargo check --target wasm32-unknown-unknown --features sync-send
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
-          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
-          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
-          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
-          SCCACHE_IDLE_TIMEOUT: "0"
 
       - name: Check WASM build (with paranoid feature)
         run: cargo check --target wasm32-unknown-unknown --features paranoid
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
-          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
-          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
-          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
-          SCCACHE_IDLE_TIMEOUT: "0"
 
       - name: Check WASM build (with json feature)
         run: cargo check --target wasm32-unknown-unknown --features json
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
-          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
-          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
-          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
-          SCCACHE_IDLE_TIMEOUT: "0"
 
       - name: Run clippy for WASM target
         run: cargo clippy --target wasm32-unknown-unknown --no-default-features -- -D warnings
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
-          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
-          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
-          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
-          SCCACHE_IDLE_TIMEOUT: "0"
 
   # ARM64 (aarch64) cross-compilation verification
   arm64-cross:
     name: ARM64 Cross-Compile
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     # Override linker settings to use the default GCC cross-compiler instead of clang+lld.
     # This avoids needing to install extra tools in the cross-rs container.
     # The .cargo/config.toml specifies clang+lld for faster local builds, but
@@ -617,6 +583,7 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry

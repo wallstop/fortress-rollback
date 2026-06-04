@@ -1,0 +1,81 @@
+# Unified Rust build caching: sccache (compiler-level) + cargo registry/target.
+#
+# This composite action consolidates the sccache setup that was previously
+# duplicated across every heavy cargo job. It:
+#   1. Configures sccache (best-effort - a GitHub Actions Cache service outage
+#      must NEVER fail the build; it degrades to direct compilation).
+#   2. Verifies sccache can actually compile (catches outages that pass a
+#      version check but fail real builds), cross-platform via bash.
+#   3. Exports RUSTC_WRAPPER/SCCACHE_* to $GITHUB_ENV so every subsequent cargo
+#      step in the job is accelerated automatically - no per-step env blocks.
+#      This is the approach recommended by mozilla-actions/sccache-action.
+#   4. Caches the cargo registry/git and (optionally) the target directory.
+#
+# Sharing the sccache GHA backend across jobs means each job's dependency
+# compilations are reused, turning cold multi-minute builds into warm seconds.
+
+name: "Setup Rust cache"
+description: "Best-effort sccache plus cargo registry/target caching, shared across jobs."
+
+inputs:
+  cache-key:
+    description: "Prefix for the actions/cache key (e.g. build, wasm, feature, semver, kani)."
+    required: true
+  cache-paths:
+    description: "Newline-separated paths to cache. Defaults to the cargo registry, git, and target dir."
+    required: false
+    default: |
+      ~/.cargo/registry
+      ~/.cargo/git
+      target
+
+runs:
+  using: "composite"
+  steps:
+    - name: Configure sccache
+      id: sccache
+      uses: mozilla-actions/sccache-action@v0.0.10
+      continue-on-error: true
+
+    - name: Verify sccache is working
+      id: sccache-check
+      if: steps.sccache.outcome == 'success'
+      shell: bash
+      run: ./scripts/ci/verify-sccache.sh
+      continue-on-error: true
+
+    # If sccache is unavailable, the verify step is skipped (or writes
+    # working=false), so `steps.sccache-check.outputs.working` is not "true" and
+    # we clear the wrapper - cargo then compiles directly. sccache is purely an
+    # accelerator here; correctness never depends on it.
+    - name: Export sccache environment
+      shell: bash
+      run: |
+        if [ "${{ steps.sccache-check.outputs.working }}" = "true" ]; then
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "SCCACHE_GHA_ENABLED=true"
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
+            echo "SCCACHE_STARTUP_NOTIFY_TIMEOUT=60"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+          } >> "$GITHUB_ENV"
+          echo "sccache enabled for subsequent cargo steps"
+        else
+          # Clear any inherited wrapper so cargo falls back to direct compilation.
+          {
+            echo "RUSTC_WRAPPER="
+            echo "SCCACHE_GHA_ENABLED="
+          } >> "$GITHUB_ENV"
+          echo "sccache unavailable - using direct compilation"
+        fi
+
+    # Best-effort: a Cache-service outage must never fail the calling job, so
+    # cache restore/save errors are tolerated (the build just runs uncached).
+    - name: Cache cargo registry and build
+      uses: actions/cache@v5
+      continue-on-error: true
+      with:
+        path: ${{ inputs.cache-paths }}
+        key: ${{ inputs.cache-key }}-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ inputs.cache-key }}-${{ runner.os }}-cargo-

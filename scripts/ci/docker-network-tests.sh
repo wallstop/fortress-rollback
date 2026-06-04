@@ -113,7 +113,8 @@ run_test() {
 
     # Run the test
     cd "$PROJECT_ROOT"
-    local start_time=$(date +%s)
+    local start_time
+    start_time=$(date +%s)
 
     # Start containers in detached mode and capture logs
     # NOTE: We don't use --abort-on-container-exit because under poor network
@@ -171,7 +172,8 @@ run_test() {
     peer1_exit=$(docker inspect -f '{{.State.ExitCode}}' fortress-peer1 2>/dev/null || echo "1")
     peer2_exit=$(docker inspect -f '{{.State.ExitCode}}' fortress-peer2 2>/dev/null || echo "1")
 
-    local end_time=$(date +%s)
+    local end_time
+    end_time=$(date +%s)
     local duration=$((end_time - start_time))
 
     # Parse results from the log file
