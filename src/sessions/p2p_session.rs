@@ -59,9 +59,11 @@ const MIN_RECOMMENDATION: u32 = 3;
 #[cfg(test)]
 const DEFAULT_MAX_EVENT_QUEUE_SIZE: usize = 100;
 
-/// Maximum number of [`poll_remote_clients`](P2PSession::poll_remote_clients)
-/// calls a host will keep a single hot-join serve open (re-sending the cached
-/// snapshot each poll) before aborting it.
+/// Default for the hot-join serve timeout: the maximum number of
+/// [`poll_remote_clients`](P2PSession::poll_remote_clients) calls a host will
+/// keep a single hot-join serve open (re-sending the cached snapshot each poll)
+/// before aborting it. Override per session with
+/// [`SessionBuilder::with_hot_join_serve_timeout_polls`](crate::SessionBuilder::with_hot_join_serve_timeout_polls).
 ///
 /// While a serve is open the **solo host is paused** (see
 /// [`advance_frame`](P2PSession::advance_frame)), so this bounds how long an
@@ -78,10 +80,13 @@ const DEFAULT_MAX_EVENT_QUEUE_SIZE: usize = 100;
 /// (which it does automatically while `HotJoining`) — or a brand-new joiner
 /// connection — re-opens a serve and completes the join **in-session**.
 #[cfg(feature = "hot-join")]
-const HOT_JOIN_SERVE_TIMEOUT_POLLS: usize = 600;
+pub(crate) const DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS: usize = 600;
 
-/// Number of [`poll_remote_clients`](P2PSession::poll_remote_clients) calls the
-/// joiner keeps re-sending its `StateSnapshotAck` after applying the snapshot.
+/// Default for the hot-join ack-resend budget: the number of
+/// [`poll_remote_clients`](P2PSession::poll_remote_clients) calls the joiner
+/// keeps re-sending its `StateSnapshotAck` after applying the snapshot. Override
+/// per session with
+/// [`SessionBuilder::with_hot_join_ack_resends`](crate::SessionBuilder::with_hot_join_ack_resends).
 ///
 /// The joiner cannot directly observe that the host received its ack and
 /// reactivated the slot, so it re-acks for a bounded number of polls to
@@ -89,7 +94,7 @@ const HOT_JOIN_SERVE_TIMEOUT_POLLS: usize = 600;
 /// inputs for frames `>= F` (proof the host is past the activation frame and
 /// the join completed). Kept small and deterministic for tests.
 #[cfg(feature = "hot-join")]
-const HOT_JOIN_ACK_RESENDS: usize = 30;
+pub(crate) const DEFAULT_HOT_JOIN_ACK_RESENDS: usize = 30;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum DisconnectEventPolicy {
@@ -215,6 +220,14 @@ where
     /// Joiner-side state, present only on a session built via
     /// [`SessionBuilder::start_hot_join_session`](crate::SessionBuilder::start_hot_join_session).
     joiner: Option<JoinerState<T>>,
+    /// Host-side serve timeout (in polls). Defaults to
+    /// [`DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS`]; configurable via the builder.
+    /// Always `>= 1` (validated at the builder boundary).
+    serve_timeout_polls: usize,
+    /// Joiner-side ack-resend budget (in polls). Defaults to
+    /// [`DEFAULT_HOT_JOIN_ACK_RESENDS`]; configurable via the builder. May be 0
+    /// (the joiner acks exactly once, with no loss tolerance).
+    ack_resends: usize,
 }
 
 #[cfg(feature = "hot-join")]
@@ -225,6 +238,8 @@ impl<T: Config> Default for HotJoinState<T> {
             accept_hot_join: false,
             joining: BTreeMap::new(),
             joiner: None,
+            serve_timeout_polls: DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS,
+            ack_resends: DEFAULT_HOT_JOIN_ACK_RESENDS,
         }
     }
 }
@@ -251,8 +266,8 @@ where
     /// The snapshot captured once at `frame`, re-sent each poll (reliable
     /// retransmit). Cloned per send.
     snapshot: StateSnapshot,
-    /// Number of polls since the serve began; aborts at
-    /// [`HOT_JOIN_SERVE_TIMEOUT_POLLS`].
+    /// Number of polls since the serve began; aborts at the session's configured
+    /// serve timeout (default [`DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS`]).
     polls_since_serve: usize,
 }
 
@@ -294,7 +309,8 @@ where
     /// `StateSnapshotAck(F)` (ack-loss tolerance). Counts down each
     /// [`poll_remote_clients`](crate::P2PSession::poll_remote_clients); resends stop
     /// when it reaches zero or the joiner starts receiving host inputs for
-    /// frames `>= F`. See [`HOT_JOIN_ACK_RESENDS`].
+    /// frames `>= F`. Re-armed to the session's configured budget (default
+    /// [`DEFAULT_HOT_JOIN_ACK_RESENDS`]).
     ack_resends_remaining: usize,
 }
 
@@ -312,6 +328,12 @@ where
     /// Joiner-side state, present only for sessions built via
     /// `start_hot_join_session`.
     pub(crate) joiner: Option<JoinerStateInit<T>>,
+    /// Host-side serve timeout in polls (defaults to
+    /// [`DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS`]). Guaranteed `>= 1` by the builder.
+    pub(crate) serve_timeout_polls: usize,
+    /// Joiner-side ack-resend budget in polls (defaults to
+    /// [`DEFAULT_HOT_JOIN_ACK_RESENDS`]).
+    pub(crate) ack_resends: usize,
 }
 
 /// Construction-time joiner configuration. Mirrors [`JoinerState`] but holds
@@ -334,6 +356,8 @@ impl<T: Config> Default for HotJoinConfig<T> {
             reserved_slots: std::collections::BTreeSet::new(),
             accept_hot_join: false,
             joiner: None,
+            serve_timeout_polls: DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS,
+            ack_resends: DEFAULT_HOT_JOIN_ACK_RESENDS,
         }
     }
 }
@@ -484,6 +508,8 @@ impl<T: Config> P2PSession<T> {
                     applied_frame: None,
                     ack_resends_remaining: 0,
                 }),
+                serve_timeout_polls: hot_join.serve_timeout_polls,
+                ack_resends: hot_join.ack_resends,
             },
         })
     }
@@ -868,6 +894,36 @@ impl<T: Config> P2PSession<T> {
         }
     }
 
+    /// Aborts an in-flight hot-join serve for `handle`, performing **all**
+    /// teardown in one place so every abort path stays symmetric.
+    ///
+    /// Removing the serve from [`HotJoinState::joining`] is not enough: the
+    /// joiner endpoint's `pending_output` has been accumulating the host's inputs
+    /// since the pause began (the abandoned joiner never acked them, and a paused
+    /// host never trims them). Left behind, those stale inputs make the next
+    /// `send_input` see a full queue and raise an internal disconnect event on
+    /// *every* subsequent frame. Clearing them also leaves the endpoint able to
+    /// serve a fresh join cleanly (in-session retry). The joiner never needs these
+    /// pre-snapshot inputs — a retry loads a snapshot.
+    ///
+    /// The slot is **kept** in `reserved_slots` (it stays frozen/disconnected), so
+    /// the host resumes solo and a still-alive (or returning) joiner can re-open a
+    /// serve. This is the *abort* teardown only; the successful-join path
+    /// ([`poll_hot_join_host`](Self::poll_hot_join_host) Phase 3) deliberately does
+    /// **not** clear `pending_output` (the joiner needs those frames `>= F`).
+    ///
+    /// Returns `true` if a serve was actually open for `handle`.
+    #[cfg(feature = "hot-join")]
+    fn abort_hot_join_serve(&mut self, handle: PlayerHandle) -> bool {
+        let Some(serve) = self.hot_join.joining.remove(&handle) else {
+            return false;
+        };
+        if let Some(endpoint) = self.player_reg.remotes.get_mut(&serve.addr) {
+            endpoint.clear_pending_output();
+        }
+        true
+    }
+
     /// Host side of hot-join: an **ack-gated, pause-based** join transaction.
     ///
     /// Each call performs four phases (in order). While any serve is open
@@ -886,7 +942,8 @@ impl<T: Config> P2PSession<T> {
     ///    when it matches the cached `F`, NOW reactivate the slot, mark it
     ///    connected with `last_frame = F - 1`, drop it from both `joining` and
     ///    `reserved_slots`, and emit [`FortressEvent::PeerJoined`].
-    /// 4. **Timeout.** A serve open longer than [`HOT_JOIN_SERVE_TIMEOUT_POLLS`]
+    /// 4. **Timeout.** A serve open longer than the configured serve timeout
+    ///    (default [`DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS`])
     ///    is aborted: removed from `joining` but KEPT in `reserved_slots` (slot
     ///    stays frozen/disconnected, host resumes solo, joiner may retry).
     #[cfg(feature = "hot-join")]
@@ -895,8 +952,28 @@ impl<T: Config> P2PSession<T> {
         // releases the per-endpoint borrow so we can touch the sync layer below.
         let mut join_requests: Vec<(T::Address, usize)> = Vec::new();
         for endpoint in self.player_reg.remotes.values_mut() {
-            if let Some(requested) = endpoint.take_pending_join_request() {
+            let Some(requested) = endpoint.take_pending_join_request() else {
+                continue;
+            };
+            // Authorization: only the endpoint that OWNS the requested handle may
+            // solicit its snapshot. `requested` is peer-controlled, so without this
+            // any connected endpoint could request another endpoint's reserved
+            // slot and be served its snapshot (and have the wrong address paired to
+            // that slot on reactivation). `handles()` is the immutable build-time
+            // binding established by `add_reserved_player(addr, handle)`, so the
+            // owning endpoint's `handles()` contains the reserved handle and no
+            // other endpoint's does. (The reserved-and-unjoined check below is a
+            // separate gate; this one is ownership.)
+            if endpoint.handles().contains(&PlayerHandle::new(requested)) {
                 join_requests.push((endpoint.peer_addr(), requested));
+            } else {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "Ignoring hot-join request for handle {} from endpoint {:?} that does not own it",
+                    requested,
+                    endpoint.peer_addr()
+                );
             }
         }
 
@@ -957,14 +1034,19 @@ impl<T: Config> P2PSession<T> {
                 },
             };
 
-            // Cache the serve and send the snapshot ONCE now. The slot is NOT
-            // reactivated yet: it stays frozen/disconnected until the ack arrives
-            // (Phase 3). `handle` stays in `reserved_slots` AND is added to
-            // `joining`, which pauses the host until the join resolves.
-            let Some(endpoint) = self.player_reg.remotes.get_mut(&addr) else {
+            // The joiner endpoint must still exist to receive the snapshot that
+            // Phase 2 sends below this same poll.
+            if !self.player_reg.remotes.contains_key(&addr) {
                 continue;
-            };
-            endpoint.send_state_snapshot(snapshot.clone());
+            }
+            // Cache the serve. The actual send is Phase 2's job — it is the SOLE
+            // snapshot-send site, so the serve we open here is transmitted exactly
+            // once this poll (Phase 2 runs immediately below) and once per poll
+            // thereafter. Sending here too would double the first poll's traffic
+            // and desync the `polls_since_serve`/timeout accounting. The slot is
+            // NOT reactivated yet: it stays frozen/disconnected until the ack
+            // arrives (Phase 3). `handle` stays in `reserved_slots` AND is added to
+            // `joining`, which pauses the host until the join resolves.
             self.hot_join.joining.insert(
                 handle,
                 JoinServe {
@@ -979,9 +1061,13 @@ impl<T: Config> P2PSession<T> {
                 .push_back(FortressEvent::JoinRequested { handle, addr });
         }
 
-        // Phase 2: reliable retransmit. Re-send the cached snapshot for every open
-        // serve and advance its poll counter. The host is paused, so the cached
-        // frame and state are stable — we deliberately do NOT re-capture.
+        // Phase 2: the SOLE snapshot-send site (reliable retransmit). Send the
+        // cached snapshot for every open serve — including one just opened in
+        // Phase 1 — exactly once, and advance its poll counter. Because this is the
+        // only place a snapshot is sent, each open serve emits exactly one snapshot
+        // per poll, so `polls_since_serve` counts sends 1:1 and the Phase-4 timeout
+        // accounting is exact. The host is paused, so the cached frame and state
+        // are stable — we deliberately do NOT re-capture.
         for serve in self.hot_join.joining.values_mut() {
             serve.polls_since_serve = serve.polls_since_serve.saturating_add(1);
             if let Some(endpoint) = self.player_reg.remotes.get_mut(&serve.addr) {
@@ -1069,33 +1155,30 @@ impl<T: Config> P2PSession<T> {
         // `joining` empties. Because the slot stays reserved, a still-alive joiner
         // that later sends a fresh `JoinRequest` re-opens a serve (in-session
         // retry); see the joiner-endpoint cleanup below for why that works.
-        let timed_out: Vec<(PlayerHandle, T::Address)> = self
+        // `polls_since_serve` is incremented once per poll in Phase 2 and starts at
+        // 0, so after the Phase-2 send of poll number N it equals N. Aborting at
+        // `>= serve_timeout_polls` therefore keeps the serve open for *exactly*
+        // `serve_timeout_polls` polls (the documented maximum) before tearing it
+        // down, rather than one poll longer.
+        let serve_timeout_polls = self.hot_join.serve_timeout_polls;
+        let timed_out: Vec<PlayerHandle> = self
             .hot_join
             .joining
             .iter()
-            .filter(|(_, serve)| serve.polls_since_serve > HOT_JOIN_SERVE_TIMEOUT_POLLS)
-            .map(|(&handle, serve)| (handle, serve.addr.clone()))
+            .filter(|(_, serve)| serve.polls_since_serve >= serve_timeout_polls)
+            .map(|(&handle, _)| handle)
             .collect();
-        for (handle, addr) in timed_out {
+        for handle in timed_out {
             report_violation!(
                 ViolationSeverity::Warning,
                 ViolationKind::NetworkProtocol,
                 "Hot-join serve for slot {} timed out after {} polls; aborting (slot stays reserved/frozen, host resumes solo)",
                 handle,
-                HOT_JOIN_SERVE_TIMEOUT_POLLS
+                serve_timeout_polls
             );
-            self.hot_join.joining.remove(&handle);
-            // Drop the host inputs that piled up in this endpoint's pending_output
-            // before the pause (the abandoned joiner never acked them). Without
-            // this, `send_input` would see a full queue and emit
-            // `Event::Disconnected` on EVERY subsequent frame (caught by the
-            // reserved-endpoint exemption, but a permanent, wasteful storm). The
-            // joiner never needs these pre-snapshot inputs — a retry loads a
-            // snapshot — and clearing them lets the same endpoint serve a fresh
-            // join cleanly (in-session retry).
-            if let Some(endpoint) = self.player_reg.remotes.get_mut(&addr) {
-                endpoint.clear_pending_output();
-            }
+            // Single teardown path — removes the serve AND clears the joiner
+            // endpoint's stale pending_output. See `abort_hot_join_serve`.
+            self.abort_hot_join_serve(handle);
         }
     }
 
@@ -1136,12 +1219,24 @@ impl<T: Config> P2PSession<T> {
             .get_mut(&host_addr)
             .and_then(UdpProtocol::take_received_snapshot);
 
-        // Bounded ack-resend: after applying, keep re-acking the activation frame
-        // each poll until the host clearly received it (we observe host inputs for
-        // frames >= F, i.e. confirmed_frame >= F) or the resend budget is spent.
-        // This tolerates a lost ack without re-applying the snapshot. Runs whether
-        // or not a (duplicate) snapshot arrived this poll.
+        // Once the snapshot is applied (`applied_frame` is `Some`, set in lockstep
+        // with the transition to `Running`), this block is the SOLE ack-send site
+        // and the function returns here without ever re-applying — a duplicate
+        // snapshot is idempotently dropped. Keeping a single send site makes a
+        // same-poll double-ack structurally impossible:
+        //
+        // - A (duplicate) snapshot arriving here proves the host has not yet seen
+        //   our ack, so it re-arms the bounded resend budget.
+        // - The bounded resend then sends at most ONE ack this poll, stopping once
+        //   the host clearly received it (we observe host inputs for frames >= F,
+        //   i.e. confirmed_frame >= F) or the resend budget is spent.
         if let Some(frame) = applied_frame {
+            if snapshot.is_some() {
+                let ack_resends = self.hot_join.ack_resends;
+                if let Some(joiner) = self.hot_join.joiner.as_mut() {
+                    joiner.ack_resends_remaining = ack_resends;
+                }
+            }
             let host_progressed = self.confirmed_frame() >= frame;
             let mut stop = host_progressed;
             if let Some(joiner) = self.hot_join.joiner.as_mut() {
@@ -1156,26 +1251,13 @@ impl<T: Config> P2PSession<T> {
                     endpoint.send_state_snapshot_ack(frame);
                 }
             }
+            return;
         }
 
+        // Not yet applied (still `HotJoining`): a snapshot is required to proceed.
         let Some(snapshot) = snapshot else {
             return;
         };
-
-        // Idempotent apply: if we already applied (now Running), just re-ack the
-        // already-applied frame and drop this duplicate. Re-arm the resend budget
-        // so a host still waiting for an ack keeps getting one.
-        if self.state != SessionState::HotJoining {
-            if let Some(frame) = applied_frame {
-                if let Some(endpoint) = self.player_reg.remotes.get_mut(&host_addr) {
-                    endpoint.send_state_snapshot_ack(frame);
-                }
-                if let Some(joiner) = self.hot_join.joiner.as_mut() {
-                    joiner.ack_resends_remaining = HOT_JOIN_ACK_RESENDS;
-                }
-            }
-            return;
-        }
 
         let activation_frame = snapshot.frame;
         let load = match crate::sessions::hot_join::apply_snapshot(
@@ -1269,10 +1351,11 @@ impl<T: Config> P2PSession<T> {
         // next advance_frame (the user restores the received state BEFORE any
         // AdvanceFrame), record the applied frame + arm the bounded ack-resend,
         // then go Running.
+        let ack_resends = self.hot_join.ack_resends;
         if let Some(joiner) = self.hot_join.joiner.as_mut() {
             joiner.pending_load = Some(load);
             joiner.applied_frame = Some(activation_frame);
-            joiner.ack_resends_remaining = HOT_JOIN_ACK_RESENDS;
+            joiner.ack_resends_remaining = ack_resends;
         }
         self.state = SessionState::Running;
     }
@@ -3471,8 +3554,15 @@ impl<T: Config> P2PSession<T> {
                         .iter()
                         .all(|handle| self.hot_join.reserved_slots.contains(handle))
                 {
+                    // Abort any in-flight serve for these handles via the single
+                    // teardown path, which also clears the endpoint's accumulated
+                    // `pending_output`. Without that clear, a host that resumes
+                    // serving this slot would see a full `pending_output` on every
+                    // `send_input` and raise an internal disconnect on every frame
+                    // (the same storm the Phase-4 timeout guards against). See
+                    // `abort_hot_join_serve`.
                     for handle in player_handles.iter() {
-                        self.hot_join.joining.remove(handle);
+                        self.abort_hot_join_serve(*handle);
                     }
                     return;
                 }
@@ -5176,6 +5266,89 @@ mod tests {
         assert!(
             matches!(result, Err(FortressError::NotSynchronized)),
             "expected NotSynchronized after fail-closed",
+        );
+    }
+
+    /// Advances the host one frame and persists the emitted save cell so
+    /// `last_saved_frame` becomes valid (a prerequisite for serving a snapshot).
+    #[cfg(feature = "hot-join")]
+    fn advance_host_and_save(host: &mut P2PSession<TestConfig>) {
+        host.add_local_input(PlayerHandle::new(0), 0u8).unwrap();
+        let requests = host.advance_frame().unwrap();
+        for request in &*requests {
+            if let FortressRequest::SaveGameState { cell, frame } = request {
+                cell.save(*frame, Some(0u8), Some(0u128));
+            }
+        }
+    }
+
+    /// The host-side join-request authorization gate must serve a reserved slot
+    /// only to the endpoint that actually owns the requested handle. A
+    /// `JoinRequest` is peer-controlled, so an endpoint requesting a reserved
+    /// handle bound to a *different* endpoint must be rejected, never served the
+    /// other slot's snapshot — while the legitimate owner is unaffected.
+    ///
+    /// Pinned by serve-opening: with a saved state available, the owning endpoint
+    /// requesting its own reserved handle DOES open a serve, but the SAME endpoint
+    /// requesting a handle it does not own does NOT. Without the gate the spoofed
+    /// request would open a serve too (the handle is reserved), so this is
+    /// non-vacuous.
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn poll_hot_join_host_rejects_join_request_from_non_owning_endpoint() {
+        // local 0; reserved 1 @ addr_a; reserved 2 @ addr_b. Two distinct remote
+        // endpoints, each the sole owner of one reserved handle.
+        let addr_a = test_addr(9101);
+        let addr_b = test_addr(9102);
+        let mut host = SessionBuilder::<TestConfig>::new()
+            .with_num_players(3)
+            .unwrap()
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .unwrap()
+            .add_reserved_player(addr_a, PlayerHandle::new(1))
+            .unwrap()
+            .add_reserved_player(addr_b, PlayerHandle::new(2))
+            .unwrap()
+            .start_p2p_session(DummySocket)
+            .unwrap();
+
+        // Reach Running (reserved endpoints are skipped by sync) and advance a
+        // couple of frames so the host has a saved state it could serve.
+        host.poll_remote_clients();
+        assert_eq!(host.current_state(), SessionState::Running);
+        advance_host_and_save(&mut host);
+        advance_host_and_save(&mut host);
+        assert!(!host.sync_layer.last_saved_frame().is_null());
+
+        // addr_b owns handle 2, NOT handle 1. Stage a request from it for handle 1
+        // — the cross-endpoint request the gate must reject.
+        host.player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("addr_b endpoint exists")
+            .set_pending_join_request_for_test(1);
+        host.poll_hot_join();
+        assert!(
+            !host.hot_join.joining.contains_key(&PlayerHandle::new(1)),
+            "a join request from a non-owning endpoint must not open a serve"
+        );
+
+        // Positive control: the SAME endpoint requesting the slot it DOES own
+        // (handle 2) passes the gate and opens a serve — proving the saved state
+        // is servable and only the ownership mismatch blocked handle 1.
+        host.player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("addr_b endpoint exists")
+            .set_pending_join_request_for_test(2);
+        host.poll_hot_join();
+        assert!(
+            host.hot_join.joining.contains_key(&PlayerHandle::new(2)),
+            "an endpoint requesting the reserved slot it owns must open a serve"
+        );
+        assert!(
+            !host.hot_join.joining.contains_key(&PlayerHandle::new(1)),
+            "the spoofed handle 1 must never be served"
         );
     }
 }

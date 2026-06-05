@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   peers' delta-compressed input streams are never disturbed.
   - `SessionBuilder::with_hot_join(bool)`, `SessionBuilder::add_reserved_player(addr, handle)` (host side),
     and `SessionBuilder::start_hot_join_session(socket, host_addr)` (joiner side).
+  - `SessionBuilder::with_hot_join_serve_timeout_polls(polls)` (host-side maximum polls a serve stays open
+    before aborting; rejects `0`) and `SessionBuilder::with_hot_join_ack_resends(resends)` (joiner-side
+    ack-resend budget) tune the handshake's loss/latency envelope; both default to sensible values.
   - `SessionState::HotJoining`; `FortressEvent::JoinRequested { handle, addr }` and
     `FortressEvent::PeerJoined { handle, addr }`; `InvalidRequestKind::PlayerCountMismatch { expected, actual }`.
   - Under `hot-join`, `Config::State` additionally requires `Serialize + DeserializeOwned` (for snapshot

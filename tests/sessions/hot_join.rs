@@ -27,11 +27,11 @@ use fortress_rollback::{
     SessionBuilder, SessionState,
 };
 
-/// Local mirror of the crate-private `HOT_JOIN_SERVE_TIMEOUT_POLLS` constant in
-/// `src/sessions/p2p_session.rs`. The Phase-4 serve-timeout tests size their poll
-/// budgets as multiples of this; if the production constant changes, update this
-/// to match (the tests assert behavior, not the exact value, so a small drift
-/// only over-/under-drives the loop).
+/// Local mirror of the crate-private `DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS`
+/// constant in `src/sessions/p2p_session.rs`. The Phase-4 serve-timeout tests
+/// size their poll budgets as multiples of this; if the production default
+/// changes, update this to match (the tests assert behavior, not the exact
+/// value, so a small drift only over-/under-drives the loop).
 const HOT_JOIN_SERVE_TIMEOUT_POLLS_TEST: usize = 600;
 
 /// Helper: creates a `ProtocolConfig` with the given test clock.
@@ -53,6 +53,62 @@ fn is_state_snapshot(msg: &Message) -> bool {
     match serde_json::to_string(msg) {
         Ok(json) => json.contains("StateSnapshot\":") && !json.contains("StateSnapshotAck\":"),
         Err(_) => false,
+    }
+}
+
+/// Returns `true` if `msg` is a hot-join `StateSnapshotAck` message. Mirror of
+/// [`is_state_snapshot`] for the ack body (used to count acks a joiner emits).
+fn is_state_snapshot_ack(msg: &Message) -> bool {
+    match serde_json::to_string(msg) {
+        Ok(json) => json.contains("StateSnapshotAck\":"),
+        Err(_) => false,
+    }
+}
+
+/// A deterministic [`NonBlockingSocket`] wrapper that COUNTS the hot-join
+/// `StateSnapshot` and `StateSnapshotAck` messages its owner *sends* (delegating
+/// the actual transport to the inner [`ChannelSocket`]) and, optionally, drops
+/// every outgoing `StateSnapshot` so a join never completes.
+///
+/// Used to pin the "exactly one send per poll" fixes: by snapshotting the
+/// counters around each `poll_remote_clients` call a test can assert that a host
+/// sends at most one snapshot per poll, and a joiner at most one ack per poll,
+/// even when duplicate snapshots are arriving.
+struct CountingSocket {
+    inner: crate::common::ChannelSocket,
+    /// Count of `StateSnapshot` messages this socket has sent.
+    snapshots_sent: std::rc::Rc<std::cell::Cell<usize>>,
+    /// Count of `StateSnapshotAck` messages this socket has sent.
+    acks_sent: std::rc::Rc<std::cell::Cell<usize>>,
+    /// When `true`, every outgoing `StateSnapshot` is silently dropped (the
+    /// counter still increments, recording the *attempt*). Lets a host-side test
+    /// keep a serve from ever completing while still counting per-poll sends.
+    drop_outgoing_snapshots: bool,
+    /// When `true`, every outgoing `StateSnapshotAck` is silently dropped (the
+    /// counter still increments). Lets a joiner-side test keep the host's serve
+    /// open (no ack ever lands) so the joiner keeps receiving duplicate snapshots
+    /// and re-acking, while the per-poll ack count is still measured.
+    drop_outgoing_acks: bool,
+}
+
+impl NonBlockingSocket<std::net::SocketAddr> for CountingSocket {
+    fn send_to(&mut self, msg: &Message, addr: &std::net::SocketAddr) {
+        if is_state_snapshot(msg) {
+            self.snapshots_sent.set(self.snapshots_sent.get() + 1);
+            if self.drop_outgoing_snapshots {
+                return;
+            }
+        } else if is_state_snapshot_ack(msg) {
+            self.acks_sent.set(self.acks_sent.get() + 1);
+            if self.drop_outgoing_acks {
+                return;
+            }
+        }
+        self.inner.send_to(msg, addr);
+    }
+
+    fn receive_all_messages(&mut self) -> Vec<(std::net::SocketAddr, Message)> {
+        self.inner.receive_all_messages()
     }
 }
 
@@ -1803,6 +1859,415 @@ fn hot_join_in_session_retry_after_phase4_timeout_completes() -> Result<(), Fort
     assert!(
         compared >= 3,
         "expected at least 3 overlapping confirmed frames after retry; got {compared}"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Regression: single snapshot send per host poll (host-side send dedup)
+// ============================================================================
+
+/// While a serve is open the host must send **at most one** `StateSnapshot` per
+/// `poll_remote_clients` call. A prior version sent the snapshot once when
+/// opening the serve (Phase 1) and then re-sent it again in Phase 2 of the same
+/// poll, doubling the first poll's snapshot traffic and desyncing the
+/// `polls_since_serve` timeout accounting. Phase 2 is now the sole send site, so
+/// each open serve emits exactly one snapshot per poll.
+#[test]
+fn hot_join_host_sends_at_most_one_snapshot_per_poll() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (host_socket, joiner_socket, host_addr, joiner_addr) = crate::common::create_channel_pair();
+
+    let snapshots_sent = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    // Drop the host's outgoing snapshots so the joiner never acks: the serve
+    // stays open for the whole run and we observe many consecutive serving polls,
+    // each of which must send exactly one snapshot.
+    let host_socket = CountingSocket {
+        inner: host_socket,
+        snapshots_sent: std::rc::Rc::clone(&snapshots_sent),
+        acks_sent: std::rc::Rc::new(std::cell::Cell::new(0)),
+        drop_outgoing_snapshots: true,
+        drop_outgoing_acks: false,
+    };
+
+    let mut host = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .with_hot_join(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_reserved_player(joiner_addr, PlayerHandle::new(1))?
+        .start_p2p_session(host_socket)?;
+
+    // Advance solo a few frames so the host has a saved state to serve.
+    let mut host_stub = GameStub::new();
+    for _ in 0..5 {
+        host.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        advance_session(&mut host, &mut host_stub, PlayerHandle::new(0), 1)?;
+    }
+    let _ = drain_events(&mut host);
+
+    let mut joiner = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .add_player(PlayerType::Remote(host_addr), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_hot_join_session(joiner_socket, host_addr)?;
+
+    let mut serving_polls = 0_usize;
+    for _ in 0..40 {
+        let before = snapshots_sent.get();
+        host.poll_remote_clients();
+        let delta = snapshots_sent.get() - before;
+        assert!(
+            delta <= 1,
+            "host must send at most one snapshot per poll; sent {delta} this poll"
+        );
+        if delta == 1 {
+            serving_polls += 1;
+        }
+        // Host is paused while the serve is open; advancing is a no-op but kept
+        // for realism. (Solo advance only progresses once the serve closes.)
+        if host.current_state() == SessionState::Running {
+            let _ = advance_session(&mut host, &mut host_stub, PlayerHandle::new(0), 1);
+        }
+        joiner.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+
+    // Non-vacuity: the serve really did stay open and send across many polls.
+    assert!(
+        serving_polls >= 10,
+        "expected many serving polls (each sending one snapshot); got {serving_polls}"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Regression: single ack send per joiner poll (joiner-side send dedup)
+// ============================================================================
+
+/// After applying the snapshot the joiner must send **at most one**
+/// `StateSnapshotAck` per `poll_remote_clients` call, even while duplicate
+/// snapshots keep arriving. A prior version could send two acks on such a poll
+/// (the bounded resend AND the duplicate-snapshot handler both fired); the ack
+/// path is now a single send site. Also exercises
+/// [`SessionBuilder::with_hot_join_ack_resends`].
+#[test]
+fn hot_join_joiner_sends_at_most_one_ack_per_poll() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (host_socket, joiner_socket, host_addr, joiner_addr) = crate::common::create_channel_pair();
+
+    let acks_sent = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    // Drop the joiner's outgoing acks so the host never completes the join and
+    // keeps re-sending the snapshot every poll. The joiner therefore receives a
+    // duplicate snapshot on every poll while Running — the exact condition that
+    // used to trigger a double ack.
+    let joiner_socket = CountingSocket {
+        inner: joiner_socket,
+        snapshots_sent: std::rc::Rc::new(std::cell::Cell::new(0)),
+        acks_sent: std::rc::Rc::clone(&acks_sent),
+        drop_outgoing_snapshots: false,
+        drop_outgoing_acks: true,
+    };
+
+    let mut host = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .with_hot_join(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_reserved_player(joiner_addr, PlayerHandle::new(1))?
+        .start_p2p_session(host_socket)?;
+
+    let mut host_stub = GameStub::new();
+    for _ in 0..5 {
+        host.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        advance_session(&mut host, &mut host_stub, PlayerHandle::new(0), 1)?;
+    }
+    let _ = drain_events(&mut host);
+
+    // Long ack-resend budget so the joiner keeps acking for the whole run.
+    let mut joiner = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .with_hot_join_ack_resends(50)
+        .add_player(PlayerType::Remote(host_addr), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_hot_join_session(joiner_socket, host_addr)?;
+
+    let mut max_acks_per_poll = 0_usize;
+    let mut polls_with_ack = 0_usize;
+    for _ in 0..50 {
+        host.poll_remote_clients();
+        if host.current_state() == SessionState::Running {
+            let _ = advance_session(&mut host, &mut host_stub, PlayerHandle::new(0), 1);
+        }
+        let before = acks_sent.get();
+        joiner.poll_remote_clients();
+        let delta = acks_sent.get() - before;
+        assert!(
+            delta <= 1,
+            "joiner must send at most one ack per poll; sent {delta} this poll"
+        );
+        max_acks_per_poll = max_acks_per_poll.max(delta);
+        if delta == 1 {
+            polls_with_ack += 1;
+        }
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+
+    // Non-vacuity: the joiner really did re-ack across many polls (so a
+    // double-ack would have been observed had it regressed).
+    assert!(
+        polls_with_ack >= 5,
+        "expected the joiner to re-ack across several polls; got {polls_with_ack}"
+    );
+    assert_eq!(
+        max_acks_per_poll, 1,
+        "the joiner must have acked (max per poll == 1), never zero-throughout nor doubled"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Regression: serve-timeout is configurable and aborts at EXACTLY N polls
+// ============================================================================
+
+/// A serve timeout of `0` is nonsensical (the serve would be aborted before any
+/// joiner could complete the handshake) and must be rejected at the builder
+/// boundary.
+#[test]
+fn with_hot_join_serve_timeout_polls_zero_is_rejected() -> Result<(), FortressError> {
+    let result = SessionBuilder::<StubConfig>::new()
+        .with_num_players(2)?
+        .with_hot_join_serve_timeout_polls(0);
+    assert!(
+        matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: fortress_rollback::InvalidRequestKind::NotSupported { .. }
+            })
+        ),
+        "a zero serve timeout must be rejected"
+    );
+    Ok(())
+}
+
+/// With a custom (small) serve timeout of `N`, each in-flight serve must stay
+/// open for **exactly** `N` polls — sending exactly `N` snapshots — before the
+/// host aborts it and (because the slot stays reserved) re-opens a fresh serve
+/// on the next `JoinRequest`. This pins both the configurability of the timeout
+/// and the inclusive `>= N` boundary (a prior `> N` kept the serve open one poll
+/// — one extra snapshot — too long).
+#[test]
+fn hot_join_custom_serve_timeout_aborts_at_exactly_configured_polls() -> Result<(), FortressError> {
+    const N: usize = 4;
+
+    let clock = TestClock::new();
+    let (host_socket, joiner_socket, host_addr, joiner_addr) = crate::common::create_channel_pair();
+
+    let snapshots_sent = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    // Drop the host's outgoing snapshots so the joiner never acks: every serve
+    // runs to its timeout, then the still-HotJoining joiner's next JoinRequest
+    // re-opens a fresh serve. We count snapshots between consecutive
+    // JoinRequested events.
+    let host_socket = CountingSocket {
+        inner: host_socket,
+        snapshots_sent: std::rc::Rc::clone(&snapshots_sent),
+        acks_sent: std::rc::Rc::new(std::cell::Cell::new(0)),
+        drop_outgoing_snapshots: true,
+        drop_outgoing_acks: false,
+    };
+
+    let mut host = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .with_hot_join(true)
+        .with_hot_join_serve_timeout_polls(N)?
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_reserved_player(joiner_addr, PlayerHandle::new(1))?
+        .start_p2p_session(host_socket)?;
+
+    let mut host_stub = GameStub::new();
+    for _ in 0..5 {
+        host.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        advance_session(&mut host, &mut host_stub, PlayerHandle::new(0), 1)?;
+    }
+    let _ = drain_events(&mut host);
+
+    let mut joiner = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .add_player(PlayerType::Remote(host_addr), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_hot_join_session(joiner_socket, host_addr)?;
+
+    // Snapshot count recorded at each JoinRequested event; the gap between
+    // consecutive records is the number of snapshots one serve sent.
+    let mut last_at_join_req: Option<usize> = None;
+    let mut per_serve_snapshots: Vec<usize> = Vec::new();
+    for _ in 0..(N * 10) {
+        host.poll_remote_clients();
+        for e in drain_events(&mut host) {
+            if matches!(e, FortressEvent::JoinRequested { .. }) {
+                let now = snapshots_sent.get();
+                if let Some(prev) = last_at_join_req {
+                    per_serve_snapshots.push(now - prev);
+                }
+                last_at_join_req = Some(now);
+            }
+        }
+        if host.current_state() == SessionState::Running {
+            let _ = advance_session(&mut host, &mut host_stub, PlayerHandle::new(0), 1);
+        }
+        joiner.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+
+    assert!(
+        per_serve_snapshots.len() >= 3,
+        "expected several serve cycles to measure; got {per_serve_snapshots:?}"
+    );
+    for count in &per_serve_snapshots {
+        assert_eq!(
+            *count, N,
+            "each serve must send exactly N={N} snapshots before the timeout aborts it; got {per_serve_snapshots:?}"
+        );
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Regression: reserved-slot disconnect during an in-flight serve (Class A)
+// ============================================================================
+
+/// If the reserved-slot endpoint disconnects (its protocol disconnect-timeout
+/// fires) **while a serve is in flight**, the host must abort that serve through
+/// the single teardown path — which keeps the slot reserved/frozen and clears
+/// the endpoint's stale `pending_output` exactly like the Phase-4 timeout path —
+/// without emitting a user-facing `Disconnected` or halting. (The pending_output
+/// clear itself is not separately observable here because a disconnected
+/// endpoint's `network_stats` is unavailable; it is guaranteed structurally by
+/// the shared `abort_hot_join_serve` helper and pinned for the timeout path by
+/// `hot_join_phase4_abort_does_not_spam_send_queue`.)
+#[test]
+fn hot_join_reserved_disconnect_during_serve_keeps_host_running() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (host_socket, joiner_socket, host_addr, joiner_addr) = crate::common::create_channel_pair();
+
+    let mut host = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .with_hot_join(true)
+        // Short timeouts so the joiner-endpoint disconnect fires quickly once it
+        // goes silent (notify < timeout).
+        .with_disconnect_notify_delay(std::time::Duration::from_millis(200))
+        .with_disconnect_timeout(std::time::Duration::from_millis(600))
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_reserved_player(joiner_addr, PlayerHandle::new(1))?
+        .start_p2p_session(host_socket)?;
+
+    let mut host_stub = GameStub::new();
+    for _ in 0..5 {
+        host.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        advance_session(&mut host, &mut host_stub, PlayerHandle::new(0), 1)?;
+    }
+    let _ = drain_events(&mut host);
+
+    let mut joiner = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .add_player(PlayerType::Remote(host_addr), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_hot_join_session(joiner_socket, host_addr)?;
+
+    // Drive both until the host opens a serve (JoinRequested), then immediately
+    // stop polling the joiner so its endpoint goes silent mid-serve.
+    let mut serve_opened = false;
+    let mut host_disconnect_event = false;
+    for _ in 0..200 {
+        host.poll_remote_clients();
+        for e in drain_events(&mut host) {
+            match e {
+                FortressEvent::JoinRequested { .. } => serve_opened = true,
+                FortressEvent::Disconnected { .. } => host_disconnect_event = true,
+                _ => {},
+            }
+        }
+        if serve_opened {
+            break;
+        }
+        if host.current_state() == SessionState::Running {
+            let _ = advance_session(&mut host, &mut host_stub, PlayerHandle::new(0), 1);
+        }
+        joiner.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+    assert!(serve_opened, "host must open a serve before the disconnect");
+
+    // Joiner now silent. Advance the host clock past the disconnect timeout so
+    // the joiner endpoint's protocol disconnect fires while the serve is open.
+    let mut endpoint_disconnected = false;
+    for _ in 0..60 {
+        host.poll_remote_clients();
+        for e in drain_events(&mut host) {
+            if matches!(e, FortressEvent::Disconnected { .. }) {
+                host_disconnect_event = true;
+            }
+        }
+        if host.current_state() == SessionState::Running {
+            let _ = advance_session(&mut host, &mut host_stub, PlayerHandle::new(0), 1);
+        }
+        // Once the reserved endpoint's protocol has disconnected, its network
+        // stats become unavailable — our proof the disconnect path actually ran.
+        if host.network_stats(PlayerHandle::new(1)).is_err() {
+            endpoint_disconnected = true;
+        }
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+
+    // Non-vacuity: the disconnect path really fired.
+    assert!(
+        endpoint_disconnected,
+        "the reserved joiner endpoint must have disconnected (its stats became unavailable)"
+    );
+    // The reserved-slot exemption must hold: no user-facing Disconnected, and the
+    // host keeps running solo rather than halting.
+    assert!(
+        !host_disconnect_event,
+        "host must NOT emit a user-facing Disconnected for a reserved-slot disconnect"
+    );
+    assert_eq!(
+        host.current_state(),
+        SessionState::Running,
+        "host must keep running solo after a reserved-slot disconnect during a serve"
+    );
+    // The slot stays reserved/frozen (reports Disconnected input) after the
+    // abort, so a peer can still retry. Read its status from the AdvanceFrame
+    // request, exactly like the solo-reserved-slot checks above.
+    host.add_local_input(PlayerHandle::new(0), StubInput { inp: 1 })?;
+    let requests = host.advance_frame()?;
+    let mut reserved_status = None;
+    for request in &*requests {
+        if let FortressRequest::AdvanceFrame { inputs } = request {
+            let inputs: &InputVec<StubInput> = inputs;
+            if let Some(&(_, status)) = inputs.get(1) {
+                reserved_status = Some(status);
+            }
+        }
+    }
+    host_stub.handle_requests(requests);
+    assert_eq!(
+        reserved_status,
+        Some(InputStatus::Disconnected),
+        "reserved slot must still report Disconnected after the abort"
     );
 
     Ok(())

@@ -1680,6 +1680,14 @@ impl<T: Config> UdpProtocol<T> {
         self.pending_join_request.take()
     }
 
+    /// Test seam: stage a pending `JoinRequest` for `handle` exactly as if one
+    /// had arrived from the peer, without driving the full sync + message path.
+    /// Used to unit-test the host-side join-request authorization gate.
+    #[cfg(all(test, feature = "hot-join"))]
+    pub(crate) fn set_pending_join_request_for_test(&mut self, handle: usize) {
+        self.pending_join_request = Some(handle);
+    }
+
     /// Drains the most recently received `StateSnapshot`, if any.
     #[cfg(feature = "hot-join")]
     #[allow(dead_code)]

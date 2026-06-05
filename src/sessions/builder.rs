@@ -120,6 +120,16 @@ where
     /// Remote handles reserved for future hot-joiners.
     #[cfg(feature = "hot-join")]
     reserved_slots: std::collections::BTreeSet<PlayerHandle>,
+    /// Host-side hot-join serve timeout, in `poll_remote_clients` calls. Defaults
+    /// to `DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS`; set via
+    /// [`with_hot_join_serve_timeout_polls`](Self::with_hot_join_serve_timeout_polls).
+    #[cfg(feature = "hot-join")]
+    hot_join_serve_timeout_polls: usize,
+    /// Joiner-side hot-join ack-resend budget, in `poll_remote_clients` calls.
+    /// Defaults to `DEFAULT_HOT_JOIN_ACK_RESENDS`; set via
+    /// [`with_hot_join_ack_resends`](Self::with_hot_join_ack_resends).
+    #[cfg(feature = "hot-join")]
+    hot_join_ack_resends: usize,
 }
 
 impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
@@ -154,6 +164,10 @@ impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
             accept_hot_join,
             #[cfg(feature = "hot-join")]
             reserved_slots,
+            #[cfg(feature = "hot-join")]
+            hot_join_serve_timeout_polls,
+            #[cfg(feature = "hot-join")]
+            hot_join_ack_resends,
         } = self;
 
         let mut debug = f.debug_struct("SessionBuilder");
@@ -184,7 +198,9 @@ impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
         #[cfg(feature = "hot-join")]
         debug
             .field("accept_hot_join", accept_hot_join)
-            .field("reserved_slots", reserved_slots);
+            .field("reserved_slots", reserved_slots)
+            .field("hot_join_serve_timeout_polls", hot_join_serve_timeout_polls)
+            .field("hot_join_ack_resends", hot_join_ack_resends);
         debug.finish()
     }
 }
@@ -226,6 +242,11 @@ impl<T: Config> SessionBuilder<T> {
             accept_hot_join: false,
             #[cfg(feature = "hot-join")]
             reserved_slots: std::collections::BTreeSet::new(),
+            #[cfg(feature = "hot-join")]
+            hot_join_serve_timeout_polls:
+                crate::sessions::p2p_session::DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS,
+            #[cfg(feature = "hot-join")]
+            hot_join_ack_resends: crate::sessions::p2p_session::DEFAULT_HOT_JOIN_ACK_RESENDS,
         }
     }
 
@@ -443,6 +464,62 @@ impl<T: Config> SessionBuilder<T> {
         self.reserved_slots.insert(handle);
         self.accept_hot_join = true;
         Ok(self)
+    }
+
+    /// Overrides the host-side hot-join **serve timeout**, in
+    /// [`poll_remote_clients`](P2PSession::poll_remote_clients) calls.
+    ///
+    /// This is the maximum number of polls a host keeps a single in-flight serve
+    /// open (re-sending the cached snapshot each poll) before aborting it and
+    /// resuming solo with the slot still reserved. Defaults to
+    /// `DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS` (600 polls). Larger values tolerate
+    /// slower or lossier joiners; smaller values free the paused host sooner.
+    ///
+    /// Only meaningful on the host side (a session built with
+    /// [`add_reserved_player`](Self::add_reserved_player) /
+    /// [`with_hot_join`](Self::with_hot_join)); it is inert on a joiner session.
+    ///
+    /// This is feature-gated behind the `hot-join` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRequestKind::NotSupported`] if `polls` is `0`: a serve
+    /// must stay open for at least one poll, otherwise it would be aborted before
+    /// any joiner could ever complete the handshake.
+    #[cfg(feature = "hot-join")]
+    pub fn with_hot_join_serve_timeout_polls(
+        mut self,
+        polls: usize,
+    ) -> Result<Self, FortressError> {
+        if polls == 0 {
+            return Err(InvalidRequestKind::NotSupported {
+                operation: "with_hot_join_serve_timeout_polls(0) (the serve timeout must be >= 1)",
+            }
+            .into());
+        }
+        self.hot_join_serve_timeout_polls = polls;
+        Ok(self)
+    }
+
+    /// Overrides the joiner-side hot-join **ack-resend budget**, in
+    /// [`poll_remote_clients`](P2PSession::poll_remote_clients) calls.
+    ///
+    /// After applying the host's snapshot the joiner re-sends its
+    /// `StateSnapshotAck` for up to this many polls to tolerate a lost ack,
+    /// stopping early once it observes the host has progressed past the
+    /// activation frame. Defaults to `DEFAULT_HOT_JOIN_ACK_RESENDS` (30 polls).
+    /// `0` is allowed and means the joiner acks exactly once with no loss
+    /// tolerance.
+    ///
+    /// Only meaningful on the joiner side (a session built with
+    /// [`start_hot_join_session`](Self::start_hot_join_session)); it is inert on a
+    /// host session.
+    ///
+    /// This is feature-gated behind the `hot-join` feature.
+    #[cfg(feature = "hot-join")]
+    pub fn with_hot_join_ack_resends(mut self, resends: usize) -> Self {
+        self.hot_join_ack_resends = resends;
+        self
     }
 
     /// Change the maximum prediction window. Default is 8.
@@ -1203,6 +1280,8 @@ impl<T: Config> SessionBuilder<T> {
             reserved_slots: self.reserved_slots,
             accept_hot_join: self.accept_hot_join,
             joiner: None,
+            serve_timeout_polls: self.hot_join_serve_timeout_polls,
+            ack_resends: self.hot_join_ack_resends,
         };
 
         P2PSession::<T>::new(
@@ -1342,6 +1421,8 @@ impl<T: Config> SessionBuilder<T> {
                 local_handle,
                 host_addr,
             }),
+            serve_timeout_polls: self.hot_join_serve_timeout_polls,
+            ack_resends: self.hot_join_ack_resends,
         };
 
         P2PSession::<T>::new(

@@ -455,11 +455,6 @@ def check_rust_doc_link(
     ):
         return True, ""
 
-    try:
-        content = source_file.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        return False, f"Cannot read Rust source to validate doc link '{link_target}': {exc}"
-
     link_path, anchor = split_link_target(link_target)
 
     if anchor and is_rustdoc_item_fragment(anchor):
@@ -469,9 +464,22 @@ def check_rust_doc_link(
             f"'{link_target}' is not linted by rustdoc; use an intra-doc path link instead",
         )
 
-    fallback_markdown = extract_rust_doc_markdown(content)
-    current_markdown = current_doc_markdown if current_doc_markdown is not None else fallback_markdown
-    module_markdown = module_doc_markdown if module_doc_markdown is not None else fallback_markdown
+    # The caller (`check_rust_doc_file`) parses the doc blocks once and passes the
+    # already-extracted Markdown for every link in a file. Only read (and re-parse)
+    # the source as a fallback when a caller omits one of those — never per link in
+    # the common path, which would be O(links) redundant I/O on large crates.
+    current_markdown = current_doc_markdown
+    module_markdown = module_doc_markdown
+    if current_markdown is None or module_markdown is None:
+        try:
+            content = source_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            return False, f"Cannot read Rust source to validate doc link '{link_target}': {exc}"
+        fallback_markdown = extract_rust_doc_markdown(content)
+        if current_markdown is None:
+            current_markdown = fallback_markdown
+        if module_markdown is None:
+            module_markdown = fallback_markdown
 
     if anchor and link_path == "self":
         doc_anchors = {a.lower() for a in extract_markdown_anchors(module_markdown)}
