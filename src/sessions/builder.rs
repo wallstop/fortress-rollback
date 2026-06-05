@@ -237,7 +237,6 @@ impl<T: Config> SessionBuilder<T> {
     /// - Returns a [`FortressError`] if a player with that handle has been added before
     /// - Returns a [`FortressError`] if the handle is invalid for the given [`PlayerType`]
     ///
-    /// [`num_players`]: Self#structfield.num_players
     pub fn add_player(
         mut self,
         player_type: PlayerType<T::Address>,

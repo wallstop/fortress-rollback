@@ -1364,7 +1364,7 @@ where
 
 /// A session is always in one of these states. You can query the current state of a session via [`current_state`].
 ///
-/// [`current_state`]: P2PSession#method.current_state
+/// [`current_state`]: crate::P2PSession::current_state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SessionState {
     /// When synchronizing, the session attempts to establish a connection to the remote clients.

@@ -515,7 +515,7 @@ impl<T: Config> SpectatorSession<T> {
     /// breaks once `frame_to_grab` passes the viewable boundary, and the number
     /// of buffered-but-unsimulated frames can never exceed `buffer_size`. This
     /// keeps the allocation bounded even when an unvalidated `catchup_speed`
-    /// (e.g. from a directly constructed [`SpectatorConfig`]) is pathologically
+    /// (e.g. from a directly constructed [`crate::SpectatorConfig`]) is pathologically
     /// large. When rewind is enabled each advanced frame also emits a
     /// `SaveGameState`, so the batch can hold up to twice as many requests.
     ///

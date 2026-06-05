@@ -154,14 +154,13 @@ impl<T: Config> SyncTestSession<T> {
         })
     }
 
-    /// Registers local input for a player for the current frame. This should be successfully called for every local player before calling [`advance_frame()`].
+    /// Registers local input for a player for the current frame. This should be successfully called for every local player before calling [`advance_frame()`](Self::advance_frame).
     /// If this is called multiple times for the same player before advancing the frame, older given inputs will be overwritten.
     /// In a sync test, all players are considered to be local, so you need to add input for all of them.
     ///
     /// # Errors
     /// - Returns a [`FortressError`] when the given handle is not valid (i.e. not between 0 and num_players).
     ///
-    /// [`advance_frame()`]: Self#method.advance_frame
     pub fn add_local_input(
         &mut self,
         player_handle: PlayerHandle,

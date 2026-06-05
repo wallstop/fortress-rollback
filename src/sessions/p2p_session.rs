@@ -292,13 +292,13 @@ where
     applied_frame: Option<Frame>,
     /// Remaining polls for which the joiner will re-send its
     /// `StateSnapshotAck(F)` (ack-loss tolerance). Counts down each
-    /// [`poll_remote_clients`](P2PSession::poll_remote_clients); resends stop
+    /// [`poll_remote_clients`](crate::P2PSession::poll_remote_clients); resends stop
     /// when it reaches zero or the joiner starts receiving host inputs for
     /// frames `>= F`. See [`HOT_JOIN_ACK_RESENDS`].
     ack_resends_remaining: usize,
 }
 
-/// Construction-time hot-join configuration handed from [`SessionBuilder`] to
+/// Construction-time hot-join configuration handed from [`crate::SessionBuilder`] to
 /// [`P2PSession::new`]. Folded into [`HotJoinState`] inside the constructor.
 #[cfg(feature = "hot-join")]
 pub(crate) struct HotJoinConfig<T>
@@ -488,13 +488,12 @@ impl<T: Config> P2PSession<T> {
         })
     }
 
-    /// Registers local input for a player for the current frame. This should be successfully called for every local player before calling [`advance_frame()`].
+    /// Registers local input for a player for the current frame. This should be successfully called for every local player before calling [`advance_frame()`](Self::advance_frame).
     /// If this is called multiple times for the same player before advancing the frame, older given inputs will be overwritten.
     ///
     /// # Errors
     /// - Returns a [`FortressError`] when the given handle does not refer to a local player.
     ///
-    /// [`advance_frame()`]: Self#method.advance_frame
     pub fn add_local_input(
         &mut self,
         player_handle: PlayerHandle,
@@ -844,7 +843,7 @@ impl<T: Config> P2PSession<T> {
         }
     }
 
-    /// Drives hot-join orchestration once per [`poll_remote_clients`] call:
+    /// Drives hot-join orchestration once per [`poll_remote_clients`](Self::poll_remote_clients) call:
     /// the host side serves snapshots for reserved slots, and the joiner side
     /// requests + applies a snapshot. Called after endpoint message handling and
     /// before the outgoing packet flush so any queued hot-join message is sent in
@@ -1215,7 +1214,7 @@ impl<T: Config> P2PSession<T> {
         }
 
         // Set every slot's connection status consistent with the seek: all players
-        // are connected with last_frame = F - 1 (matching the joiner's seeked
+        // are connected with last_frame = F - 1 (matching the joiner's sought
         // last_confirmed_frame). The joiner now contributes real inputs for its
         // own slot from F onward; the host slot is confirmed up to F-1 already.
         let baseline = safe_frame_sub!(

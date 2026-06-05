@@ -2042,7 +2042,7 @@ fn try_lower_delay<C: Config>(
 
 #### `FortressEvent::InputDelayRecommendation`
 
-The library reserves a `FortressEvent::InputDelayRecommendation { player_handle, current_delay, suggested_delay }` variant for application-level heuristics or future automatic emitters. **No built-in emitter currently produces this event.** Application code may construct and dispatch its own recommendations through the standard event channel and react to them via [`set_input_delay`](#adjusting-input-delay-at-runtime), or simply call `set_input_delay` directly from its own scheduling logic. Exhaustive matches on `FortressEvent` must still handle the variant — see the [Migration Guide](Migration#unreleased-runtime-input-delay-disconnect-behavior-and-graceful-peer-removal).
+The library reserves a `FortressEvent::InputDelayRecommendation { player_handle, current_delay, suggested_delay }` variant for application-level heuristics or future automatic emitters. **No built-in emitter currently produces this event.** Application code may construct and dispatch its own recommendations through the standard event channel and react to them via [`set_input_delay`](#adjusting-input-delay-at-runtime), or simply call `set_input_delay` directly from its own scheduling logic. Exhaustive matches on `FortressEvent` must still handle the variant — see the [Migration Guide](Migration#unreleased-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
 
 ---
 

@@ -1,20 +1,19 @@
 //! Shared, fail-closed buffer allocation for the built-in UDP socket adapters.
 //!
-//! The socket adapters ([`udp_socket`](crate::network::udp_socket) and
-//! [`tokio_socket`](crate::network::tokio_socket)) each keep a reused receive
+//! The socket adapters (`udp_socket` and `tokio_socket`) each keep a reused receive
 //! and send buffer. Those buffers must satisfy two invariants:
 //!
 //! 1. **Non-empty.** A zero-length receive buffer silently drops every datagram
 //!    (`recv_from` reads zero bytes), and a zero-length send buffer makes every
 //!    encode fail as `BufferTooSmall`. A socket built from a `0` size is
 //!    therefore permanently non-functional, so a `0` request is rejected up
-//!    front with [`ErrorKind::InvalidInput`].
+//!    front with [`std::io::ErrorKind::InvalidInput`].
 //! 2. **Fallibly allocated.** The size is caller-supplied and unbounded, and the
 //!    global allocator *aborts* the process on failure. The reservation uses
 //!    [`Vec::try_reserve_exact`] so an over-large request returns a recoverable
 //!    error instead of taking the process down (cf. RUSTSEC-2022-0035).
 //!
-//! Concentrating both invariants in [`zeroed_buffer`] means every socket
+//! Concentrating both invariants in `zeroed_buffer` means every socket
 //! constructor — `with_buffer_sizes`, `bind_to_port_with_buffer_sizes`,
 //! `from_socket_with_buffer_sizes` — inherits them without re-implementing the
 //! checks (and so cannot drift out of agreement).
@@ -29,9 +28,9 @@ use std::io::{Error, ErrorKind};
 ///
 /// # Errors
 ///
-/// Returns [`ErrorKind::InvalidInput`] if `size` is `0` (a zero-length socket
-/// buffer can never send or receive), or [`ErrorKind::OutOfMemory`] if the
-/// allocation cannot be reserved.
+/// Returns [`std::io::ErrorKind::InvalidInput`] if `size` is `0` (a zero-length
+/// socket buffer can never send or receive), or [`std::io::ErrorKind::OutOfMemory`]
+/// if the allocation cannot be reserved.
 pub(crate) fn zeroed_buffer(size: usize, name: &'static str) -> Result<Vec<u8>, Error> {
     if size == 0 {
         return Err(Error::new(

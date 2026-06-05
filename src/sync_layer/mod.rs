@@ -3474,7 +3474,7 @@ mod hot_join_sync_layer_tests {
     /// a full save -> advance -> (confirmed inputs + advance) -> rollback cycle.
     /// Mirrors the existing `test_save_current_state_after_rollback` /
     /// `test_load_frame_success` scaffolding (populate a `GameStateCell` via
-    /// `cell.save`, then `load_frame`). Proves a seeked layer participates in the
+    /// `cell.save`, then `load_frame`). Proves a sought layer participates in the
     /// rollback machinery and remains usable afterward.
     #[test]
     fn seek_to_frame_save_advance_rollback_roundtrips() {
@@ -3524,7 +3524,7 @@ mod hot_join_sync_layer_tests {
         // snapshot data we stored.
         let request = sync_layer
             .load_frame(f)
-            .expect("rollback to seeked frame F must succeed");
+            .expect("rollback to sought frame F must succeed");
         match request {
             FortressRequest::LoadGameState { frame, cell } => {
                 assert_eq!(frame, f);
@@ -3535,7 +3535,7 @@ mod hot_join_sync_layer_tests {
         assert_eq!(sync_layer.current_frame(), f);
         assert!(
             sync_layer.check_invariants().is_ok(),
-            "invariants must hold after rollback to seeked frame"
+            "invariants must hold after rollback to sought frame"
         );
 
         // Layer is still usable: re-save at F, advance again, invariants intact.

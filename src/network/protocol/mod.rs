@@ -1695,7 +1695,7 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     /// Sets whether this endpoint defers (ignores) incoming `Input` messages.
-    /// See [`defer_input_processing`](Self#structfield.defer_input_processing).
+    /// See `defer_input_processing`.
     #[cfg(feature = "hot-join")]
     #[allow(dead_code)]
     pub(crate) fn set_defer_input_processing(&mut self, defer: bool) {

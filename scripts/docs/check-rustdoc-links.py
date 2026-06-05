@@ -2,9 +2,8 @@
 """
 Cross-platform rustdoc warning checker for pre-commit hooks.
 
-Runs `cargo doc --no-deps` with RUSTDOCFLAGS that match CI configuration,
-treating all rustdoc warnings as errors. Fails if cargo doc returns a
-non-zero exit code.
+Runs the same strict rustdoc passes used by CI, treating rustdoc warnings as
+errors. Fails if any cargo doc pass returns a non-zero exit code.
 
 Works on Windows, macOS, and Linux.
 """
@@ -31,6 +30,21 @@ RUSTDOCFLAGS = (
     "-D rustdoc::bare_urls"
 )
 
+DOC_PASSES = (
+    ("default public docs", ["cargo", "doc", "--no-deps"]),
+    (
+        "private feature-gated docs",
+        [
+            "cargo",
+            "doc",
+            "--no-deps",
+            "--features",
+            "hot-join,tokio,json,sync-send",
+            "--document-private-items",
+        ],
+    ),
+)
+
 
 def main() -> int:
     """Run cargo doc with CI-matching RUSTDOCFLAGS and check exit code."""
@@ -47,22 +61,24 @@ def main() -> int:
             env["RUSTDOCFLAGS"] = f"{existing_rustdocflags} {RUSTDOCFLAGS}"
         else:
             env["RUSTDOCFLAGS"] = RUSTDOCFLAGS
-        # Run cargo doc and capture output
-        result = subprocess.run(
-            ["cargo", "doc", "--no-deps"],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        for pass_name, command in DOC_PASSES:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
 
-        # If cargo doc failed (non-zero exit code), print stderr and fail
-        if result.returncode != 0:
-            print("ERROR: cargo doc failed with rustdoc warnings/errors:", file=sys.stderr)
-            if result.stderr:
-                print(result.stderr, file=sys.stderr)
-            if result.stdout:
-                print(result.stdout, file=sys.stderr)
-            return 1
+            if result.returncode != 0:
+                print(
+                    f"ERROR: cargo doc failed during {pass_name} with rustdoc warnings/errors:",
+                    file=sys.stderr,
+                )
+                if result.stderr:
+                    print(result.stderr, file=sys.stderr)
+                if result.stdout:
+                    print(result.stdout, file=sys.stderr)
+                return 1
 
         return 0
 

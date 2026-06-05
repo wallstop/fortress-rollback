@@ -242,7 +242,7 @@ Validate locally: `python3 scripts/hooks/check-changelog-unreleased.py`. Also ru
 - **After shell-script changes:** `bash scripts/ci/check-shell-portability.sh`
 - **Hook policy:** `pre-commit`/`pre-push` target <10s; slow full-repo checks belong in manual hooks, agent preflight, or CI.
 - **After `.llm/` changes:** All `.md` files under `.llm/` must be **300 lines or fewer** (enforced by pre-commit hook `llm-line-limit`)
-- **Link validation:** `./scripts/docs/check-links.sh`
+- **Link validation:** `python3 scripts/docs/check-links.py`
 - **Spell check:** `typos`
 - **Vale (advisory):** `vale docs/` -- checks prose quality, non-blocking in CI. Cheat-sheet of recurring swaps and weasel words: [`.llm/skills/workflows/user-facing-docs.md`](skills/workflows/user-facing-docs.md#prose-conventions). Agent preflight surfaces per-file counts via the `vale-advisory` check.
 - **Full local validation:** `cargo fmt && cargo clippy --workspace --all-targets --features tokio,json && cargo nextest run --no-capture`

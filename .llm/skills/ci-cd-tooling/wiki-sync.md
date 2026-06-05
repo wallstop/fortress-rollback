@@ -122,7 +122,7 @@ Avoid special characters: `--` (double hyphen), `+`, spaces, `@`, `#`, `&`.
 python3 scripts/docs/sync-wiki.py                 # Generate wiki
 python3 scripts/docs/check-wiki-consistency.py    # Cross-validate pipeline
 python3 scripts/docs/validate-wiki-output.py      # Check rendering issues
-./scripts/docs/check-links.sh                     # Link validation
+python3 scripts/docs/check-links.py               # Link validation
 ```
 
 ### What check-wiki-consistency.py Validates
@@ -193,7 +193,7 @@ Pipe `|` inside backticks in table cells MUST be escaped as `\|` -- the table pa
 ### Validation Commands
 
 ```bash
-./scripts/docs/check-links.sh                                    # All links
+python3 scripts/docs/check-links.py                              # All links
 lychee --config .lychee.toml docs/user-guide.md             # Single file
 npx markdownlint 'docs/file.md' --config .markdownlint.json # Lint check
 ```

@@ -82,7 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `InternalErrorKind::InputQueueGapFillFailed { frame }` — new variant added; reported if mid-session gap-fill replication fails an internal invariant. Since `InternalErrorKind` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
 - **Breaking:** `PlayerRegistry::handles_by_address` and `PlayerRegistry::handles_by_address_iter` now take `&T::Address` instead of `T::Address`. The same change applies to the `P2PSession::handles_by_address` and `P2PSession::handles_by_address_iter` forwarders. Existing callers passing an owned address must add a leading `&`: `session.handles_by_address(&addr)` and `session.handles_by_address_iter(&addr)`.
 
-> _Follow-up:_ a session-level telemetry hook for input-delay changes (e.g.,
+> *Follow-up:* a session-level telemetry hook for input-delay changes (e.g.,
 > a `TelemetryEvent::InputDelayChanged`) is intentionally deferred to the
 > upcoming frame-advantage-heuristic feature, which will be the primary
 > producer of input-delay adjustments.

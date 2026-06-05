@@ -162,7 +162,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 npx markdownlint '**/*.md' --config .markdownlint.json --ignore 'target/**'
 
 # 4. Link validation
-./scripts/docs/check-links.sh
+python3 scripts/docs/check-links.py
 
 # 5. Wiki sync and validation
 python3 scripts/docs/sync-wiki.py
