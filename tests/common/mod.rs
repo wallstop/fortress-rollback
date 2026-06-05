@@ -16,6 +16,7 @@
 //! use common::{synchronize_sessions, test_addr};
 //! ```
 
+pub mod bus_socket;
 pub mod channel_socket;
 pub mod stubs;
 pub mod stubs_enum;
@@ -24,6 +25,8 @@ pub mod test_utils;
 
 // Re-export commonly used items for convenience.
 // These are public utilities for integration tests - allow unused until tests adopt them.
+#[allow(unused_imports)]
+pub use bus_socket::{BusSocket, RoutingBus};
 #[allow(unused_imports)]
 pub use channel_socket::{
     create_channel_pair, create_channel_quad, create_channel_triple, create_chaos_channel_pair,

@@ -32,7 +32,7 @@ use std::cmp;
 /// This is sufficient to prove the invariants hold for the circular buffer logic.
 ///
 /// Why 7 (not 8): this constant also caps the Kani-only
-/// [`InlineVec`](crate::proof_vec) that backs the queue under verification. CBMC
+/// [`InlineVec`](crate::proof_vec::InlineVec) that backs the queue under verification. CBMC
 /// unwinds the `CAP`-element loops that initialize, and (for non-`Copy` elements
 /// such as `SavedStates`' cells) drop, a `[Option<T>; CAP]`; their unwinding
 /// assertion needs an unwind bound of `CAP + 1`. A proof carrying no explicit
@@ -785,7 +785,7 @@ impl<T: Config> InputQueue<T> {
             report_violation!(
                 ViolationSeverity::Error,
                 ViolationKind::InputQueue,
-                "reset_to_frame called with non-negative-required frame {}",
+                "reset_to_frame called with negative frame {} (frames must be non-negative)",
                 frame
             );
             return;
@@ -3014,7 +3014,7 @@ mod property_tests {
 /// Kani proofs require sufficient unwind bounds to verify loops. Key considerations:
 ///
 /// 1. **Buffer initialization**: Creating `InputQueue` via `test_queue()` fills its
-///    backing buffer (a `#[cfg(kani)]` heap-free [`ProofVec`](crate::proof_vec)) with
+///    backing buffer (a `#[cfg(kani)]` heap-free [`ProofVec`](crate::proof_vec::ProofVec)) with
 ///    `INPUT_QUEUE_LENGTH` (7 under Kani) blank inputs via a `0..queue_length` push
 ///    loop, so the harness needs unwind >= 8 (7 fill iterations + 1 for the
 ///    unwinding-assertion check). The proofs here use 10 for margin.

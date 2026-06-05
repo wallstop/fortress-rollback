@@ -37,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     can never stall or fail-close the host (it resumes solo with the slot still reserved), and a joiner
     that loses its snapshot or ack fails cleanly (retryable) rather than desyncing. Scope: 2-peer /
     host-mediated topology; requires `max_prediction >= 1` (lockstep hot-join is rejected at build time).
+  - A slot that is *cleanly gracefully dropped* (via `P2PSession::remove_player`, or automatically on the
+    disconnect timeout under `DisconnectBehavior::ContinueWithout`) on a hot-join-serving host is returned
+    to the reserved/frozen state and can be re-filled by a returning peer connecting from the same address,
+    exactly like a build-time reserved slot — this is the "previously gracefully-dropped" path above.
+    Legacy `disconnect_player` (`Halt`-style) drops, and drops on a host that does not serve hot-joins, are
+    not made re-joinable.
 
 ## [0.9.0] - 2026-06-04
 

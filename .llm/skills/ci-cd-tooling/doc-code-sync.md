@@ -86,6 +86,31 @@ Production code should never have a `# Panics` rustdoc section.
 /// [`FortressError::InvalidFrameStructured`]: crate::FortressError::InvalidFrameStructured
 ```
 
+## Intra-Doc Link Text vs Target
+
+A backticked link whose text names an item must point at THAT item, not its
+enclosing module. `cargo doc` does NOT catch this -- the link resolves but lands
+on the wrong page. `check-links.py` flags it: it compares the final `::` segment
+of the link text against the final segment of any `crate::`/`super::`/`self::`
+target.
+
+```rust
+// WRONG: text names the constant, target is the module -> wrong page
+/// [`MAX_BOUNDED_DECODE_LEN`](crate::network::codec)
+
+// RIGHT (pick based on item visibility):
+/// [`MAX_BOUNDED_DECODE_LEN`](crate::network::codec::MAX_BOUNDED_DECODE_LEN)  // if reachable
+/// `MAX_BOUNDED_DECODE_LEN`                                                   // de-link if pub(crate) in a pub module
+/// the [`codec`](crate::network::codec) module                               // or name the module
+```
+
+The fix is NOT always "append the item". A `pub(crate)` item inside a `pub`
+module cannot be linked directly -- that trips `rustdoc::private_intra_doc_links`
+(CI denies it). De-link to a plain code span or link the module instead. A direct
+item link is fine when the item is `pub`, or when both item and module are
+crate-internal. External-crate targets (e.g. `bincode::...`) and `Self::`/bare
+relative paths are exempt.
+
 ## Code Fence Language
 
 | Content | Fence | When |

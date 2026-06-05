@@ -24,14 +24,15 @@
 //! bincode decodes a recursive type by recursing, and a pathologically
 //! deeply-nested `Config::State` (e.g. `enum Tree { Leaf(u8), Node(Box<Tree>) }`
 //! nested thousands deep) can be encoded in far fewer bytes than the
-//! [`MAX_BOUNDED_DECODE_LEN`](crate::network::codec) cap yet still exhaust the
+//! `MAX_BOUNDED_DECODE_LEN` cap yet still exhaust the
 //! call stack while decoding — an uncatchable abort, not a recoverable `Err`.
 //! Reaching that requires a peer feeding such bytes through a custom socket
 //! large enough to carry them. Consistent with the project's "the user owns
 //! `Config::State`'s shape and determinism" stance, **save-state types should be
 //! non-recursive / shallow**; the bounded decoder cannot make a deeply recursive
-//! state safe to decode. See [`decode_bounded`](crate::network::codec) for the
-//! analysis of bincode's *allocation* bounds.
+//! state safe to decode. See `decode_bounded` in the
+//! [`codec`](crate::network::codec) module for the analysis of bincode's
+//! *allocation* bounds.
 
 use crate::network::codec;
 use crate::report_violation;

@@ -107,6 +107,13 @@ where
     T: Config,
 {
     num_players: usize,
+    /// Number of local players this endpoint serializes inputs for (the width of
+    /// [`last_acked_input`](Self::last_acked_input)). Retained so the endpoint can
+    /// rebuild itself for a hot-join rejoin via [`rearm_for_rejoin`](Self::rearm_for_rejoin);
+    /// only read under that feature, so it is gated to keep the default build's
+    /// dead-code lint clean.
+    #[cfg(feature = "hot-join")]
+    local_players: usize,
     handles: Arc<[PlayerHandle]>,
     send_queue: VecDeque<Message>,
     event_queue: VecDeque<Event<T>>,
@@ -154,6 +161,11 @@ where
 
     // time sync
     time_sync_layer: TimeSync,
+    /// Retained so the endpoint can rebuild its `TimeSync` for a hot-join rejoin
+    /// via [`rearm_for_rejoin`](Self::rearm_for_rejoin); only read under that
+    /// feature, so it is gated to keep the default build's dead-code lint clean.
+    #[cfg(feature = "hot-join")]
+    time_sync_config: TimeSyncConfig,
     local_frame_advantage: i32,
     remote_frame_advantage: i32,
 
@@ -496,6 +508,8 @@ impl<T: Config> UdpProtocol<T> {
 
         Ok(Self {
             num_players,
+            #[cfg(feature = "hot-join")]
+            local_players,
             handles,
             send_queue: VecDeque::new(),
             event_queue: VecDeque::new(),
@@ -539,6 +553,8 @@ impl<T: Config> UdpProtocol<T> {
 
             // time sync
             time_sync_layer,
+            #[cfg(feature = "hot-join")]
+            time_sync_config,
             local_frame_advantage: 0,
             remote_frame_advantage: 0,
 
@@ -703,6 +719,56 @@ impl<T: Config> UdpProtocol<T> {
         self.stats_start_time = self.now();
         self.send_sync_request();
         Ok(())
+    }
+
+    /// Rebuilds this endpoint to a pristine pre-synchronization state and
+    /// re-enters synchronization, so a returning peer can hot-join the slot it
+    /// just vacated.
+    ///
+    /// The protocol state machine is otherwise strictly one-directional
+    /// (`Initializing → Synchronizing → Running → Disconnected → Shutdown`) with no
+    /// reconnect edge. After a graceful drop the endpoint is `Disconnected` (then
+    /// `Shutdown`) and can never sync, ack, or serve a snapshot again. This method
+    /// reconstructs the endpoint through [`new`](Self::new) — reusing every
+    /// retained construction parameter — so the result is byte-for-byte equivalent
+    /// to a freshly built reserved endpoint (fresh magic, empty send/recv/pending
+    /// queues, reset sync counters and timers, cleared hot-join scratch state),
+    /// then calls [`synchronize`](Self::synchronize) to return to `Synchronizing`.
+    ///
+    /// Rebuilding through the constructor — rather than resetting fields one by one
+    /// — is deliberate: it guarantees no runtime state from the previous
+    /// connection can leak into the new one, and it stays correct automatically if
+    /// `new` gains or drops fields. With a deterministic `protocol_rng_seed` the
+    /// rebuilt endpoint re-seeds identically, preserving reproducible behavior.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the same construction errors as [`new`](Self::new) (a
+    /// should-never-happen serialization/allocation failure) and the
+    /// [`synchronize`](Self::synchronize) transition error. On error `self` is left
+    /// rebuilt-but-not-synchronized only if `synchronize` fails after a successful
+    /// rebuild; a rebuild failure leaves `self` untouched.
+    #[cfg(feature = "hot-join")]
+    pub(crate) fn rearm_for_rejoin(&mut self) -> Result<(), FortressError> {
+        // Construct the replacement BEFORE mutating `self`: if `new` fails (the
+        // should-never-happen serialization path) the existing endpoint is left
+        // untouched rather than half-reset.
+        let rebuilt = Self::new(
+            self.handles.to_vec(),
+            self.peer_addr.clone(),
+            self.num_players,
+            self.local_players,
+            self.max_prediction,
+            self.disconnect_timeout,
+            self.disconnect_notify_start,
+            self.fps,
+            self.desync_detection,
+            self.sync_config,
+            self.protocol_config.clone(),
+            self.time_sync_config,
+        )?;
+        *self = rebuilt;
+        self.synchronize()
     }
 
     pub(crate) fn average_frame_advantage(&self) -> i32 {

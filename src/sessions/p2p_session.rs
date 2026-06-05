@@ -204,6 +204,12 @@ where
     /// to [`joining`](Self::joining) while a serve is open) and is only removed
     /// once the join completes (ack received). On a serve timeout it remains
     /// here so the host can resume solo and the joiner can retry.
+    ///
+    /// Populated from [`add_reserved_player`](crate::SessionBuilder::add_reserved_player)
+    /// at build time, **and** re-populated at runtime when a slot is cleanly
+    /// gracefully dropped on a hot-join-serving host (see
+    /// [`rearm_dropped_slot_for_rejoin`](P2PSession::rearm_dropped_slot_for_rejoin)),
+    /// which is what makes a dropped slot re-joinable.
     reserved_slots: std::collections::BTreeSet<PlayerHandle>,
     /// Whether this session serves hot-joins (host role).
     accept_hot_join: bool,
@@ -1141,6 +1147,37 @@ impl<T: Config> P2PSession<T> {
                 );
                 continue;
             }
+            // Force the host to re-simulate from the activation frame F so its
+            // prediction for the reactivated handle anchors at F.
+            //
+            // The host is paused at `current_frame = F + 1` (the snapshot is the
+            // saved state at `F = last_saved_frame`, which is `current_frame - 1`).
+            // Without this, the host's first input request for the reactivated
+            // handle is for `current_frame` (F+1), which creates a prediction
+            // anchored at F+1 and SKIPS frame F entirely. The joiner, however,
+            // loads the snapshot at F and contributes its first real input for
+            // frame F. That input arrives "late" (after the host predicted past
+            // it) and is silently dropped by the input queue's prediction-frame
+            // check (`add_input_by_frame` rejects an input whose frame != the
+            // advanced `prediction.frame`). The host then permanently simulates
+            // frame F with the *previous* occupant's stale frozen input instead
+            // of the joiner's real one, diverging at F+1 onward — a desync that is
+            // only masked when the stale value happens to reduce to the same
+            // game-state as the joiner's real input.
+            //
+            // Re-rooting the rollback at F (exactly the AI-takeover resimulation
+            // mechanism) makes the host re-request `input(F)` first, anchoring the
+            // prediction at F. `prediction.frame` then stays at F (the oldest
+            // unconfirmed frame) until the joiner's real frame-F input arrives, so
+            // that input is accepted and the standard misprediction -> rollback
+            // path reconciles it — identical to how every other late remote input
+            // is handled. `confirmed_frame` is still F-1 here, so no frame >= F is
+            // checksum-compared until reconciliation completes.
+            self.disconnect_frame = if self.disconnect_frame.is_null() {
+                activation_frame
+            } else {
+                std::cmp::min(self.disconnect_frame, activation_frame)
+            };
             // Join complete: retire the serve and the reservation, resume solo+peer
             // advancing (the host unpauses once `joining` is empty).
             self.hot_join.joining.remove(&handle);
@@ -1401,6 +1438,16 @@ impl<T: Config> P2PSession<T> {
     /// For automatic graceful drop on disconnect timeout, configure
     /// [`crate::SessionBuilder::with_disconnect_behavior`] with
     /// [`DisconnectBehavior::ContinueWithout`].
+    ///
+    /// # Re-joining the dropped slot (hot-join)
+    ///
+    /// With the `hot-join` feature enabled and serving turned on (via
+    /// `SessionBuilder::with_hot_join`), a cleanly removed slot is automatically
+    /// returned to the reserved/frozen state, so a peer can re-fill it later via
+    /// `SessionBuilder::start_hot_join_session` from the same address. Without
+    /// hot-join serving the slot stays dropped for the remainder of the session.
+    /// (The method names are unlinked here because they only exist under the
+    /// `hot-join` feature, which the default doc build does not enable.)
     ///
     /// # Spectator endpoints at the same address
     ///
@@ -2934,6 +2981,25 @@ impl<T: Config> P2PSession<T> {
 
         self.disconnect_player_at_frames(player_handle, earliest_last_frame, last_frame_overrides);
 
+        // Hot-join: a *cleanly* gracefully-dropped slot is documented to be
+        // re-joinable (see `SessionBuilder::with_hot_join`). The steps above left
+        // the slot in a dropped state — queue frozen, status disconnected, and its
+        // endpoint `Disconnected` (a terminal protocol state with no reconnect
+        // edge). Re-arm the endpoint and re-reserve its handle(s) so the slot
+        // returns to the exact shape a build-time `add_reserved_player` slot has,
+        // and the existing reserved-slot serve machinery handles a returning
+        // joiner with no new netcode. Strictly gated to the clean graceful path so
+        // a `Halt` disconnect, a suppressed legacy `disconnect_player`, a failed
+        // graceful drop, or a session that does not serve hot-joins is untouched.
+        #[cfg(feature = "hot-join")]
+        if behavior == DisconnectBehavior::ContinueWithout
+            && event_policy == DisconnectEventPolicy::Emit
+            && graceful_drop_error.is_none()
+            && self.hot_join.accept_hot_join
+        {
+            self.rearm_dropped_slot_for_rejoin(&addr, &handles);
+        }
+
         if behavior == DisconnectBehavior::Halt || graceful_drop_error.is_some() {
             self.state = SessionState::Synchronizing;
         }
@@ -2948,6 +3014,58 @@ impl<T: Config> P2PSession<T> {
         }
 
         Ok(())
+    }
+
+    /// Re-arms a cleanly gracefully-dropped slot so a returning peer can hot-join
+    /// it, restoring the exact state a build-time reserved slot has.
+    ///
+    /// The caller ([`disconnect_player_with_policy`](Self::disconnect_player_with_policy))
+    /// has already frozen the input queue and marked the connection status
+    /// disconnected — the two invariants a reserved slot shares with a dropped one.
+    /// This restores the remaining two: a re-synchronizable endpoint (the protocol
+    /// has no reconnect edge, so the endpoint is rebuilt via
+    /// [`UdpProtocol::rearm_for_rejoin`]) and `reserved_slots` membership for every
+    /// non-spectator handle the endpoint owns. After this the slot is
+    /// indistinguishable from one created by
+    /// [`add_reserved_player`](crate::SessionBuilder::add_reserved_player), so the
+    /// existing host serve path ([`poll_hot_join_host`](Self::poll_hot_join_host))
+    /// fills it on rejoin with no special-casing.
+    ///
+    /// If the endpoint cannot be re-armed (a should-never-happen reconstruction
+    /// failure) the slot is left dropped and **not** re-reserved: a reserved handle
+    /// backed by a dead endpoint could never be served yet would wrongly suppress
+    /// its disconnect/sync-timeout events.
+    #[cfg(feature = "hot-join")]
+    fn rearm_dropped_slot_for_rejoin(&mut self, addr: &T::Address, handles: &[PlayerHandle]) {
+        let Some(endpoint) = self.player_reg.remotes.get_mut(addr) else {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::InternalError,
+                "Cannot re-arm dropped slot for rejoin: no remote endpoint at {:?}",
+                addr
+            );
+            return;
+        };
+        if let Err(e) = endpoint.rearm_for_rejoin() {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InternalError,
+                "Failed to re-arm dropped slot endpoint at {:?} for rejoin; leaving slot dropped (not re-reserved): {}",
+                addr,
+                e
+            );
+            return;
+        }
+        // Re-reserve every non-spectator handle the endpoint owns. `endpoint_is_reserved`
+        // requires ALL of an endpoint's handles to be reserved, so a multi-handle
+        // (couch co-op) endpoint must have each handle re-added or it would not be
+        // treated as reserved. Spectator/out-of-range handles carry no reserved-slot
+        // semantics and are skipped.
+        for &handle in handles {
+            if handle.is_valid_player_for(self.num_players) {
+                self.hot_join.reserved_slots.insert(handle);
+            }
+        }
     }
 
     fn disconnect_player_at_frame(&mut self, player_handle: PlayerHandle, last_frame: Frame) {
@@ -5349,6 +5467,266 @@ mod tests {
         assert!(
             !host.hot_join.joining.contains_key(&PlayerHandle::new(1)),
             "the spoofed handle 1 must never be served"
+        );
+    }
+
+    // ==========================================
+    // Graceful-drop hot-join rejoin (rearm) tests
+    // ==========================================
+    //
+    // These pin the "graceful-drop hot-join rejoin" contract: a *cleanly*
+    // gracefully-dropped slot on a hot-join-serving host is returned to the same
+    // reserved/frozen shape a build-time `add_reserved_player` slot has, so a
+    // returning peer can re-join it via the existing serve path. The four shapes a
+    // re-armed slot shares with a build-time reserved slot are: queue frozen,
+    // connect-status disconnected, endpoint re-synchronizable (`Synchronizing`,
+    // NOT the terminal `Disconnected`/`Shutdown`), and handle(s) present in
+    // `reserved_slots`.
+    //
+    // Endpoint-state assertions reuse the existing `is_synchronized()` /
+    // `is_running()` accessors instead of adding a test-only state getter. The
+    // protocol lifecycle is one-directional
+    // (`Initializing → Synchronizing → Running → Disconnected → Shutdown`), and
+    // `is_synchronized()` is true ONLY for `Running`/`Disconnected`/`Shutdown`.
+    // Therefore `!is_running() && !is_synchronized()` uniquely identifies a
+    // re-synchronizing endpoint (`Synchronizing`) and positively rules out the
+    // terminal `Disconnected`/`Shutdown` a plain (non-rearmed) drop would leave —
+    // exactly the distinction these tests need.
+
+    /// Builds a 2-player host (local 0, remote 1) that serves hot-joins. The
+    /// remote slot is a *normal* connected remote (NOT a build-time reserved
+    /// slot), so it can later be cleanly dropped and re-armed.
+    #[cfg(feature = "hot-join")]
+    fn build_hot_join_serving_host(remote_addr: SocketAddr) -> P2PSession<TestConfig> {
+        SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_hot_join(true)
+            .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .unwrap()
+            .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))
+            .unwrap()
+            .start_p2p_session(DummySocket)
+            .expect("hot-join-serving host should build")
+    }
+
+    /// `remove_player` on a hot-join-serving host (with the rearm-eligible
+    /// `ContinueWithout` behavior) must re-reserve the dropped handle AND leave its
+    /// endpoint re-synchronizable (`Synchronizing`), never the terminal
+    /// `Disconnected`/`Shutdown`.
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn remove_player_on_hot_join_serving_host_rearms_dropped_slot() {
+        // Arrange: a hot-join-serving host with a normal connected remote slot.
+        let addr = test_addr(9201);
+        let mut host = build_hot_join_serving_host(addr);
+        // Pre-condition non-vacuity: handle 1 is NOT reserved before the drop.
+        assert!(
+            !host.hot_join.reserved_slots.contains(&PlayerHandle::new(1)),
+            "handle 1 must not be reserved before being dropped"
+        );
+
+        // Act: cleanly remove the remote player (graceful drop on a serving host).
+        host.remove_player(PlayerHandle::new(1))
+            .expect("remove_player on a serving host should succeed");
+
+        // Assert: the handle is re-reserved (slot returned to reserved state).
+        assert!(
+            host.hot_join.reserved_slots.contains(&PlayerHandle::new(1)),
+            "a cleanly dropped slot on a serving host must be re-reserved for rejoin"
+        );
+        // Assert: the connect-status is disconnected (shared with a reserved slot).
+        assert!(
+            host.local_connect_status[1].disconnected,
+            "the dropped slot's connect-status must be marked disconnected"
+        );
+        // Assert: the endpoint is re-synchronizable (Synchronizing), NOT terminal.
+        let endpoint = host
+            .player_reg
+            .remotes
+            .get(&addr)
+            .expect("remote endpoint must still exist after rearm");
+        assert!(
+            !endpoint.is_running() && !endpoint.is_synchronized(),
+            "re-armed endpoint must be Synchronizing (not Running/Disconnected/Shutdown)"
+        );
+        // And the whole endpoint now reads as reserved (its only handle is reserved).
+        assert!(
+            host.hot_join.endpoint_is_reserved(endpoint),
+            "the re-armed endpoint must read as reserved"
+        );
+    }
+
+    /// `remove_player` on a host that does NOT serve hot-joins must NOT re-reserve
+    /// the dropped handle: the slot stays dropped (endpoint terminal
+    /// `Disconnected`), exactly as before the rejoin feature.
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn remove_player_on_non_serving_host_does_not_rearm_dropped_slot() {
+        // Arrange: a host that does NOT accept hot-joins (default), ContinueWithout
+        // so remove_player still takes the graceful-drop path.
+        let addr = test_addr(9202);
+        let mut host = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .unwrap()
+            .add_player(PlayerType::Remote(addr), PlayerHandle::new(1))
+            .unwrap()
+            .start_p2p_session(DummySocket)
+            .expect("non-serving host should build");
+        assert!(
+            !host.hot_join.accept_hot_join,
+            "this host must not serve hot-joins"
+        );
+
+        // Act: cleanly remove the remote player.
+        host.remove_player(PlayerHandle::new(1))
+            .expect("remove_player should succeed");
+
+        // Assert: the handle is NOT re-reserved; the slot stays dropped.
+        assert!(
+            !host.hot_join.reserved_slots.contains(&PlayerHandle::new(1)),
+            "a host that does not serve hot-joins must not re-reserve a dropped slot"
+        );
+        // Assert: the endpoint is in the terminal Disconnected state (is_synchronized
+        // is true ONLY for Running/Disconnected/Shutdown; not Running here).
+        let endpoint = host
+            .player_reg
+            .remotes
+            .get(&addr)
+            .expect("remote endpoint must still exist after a plain drop");
+        assert!(
+            !endpoint.is_running() && endpoint.is_synchronized(),
+            "a non-rearmed dropped endpoint must be terminal (Disconnected/Shutdown)"
+        );
+    }
+
+    /// The legacy `disconnect_player` (which takes the `Halt`/`Suppress` path) must
+    /// NOT re-reserve the slot, even on a hot-join-serving host: the rearm is
+    /// strictly scoped to the clean `ContinueWithout` + `Emit` graceful drop.
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn legacy_disconnect_player_on_serving_host_does_not_rearm_dropped_slot() {
+        // Arrange: a hot-join-serving host with a normal connected remote slot.
+        let addr = test_addr(9203);
+        let mut host = build_hot_join_serving_host(addr);
+
+        // Act: legacy disconnect (Halt behavior, suppressed events).
+        host.disconnect_player(PlayerHandle::new(1))
+            .expect("legacy disconnect_player should succeed");
+
+        // Assert: the handle is NOT re-reserved (legacy path never re-arms).
+        assert!(
+            !host.hot_join.reserved_slots.contains(&PlayerHandle::new(1)),
+            "legacy disconnect_player (Halt) must not re-reserve the dropped slot"
+        );
+        // The Halt path also moves the session out of Running into Synchronizing.
+        assert_eq!(
+            host.current_state(),
+            SessionState::Synchronizing,
+            "legacy disconnect_player (Halt) must put the session in Synchronizing"
+        );
+    }
+
+    /// A multi-handle endpoint (one address owning two player handles — couch
+    /// co-op) cleanly dropped on a serving host must re-reserve BOTH handles, so
+    /// the whole endpoint reads as reserved (`endpoint_is_reserved` requires every
+    /// handle reserved).
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn remove_player_on_multi_handle_endpoint_rearms_all_handles() {
+        // Arrange: local 0; one remote address owning handles 1 and 2.
+        let addr = test_addr(9204);
+        let mut host = SessionBuilder::<TestConfig>::new()
+            .with_num_players(3)
+            .unwrap()
+            .with_hot_join(true)
+            .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .unwrap()
+            .add_player(PlayerType::Remote(addr), PlayerHandle::new(1))
+            .unwrap()
+            .add_player(PlayerType::Remote(addr), PlayerHandle::new(2))
+            .unwrap()
+            .start_p2p_session(DummySocket)
+            .expect("multi-handle hot-join-serving host should build");
+
+        // Act: removing either handle drops the whole endpoint (same address).
+        host.remove_player(PlayerHandle::new(1))
+            .expect("remove_player on a multi-handle endpoint should succeed");
+
+        // Assert: BOTH handles are re-reserved.
+        assert!(
+            host.hot_join.reserved_slots.contains(&PlayerHandle::new(1))
+                && host.hot_join.reserved_slots.contains(&PlayerHandle::new(2)),
+            "both handles of a couch-co-op endpoint must be re-reserved; got {:?}",
+            host.hot_join.reserved_slots
+        );
+        // Assert: the endpoint reads as fully reserved (requires ALL handles reserved).
+        let endpoint = host
+            .player_reg
+            .remotes
+            .get(&addr)
+            .expect("multi-handle endpoint must still exist after rearm");
+        assert!(
+            host.hot_join.endpoint_is_reserved(endpoint),
+            "a multi-handle endpoint must read as reserved only if ALL its handles are reserved"
+        );
+        // And the endpoint is re-synchronizable, not terminal.
+        assert!(
+            !endpoint.is_running() && !endpoint.is_synchronized(),
+            "the re-armed multi-handle endpoint must be Synchronizing"
+        );
+    }
+
+    /// The auto disconnect-timeout graceful path (session
+    /// `disconnect_behavior == ContinueWithout`) drives the same rearm as the
+    /// explicit `remove_player`. This exercises the `handle_event` /
+    /// `update_player_disconnects` trigger by invoking the shared
+    /// `disconnect_player_with_policy` entry point with the exact arguments those
+    /// auto-timeout sites use (`ContinueWithout` + `Emit`), which is what the
+    /// disconnect-timeout handler funnels into.
+    ///
+    /// Driving a real timeout deterministically end-to-end (clock past the
+    /// disconnect timeout with no acks) is covered by the integration test
+    /// `auto_timeout_dropped_slot_is_rejoinable_without_desync`; this unit test
+    /// pins the same rearm at the policy boundary.
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn auto_timeout_graceful_drop_on_serving_host_rearms_dropped_slot() {
+        // Arrange.
+        let addr = test_addr(9205);
+        let mut host = build_hot_join_serving_host(addr);
+
+        // Act: the auto-timeout path emits a graceful drop via the shared policy
+        // entry point with ContinueWithout + Emit (see the Event::Disconnected
+        // handler in handle_event / update_player_disconnects).
+        let behavior = host.disconnect_behavior;
+        host.disconnect_player_with_policy(
+            PlayerHandle::new(1),
+            None,
+            behavior,
+            DisconnectEventPolicy::Emit,
+            GracefulDropFailurePolicy::DisconnectAndHalt,
+        )
+        .expect("auto-timeout graceful drop should succeed");
+
+        // Assert: the slot is re-reserved and the endpoint re-synchronizable.
+        assert!(
+            host.hot_join.reserved_slots.contains(&PlayerHandle::new(1)),
+            "an auto-timeout graceful drop on a serving host must re-reserve the slot"
+        );
+        let endpoint = host
+            .player_reg
+            .remotes
+            .get(&addr)
+            .expect("remote endpoint must still exist after rearm");
+        assert!(
+            !endpoint.is_running() && !endpoint.is_synchronized(),
+            "the auto-timeout re-armed endpoint must be Synchronizing"
         );
     }
 }

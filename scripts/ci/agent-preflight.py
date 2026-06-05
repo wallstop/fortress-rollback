@@ -100,6 +100,20 @@ def is_rust_file(path: str) -> bool:
     return path.endswith(".rs")
 
 
+def is_markdown_file(path: str) -> bool:
+    """Return True for any Markdown file."""
+    return path.endswith(".md")
+
+
+def is_link_check_surface_file(path: str) -> bool:
+    """Return True for files whose links check-links.py validates (.md or .rs).
+
+    Mirrors the ``check-links`` pre-commit hook's ``\\.(md|rs)$`` file filter so
+    agent preflight runs the same validation when those files change.
+    """
+    return is_markdown_file(path) or is_rust_file(path)
+
+
 def git_output_lines(repo_root: Path, args: list[str]) -> set[str]:
     """Run git and return non-empty output lines.
 
@@ -146,6 +160,9 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
     rust_files = sorted(path for path in changed_files if is_rust_file(path))
     rust_source_files = sorted(
         path for path in changed_files if is_rust_source_file(path)
+    )
+    link_check_changed = any(
+        is_link_check_surface_file(path) for path in changed_files
     )
     changelog_changed = any(is_changelog_file(path) for path in changed_files)
 
@@ -248,6 +265,32 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                     "monitor->watch, terminate->end. Drop weasel words "
                     "(very, extremely, several, usually, significantly)."
                 ),
+            )
+        )
+
+    if run_all or link_check_changed:
+        checks.append(
+            PlannedCheck(
+                check_id="link-check",
+                description=(
+                    "validate local file/anchor links and rustdoc intra-doc "
+                    "links, including text-vs-target mismatches where backticked "
+                    "link text names an item the crate-internal path does not "
+                    "(see .llm/skills/ci-cd-tooling/doc-code-sync.md)"
+                ),
+                # check-links.py scans the whole tree (no per-file args), matching
+                # the `pass_filenames: false` `check-links` pre-commit hook.
+                command=[PYTHON_EXECUTABLE, "scripts/docs/check-links.py"],
+                fix_hint=(
+                    "Fix the reported broken link or anchor. For a flagged "
+                    "intra-doc text/target mismatch, link to the named item if it "
+                    "is reachable without tripping "
+                    "rustdoc::private_intra_doc_links; otherwise use a plain code "
+                    "span (no link) or link the module with module-named text."
+                ),
+                # Detection + reporting only -- the correct fix depends on item
+                # visibility, so there is no safe blind auto-fix.
+                fix_command=None,
             )
         )
 

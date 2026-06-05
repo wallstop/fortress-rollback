@@ -201,6 +201,7 @@ INSTA_UPDATE=always cargo test  # Accept all
 | Untracked background threads | Return `JoinHandle` |
 | Value moved into thread | Clone `Arc` before `spawn` |
 | Testing hash uniqueness | Test determinism + known vectors |
+| Vacuous correctness test (still passes on broken code) | Prove non-vacuity: revert the fix and confirm the test FAILS. Watch for reducer stubs that fold inputs and mask differences -- e.g. the integration `StateStub` folds inputs by parity (`sum % 2`), so a same-parity input substitution (a dropped/mispredicted rollback input) is invisible; give the relevant actors opposite-parity inputs |
 
 ## Test Performance Tips
 

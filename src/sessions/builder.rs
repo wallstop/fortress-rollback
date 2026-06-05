@@ -401,6 +401,22 @@ impl<T: Config> SessionBuilder<T> {
     /// serve and the join completes with no further action from your code. A
     /// brand-new joiner connection to that reserved address is likewise served.
     ///
+    /// # Re-joining a gracefully-dropped slot
+    ///
+    /// Hot-join serving is not limited to slots reserved at build time. When this
+    /// host serves hot-joins, a player slot that is **cleanly gracefully dropped**
+    /// — via [`remove_player`](P2PSession::remove_player), or automatically on the
+    /// disconnect timeout when [`DisconnectBehavior::ContinueWithout`] is
+    /// configured — is automatically returned to the reserved/frozen state, so a
+    /// returning peer can re-fill it exactly like a build-time reserved slot. The
+    /// returning peer connects with
+    /// [`start_hot_join_session`](Self::start_hot_join_session) from the **same
+    /// address** the dropped peer used (the host keys the slot's endpoint by that
+    /// address). Slots dropped via the legacy
+    /// [`disconnect_player`](P2PSession::disconnect_player) (a `Halt`-style
+    /// disconnect), or dropped while hot-join serving is disabled, are **not** made
+    /// re-joinable.
+    ///
     /// Hot-join requires `max_prediction >= 1`: in lockstep mode
     /// (`max_prediction == 0`) the host never saves state and so can never serve
     /// a snapshot, so the start methods reject that configuration.

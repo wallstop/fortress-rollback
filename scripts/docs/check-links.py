@@ -344,8 +344,14 @@ def clean_link_target(link_target: str) -> str:
     return link_target.split(maxsplit=1)[0] if link_target else ""
 
 
-def iter_markdown_link_targets(content: str):
-    """Yield local-link candidate targets from Markdown-like content."""
+def iter_markdown_links(content: str):
+    """Yield ``(link_text, link_target)`` pairs from Markdown-like content.
+
+    ``link_text`` is ``None`` for link forms that have no inline text (reference
+    definitions and HTML ``href``/``src`` attributes). Inline links yield their
+    raw bracket text so callers can compare it against the (cleaned) target --
+    for example to catch a backticked item name pointing at the wrong page.
+    """
     code_ranges = find_code_fence_ranges(content)
     inline_code_ranges = find_inline_code_ranges(content)
 
@@ -355,13 +361,13 @@ def iter_markdown_link_targets(content: str):
             continue
         if in_code_span(match.start(), inline_code_ranges):
             continue
-        yield clean_link_target(match.group(2))
+        yield match.group(1), clean_link_target(match.group(2))
 
     ref_link_pattern = re.compile(r"^\s*\[[^\]]+\]:\s*(.+?)\s*$", re.MULTILINE)
     for match in ref_link_pattern.finditer(content):
         if in_code_block(match.start(), code_ranges):
             continue
-        yield clean_link_target(match.group(1))
+        yield None, clean_link_target(match.group(1))
 
     html_link_pattern = re.compile(r"""\b(?:href|src)=["']([^"']+)["']""", re.IGNORECASE)
     for match in html_link_pattern.finditer(content):
@@ -369,7 +375,13 @@ def iter_markdown_link_targets(content: str):
             continue
         if in_code_span(match.start(), inline_code_ranges):
             continue
-        yield clean_link_target(match.group(1))
+        yield None, clean_link_target(match.group(1))
+
+
+def iter_markdown_link_targets(content: str):
+    """Yield local-link candidate targets from Markdown-like content."""
+    for _link_text, link_target in iter_markdown_links(content):
+        yield link_target
 
 
 def extract_rust_doc_markdown(content: str) -> str:
@@ -432,6 +444,124 @@ def is_rustdoc_item_fragment(anchor: str) -> bool:
     }
 
 
+# Crate-internal rustdoc intra-doc path prefixes. Links starting with one of
+# these resolve against the current crate, so their final `::` segment must name
+# the same item as the backticked link text. External-crate paths (e.g.
+# `bincode::config::Configuration`) are deliberately excluded: their text may
+# legitimately name a re-exported or differently-scoped item, and a manual audit
+# found that flagging them produced false positives.
+INTRA_DOC_PATH_PREFIXES = ("crate::", "super::", "self::")
+
+
+def backticked_item_text(link_text: str) -> str | None:
+    """Return the item named by single-backticked rustdoc link text, else None.
+
+    Recognizes link text that is exactly one backticked identifier or qualified
+    path, e.g. `` `Foo` `` or `` `Foo::bar` ``. Returns the final `::`-segment
+    with any trailing ``()`` call parens and generic arguments stripped, so
+    `` `decode_message()` `` -> ``decode_message`` and `` `ProofVec<U>` `` ->
+    ``ProofVec``. Returns None for prose text, multi-token text, empty spans, or
+    anything that is not a plain identifier path.
+    """
+    text = link_text.strip()
+    if len(text) < 3 or not text.startswith("`") or not text.endswith("`"):
+        return None
+    inner = text[1:-1].strip()
+    if not inner or "`" in inner:
+        return None
+
+    # Drop generic arguments anywhere in the path (e.g. `Vec<T>::iter`), then any
+    # trailing call parens, before taking the final path segment.
+    inner = re.sub(r"<[^`]*>", "", inner)
+    last_segment = inner.split("::")[-1].strip()
+    if last_segment.endswith("()"):
+        last_segment = last_segment[:-2].strip()
+    elif last_segment.endswith(")") and "(" in last_segment:
+        last_segment = last_segment[: last_segment.index("(")].strip()
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", last_segment):
+        return None
+    return last_segment
+
+
+def intra_doc_target_item(link_target: str) -> str | None:
+    """Return the final `::` segment of a crate-internal intra-doc path, else None.
+
+    Only ``crate::``/``super::``/``self::`` targets qualify; everything else
+    (external crates, ``Self::``, bare relative paths, anchors) returns None so
+    the mismatch check stays scoped to crate-internal links. Generic arguments
+    and a trailing ``()`` are stripped, symmetric with `backticked_item_text`, so
+    ``crate::m::Foo<T>`` -> ``Foo``.
+
+    Known, deliberately-unhandled edge cases (near-nil in practice, kept out to
+    keep the check simple and false-positive-free): reference-style links
+    (``[`Foo`][ref]`` — the text is checked only for inline links, see
+    `iter_markdown_links`) and raw identifiers (``r#type``).
+    """
+    if not link_target.startswith(INTRA_DOC_PATH_PREFIXES):
+        return None
+    path = link_target.split("#", 1)[0]
+    # Strip generic arguments anywhere in the path (mirrors `backticked_item_text`)
+    # so a target like ``crate::m::Foo<T>`` compares as ``Foo``.
+    path = re.sub(r"<[^`]*>", "", path)
+    last_segment = path.split("::")[-1].strip()
+    if last_segment.endswith("()"):
+        last_segment = last_segment[:-2].strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", last_segment):
+        return None
+    return last_segment
+
+
+def intra_doc_link_text_mismatch(
+    link_text: str | None, link_target: str
+) -> tuple[str, str] | None:
+    """Return ``(text_item, target_item)`` when a link's text and target disagree.
+
+    Detects the defect class where backticked link text names a specific item but
+    a crate-internal intra-doc target points at a different (usually enclosing)
+    item, so the rendered link silently lands on the wrong rustdoc page even
+    though it resolves. Returns None when there is no such mismatch.
+    """
+    if link_text is None:
+        return None
+    text_item = backticked_item_text(link_text)
+    if text_item is None:
+        return None
+    target_item = intra_doc_target_item(link_target)
+    if target_item is None:
+        return None
+    if text_item == target_item:
+        return None
+    return text_item, target_item
+
+
+def intra_doc_mismatch_error(
+    link_text: str | None, link_target: str
+) -> tuple[bool, str] | None:
+    """Return a ``(False, message)`` failure for a text/target mismatch, else None.
+
+    Wraps :func:`intra_doc_link_text_mismatch` with the user-facing diagnostic so
+    every rustdoc intra-doc rubber-stamp path can share one report. The hint is
+    deliberately non-prescriptive about the fix: linking directly to the named
+    item is correct only when it is reachable without tripping rustdoc's
+    ``private_intra_doc_links`` lint (e.g. a ``pub(crate)`` item inside a ``pub``
+    module is not); otherwise de-link to a plain code span or link the module
+    with module-named text.
+    """
+    mismatch = intra_doc_link_text_mismatch(link_text, link_target)
+    if mismatch is None:
+        return None
+    text_item, target_item = mismatch
+    return (
+        False,
+        f"Rustdoc intra-doc link text `{text_item}` points at `{target_item}` "
+        f"('{link_target}'); the link resolves but lands on the wrong page. Link "
+        f"to the item itself if it is reachable without tripping "
+        f"rustdoc::private_intra_doc_links, otherwise use a plain code span (no "
+        f"link) or link the module with module-named text.",
+    )
+
+
 def check_rust_doc_link(
     source_file: Path,
     link_target: str,
@@ -439,6 +569,7 @@ def check_rust_doc_link(
     verbose: bool = False,
     current_doc_markdown: str | None = None,
     module_doc_markdown: str | None = None,
+    link_text: str | None = None,
 ) -> tuple[bool, str]:
     """Check Markdown URL targets extracted from Rust doc comments."""
     if link_target.startswith(
@@ -504,6 +635,12 @@ def check_rust_doc_link(
                 "Rustdoc path URL fragments are not linted by rustdoc; "
                 f"use an intra-doc path link instead of '{link_target}'",
             )
+        # A clean intra-doc path (e.g. `crate::network::codec`) resolves, so no
+        # broken-link lint fires -- but if the backticked link text names an item
+        # the path's final segment does not, the link lands on the wrong page.
+        mismatch_error = intra_doc_mismatch_error(link_text, link_target)
+        if mismatch_error is not None:
+            return mismatch_error
         return True, ""
 
     if link_target.startswith("#"):
@@ -517,6 +654,15 @@ def check_rust_doc_link(
         return True, ""
 
     if link_target.startswith(("crate::", "super::", "self::", "Self::", "`")) or "::" in link_target:
+        # Rustdoc resolves these intra-doc paths, so a broken-link lint will not
+        # fire. But a crate-internal path whose final segment differs from the
+        # backticked item named in the link text resolves to the WRONG page --
+        # catch that mismatch here before rubber-stamping the link. (Clean
+        # `crate::`/`super::`/`self::` paths are handled in the non-local-path
+        # branch above; this also covers path-like intra-doc targets.)
+        mismatch_error = intra_doc_mismatch_error(link_text, link_target)
+        if mismatch_error is not None:
+            return mismatch_error
         return True, ""
 
     return check_markdown_link(source_file, link_target, project_root, verbose)
@@ -582,7 +728,7 @@ def check_rust_doc_file(
     blocks = extract_rust_doc_blocks(content)
     module_doc_markdown = "\n".join(block.markdown for block in blocks if block.is_module)
     for block in blocks:
-        for link_target in iter_markdown_link_targets(block.markdown):
+        for link_text, link_target in iter_markdown_links(block.markdown):
             checked += 1
             if not link_target:
                 continue
@@ -593,6 +739,7 @@ def check_rust_doc_file(
                 verbose,
                 current_doc_markdown=block.markdown,
                 module_doc_markdown=module_doc_markdown,
+                link_text=link_text,
             )
             if not is_valid:
                 errors += 1
