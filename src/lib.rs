@@ -224,6 +224,9 @@ pub mod sessions {
     pub mod config;
     #[doc(hidden)]
     pub mod event_drain;
+    /// Hot-join snapshot serialization and capture/apply helpers.
+    #[cfg(feature = "hot-join")]
+    pub mod hot_join;
     #[doc(hidden)]
     pub mod p2p_session;
     #[doc(hidden)]
@@ -1368,6 +1371,10 @@ pub enum SessionState {
     Synchronizing,
     /// When running, the session has synchronized and is ready to take and transmit player input.
     Running,
+    /// The session is a hot-joiner receiving a state snapshot from a host
+    /// before it can resume normal rollback play.
+    #[cfg(feature = "hot-join")]
+    HotJoining,
 }
 
 impl std::fmt::Display for SessionState {
@@ -1375,6 +1382,8 @@ impl std::fmt::Display for SessionState {
         match self {
             Self::Synchronizing => write!(f, "Synchronizing"),
             Self::Running => write!(f, "Running"),
+            #[cfg(feature = "hot-join")]
+            Self::HotJoining => write!(f, "HotJoining"),
         }
     }
 }
@@ -1647,6 +1656,26 @@ where
         /// Address of the removed player.
         addr: T::Address,
     },
+    /// A peer is requesting to hot-join the session by filling a reserved or
+    /// previously-dropped player slot `handle`. Informational: the host serves
+    /// a state snapshot automatically; applications may observe this to log or
+    /// gate joins.
+    #[cfg(feature = "hot-join")]
+    JoinRequested {
+        /// Handle of the slot the peer wants to fill.
+        handle: PlayerHandle,
+        /// Address of the joining peer.
+        addr: T::Address,
+    },
+    /// A peer finished hot-joining: it loaded the snapshot and resumed
+    /// contributing inputs for slot `handle`. The session is `Running` again.
+    #[cfg(feature = "hot-join")]
+    PeerJoined {
+        /// Handle the joined peer now occupies.
+        handle: PlayerHandle,
+        /// Address of the joined peer.
+        addr: T::Address,
+    },
 }
 
 impl<T: Config> std::fmt::Display for FortressEvent<T>
@@ -1731,6 +1760,14 @@ where
             ),
             Self::PeerDropped { handle, addr } => {
                 write!(f, "PeerDropped(handle={}, addr={})", handle, addr)
+            },
+            #[cfg(feature = "hot-join")]
+            Self::JoinRequested { handle, addr } => {
+                write!(f, "JoinRequested(handle={}, addr={})", handle, addr)
+            },
+            #[cfg(feature = "hot-join")]
+            Self::PeerJoined { handle, addr } => {
+                write!(f, "PeerJoined(handle={}, addr={})", handle, addr)
             },
         }
     }
@@ -1855,7 +1892,7 @@ impl<T: Config> std::fmt::Display for FortressRequest<T> {
 /// # #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 /// # struct MyInput(u8);
 /// #
-/// # #[derive(Clone, Default)]
+/// # #[derive(Clone, Default, Serialize, Deserialize)]
 /// # struct MyState { frame: i32, data: u64 }
 /// #
 /// # struct MyConfig;
@@ -1914,7 +1951,7 @@ impl<T: Config> std::fmt::Display for FortressRequest<T> {
 /// #
 /// # #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 /// # struct MyInput(u8);
-/// # #[derive(Clone, Default)]
+/// # #[derive(Clone, Default, Serialize, Deserialize)]
 /// # struct MyState { frame: i32 }
 /// # struct MyConfig;
 /// # impl Config for MyConfig {
@@ -2029,7 +2066,7 @@ macro_rules! handle_requests {
 /// - **UDP Games**: Use `std::net::SocketAddr` for `Address`
 /// - **WebRTC/Browser**: Use a custom address type from your WebRTC library
 /// - **Local Testing**: Any `Clone + PartialEq + Eq + Ord + Hash + Debug` type works
-#[cfg(feature = "sync-send")]
+#[cfg(all(feature = "sync-send", not(feature = "hot-join")))]
 pub trait Config: 'static + Send + Sync {
     /// The input type for a session. This is the only game-related data
     /// transmitted over the network.
@@ -2048,6 +2085,31 @@ pub trait Config: 'static + Send + Sync {
 
     /// The save state type for the session.
     type State: Clone + Send + Sync;
+
+    /// The address type which identifies the remote clients
+    type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Send + Sync + Debug;
+}
+
+/// Compile time parameterization for sessions.
+#[cfg(all(feature = "sync-send", feature = "hot-join"))]
+pub trait Config: 'static + Send + Sync {
+    /// The input type for a session. This is the only game-related data
+    /// transmitted over the network.
+    ///
+    /// The implementation of [Default] is used for representing "no input" for
+    /// a player, including when a player is disconnected.
+    ///
+    /// Network sessions require this type to serialize to at least one byte,
+    /// every value must serialize to the same byte length under Fortress
+    /// Rollback's codec, and each local or remote aggregate input frame must
+    /// fit the protocol receive decode cap. Prefer structs of fixed-width
+    /// numeric and boolean fields; avoid variable-length enums, strings,
+    /// vectors, maps, or other payloads whose encoded size can change from
+    /// frame to frame.
+    type Input: Copy + Clone + PartialEq + Eq + Default + Serialize + DeserializeOwned + Send + Sync;
+
+    /// The save state type for the session.
+    type State: Clone + Send + Sync + Serialize + DeserializeOwned;
 
     /// The address type which identifies the remote clients
     type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Send + Sync + Debug;
@@ -2095,7 +2157,7 @@ where
 }
 
 /// Compile time parameterization for sessions.
-#[cfg(not(feature = "sync-send"))]
+#[cfg(all(not(feature = "sync-send"), not(feature = "hot-join")))]
 pub trait Config: 'static {
     /// The input type for a session. This is the only game-related data
     /// transmitted over the network.
@@ -2114,6 +2176,35 @@ pub trait Config: 'static {
 
     /// The save state type for the session.
     type State;
+
+    /// The address type which identifies the remote clients
+    type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Debug;
+}
+
+/// Compile time parameterization for sessions.
+#[cfg(all(not(feature = "sync-send"), feature = "hot-join"))]
+pub trait Config: 'static {
+    /// The input type for a session. This is the only game-related data
+    /// transmitted over the network.
+    ///
+    /// The implementation of [Default] is used for representing "no input" for
+    /// a player, including when a player is disconnected.
+    ///
+    /// Network sessions require this type to serialize to at least one byte,
+    /// every value must serialize to the same byte length under Fortress
+    /// Rollback's codec, and each local or remote aggregate input frame must
+    /// fit the protocol receive decode cap. Prefer structs of fixed-width
+    /// numeric and boolean fields; avoid variable-length enums, strings,
+    /// vectors, maps, or other payloads whose encoded size can change from
+    /// frame to frame.
+    type Input: Copy + Clone + PartialEq + Eq + Default + Serialize + DeserializeOwned;
+
+    /// The save state type for the session.
+    ///
+    /// `Clone` is required so a hot-join host can capture a snapshot of its
+    /// saved state to serve to a joiner (see
+    /// [`SessionBuilder::start_hot_join_session`](crate::SessionBuilder::start_hot_join_session)).
+    type State: Clone + Serialize + DeserializeOwned;
 
     /// The address type which identifies the remote clients
     type Address: Clone + PartialEq + Eq + PartialOrd + Ord + Hash + Debug;
@@ -2555,6 +2646,18 @@ mod tests {
                 format!("handle={handle}"),
                 format!("addr={addr}"),
             ],
+            #[cfg(feature = "hot-join")]
+            FortressEvent::JoinRequested { handle, addr } => vec![
+                "JoinRequested(".to_string(),
+                format!("handle={handle}"),
+                format!("addr={addr}"),
+            ],
+            #[cfg(feature = "hot-join")]
+            FortressEvent::PeerJoined { handle, addr } => vec![
+                "PeerJoined(".to_string(),
+                format!("handle={handle}"),
+                format!("addr={addr}"),
+            ],
         };
 
         let display = event.to_string();
@@ -2635,6 +2738,16 @@ mod tests {
                 handle: PlayerHandle::new(4),
                 addr: test_addr(7002),
             },
+            #[cfg(feature = "hot-join")]
+            FortressEvent::JoinRequested {
+                handle: PlayerHandle::new(5),
+                addr: test_addr(7003),
+            },
+            #[cfg(feature = "hot-join")]
+            FortressEvent::PeerJoined {
+                handle: PlayerHandle::new(6),
+                addr: test_addr(7004),
+            },
         ];
 
         for event in samples {
@@ -2699,6 +2812,36 @@ mod tests {
     #[test]
     fn session_state_display_running() {
         assert_eq!(SessionState::Running.to_string(), "Running");
+    }
+
+    #[cfg(all(test, feature = "hot-join"))]
+    #[test]
+    fn session_state_display_hot_joining() {
+        assert_eq!(SessionState::HotJoining.to_string(), "HotJoining");
+    }
+
+    #[cfg(all(test, feature = "hot-join"))]
+    #[test]
+    fn fortress_event_join_requested_display() {
+        let handle = PlayerHandle::new(3);
+        let addr = test_addr(7200);
+        let event: FortressEvent<TestConfig> = FortressEvent::JoinRequested { handle, addr };
+        assert_eq!(
+            event.to_string(),
+            format!("JoinRequested(handle={handle}, addr={addr})")
+        );
+    }
+
+    #[cfg(all(test, feature = "hot-join"))]
+    #[test]
+    fn fortress_event_peer_joined_display() {
+        let handle = PlayerHandle::new(2);
+        let addr = test_addr(7201);
+        let event: FortressEvent<TestConfig> = FortressEvent::PeerJoined { handle, addr };
+        assert_eq!(
+            event.to_string(),
+            format!("PeerJoined(handle={handle}, addr={addr})")
+        );
     }
 
     // ==========================================

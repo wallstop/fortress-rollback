@@ -44,6 +44,7 @@ use std::net::SocketAddr;
 /// This is intentionally simple to demonstrate the sync test workflow.
 /// In a real game, this would contain all game entities, physics state, etc.
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "hot-join", derive(Serialize, Deserialize))]
 struct CounterState {
     /// The current frame number (for verification)
     frame: i32,

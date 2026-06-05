@@ -756,6 +756,21 @@ pub enum InvalidRequestKind {
         /// The actual number of players registered.
         actual: usize,
     },
+    /// The player count carried by a hot-join state snapshot does not match the
+    /// joining session's fixed player count.
+    ///
+    /// The reserved-slot hot-join model fixes the wire input width at
+    /// construction, so a snapshot whose `num_players` differs (in *either*
+    /// direction) describes a different session shape and must be rejected.
+    /// Unlike [`Self::NotEnoughPlayers`], this is directionless: `actual` may be
+    /// larger or smaller than `expected`.
+    #[cfg(feature = "hot-join")]
+    PlayerCountMismatch {
+        /// The joining session's fixed player count.
+        expected: usize,
+        /// The player count declared by the received snapshot.
+        actual: usize,
+    },
     /// Check distance is too large for the prediction window.
     CheckDistanceTooLarge {
         /// The requested check distance.
@@ -995,6 +1010,14 @@ impl Display for InvalidRequestKind {
                 write!(
                     f,
                     "not enough players registered: expected {}, got {}",
+                    expected, actual
+                )
+            },
+            #[cfg(feature = "hot-join")]
+            Self::PlayerCountMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "player count mismatch: session has {}, snapshot has {}",
                     expected, actual
                 )
             },

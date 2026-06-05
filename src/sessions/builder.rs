@@ -112,6 +112,14 @@ where
     /// Defaults to [`DisconnectBehavior::Halt`] for back-compat with legacy
     /// GGRS-style behavior.
     disconnect_behavior: DisconnectBehavior,
+    /// Whether this session serves hot-joins (host role). Set via
+    /// [`with_hot_join`](Self::with_hot_join) or implied by
+    /// [`add_reserved_player`](Self::add_reserved_player).
+    #[cfg(feature = "hot-join")]
+    accept_hot_join: bool,
+    /// Remote handles reserved for future hot-joiners.
+    #[cfg(feature = "hot-join")]
+    reserved_slots: std::collections::BTreeSet<PlayerHandle>,
 }
 
 impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
@@ -142,9 +150,14 @@ impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
             recording,
             telemetry,
             disconnect_behavior,
+            #[cfg(feature = "hot-join")]
+            accept_hot_join,
+            #[cfg(feature = "hot-join")]
+            reserved_slots,
         } = self;
 
-        f.debug_struct("SessionBuilder")
+        let mut debug = f.debug_struct("SessionBuilder");
+        debug
             .field("num_players", num_players)
             .field("local_players", local_players)
             .field("max_prediction", max_prediction)
@@ -167,8 +180,12 @@ impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
             .field("input_queue_config", input_queue_config)
             .field("event_queue_size", event_queue_size)
             .field("recording", recording)
-            .field("disconnect_behavior", disconnect_behavior)
-            .finish()
+            .field("disconnect_behavior", disconnect_behavior);
+        #[cfg(feature = "hot-join")]
+        debug
+            .field("accept_hot_join", accept_hot_join)
+            .field("reserved_slots", reserved_slots);
+        debug.finish()
     }
 }
 
@@ -205,6 +222,10 @@ impl<T: Config> SessionBuilder<T> {
             recording: false,
             telemetry: None,
             disconnect_behavior: DisconnectBehavior::default(),
+            #[cfg(feature = "hot-join")]
+            accept_hot_join: false,
+            #[cfg(feature = "hot-join")]
+            reserved_slots: std::collections::BTreeSet::new(),
         }
     }
 
@@ -330,6 +351,99 @@ impl<T: Config> SessionBuilder<T> {
     /// ```
     pub fn add_remote_player(self, handle: usize, addr: T::Address) -> Result<Self, FortressError> {
         self.add_player(PlayerType::Remote(addr), PlayerHandle::new(handle))
+    }
+
+    /// Enables (or disables) serving hot-joins for this session (host role).
+    ///
+    /// When enabled, a host [`P2PSession`] responds to a hot-joiner's snapshot
+    /// request for a reserved/dropped slot by capturing and serving its saved
+    /// state as an **ack-gated transaction**: it caches and re-sends the
+    /// snapshot until the joiner acks, and only then reactivates the slot. See
+    /// [`add_reserved_player`](Self::add_reserved_player) and
+    /// [`start_hot_join_session`](Self::start_hot_join_session).
+    ///
+    /// While a join is in flight the solo host **pauses** (its
+    /// [`advance_frame`](P2PSession::advance_frame) returns an empty request set
+    /// and the simulation does not advance) for the duration of the ~1–2 RTT
+    /// handshake; it resumes automatically once the join completes or the serve
+    /// times out. This is safe in the 2-peer reserved-slot scope and bounds the
+    /// handshake. Keep polling/advancing during the pause.
+    ///
+    /// # Recovery from an abandoned join
+    ///
+    /// If a serve is abandoned mid-handshake (the joiner stops acking but its
+    /// endpoint stays alive), the host aborts it after a bounded number of polls
+    /// and **resumes advancing solo** with the slot left reserved/frozen — it
+    /// never falls back to `Synchronizing` and emits no user-facing
+    /// `Disconnected`. Because the slot stays reserved, the **same still-alive
+    /// joiner** can retry **in-session**: it keeps re-sending its `JoinRequest`
+    /// while `HotJoining`, so once the snapshot reaches it the host re-opens a
+    /// serve and the join completes with no further action from your code. A
+    /// brand-new joiner connection to that reserved address is likewise served.
+    ///
+    /// Hot-join requires `max_prediction >= 1`: in lockstep mode
+    /// (`max_prediction == 0`) the host never saves state and so can never serve
+    /// a snapshot, so the start methods reject that configuration.
+    ///
+    /// This is feature-gated behind the `hot-join` feature.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use fortress_rollback::prelude::*;
+    /// # use std::net::SocketAddr;
+    /// # #[derive(Clone)]
+    /// # struct State;
+    /// # #[derive(Debug)]
+    /// # struct TestConfig;
+    /// # impl Config for TestConfig {
+    /// #     type Input = u8;
+    /// #     type State = u8;
+    /// #     type Address = SocketAddr;
+    /// # }
+    /// let builder = SessionBuilder::<TestConfig>::new().with_hot_join(true);
+    /// ```
+    #[cfg(feature = "hot-join")]
+    pub fn with_hot_join(mut self, enabled: bool) -> Self {
+        self.accept_hot_join = enabled;
+        self
+    }
+
+    /// Registers a **remote** slot reserved for a future hot-joiner (host side).
+    ///
+    /// This creates a remote endpoint at `addr` exactly like
+    /// [`add_remote_player`](Self::add_remote_player) (so a joiner can later
+    /// synchronize to that address), but additionally records `handle` as
+    /// *reserved*. A reserved slot:
+    ///
+    /// - is frozen and marked disconnected from frame 0 (behaving like a
+    ///   gracefully-dropped Feature-5 slot), so the host reaches
+    ///   [`SessionState::Running`](crate::SessionState::Running) and advances
+    ///   solo without waiting for the absent joiner;
+    /// - does not block synchronization or trigger a sync-timeout disconnect
+    ///   while waiting for a joiner;
+    /// - is reactivated when a peer hot-joins and loads the host's snapshot.
+    ///
+    /// Calling this implies hot-join serving (it sets the same flag as
+    /// [`with_hot_join(true)`](Self::with_hot_join)) so the session cannot be
+    /// misconfigured with a reserved slot but no serving.
+    ///
+    /// This is feature-gated behind the `hot-join` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`add_player`](Self::add_player) (e.g. the
+    /// handle is already in use or invalid for a remote player).
+    #[cfg(feature = "hot-join")]
+    pub fn add_reserved_player(
+        mut self,
+        addr: T::Address,
+        handle: PlayerHandle,
+    ) -> Result<Self, FortressError> {
+        self = self.add_player(PlayerType::Remote(addr), handle)?;
+        self.reserved_slots.insert(handle);
+        self.accept_hot_join = true;
+        Ok(self)
     }
 
     /// Change the maximum prediction window. Default is 8.
@@ -1019,6 +1133,21 @@ impl<T: Config> SessionBuilder<T> {
     ) -> Result<P2PSession<T>, FortressError> {
         self.validate_rollback_config()?;
 
+        // Hot-join requires a non-zero prediction window. In lockstep mode
+        // (`max_prediction == 0`) the host never saves state, so it can never
+        // capture a snapshot to serve a joiner — the join could never complete.
+        // Reject at build time (only when this host actually serves hot-joins)
+        // rather than hang a joiner forever. See `with_hot_join` /
+        // `start_hot_join_session`.
+        #[cfg(feature = "hot-join")]
+        if (self.accept_hot_join || !self.reserved_slots.is_empty()) && self.max_prediction == 0 {
+            return Err(InvalidRequestKind::NotSupported {
+                operation:
+                    "hot-join host with max_prediction == 0 (lockstep); hot-join requires max_prediction >= 1",
+            }
+            .into());
+        }
+
         // check if all players are added without iterating over the configured
         // player count, which may be intentionally huge.
         let registered_count = self
@@ -1070,6 +1199,13 @@ impl<T: Config> SessionBuilder<T> {
             }
         }
 
+        #[cfg(feature = "hot-join")]
+        let hot_join = crate::sessions::p2p_session::HotJoinConfig {
+            reserved_slots: self.reserved_slots,
+            accept_hot_join: self.accept_hot_join,
+            joiner: None,
+        };
+
         P2PSession::<T>::new(
             self.num_players,
             self.max_prediction,
@@ -1085,6 +1221,146 @@ impl<T: Config> SessionBuilder<T> {
             self.recording,
             self.telemetry,
             self.disconnect_behavior,
+            #[cfg(feature = "hot-join")]
+            hot_join,
+        )
+    }
+
+    /// Consumes the builder to construct a hot-joiner [`P2PSession`] that joins a
+    /// running host's reserved slot.
+    ///
+    /// The joiner is built as a 2-peer-style session: the calling side is the
+    /// **local** player and the `host` is its single **remote** at `host_addr`.
+    /// Register exactly one local player (the slot being filled) and the host as
+    /// a remote player before calling this. The session starts in
+    /// [`SessionState::HotJoining`](crate::SessionState::HotJoining); it
+    /// synchronizes with the host, requests a state snapshot, loads it (emitting a
+    /// [`LoadGameState`](crate::FortressRequest::LoadGameState) on the first
+    /// [`advance_frame`](P2PSession::advance_frame)), and only then transitions to
+    /// [`Running`](crate::SessionState::Running).
+    ///
+    /// Hot-join uses **input delay 0** for the joining slot (the activation-frame
+    /// model relies on the joiner contributing inputs for frames `>= F` with no
+    /// extra delay). This method enforces that requirement and returns an error
+    /// otherwise.
+    ///
+    /// This is feature-gated behind the `hot-join` feature.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`InvalidRequestKind::NotSupported`] if the configured input
+    ///   delay is non-zero.
+    /// - Returns the same player-count / configuration errors as
+    ///   [`start_p2p_session`](Self::start_p2p_session).
+    /// - Returns an error if exactly one local player is not registered, or if
+    ///   the host endpoint cannot be created/synchronized.
+    #[cfg(feature = "hot-join")]
+    pub fn start_hot_join_session(
+        mut self,
+        socket: impl NonBlockingSocket<T::Address> + 'static,
+        host_addr: T::Address,
+    ) -> Result<P2PSession<T>, FortressError> {
+        self.validate_rollback_config()?;
+
+        // Hot-join requires input delay 0 (see method docs / activation-frame model).
+        if self.input_delay != 0 {
+            return Err(InvalidRequestKind::NotSupported {
+                operation: "start_hot_join_session with non-zero input delay (hot-join requires input delay 0)",
+            }
+            .into());
+        }
+
+        // Hot-join requires a non-zero prediction window. In lockstep mode
+        // (`max_prediction == 0`) the host never saves state and so can never
+        // serve a snapshot; a joiner would hang in `HotJoining` forever. Reject
+        // at build time on the joiner side too, mirroring the host-side guard in
+        // `start_p2p_session`.
+        if self.max_prediction == 0 {
+            return Err(InvalidRequestKind::NotSupported {
+                operation:
+                    "start_hot_join_session with max_prediction == 0 (lockstep); hot-join requires max_prediction >= 1",
+            }
+            .into());
+        }
+
+        // The joiner must have exactly one local player (the slot it fills).
+        let local_handle = self.player_reg.local_player_handle_required()?;
+
+        // All slots must be registered, same as a normal P2P session.
+        let registered_count = self
+            .player_reg
+            .handles
+            .keys()
+            .filter(|handle| handle.is_valid_player_for(self.num_players))
+            .count();
+        if registered_count < self.num_players {
+            return Err(InvalidRequestKind::NotEnoughPlayers {
+                expected: self.num_players,
+                actual: registered_count,
+            }
+            .into());
+        }
+
+        // Build remote endpoints exactly like start_p2p_session: one per unique
+        // remote address (the host plus any other remote slots in scope).
+        let mut addr_count = BTreeMap::<PlayerType<T::Address>, Vec<PlayerHandle>>::new();
+        for (handle, player_type) in self.player_reg.handles.iter() {
+            match player_type {
+                PlayerType::Remote(_) | PlayerType::Spectator(_) => addr_count
+                    .entry(player_type.clone())
+                    .or_insert_with(Vec::new)
+                    .push(*handle),
+                PlayerType::Local => (),
+            }
+        }
+        for (player_type, handles) in addr_count.into_iter() {
+            match player_type {
+                PlayerType::Remote(peer_addr) => {
+                    let mut endpoint =
+                        self.create_endpoint(handles, peer_addr.clone(), self.local_players)?;
+                    // Defer input processing until the snapshot is applied: the
+                    // joiner must not ack the host's inputs before the activation
+                    // frame is known (acking would let the host trim its
+                    // pending_output below that frame). Cleared by the session
+                    // once the snapshot is applied.
+                    endpoint.set_defer_input_processing(true);
+                    self.player_reg.remotes.insert(peer_addr, endpoint);
+                },
+                PlayerType::Spectator(peer_addr) => {
+                    let endpoint =
+                        self.create_endpoint(handles, peer_addr.clone(), self.num_players)?;
+                    self.player_reg.spectators.insert(peer_addr, endpoint);
+                },
+                PlayerType::Local => (),
+            }
+        }
+
+        let hot_join = crate::sessions::p2p_session::HotJoinConfig {
+            reserved_slots: self.reserved_slots,
+            // A joiner does not serve hot-joins.
+            accept_hot_join: false,
+            joiner: Some(crate::sessions::p2p_session::JoinerStateInit {
+                local_handle,
+                host_addr,
+            }),
+        };
+
+        P2PSession::<T>::new(
+            self.num_players,
+            self.max_prediction,
+            Box::new(socket),
+            self.player_reg,
+            self.save_mode,
+            self.desync_detection,
+            self.input_delay,
+            self.violation_observer,
+            self.protocol_config,
+            self.input_queue_config.queue_length,
+            self.event_queue_size,
+            self.recording,
+            self.telemetry,
+            self.disconnect_behavior,
+            hot_join,
         )
     }
 

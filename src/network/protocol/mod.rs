@@ -19,6 +19,8 @@ use crate::network::messages::{
     ChecksumReport, ConnectionStatus, Input, InputAck, Message, MessageBody, MessageHeader,
     QualityReply, QualityReport, SyncReply, SyncRequest,
 };
+#[cfg(feature = "hot-join")]
+use crate::network::messages::{JoinRequest, StateSnapshot, StateSnapshotAck};
 use crate::rle;
 use crate::rng::{random, Pcg32, Rng, SeedableRng};
 use crate::sessions::config::{ProtocolConfig, SyncConfig};
@@ -176,6 +178,26 @@ where
     /// generating magic numbers and sync request IDs, enabling fully reproducible
     /// protocol behavior. When `None`, the thread-local RNG is used instead.
     protocol_rng: Option<Pcg32>,
+
+    // hot-join (chunk 5 orchestration drives these; last-writer-wins)
+    /// A `JoinRequest`'s requested slot received from the peer, awaiting drain.
+    #[cfg(feature = "hot-join")]
+    pending_join_request: Option<usize>,
+    /// A `StateSnapshot` received from the peer, awaiting drain.
+    #[cfg(feature = "hot-join")]
+    received_snapshot: Option<StateSnapshot>,
+    /// The frame from a received `StateSnapshotAck`, awaiting drain.
+    #[cfg(feature = "hot-join")]
+    received_snapshot_ack: Option<Frame>,
+    /// When `true`, `on_input` ignores incoming `Input` messages entirely (no
+    /// decode, recv, ack, or `Event::Input`). A hot-joiner sets this on its host
+    /// endpoint while it is still `HotJoining` so it neither processes nor *acks*
+    /// the host's inputs before the snapshot defines the activation frame —
+    /// acking pre-snapshot inputs would let the host trim its `pending_output`
+    /// below the activation frame, permanently losing the host inputs the joiner
+    /// needs after loading. Cleared once the snapshot is applied.
+    #[cfg(feature = "hot-join")]
+    defer_input_processing: bool,
 }
 
 impl<T: Config> PartialEq for UdpProtocol<T> {
@@ -534,6 +556,16 @@ impl<T: Config> UdpProtocol<T> {
 
             // deterministic protocol RNG (if configured)
             protocol_rng,
+
+            // hot-join
+            #[cfg(feature = "hot-join")]
+            pending_join_request: None,
+            #[cfg(feature = "hot-join")]
+            received_snapshot: None,
+            #[cfg(feature = "hot-join")]
+            received_snapshot_ack: None,
+            #[cfg(feature = "hot-join")]
+            defer_input_processing: false,
         })
     }
 
@@ -1241,6 +1273,12 @@ impl<T: Config> UdpProtocol<T> {
             MessageBody::QualityReply(body) => self.on_quality_reply(body),
             MessageBody::ChecksumReport(body) => self.on_checksum_report(body),
             MessageBody::KeepAlive => (),
+            #[cfg(feature = "hot-join")]
+            MessageBody::JoinRequest(body) => self.on_join_request(body),
+            #[cfg(feature = "hot-join")]
+            MessageBody::StateSnapshot(body) => self.on_state_snapshot(body),
+            #[cfg(feature = "hot-join")]
+            MessageBody::StateSnapshotAck(body) => self.on_state_snapshot_ack(body),
         }
     }
 
@@ -1301,6 +1339,14 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     fn on_input(&mut self, body: &Input) {
+        // A hot-joiner defers ALL input processing until it has applied the
+        // snapshot. Crucially this also defers the ack: acking now would let the
+        // host trim pending_output below the activation frame.
+        #[cfg(feature = "hot-join")]
+        if self.defer_input_processing {
+            return;
+        }
+
         let ack_disposition = self.classify_ack_frame(body.ack_frame);
 
         if body.peer_connect_status.len() != self.num_players {
@@ -1558,6 +1604,27 @@ impl<T: Config> UdpProtocol<T> {
         self.pending_checksums.insert(body.frame, body.checksum);
     }
 
+    /// Upon receiving a `JoinRequest`, store the requested slot for the orchestration
+    /// layer to drain via [`take_pending_join_request`](Self::take_pending_join_request).
+    #[cfg(feature = "hot-join")]
+    fn on_join_request(&mut self, body: &JoinRequest) {
+        self.pending_join_request = Some(body.player_handle);
+    }
+
+    /// Upon receiving a `StateSnapshot`, store it for the orchestration layer to drain
+    /// via [`take_received_snapshot`](Self::take_received_snapshot).
+    #[cfg(feature = "hot-join")]
+    fn on_state_snapshot(&mut self, body: &StateSnapshot) {
+        self.received_snapshot = Some(body.clone());
+    }
+
+    /// Upon receiving a `StateSnapshotAck`, store the acked frame for the orchestration
+    /// layer to drain via [`take_received_snapshot_ack`](Self::take_received_snapshot_ack).
+    #[cfg(feature = "hot-join")]
+    fn on_state_snapshot_ack(&mut self, body: &StateSnapshotAck) {
+        self.received_snapshot_ack = Some(body.frame);
+    }
+
     /// Returns the frame of the last received input
     fn last_recv_frame(&self) -> Frame {
         match self.recv_inputs.iter().max_by_key(|&(k, _)| k) {
@@ -1572,6 +1639,85 @@ impl<T: Config> UdpProtocol<T> {
             checksum,
         };
         self.queue_message(MessageBody::ChecksumReport(body));
+    }
+
+    /// Queues a `JoinRequest` for the slot `player_handle`. No-op unless `Running`.
+    // dead_code: consumed by chunk 5's session orchestration; only the message +
+    // protocol layer lands in this chunk.
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn send_join_request(&mut self, player_handle: usize) {
+        if self.state != ProtocolState::Running {
+            return;
+        }
+        self.queue_message(MessageBody::JoinRequest(JoinRequest { player_handle }));
+    }
+
+    /// Queues a `StateSnapshot`. No-op unless `Running`.
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn send_state_snapshot(&mut self, snapshot: StateSnapshot) {
+        if self.state != ProtocolState::Running {
+            return;
+        }
+        self.queue_message(MessageBody::StateSnapshot(snapshot));
+    }
+
+    /// Queues a `StateSnapshotAck` for `frame`. No-op unless `Running`.
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn send_state_snapshot_ack(&mut self, frame: Frame) {
+        if self.state != ProtocolState::Running {
+            return;
+        }
+        self.queue_message(MessageBody::StateSnapshotAck(StateSnapshotAck { frame }));
+    }
+
+    /// Drains the most recently received `JoinRequest`'s requested slot, if any.
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn take_pending_join_request(&mut self) -> Option<usize> {
+        self.pending_join_request.take()
+    }
+
+    /// Drains the most recently received `StateSnapshot`, if any.
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn take_received_snapshot(&mut self) -> Option<StateSnapshot> {
+        self.received_snapshot.take()
+    }
+
+    /// Drains the most recently received `StateSnapshotAck` frame, if any.
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn take_received_snapshot_ack(&mut self) -> Option<Frame> {
+        self.received_snapshot_ack.take()
+    }
+
+    /// Sets whether this endpoint defers (ignores) incoming `Input` messages.
+    /// See [`defer_input_processing`](Self#structfield.defer_input_processing).
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn set_defer_input_processing(&mut self, defer: bool) {
+        self.defer_input_processing = defer;
+    }
+
+    /// Drops all unacked entries from `pending_output` (the host's queue of
+    /// inputs awaiting the peer's ack).
+    ///
+    /// Used when a hot-join serve is aborted at the Phase-4 timeout: while a
+    /// serve is open the host is paused and never sends inputs, but inputs may
+    /// have accumulated *before* the pause began. Once the serve aborts the host
+    /// resumes solo and `send_input` would otherwise see a full `pending_output`
+    /// (the abandoned joiner never acked) and emit `Event::Disconnected` on every
+    /// subsequent frame. The aborted joiner never needs these pre-snapshot host
+    /// inputs (a future join loads a snapshot), so discarding them is safe and
+    /// stops the disconnect spam. `last_acked_input` is left intact so the
+    /// reference byte-length used to validate later sends stays valid.
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn clear_pending_output(&mut self) {
+        self.pending_output.clear();
     }
 }
 
@@ -1596,6 +1742,7 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
+    #[cfg_attr(feature = "hot-join", derive(Serialize, Deserialize))]
     struct TestState;
 
     struct TestConfig;
@@ -4188,6 +4335,208 @@ mod tests {
         assert!(protocol.pending_output.is_empty());
         assert!(protocol.send_queue.is_empty());
     }
+
+    // ==========================================
+    // Hot-Join Message Handling Tests
+    // ==========================================
+
+    /// Drives a protocol through synchronization into the `Running` state. After
+    /// `complete_test_sync` the `remote_magic` is the SyncReply header magic (999),
+    /// so messages delivered with that magic pass `handle_message`'s magic filter.
+    #[cfg(feature = "hot-join")]
+    const HOT_JOIN_REMOTE_MAGIC: u16 = 999;
+
+    #[cfg(feature = "hot-join")]
+    fn running_protocol() -> UdpProtocol<TestConfig> {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+        assert!(protocol.is_running());
+        protocol.send_queue.clear();
+        protocol
+    }
+
+    #[cfg(feature = "hot-join")]
+    fn deliver(protocol: &mut UdpProtocol<TestConfig>, body: MessageBody) {
+        protocol.handle_message(&Message {
+            header: MessageHeader {
+                magic: HOT_JOIN_REMOTE_MAGIC,
+            },
+            body,
+        });
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn handle_message_stores_join_request() {
+        let mut protocol = running_protocol();
+
+        deliver(
+            &mut protocol,
+            MessageBody::JoinRequest(JoinRequest { player_handle: 1 }),
+        );
+
+        assert_eq!(protocol.take_pending_join_request(), Some(1));
+        // Draining is one-shot.
+        assert_eq!(protocol.take_pending_join_request(), None);
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn handle_message_stores_state_snapshot() {
+        let mut protocol = running_protocol();
+        let snapshot = StateSnapshot {
+            frame: Frame::new(42),
+            num_players: 2,
+            state_bytes: vec![1, 2, 3, 4],
+            checksum: Some(0xABCD),
+        };
+
+        deliver(&mut protocol, MessageBody::StateSnapshot(snapshot.clone()));
+
+        assert_eq!(protocol.take_received_snapshot(), Some(snapshot));
+        assert_eq!(protocol.take_received_snapshot(), None);
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn handle_message_stores_state_snapshot_ack() {
+        let mut protocol = running_protocol();
+
+        deliver(
+            &mut protocol,
+            MessageBody::StateSnapshotAck(StateSnapshotAck {
+                frame: Frame::new(77),
+            }),
+        );
+
+        assert_eq!(protocol.take_received_snapshot_ack(), Some(Frame::new(77)));
+        assert_eq!(protocol.take_received_snapshot_ack(), None);
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn handle_message_join_request_last_writer_wins() {
+        let mut protocol = running_protocol();
+
+        deliver(
+            &mut protocol,
+            MessageBody::JoinRequest(JoinRequest { player_handle: 1 }),
+        );
+        deliver(
+            &mut protocol,
+            MessageBody::JoinRequest(JoinRequest { player_handle: 5 }),
+        );
+
+        assert_eq!(protocol.take_pending_join_request(), Some(5));
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn send_join_request_queues_when_running() {
+        let mut protocol = running_protocol();
+
+        protocol.send_join_request(3);
+
+        assert_eq!(protocol.send_queue.len(), 1);
+        match &protocol.send_queue.front().unwrap().body {
+            MessageBody::JoinRequest(body) => assert_eq!(body.player_handle, 3),
+            other => panic!("expected JoinRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn send_state_snapshot_queues_when_running() {
+        let mut protocol = running_protocol();
+        let snapshot = StateSnapshot {
+            frame: Frame::new(10),
+            num_players: 2,
+            state_bytes: vec![9, 9, 9],
+            checksum: None,
+        };
+
+        protocol.send_state_snapshot(snapshot.clone());
+
+        assert_eq!(protocol.send_queue.len(), 1);
+        match &protocol.send_queue.front().unwrap().body {
+            MessageBody::StateSnapshot(body) => assert_eq!(body, &snapshot),
+            other => panic!("expected StateSnapshot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn send_state_snapshot_ack_queues_when_running() {
+        let mut protocol = running_protocol();
+
+        protocol.send_state_snapshot_ack(Frame::new(55));
+
+        assert_eq!(protocol.send_queue.len(), 1);
+        match &protocol.send_queue.front().unwrap().body {
+            MessageBody::StateSnapshotAck(body) => assert_eq!(body.frame, Frame::new(55)),
+            other => panic!("expected StateSnapshotAck, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn send_hot_join_messages_are_noop_when_not_running() {
+        // Protocol stays in Initializing (never synchronized).
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        assert!(!protocol.is_running());
+
+        protocol.send_join_request(1);
+        protocol.send_state_snapshot(StateSnapshot {
+            frame: Frame::new(1),
+            num_players: 2,
+            state_bytes: vec![1],
+            checksum: None,
+        });
+        protocol.send_state_snapshot_ack(Frame::new(1));
+
+        assert!(protocol.send_queue.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn handle_message_drops_hot_join_messages_while_synchronizing_without_side_effects() {
+        // While Synchronizing, `message_allowed_in_current_state` admits only
+        // Sync messages, so hot-join control messages must be dropped before
+        // reaching a handler. This pins that the Running-only gate also covers
+        // the three new variants (guarding against a future state-machine change
+        // that forgets them). Mirrors
+        // `handle_message_drops_gameplay_messages_while_synchronizing_without_side_effects`.
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        assert!(!protocol.is_running());
+        let initial_event_len = protocol.event_queue.len();
+
+        deliver(
+            &mut protocol,
+            MessageBody::JoinRequest(JoinRequest { player_handle: 1 }),
+        );
+        deliver(
+            &mut protocol,
+            MessageBody::StateSnapshot(StateSnapshot {
+                frame: Frame::new(7),
+                num_players: 2,
+                state_bytes: vec![1, 2, 3, 4],
+                checksum: Some(0xABCD),
+            }),
+        );
+        deliver(
+            &mut protocol,
+            MessageBody::StateSnapshotAck(StateSnapshotAck {
+                frame: Frame::new(7),
+            }),
+        );
+
+        assert_eq!(protocol.take_pending_join_request(), None);
+        assert!(protocol.take_received_snapshot().is_none());
+        assert_eq!(protocol.take_received_snapshot_ack(), None);
+        assert_eq!(protocol.event_queue.len(), initial_event_len);
+    }
 }
 
 // ============================================================================
@@ -4237,6 +4586,7 @@ mod property_tests {
     }
 
     #[derive(Clone, Default)]
+    #[cfg_attr(feature = "hot-join", derive(Serialize, Deserialize))]
     struct TestState;
 
     struct TestConfig;

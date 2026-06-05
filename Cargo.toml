@@ -326,6 +326,10 @@ ignored = ["macroquad", "z3"]
 
 [features]
 sync-send = []
+# Enable hot-join: a peer can join/rejoin a running session by filling a
+# reserved or gracefully-dropped player slot via a state snapshot. Requires
+# Config::State: Serialize + DeserializeOwned (player count stays fixed).
+hot-join = []
 # Enable runtime invariant checking in release builds (for debugging production issues)
 paranoid = []
 # Enable loom-compatible synchronization primitives for concurrency testing

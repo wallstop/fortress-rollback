@@ -34,6 +34,7 @@ struct BenchInput {
 
 /// Simple test state type for benchmarking
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "hot-join", derive(Serialize, Deserialize))]
 struct BenchState {
     frame: i32,
     // Additional state fields would be here in a real game

@@ -12,6 +12,8 @@ mod common;
 
 // Session test modules
 mod sessions {
+    #[cfg(feature = "hot-join")]
+    pub mod hot_join;
     pub mod input_delay;
     pub mod macro_tests;
     pub mod p2p;

@@ -14,6 +14,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Hot Join (reserved-slot model), behind the new opt-in `hot-join` feature flag.** A peer can join a
+  running session by filling a *reserved* (or previously gracefully-dropped) player slot: it synchronizes
+  with the host, receives a full game-state snapshot, loads it, and resumes normal rollback play — all
+  while the total player count (and therefore the network input wire-width) stays fixed, so existing
+  peers' delta-compressed input streams are never disturbed.
+  - `SessionBuilder::with_hot_join(bool)`, `SessionBuilder::add_reserved_player(addr, handle)` (host side),
+    and `SessionBuilder::start_hot_join_session(socket, host_addr)` (joiner side).
+  - `SessionState::HotJoining`; `FortressEvent::JoinRequested { handle, addr }` and
+    `FortressEvent::PeerJoined { handle, addr }`; `InvalidRequestKind::PlayerCountMismatch { expected, actual }`.
+  - Under `hot-join`, `Config::State` additionally requires `Serialize + DeserializeOwned` (for snapshot
+    transfer). This bound only applies when the feature is enabled, so it is **not** a breaking change for
+    existing builds. Snapshot deserialization is allocation-bounded (a hostile length prefix yields an
+    error, never an OOM); keep `Config::State` non-recursive.
+  - The join handshake is ack-gated and loss/latency tolerant within a bounded envelope: the host
+    re-serves the snapshot until acknowledged and only reactivates the slot on the ack, an abandoned join
+    can never stall or fail-close the host (it resumes solo with the slot still reserved), and a joiner
+    that loses its snapshot or ack fails cleanly (retryable) rather than desyncing. Scope: 2-peer /
+    host-mediated topology; requires `max_prediction >= 1` (lockstep hot-join is rejected at build time).
+
 ## [0.9.0] - 2026-06-04
 
 ### Added

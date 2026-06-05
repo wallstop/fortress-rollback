@@ -114,9 +114,10 @@ use crate::proof_vec::ProofVec;
 use crate::sessions::config::SaveMode;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
 use crate::{report_violation, safe_frame_add};
-// `safe_frame_sub!` is only invoked from the confirmed-frame discard pass,
-// which is compiled out under Kani (see `set_last_confirmed_frame`).
-#[cfg(not(kani))]
+// `safe_frame_sub!` is invoked from the confirmed-frame discard pass (compiled
+// out under Kani; see `set_last_confirmed_frame`) and, under the `hot-join`
+// feature, from `seek_to_frame`. Import it whenever either consumer is present.
+#[cfg(any(not(kani), feature = "hot-join"))]
 use crate::safe_frame_sub;
 use crate::{
     Config, FortressError, FortressRequest, Frame, IndexOutOfBounds, InputStatus, InputVec,
@@ -512,6 +513,222 @@ impl<T: Config> SyncLayer<T> {
             .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?;
         queue.freeze();
         Ok(())
+    }
+
+    /// Unfreezes the input queue for a specific player, the counterpart to
+    /// [`Self::freeze_player`].
+    ///
+    /// After this call, [`Self::add_remote_input`] for `player_handle` is no
+    /// longer silently dropped (the underlying [`InputQueue::add_input`] resumes
+    /// accepting inputs). Used when a previously gracefully-dropped slot is
+    /// reactivated by a hot-joining peer. Callers reactivating a slot at a
+    /// non-zero activation frame typically use
+    /// [`Self::reactivate_player_at_frame`] instead, which also repositions the
+    /// queue.
+    ///
+    /// # Errors
+    /// Returns [`FortressError::InvalidPlayerHandle`] if `player_handle` is out
+    /// of range for this sync layer (same validation as [`Self::freeze_player`]).
+    ///
+    /// [`InputQueue::add_input`]: crate::__internal::InputQueue::add_input
+    // dead_code: consumed by chunk 5's session orchestration; only the sync-layer
+    // primitive lands in this chunk.
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn unfreeze_player(
+        &mut self,
+        player_handle: PlayerHandle,
+    ) -> Result<(), FortressError> {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            return Err(FortressError::InvalidPlayerHandle {
+                handle: player_handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        let len = self.input_queues.len();
+        let queue = self
+            .input_queues
+            .get_mut(player_handle.as_usize())
+            .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?;
+        queue.unfreeze();
+        Ok(())
+    }
+
+    /// Reactivates a frozen/reserved slot at game frame `frame` (host side).
+    ///
+    /// Used by the host to reactivate a slot when a peer hot-joins, so the slot
+    /// resumes accepting that peer's real inputs from `frame` onward. This
+    /// repositions only the single target player's input queue via
+    /// [`InputQueue::reset_to_frame`] (which also unfreezes it); it does **not**
+    /// touch any sync-layer frame counter (`current_frame`,
+    /// `last_confirmed_frame`, `last_saved_frame`) — those are driven by the
+    /// session's normal advance path.
+    ///
+    /// After reactivation, [`Self::confirmed_input`] for the reactivated slot is
+    /// only valid for frames `>= frame - 1` (see [`InputQueue::reset_to_frame`]'s
+    /// "Pre-activation `confirmed_input` surface" note); requesting a lower frame
+    /// yields [`InvalidRequestKind::NoConfirmedInput`](crate::error::InvalidRequestKind::NoConfirmedInput).
+    ///
+    /// # Errors
+    /// Returns [`FortressError::InvalidPlayerHandle`] if `player_handle` is out
+    /// of range for this sync layer (same validation as [`Self::freeze_player`]).
+    ///
+    /// Note: a negative/`NULL` `frame` is rejected by
+    /// [`InputQueue::reset_to_frame`] itself (it reports a violation and leaves
+    /// the queue unchanged); this method still returns `Ok(())` for a valid
+    /// handle, since the per-queue primitive owns frame validation.
+    // dead_code: consumed by chunk 5's host orchestration.
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn reactivate_player_at_frame(
+        &mut self,
+        player_handle: PlayerHandle,
+        frame: Frame,
+    ) -> Result<(), FortressError> {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            return Err(FortressError::InvalidPlayerHandle {
+                handle: player_handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        let len = self.input_queues.len();
+        let queue = self
+            .input_queues
+            .get_mut(player_handle.as_usize())
+            .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?;
+        queue.reset_to_frame(frame);
+        Ok(())
+    }
+
+    /// Fast-forwards a freshly-constructed sync layer to a received snapshot's
+    /// activation `frame` (joiner side).
+    ///
+    /// Intended for a **fresh joiner** layer that is about to load a host's
+    /// state snapshot taken at `frame`. Frames before `frame` are considered
+    /// done (their effect is already baked into the snapshot's simulated state);
+    /// `frame` itself is not yet confirmed.
+    ///
+    /// # Postconditions (on success)
+    /// - [`Self::current_frame`] returns `frame`.
+    /// - [`Self::last_confirmed_frame`] returns `frame - 1` (which is
+    ///   [`Frame::NULL`] for `frame == 0`).
+    /// - [`Self::last_saved_frame`] is **unchanged** — the snapshot's state is
+    ///   injected into the saved-states cell (and `last_saved_frame` set) by a
+    ///   later chunk; this method does not set it.
+    /// - Every input queue has been repositioned via
+    ///   [`InputQueue::reset_to_frame`] to accept inputs from `frame` onward.
+    /// - [`InvariantChecker::check_invariants`] still holds
+    ///   (`last_confirmed_frame <= current_frame`, `last_saved_frame <=
+    ///   current_frame`, queue count unchanged).
+    ///
+    /// This is **not** intended for a running layer; it overwrites the frame
+    /// counters wholesale.
+    ///
+    /// # Errors
+    /// Returns [`FortressError::InvalidFrameStructured`] with
+    /// [`InvalidFrameReason::MustBeNonNegative`] if `frame` is negative or
+    /// [`Frame::NULL`].
+    // dead_code: consumed by chunk 5's joiner orchestration.
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn seek_to_frame(&mut self, frame: Frame) -> Result<(), FortressError> {
+        if frame.as_i32() < 0 {
+            return Err(FortressError::InvalidFrameStructured {
+                frame,
+                reason: InvalidFrameReason::MustBeNonNegative,
+            });
+        }
+
+        self.current_frame = frame;
+        // Frames before `frame` are baked into the loaded snapshot; `frame`
+        // itself is not yet confirmed. For `frame == 0` this is `Frame::NULL`.
+        self.last_confirmed_frame = safe_frame_sub!(frame, 1, "SyncLayer::seek_to_frame confirmed");
+        // `last_saved_frame` is intentionally left unchanged (set by the later
+        // snapshot-injection chunk).
+
+        for queue in self.input_queues.iter_mut() {
+            queue.reset_to_frame(frame);
+        }
+
+        // The seek keeps both frame-ordering invariants: last_confirmed_frame
+        // (= frame - 1) <= current_frame (= frame), and last_saved_frame is
+        // unchanged (it was <= the old current_frame == 0 <= frame). This debug
+        // assert surfaces a regression in development; production is unaffected.
+        debug_assert!(
+            self.check_invariants().is_ok(),
+            "seek_to_frame must preserve SyncLayer invariants"
+        );
+
+        Ok(())
+    }
+
+    /// Reads the saved state and checksum at `frame` for a hot-join snapshot
+    /// (host side).
+    ///
+    /// Returns `Some((state, checksum))` only when the circular-buffer slot for
+    /// `frame` actually holds `frame` and contains data: [`SavedStates`] indexes
+    /// by `frame % len`, so a slot can hold a *different* (later or earlier)
+    /// frame after the buffer wraps. The `cell.frame() == frame` guard rejects
+    /// that stale/wrapped case (mirroring [`Self::saved_state_by_frame`] /
+    /// [`Self::load_frame`]). Returns `None` when the slot is stale, empty
+    /// (`cell.load()` is `None`), or `frame` is invalid for `get_cell`.
+    ///
+    /// This is a pure read: no sync-layer state is mutated.
+    // dead_code: consumed by chunk 5's host snapshot orchestration; only the
+    // sync-layer accessor lands in this chunk.
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn capture_snapshot_state(&self, frame: Frame) -> Option<(T::State, Option<u128>)>
+    where
+        // `cell.load()` clones the saved state out of the cell. `Config::State`
+        // is not unconditionally `Clone` in every feature combination (e.g.
+        // `hot-join` without `sync-send`), so the bound is stated locally.
+        T::State: Clone,
+    {
+        let cell = self.saved_states.get_cell(frame).ok()?;
+        if cell.frame() != frame {
+            return None;
+        }
+        let state = cell.load()?;
+        Some((state, cell.checksum()))
+    }
+
+    /// Injects a received hot-join snapshot's `state` into the saved-states cell
+    /// at `frame` and returns the [`FortressRequest::LoadGameState`] the joiner
+    /// must emit so the user restores it (joiner side).
+    ///
+    /// Writes the cell via [`GameStateCell::save`] and sets
+    /// [`Self::last_saved_frame`] to `frame` (the snapshot is now the joiner's
+    /// most recent saved state), then returns the same `LoadGameState { cell,
+    /// frame }` shape [`Self::load_frame`] constructs. Intended to be called
+    /// *after* [`Self::seek_to_frame`] has repositioned the layer to `frame`
+    /// (seek resets the queues and frame counters; this injection writes the
+    /// cell and `last_saved_frame`).
+    ///
+    /// Returns `None` when [`SavedStates::get_cell`] fails for `frame` (a
+    /// negative/`NULL` frame or an internal indexing fault) or — defensively —
+    /// when the cell write is rejected (see below); on the happy path it always
+    /// returns `Some`.
+    // dead_code: consumed by chunk 5's joiner snapshot orchestration.
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn inject_snapshot_state(
+        &mut self,
+        frame: Frame,
+        state: T::State,
+        checksum: Option<u128>,
+    ) -> Option<FortressRequest<T>> {
+        let cell = self.saved_states.get_cell(frame).ok()?;
+        // `GameStateCell::save` only returns `false` for a `Frame::NULL`, which
+        // `get_cell` above already rejects (it errors on any frame < 0). Propagate
+        // the result anyway so this stays correct if either guard ever changes,
+        // and so `last_saved_frame` is never advanced for a write that did not
+        // land.
+        if !cell.save(frame, Some(state), checksum) {
+            return None;
+        }
+        self.last_saved_frame = frame;
+        Some(FortressRequest::LoadGameState { cell, frame })
     }
 
     /// Pre-validates that a subsequent call to [`Self::freeze_player`] for
@@ -3046,5 +3263,329 @@ mod kani_sync_layer_proofs {
         // of the input queue's `Vec` and the saved-state `Rc<RefCell>` cells.
         // Production / `cargo test` / loom drop normally.
         core::mem::forget(sync_layer);
+    }
+}
+
+#[cfg(all(test, feature = "hot-join"))]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
+mod hot_join_sync_layer_tests {
+
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use std::net::SocketAddr;
+
+    #[repr(C)]
+    #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
+    struct TestInput {
+        inp: u8,
+    }
+
+    #[derive(Debug)]
+    struct TestConfig;
+
+    impl Config for TestConfig {
+        type Input = TestInput;
+        type State = u8;
+        type Address = SocketAddr;
+    }
+
+    /// White-box helper: is the given player's queue frozen?
+    fn queue_frozen(sync_layer: &SyncLayer<TestConfig>, handle: usize) -> bool {
+        sync_layer
+            .input_queues
+            .get(handle)
+            .expect("queue should exist")
+            .is_frozen()
+    }
+
+    /// Test 7: `unfreeze_player` round-trips with `freeze_player`; invalid handle errors.
+    #[test]
+    fn unfreeze_player_roundtrips_with_freeze_player() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        assert!(!queue_frozen(&sync_layer, 0));
+        sync_layer
+            .freeze_player(PlayerHandle::new(0))
+            .expect("freeze valid handle");
+        assert!(queue_frozen(&sync_layer, 0));
+
+        sync_layer
+            .unfreeze_player(PlayerHandle::new(0))
+            .expect("unfreeze valid handle");
+        assert!(!queue_frozen(&sync_layer, 0));
+
+        // Invalid handle errors exactly like freeze_player.
+        let result = sync_layer.unfreeze_player(PlayerHandle::new(2));
+        match result {
+            Err(FortressError::InvalidPlayerHandle { handle, max_handle }) => {
+                assert_eq!(handle, PlayerHandle::new(2));
+                assert_eq!(max_handle, PlayerHandle::new(1));
+            },
+            other => panic!("Expected InvalidPlayerHandle error, got {other:?}"),
+        }
+    }
+
+    /// Test 8: `reactivate_player_at_frame` resets ONLY the target queue;
+    /// invalid handle errors.
+    #[test]
+    fn reactivate_player_at_frame_resets_only_target() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        // Give both queues some state via remote inputs.
+        for i in 0..3i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 });
+            sync_layer.add_remote_input(PlayerHandle::new(0), input);
+            sync_layer.add_remote_input(PlayerHandle::new(1), input);
+        }
+
+        // Freeze player 0 so we can observe reactivation unfreezing it, and
+        // capture player 1's queue markers to prove they are untouched.
+        sync_layer
+            .freeze_player(PlayerHandle::new(0))
+            .expect("freeze valid handle");
+        assert!(queue_frozen(&sync_layer, 0));
+
+        let other_queue_before = sync_layer.input_queues.get(1).expect("queue 1 exists");
+        let other_last_added_before = other_queue_before.last_added_frame();
+        let other_last_confirmed_before = other_queue_before.last_confirmed_input();
+        let other_frozen_before = other_queue_before.is_frozen();
+
+        let f = Frame::new(30);
+        sync_layer
+            .reactivate_player_at_frame(PlayerHandle::new(0), f)
+            .expect("reactivate valid handle");
+
+        // Target queue (0) was reset + unfrozen and now accepts at F. After the
+        // reset the queue's last_added_frame is F + frame_delay(0) - 1 = 29, so
+        // the next sequential input is for F. Adding it advances last_added_frame
+        // to F, proving acceptance. (We verify via last_added_frame rather than
+        // confirmed_input because confirmed_input indexes by `frame %
+        // queue_length`, which only holds for queues filled contiguously from
+        // frame 0; a reset queue stores frame F at slot 0. The simulation reads
+        // a reset queue via input()'s tail-relative path, exercised in the
+        // input-queue unit tests.)
+        assert!(!queue_frozen(&sync_layer, 0));
+        assert_eq!(
+            sync_layer.last_added_frame(PlayerHandle::new(0)).unwrap(),
+            Frame::new(29)
+        );
+        sync_layer.add_remote_input(
+            PlayerHandle::new(0),
+            PlayerInput::new(f, TestInput { inp: 77 }),
+        );
+        assert_eq!(
+            sync_layer.last_added_frame(PlayerHandle::new(0)).unwrap(),
+            f
+        );
+
+        // Other queue (1)'s markers are unchanged.
+        let other_after = sync_layer.input_queues.get(1).expect("queue 1 exists");
+        assert_eq!(other_after.last_added_frame(), other_last_added_before);
+        assert_eq!(
+            other_after.last_confirmed_input(),
+            other_last_confirmed_before
+        );
+        assert_eq!(other_after.is_frozen(), other_frozen_before);
+        assert!(!other_after.is_frozen());
+        // Its frame-2 input is still confirmed (not reset away).
+        assert_eq!(
+            sync_layer
+                .confirmed_input(PlayerHandle::new(1), Frame::new(2))
+                .unwrap()
+                .input
+                .inp,
+            2
+        );
+
+        // Invalid handle errors.
+        let result = sync_layer.reactivate_player_at_frame(PlayerHandle::new(5), f);
+        match result {
+            Err(FortressError::InvalidPlayerHandle { handle, max_handle }) => {
+                assert_eq!(handle, PlayerHandle::new(5));
+                assert_eq!(max_handle, PlayerHandle::new(1));
+            },
+            other => panic!("Expected InvalidPlayerHandle error, got {other:?}"),
+        }
+    }
+
+    /// Test 9: `seek_to_frame(F)` sets counters correctly, invariants hold, and
+    /// the layer is usable for a full save/advance cycle afterward.
+    #[test]
+    fn seek_to_frame_sets_counters_and_is_usable() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+        let f = Frame::new(100);
+
+        sync_layer.seek_to_frame(f).expect("seek to valid frame");
+
+        assert_eq!(sync_layer.current_frame(), f);
+        assert_eq!(sync_layer.last_confirmed_frame(), Frame::new(99));
+        // last_saved_frame untouched by seek.
+        assert_eq!(sync_layer.last_saved_frame(), Frame::NULL);
+        // Every queue repositioned to accept at F.
+        assert_eq!(sync_layer.input_queues.len(), 2);
+        for handle in 0..2 {
+            assert_eq!(
+                sync_layer
+                    .last_added_frame(PlayerHandle::new(handle))
+                    .unwrap(),
+                Frame::new(99)
+            );
+        }
+
+        // Invariants hold post-seek.
+        assert!(
+            sync_layer.check_invariants().is_ok(),
+            "invariants must hold after seek_to_frame"
+        );
+
+        // Full cycle: predictions, save at F, advance to F+1.
+        let mut connect_status = vec![ConnectionStatus::default(); 2];
+        connect_status[0].last_frame = f;
+        connect_status[1].last_frame = f;
+
+        let inputs = sync_layer
+            .synchronized_inputs(&connect_status)
+            .expect("synchronized inputs available after seek");
+        assert_eq!(inputs.len(), 2);
+        // No real inputs yet at F -> predictions.
+        assert_eq!(inputs[0].1, InputStatus::Predicted);
+        assert_eq!(inputs[1].1, InputStatus::Predicted);
+
+        match sync_layer.save_current_state() {
+            FortressRequest::SaveGameState { frame, .. } => assert_eq!(frame, f),
+            _ => panic!("Expected SaveGameState at F"),
+        }
+        assert_eq!(sync_layer.last_saved_frame(), f);
+
+        sync_layer.advance_frame();
+        assert_eq!(sync_layer.current_frame(), Frame::new(101));
+        assert!(
+            sync_layer.check_invariants().is_ok(),
+            "invariants must hold after advance"
+        );
+    }
+
+    /// Test 9 (rollback round-trip): after `seek_to_frame(F)` the layer supports
+    /// a full save -> advance -> (confirmed inputs + advance) -> rollback cycle.
+    /// Mirrors the existing `test_save_current_state_after_rollback` /
+    /// `test_load_frame_success` scaffolding (populate a `GameStateCell` via
+    /// `cell.save`, then `load_frame`). Proves a seeked layer participates in the
+    /// rollback machinery and remains usable afterward.
+    #[test]
+    fn seek_to_frame_save_advance_rollback_roundtrips() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+        let f = Frame::new(100);
+
+        sync_layer.seek_to_frame(f).expect("seek to valid frame");
+        assert_eq!(sync_layer.current_frame(), f);
+
+        // Save the snapshot frame F, filling the cell exactly as the production
+        // save path would (the orchestration injects the loaded snapshot here).
+        match sync_layer.save_current_state() {
+            FortressRequest::SaveGameState { cell, frame } => {
+                assert_eq!(frame, f);
+                cell.save(f, Some(0xAB_u8), Some(0x1234));
+                assert_eq!(cell.frame(), f);
+            },
+            _ => panic!("Expected SaveGameState at F"),
+        }
+        assert_eq!(sync_layer.last_saved_frame(), f);
+
+        // Advance to F+1, feed confirmed inputs for F (remote inputs avoid the
+        // prediction-threshold path), and advance once more.
+        sync_layer.advance_frame();
+        assert_eq!(sync_layer.current_frame(), Frame::new(101));
+        sync_layer.add_remote_input(
+            PlayerHandle::new(0),
+            PlayerInput::new(f, TestInput { inp: 5 }),
+        );
+        sync_layer.add_remote_input(
+            PlayerHandle::new(1),
+            PlayerInput::new(f, TestInput { inp: 6 }),
+        );
+
+        // Save F+1 too so the rollback target's prediction window is populated.
+        match sync_layer.save_current_state() {
+            FortressRequest::SaveGameState { cell, frame } => {
+                assert_eq!(frame, Frame::new(101));
+                cell.save(Frame::new(101), Some(0xCD_u8), None);
+            },
+            _ => panic!("Expected SaveGameState at F+1"),
+        }
+        sync_layer.advance_frame();
+        assert_eq!(sync_layer.current_frame(), Frame::new(102));
+
+        // Rollback to F: load_frame restores current_frame == F and returns the
+        // snapshot data we stored.
+        let request = sync_layer
+            .load_frame(f)
+            .expect("rollback to seeked frame F must succeed");
+        match request {
+            FortressRequest::LoadGameState { frame, cell } => {
+                assert_eq!(frame, f);
+                assert_eq!(cell.load(), Some(0xAB_u8));
+            },
+            _ => panic!("Expected LoadGameState at F"),
+        }
+        assert_eq!(sync_layer.current_frame(), f);
+        assert!(
+            sync_layer.check_invariants().is_ok(),
+            "invariants must hold after rollback to seeked frame"
+        );
+
+        // Layer is still usable: re-save at F, advance again, invariants intact.
+        match sync_layer.save_current_state() {
+            FortressRequest::SaveGameState { frame, .. } => assert_eq!(frame, f),
+            _ => panic!("Expected SaveGameState at F after rollback"),
+        }
+        sync_layer.advance_frame();
+        assert_eq!(sync_layer.current_frame(), Frame::new(101));
+        assert!(
+            sync_layer.check_invariants().is_ok(),
+            "invariants must hold after post-rollback advance"
+        );
+    }
+
+    /// Test 9 (frame 0 variant): seek_to_frame(0) yields a NULL last_confirmed_frame.
+    #[test]
+    fn seek_to_frame_zero_confirmed_is_null() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+        sync_layer.seek_to_frame(Frame::new(0)).expect("seek to 0");
+        assert_eq!(sync_layer.current_frame(), Frame::new(0));
+        assert_eq!(sync_layer.last_confirmed_frame(), Frame::NULL);
+        assert!(sync_layer.check_invariants().is_ok());
+    }
+
+    /// Test 10: `seek_to_frame` with a negative frame returns an error (no panic).
+    #[test]
+    fn seek_to_frame_negative_errors() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        let result = sync_layer.seek_to_frame(Frame::NULL);
+        match result {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
+                assert_eq!(frame, Frame::NULL);
+                assert!(matches!(reason, InvalidFrameReason::MustBeNonNegative));
+            },
+            other => panic!("Expected InvalidFrameStructured error, got {other:?}"),
+        }
+
+        let result = sync_layer.seek_to_frame(Frame::new(-7));
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidFrameStructured {
+                reason: InvalidFrameReason::MustBeNonNegative,
+                ..
+            })
+        ));
+
+        // State unchanged after a rejected seek.
+        assert_eq!(sync_layer.current_frame(), Frame::new(0));
+        assert_eq!(sync_layer.last_confirmed_frame(), Frame::NULL);
     }
 }
