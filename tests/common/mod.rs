@@ -18,6 +18,7 @@
 
 pub mod bus_socket;
 pub mod channel_socket;
+pub mod filter_socket;
 pub mod stubs;
 pub mod stubs_enum;
 pub mod test_clock;
@@ -32,6 +33,8 @@ pub use channel_socket::{
     create_channel_pair, create_channel_quad, create_channel_triple, create_chaos_channel_pair,
     create_unconnected_socket, ChannelSocket,
 };
+#[allow(unused_imports)]
+pub use filter_socket::{create_filtered_channel_triple, BlockedLinks, FilterSocket};
 #[allow(unused_imports)]
 pub use test_clock::TestClock;
 #[allow(unused_imports)]

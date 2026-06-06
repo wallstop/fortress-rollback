@@ -18,10 +18,11 @@
     clippy::ip_constant
 )]
 
-use crate::common::stubs::{GameStub, StubConfig, StubInput};
+use crate::common::stubs::{GameStub, StateStub, StubConfig, StubInput};
 use crate::common::{
-    create_channel_pair, create_channel_quad, create_channel_triple, drain_sync_events,
-    poll_with_advance, synchronize_sessions_deterministic, SyncConfig, TestClock,
+    create_channel_pair, create_channel_quad, create_channel_triple,
+    create_filtered_channel_triple, drain_sync_events, poll_with_advance,
+    synchronize_sessions_deterministic, BlockedLinks, FilterSocket, SyncConfig, TestClock,
     POLL_INTERVAL_DETERMINISTIC,
 };
 use fortress_rollback::{
@@ -29,6 +30,8 @@ use fortress_rollback::{
     InputVec, P2PSession, PlayerHandle, PlayerType, ProtocolConfig, SessionBuilder, SessionState,
     SpectatorSession,
 };
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use web_time::Duration;
 
 /// Helper: creates a `ProtocolConfig` with the given test clock.
@@ -1884,6 +1887,497 @@ fn p2p_remove_player_multi_handle_emits_both_peer_dropped_then_disconnected(
             events
         );
     }
+
+    Ok(())
+}
+
+// ============================================================================
+// Regression: under-loss graceful-drop desync (Chunk N0)
+// ============================================================================
+//
+// In an N>=3 full-mesh `ContinueWithout` session, when a peer drops under
+// *asymmetric* packet loss, survivors can have received the dropped peer's
+// inputs through DIFFERENT frames (per-link delivery; a now-terminal endpoint
+// never re-supplies them). Before the fix, each survivor froze the dropped slot
+// at its OWN last-received value, so a survivor that received more of the dropped
+// peer's frames repeated a different value than a survivor that received fewer —
+// divergent confirmed history = silent desync. The fix rolls every survivor's
+// frozen value back to the value at the globally-agreed freeze frame `F` (the
+// global min over peers of the dropped slot's received frame), so all survivors
+// repeat the IDENTICAL value.
+//
+// This is a deterministic asymmetric-loss repro: P3 keeps delivering to P1 but
+// is blocked to P2 for several frames (so P1 confirms P3 through a higher frame
+// than P2), then P3 goes fully silent and both survivors auto-drop it via the
+// disconnect-timeout path through `update_player_disconnects`. The assertion
+// checks cross-peer byte-equality of recorded confirmed state for every frame
+// both peers consider confirmed. It FAILS before the fix and PASSES after.
+
+/// Builds three synchronized `ContinueWithout` sessions over filtered sockets
+/// with a short disconnect timeout, returning the sessions, the shared
+/// blocked-links handle, the three addresses, and the clock.
+#[allow(clippy::type_complexity)]
+fn build_filtered_three_player_sessions(
+    disconnect_timeout: Duration,
+) -> Result<
+    (
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        BlockedLinks,
+        SocketAddr,
+        SocketAddr,
+        SocketAddr,
+        TestClock,
+    ),
+    FortressError,
+> {
+    let clock = TestClock::new();
+    let (s1, s2, s3, a1, a2, a3, blocked) = create_filtered_channel_triple();
+    let pc = protocol_config(&clock);
+
+    let build = |local: PlayerHandle,
+                 socket: FilterSocket,
+                 remotes: [(PlayerHandle, SocketAddr); 2]|
+     -> Result<P2PSession<StubConfig>, FortressError> {
+        let mut builder = SessionBuilder::<StubConfig>::new()
+            .with_protocol_config(pc.clone())
+            .with_num_players(3)?
+            .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+            .with_disconnect_timeout(disconnect_timeout)
+            .with_disconnect_notify_delay(Duration::from_millis(100))
+            .add_player(PlayerType::Local, local)?;
+        for (handle, addr) in remotes {
+            builder = builder.add_player(PlayerType::Remote(addr), handle)?;
+        }
+        builder.start_p2p_session(socket)
+    };
+
+    let mut sess1 = build(
+        PlayerHandle::new(0),
+        s1,
+        [(PlayerHandle::new(1), a2), (PlayerHandle::new(2), a3)],
+    )?;
+    let mut sess2 = build(
+        PlayerHandle::new(1),
+        s2,
+        [(PlayerHandle::new(0), a1), (PlayerHandle::new(2), a3)],
+    )?;
+    let mut sess3 = build(
+        PlayerHandle::new(2),
+        s3,
+        [(PlayerHandle::new(0), a1), (PlayerHandle::new(1), a2)],
+    )?;
+
+    synchronize_three_sessions(&mut sess1, &mut sess2, &mut sess3, &clock, 500);
+    let _ = drain_events(&mut sess1);
+    let _ = drain_events(&mut sess2);
+    let _ = drain_events(&mut sess3);
+
+    Ok((sess1, sess2, sess3, blocked, a1, a2, a3, clock))
+}
+
+/// Advances a session one frame with the given local input, recording confirmed
+/// state into `states` (via `handle_requests_recording`, which captures every
+/// re-simulated frame). Tolerates `PredictionThreshold`/`NotSynchronized`
+/// (returns `false` so the caller can poll and retry); propagates other errors.
+fn try_advance_recording(
+    session: &mut P2PSession<StubConfig>,
+    stub: &mut GameStub,
+    handle: PlayerHandle,
+    value: u32,
+    states: &mut BTreeMap<i32, StateStub>,
+) -> Result<bool, FortressError> {
+    match session.add_local_input(handle, StubInput { inp: value }) {
+        Ok(()) => {},
+        Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => {
+            return Ok(false)
+        },
+        Err(other) => return Err(other),
+    }
+    match session.advance_frame() {
+        Ok(requests) => {
+            stub.handle_requests_recording(requests, states);
+            Ok(true)
+        },
+        Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => Ok(false),
+        Err(other) => Err(other),
+    }
+}
+
+#[test]
+fn p2p_continue_without_under_asymmetric_loss_freezes_dropped_peer_consistently(
+) -> Result<(), FortressError> {
+    // Guards the *freeze-time* leg of the agreement: under asymmetric loss the
+    // auto-timeout drop freezes each survivor's dropped slot at the global-min
+    // agreed frame `F` (via `freeze_at` seeded from the gossiped `last_frame`
+    // override), so survivors that received different amounts of P3's input still
+    // repeat the identical value. (The complementary `remove_player` test below
+    // exercises the re-roll *convergence* chokepoint in `disconnect_player_at_frames`
+    // — the path that corrects a survivor which first froze "high" on local
+    // detection.) Short timeout keeps the test fast; notify delay is even shorter
+    // so the protocol starts the disconnect sequence promptly once P3 goes silent.
+    let (mut sess1, mut sess2, mut sess3, blocked, a1, a2, a3, clock) =
+        build_filtered_three_player_sessions(Duration::from_millis(400))?;
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let mut stub3 = GameStub::new();
+
+    let mut states1: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states2: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut sink: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    // --- Phase 1: warmup with all links open so all three confirm together. ---
+    let warmup_frames = 8_u32;
+    for i in 0..warmup_frames {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1000,
+            &mut states2,
+        )?;
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 2000,
+            &mut sink,
+        )?;
+    }
+    // Let confirmed inputs settle so the warmup frames are mutually confirmed.
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 12);
+
+    // --- Phase 2: asymmetric loss. Block ONLY P3 -> P2. P3 keeps delivering to
+    // P1 and keeps producing DISTINCT local inputs (i + 3000), so P1 confirms P3
+    // through a higher frame than P2 does. Each distinct value makes the dropped
+    // slot's frozen value frame-sensitive, so divergent freeze frames surface as
+    // divergent recorded state. ---
+    blocked.block(a3, a2);
+
+    let loss_window = 4_u32;
+    for i in 0..loss_window {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i + 20,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1020,
+            &mut states2,
+        )?;
+        // P3 keeps advancing locally with distinct values; only P1 receives them.
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 3000,
+            &mut sink,
+        )?;
+    }
+    // Drain deliveries: P1 absorbs P3's extra frames; P2 does not.
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 6);
+
+    // --- Phase 3: P3 goes fully silent (block P3 -> everyone, stop advancing
+    // P3). Pump P1 + P2 + advance the clock past the disconnect timeout so both
+    // auto-drop P3 via the ContinueWithout timeout path. ---
+    blocked.block(a3, a1);
+
+    let mut sess1_dropped = false;
+    let mut sess2_dropped = false;
+    for _ in 0..80 {
+        // Poll P1 and P2 only (P3 is gone). Advance the clock so the disconnect
+        // timeout fires.
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            500,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            1500,
+            &mut states2,
+        )?;
+
+        if sess1
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess1_dropped = true;
+        }
+        if sess2
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess2_dropped = true;
+        }
+    }
+
+    // Both survivors must have actually dropped P3 and advanced past the drop.
+    assert!(
+        sess1_dropped,
+        "sess1 must emit PeerDropped for the timed-out peer"
+    );
+    assert!(
+        sess2_dropped,
+        "sess2 must emit PeerDropped for the timed-out peer"
+    );
+    assert!(
+        sess1.confirmed_frame().as_i32() > warmup_frames as i32,
+        "sess1 confirmed_frame must advance past the drop; got {:?}",
+        sess1.confirmed_frame()
+    );
+    assert!(
+        sess2.confirmed_frame().as_i32() > warmup_frames as i32,
+        "sess2 confirmed_frame must advance past the drop; got {:?}",
+        sess2.confirmed_frame()
+    );
+
+    // --- The desync check: every frame both peers consider confirmed (and that
+    // both recorded) must have byte-equal recorded state. Pre-fix this FAILS
+    // because the survivors froze the dropped slot at divergent values across the
+    // asymmetric-loss window. ---
+    let confirmed_bound = std::cmp::min(
+        sess1.confirmed_frame().as_i32(),
+        sess2.confirmed_frame().as_i32(),
+    );
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(i32, StateStub, StateStub)> = Vec::new();
+    for (&frame, &state1) in &states1 {
+        if frame > confirmed_bound {
+            continue;
+        }
+        if let Some(&state2) = states2.get(&frame) {
+            compared += 1;
+            if state1 != state2 {
+                divergences.push((frame, state1, state2));
+            }
+        }
+    }
+
+    assert!(
+        compared > 0,
+        "no confirmed frames were compared across both peers (bound={confirmed_bound}); \
+         the repro did not exercise the drop path"
+    );
+    assert!(
+        divergences.is_empty(),
+        "confirmed state diverged across survivors after under-loss graceful drop \
+         (bound={confirmed_bound}, compared={compared}): {divergences:?}"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Regression (direct-detection path): `remove_player` under asymmetric loss
+// ============================================================================
+//
+// This complements the timeout/gossip repro above. Here both survivors take the
+// DIRECT-DETECTION path: each explicitly `remove_player(P3)` while P1 has
+// confirmed P3 through a HIGHER frame than P2 (asymmetric loss blocked P3 -> P2
+// for a window). On the direct path `remove_player` passes `last_frame_overrides
+// = None`, so each survivor's *initial* freeze frame is its OWN local received
+// frame — which differs across survivors. Only after gossip propagates through
+// `update_player_disconnects` does each survivor converge its
+// `local_connect_status[2].last_frame` DOWN to the global-min agreed frame `F`.
+//
+// Before the frozen-value re-roll fix, that convergence lowers `status.last_frame`
+// but the already-frozen queue's repeated value is NEVER corrected (the re-adjust
+// path runs with `event_policy == Suppress`, skipping the Emit-gated freeze, and
+// `freeze_at` is idempotent). So the survivor that froze "high" keeps repeating a
+// different value than the survivor that froze "low" -> divergent confirmed
+// history. After the fix, `disconnect_player_at_frames` re-rolls the frozen value
+// to track `F` down on EVERY path, so both survivors repeat the identical value.
+//
+// This test FAILS before the re-roll change and PASSES after.
+#[test]
+fn p2p_remove_player_under_asymmetric_loss_freezes_dropped_peer_consistently(
+) -> Result<(), FortressError> {
+    // Generous timeout so the auto-drop timeout does not fire before we
+    // explicitly `remove_player`: this test exercises the EXPLICIT
+    // `remove_player` direct-detection path, not the timeout path. The explicit
+    // removal in Phase 3 happens well within this window.
+    let (mut sess1, mut sess2, mut sess3, blocked, _a1, a2, a3, clock) =
+        build_filtered_three_player_sessions(Duration::from_secs(2))?;
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let mut stub3 = GameStub::new();
+
+    let mut states1: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states2: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut sink: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    // --- Phase 1: warmup, all links open so all three confirm together. ---
+    let warmup_frames = 8_u32;
+    for i in 0..warmup_frames {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1000,
+            &mut states2,
+        )?;
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 2000,
+            &mut sink,
+        )?;
+    }
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 12);
+
+    // --- Phase 2: asymmetric loss. Block ONLY P3 -> P2 with DISTINCT P3 inputs,
+    // so P1 *receives* P3 through a higher frame than P2 does. We keep the window
+    // SMALL and DO NOT let mutual confirmation advance past the lower (P2) frame:
+    // confirmation requires every peer's acks, and P3 -> P2 is blocked, so the
+    // mesh-confirmed frame for the P3 slot stays at P2's lower value. The
+    // divergence we want is in each survivor's *locally received* frame
+    // (`local_connect_status[2].last_frame`), which differs across survivors and
+    // drives the initial freeze on the direct `remove_player` path. ---
+    blocked.block(a3, a2);
+
+    // Keep the asymmetry to a SINGLE frame: P1 receives exactly one more P3
+    // frame than P2. A larger gap would let P1 confirm + discard frames below
+    // the eventual global-min `F`, so the post-drop rollback could no longer
+    // reach `F` — the genuine (and separately documented) TOCTOU limitation,
+    // not the bug under test. A one-frame gap keeps `F` within the un-discarded
+    // window so the re-roll + rollback can actually converge.
+    let loss_window = 1_u32;
+    for i in 0..loss_window {
+        // Poll only ONCE per frame and DO NOT drain afterward, so neither
+        // survivor confirms past the asymmetric window (which would discard the
+        // very inputs the post-drop rollback needs).
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 1);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i + 20,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1020,
+            &mut states2,
+        )?;
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 3000,
+            &mut sink,
+        )?;
+    }
+    // One light poll so P1 absorbs P3's in-flight extra frames (P3 -> P1 open),
+    // but NOT enough to advance mutual confirmation past P2's stalled P3 frame.
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 1);
+
+    // --- Phase 3: BOTH survivors explicitly `remove_player(P3)`. P1 received P3
+    // through a higher frame than P2 (P3 -> P2 is still blocked), so each
+    // survivor freezes at its OWN (divergent) local received frame. ---
+    sess1.remove_player(PlayerHandle::new(2)).unwrap();
+    sess2.remove_player(PlayerHandle::new(2)).unwrap();
+
+    // --- Phase 4: pump P1 + P2 so gossip propagates through
+    // `update_player_disconnects`, converging each survivor's agreed frame DOWN
+    // to the global min and (post-fix) re-rolling the frozen value with it. ---
+    for _ in 0..80 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            500,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            1500,
+            &mut states2,
+        )?;
+    }
+
+    assert!(
+        sess1.confirmed_frame().as_i32() > warmup_frames as i32,
+        "sess1 confirmed_frame must advance past the drop; got {:?}",
+        sess1.confirmed_frame()
+    );
+    assert!(
+        sess2.confirmed_frame().as_i32() > warmup_frames as i32,
+        "sess2 confirmed_frame must advance past the drop; got {:?}",
+        sess2.confirmed_frame()
+    );
+
+    // --- The desync check: every frame both peers consider confirmed (and that
+    // both recorded) must have byte-equal recorded state. ---
+    let confirmed_bound = std::cmp::min(
+        sess1.confirmed_frame().as_i32(),
+        sess2.confirmed_frame().as_i32(),
+    );
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(i32, StateStub, StateStub)> = Vec::new();
+    for (&frame, &state1) in &states1 {
+        if frame > confirmed_bound {
+            continue;
+        }
+        if let Some(&state2) = states2.get(&frame) {
+            compared += 1;
+            if state1 != state2 {
+                divergences.push((frame, state1, state2));
+            }
+        }
+    }
+
+    assert!(
+        compared > 0,
+        "no confirmed frames were compared across both peers (bound={confirmed_bound}); \
+         the repro did not exercise the drop path"
+    );
+    assert!(
+        divergences.is_empty(),
+        "confirmed state diverged across survivors after under-loss remove_player drop \
+         (bound={confirmed_bound}, compared={compared}): {divergences:?}"
+    );
 
     Ok(())
 }

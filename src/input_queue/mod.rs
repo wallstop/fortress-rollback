@@ -695,6 +695,157 @@ impl<T: Config> InputQueue<T> {
         self.frozen = true;
     }
 
+    /// Freezes this input queue at a specific **agreed freeze frame**, rolling
+    /// the queue's `last_confirmed_input` back to the value confirmed at
+    /// `freeze_frame` before freezing.
+    ///
+    /// # Why this exists (graceful peer drop under packet loss)
+    ///
+    /// When a peer drops in an N≥3 full-mesh session using
+    /// `DisconnectBehavior::ContinueWithout`, every survivor freezes the dropped
+    /// slot so it repeats the dropped peer's last good input forever. Without
+    /// coordination, each survivor would repeat *its own* last received input —
+    /// but under packet loss survivors may have received the dropped peer's
+    /// inputs through **different** frames (per-link delivery; a now-terminal
+    /// endpoint never re-supplies them). One survivor freezing at frame 10's
+    /// value while another freezes at frame 8's value yields divergent confirmed
+    /// history — a silent desync.
+    ///
+    /// The session layer computes a single **agreed freeze frame** `F` as the
+    /// global minimum across all peers of each peer's received frame for the
+    /// dropped slot (see `update_player_disconnects` /
+    /// `remote_disconnect_snapshot` in `p2p_session.rs`). Because `F` is a global
+    /// min, every survivor has a confirmed input *at* `F` (each received at least
+    /// through `F`), and that value is identical across survivors. Rolling
+    /// `last_confirmed_input` back to the value at `F` therefore makes every
+    /// survivor repeat the **same** deterministic value. The existing
+    /// `disconnect_frame` rollback then re-simulates any survivor's extra frames
+    /// (`F+1..received`) using that agreed value, converging confirmed history.
+    ///
+    /// # Behavior
+    ///
+    /// While the queue is **not yet frozen**:
+    /// - If `freeze_frame` is non-NULL and a confirmed input exists at that frame
+    ///   in the ring buffer (via [`Self::confirmed_input`]), set
+    ///   `last_confirmed_input` to that input's value, then freeze.
+    /// - If `freeze_frame` is [`Frame::NULL`] or no confirmed input exists at that
+    ///   frame (e.g. evicted from the ring buffer, or never received), leave
+    ///   `last_confirmed_input` **unchanged** (fail-safe), report a
+    ///   [`ViolationSeverity::Warning`] violation describing the miss, and still
+    ///   freeze. This never panics.
+    ///
+    /// If the queue is already frozen, this is a no-op (mirrors [`Self::freeze`]
+    /// idempotence and avoids mutating an already-settled frozen value).
+    pub(crate) fn freeze_at(&mut self, freeze_frame: Frame) {
+        if self.frozen {
+            return;
+        }
+
+        if freeze_frame.is_null() {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::InputQueue,
+                "freeze_at called with NULL freeze frame; leaving last_confirmed_input unchanged"
+            );
+            self.frozen = true;
+            return;
+        }
+
+        // Best-effort initial value-set, then freeze. The convergence guarantee
+        // — rolling the frozen value DOWN to the global-min agreed frame `F` on
+        // the direct-detection / re-adjust paths — is provided separately by
+        // [`Self::set_frozen_value_at`], driven from
+        // `P2PSession::disconnect_player_at_frames`. Here we seed an initial
+        // value and flip the frozen flag.
+        if !self.roll_confirmed_input_to(freeze_frame) {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::InputQueue,
+                "freeze_at: no confirmed input at agreed freeze frame {}; leaving last_confirmed_input unchanged",
+                freeze_frame
+            );
+        }
+
+        self.frozen = true;
+    }
+
+    /// Rolls an **already-frozen** queue's `last_confirmed_input` to the value
+    /// confirmed at `frame`, if one exists. This is the non-idempotent
+    /// counterpart to [`Self::freeze_at`]: where `freeze_at` only seeds a value
+    /// while transitioning *into* the frozen state (and no-ops once frozen),
+    /// this method intentionally *updates* a queue that is already frozen.
+    ///
+    /// # Why this exists (closing the under-loss desync on the direct paths)
+    ///
+    /// `freeze_at` rolls the frozen value to the agreed freeze frame `F` only on
+    /// the gossip-propagation path, where the session supplies a global-min `F`.
+    /// On the **direct-detection** paths (own-endpoint timeout, `remove_player`),
+    /// the survivor that detected the drop freezes at its OWN locally-received
+    /// frame, which under asymmetric packet loss can be HIGHER than the global
+    /// min. The disconnect machinery later converges every survivor's
+    /// `local_connect_status[handle].last_frame` DOWN to the same global-min `F`
+    /// (`disconnect_player_at_frames` mins it on the re-adjust branch), but
+    /// `freeze_at` is idempotent and would never lower the already-frozen value.
+    ///
+    /// This method is the chokepoint fix: whenever the disconnect machinery
+    /// sets/lowers `status.last_frame` for a frozen handle, the session calls
+    /// this with the new `last_frame`, re-rolling the frozen value to track `F`
+    /// **down**. Because every survivor converges `status.last_frame` to the
+    /// identical global min, and every survivor received the dropped peer's
+    /// input at `F` (`F` is the min, hence `<=` each survivor's received frame),
+    /// the re-rolled value is byte-identical across survivors — closing the
+    /// desync.
+    ///
+    /// # Behavior (fail-safe)
+    ///
+    /// - If the queue is **not** frozen, this is a no-op (it never seeds a value
+    ///   on a live queue; only the freeze transition may do that).
+    /// - If `frame` is [`Frame::NULL`], this is a no-op (no agreed frame yet).
+    /// - If the queue is frozen and a confirmed input exists at `frame`, sets
+    ///   `last_confirmed_input` to that value.
+    /// - If the queue is frozen, `frame` is non-NULL, but no confirmed input
+    ///   exists at `frame` (evicted from the ring buffer, or never received),
+    ///   the value is left **unchanged** (fail-safe) and a
+    ///   [`ViolationSeverity::Warning`] is reported. This never panics.
+    pub(crate) fn set_frozen_value_at(&mut self, frame: Frame) {
+        if !self.frozen {
+            return;
+        }
+        if frame.is_null() {
+            return;
+        }
+        if !self.roll_confirmed_input_to(frame) {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::InputQueue,
+                "set_frozen_value_at: no confirmed input at agreed freeze frame {}; leaving last_confirmed_input at its last agreed value",
+                frame
+            );
+        }
+    }
+
+    /// Sets `last_confirmed_input` to the value confirmed at `frame`, returning
+    /// whether a confirmed input was found and applied.
+    ///
+    /// Shared lookup helper for [`Self::freeze_at`] and
+    /// [`Self::set_frozen_value_at`]. Returns `false` (leaving
+    /// `last_confirmed_input` unchanged) when `frame` is [`Frame::NULL`] or when
+    /// no confirmed input exists at `frame` (evicted or never received). Never
+    /// panics. The caller decides whether and how to report a violation, since
+    /// the two callers want different wording.
+    fn roll_confirmed_input_to(&mut self, frame: Frame) -> bool {
+        if frame.is_null() {
+            return false;
+        }
+        match self.confirmed_input(frame) {
+            Ok(input) => {
+                self.last_confirmed_input = Some(input.input);
+                true
+            },
+            Err(_) => false,
+        }
+    }
+
     /// Returns whether this queue has been frozen via [`Self::freeze`].
     #[must_use]
     pub fn is_frozen(&self) -> bool {
@@ -2682,6 +2833,108 @@ mod input_queue_tests {
         // Status at the queue level is Predicted; SyncLayer reinterprets
         // this as Disconnected when connect_status[i].disconnected = true.
         assert_eq!(status, InputStatus::Predicted);
+    }
+
+    // ----------------------------------------------------------------------
+    // Frozen-value rollback (graceful peer drop, under-loss convergence)
+    // ----------------------------------------------------------------------
+
+    /// Adds sequential confirmed inputs `0..=last` with payload `inp == frame`.
+    fn fill_sequential(queue: &mut InputQueue<TestConfig>, last: i32) {
+        for f in 0..=last {
+            let added = queue.add_input(PlayerInput::new(
+                Frame::new(f),
+                TestInput {
+                    inp: u8::try_from(f).expect("frame fits in u8 for test"),
+                },
+            ));
+            assert_eq!(added, Frame::new(f), "input {f} should be accepted");
+        }
+    }
+
+    #[test]
+    fn freeze_at_rolls_last_confirmed_input_back_to_earlier_frame() {
+        let mut queue = test_queue(0);
+        fill_sequential(&mut queue, 5);
+        // Most-recently confirmed value is frame 5's payload.
+        assert_eq!(queue.last_confirmed_input, Some(TestInput { inp: 5 }));
+
+        // Freeze at an EARLIER frame: last_confirmed_input must roll back to it.
+        queue.freeze_at(Frame::new(2));
+        assert!(queue.is_frozen());
+        assert_eq!(queue.last_confirmed_input, Some(TestInput { inp: 2 }));
+    }
+
+    #[test]
+    fn freeze_at_with_null_frame_leaves_value_unchanged() {
+        let mut queue = test_queue(0);
+        fill_sequential(&mut queue, 5);
+        let before_value = queue.last_confirmed_input;
+
+        queue.freeze_at(Frame::NULL);
+        assert!(queue.is_frozen());
+        // NULL freeze frame: value left exactly as the most-recent confirmed.
+        assert_eq!(queue.last_confirmed_input, before_value);
+        assert_eq!(queue.last_confirmed_input, Some(TestInput { inp: 5 }));
+    }
+
+    #[test]
+    fn set_frozen_value_at_lowers_already_frozen_value_to_earlier_frame() {
+        // The key NEW behavior: a survivor that initially froze "high" must be
+        // corrected DOWN to the global-min agreed frame `F` once it converges.
+        let mut queue = test_queue(0);
+        fill_sequential(&mut queue, 5);
+
+        // Initial freeze at frame 4 (the survivor's own higher received frame).
+        queue.freeze_at(Frame::new(4));
+        assert!(queue.is_frozen());
+        assert_eq!(queue.last_confirmed_input, Some(TestInput { inp: 4 }));
+
+        // The disconnect machinery converges F DOWN to frame 2 and re-rolls.
+        queue.set_frozen_value_at(Frame::new(2));
+        assert!(queue.is_frozen());
+        assert_eq!(queue.last_confirmed_input, Some(TestInput { inp: 2 }));
+    }
+
+    #[test]
+    fn set_frozen_value_at_with_null_frame_leaves_value_unchanged() {
+        let mut queue = test_queue(0);
+        fill_sequential(&mut queue, 5);
+        queue.freeze_at(Frame::new(4));
+        assert_eq!(queue.last_confirmed_input, Some(TestInput { inp: 4 }));
+
+        queue.set_frozen_value_at(Frame::NULL);
+        // NULL agreed frame: no-op.
+        assert_eq!(queue.last_confirmed_input, Some(TestInput { inp: 4 }));
+    }
+
+    #[test]
+    fn set_frozen_value_at_on_unfrozen_queue_is_noop() {
+        let mut queue = test_queue(0);
+        fill_sequential(&mut queue, 5);
+        // NOT frozen.
+        assert!(!queue.is_frozen());
+        assert_eq!(queue.last_confirmed_input, Some(TestInput { inp: 5 }));
+
+        queue.set_frozen_value_at(Frame::new(2));
+        // Must not mutate a live queue, and must not freeze it.
+        assert!(!queue.is_frozen());
+        assert_eq!(queue.last_confirmed_input, Some(TestInput { inp: 5 }));
+    }
+
+    #[test]
+    fn set_frozen_value_at_with_missing_frame_leaves_value_unchanged() {
+        // Evicted/missing-frame fail-safe: requesting a frame that has no
+        // confirmed input (here, a frame far beyond what was ever added) must
+        // leave the frozen value untouched rather than clobbering it.
+        let mut queue = test_queue(0);
+        fill_sequential(&mut queue, 5);
+        queue.freeze_at(Frame::new(4));
+        assert_eq!(queue.last_confirmed_input, Some(TestInput { inp: 4 }));
+
+        // Frame 100 was never added: confirmed_input(100) errors -> no-op.
+        queue.set_frozen_value_at(Frame::new(100));
+        assert_eq!(queue.last_confirmed_input, Some(TestInput { inp: 4 }));
     }
 }
 

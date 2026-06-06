@@ -454,7 +454,11 @@ impl<T: Config> P2PSession<T> {
         // host then runs solo until a joiner fills the slot.
         #[cfg(feature = "hot-join")]
         for &handle in &hot_join.reserved_slots {
-            if let Err(e) = sync_layer.freeze_player(handle) {
+            // Reserved slots have no confirmed inputs yet (frozen from frame 0),
+            // so there is no agreed freeze frame to roll back to. Passing
+            // `Frame::NULL` leaves `last_confirmed_input` untouched (`None`),
+            // preserving the existing default-input-from-frame-0 behavior.
+            if let Err(e) = sync_layer.freeze_player(handle, Frame::NULL) {
                 report_violation!(
                     ViolationSeverity::Critical,
                     ViolationKind::InternalError,
@@ -2833,10 +2837,28 @@ impl<T: Config> P2PSession<T> {
     ///
     /// Spectator handles in `handles` are skipped (they have no input queue
     /// to freeze and never receive `PeerDropped`).
+    ///
+    /// `freeze_frames` maps each dropped handle to its **agreed freeze frame**
+    /// `F` — the global minimum across all peers of that slot's received frame.
+    /// The caller must capture these frames *before* `disconnect_player_at_frames`
+    /// overwrites `local_connect_status[handle].last_frame`. Each frame is passed
+    /// through to [`SyncLayer::freeze_player`], which rolls the dropped slot's
+    /// `last_confirmed_input` back to the value at `F`. Because every survivor
+    /// computes the same global-min `F`, all survivors freeze the slot at the
+    /// identical value — closing (for the common case) the under-loss desync where
+    /// survivors otherwise freeze at their own (differing) last-received value. The
+    /// frozen value is kept converged as `F` is mined down by the re-roll in
+    /// `disconnect_player_at_frames`; a staggered-detection discard-before-convergence
+    /// residual remains (see `CHANGELOG.md` / the N0 design notes). A handle
+    /// missing from the map (or mapped to [`Frame::NULL`]) freezes without rolling
+    /// back (fail-safe — the `freeze_at` rollback on [`InputQueue`] is a no-op).
+    ///
+    /// [`InputQueue`]: crate::__internal::InputQueue
     fn emit_peer_dropped_for_endpoint(
         &mut self,
         addr: &T::Address,
         handles: &[PlayerHandle],
+        freeze_frames: &BTreeMap<PlayerHandle, Frame>,
     ) -> Result<(), FortressError> {
         for &handle in handles {
             if !handle.is_valid_player_for(self.num_players) {
@@ -2844,13 +2866,46 @@ impl<T: Config> P2PSession<T> {
                 // to freeze and no PeerDropped event for this handle.
                 continue;
             }
-            self.sync_layer.freeze_player(handle)?;
+            let freeze_frame = freeze_frames.get(&handle).copied().unwrap_or(Frame::NULL);
+            self.sync_layer.freeze_player(handle, freeze_frame)?;
             self.event_queue.push_back(FortressEvent::PeerDropped {
                 handle,
                 addr: addr.clone(),
             });
         }
         Ok(())
+    }
+
+    /// Computes the per-handle **agreed freeze frame** `F` for each handle being
+    /// dropped, used to roll each dropped slot's frozen value back to a value
+    /// every survivor shares.
+    ///
+    /// For each handle the frame is
+    /// `last_frame_overrides.get(handle).unwrap_or(local_connect_status[handle].last_frame)`
+    /// — the same global-minimum frame `remote_disconnect_snapshot` mins into the
+    /// session-wide `earliest_last_frame`. This MUST be read before
+    /// `disconnect_player_at_frames` overwrites
+    /// `local_connect_status[handle].last_frame`.
+    fn agreed_freeze_frames(
+        &self,
+        handles: &[PlayerHandle],
+        last_frame_overrides: Option<&BTreeMap<PlayerHandle, Frame>>,
+    ) -> BTreeMap<PlayerHandle, Frame> {
+        let mut frames = BTreeMap::new();
+        for &handle in handles {
+            if !handle.is_valid_player_for(self.num_players) {
+                continue;
+            }
+            let local_last_frame = self
+                .local_connect_status
+                .get(handle.as_usize())
+                .map_or(Frame::NULL, |status| status.last_frame);
+            let freeze_frame = last_frame_overrides
+                .and_then(|overrides| overrides.get(&handle).copied())
+                .unwrap_or(local_last_frame);
+            frames.insert(handle, freeze_frame);
+        }
+        frames
     }
 
     fn remote_disconnect_snapshot(
@@ -2976,9 +3031,19 @@ impl<T: Config> P2PSession<T> {
         if behavior == DisconnectBehavior::ContinueWithout
             && event_policy == DisconnectEventPolicy::Emit
         {
+            // Capture the per-handle agreed freeze frame BEFORE
+            // `disconnect_player_at_frames` overwrites
+            // `local_connect_status[handle].last_frame`. The agreed frame is the
+            // same global-min value `update_player_disconnects` passes in via
+            // `last_frame_overrides` (falling back to the locally received
+            // `last_frame`). Threading these into the freeze makes every survivor
+            // roll the dropped slot back to the identical value at `F`.
+            let freeze_frames = self.agreed_freeze_frames(&handles, last_frame_overrides);
             match self.validate_graceful_drop_handles(&handles) {
                 Ok(()) => {
-                    if let Err(e) = self.emit_peer_dropped_for_endpoint(&addr, &handles) {
+                    if let Err(e) =
+                        self.emit_peer_dropped_for_endpoint(&addr, &handles, &freeze_frames)
+                    {
                         graceful_drop_error = Some(e);
                     }
                 },
@@ -3115,29 +3180,57 @@ impl<T: Config> P2PSession<T> {
                     return;
                 };
 
-                // mark the affected players as disconnected
-                for &handle in endpoint.handles().iter() {
-                    let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) else {
-                        report_violation!(
-                            ViolationSeverity::Warning,
-                            ViolationKind::InternalError,
-                            "Invalid player handle {} when marking as disconnected - skipping",
-                            handle
-                        );
-                        continue;
-                    };
-                    let existing_last_frame = status.last_frame;
-                    let handle_last_frame = last_frame_overrides
-                        .and_then(|overrides| overrides.get(&handle).copied())
-                        .unwrap_or(existing_last_frame);
-                    if status.disconnected {
-                        status.last_frame = std::cmp::min(status.last_frame, handle_last_frame);
-                    } else {
-                        status.last_frame = handle_last_frame;
-                    }
-                    status.disconnected = true;
-                }
+                // Collect the affected handles first so the per-handle status
+                // mutation below does not hold a borrow of `endpoint` across the
+                // `self.sync_layer` borrow needed for the frozen-value re-roll.
+                let affected_handles: Vec<PlayerHandle> =
+                    endpoint.handles().iter().copied().collect();
                 endpoint.disconnect();
+
+                // mark the affected players as disconnected
+                for &handle in &affected_handles {
+                    // Set/lower the agreed frame, then capture the resulting
+                    // `status.last_frame` and END the `&mut status` borrow before
+                    // touching `self.sync_layer`.
+                    let converged_last_frame = {
+                        let Some(status) = self.local_connect_status.get_mut(handle.as_usize())
+                        else {
+                            report_violation!(
+                                ViolationSeverity::Warning,
+                                ViolationKind::InternalError,
+                                "Invalid player handle {} when marking as disconnected - skipping",
+                                handle
+                            );
+                            continue;
+                        };
+                        let existing_last_frame = status.last_frame;
+                        let handle_last_frame = last_frame_overrides
+                            .and_then(|overrides| overrides.get(&handle).copied())
+                            .unwrap_or(existing_last_frame);
+                        if status.disconnected {
+                            status.last_frame = std::cmp::min(status.last_frame, handle_last_frame);
+                        } else {
+                            status.last_frame = handle_last_frame;
+                        }
+                        status.disconnected = true;
+                        status.last_frame
+                    };
+
+                    // Convergence chokepoint. `status.last_frame` has just been
+                    // set (initial drop) or mined DOWN (re-adjust) to the
+                    // global-min agreed freeze frame `F`. Re-roll the dropped
+                    // slot's frozen value to the dropped peer's input confirmed
+                    // at this `F`. This runs on EVERY path — Emit first-freeze,
+                    // Suppress re-adjust, and `remove_player` — so a survivor
+                    // that initially froze "high" (at its own locally-received
+                    // frame on the direct-detection path) is corrected down to
+                    // the same value every survivor shares once `F` converges.
+                    // `set_frozen_value_at` is a no-op if the queue is not frozen
+                    // and fail-safe if `F` is NULL or evicted, so calling it
+                    // unconditionally here is safe.
+                    self.sync_layer
+                        .set_frozen_value_at(handle, converged_last_frame);
+                }
 
                 if self.sync_layer.current_frame() > earliest_last_frame {
                     // remember to adjust simulation to account for the fact that the player disconnected a few frames ago,
