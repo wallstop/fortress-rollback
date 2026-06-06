@@ -58,6 +58,7 @@ SPECS=(
     "TimeSync"
     "SpectatorSession"
     "PeerDrop"
+    "NPeerReactivation"
 )
 
 # Track results

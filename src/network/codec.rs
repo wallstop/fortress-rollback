@@ -45,7 +45,9 @@ use crate::network::messages::{
     QualityReply, QualityReport, SyncReply, SyncRequest,
 };
 #[cfg(feature = "hot-join")]
-use crate::network::messages::{JoinRequest, StateSnapshot, StateSnapshotAck};
+use crate::network::messages::{
+    JoinRequest, ReactivateSlot, ReactivateSlotAck, StateSnapshot, StateSnapshotAck,
+};
 use crate::Frame;
 
 // The bincode configuration used throughout Fortress Rollback.
@@ -616,6 +618,16 @@ pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
         10 => MessageBody::StateSnapshotAck(StateSnapshotAck {
             frame: Frame::new(read_i32(bytes, &mut cursor, "state_snapshot_ack.frame")?),
         }),
+        #[cfg(feature = "hot-join")]
+        11 => MessageBody::ReactivateSlot(ReactivateSlot {
+            handle: read_usize(bytes, &mut cursor, "reactivate_slot.handle")?,
+            frame: Frame::new(read_i32(bytes, &mut cursor, "reactivate_slot.frame")?),
+        }),
+        #[cfg(feature = "hot-join")]
+        12 => MessageBody::ReactivateSlotAck(ReactivateSlotAck {
+            handle: read_usize(bytes, &mut cursor, "reactivate_slot_ack.handle")?,
+            frame: Frame::new(read_i32(bytes, &mut cursor, "reactivate_slot_ack.frame")?),
+        }),
         other => {
             return Err(decode_message_error(format!(
                 "unknown message body variant {}",
@@ -1078,7 +1090,8 @@ mod tests {
 mod hot_join_tests {
     use super::*;
     use crate::network::messages::{
-        JoinRequest, Message, MessageBody, MessageHeader, StateSnapshot, StateSnapshotAck,
+        JoinRequest, Message, MessageBody, MessageHeader, ReactivateSlot, ReactivateSlotAck,
+        StateSnapshot, StateSnapshotAck,
     };
 
     fn roundtrip(original: Message) {
@@ -1216,6 +1229,96 @@ mod hot_join_tests {
                 num_players: 2,
                 state_bytes: vec![7, 8, 9],
                 checksum: Some(123),
+            }),
+        };
+        let mut bytes = encode(&original).unwrap();
+        bytes.push(0); // trailing byte
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    #[test]
+    fn decode_message_roundtrips_reactivate_slot() {
+        roundtrip(Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::ReactivateSlot(ReactivateSlot {
+                handle: 2,
+                frame: Frame::new(42),
+            }),
+        });
+    }
+
+    #[test]
+    fn decode_message_roundtrips_reactivate_slot_ack() {
+        roundtrip(Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::ReactivateSlotAck(ReactivateSlotAck {
+                handle: 2,
+                frame: Frame::new(42),
+            }),
+        });
+    }
+
+    /// A `ReactivateSlot` buffer truncated mid-`frame` (the `handle` is present but
+    /// the trailing `i32` is missing) must be rejected, never panicking or reading
+    /// out of bounds.
+    #[test]
+    fn decode_message_rejects_truncated_reactivate_slot() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
+        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::ReactivateSlot
+        bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
+                                                       // frame (i32) omitted entirely.
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// A `ReactivateSlotAck` buffer truncated mid-`frame` must likewise be rejected.
+    #[test]
+    fn decode_message_rejects_truncated_reactivate_slot_ack() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
+        bytes.extend_from_slice(&12_u32.to_le_bytes()); // MessageBody::ReactivateSlotAck
+        bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
+                                                       // frame (i32) omitted entirely.
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// A valid `ReactivateSlot` buffer with an extra trailing byte must be rejected
+    /// by the trailing-bytes check.
+    #[test]
+    fn decode_message_rejects_trailing_bytes_after_reactivate_slot() {
+        let original = Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::ReactivateSlot(ReactivateSlot {
+                handle: 1,
+                frame: Frame::new(7),
+            }),
+        };
+        let mut bytes = encode(&original).unwrap();
+        bytes.push(0); // trailing byte
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// A valid `ReactivateSlotAck` buffer with an extra trailing byte must be
+    /// rejected by the trailing-bytes check.
+    #[test]
+    fn decode_message_rejects_trailing_bytes_after_reactivate_slot_ack() {
+        let original = Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::ReactivateSlotAck(ReactivateSlotAck {
+                handle: 1,
+                frame: Frame::new(7),
             }),
         };
         let mut bytes = encode(&original).unwrap();

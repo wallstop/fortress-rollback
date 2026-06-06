@@ -34,6 +34,7 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | `SpectatorSession.tla` | `SpectatorSession.cfg` | ✓ CI | Spectator session with frame delay and catchup |
 | `TimeSync.tla` | `TimeSync.cfg` | ✓ CI | Time synchronization for peer frame rate coordination |
 | `PeerDrop.tla` | `PeerDrop.cfg` | ✓ CI | Halt vs ContinueWithout peer-drop policy model |
+| `NPeerReactivation.tla` | `NPeerReactivation.cfg` | ✓ CI | N-peer mesh reconnection activation-frame agreement (Agreement C) |
 
 ## Properties Verified
 
@@ -75,6 +76,46 @@ This directory contains TLA+ specifications for formally verifying the correctne
 - `PeerDropped` events are emitted only by ContinueWithout
 - Dropped players are excluded from survivor progress
 - Rollback starts no later than every dropped player's `lastFrame + 1`
+
+### NPeerReactivation.tla
+
+Models "Agreement C" of N-peer mesh reconnection (1 coordinator, 2 survivors,
+1 joiner) from `progress/session-18-npeer-mesh-reconnection-design.md` (§4.C/§5/§8).
+
+**Safety:**
+
+- `Agreement` (S1): any two peers (coordinator, both survivors, joiner) that both
+  committed a frame committed the same committed **value** (the bytes in `val`, *not*
+  the `mode`/value-source label) at that frame
+- `NoConfirmedRewrite` (S2): committed history never reverts (every frame within `committedUpTo` stays definite)
+- `NoSplitBrainOnAbort` (L1): no aborted state has the joiner real-at-`F` while a survivor is frozen-at-`F`
+
+**Liveness (under weak fairness):**
+
+- `EventuallyResolved`: the protocol always reaches a terminal `joined`/`aborted` state
+
+**The cap and the abort lifecycle are modeled non-vacuously (have teeth):**
+
+- Survivors start with `committedUpTo` *below* `L` and **race toward `F`** by committing
+  frozen frames (`SurvivorAdvanceFrozen`). The keepalive-preserved cap (design §4.C —
+  "confirmed = min over connected incl. K") **holds each survivor at `F-1 = L`**: a
+  survivor cannot commit frame `F` frozen while `capHeld` is true. So the cap is an
+  exercised, live constraint, not an assertion by construction.
+- `CapCollapse` models the cap-collapse hazard (the coordinator dropping out of a
+  survivor's connected-min mid-pause). The protocol's keepalive serve (`keepaliveServing`)
+  is its guard: while the paused coordinator is serving, `CapCollapse` cannot fire.
+- The joiner follows the **late-apply lifecycle** (§5): `JoinerBuffer` buffers the
+  snapshot without applying it; `JoinerCommit` makes the joiner real-at-`F` *only* after
+  every survivor has reopened (the `JoinCommitted` gate); `JoinerAbortDiscard` discards
+  the buffer on abort, so the joiner is never real-at-`F` after an abort.
+- Removing either guard (a scratch *naive* variant: `CapCollapse` ungated **and** the
+  joiner committing real-at-`F` eagerly on buffer) makes TLC find a `NoSplitBrainOnAbort`
+  counterexample — confirming both the cap and the gated commit are load-bearing.
+
+**Precondition P-A is checkable, not assumed:** survivors hold *independent* frozen
+values. The default config pins P-A (`AssumePA = TRUE`) and passes. `NPeerReactivation_NoPA.cfg`
+(`AssumePA = FALSE`, not registered in CI) drops P-A and TLC reports an `Agreement`
+counterexample — demonstrating P-A is necessary.
 
 ### Rollback.tla
 

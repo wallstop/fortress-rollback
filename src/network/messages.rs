@@ -178,6 +178,24 @@ pub(crate) struct StateSnapshotAck {
     pub frame: Frame,
 }
 
+#[cfg(feature = "hot-join")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ReactivateSlot {
+    /// The player handle (slot index) the survivor should reopen.
+    pub handle: usize,
+    /// The activation frame at which the slot becomes live again.
+    pub frame: Frame,
+}
+
+#[cfg(feature = "hot-join")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ReactivateSlotAck {
+    /// The player handle (slot index) the survivor reopened.
+    pub handle: usize,
+    /// The activation frame the survivor acknowledged.
+    pub frame: Frame,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum MessageBody {
     SyncRequest(SyncRequest),
@@ -194,6 +212,10 @@ pub(crate) enum MessageBody {
     StateSnapshot(StateSnapshot),
     #[cfg(feature = "hot-join")]
     StateSnapshotAck(StateSnapshotAck),
+    #[cfg(feature = "hot-join")]
+    ReactivateSlot(ReactivateSlot),
+    #[cfg(feature = "hot-join")]
+    ReactivateSlotAck(ReactivateSlotAck),
 }
 
 /// A messages that [`NonBlockingSocket`] sends and receives. When implementing [`NonBlockingSocket`],

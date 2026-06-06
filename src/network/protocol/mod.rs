@@ -20,7 +20,9 @@ use crate::network::messages::{
     QualityReply, QualityReport, SyncReply, SyncRequest,
 };
 #[cfg(feature = "hot-join")]
-use crate::network::messages::{JoinRequest, StateSnapshot, StateSnapshotAck};
+use crate::network::messages::{
+    JoinRequest, ReactivateSlot, ReactivateSlotAck, StateSnapshot, StateSnapshotAck,
+};
 use crate::rle;
 use crate::rng::{random, Pcg32, Rng, SeedableRng};
 use crate::sessions::config::{ProtocolConfig, SyncConfig};
@@ -201,6 +203,16 @@ where
     /// The frame from a received `StateSnapshotAck`, awaiting drain.
     #[cfg(feature = "hot-join")]
     received_snapshot_ack: Option<Frame>,
+    /// A `ReactivateSlot` received from the peer, awaiting drain.
+    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    received_reactivate_slot: Option<ReactivateSlot>,
+    /// A `ReactivateSlotAck` received from the peer, awaiting drain.
+    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    received_reactivate_slot_ack: Option<ReactivateSlotAck>,
     /// When `true`, `on_input` ignores incoming `Input` messages entirely (no
     /// decode, recv, ack, or `Event::Input`). A hot-joiner sets this on its host
     /// endpoint while it is still `HotJoining` so it neither processes nor *acks*
@@ -580,6 +592,10 @@ impl<T: Config> UdpProtocol<T> {
             received_snapshot: None,
             #[cfg(feature = "hot-join")]
             received_snapshot_ack: None,
+            #[cfg(feature = "hot-join")]
+            received_reactivate_slot: None,
+            #[cfg(feature = "hot-join")]
+            received_reactivate_slot_ack: None,
             #[cfg(feature = "hot-join")]
             defer_input_processing: false,
         })
@@ -1345,6 +1361,10 @@ impl<T: Config> UdpProtocol<T> {
             MessageBody::StateSnapshot(body) => self.on_state_snapshot(body),
             #[cfg(feature = "hot-join")]
             MessageBody::StateSnapshotAck(body) => self.on_state_snapshot_ack(body),
+            #[cfg(feature = "hot-join")]
+            MessageBody::ReactivateSlot(body) => self.on_reactivate_slot(body),
+            #[cfg(feature = "hot-join")]
+            MessageBody::ReactivateSlotAck(body) => self.on_reactivate_slot_ack(body),
         }
     }
 
@@ -1691,6 +1711,24 @@ impl<T: Config> UdpProtocol<T> {
         self.received_snapshot_ack = Some(body.frame);
     }
 
+    /// Upon receiving a `ReactivateSlot`, store it for the orchestration layer to drain
+    /// via [`take_received_reactivate_slot`](Self::take_received_reactivate_slot).
+    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    fn on_reactivate_slot(&mut self, body: &ReactivateSlot) {
+        self.received_reactivate_slot = Some(body.clone());
+    }
+
+    /// Upon receiving a `ReactivateSlotAck`, store it for the orchestration layer to
+    /// drain via [`take_received_reactivate_slot_ack`](Self::take_received_reactivate_slot_ack).
+    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    fn on_reactivate_slot_ack(&mut self, body: &ReactivateSlotAck) {
+        self.received_reactivate_slot_ack = Some(body.clone());
+    }
+
     /// Returns the frame of the last received input
     fn last_recv_frame(&self) -> Frame {
         match self.recv_inputs.iter().max_by_key(|&(k, _)| k) {
@@ -1739,6 +1777,34 @@ impl<T: Config> UdpProtocol<T> {
         self.queue_message(MessageBody::StateSnapshotAck(StateSnapshotAck { frame }));
     }
 
+    /// Queues a `ReactivateSlot` reopening `handle` at `frame`. No-op unless `Running`.
+    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn send_reactivate_slot(&mut self, handle: usize, frame: Frame) {
+        if self.state != ProtocolState::Running {
+            return;
+        }
+        self.queue_message(MessageBody::ReactivateSlot(ReactivateSlot {
+            handle,
+            frame,
+        }));
+    }
+
+    /// Queues a `ReactivateSlotAck` for `handle` at `frame`. No-op unless `Running`.
+    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn send_reactivate_slot_ack(&mut self, handle: usize, frame: Frame) {
+        if self.state != ProtocolState::Running {
+            return;
+        }
+        self.queue_message(MessageBody::ReactivateSlotAck(ReactivateSlotAck {
+            handle,
+            frame,
+        }));
+    }
+
     /// Drains the most recently received `JoinRequest`'s requested slot, if any.
     #[cfg(feature = "hot-join")]
     #[allow(dead_code)]
@@ -1766,6 +1832,22 @@ impl<T: Config> UdpProtocol<T> {
     #[allow(dead_code)]
     pub(crate) fn take_received_snapshot_ack(&mut self) -> Option<Frame> {
         self.received_snapshot_ack.take()
+    }
+
+    /// Drains the most recently received `ReactivateSlot`, if any.
+    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn take_received_reactivate_slot(&mut self) -> Option<ReactivateSlot> {
+        self.received_reactivate_slot.take()
+    }
+
+    /// Drains the most recently received `ReactivateSlotAck`, if any.
+    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn take_received_reactivate_slot_ack(&mut self) -> Option<ReactivateSlotAck> {
+        self.received_reactivate_slot_ack.take()
     }
 
     /// Sets whether this endpoint defers (ignores) incoming `Input` messages.
@@ -4578,8 +4660,8 @@ mod tests {
         // While Synchronizing, `message_allowed_in_current_state` admits only
         // Sync messages, so hot-join control messages must be dropped before
         // reaching a handler. This pins that the Running-only gate also covers
-        // the three new variants (guarding against a future state-machine change
-        // that forgets them). Mirrors
+        // all five hot-join variants (guarding against a future state-machine
+        // change that forgets them). Mirrors
         // `handle_message_drops_gameplay_messages_while_synchronizing_without_side_effects`.
         let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
         protocol.synchronize().unwrap();
@@ -4605,11 +4687,106 @@ mod tests {
                 frame: Frame::new(7),
             }),
         );
+        deliver(
+            &mut protocol,
+            MessageBody::ReactivateSlot(ReactivateSlot {
+                handle: 1,
+                frame: Frame::new(7),
+            }),
+        );
+        deliver(
+            &mut protocol,
+            MessageBody::ReactivateSlotAck(ReactivateSlotAck {
+                handle: 1,
+                frame: Frame::new(7),
+            }),
+        );
 
         assert_eq!(protocol.take_pending_join_request(), None);
         assert!(protocol.take_received_snapshot().is_none());
         assert_eq!(protocol.take_received_snapshot_ack(), None);
+        assert!(protocol.take_received_reactivate_slot().is_none());
+        assert!(protocol.take_received_reactivate_slot_ack().is_none());
         assert_eq!(protocol.event_queue.len(), initial_event_len);
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn send_reactivate_slot_queues_when_running() {
+        let mut protocol = running_protocol();
+
+        protocol.send_reactivate_slot(3, Frame::new(42));
+
+        assert_eq!(protocol.send_queue.len(), 1);
+        match &protocol.send_queue.front().unwrap().body {
+            MessageBody::ReactivateSlot(body) => {
+                assert_eq!(body.handle, 3);
+                assert_eq!(body.frame, Frame::new(42));
+            },
+            other => panic!("expected ReactivateSlot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn send_reactivate_slot_ack_queues_when_running() {
+        let mut protocol = running_protocol();
+
+        protocol.send_reactivate_slot_ack(3, Frame::new(42));
+
+        assert_eq!(protocol.send_queue.len(), 1);
+        match &protocol.send_queue.front().unwrap().body {
+            MessageBody::ReactivateSlotAck(body) => {
+                assert_eq!(body.handle, 3);
+                assert_eq!(body.frame, Frame::new(42));
+            },
+            other => panic!("expected ReactivateSlotAck, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn send_reactivate_slot_messages_are_noop_when_not_running() {
+        // Protocol stays in Initializing (never synchronized).
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        assert!(!protocol.is_running());
+
+        protocol.send_reactivate_slot(1, Frame::new(1));
+        protocol.send_reactivate_slot_ack(1, Frame::new(1));
+
+        assert!(protocol.send_queue.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn handle_message_stores_reactivate_slot() {
+        let mut protocol = running_protocol();
+        let body = ReactivateSlot {
+            handle: 2,
+            frame: Frame::new(77),
+        };
+
+        deliver(&mut protocol, MessageBody::ReactivateSlot(body.clone()));
+
+        assert_eq!(protocol.take_received_reactivate_slot(), Some(body));
+        // Draining is one-shot.
+        assert_eq!(protocol.take_received_reactivate_slot(), None);
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn handle_message_stores_reactivate_slot_ack() {
+        let mut protocol = running_protocol();
+        let body = ReactivateSlotAck {
+            handle: 2,
+            frame: Frame::new(77),
+        };
+
+        deliver(&mut protocol, MessageBody::ReactivateSlotAck(body.clone()));
+
+        assert_eq!(protocol.take_received_reactivate_slot_ack(), Some(body));
+        // Draining is one-shot.
+        assert_eq!(protocol.take_received_reactivate_slot_ack(), None);
     }
 }
 
