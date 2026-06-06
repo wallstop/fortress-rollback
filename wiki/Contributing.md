@@ -93,7 +93,7 @@ pre-commit run --hook-stage manual check-derive-bounds --all-files
 pre-commit run markdownlint --all-files
 
 # Run the link checker script directly
-./scripts/docs/check-links.sh --verbose
+python3 scripts/docs/check-links.py --verbose
 
 # Verify markdown code samples compile
 ./scripts/docs/verify-markdown-code.sh

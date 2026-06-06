@@ -68,6 +68,29 @@ impl GameStub {
         }
     }
 
+    /// Like [`handle_requests`], but records the game state after **every**
+    /// `AdvanceFrame` (including rollback re-simulations) into `states`, keyed by
+    /// the resulting (post-advance) frame. The last value recorded for a given
+    /// frame reflects its most recent re-simulation, so for a confirmed frame it
+    /// is the confirmed state — enabling cross-peer byte-equality checks.
+    #[allow(dead_code)]
+    pub fn handle_requests_recording(
+        &mut self,
+        requests: RequestVec<StubConfig>,
+        states: &mut std::collections::BTreeMap<i32, StateStub>,
+    ) {
+        for request in requests {
+            match request {
+                FortressRequest::LoadGameState { cell, .. } => self.load_game_state(cell),
+                FortressRequest::SaveGameState { cell, frame } => self.save_game_state(cell, frame),
+                FortressRequest::AdvanceFrame { inputs } => {
+                    self.advance_frame(inputs);
+                    states.insert(self.gs.frame, self.gs);
+                },
+            }
+        }
+    }
+
     /// Returns the current frame number.
     #[allow(dead_code)]
     #[must_use]
@@ -223,6 +246,10 @@ impl CorruptibleGameStub {
 }
 
 #[derive(Default, Copy, Clone, Hash)]
+#[cfg_attr(
+    feature = "hot-join",
+    derive(Serialize, Deserialize, Debug, PartialEq, Eq)
+)]
 pub struct StateStub {
     pub frame: i32,
     pub state: i32,

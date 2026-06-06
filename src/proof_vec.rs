@@ -1,4 +1,4 @@
-//! [`ProofVec`]: a growable vector that is a real [`Vec`] in production but a
+//! `ProofVec`: a growable vector that is a real [`Vec`] in production but a
 //! stack-allocated, fixed-capacity inline buffer under Kani.
 //!
 //! # Why this exists
@@ -17,7 +17,7 @@
 //! collapsing the propositional-reduction phase. It is 100% safe (no `unsafe`),
 //! so it upholds the crate's `#![forbid(unsafe_code)]` guarantee.
 //!
-//! [`cfg(kani)`] is inactive in every normal build (`cargo build`, `cargo test`,
+//! `cfg(kani)` is inactive in every normal build (`cargo build`, `cargo test`,
 //! `cargo clippy`, loom, release), so production keeps the real `Vec` with
 //! identical behavior and zero overhead — `ProofVec<T>` is literally `Vec<T>`.
 //!
@@ -26,7 +26,7 @@
 //! [`SyncLayer`]: crate::sync_layer::SyncLayer
 
 /// A growable vector. In production this is exactly [`Vec<T>`]; under Kani it is
-/// the fixed-capacity [`InlineVec`]. The two expose the same subset of the `Vec`
+/// the fixed-capacity `InlineVec`. The two expose the same subset of the `Vec`
 /// API that the rollback containers use (`push`, `get`, `get_mut`, `len`,
 /// `first`, `clone`, `iter`, `iter_mut`), so call sites are identical.
 #[cfg(not(kani))]

@@ -24,6 +24,7 @@ struct MacroTestConfig;
 struct MacroTestInput(u8);
 
 #[derive(Clone, Default, Debug, PartialEq)]
+#[cfg_attr(feature = "hot-join", derive(Serialize, Deserialize))]
 struct MacroTestState {
     frame: i32,
     value: u64,

@@ -93,6 +93,7 @@ impl GameStubEnum {
 }
 
 #[derive(Default, Copy, Clone, Hash)]
+#[cfg_attr(feature = "hot-join", derive(Serialize, Deserialize))]
 pub struct StateStubEnum {
     pub frame: i32,
     pub state: i32,

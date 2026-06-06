@@ -17,9 +17,7 @@ pub struct NetworkStats {
     /// For example, if at this instant the current game client is running frame 1002 and the remote game client is running frame 1009,
     /// this value will mostly likely roughly equal 7.
     pub local_frames_behind: i32,
-    /// The same as [`local_frames_behind`], but calculated from the perspective of the remote player.
-    ///
-    /// [`local_frames_behind`]: #structfield.local_frames_behind
+    /// The same as [`local_frames_behind`](Self::local_frames_behind), but calculated from the perspective of the remote player.
     pub remote_frames_behind: i32,
 
     // === Checksum/Desync Detection Fields ===
@@ -29,35 +27,29 @@ pub struct NetworkStats {
     /// in the session or if desync detection is disabled).
     pub last_compared_frame: Option<Frame>,
 
-    /// The local checksum at [`last_compared_frame`].
+    /// The local checksum at [`last_compared_frame`](Self::last_compared_frame).
     ///
     /// This is the checksum computed locally from the saved game state at that frame.
-    /// Compare with [`remote_checksum`] to check for desync.
-    ///
-    /// [`last_compared_frame`]: #structfield.last_compared_frame
-    /// [`remote_checksum`]: #structfield.remote_checksum
+    /// Compare with [`remote_checksum`](Self::remote_checksum) to check for desync.
     pub local_checksum: Option<u128>,
 
-    /// The remote checksum at [`last_compared_frame`].
+    /// The remote checksum at [`last_compared_frame`](Self::last_compared_frame).
     ///
     /// This is the checksum received from the remote peer for that frame.
-    /// Compare with [`local_checksum`] to check for desync.
-    ///
-    /// [`last_compared_frame`]: #structfield.last_compared_frame
-    /// [`local_checksum`]: #structfield.local_checksum
+    /// Compare with [`local_checksum`](Self::local_checksum) to check for desync.
     pub remote_checksum: Option<u128>,
 
     /// Whether checksums matched at the most recently compared frame.
     ///
-    /// This is a convenience field derived from comparing [`local_checksum`]
-    /// and [`remote_checksum`]. It is `None` if no comparison has occurred.
+    /// This is a convenience field derived from comparing
+    /// [`local_checksum`](Self::local_checksum) and
+    /// [`remote_checksum`](Self::remote_checksum). It is `None` if no
+    /// comparison has occurred.
     ///
     /// * `Some(true)` - Checksums match, peers are synchronized
     /// * `Some(false)` - **DESYNC DETECTED** - game state has diverged
     /// * `None` - No comparison available yet
     ///
-    /// [`local_checksum`]: #structfield.local_checksum
-    /// [`remote_checksum`]: #structfield.remote_checksum
     pub checksums_match: Option<bool>,
 }
 

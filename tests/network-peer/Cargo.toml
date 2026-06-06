@@ -18,6 +18,11 @@ print_stdout = "allow"
 print_stderr = "allow"
 disallowed_macros = "allow"
 
+[features]
+# Forward the hot-join feature to fortress-rollback so this peer's exhaustive
+# FortressEvent match stays in sync with the variants the linked crate exposes.
+hot-join = ["fortress-rollback/hot-join"]
+
 [dependencies]
 fortress-rollback = { path = "../.." }
 serde = { version = "1.0", features = ["derive"] }

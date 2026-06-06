@@ -8,7 +8,7 @@
 npx markdownlint "**/*.md" --config .markdownlint.json        # Check
 npx markdownlint --fix "**/*.md" --config .markdownlint.json   # Auto-fix
 python3 scripts/docs/check-wiki-consistency.py                      # Wiki links
-./scripts/docs/check-links.sh                                       # Link validation
+python3 scripts/docs/check-links.py                                 # Link validation
 ```
 
 ## ATX Heading Rules
@@ -116,6 +116,6 @@ Rules are in `.markdownlint.json` at the repository root. Pre-commit hooks run m
 ## Pre-Commit Checklist
 
 - [ ] `npx markdownlint '<file>' --config .markdownlint.json` passes
-- [ ] `./scripts/docs/check-links.sh` -- no broken links
+- [ ] `python3 scripts/docs/check-links.py` -- no broken links
 - [ ] Relative paths correct for file location
 - [ ] If file moved/renamed: `rg 'old-filename\.md'` to find referencing files

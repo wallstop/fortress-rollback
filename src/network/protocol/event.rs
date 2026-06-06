@@ -106,6 +106,7 @@ mod tests {
     struct TestInput(u32);
 
     #[derive(Debug, Clone, Default)]
+    #[cfg_attr(feature = "hot-join", derive(serde::Serialize, serde::Deserialize))]
     struct TestState;
 
     #[derive(Debug, Clone, PartialEq)]

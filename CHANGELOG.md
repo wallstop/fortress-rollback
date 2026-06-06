@@ -14,6 +14,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Hot Join (reserved-slot model), behind the new opt-in `hot-join` feature flag.** A peer can join a
+  running session by filling a *reserved* (or previously gracefully-dropped) player slot: it synchronizes
+  with the host, receives a full game-state snapshot, loads it, and resumes normal rollback play — all
+  while the total player count (and therefore the network input wire-width) stays fixed, so existing
+  peers' delta-compressed input streams are never disturbed.
+  - `SessionBuilder::with_hot_join(bool)`, `SessionBuilder::add_reserved_player(addr, handle)` (host side),
+    and `SessionBuilder::start_hot_join_session(socket, host_addr)` (joiner side).
+  - `SessionBuilder::with_hot_join_serve_timeout_polls(polls)` (host-side maximum polls a serve stays open
+    before aborting; rejects values below `2`), `SessionBuilder::with_hot_join_max_snapshot_wire_bytes(bytes)`
+    (host-side cap for the complete encoded snapshot message; defaults to 4 KiB for the built-in UDP
+    receive buffer), and `SessionBuilder::with_hot_join_ack_resends(resends)` (joiner-side ack-resend
+    budget) tune the handshake's loss/latency envelope; all default to sensible values.
+  - `SessionState::HotJoining`; `FortressEvent::JoinRequested { handle, addr }` and
+    `FortressEvent::PeerJoined { handle, addr }`; `InvalidRequestKind::PlayerCountMismatch { expected, actual }`.
+  - Under `hot-join`, `Config::State` additionally requires `Serialize + DeserializeOwned` (for snapshot
+    transfer). This bound only applies when the feature is enabled, so it is **not** a breaking change for
+    existing builds. Snapshot deserialization is allocation-bounded (a hostile length prefix yields an
+    error, never an OOM); keep `Config::State` non-recursive.
+  - The join handshake is ack-gated and loss/latency tolerant within a bounded envelope: the host
+    re-serves the snapshot until acknowledged and only reactivates the slot on the ack, an abandoned join
+    can never stall or fail-close the host (it resumes solo with the slot still reserved), and a joiner
+    that loses its snapshot or ack fails cleanly (retryable) rather than desyncing. Scope: 2-peer /
+    host-mediated topology; requires `max_prediction >= 1` (lockstep hot-join is rejected at build time).
+  - A slot that is *cleanly gracefully dropped* (via `P2PSession::remove_player`, or automatically on the
+    disconnect timeout under `DisconnectBehavior::ContinueWithout`) on a hot-join-serving host is returned
+    to the reserved/frozen state and can be re-filled by a returning peer connecting from the same address,
+    exactly like a build-time reserved slot — this is the "previously gracefully-dropped" path above.
+    Legacy `disconnect_player` (`Halt`-style) drops, and drops on a host that does not serve hot-joins, are
+    not made re-joinable.
+
 ## [0.9.0] - 2026-06-04
 
 ### Added
@@ -61,7 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `InternalErrorKind::InputQueueGapFillFailed { frame }` — new variant added; reported if mid-session gap-fill replication fails an internal invariant. Since `InternalErrorKind` is not `#[non_exhaustive]`, exhaustive matches must now handle this variant.
 - **Breaking:** `PlayerRegistry::handles_by_address` and `PlayerRegistry::handles_by_address_iter` now take `&T::Address` instead of `T::Address`. The same change applies to the `P2PSession::handles_by_address` and `P2PSession::handles_by_address_iter` forwarders. Existing callers passing an owned address must add a leading `&`: `session.handles_by_address(&addr)` and `session.handles_by_address_iter(&addr)`.
 
-> _Follow-up:_ a session-level telemetry hook for input-delay changes (e.g.,
+> *Follow-up:* a session-level telemetry hook for input-delay changes (e.g.,
 > a `TelemetryEvent::InputDelayChanged`) is intentionally deferred to the
 > upcoming frame-advantage-heuristic feature, which will be the primary
 > producer of input-delay adjustments.

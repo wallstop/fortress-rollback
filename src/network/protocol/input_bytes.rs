@@ -423,6 +423,7 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
+    #[cfg_attr(feature = "hot-join", derive(Serialize, Deserialize))]
     struct TestState;
 
     struct TestConfig;
@@ -858,6 +859,7 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
+    #[cfg_attr(feature = "hot-join", derive(Serialize, Deserialize))]
     struct ComplexState;
 
     struct ComplexConfig;

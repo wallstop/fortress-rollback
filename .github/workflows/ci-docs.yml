@@ -229,6 +229,11 @@ jobs:
           # docs/, so hand-edited or stale mirror content cannot drift from the
           # docs source of truth (the source SYNC headers say "Edit docs source").
           if ! diff -rq wiki/ wiki-test-output/; then
+            echo "::group::Wiki drift diagnostics"
+            git diff --no-index --stat wiki/ wiki-test-output/ || true
+            echo ""
+            diff -ru wiki/ wiki-test-output/ | sed -n '1,240p' || true
+            echo "::endgroup::"
             echo "::error::Committed wiki/ is out of sync with docs/. Run 'python scripts/docs/sync-wiki.py' and commit the regenerated wiki/."
             exit 1
           fi
@@ -321,6 +326,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Check local file links
+        run: python3 scripts/docs/check-links.py
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -381,9 +389,6 @@ jobs:
           name: markdown-link-check-report
           path: markdown-link-check-output.txt
           retention-days: 7
-
-      - name: Check local file links
-        run: ./scripts/docs/check-links.sh
 
   # ============================================================================
   # LYCHEE LINK CHECK - Fast link checking with caching
@@ -532,70 +537,20 @@ jobs:
             -D rustdoc::bare_urls" \
           cargo doc --no-deps
 
-  # ============================================================================
-  # RUSTDOC DEAD LINKS - Check for broken links in generated HTML
-  # ============================================================================
-  rustdoc-deadlinks:
-    name: Rustdoc Dead Links
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-deadlinks
-        uses: ./.github/actions/install-cargo-tool
-        with:
-          tool: cargo-deadlinks
-
-      - name: Cache cargo registry and build
-        uses: actions/cache@v5
-        continue-on-error: true
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: deadlinks-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            deadlinks-${{ runner.os }}-cargo-
-
-      - name: Build documentation
-        run: cargo doc --no-deps
-
-      - name: Check for dead links in rustdoc HTML
+      - name: Check private and feature-gated rustdoc links
         run: |
-          {
-            echo "## Rustdoc Dead Links Check"
-            echo ""
-            echo "Checking generated documentation for broken links..."
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          # Check for dead links (file:// links only, HTTP would be too slow)
-          if cargo deadlinks 2>&1 | tee deadlinks-output.txt; then
-            echo "✅ No dead links found in documentation" >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
-              echo "⚠️ Dead links detected:"
-              echo ""
-              echo "\`\`\`"
-              head -50 deadlinks-output.txt
-              echo "\`\`\`"
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-
-      - name: Upload deadlinks report
-        uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: deadlinks-report
-          path: deadlinks-output.txt
-          retention-days: 7
+          # Private and feature-gated doc comments are still source-controlled
+          # documentation. Validate them with rustdoc itself instead of scanning
+          # generated HTML, which has produced false positives on rustdoc-owned
+          # synthetic links such as blanket-impl dispatcher anchors.
+          RUSTDOCFLAGS="\
+            -D warnings \
+            -D rustdoc::broken_intra_doc_links \
+            -D rustdoc::private_intra_doc_links \
+            -D rustdoc::invalid_codeblock_attributes \
+            -D rustdoc::invalid_html_tags \
+            -D rustdoc::bare_urls" \
+          cargo doc --no-deps --features hot-join,tokio,json,sync-send --document-private-items
 
   # ============================================================================
   # DOC TESTS - Verify all documentation examples compile and run

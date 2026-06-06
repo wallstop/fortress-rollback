@@ -39,7 +39,7 @@
 //! }
 //!
 //! // Define your game state
-//! #[derive(Clone, Default)]
+//! #[derive(Clone, Default, Serialize, Deserialize)]
 //! struct MyGameState {
 //!     frame: i32,
 //!     player_positions: [(i32, i32); 2],

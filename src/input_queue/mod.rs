@@ -32,7 +32,8 @@ use std::cmp;
 /// This is sufficient to prove the invariants hold for the circular buffer logic.
 ///
 /// Why 7 (not 8): this constant also caps the Kani-only
-/// [`InlineVec`](crate::proof_vec) that backs the queue under verification. CBMC
+/// `InlineVec` (defined under `#[cfg(kani)]` in `crate::proof_vec`) that backs the
+/// queue under verification. CBMC
 /// unwinds the `CAP`-element loops that initialize, and (for non-`Copy` elements
 /// such as `SavedStates`' cells) drop, a `[Option<T>; CAP]`; their unwinding
 /// assertion needs an unwind bound of `CAP + 1`. A proof carrying no explicit
@@ -698,6 +699,208 @@ impl<T: Config> InputQueue<T> {
     #[must_use]
     pub fn is_frozen(&self) -> bool {
         self.frozen
+    }
+
+    /// Unfreezes this queue, re-enabling [`Self::add_input`].
+    ///
+    /// This is the counterpart to [`Self::freeze`]. It is used when a slot that
+    /// was gracefully dropped (and therefore frozen, repeating its last
+    /// confirmed input forever) is reactivated by a hot-joining peer: the slot
+    /// must stop auto-confirming the frozen value and resume accepting that
+    /// peer's real inputs.
+    ///
+    /// Unfreezing alone does **not** reposition the queue. Because the queue's
+    /// `last_added_frame` is still whatever it was when the slot froze, the very
+    /// next [`Self::add_input`] would have to be the immediately sequential
+    /// frame. Callers reactivating a slot at a non-zero activation frame should
+    /// therefore follow this with [`Self::reset_to_frame`], which both unfreezes
+    /// and repositions the queue to accept inputs from the activation frame
+    /// onward.
+    // dead_code: consumed by chunk 5's session orchestration (host reactivation
+    // of a reserved/dropped slot). Only the input-queue primitive lands here.
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub fn unfreeze(&mut self) {
+        self.frozen = false;
+    }
+
+    /// Repositions the queue so that its **next accepted input is for game frame
+    /// `frame`**, exactly as if the queue had just finished confirming every
+    /// frame before `frame`.
+    ///
+    /// This is the core hot-join primitive. It is used in two places:
+    /// - On a **host** reactivating a frozen/reserved slot, where
+    ///   `last_confirmed_input` holds the frozen value (the deterministic
+    ///   prediction base for frames `>= frame` until the joiner's real inputs
+    ///   arrive).
+    /// - On a **fresh joiner** layer fast-forwarded to a snapshot's activation
+    ///   frame, where `last_confirmed_input` is `None` (the queue has never seen
+    ///   an input).
+    ///
+    /// In both cases `last_confirmed_input` is **preserved** — it is the value
+    /// [`Self::input`] predicts with, and clearing it would change the
+    /// deterministic prediction seen by other peers.
+    ///
+    /// # Postconditions (on success, i.e. `frame` is non-negative)
+    /// - [`Self::is_frozen`] returns `false`.
+    /// - The next [`Self::add_input`] whose effective frame (`frame +
+    ///   frame_delay`) equals `frame + frame_delay` is accepted (returns a real
+    ///   frame, not [`Frame::NULL`]); concretely, with the queue's current
+    ///   `frame_delay`, `add_input(input @ frame)` is accepted and subsequent
+    ///   sequential inputs (`frame + 1`, `frame + 2`, …) are accepted too.
+    /// - Until a real input for `frame` arrives, [`Self::input`] for `frame` (or
+    ///   any later frame) returns a prediction built from the preserved
+    ///   `last_confirmed_input` via [`RepeatLastConfirmed`].
+    /// - The circular buffer is realigned so that [`Self::confirmed_input`] —
+    ///   which indexes absolutely as `inputs[f % queue_length]` — keeps working
+    ///   after the reset: once `add_input(input @ frame)` is accepted,
+    ///   `confirmed_input(frame + frame_delay)` returns that input.
+    ///
+    /// # Pre-activation `confirmed_input` surface
+    /// After a reset to `F`, the only confirmed slot that exists before the first
+    /// real input is the phantom predecessor: `confirmed_input(last_added_frame)`
+    /// (i.e. `F + frame_delay - 1`, the frame just before the first accepted
+    /// input) returns the preserved `last_confirmed_input` (the frozen value on a
+    /// reactivated host queue, or `T::Input::default()` if none was preserved) —
+    /// semantically correct for that pre-activation frame. [`Self::confirmed_input`]
+    /// for any frame *below* that returns
+    /// [`InvalidRequestKind::NoConfirmedInput`](crate::error::InvalidRequestKind::NoConfirmedInput).
+    /// Callers (the chunk-5 session orchestration) must therefore never request a
+    /// reactivated slot's `confirmed_input` for frames below its activation frame
+    /// minus one.
+    ///
+    /// For `frame == 0` with `frame_delay == 0` this reproduces fresh-queue
+    /// behavior: `last_added_frame` becomes [`Frame::NULL`] and `first_frame`
+    /// becomes `true`, so the first-input path of [`Self::add_input`] is taken.
+    ///
+    /// # No-op on invalid input
+    /// `frame` must be non-negative. On a negative or [`Frame::NULL`] frame this
+    /// reports a violation and leaves the queue **unchanged** (it does not
+    /// panic).
+    // dead_code: consumed by chunk 5's session orchestration; the public session
+    // API that drives reactivation/seek lands there.
+    #[cfg(feature = "hot-join")]
+    #[allow(dead_code)]
+    pub(crate) fn reset_to_frame(&mut self, frame: Frame) {
+        if frame.as_i32() < 0 {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InputQueue,
+                "reset_to_frame called with negative frame {} (frames must be non-negative)",
+                frame
+            );
+            return;
+        }
+
+        // `last_added_frame` is the frame stamp of the most recently accepted
+        // input *with frame delay applied*. After this reset the next accepted
+        // input is for game `frame`, so its delayed stamp is `frame +
+        // frame_delay`. `add_input` requires `input.frame + frame_delay ==
+        // last_added_frame + 1` (unless `last_added_frame.is_null()`), so we set
+        // `last_added_frame = frame + frame_delay - 1`. Compute it with checked
+        // arithmetic and bail (leaving the queue unchanged) on overflow, matching
+        // the file's arithmetic-safety idiom. We do this *before* mutating any
+        // field so the early return preserves the queue's prior state.
+        let Some(delayed) = frame.checked_add(self.frame_delay as i32) else {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InputQueue,
+                "reset_to_frame frame {} + frame_delay {} overflowed",
+                frame,
+                self.frame_delay
+            );
+            return;
+        };
+        let Some(new_last_added) = delayed.checked_sub(1) else {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InputQueue,
+                "reset_to_frame last_added_frame underflowed for frame {} (delay {})",
+                frame,
+                self.frame_delay
+            );
+            return;
+        };
+
+        // Re-blank every slot so `input(frame)` predicts cleanly: `input`
+        // errors if the requested frame is before `inputs[tail].frame`, and a
+        // NULL tail-slot frame (slot `tail == 0` below) is always `<=` any
+        // valid requested frame.
+        for slot in self.inputs.iter_mut() {
+            *slot = PlayerInput::blank_input(Frame::NULL);
+        }
+
+        // Align the empty circular buffer so the *next* accepted write lands at
+        // the absolute slot `confirmed_input` reads for that frame.
+        // `confirmed_input(f)` indexes absolutely as `inputs[f % queue_length]`;
+        // a normally-filled queue upholds "frame X lives at slot X %
+        // queue_length" because it starts at `head == 0` and advances one slot
+        // per sequential add. The next add here is for the delayed frame `frame
+        // + frame_delay` (== `new_last_added + 1` == `delayed`), so we must place
+        // `head`/`tail` at `delayed % queue_length`. (The previous `head = tail =
+        // 0` broke this: a write for frame F landed at slot 0 but
+        // `confirmed_input(F)` looked at slot `F % queue_length`.)
+        //
+        // `delayed` is known non-negative here: `frame >= 0` (guarded above) and
+        // `self.frame_delay` is a `usize`, so `frame + frame_delay >= 0`. The
+        // `as usize` cast is therefore lossless for the in-range value.
+        let next_slot = (delayed.as_i32() as usize) % self.queue_length;
+        self.head = next_slot;
+        self.tail = next_slot;
+        self.length = 0;
+        self.last_added_frame = new_last_added;
+        // For `frame == 0, frame_delay == 0`, `new_last_added == Frame::NULL`,
+        // which puts the queue back on the fresh-queue first-input path.
+        self.first_frame = self.last_added_frame.is_null();
+        self.first_incorrect_frame = Frame::NULL;
+        self.last_requested_frame = Frame::NULL;
+        self.prediction = PlayerInput::blank_input(Frame::NULL);
+        self.frozen = false;
+        // `last_confirmed_input` is intentionally preserved: it is the
+        // deterministic prediction base (frozen value on a reactivated host
+        // queue, `None` on a fresh joiner queue).
+
+        // Seed the "phantom previous input" slot when the queue is *not* on the
+        // first-input path. `add_input(frame)` routes through
+        // `advance_queue_head`, which (with `first_frame == false`) derives its
+        // expected next frame from the slot just behind `head` — i.e. the
+        // most-recently-added position. With `head == next_slot`, that slot is
+        // `next_slot - 1` (wrapping to `queue_length - 1` when `next_slot == 0`).
+        // The circular-buffer contract `add_input_by_frame` upholds is that this
+        // slot's frame equals `last_added_frame`; without restoring it the
+        // (just-blanked, NULL-framed) slot would make `advance_queue_head`
+        // expect frame 0 and attempt a spurious gap-fill, dropping the input. We
+        // stamp it with `last_added_frame` and the preserved confirmed value
+        // (the value is never read for this empty queue — `input` predicts via
+        // `last_confirmed_input` — but keeping it consistent avoids surprises).
+        // When `last_added_frame.is_null()` (`first_frame == true`, the frame-0
+        // path) `advance_queue_head` ignores this slot entirely, so we leave it
+        // blank.
+        if !self.last_added_frame.is_null() {
+            let phantom = PlayerInput {
+                frame: self.last_added_frame,
+                input: self.last_confirmed_input.unwrap_or_default(),
+            };
+            // Phantom predecessor lives at `head - 1`, wrapping. `next_slot` and
+            // `queue_length` are both valid here, so this is a plain modular
+            // predecessor (no `saturating_sub` masking an out-of-range index).
+            let phantom_position = if next_slot == 0 {
+                self.queue_length - 1
+            } else {
+                next_slot - 1
+            };
+            if let Some(slot) = self.inputs.get_mut(phantom_position) {
+                *slot = phantom;
+            } else {
+                report_violation!(
+                    ViolationSeverity::Critical,
+                    ViolationKind::InputQueue,
+                    "reset_to_frame: phantom previous slot index {} out of bounds (queue_length {})",
+                    phantom_position,
+                    self.queue_length
+                );
+            }
+        }
     }
 
     /// Adds an input frame to the queue. Will consider the set frame delay.
@@ -2812,7 +3015,7 @@ mod property_tests {
 /// Kani proofs require sufficient unwind bounds to verify loops. Key considerations:
 ///
 /// 1. **Buffer initialization**: Creating `InputQueue` via `test_queue()` fills its
-///    backing buffer (a `#[cfg(kani)]` heap-free [`ProofVec`](crate::proof_vec)) with
+///    backing buffer (a `#[cfg(kani)]` heap-free [`ProofVec`](crate::proof_vec::ProofVec)) with
 ///    `INPUT_QUEUE_LENGTH` (7 under Kani) blank inputs via a `0..queue_length` push
 ///    loop, so the harness needs unwind >= 8 (7 fill iterations + 1 for the
 ///    unwinding-assertion check). The proofs here use 10 for margin.
@@ -3667,5 +3870,362 @@ mod kani_input_queue_proofs {
             queue.frame_delay == delay_before,
             "delay should be unchanged",
         );
+    }
+}
+
+#[cfg(all(test, feature = "hot-join"))]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
+mod hot_join_input_queue_tests {
+
+    use std::net::SocketAddr;
+
+    use serde::{Deserialize, Serialize};
+
+    use super::*;
+
+    #[repr(C)]
+    #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
+    struct TestInput {
+        inp: u8,
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestConfig;
+
+    impl Config for TestConfig {
+        type Input = TestInput;
+        type State = Vec<u8>;
+        type Address = SocketAddr;
+    }
+
+    fn test_queue(player_index: usize) -> InputQueue<TestConfig> {
+        InputQueue::<TestConfig>::new(player_index).expect("Failed to create test queue")
+    }
+
+    /// Test 1: `unfreeze` re-enables `add_input`.
+    #[test]
+    fn unfreeze_reenables_add_input() {
+        let mut queue = test_queue(0);
+
+        // Add a couple of inputs so the queue has real state.
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(0), TestInput { inp: 1 })),
+            Frame::new(0)
+        );
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(1), TestInput { inp: 2 })),
+            Frame::new(1)
+        );
+
+        queue.freeze();
+        assert!(queue.is_frozen());
+
+        // While frozen, add_input is a no-op: it returns the existing
+        // last_added_frame (1), NOT a newly-accepted frame, and does not advance.
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(2), TestInput { inp: 3 })),
+            Frame::new(1)
+        );
+        assert_eq!(queue.last_added_frame, Frame::new(1));
+
+        queue.unfreeze();
+        assert!(!queue.is_frozen());
+
+        // After unfreeze, the next sequential input (frame 2) is accepted.
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(2), TestInput { inp: 3 })),
+            Frame::new(2)
+        );
+        assert_eq!(queue.last_added_frame, Frame::new(2));
+    }
+
+    /// Test 2: `reset_to_frame` to a non-zero frame (delay 0) accepts inputs at F.
+    #[test]
+    fn reset_to_frame_nonzero_accepts_at_frame() {
+        let mut queue = test_queue(0);
+        let f = Frame::new(50);
+
+        queue.reset_to_frame(f);
+        assert!(!queue.is_frozen());
+
+        // add_input(input @ F) is accepted (returns F, not NULL).
+        assert_eq!(
+            queue.add_input(PlayerInput::new(f, TestInput { inp: 7 })),
+            f
+        );
+
+        // input(F) returns the just-added input as Confirmed.
+        let (value, status) = queue.input(f).expect("input at F should be available");
+        assert_eq!(value.inp, 7);
+        assert_eq!(status, InputStatus::Confirmed);
+
+        // input(F+1) is a prediction (no real input yet).
+        let (_pred, pred_status) = queue
+            .input(Frame::new(51))
+            .expect("input at F+1 should predict");
+        assert_eq!(pred_status, InputStatus::Predicted);
+
+        // Sequential adds continue to be accepted.
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(51), TestInput { inp: 8 })),
+            Frame::new(51)
+        );
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(52), TestInput { inp: 9 })),
+            Frame::new(52)
+        );
+    }
+
+    /// Test 2 (delay variant): reset honors a non-zero frame_delay.
+    #[test]
+    fn reset_to_frame_with_delay_accepts_at_frame() {
+        let mut queue = test_queue(0);
+        queue.set_frame_delay(2).expect("valid delay");
+        let f = Frame::new(50);
+
+        queue.reset_to_frame(f);
+
+        // With delay 2, add_input(input @ F) is accepted and reports the
+        // delayed frame F + delay = 52.
+        assert_eq!(
+            queue.add_input(PlayerInput::new(f, TestInput { inp: 7 })),
+            Frame::new(52)
+        );
+        // Subsequent sequential user frames are accepted.
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(51), TestInput { inp: 8 })),
+            Frame::new(53)
+        );
+    }
+
+    /// Regression guard for the Critical frame-indexing bug: after
+    /// `reset_to_frame(F)` the circular buffer must be realigned so that
+    /// `confirmed_input` (which indexes absolutely as `inputs[f % queue_length]`)
+    /// finds the input added at `F`. F is chosen so that `F % queue_length != 0`
+    /// (50 % 128 == 50); under the old `head = tail = 0` code the input for F
+    /// landed at slot 0 while `confirmed_input` read slot 50, returning
+    /// `NoConfirmedInput`. Covers both delay 0 and a delay > 0 case.
+    #[test]
+    fn reset_to_frame_then_confirmed_input_roundtrips() {
+        // --- delay 0 ---
+        {
+            let mut queue = test_queue(0);
+            let f = Frame::new(50);
+            assert_ne!(f.as_i32() as usize % queue.queue_length(), 0);
+
+            queue.reset_to_frame(f);
+
+            // Accept the joiner's real input at the activation frame.
+            assert_eq!(
+                queue.add_input(PlayerInput::new(f, TestInput { inp: 7 })),
+                f
+            );
+
+            // confirmed_input(F + delay) == confirmed_input(F) returns the added
+            // value (this is the assertion that fails under the old code).
+            let confirmed = queue
+                .confirmed_input(f)
+                .expect("confirmed_input(F) must find the input added after reset");
+            assert_eq!(confirmed.frame, f);
+            assert_eq!(confirmed.input.inp, 7);
+
+            // input(F) still reports Confirmed via the tail-relative path.
+            let (value, status) = queue.input(f).expect("input at F should be available");
+            assert_eq!(value.inp, 7);
+            assert_eq!(status, InputStatus::Confirmed);
+
+            // A second sequential add is also addressable by confirmed_input.
+            assert_eq!(
+                queue.add_input(PlayerInput::new(Frame::new(51), TestInput { inp: 8 })),
+                Frame::new(51)
+            );
+            let confirmed_next = queue
+                .confirmed_input(Frame::new(51))
+                .expect("confirmed_input(F+1) must find the second input");
+            assert_eq!(confirmed_next.input.inp, 8);
+
+            // Discard + invariants still hold after the realigned writes.
+            queue.discard_confirmed_frames(Frame::new(51));
+            assert!(queue.check_invariants().is_ok());
+        }
+
+        // --- delay > 0 ---
+        {
+            let mut queue = test_queue(0);
+            let delay = 3usize;
+            queue.set_frame_delay(delay).expect("valid delay");
+            let f = Frame::new(50);
+            let delayed = Frame::new(f.as_i32() + delay as i32); // 53
+            assert_ne!(delayed.as_i32() as usize % queue.queue_length(), 0);
+
+            queue.reset_to_frame(f);
+
+            // add_input(input @ F) is accepted and reports the delayed frame.
+            assert_eq!(
+                queue.add_input(PlayerInput::new(f, TestInput { inp: 7 })),
+                delayed
+            );
+
+            // confirmed_input is keyed by the DELAYED frame (that is the frame
+            // actually stored in the queue).
+            let confirmed = queue
+                .confirmed_input(delayed)
+                .expect("confirmed_input(F+delay) must find the input added after reset");
+            assert_eq!(confirmed.frame, delayed);
+            assert_eq!(confirmed.input.inp, 7);
+
+            // input(F+delay) reports Confirmed: with frame delay the input is
+            // stored at its DELAYED frame, and the simulation queries `input` by
+            // that stored frame (the queue stamps slots with `frame + delay`).
+            let (value, status) = queue
+                .input(delayed)
+                .expect("input at F+delay should be available");
+            assert_eq!(value.inp, 7);
+            assert_eq!(status, InputStatus::Confirmed);
+
+            // Second sequential add: confirmed_input(F+1+delay) works.
+            assert_eq!(
+                queue.add_input(PlayerInput::new(Frame::new(51), TestInput { inp: 8 })),
+                Frame::new(54)
+            );
+            let confirmed_next = queue
+                .confirmed_input(Frame::new(54))
+                .expect("confirmed_input(F+1+delay) must find the second input");
+            assert_eq!(confirmed_next.input.inp, 8);
+
+            queue.discard_confirmed_frames(Frame::new(54));
+            assert!(queue.check_invariants().is_ok());
+        }
+    }
+
+    /// Test 3: `reset_to_frame(0)` reproduces fresh-queue behavior.
+    #[test]
+    fn reset_to_frame_zero_matches_fresh_queue() {
+        let mut queue = test_queue(0);
+        // Mutate the queue first so reset has something to undo.
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(0), TestInput { inp: 1 })),
+            Frame::new(0)
+        );
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(1), TestInput { inp: 2 })),
+            Frame::new(1)
+        );
+
+        queue.reset_to_frame(Frame::new(0));
+
+        // Matches a fresh queue: first-input path is taken.
+        assert_eq!(queue.last_added_frame, Frame::NULL);
+        assert!(queue.first_frame);
+        assert!(!queue.is_frozen());
+
+        // add_input(input @ 0) is accepted.
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(0), TestInput { inp: 5 })),
+            Frame::new(0)
+        );
+        let (value, status) = queue
+            .input(Frame::new(0))
+            .expect("input at 0 should be available");
+        assert_eq!(value.inp, 5);
+        assert_eq!(status, InputStatus::Confirmed);
+    }
+
+    /// Test 4: `reset_to_frame` preserves `last_confirmed_input`, so a
+    /// pre-real-input prediction equals the preserved confirmed value.
+    #[test]
+    fn reset_to_frame_preserves_last_confirmed_input() {
+        let mut queue = test_queue(0);
+
+        // `last_confirmed_input` is set by the add_input path (see
+        // `add_input_by_frame`). Add an input with a distinctive, non-default
+        // value so we can tell a preserved prediction from a default one.
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(0), TestInput { inp: 200 })),
+            Frame::new(0)
+        );
+        assert_eq!(queue.last_confirmed_input, Some(TestInput { inp: 200 }));
+
+        // Reset forward to a later activation frame.
+        let f = Frame::new(10);
+        queue.reset_to_frame(f);
+
+        // White-box: the field itself is preserved (not cleared to None).
+        assert_eq!(queue.last_confirmed_input, Some(TestInput { inp: 200 }));
+
+        // Behavioral: input(F) before any real input predicts the preserved
+        // confirmed value (200), NOT the default (0).
+        let (value, status) = queue.input(f).expect("input at F should predict");
+        assert_eq!(status, InputStatus::Predicted);
+        assert_eq!(value.inp, 200);
+    }
+
+    /// Test 5: freeze then `reset_to_frame(F)` leaves the queue unfrozen and
+    /// accepting at F (the host reactivation path).
+    #[test]
+    fn reset_to_frame_after_freeze_reactivates() {
+        let mut queue = test_queue(0);
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(0), TestInput { inp: 1 })),
+            Frame::new(0)
+        );
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(1), TestInput { inp: 2 })),
+            Frame::new(1)
+        );
+
+        queue.freeze();
+        assert!(queue.is_frozen());
+
+        let f = Frame::new(20);
+        queue.reset_to_frame(f);
+
+        // Reset unfreezes the queue (reactivation).
+        assert!(!queue.is_frozen());
+
+        // And it accepts the joiner's real input at the activation frame.
+        assert_eq!(
+            queue.add_input(PlayerInput::new(f, TestInput { inp: 42 })),
+            f
+        );
+        let (value, status) = queue.input(f).expect("input at F should be available");
+        assert_eq!(value.inp, 42);
+        assert_eq!(status, InputStatus::Confirmed);
+    }
+
+    /// Test 6: `reset_to_frame` with a negative frame is a no-op and does not panic.
+    #[test]
+    fn reset_to_frame_negative_is_noop() {
+        let mut queue = test_queue(0);
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(0), TestInput { inp: 1 })),
+            Frame::new(0)
+        );
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(1), TestInput { inp: 2 })),
+            Frame::new(1)
+        );
+
+        let before = queue.clone();
+
+        // NULL frame: no-op.
+        queue.reset_to_frame(Frame::NULL);
+        assert_eq!(queue.head, before.head);
+        assert_eq!(queue.tail, before.tail);
+        assert_eq!(queue.length, before.length);
+        assert_eq!(queue.first_frame, before.first_frame);
+        assert_eq!(queue.last_added_frame, before.last_added_frame);
+        assert_eq!(queue.last_confirmed_input, before.last_confirmed_input);
+        assert_eq!(queue.frozen, before.frozen);
+
+        // A different negative frame: also a no-op.
+        queue.reset_to_frame(Frame::new(-5));
+        assert_eq!(queue.last_added_frame, before.last_added_frame);
+        assert_eq!(queue.length, before.length);
     }
 }

@@ -151,6 +151,33 @@ pub(crate) struct MessageHeader {
     pub magic: u16,
 }
 
+#[cfg(feature = "hot-join")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct JoinRequest {
+    /// The player handle (slot index) the joiner wants to occupy.
+    pub player_handle: usize,
+}
+
+#[cfg(feature = "hot-join")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct StateSnapshot {
+    /// The frame the serialized state corresponds to (the activation frame).
+    pub frame: Frame,
+    /// Total player count the snapshot was produced with (receiver validates equality).
+    pub num_players: usize,
+    /// bincode-serialized `Config::State` at `frame`.
+    pub state_bytes: Vec<u8>,
+    /// Optional checksum of the saved state at `frame`.
+    pub checksum: Option<u128>,
+}
+
+#[cfg(feature = "hot-join")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct StateSnapshotAck {
+    /// The frame the joiner successfully loaded.
+    pub frame: Frame,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum MessageBody {
     SyncRequest(SyncRequest),
@@ -161,6 +188,12 @@ pub(crate) enum MessageBody {
     QualityReply(QualityReply),
     ChecksumReport(ChecksumReport),
     KeepAlive,
+    #[cfg(feature = "hot-join")]
+    JoinRequest(JoinRequest),
+    #[cfg(feature = "hot-join")]
+    StateSnapshot(StateSnapshot),
+    #[cfg(feature = "hot-join")]
+    StateSnapshotAck(StateSnapshotAck),
 }
 
 /// A messages that [`NonBlockingSocket`] sends and receives. When implementing [`NonBlockingSocket`],

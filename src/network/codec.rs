@@ -44,6 +44,8 @@ use crate::network::messages::{
     ChecksumReport, ConnectionStatus, Input, InputAck, Message, MessageBody, MessageHeader,
     QualityReply, QualityReport, SyncReply, SyncRequest,
 };
+#[cfg(feature = "hot-join")]
+use crate::network::messages::{JoinRequest, StateSnapshot, StateSnapshotAck};
 use crate::Frame;
 
 // The bincode configuration used throughout Fortress Rollback.
@@ -395,6 +397,56 @@ fn decode_input(bytes: &[u8], cursor: &mut usize) -> CodecResult<Input> {
     })
 }
 
+/// Reads a bincode `Option<u128>` encoded under fixed-int config: a one-byte
+/// tag (0 = `None`, 1 = `Some`) followed by a 16-byte little-endian `u128` when
+/// the tag is 1.
+#[cfg(feature = "hot-join")]
+fn read_option_u128(
+    bytes: &[u8],
+    cursor: &mut usize,
+    field: &'static str,
+) -> CodecResult<Option<u128>> {
+    let tag = read_array::<1>(bytes, cursor, field)?[0];
+    match tag {
+        0 => Ok(None),
+        1 => Ok(Some(read_u128(bytes, cursor, field)?)),
+        other => Err(decode_message_error(format!(
+            "invalid option tag {} for {}",
+            other, field
+        ))),
+    }
+}
+
+#[cfg(feature = "hot-join")]
+fn decode_state_snapshot(bytes: &[u8], cursor: &mut usize) -> CodecResult<StateSnapshot> {
+    let frame = Frame::new(read_i32(bytes, cursor, "state_snapshot.frame")?);
+    let num_players = read_usize(bytes, cursor, "state_snapshot.num_players")?;
+
+    let state_len = read_usize(bytes, cursor, "state_snapshot.state_bytes.len")?;
+    // alloc-bound: `state_len` is a peer-controlled length prefix. Before reserving,
+    // it is validated against the bytes still remaining in this packet
+    // (`ensure_length_within_remaining`, min element footprint 1 byte/`u8`), so a
+    // count larger than the buffer can describe is rejected outright. Only then do we
+    // `try_reserve_exact` and copy exactly `state_len` bytes via `take_bytes`, which
+    // bounds-checks the slice. This is the same pattern as `decode_input`'s `bytes`.
+    ensure_length_within_remaining(bytes, *cursor, state_len, 1, "state_snapshot.state_bytes")?;
+    let state_slice = take_bytes(bytes, cursor, state_len, "state_snapshot.state_bytes")?;
+    let mut state_bytes = Vec::new();
+    state_bytes.try_reserve_exact(state_len).map_err(|_err| {
+        decode_message_error(format!("failed to reserve {} state bytes", state_len))
+    })?;
+    state_bytes.extend_from_slice(state_slice);
+
+    let checksum = read_option_u128(bytes, cursor, "state_snapshot.checksum")?;
+
+    Ok(StateSnapshot {
+        frame,
+        num_players,
+        state_bytes,
+        checksum,
+    })
+}
+
 /// Encodes a value into a new `Vec<u8>`.
 ///
 /// This is the simplest encoding function but allocates a new vector.
@@ -554,6 +606,16 @@ pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
             frame: Frame::new(read_i32(bytes, &mut cursor, "checksum_report.frame")?),
         }),
         7 => MessageBody::KeepAlive,
+        #[cfg(feature = "hot-join")]
+        8 => MessageBody::JoinRequest(JoinRequest {
+            player_handle: read_usize(bytes, &mut cursor, "join_request.player_handle")?,
+        }),
+        #[cfg(feature = "hot-join")]
+        9 => MessageBody::StateSnapshot(decode_state_snapshot(bytes, &mut cursor)?),
+        #[cfg(feature = "hot-join")]
+        10 => MessageBody::StateSnapshotAck(StateSnapshotAck {
+            frame: Frame::new(read_i32(bytes, &mut cursor, "state_snapshot_ack.frame")?),
+        }),
         other => {
             return Err(decode_message_error(format!(
                 "unknown message body variant {}",
@@ -589,6 +651,91 @@ pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
 /// ```
 pub fn decode_value<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<T> {
     decode(bytes).map(|(value, _)| value)
+}
+
+/// Compile-time byte cap applied by [`decode_bounded`] to every container a
+/// decoded value declares.
+///
+/// bincode's container decoders (`Vec`, byte buffers, etc.) only validate a
+/// declared element/byte count against the input when the bincode config carries
+/// a `Limit` — with the default no-limit config a `Vec<u8>`/`serde_bytes` field
+/// whose length prefix claims `u64::MAX` is allocated as `vec![0u8; u64::MAX]`
+/// *before* any data is read (an allocator-abort / OOM DoS, the
+/// RUSTSEC-2022-0035 class). Decoding peer-controlled bytes into a user
+/// `Config::State` must therefore be bounded.
+///
+/// This mirrors [`crate::rle::DEFAULT_MAX_DECODED_LEN`] (64 MiB): a single
+/// rollback state snapshot far below it, far above any plausible decode buffer.
+#[cfg(feature = "hot-join")]
+pub(crate) const MAX_BOUNDED_DECODE_LEN: usize = crate::rle::DEFAULT_MAX_DECODED_LEN;
+
+/// Decodes a value from a byte slice with a fixed per-decode byte limit, so a
+/// corrupt or malicious length prefix cannot trigger an oversized allocation.
+///
+/// Identical to [`decode_value`] except the bincode config carries a
+/// [`Limit`](bincode::config::Configuration::with_limit) of
+/// [`MAX_BOUNDED_DECODE_LEN`] bytes. Under that config every container decoder
+/// claims `len * size_of::<element>()` bytes against the running total *before*
+/// allocating and fails with a decode error once the total would exceed the
+/// limit — so even a `Vec<u8>`/`serde_bytes` field claiming `u64::MAX` is
+/// rejected without allocating. `bytes` is additionally pre-rejected when it is
+/// itself longer than the cap, so no input this function accepts can drive an
+/// allocation past [`MAX_BOUNDED_DECODE_LEN`].
+///
+/// Use this (not [`decode_value`]) for any value reconstructed from
+/// peer-controlled bytes whose type can contain a length-prefixed container.
+///
+/// # Bounds *allocation*, not *recursion depth*
+///
+/// The limit caps total bytes allocated; it does **not** cap the decode's call
+/// stack. bincode decodes a recursive type (one transitively containing
+/// `Box<Self>`, `Vec<Self>`, etc.) by recursing once per level of nesting, and a
+/// deeply-nested value can be encoded in far fewer bytes than
+/// [`MAX_BOUNDED_DECODE_LEN`] (each nesting level adds only a tag/length byte or
+/// two). Such input therefore stays under the byte cap yet can still overflow
+/// the stack mid-decode — an uncatchable abort, not a recoverable `Err`. This
+/// limit cannot prevent that; callers must keep peer-decoded types non-recursive
+/// / shallow. (Thread-based stack bounding is intentionally avoided: it would
+/// require `T: Send`, which `T` here is not guaranteed to be.)
+///
+/// # Errors
+///
+/// Returns [`CodecError::DecodeError`] when `bytes` exceeds the cap, when a
+/// declared container length would exceed the cap, or when bincode otherwise
+/// fails to decode (truncated input, trailing bytes are *not* rejected here —
+/// use [`decode`] if you need the consumed length).
+#[cfg(feature = "hot-join")]
+pub(crate) fn decode_bounded<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<T> {
+    // alloc-bound: this decode is bounded to MAX_BOUNDED_DECODE_LEN (64 MiB) two
+    // ways. (1) `bytes` is pre-rejected when longer than the cap. (2) The bincode
+    // `Limit<MAX_BOUNDED_DECODE_LEN>` config makes every container decoder claim
+    // its `len * size_of::<element>()` byte footprint against a running total
+    // *before* allocating and error once it would exceed the cap, so a malicious
+    // length prefix (e.g. a `Vec<u8>` claiming u64::MAX) yields a decode error,
+    // never a giant `vec![0u8; len]`. No input this function accepts can drive an
+    // allocation past the cap. Empirically verified for both the per-element
+    // (`Vec<T>`) and native (`serde_bytes`) decode paths.
+    if bytes.len() > MAX_BOUNDED_DECODE_LEN {
+        return Err(CodecError::decode(
+            format!(
+                "input length {} exceeds bounded-decode cap {}",
+                bytes.len(),
+                MAX_BOUNDED_DECODE_LEN
+            ),
+            CodecOperation::Decode,
+        ));
+    }
+    // `with_limit` is an inherent method on the concrete `Configuration`, so the
+    // limited config is built from the same `standard().with_fixed_int_encoding()`
+    // base as `config()` (kept byte-for-byte identical to the shared codec config,
+    // only adding the limit) rather than from the `impl Config` return of
+    // `config()`.
+    let config = bincode::config::standard()
+        .with_fixed_int_encoding()
+        .with_limit::<MAX_BOUNDED_DECODE_LEN>();
+    bincode::serde::decode_from_slice(bytes, config)
+        .map(|(value, _consumed)| value)
+        .map_err(|e| CodecError::decode(e.to_string(), CodecOperation::Decode))
 }
 
 #[cfg(test)]
@@ -918,5 +1065,164 @@ mod tests {
 
         let (decoded, _): (Message, _) = decode(&buffer[..len]).unwrap();
         assert_eq!(msg, decoded);
+    }
+}
+
+#[cfg(all(test, feature = "hot-join"))]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
+mod hot_join_tests {
+    use super::*;
+    use crate::network::messages::{
+        JoinRequest, Message, MessageBody, MessageHeader, StateSnapshot, StateSnapshotAck,
+    };
+
+    fn roundtrip(original: Message) {
+        let bytes = encode(&original).unwrap();
+        // The generic bincode decode is the authority for the wire format; the manual
+        // bounded decoder must agree with it byte-for-byte.
+        let generic: Message = decode_value(&bytes).unwrap();
+        let (manual, consumed) = decode_message(&bytes).unwrap();
+
+        assert_eq!(generic, original, "generic bincode decode must roundtrip");
+        assert_eq!(manual, original, "manual bounded decode must roundtrip");
+        assert_eq!(
+            consumed,
+            bytes.len(),
+            "manual decode must consume all bytes"
+        );
+    }
+
+    #[test]
+    fn decode_message_roundtrips_join_request() {
+        roundtrip(Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::JoinRequest(JoinRequest { player_handle: 3 }),
+        });
+    }
+
+    #[test]
+    fn decode_message_roundtrips_state_snapshot_with_checksum() {
+        roundtrip(Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::StateSnapshot(StateSnapshot {
+                frame: Frame::new(42),
+                num_players: 4,
+                state_bytes: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02],
+                checksum: Some(0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10),
+            }),
+        });
+    }
+
+    #[test]
+    fn decode_message_roundtrips_state_snapshot_without_checksum() {
+        roundtrip(Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::StateSnapshot(StateSnapshot {
+                frame: Frame::new(7),
+                num_players: 2,
+                state_bytes: vec![1, 2, 3, 4, 5],
+                checksum: None,
+            }),
+        });
+    }
+
+    #[test]
+    fn decode_message_roundtrips_state_snapshot_empty_state_bytes() {
+        roundtrip(Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::StateSnapshot(StateSnapshot {
+                frame: Frame::new(0),
+                num_players: 1,
+                state_bytes: Vec::new(),
+                checksum: None,
+            }),
+        });
+    }
+
+    #[test]
+    fn decode_message_roundtrips_state_snapshot_ack() {
+        roundtrip(Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::StateSnapshotAck(StateSnapshotAck {
+                frame: Frame::new(99),
+            }),
+        });
+    }
+
+    /// Hand-crafts a `StateSnapshot` wire buffer whose `state_bytes` length prefix
+    /// claims `u64::MAX` while the buffer holds no payload. The bounded decoder must
+    /// reject this via `ensure_length_within_remaining` *before* reserving, never
+    /// panicking or attempting a giant allocation. Mirrors
+    /// `decode_message_rejects_input_bytes_length_that_exceeds_packet_bytes`.
+    #[test]
+    fn decode_message_rejects_state_bytes_length_that_exceeds_packet_bytes() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
+        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
+        bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // state_bytes len (absurd)
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// A `state_bytes` length that fits in `usize` but exceeds the remaining bytes
+    /// (claims 100 bytes when only a few remain) must also be rejected before reserve.
+    #[test]
+    fn decode_message_rejects_state_bytes_length_larger_than_remaining() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
+        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
+        bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&100_u64.to_le_bytes()); // state_bytes len
+        bytes.extend_from_slice(&[0xAA, 0xBB]); // only 2 bytes of payload present
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// A `checksum` option tag other than 0/1 is invalid under bincode's encoding.
+    #[test]
+    fn decode_message_rejects_invalid_checksum_option_tag() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
+        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
+        bytes.extend_from_slice(&1_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
+        bytes.push(2); // invalid option tag (only 0 or 1 valid)
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// A valid snapshot buffer with extra trailing bytes must be rejected.
+    #[test]
+    fn decode_message_rejects_trailing_bytes_after_snapshot() {
+        let original = Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::StateSnapshot(StateSnapshot {
+                frame: Frame::new(5),
+                num_players: 2,
+                state_bytes: vec![7, 8, 9],
+                checksum: Some(123),
+            }),
+        };
+        let mut bytes = encode(&original).unwrap();
+        bytes.push(0); // trailing byte
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
     }
 }

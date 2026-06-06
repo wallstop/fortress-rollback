@@ -17,6 +17,7 @@ struct TestInput {
 
 #[allow(dead_code)]
 #[derive(Default, Clone)]
+#[cfg_attr(feature = "hot-join", derive(Serialize, Deserialize))]
 struct TestGameState {
     frame: i32,
     input_history: Vec<u8>,

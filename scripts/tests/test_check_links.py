@@ -29,21 +29,48 @@ import pytest
 # Import functions from the loaded module
 find_inline_code_ranges = check_links.find_inline_code_ranges
 find_code_fence_ranges = check_links.find_code_fence_ranges
+check_rust_doc_link = check_links.check_rust_doc_link
+check_rust_doc_file = check_links.check_rust_doc_file
+clean_link_target = check_links.clean_link_target
+extract_markdown_anchors = check_links.extract_markdown_anchors
+extract_rust_doc_blocks = check_links.extract_rust_doc_blocks
+extract_rust_doc_markdown = check_links.extract_rust_doc_markdown
+is_rustdoc_item_fragment = check_links.is_rustdoc_item_fragment
 should_skip_markdown_file = check_links.should_skip_markdown_file
 
 
 class TestSkippedMarkdownPaths:
     """Tests for repository-wide link-check exclusions."""
 
-    def test_progress_session_notes_are_skipped(self) -> None:
-        """Ignored progress logs must not block local hooks."""
-        assert should_skip_markdown_file(
-            Path("progress/session-139-property-test-conversion.md")
-        )
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "progress/session-139-property-test-conversion.md",
+            ".claude/worktrees/agent/wiki/Home.md",
+            "target/doc/readme.md",
+            "node_modules/package/README.md",
+            "PLAN.md",
+            "pr-description.md",
+        ],
+    )
+    def test_ignored_markdown_is_skipped(self, path: str) -> None:
+        """Ignored or generated markdown must not block local hooks."""
+        assert should_skip_markdown_file(Path(path))
 
     def test_docs_markdown_is_checked(self) -> None:
         """Project documentation remains in scope."""
         assert not should_skip_markdown_file(Path("docs/contributing.md"))
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "docs/PLAN.md",
+            "wiki/pr-description.md",
+        ],
+    )
+    def test_root_only_ignored_names_are_checked_when_nested(self, path: str) -> None:
+        """Root-only generated filenames do not exclude real docs with same names."""
+        assert not should_skip_markdown_file(Path(path))
 
 
 class TestFindInlineCodeRanges:
@@ -238,6 +265,296 @@ class TestFindInlineCodeRanges:
         assert len(ranges) == 0
 
 
+class TestRustDocLinks:
+    """Tests for Rust doc-comment link validation."""
+
+    def test_extract_rust_doc_markdown(self) -> None:
+        """Rust doc comments are converted into Markdown before anchor checks."""
+        content = """//! Module docs
+//! # Module Heading
+/// Item docs
+/// ## Item Heading
+fn f() {}
+"""
+        markdown = extract_rust_doc_markdown(content)
+
+        assert "Module Heading" in markdown
+        assert "Item Heading" in markdown
+        assert "fn f" not in markdown
+
+    def test_extract_rust_doc_blocks_preserves_module_and_item_scope(self) -> None:
+        """Module docs and item docs are separate Rustdoc pages for fragments."""
+        content = """//! Module docs
+//! # Module Heading
+
+/// Item docs
+/// # Item Heading
+fn f() {}
+"""
+        blocks = extract_rust_doc_blocks(content)
+
+        assert [(block.is_module, block.markdown.splitlines()[0]) for block in blocks] == [
+            (True, "Module docs"),
+            (False, "Item docs"),
+        ]
+
+    @pytest.mark.parametrize(
+        "anchor",
+        [
+            "structfield.defer_input_processing",
+            "method.advance_frame",
+            "associatedtype.Item",
+            "associatedconstant.CAP",
+            "variant.Running",
+        ],
+    )
+    def test_rustdoc_item_fragment_is_rejected_as_url_fragment(self, anchor: str) -> None:
+        """Rustdoc item fragments are recognized so URL-style links can fail closed."""
+        assert is_rustdoc_item_fragment(anchor)
+
+    @pytest.mark.parametrize(
+        "anchor",
+        [
+            "missing",
+            "structfield.",
+            "structfield.not-a-rust-ident",
+            "unknown_kind.Item",
+        ],
+    )
+    def test_non_item_rustdoc_fragment_is_not_delegated(self, anchor: str) -> None:
+        """Only known rustdoc item-fragment forms bypass local heading checks."""
+        assert not is_rustdoc_item_fragment(anchor)
+
+    @pytest.mark.parametrize(
+        ("target", "source"),
+        [
+            (
+                "#bounded-deserialization-allocation-only",
+                "//! # Bounded deserialization (allocation only)\n",
+            ),
+            (
+                "self#bounded-deserialization-allocation-only",
+                "//! # Bounded deserialization (allocation only)\n",
+            ),
+        ],
+    )
+    def test_rust_doc_local_anchor_links_pass(
+        self, tmp_path: Path, target: str, source: str
+    ) -> None:
+        """Local rustdoc anchors are validated instead of treated as files."""
+        rust_file = tmp_path / "lib.rs"
+        rust_file.write_text(source, encoding="utf-8")
+
+        is_valid, error_msg = check_rust_doc_link(rust_file, target, tmp_path)
+
+        assert is_valid, error_msg
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "#missing",
+            "self#missing",
+        ],
+    )
+    def test_rust_doc_missing_local_anchor_fails(
+        self, tmp_path: Path, target: str
+    ) -> None:
+        """Missing local rustdoc anchors fail closed with diagnostics."""
+        rust_file = tmp_path / "lib.rs"
+        rust_file.write_text(
+            "//! # Existing\nstruct S { present: bool }\n", encoding="utf-8"
+        )
+
+        is_valid, error_msg = check_rust_doc_link(rust_file, target, tmp_path)
+
+        assert not is_valid
+        assert "Rustdoc" in error_msg
+        assert "anchor" in error_msg
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "#structfield.defer_input_processing",
+            "Self#structfield.defer_input_processing",
+            "P2PSession#method.current_state",
+        ],
+    )
+    def test_rust_doc_item_fragment_urls_fail_closed(
+        self, tmp_path: Path, target: str
+    ) -> None:
+        """Item-fragment URLs must be converted to rustdoc intra-doc paths."""
+        rust_file = tmp_path / "lib.rs"
+        rust_file.write_text("struct S {}\n", encoding="utf-8")
+
+        is_valid, error_msg = check_rust_doc_link(rust_file, target, tmp_path)
+
+        assert not is_valid
+        assert "intra-doc path link" in error_msg
+
+    @pytest.mark.parametrize(
+        ("content", "expected_errors"),
+        [
+            (
+                """//! # Module Heading
+/// See [module docs](self#module-heading).
+fn f() {}
+""",
+                0,
+            ),
+            (
+                """//! # Module Heading
+/// See [wrong page](#module-heading).
+fn f() {}
+""",
+                1,
+            ),
+            (
+                """/// # Item Heading
+/// See [same item](#item-heading).
+fn f() {}
+""",
+                0,
+            ),
+        ],
+    )
+    def test_rust_doc_heading_fragments_are_page_scoped(
+        self, tmp_path: Path, content: str, expected_errors: int
+    ) -> None:
+        """Bare item fragments are item-local; self# targets module docs."""
+        rust_file = tmp_path / "lib.rs"
+        rust_file.write_text(content, encoding="utf-8")
+
+        result = check_rust_doc_file(rust_file, tmp_path)
+
+        assert result.errors == expected_errors
+
+    def test_rust_doc_links_inside_code_are_skipped(self, tmp_path: Path) -> None:
+        """Rustdoc examples and inline code do not create false link failures."""
+        rust_file = tmp_path / "lib.rs"
+        rust_file.write_text(
+            """//! # Existing
+//! Inline code `[bad](missing.md)` is ignored.
+//! ```
+//! [also ignored](missing.md)
+//! ```
+//! A real [local link](#existing) is still checked.
+""",
+            encoding="utf-8",
+        )
+
+        result = check_rust_doc_file(rust_file, tmp_path)
+
+        assert result.errors == 0
+        assert result.checked == 1
+
+    @pytest.mark.parametrize(
+        ("content", "expected_errors"),
+        [
+            ('/// <img src="target.md" alt="ok">\n', 0),
+            ('/// <a href="missing.md">bad</a>\n', 1),
+            ("/// [ref]: target.md\n", 0),
+            ("/// [ref]: missing.md\n", 1),
+            ('/// [inline](target.md "title")\n', 0),
+        ],
+    )
+    def test_rust_doc_markdown_link_forms_are_checked(
+        self, tmp_path: Path, content: str, expected_errors: int
+    ) -> None:
+        """Rustdoc uses the same local link extraction as Markdown files."""
+        rust_file = tmp_path / "lib.rs"
+        rust_file.write_text(content, encoding="utf-8")
+        (tmp_path / "target.md").write_text("# Target\n", encoding="utf-8")
+
+        result = check_rust_doc_file(rust_file, tmp_path)
+
+        assert result.errors == expected_errors
+
+
+class TestMarkdownLinkExtraction:
+    """Tests for Markdown link target extraction beyond inline links."""
+
+    @pytest.mark.parametrize(
+        ("raw_target", "expected"),
+        [
+            ("target.md", "target.md"),
+            ("target.md \"title\"", "target.md"),
+            ("<target.md> \"title\"", "target.md"),
+            (" https://example.com/a b ", "https://example.com/a"),
+        ],
+    )
+    def test_clean_link_target(self, raw_target: str, expected: str) -> None:
+        """Optional Markdown titles are removed before local path checks."""
+        assert clean_link_target(raw_target) == expected
+
+    @pytest.mark.parametrize(
+        ("content", "expected_errors"),
+        [
+            ("[ref]: target.md\n", 0),
+            ("[ref]: <target.md> \"title\"\n", 0),
+            ("[ref]: missing.md\n", 1),
+            ('<img src="target.md" alt="ok">\n', 0),
+            ('<a href="missing.md">bad</a>\n', 1),
+            ("[inline](target.md \"title\")\n", 0),
+        ],
+    )
+    def test_markdown_link_forms_are_checked(
+        self, tmp_path: Path, content: str, expected_errors: int
+    ) -> None:
+        """Reference definitions, HTML attributes, and titled links are validated."""
+        source = tmp_path / "source.md"
+        source.write_text(content, encoding="utf-8")
+        (tmp_path / "target.md").write_text("# Target\n", encoding="utf-8")
+
+        result = check_markdown_file(source, tmp_path)
+
+        assert result.errors == expected_errors
+
+    def test_repo_root_absolute_link_is_supported(self, tmp_path: Path) -> None:
+        """Root-absolute local links resolve against the repository root."""
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        source = docs_dir / "source.md"
+        source.write_text("[root](/target.md)\n", encoding="utf-8")
+        (tmp_path / "target.md").write_text("# Target\n", encoding="utf-8")
+
+        result = check_markdown_file(source, tmp_path)
+
+        assert result.errors == 0
+
+    def test_markdown_anchors_ignore_code_fence_headings(self, tmp_path: Path) -> None:
+        """Anchors inside fenced code are not treated as rendered headings."""
+        content = """# Real
+```markdown
+# Hidden
+{#hidden-explicit}
+```
+"""
+        anchors = extract_markdown_anchors(content)
+
+        assert "real" in anchors
+        assert "hidden" not in anchors
+        assert "hidden-explicit" not in anchors
+
+        source = tmp_path / "source.md"
+        source.write_text("[bad](#hidden)\n" + content, encoding="utf-8")
+        result = check_markdown_file(source, tmp_path)
+
+        assert result.errors == 1
+
+    def test_duplicate_markdown_headings_get_github_suffixes(self, tmp_path: Path) -> None:
+        """Duplicate headings expose GitHub-style -1/-2 anchor suffixes."""
+        content = "# Added\n# Added\n# Added\n"
+        anchors = extract_markdown_anchors(content)
+
+        assert {"added", "added-1", "added-2"} <= anchors
+
+        source = tmp_path / "source.md"
+        source.write_text("[second](#added-1)\n" + content, encoding="utf-8")
+        result = check_markdown_file(source, tmp_path)
+
+        assert result.errors == 0
+
+
 class TestFindCodeFenceRanges:
     """Tests for find_code_fence_ranges function."""
 
@@ -359,6 +676,26 @@ class TestFailClosedAnchorValidation:
             assert result.errors > 0
         finally:
             target.chmod(0o644)
+
+    @pytest.mark.parametrize(
+        ("anchor", "expected_errors"),
+        [
+            ("heading", 0),
+            ("missing", 1),
+        ],
+    )
+    def test_cross_file_markdown_anchor_is_validated(
+        self, tmp_path: Path, anchor: str, expected_errors: int
+    ) -> None:
+        """Cross-file markdown fragments fail closed instead of becoming advisory."""
+        source = tmp_path / "source.md"
+        source.write_text(f"[link](target.md#{anchor})\n", encoding="utf-8")
+        target = tmp_path / "target.md"
+        target.write_text("# Heading\n", encoding="utf-8")
+
+        result = check_markdown_file(source, tmp_path)
+
+        assert result.errors == expected_errors
 
 
 class TestRelativePaths:

@@ -37,6 +37,7 @@ CHECK_TRIGGER_CASES: list[tuple[str, str]] = [
     ("actionlint", ".github/workflows/ci.yml"),
     ("changelog-unreleased-rule", "CHANGELOG.md"),
     ("vale-advisory", "docs/index.md"),
+    ("link-check", "README.md"),
     ("advance-frame-error-handling", "tests/sessions/spectator.rs"),
     ("kani-violation-cost", "src/lib.rs"),
 ]
@@ -58,15 +59,16 @@ def test_plan_checks_trigger_matrix_includes_expected_check(
 def test_plan_checks_runs_sync_version_for_version_surface_files() -> None:
     # README.md is a sync-version surface file but is NOT under docs/, so the
     # vale-advisory check should not trigger -- this isolates the
-    # sync-version trigger from the docs/ trigger.
+    # sync-version trigger from the docs/ trigger. It is a .md file, so the
+    # link-check (which gates on .md/.rs) also runs.
     checks = plan_checks({"README.md"})
-    assert _ids(checks) == ["sync-version-check"]
+    assert _ids(checks) == ["sync-version-check", "link-check"]
 
 
 def test_plan_checks_docs_markdown_triggers_both_sync_and_vale() -> None:
-    """A docs/*.md file is both a sync-version surface AND a vale target."""
+    """A docs/*.md file is a sync-version surface, a vale target, AND a link-check target."""
     checks = plan_checks({"docs/index.md"})
-    assert _ids(checks) == ["sync-version-check", "vale-advisory"]
+    assert _ids(checks) == ["sync-version-check", "vale-advisory", "link-check"]
 
 
 def test_plan_checks_runs_llm_checks_for_llm_markdown() -> None:
@@ -200,6 +202,33 @@ def test_plan_checks_runs_vale_advisory_for_docs_files() -> None:
 def test_plan_checks_skips_vale_advisory_when_no_docs_files() -> None:
     checks = plan_checks({"src/lib.rs"})
     assert "vale-advisory" not in _ids(checks)
+
+
+def test_plan_checks_runs_link_check_for_markdown_files() -> None:
+    """A .md change triggers the whole-tree link check."""
+    checks = plan_checks({"docs/user-guide.md"})
+    link_check = next(c for c in checks if c.check_id == "link-check")
+    # check-links.py scans the whole tree, so it takes no per-file arguments.
+    assert link_check.command == [
+        PYTHON_EXECUTABLE,
+        "scripts/docs/check-links.py",
+    ]
+    # Detection + reporting only; no safe blind auto-fix.
+    assert link_check.fix_command is None
+    assert link_check.fix_hint is not None
+    assert "private_intra_doc_links" in link_check.fix_hint
+
+
+def test_plan_checks_runs_link_check_for_rust_files() -> None:
+    """A .rs change triggers the link check (rustdoc intra-doc links)."""
+    checks = plan_checks({"src/lib.rs"})
+    assert "link-check" in _ids(checks)
+
+
+def test_plan_checks_skips_link_check_for_unrelated_files() -> None:
+    """Files that are neither .md nor .rs do not trigger the link check."""
+    checks = plan_checks({"Cargo.toml"})
+    assert "link-check" not in _ids(checks)
 
 
 def test_plan_checks_passes_rust_files_to_advance_frame_check() -> None:
