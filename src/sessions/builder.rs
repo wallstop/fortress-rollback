@@ -125,6 +125,11 @@ where
     /// [`with_hot_join_serve_timeout_polls`](Self::with_hot_join_serve_timeout_polls).
     #[cfg(feature = "hot-join")]
     hot_join_serve_timeout_polls: usize,
+    /// Maximum complete encoded `StateSnapshot` wire-message size the host will
+    /// serve. Defaults to `DEFAULT_HOT_JOIN_MAX_SNAPSHOT_WIRE_BYTES`; set via
+    /// [`with_hot_join_max_snapshot_wire_bytes`](Self::with_hot_join_max_snapshot_wire_bytes).
+    #[cfg(feature = "hot-join")]
+    hot_join_max_snapshot_wire_bytes: usize,
     /// Joiner-side hot-join ack-resend budget, in `poll_remote_clients` calls.
     /// Defaults to `DEFAULT_HOT_JOIN_ACK_RESENDS`; set via
     /// [`with_hot_join_ack_resends`](Self::with_hot_join_ack_resends).
@@ -167,6 +172,8 @@ impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
             #[cfg(feature = "hot-join")]
             hot_join_serve_timeout_polls,
             #[cfg(feature = "hot-join")]
+            hot_join_max_snapshot_wire_bytes,
+            #[cfg(feature = "hot-join")]
             hot_join_ack_resends,
         } = self;
 
@@ -200,6 +207,10 @@ impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
             .field("accept_hot_join", accept_hot_join)
             .field("reserved_slots", reserved_slots)
             .field("hot_join_serve_timeout_polls", hot_join_serve_timeout_polls)
+            .field(
+                "hot_join_max_snapshot_wire_bytes",
+                hot_join_max_snapshot_wire_bytes,
+            )
             .field("hot_join_ack_resends", hot_join_ack_resends);
         debug.finish()
     }
@@ -245,6 +256,9 @@ impl<T: Config> SessionBuilder<T> {
             #[cfg(feature = "hot-join")]
             hot_join_serve_timeout_polls:
                 crate::sessions::p2p_session::DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS,
+            #[cfg(feature = "hot-join")]
+            hot_join_max_snapshot_wire_bytes:
+                crate::sessions::hot_join::DEFAULT_HOT_JOIN_MAX_SNAPSHOT_WIRE_BYTES,
             #[cfg(feature = "hot-join")]
             hot_join_ack_resends: crate::sessions::p2p_session::DEFAULT_HOT_JOIN_ACK_RESENDS,
         }
@@ -499,21 +513,59 @@ impl<T: Config> SessionBuilder<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidRequestKind::NotSupported`] if `polls` is `0`: a serve
-    /// must stay open for at least one poll, otherwise it would be aborted before
-    /// any joiner could ever complete the handshake.
+    /// Returns [`InvalidRequestKind::NotSupported`] if `polls` is less than `2`:
+    /// the host sends a snapshot once per poll and checks the timeout after that
+    /// send, so a one-poll timeout would open and abort the serve in the same
+    /// call.
     #[cfg(feature = "hot-join")]
     pub fn with_hot_join_serve_timeout_polls(
         mut self,
         polls: usize,
     ) -> Result<Self, FortressError> {
-        if polls == 0 {
+        if polls < 2 {
             return Err(InvalidRequestKind::NotSupported {
-                operation: "with_hot_join_serve_timeout_polls(0) (the serve timeout must be >= 1)",
+                operation: "with_hot_join_serve_timeout_polls(<2) (the serve timeout must be >= 2)",
             }
             .into());
         }
         self.hot_join_serve_timeout_polls = polls;
+        Ok(self)
+    }
+
+    /// Overrides the maximum complete encoded hot-join `StateSnapshot` wire
+    /// message the host will serve, in bytes.
+    ///
+    /// The default is
+    /// `DEFAULT_HOT_JOIN_MAX_SNAPSHOT_WIRE_BYTES` (4 KiB), matching the built-in
+    /// UDP sockets' receive buffers. Raising this is useful only when every
+    /// peer's transport can receive larger packets. Oversized snapshots are
+    /// rejected before the host allocates `state_bytes` or opens a paused serve,
+    /// so a too-large state cannot repeatedly wedge the host's hot-join loop.
+    ///
+    /// Only meaningful on the host side (a session built with
+    /// [`add_reserved_player`](Self::add_reserved_player) /
+    /// [`with_hot_join`](Self::with_hot_join)); it is inert on a joiner session.
+    ///
+    /// This is feature-gated behind the `hot-join` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRequestKind::ConfigValueOutOfRange`] if `bytes` is `0`.
+    #[cfg(feature = "hot-join")]
+    pub fn with_hot_join_max_snapshot_wire_bytes(
+        mut self,
+        bytes: usize,
+    ) -> Result<Self, FortressError> {
+        if bytes == 0 {
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "hot_join_max_snapshot_wire_bytes",
+                min: 1,
+                max: u64::MAX,
+                actual: 0,
+            }
+            .into());
+        }
+        self.hot_join_max_snapshot_wire_bytes = bytes;
         Ok(self)
     }
 
@@ -1297,6 +1349,7 @@ impl<T: Config> SessionBuilder<T> {
             accept_hot_join: self.accept_hot_join,
             joiner: None,
             serve_timeout_polls: self.hot_join_serve_timeout_polls,
+            max_snapshot_wire_bytes: self.hot_join_max_snapshot_wire_bytes,
             ack_resends: self.hot_join_ack_resends,
         };
 
@@ -1438,6 +1491,7 @@ impl<T: Config> SessionBuilder<T> {
                 host_addr,
             }),
             serve_timeout_polls: self.hot_join_serve_timeout_polls,
+            max_snapshot_wire_bytes: self.hot_join_max_snapshot_wire_bytes,
             ack_resends: self.hot_join_ack_resends,
         };
 
@@ -1999,6 +2053,56 @@ mod tests {
         let builder = SessionBuilder::<TestConfig>::new();
         assert_eq!(builder.event_queue_size, DEFAULT_EVENT_QUEUE_SIZE);
         assert_eq!(builder.event_queue_size, 100);
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn with_hot_join_serve_timeout_polls_rejects_values_below_two() {
+        for polls in [0, 1] {
+            let result =
+                SessionBuilder::<TestConfig>::new().with_hot_join_serve_timeout_polls(polls);
+            assert!(matches!(
+                result,
+                Err(FortressError::InvalidRequestStructured {
+                    kind: InvalidRequestKind::NotSupported { .. }
+                })
+            ));
+        }
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn with_hot_join_serve_timeout_polls_accepts_two() {
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_hot_join_serve_timeout_polls(2)
+            .expect("two polls leaves a serve open across calls");
+        assert_eq!(builder.hot_join_serve_timeout_polls, 2);
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn with_hot_join_max_snapshot_wire_bytes_rejects_zero() {
+        let result = SessionBuilder::<TestConfig>::new().with_hot_join_max_snapshot_wire_bytes(0);
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "hot_join_max_snapshot_wire_bytes",
+                    min: 1,
+                    actual: 0,
+                    ..
+                }
+            })
+        ));
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn with_hot_join_max_snapshot_wire_bytes_accepts_positive_value() {
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_hot_join_max_snapshot_wire_bytes(8192)
+            .expect("positive snapshot wire cap is valid");
+        assert_eq!(builder.hot_join_max_snapshot_wire_bytes, 8192);
     }
 
     // ========================================================================

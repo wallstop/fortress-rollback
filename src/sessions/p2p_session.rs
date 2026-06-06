@@ -82,6 +82,11 @@ const DEFAULT_MAX_EVENT_QUEUE_SIZE: usize = 100;
 #[cfg(feature = "hot-join")]
 pub(crate) const DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS: usize = 600;
 
+/// Default maximum encoded hot-join snapshot wire-message size.
+#[cfg(feature = "hot-join")]
+pub(crate) const DEFAULT_HOT_JOIN_MAX_SNAPSHOT_WIRE_BYTES: usize =
+    crate::sessions::hot_join::DEFAULT_HOT_JOIN_MAX_SNAPSHOT_WIRE_BYTES;
+
 /// Default for the hot-join ack-resend budget: the number of
 /// [`poll_remote_clients`](P2PSession::poll_remote_clients) calls the joiner
 /// keeps re-sending its `StateSnapshotAck` after applying the snapshot. Override
@@ -228,8 +233,11 @@ where
     joiner: Option<JoinerState<T>>,
     /// Host-side serve timeout (in polls). Defaults to
     /// [`DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS`]; configurable via the builder.
-    /// Always `>= 1` (validated at the builder boundary).
+    /// Always `>= 2` (validated at the builder boundary).
     serve_timeout_polls: usize,
+    /// Maximum complete encoded `StateSnapshot` wire-message size the host will
+    /// serve. Defaults to [`DEFAULT_HOT_JOIN_MAX_SNAPSHOT_WIRE_BYTES`].
+    max_snapshot_wire_bytes: usize,
     /// Joiner-side ack-resend budget (in polls). Defaults to
     /// [`DEFAULT_HOT_JOIN_ACK_RESENDS`]; configurable via the builder. May be 0
     /// (the joiner acks exactly once, with no loss tolerance).
@@ -245,6 +253,7 @@ impl<T: Config> Default for HotJoinState<T> {
             joining: BTreeMap::new(),
             joiner: None,
             serve_timeout_polls: DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS,
+            max_snapshot_wire_bytes: DEFAULT_HOT_JOIN_MAX_SNAPSHOT_WIRE_BYTES,
             ack_resends: DEFAULT_HOT_JOIN_ACK_RESENDS,
         }
     }
@@ -335,8 +344,11 @@ where
     /// `start_hot_join_session`.
     pub(crate) joiner: Option<JoinerStateInit<T>>,
     /// Host-side serve timeout in polls (defaults to
-    /// [`DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS`]). Guaranteed `>= 1` by the builder.
+    /// [`DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS`]). Guaranteed `>= 2` by the builder.
     pub(crate) serve_timeout_polls: usize,
+    /// Maximum complete encoded `StateSnapshot` wire-message size the host will
+    /// serve (defaults to [`DEFAULT_HOT_JOIN_MAX_SNAPSHOT_WIRE_BYTES`]).
+    pub(crate) max_snapshot_wire_bytes: usize,
     /// Joiner-side ack-resend budget in polls (defaults to
     /// [`DEFAULT_HOT_JOIN_ACK_RESENDS`]).
     pub(crate) ack_resends: usize,
@@ -363,6 +375,7 @@ impl<T: Config> Default for HotJoinConfig<T> {
             accept_hot_join: false,
             joiner: None,
             serve_timeout_polls: DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS,
+            max_snapshot_wire_bytes: DEFAULT_HOT_JOIN_MAX_SNAPSHOT_WIRE_BYTES,
             ack_resends: DEFAULT_HOT_JOIN_ACK_RESENDS,
         }
     }
@@ -515,6 +528,7 @@ impl<T: Config> P2PSession<T> {
                     ack_resends_remaining: 0,
                 }),
                 serve_timeout_polls: hot_join.serve_timeout_polls,
+                max_snapshot_wire_bytes: hot_join.max_snapshot_wire_bytes,
                 ack_resends: hot_join.ack_resends,
             },
         })
@@ -1021,10 +1035,11 @@ impl<T: Config> P2PSession<T> {
                 continue;
             }
 
-            let snapshot = match crate::sessions::hot_join::capture_snapshot(
+            let snapshot = match crate::sessions::hot_join::capture_snapshot_with_max_wire_bytes(
                 &self.sync_layer,
                 activation_frame,
                 self.num_players,
+                self.hot_join.max_snapshot_wire_bytes,
             ) {
                 Ok(Some(snapshot)) => snapshot,
                 Ok(None) => continue, // no valid saved state at F; retry next poll

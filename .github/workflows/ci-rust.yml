@@ -157,6 +157,35 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --features tokio,json -- -D warnings
 
+  hot-join:
+    name: Hot Join Feature
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install cargo-nextest
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-nextest
+
+      - name: Setup Rust cache
+        uses: ./.github/actions/setup-rust-cache
+        with:
+          cache-key: hot-join
+
+      - name: Run hot-join tests
+        run: cargo nextest run --profile ci --features hot-join --no-capture
+
+      - name: Run hot-join clippy
+        run: cargo clippy --workspace --all-targets --features hot-join,tokio,json -- -D warnings
+
   # Miri undefined behavior check (cross-platform, optimized)
   #
   # OPTIMIZATION STRATEGY (January 2026):

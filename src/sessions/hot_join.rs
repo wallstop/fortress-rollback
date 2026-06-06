@@ -35,15 +35,26 @@
 //! *allocation* bounds.
 
 use crate::network::codec;
+use crate::network::messages::{Message, MessageBody, MessageHeader};
 use crate::report_violation;
 use crate::sync_layer::SyncLayer;
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::{
     Config, FortressError, FortressRequest, Frame, InvalidFrameReason, InvalidRequestKind,
+    SerializationErrorKind,
 };
 
 #[cfg(feature = "hot-join")]
 use crate::network::messages::StateSnapshot;
+
+/// Default cap for a complete encoded hot-join `StateSnapshot` message.
+///
+/// The built-in UDP sockets use a 4 KiB receive buffer, so the default keeps
+/// host snapshots within what those sockets can receive as one datagram. Users
+/// with custom transports or larger socket buffers can raise this through
+/// `SessionBuilder::with_hot_join_max_snapshot_wire_bytes`.
+#[cfg(feature = "hot-join")]
+pub(crate) const DEFAULT_HOT_JOIN_MAX_SNAPSHOT_WIRE_BYTES: usize = 4096;
 
 /// Serializes a host's `Config::State` into bincode bytes for a `StateSnapshot`.
 ///
@@ -71,6 +82,109 @@ pub(crate) fn serialize_state<T: Config>(state: &T::State) -> Result<Vec<u8>, Fo
             kind: crate::SerializationErrorKind::Custom("hot-join state serialization failed"),
         }
     })
+}
+
+#[cfg(feature = "hot-join")]
+fn hot_join_serialization_error(message: &'static str) -> FortressError {
+    FortressError::SerializationErrorStructured {
+        kind: SerializationErrorKind::Custom(message),
+    }
+}
+
+#[cfg(feature = "hot-join")]
+fn serialized_state_len<T: Config>(state: &T::State) -> Result<usize, FortressError> {
+    codec::encoded_len(state).map_err(|err| {
+        report_violation!(
+            ViolationSeverity::Critical,
+            ViolationKind::InternalError,
+            "Failed to measure Config::State for hot-join snapshot: {}. This likely indicates a bug in your Config::State serialization.",
+            err
+        );
+        hot_join_serialization_error("hot-join state serialization failed")
+    })
+}
+
+#[cfg(feature = "hot-join")]
+fn snapshot_wire_len(
+    frame: Frame,
+    num_players: usize,
+    checksum: Option<u128>,
+    state_bytes_len: usize,
+) -> Result<usize, FortressError> {
+    let empty_snapshot = StateSnapshot {
+        frame,
+        num_players,
+        state_bytes: Vec::new(),
+        checksum,
+    };
+    let empty_message = Message {
+        header: MessageHeader { magic: 0 },
+        body: MessageBody::StateSnapshot(empty_snapshot),
+    };
+
+    let overhead = codec::encoded_len(&empty_message).map_err(|err| {
+        report_violation!(
+            ViolationSeverity::Critical,
+            ViolationKind::InternalError,
+            "Failed to measure hot-join StateSnapshot wire overhead: {}",
+            err
+        );
+        hot_join_serialization_error("hot-join snapshot wire-size measurement failed")
+    })?;
+
+    overhead.checked_add(state_bytes_len).ok_or_else(|| {
+        report_violation!(
+            ViolationSeverity::Error,
+            ViolationKind::NetworkProtocol,
+            "Hot-join snapshot wire length overflow: overhead {} + state {} bytes",
+            overhead,
+            state_bytes_len
+        );
+        hot_join_serialization_error("hot-join snapshot exceeds configured byte limit")
+    })
+}
+
+#[cfg(feature = "hot-join")]
+fn validate_snapshot_wire_size(
+    frame: Frame,
+    num_players: usize,
+    checksum: Option<u128>,
+    state_bytes_len: usize,
+    max_snapshot_wire_bytes: usize,
+) -> Result<(), FortressError> {
+    if max_snapshot_wire_bytes == 0 {
+        report_violation!(
+            ViolationSeverity::Error,
+            ViolationKind::Configuration,
+            "Hot-join max snapshot wire bytes must be greater than zero"
+        );
+        return Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::ConfigValueOutOfRange {
+                field: "hot_join_max_snapshot_wire_bytes",
+                min: 1,
+                max: u64::MAX,
+                actual: 0,
+            },
+        });
+    }
+
+    let wire_len = snapshot_wire_len(frame, num_players, checksum, state_bytes_len)?;
+    if wire_len > max_snapshot_wire_bytes {
+        report_violation!(
+            ViolationSeverity::Error,
+            ViolationKind::NetworkProtocol,
+            "Hot-join snapshot at frame {} encodes to {} bytes (state {} bytes), exceeding configured max {}",
+            frame,
+            wire_len,
+            state_bytes_len,
+            max_snapshot_wire_bytes
+        );
+        return Err(hot_join_serialization_error(
+            "hot-join snapshot exceeds configured byte limit",
+        ));
+    }
+
+    Ok(())
 }
 
 /// Deserializes a `Config::State` from peer-controlled snapshot bytes.
@@ -148,9 +262,43 @@ where
     // `capture_snapshot_state` clones the saved state out of its cell.
     T::State: Clone,
 {
+    capture_snapshot_with_max_wire_bytes(
+        sync_layer,
+        frame,
+        num_players,
+        DEFAULT_HOT_JOIN_MAX_SNAPSHOT_WIRE_BYTES,
+    )
+}
+
+/// Captures a host snapshot after validating the complete encoded wire length.
+///
+/// This is the configurable form used by P2P hot-join orchestration. It measures
+/// the serialized state before allocating `state_bytes` so an over-limit state is
+/// rejected deterministically instead of being repeatedly encoded into packets
+/// a built-in socket cannot receive.
+#[cfg(feature = "hot-join")]
+#[allow(dead_code)]
+pub(crate) fn capture_snapshot_with_max_wire_bytes<T: Config>(
+    sync_layer: &SyncLayer<T>,
+    frame: Frame,
+    num_players: usize,
+    max_snapshot_wire_bytes: usize,
+) -> Result<Option<StateSnapshot>, FortressError>
+where
+    // `capture_snapshot_state` clones the saved state out of its cell.
+    T::State: Clone,
+{
     let Some((state, checksum)) = sync_layer.capture_snapshot_state(frame) else {
         return Ok(None);
     };
+    let state_len = serialized_state_len::<T>(&state)?;
+    validate_snapshot_wire_size(
+        frame,
+        num_players,
+        checksum,
+        state_len,
+        max_snapshot_wire_bytes,
+    )?;
     let state_bytes = serialize_state::<T>(&state)?;
     Ok(Some(StateSnapshot {
         frame,
@@ -174,15 +322,13 @@ where
 /// 5. `SyncLayer::inject_snapshot_state` — writes the saved-states cell at the
 ///    frame and sets `last_saved_frame`.
 ///
-/// **Order matters:** seek THEN inject. `seek_to_frame` repositions the queues
-/// and overwrites the frame counters wholesale (it deliberately leaves
-/// `last_saved_frame` alone); the subsequent inject writes the cell *and* sets
-/// `last_saved_frame` to the activation frame. Injecting first would have the
-/// seek leave `last_saved_frame` untouched at its pre-seek value, but the cell
-/// write would still stand — running them in the reverse order would set
-/// `last_saved_frame` and then immediately have seek reset the surrounding
-/// state, leaving the layer's saved-frame bookkeeping inconsistent with the
-/// freshly-reset queues.
+/// **Order matters:** seek THEN inject. `seek_to_frame` is restricted to fresh
+/// layers and repositions the queues plus frame counters while deliberately
+/// leaving `last_saved_frame == Frame::NULL`. `inject_snapshot_state` then
+/// requires `frame == current_frame`, writes the cell, and sets
+/// `last_saved_frame` to the activation frame. Reversing the order is rejected
+/// because it would otherwise advance the saved-frame watermark before the layer
+/// is positioned at that frame.
 ///
 /// # Errors
 ///
@@ -196,8 +342,14 @@ where
 ///   deserialize (see `deserialize_state`).
 /// - Any error `SyncLayer::seek_to_frame` can return.
 /// - [`FortressError::InvalidFrameStructured`] with
-///   [`InvalidFrameReason::MissingState`] if injecting the snapshot cell fails
-///   (an internal indexing fault for an already-validated frame).
+///   [`InvalidFrameReason::Custom`] if the joiner's `last_saved_frame` is
+///   already later than `snapshot.frame` (the helper is for fresh joiner layers;
+///   applying an older snapshot to a running layer would violate sync-layer
+///   frame ordering).
+/// - [`FortressError::InvalidRequestStructured`] with
+///   [`InvalidRequestKind::Custom`](crate::InvalidRequestKind::Custom) if the
+///   joiner layer is otherwise non-fresh.
+/// - Any error `SyncLayer::inject_snapshot_state` can return.
 // dead_code: consumed by chunk 5's joiner snapshot orchestration.
 #[cfg(feature = "hot-join")]
 #[allow(dead_code)]
@@ -226,15 +378,10 @@ pub(crate) fn apply_snapshot<T: Config>(
     // joiner untouched (no partial seek/inject on a rejected snapshot).
     let state = deserialize_state::<T>(&snapshot.state_bytes)?;
 
-    // Order: seek (resets queues + frame counters, leaves last_saved_frame) THEN
-    // inject (writes the cell + sets last_saved_frame).
+    // Order: seek (resets queues + frame counters, leaves last_saved_frame NULL)
+    // THEN inject (writes the cell + sets last_saved_frame).
     sync_layer.seek_to_frame(snapshot.frame)?;
-    sync_layer
-        .inject_snapshot_state(snapshot.frame, state, snapshot.checksum)
-        .ok_or(FortressError::InvalidFrameStructured {
-            frame: snapshot.frame,
-            reason: InvalidFrameReason::MissingState,
-        })
+    sync_layer.inject_snapshot_state(snapshot.frame, state, snapshot.checksum)
 }
 
 #[cfg(all(test, feature = "hot-join"))]
@@ -396,6 +543,51 @@ mod tests {
         // state_bytes must decode back to the saved state.
         let decoded = deserialize_state::<TestConfig>(&snapshot.state_bytes).unwrap();
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn capture_snapshot_rejects_oversized_wire_message_before_allocating_state_bytes() {
+        let frame = Frame::new(3);
+        let state = VecState {
+            counter: 7,
+            items: vec![42; 256],
+            label: "too-large-for-test-cap".to_owned(),
+        };
+        let layer = layer_with_saved_state(2, frame, state, Some(0x1234));
+
+        let result = capture_snapshot_with_max_wire_bytes(&layer, frame, 2, 64);
+
+        assert!(
+            matches!(
+                result,
+                Err(FortressError::SerializationErrorStructured {
+                    kind: SerializationErrorKind::Custom(
+                        "hot-join snapshot exceeds configured byte limit"
+                    ),
+                })
+            ),
+            "oversized snapshots must be rejected with a structured serialization error"
+        );
+    }
+
+    #[test]
+    fn capture_snapshot_with_zero_wire_limit_is_rejected() {
+        let frame = Frame::new(1);
+        let layer = layer_with_saved_state(2, frame, VecState::sample(), None);
+
+        let result = capture_snapshot_with_max_wire_bytes(&layer, frame, 2, 0);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "hot_join_max_snapshot_wire_bytes",
+                    min: 1,
+                    actual: 0,
+                    ..
+                }
+            })
+        ));
     }
 
     #[test]
@@ -596,6 +788,67 @@ mod tests {
         // run after the seek, so these assertions fail if the ordering regresses.
         assert_eq!(joiner.current_frame(), Frame::new(0));
         assert_eq!(joiner.last_saved_frame(), Frame::NULL);
+    }
+
+    #[test]
+    fn apply_snapshot_older_than_joiner_saved_frame_leaves_joiner_unmutated() {
+        let snapshot_frame = Frame::new(3);
+        let host = layer_with_saved_state(2, snapshot_frame, VecState::sample(), Some(0xAA));
+        let snapshot = capture_snapshot(&host, snapshot_frame, 2)
+            .unwrap()
+            .expect("host saved the snapshot frame");
+
+        let mut joiner = layer_with_saved_state(2, Frame::new(5), VecState::sample(), Some(0xBB));
+        let current_before = joiner.current_frame();
+        let saved_before = joiner.last_saved_frame();
+        let confirmed_before = joiner.last_confirmed_frame();
+
+        let result = apply_snapshot(&mut joiner, &snapshot, 2);
+
+        match result {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
+                assert_eq!(frame, snapshot_frame);
+                assert!(matches!(
+                    reason,
+                    InvalidFrameReason::Custom("seek target is older than last_saved_frame")
+                ));
+            },
+            _ => panic!("Expected InvalidFrameStructured error"),
+        }
+        assert_eq!(joiner.current_frame(), current_before);
+        assert_eq!(joiner.last_saved_frame(), saved_before);
+        assert_eq!(joiner.last_confirmed_frame(), confirmed_before);
+        assert!(joiner.check_invariants().is_ok());
+    }
+
+    #[test]
+    fn apply_snapshot_on_non_fresh_same_frame_leaves_joiner_unmutated() {
+        let snapshot_frame = Frame::new(5);
+        let host = layer_with_saved_state(2, snapshot_frame, VecState::sample(), Some(0xAA));
+        let snapshot = capture_snapshot(&host, snapshot_frame, 2)
+            .unwrap()
+            .expect("host saved the snapshot frame");
+
+        let mut joiner = layer_with_saved_state(2, snapshot_frame, VecState::sample(), Some(0xBB));
+        let current_before = joiner.current_frame();
+        let saved_before = joiner.last_saved_frame();
+        let confirmed_before = joiner.last_confirmed_frame();
+
+        let result = apply_snapshot(&mut joiner, &snapshot, 2);
+
+        match result {
+            Err(FortressError::InvalidRequestStructured { kind }) => {
+                assert!(matches!(
+                    kind,
+                    InvalidRequestKind::Custom("seek_to_frame requires a fresh SyncLayer")
+                ));
+            },
+            _ => panic!("Expected InvalidRequestStructured error"),
+        }
+        assert_eq!(joiner.current_frame(), current_before);
+        assert_eq!(joiner.last_saved_frame(), saved_before);
+        assert_eq!(joiner.last_confirmed_frame(), confirmed_before);
+        assert!(joiner.check_invariants().is_ok());
     }
 
     #[test]

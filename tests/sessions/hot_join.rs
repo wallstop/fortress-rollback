@@ -2059,23 +2059,25 @@ fn hot_join_joiner_sends_at_most_one_ack_per_poll() -> Result<(), FortressError>
 // Regression: serve-timeout is configurable and aborts at EXACTLY N polls
 // ============================================================================
 
-/// A serve timeout of `0` is nonsensical (the serve would be aborted before any
-/// joiner could complete the handshake) and must be rejected at the builder
-/// boundary.
+/// Serve timeouts below `2` are nonsensical with the host's send-then-timeout
+/// accounting: `1` would open and abort the serve in the same host poll, before
+/// any joiner can return an ack. Reject them at the builder boundary.
 #[test]
-fn with_hot_join_serve_timeout_polls_zero_is_rejected() -> Result<(), FortressError> {
-    let result = SessionBuilder::<StubConfig>::new()
-        .with_num_players(2)?
-        .with_hot_join_serve_timeout_polls(0);
-    assert!(
-        matches!(
-            result,
-            Err(FortressError::InvalidRequestStructured {
-                kind: fortress_rollback::InvalidRequestKind::NotSupported { .. }
-            })
-        ),
-        "a zero serve timeout must be rejected"
-    );
+fn with_hot_join_serve_timeout_polls_below_two_is_rejected() -> Result<(), FortressError> {
+    for polls in [0, 1] {
+        let result = SessionBuilder::<StubConfig>::new()
+            .with_num_players(2)?
+            .with_hot_join_serve_timeout_polls(polls);
+        assert!(
+            matches!(
+                result,
+                Err(FortressError::InvalidRequestStructured {
+                    kind: fortress_rollback::InvalidRequestKind::NotSupported { .. }
+                })
+            ),
+            "serve timeout {polls} must be rejected"
+        );
+    }
     Ok(())
 }
 

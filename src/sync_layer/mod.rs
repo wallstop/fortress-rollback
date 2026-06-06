@@ -119,6 +119,8 @@ use crate::{report_violation, safe_frame_add};
 // feature, from `seek_to_frame`. Import it whenever either consumer is present.
 #[cfg(any(not(kani), feature = "hot-join"))]
 use crate::safe_frame_sub;
+#[cfg(feature = "hot-join")]
+use crate::InvalidRequestKind;
 use crate::{
     Config, FortressError, FortressRequest, Frame, IndexOutOfBounds, InputStatus, InputVec,
     InternalErrorKind, InvalidFrameReason, PlayerHandle,
@@ -308,16 +310,18 @@ impl<T: Config> SyncLayer<T> {
 
     /// Saves the current game state.
     ///
-    /// This method maintains the invariant that `current_frame` is always valid (>= 0),
-    /// which is guaranteed by construction (initialized to 0) and by the fact that
-    /// the only mutation is via `advance_frame()` which increments it.
+    /// This method relies on the invariant that `current_frame` is always valid
+    /// (`>= 0`). Construction initializes it to `0`; frame-advance increments it;
+    /// rollback and hot-join seek paths validate their target frames before
+    /// assigning it.
     ///
     /// # Note
     /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
     pub fn save_current_state(&mut self) -> FortressRequest<T> {
         self.last_saved_frame = self.current_frame;
         // Debug assertion to catch invariant violations during development.
-        // current_frame is initialized to 0 and only incremented, so this should never fail.
+        // Every current_frame mutation path validates its target first, so this
+        // should never fail.
         debug_assert!(
             self.current_frame.as_i32() >= 0,
             "Internal invariant violation: current_frame must be non-negative"
@@ -612,22 +616,30 @@ impl<T: Config> SyncLayer<T> {
     /// - [`Self::current_frame`] returns `frame`.
     /// - [`Self::last_confirmed_frame`] returns `frame - 1` (which is
     ///   [`Frame::NULL`] for `frame == 0`).
-    /// - [`Self::last_saved_frame`] is **unchanged** — the snapshot's state is
-    ///   injected into the saved-states cell (and `last_saved_frame` set) by a
-    ///   later chunk; this method does not set it.
+    /// - [`Self::last_saved_frame`] is unchanged and remains [`Frame::NULL`].
+    ///   The snapshot's state is injected into the saved-states cell (and
+    ///   `last_saved_frame` set) by a later chunk; this method does not set it.
     /// - Every input queue has been repositioned via
     ///   [`InputQueue::reset_to_frame`] to accept inputs from `frame` onward.
     /// - [`InvariantChecker::check_invariants`] still holds
     ///   (`last_confirmed_frame <= current_frame`, `last_saved_frame <=
     ///   current_frame`, queue count unchanged).
     ///
-    /// This is **not** intended for a running layer; it overwrites the frame
-    /// counters wholesale.
+    /// This is **only** valid for a fresh layer: `current_frame == 0`,
+    /// `last_confirmed_frame == Frame::NULL`, `last_saved_frame == Frame::NULL`,
+    /// and no queue has accepted or frozen input yet. It overwrites the frame
+    /// counters wholesale, so a running layer is rejected before any mutation.
     ///
     /// # Errors
     /// Returns [`FortressError::InvalidFrameStructured`] with
     /// [`InvalidFrameReason::MustBeNonNegative`] if `frame` is negative or
     /// [`Frame::NULL`].
+    ///
+    /// Returns [`InvalidFrameReason::Custom`] with `"seek target is older than
+    /// last_saved_frame"` if `last_saved_frame` is already later than `frame`.
+    ///
+    /// Returns [`InvalidRequestKind::Custom`] with `"seek_to_frame requires a
+    /// fresh SyncLayer"` for any other non-fresh layer state.
     // dead_code: consumed by chunk 5's joiner orchestration.
     #[cfg(feature = "hot-join")]
     #[allow(dead_code)]
@@ -638,6 +650,8 @@ impl<T: Config> SyncLayer<T> {
                 reason: InvalidFrameReason::MustBeNonNegative,
             });
         }
+
+        self.validate_fresh_seek_target(frame)?;
 
         self.current_frame = frame;
         // Frames before `frame` are baked into the loaded snapshot; `frame`
@@ -650,14 +664,56 @@ impl<T: Config> SyncLayer<T> {
             queue.reset_to_frame(frame);
         }
 
-        // The seek keeps both frame-ordering invariants: last_confirmed_frame
-        // (= frame - 1) <= current_frame (= frame), and last_saved_frame is
-        // unchanged (it was <= the old current_frame == 0 <= frame). This debug
+        // The freshness precheck above keeps both frame-ordering invariants: the
+        // new last_confirmed_frame is frame - 1 (or NULL), and the unchanged
+        // last_saved_frame is NULL until snapshot injection. This debug
         // assert surfaces a regression in development; production is unaffected.
         debug_assert!(
             self.check_invariants().is_ok(),
             "seek_to_frame must preserve SyncLayer invariants"
         );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "hot-join")]
+    fn validate_fresh_seek_target(&self, frame: Frame) -> Result<(), FortressError> {
+        if !self.last_saved_frame.is_null() && self.last_saved_frame > frame {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::FrameSync,
+                "seek_to_frame target {} is before last_saved_frame {}; refusing to violate SyncLayer invariants",
+                frame,
+                self.last_saved_frame
+            );
+            return Err(FortressError::InvalidFrameStructured {
+                frame,
+                reason: InvalidFrameReason::Custom("seek target is older than last_saved_frame"),
+            });
+        }
+
+        let dirty_queue = self
+            .input_queues
+            .iter()
+            .position(|queue| !queue.last_added_frame().is_null() || queue.is_frozen());
+        if self.current_frame != Frame::new(0)
+            || !self.last_confirmed_frame.is_null()
+            || !self.last_saved_frame.is_null()
+            || dirty_queue.is_some()
+        {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::FrameSync,
+                "seek_to_frame requires a fresh SyncLayer (current_frame {}, last_confirmed_frame {}, last_saved_frame {}, dirty_queue {:?})",
+                self.current_frame,
+                self.last_confirmed_frame,
+                self.last_saved_frame,
+                dirty_queue
+            );
+            return Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::Custom("seek_to_frame requires a fresh SyncLayer"),
+            });
+        }
 
         Ok(())
     }
@@ -700,15 +756,21 @@ impl<T: Config> SyncLayer<T> {
     /// Writes the cell via [`GameStateCell::save`] and sets
     /// [`Self::last_saved_frame`] to `frame` (the snapshot is now the joiner's
     /// most recent saved state), then returns the same `LoadGameState { cell,
-    /// frame }` shape [`Self::load_frame`] constructs. Intended to be called
-    /// *after* [`Self::seek_to_frame`] has repositioned the layer to `frame`
+    /// frame }` shape [`Self::load_frame`] constructs. Must be called *after*
+    /// [`Self::seek_to_frame`] has repositioned the layer to the same `frame`
     /// (seek resets the queues and frame counters; this injection writes the
     /// cell and `last_saved_frame`).
     ///
-    /// Returns `None` when [`SavedStates::get_cell`] fails for `frame` (a
-    /// negative/`NULL` frame or an internal indexing fault) or — defensively —
-    /// when the cell write is rejected (see below); on the happy path it always
-    /// returns `Some`.
+    /// # Errors
+    /// Returns the structured error from [`SavedStates::get_cell`] when `frame`
+    /// is negative or the saved-state ring is internally inconsistent.
+    ///
+    /// Returns [`InvalidFrameReason::Custom`] with `"snapshot injection frame
+    /// must match current_frame"` if called out of order for a frame different
+    /// from [`Self::current_frame`].
+    ///
+    /// Returns [`InvalidFrameReason::MissingState`] if the cell write is
+    /// rejected defensively.
     // dead_code: consumed by chunk 5's joiner snapshot orchestration.
     #[cfg(feature = "hot-join")]
     #[allow(dead_code)]
@@ -717,18 +779,41 @@ impl<T: Config> SyncLayer<T> {
         frame: Frame,
         state: T::State,
         checksum: Option<u128>,
-    ) -> Option<FortressRequest<T>> {
-        let cell = self.saved_states.get_cell(frame).ok()?;
+    ) -> Result<FortressRequest<T>, FortressError> {
+        if frame != self.current_frame {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::FrameSync,
+                "inject_snapshot_state frame {} does not match current_frame {}; refusing to violate SyncLayer invariants",
+                frame,
+                self.current_frame
+            );
+            return Err(FortressError::InvalidFrameStructured {
+                frame,
+                reason: InvalidFrameReason::Custom(
+                    "snapshot injection frame must match current_frame",
+                ),
+            });
+        }
+
+        let cell = self.saved_states.get_cell(frame)?;
         // `GameStateCell::save` only returns `false` for a `Frame::NULL`, which
         // `get_cell` above already rejects (it errors on any frame < 0). Propagate
         // the result anyway so this stays correct if either guard ever changes,
         // and so `last_saved_frame` is never advanced for a write that did not
         // land.
         if !cell.save(frame, Some(state), checksum) {
-            return None;
+            return Err(FortressError::InvalidFrameStructured {
+                frame,
+                reason: InvalidFrameReason::MissingState,
+            });
         }
         self.last_saved_frame = frame;
-        Some(FortressRequest::LoadGameState { cell, frame })
+        debug_assert!(
+            self.check_invariants().is_ok(),
+            "inject_snapshot_state must preserve SyncLayer invariants"
+        );
+        Ok(FortressRequest::LoadGameState { cell, frame })
     }
 
     /// Pre-validates that a subsequent call to [`Self::freeze_player`] for
@@ -2397,8 +2482,8 @@ mod sync_layer_tests {
     }
 
     /// Documents the invariant that save_current_state relies on:
-    /// current_frame is always non-negative because it's initialized to 0
-    /// and only modified by advance_frame() which increments it.
+    /// current_frame is always non-negative because every mutation path validates
+    /// or increments from a valid non-negative frame.
     #[test]
     fn test_save_current_state_invariant_documentation() {
         // This test documents and verifies the invariant that save_current_state relies on.
@@ -2407,10 +2492,11 @@ mod sync_layer_tests {
         //
         // Proof:
         // 1. SyncLayer::new() initializes current_frame to Frame::new(0)
-        // 2. advance_frame() is the only method that modifies current_frame
-        // 3. advance_frame() only increments: self.current_frame += 1
-        // 4. load_frame() can reduce current_frame but only to a frame that was
+        // 2. advance_frame() increments current_frame
+        // 3. load_frame() can reduce current_frame but only to a frame that was
         //    previously valid (saved state exists)
+        // 4. feature-gated hot-join seek can reposition current_frame, but only
+        //    after validating a non-negative target
         // 5. Therefore, current_frame is always >= 0
         //
         // The save_current_state() method uses this invariant to call get_cell()
@@ -3572,7 +3658,7 @@ mod hot_join_sync_layer_tests {
                 assert_eq!(frame, Frame::NULL);
                 assert!(matches!(reason, InvalidFrameReason::MustBeNonNegative));
             },
-            other => panic!("Expected InvalidFrameStructured error, got {other:?}"),
+            _ => panic!("Expected InvalidFrameStructured error"),
         }
 
         let result = sync_layer.seek_to_frame(Frame::new(-7));
@@ -3587,5 +3673,135 @@ mod hot_join_sync_layer_tests {
         // State unchanged after a rejected seek.
         assert_eq!(sync_layer.current_frame(), Frame::new(0));
         assert_eq!(sync_layer.last_confirmed_frame(), Frame::NULL);
+    }
+
+    /// Test 10 (saved watermark variant): `seek_to_frame` refuses to move behind
+    /// `last_saved_frame` because it intentionally leaves that watermark
+    /// untouched. This pins the precondition that keeps the post-seek invariant
+    /// `last_saved_frame <= current_frame` true.
+    #[test]
+    fn seek_to_frame_before_last_saved_frame_errors_without_mutation() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+        for _ in 0..5 {
+            sync_layer.advance_frame();
+        }
+        match sync_layer.save_current_state() {
+            FortressRequest::SaveGameState { frame, .. } => assert_eq!(frame, Frame::new(5)),
+            _ => panic!("Expected SaveGameState at frame 5"),
+        }
+        assert_eq!(sync_layer.current_frame(), Frame::new(5));
+        assert_eq!(sync_layer.last_saved_frame(), Frame::new(5));
+        let last_confirmed_before = sync_layer.last_confirmed_frame();
+        let queue_markers_before = sync_layer
+            .input_queues
+            .iter()
+            .map(InputQueue::last_added_frame)
+            .collect::<Vec<_>>();
+
+        let result = sync_layer.seek_to_frame(Frame::new(3));
+
+        match result {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
+                assert_eq!(frame, Frame::new(3));
+                assert!(matches!(
+                    reason,
+                    InvalidFrameReason::Custom("seek target is older than last_saved_frame")
+                ));
+            },
+            _ => panic!("Expected InvalidFrameStructured error"),
+        }
+        assert_eq!(sync_layer.current_frame(), Frame::new(5));
+        assert_eq!(sync_layer.last_saved_frame(), Frame::new(5));
+        assert_eq!(sync_layer.last_confirmed_frame(), last_confirmed_before);
+        let queue_markers_after = sync_layer
+            .input_queues
+            .iter()
+            .map(InputQueue::last_added_frame)
+            .collect::<Vec<_>>();
+        assert_eq!(queue_markers_after, queue_markers_before);
+        assert!(sync_layer.check_invariants().is_ok());
+    }
+
+    /// Test 10 (freshness variant): even when the target is not older than
+    /// `last_saved_frame`, `seek_to_frame` rejects a running layer. The helper
+    /// resets all queues wholesale, so hot-join snapshot application must start
+    /// from a fresh layer.
+    #[test]
+    fn seek_to_frame_on_running_layer_errors_without_mutation() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+        sync_layer.advance_frame();
+        assert_eq!(sync_layer.current_frame(), Frame::new(1));
+        assert_eq!(sync_layer.last_saved_frame(), Frame::NULL);
+
+        let result = sync_layer.seek_to_frame(Frame::new(5));
+
+        match result {
+            Err(FortressError::InvalidRequestStructured { kind }) => {
+                assert!(matches!(
+                    kind,
+                    InvalidRequestKind::Custom("seek_to_frame requires a fresh SyncLayer")
+                ));
+            },
+            other => panic!("Expected InvalidRequestStructured error, got {other:?}"),
+        }
+        assert_eq!(sync_layer.current_frame(), Frame::new(1));
+        assert_eq!(sync_layer.last_confirmed_frame(), Frame::NULL);
+        assert_eq!(sync_layer.last_saved_frame(), Frame::NULL);
+        for queue in &sync_layer.input_queues {
+            assert_eq!(queue.last_added_frame(), Frame::NULL);
+            assert!(!queue.is_frozen());
+        }
+        assert!(sync_layer.check_invariants().is_ok());
+    }
+
+    /// Test 10 (injection-order variant): snapshot injection must happen after
+    /// seek positions `current_frame` at the snapshot frame. Injecting first would
+    /// otherwise set `last_saved_frame` ahead of `current_frame`.
+    #[test]
+    fn inject_snapshot_state_future_frame_errors_without_mutation() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        let result = sync_layer.inject_snapshot_state(Frame::new(5), 42_u8, Some(0xCAFE));
+
+        match result {
+            Err(FortressError::InvalidFrameStructured { frame, reason }) => {
+                assert_eq!(frame, Frame::new(5));
+                assert!(matches!(
+                    reason,
+                    InvalidFrameReason::Custom("snapshot injection frame must match current_frame")
+                ));
+            },
+            other => panic!("Expected InvalidFrameStructured error, got {other:?}"),
+        }
+        assert_eq!(sync_layer.current_frame(), Frame::new(0));
+        assert_eq!(sync_layer.last_saved_frame(), Frame::NULL);
+        assert!(sync_layer.capture_snapshot_state(Frame::new(5)).is_none());
+        assert!(sync_layer.check_invariants().is_ok());
+    }
+
+    /// Test 10 (direct injection success): after seek has positioned the layer,
+    /// injection writes the snapshot cell and advances `last_saved_frame` to the
+    /// same frame without violating invariants.
+    #[test]
+    fn inject_snapshot_state_after_seek_succeeds() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+        let f = Frame::new(5);
+
+        sync_layer.seek_to_frame(f).expect("fresh seek succeeds");
+        let request = sync_layer
+            .inject_snapshot_state(f, 42_u8, Some(0xCAFE))
+            .expect("inject at current frame succeeds");
+
+        match request {
+            FortressRequest::LoadGameState { frame, cell } => {
+                assert_eq!(frame, f);
+                assert_eq!(cell.load(), Some(42_u8));
+                assert_eq!(cell.checksum(), Some(0xCAFE));
+            },
+            _ => panic!("Expected LoadGameState"),
+        }
+        assert_eq!(sync_layer.current_frame(), f);
+        assert_eq!(sync_layer.last_saved_frame(), f);
+        assert!(sync_layer.check_invariants().is_ok());
     }
 }

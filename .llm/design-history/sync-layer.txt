@@ -1,1 +1,2 @@
 2026-01-10 | Use fixed-capacity circular buffer for saved states | None | Keep rollback memory bounded and lookup cost stable | src/sync_layer/saved_states.rs | PR #280
+2026-06-06 | Enforce executable preconditions for sync-layer seek contracts | None | Invariant/postcondition comments must be backed by prechecks or tests; seek_to_frame refuses targets older than last_saved_frame before mutation | src/sync_layer/mod.rs; src/sessions/hot_join.rs | Copilot feedback
