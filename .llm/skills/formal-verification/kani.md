@@ -283,14 +283,12 @@ fn proof_default() {
 
 Prevention: Read the implementation first. Document the property being verified.
 
-### State explosion
-Use `[u64; 2]` not `[u64; 100]`. Constrain inputs aggressively.
-
-### Ignoring counterexamples
-Don't add `kani::assume()` just to make proofs pass. Fix the actual code.
-
-### Concrete values in proofs
-Use `kani::any()` (symbolic), not literal values like `let x: u32 = 42`.
+### Other pitfalls
+Use `[u64; 2]` not `[u64; 100]`; constrain inputs aggressively. Don't add
+`kani::assume()` just to pass — fix the code. Use `kani::any()` (symbolic), not
+literals like `let x: u32 = 42`. Never intra-doc-link a `#[cfg(kani)]`-only item
+(e.g. `InlineVec`) — `cargo doc` lacks `--cfg kani` so the link breaks; use a code
+span ([doc-code-sync.md](../ci-cd-tooling/doc-code-sync.md#intra-doc-links-to-cfgkani-only-items)).
 
 ## Checklist for New Kani Proofs
 

@@ -32,7 +32,8 @@ use std::cmp;
 /// This is sufficient to prove the invariants hold for the circular buffer logic.
 ///
 /// Why 7 (not 8): this constant also caps the Kani-only
-/// [`InlineVec`](crate::proof_vec::InlineVec) that backs the queue under verification. CBMC
+/// `InlineVec` (defined under `#[cfg(kani)]` in `crate::proof_vec`) that backs the
+/// queue under verification. CBMC
 /// unwinds the `CAP`-element loops that initialize, and (for non-`Copy` elements
 /// such as `SavedStates`' cells) drop, a `[Option<T>; CAP]`; their unwinding
 /// assertion needs an unwind bound of `CAP + 1`. A proof carrying no explicit

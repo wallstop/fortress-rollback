@@ -111,6 +111,32 @@ item link is fine when the item is `pub`, or when both item and module are
 crate-internal. External-crate targets (e.g. `bincode::...`) and `Self::`/bare
 relative paths are exempt.
 
+## Intra-Doc Links to `#[cfg(kani)]`-Only Items
+
+Never write a rustdoc intra-doc link to an item defined only under `#[cfg(kani)]`
+(e.g. `InlineVec`, `KANI_INLINE_CAP` in `src/proof_vec.rs`):
+
+```rust
+// WRONG: resolves only under --cfg kani; a broken intra-doc link everywhere else.
+/// The Kani-only [`InlineVec`](crate::proof_vec::InlineVec) backs the queue.
+
+// RIGHT: a plain code span -- no link, nothing to break.
+/// The Kani-only `InlineVec` (defined under `#[cfg(kani)]`) backs the queue.
+```
+
+`cargo doc` never sets `--cfg kani`, so the item is not compiled and the target
+does not exist; `-D rustdoc::broken_intra_doc_links` would fail. Such a link only
+*appears* safe when it happens to sit on a `#[cfg(kani)]` item that rustdoc skips
+entirely -- a fragile coincidence, not a guarantee. Use a code span and name the
+defining module in prose.
+
+`check-links.py` enforces this (`find_cfg_kani_only_items` +
+`cfg_kani_only_link_error`), with no Kani toolchain needed: it harvests names
+gated by an exact `#[cfg(kani)]` and forbids intra-doc links to any that never
+appear unconditionally or under `#[cfg(not(kani))]`. Items defined under *both*
+cfgs (e.g. `ProofVec`, `INPUT_QUEUE_LENGTH`) exist in every build and stay
+linkable. Tests: `scripts/tests/test_check_links_cfg_kani.py`.
+
 ## Code Fence Language
 
 | Content | Fence | When |

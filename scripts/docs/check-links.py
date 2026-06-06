@@ -452,6 +452,117 @@ def is_rustdoc_item_fragment(anchor: str) -> bool:
 # found that flagging them produced false positives.
 INTRA_DOC_PATH_PREFIXES = ("crate::", "super::", "self::")
 
+# An item is treated as Kani-gated only when it carries an *exact* `#[cfg(kani)]`
+# attribute. This is deliberately strict: any other cfg form (e.g.
+# `#[cfg(not(kani))]`, `#[cfg(any(kani, test))]`) is treated as "available in
+# normal builds", so the Kani-only guard below stays false-positive-free.
+_CFG_KANI_ATTR_RE = re.compile(r"^#\[\s*cfg\s*\(\s*kani\s*\)\s*\]$")
+
+# A Rust item declaration: an optional run of leading modifiers, then an
+# item-introducing keyword, then the item's identifier. Used only to harvest item
+# *names* for the Kani-only set. `const` appears as a modifier (so `const fn foo`
+# captures `foo`, not `fn`) AND as an item keyword (so a bare `const FOO` still
+# captures `FOO`); the regex backtracks between the two. Worst case a harmless
+# misread costs a missed name, never a false positive.
+_RUST_ITEM_DECL_RE = re.compile(
+    r"^\s*(?:(?:pub(?:\s*\([^)]*\))?|default|unsafe|async|const"
+    r"|extern(?:\s+\"[^\"]*\")?)\s+)*"
+    r"(?:struct|enum|union|trait|type|const|static|fn|mod)\s+"
+    r"([A-Za-z_][A-Za-z0-9_]*)"
+)
+
+
+def find_cfg_kani_only_items(project_root: Path) -> frozenset[str]:
+    """Return item names defined ONLY under ``#[cfg(kani)]`` across ``src/``.
+
+    An intra-doc link to such an item resolves under ``--cfg kani`` but is a
+    broken intra-doc link in every normal ``cargo doc`` build (the item is not
+    compiled, so rustdoc cannot find it). Today the crate's only such links avoid
+    tripping CI purely because they happen to sit on ``#[cfg(kani)]`` items that
+    rustdoc skips -- a fragile coincidence. The set returned here powers
+    :func:`cfg_kani_only_link_error`, which forbids the whole class.
+
+    The scan is intentionally conservative. A name is Kani-only iff it appears
+    with an exact ``#[cfg(kani)]`` gate AND never appears unconditionally or under
+    any other cfg. So ``ProofVec`` and ``INPUT_QUEUE_LENGTH`` -- each defined once
+    under ``#[cfg(kani)]`` and once under ``#[cfg(not(kani))]`` -- are NOT flagged,
+    while truly Kani-only items such as ``InlineVec`` and ``KANI_INLINE_CAP`` are.
+    Conservatism guarantees no false positives; the only cost is possibly missing
+    an exotic cfg form, which the ``cargo doc`` passes still backstop.
+    """
+    kani_gated: set[str] = set()
+    normally_available: set[str] = set()
+    src_root = project_root / "src"
+    for rust_file in src_root.rglob("*.rs"):
+        if any(part in SKIP_DIRS for part in rust_file.parts):
+            continue
+        try:
+            content = rust_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        # `pending_cfg_kani` survives only across the attribute/doc/blank lines
+        # that may sit between a `#[cfg(kani)]` attribute and the item it gates;
+        # any other line resets it so an attribute never "leaks" onto a later item.
+        pending_cfg_kani = False
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("#["):
+                if _CFG_KANI_ATTR_RE.match(stripped):
+                    pending_cfg_kani = True
+                continue
+            if stripped.startswith(("///", "//!", "//")):
+                continue
+            match = _RUST_ITEM_DECL_RE.match(line)
+            if match:
+                name = match.group(1)
+                (kani_gated if pending_cfg_kani else normally_available).add(name)
+            pending_cfg_kani = False
+    return frozenset(kani_gated - normally_available)
+
+
+def cfg_kani_only_link_error(
+    link_target: str, kani_only_items: frozenset[str]
+) -> tuple[bool, str] | None:
+    """Return a ``(False, message)`` failure for an intra-doc link to a Kani-only item.
+
+    A ``crate::``/``super::``/``self::`` link whose final segment names an item in
+    *kani_only_items* (see :func:`find_cfg_kani_only_items`) resolves only under
+    ``--cfg kani`` and is a broken intra-doc link in every normal ``cargo doc``
+    build. Returns None when *link_target* is not such a link.
+    """
+    if not kani_only_items:
+        return None
+    target_item = intra_doc_target_item(link_target)
+    if target_item is None or target_item not in kani_only_items:
+        return None
+    return (
+        False,
+        f"Rustdoc intra-doc link targets `{target_item}` ('{link_target}'), which "
+        f"is defined only under #[cfg(kani)] and so does not exist in normal "
+        f"cargo doc builds. The link resolves only under --cfg kani and is "
+        f"otherwise a broken intra-doc link -- use a plain code span (no link) "
+        f"instead.",
+    )
+
+
+def intra_doc_link_error(
+    link_text: str | None,
+    link_target: str,
+    kani_only_items: frozenset[str] = frozenset(),
+) -> tuple[bool, str] | None:
+    """Return the first applicable intra-doc-link failure, else None.
+
+    Bundles the two intra-doc defect classes so every rubber-stamp path checks
+    both: a link to a ``#[cfg(kani)]``-only item (broken in normal doc builds)
+    and a text/target mismatch (resolves but lands on the wrong page).
+    """
+    kani_error = cfg_kani_only_link_error(link_target, kani_only_items)
+    if kani_error is not None:
+        return kani_error
+    return intra_doc_mismatch_error(link_text, link_target)
+
 
 def backticked_item_text(link_text: str) -> str | None:
     """Return the item named by single-backticked rustdoc link text, else None.
@@ -570,6 +681,7 @@ def check_rust_doc_link(
     current_doc_markdown: str | None = None,
     module_doc_markdown: str | None = None,
     link_text: str | None = None,
+    kani_only_items: frozenset[str] = frozenset(),
 ) -> tuple[bool, str]:
     """Check Markdown URL targets extracted from Rust doc comments."""
     if link_target.startswith(
@@ -636,11 +748,12 @@ def check_rust_doc_link(
                 f"use an intra-doc path link instead of '{link_target}'",
             )
         # A clean intra-doc path (e.g. `crate::network::codec`) resolves, so no
-        # broken-link lint fires -- but if the backticked link text names an item
-        # the path's final segment does not, the link lands on the wrong page.
-        mismatch_error = intra_doc_mismatch_error(link_text, link_target)
-        if mismatch_error is not None:
-            return mismatch_error
+        # broken-link lint fires -- but it may still target a `#[cfg(kani)]`-only
+        # item (broken in normal doc builds), or its backticked text may name an
+        # item the path's final segment does not (lands on the wrong page).
+        intra_error = intra_doc_link_error(link_text, link_target, kani_only_items)
+        if intra_error is not None:
+            return intra_error
         return True, ""
 
     if link_target.startswith("#"):
@@ -660,9 +773,9 @@ def check_rust_doc_link(
         # catch that mismatch here before rubber-stamping the link. (Clean
         # `crate::`/`super::`/`self::` paths are handled in the non-local-path
         # branch above; this also covers path-like intra-doc targets.)
-        mismatch_error = intra_doc_mismatch_error(link_text, link_target)
-        if mismatch_error is not None:
-            return mismatch_error
+        intra_error = intra_doc_link_error(link_text, link_target, kani_only_items)
+        if intra_error is not None:
+            return intra_error
         return True, ""
 
     return check_markdown_link(source_file, link_target, project_root, verbose)
@@ -713,7 +826,10 @@ def check_markdown_file(
 
 
 def check_rust_doc_file(
-    file_path: Path, project_root: Path, verbose: bool = False
+    file_path: Path,
+    project_root: Path,
+    verbose: bool = False,
+    kani_only_items: frozenset[str] = frozenset(),
 ) -> LinkCheckResult:
     """Check Markdown URL targets in Rust doc comments."""
     errors = 0
@@ -740,6 +856,7 @@ def check_rust_doc_file(
                 current_doc_markdown=block.markdown,
                 module_doc_markdown=module_doc_markdown,
                 link_text=link_text,
+                kani_only_items=kani_only_items,
             )
             if not is_valid:
                 errors += 1
@@ -776,12 +893,18 @@ def main() -> int:
         files_checked += 1
         markdown_files_checked += 1
 
+    kani_only_items = find_cfg_kani_only_items(project_root)
+    if verbose and kani_only_items:
+        print(f"  Kani-only items (intra-doc links forbidden): {sorted(kani_only_items)}")
+
     for rust_file in project_root.rglob("*.rs"):
         rel_path = rust_file.relative_to(project_root)
         if any(part in SKIP_DIRS for part in rel_path.parts):
             continue
 
-        result = check_rust_doc_file(rust_file, project_root, verbose)
+        result = check_rust_doc_file(
+            rust_file, project_root, verbose, kani_only_items=kani_only_items
+        )
         total_errors += result.errors
         total_warnings += result.warnings
         total_checked += result.checked

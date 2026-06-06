@@ -2559,7 +2559,7 @@ mod sync_layer_tests {
 ///    routed through `crate::error::try_with_capacity`. This is a *per-operation*
 ///    cost, independent of the element count, so shrinking sizes does not help.
 ///    It is addressed by backing those vectors with the `#[cfg(kani)]`
-///    [`InlineVec`](crate::proof_vec::InlineVec): a stack `[Option<T>; CAP]` with no heap
+///    `InlineVec` (in `crate::proof_vec`): a stack `[Option<T>; CAP]` with no heap
 ///    allocation, so CBMC models a fixed-size object with no allocator circuit at
 ///    all. Kani-only; zero production impact (`ProofVec<T>` is exactly `Vec<T>`
 ///    in every real build). Measured: the rollback proofs went from ~20 GB / OOM
