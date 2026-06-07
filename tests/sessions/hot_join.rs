@@ -3620,3 +3620,244 @@ fn dropped_slot_can_be_rejoined_repeatedly() -> Result<(), FortressError> {
 
     Ok(())
 }
+
+// ============================================================================
+// Build-time guard: N>=3 hot-join meshes are rejected (audit F1/F2 mitigation)
+// ============================================================================
+//
+// Hot-join is correct only in the 2-machine scope today. An N>=3 joiner would
+// leave every non-host survivor endpoint permanently deferred (F1), and an N>=3
+// host would have only the survivor that received the JoinRequest reopen the
+// slot (F2) -- both silent desyncs. The builder rejects N>=3 hot-join
+// construction; these tests pin that the 2-machine shipped cases still build and
+// the N>=3 cases return `InvalidRequestKind::NotSupported`.
+
+/// A 2-machine hot-join host (one local + one reserved slot) must still
+/// construct successfully (regression: the guard must not reject the shipped
+/// 2-peer case).
+#[test]
+fn two_machine_hot_join_host_constructs_ok() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (host_socket, _joiner_socket, _host_addr, joiner_addr) =
+        crate::common::create_channel_pair();
+
+    // A failure here propagates the real construction error rather than a
+    // bare `is_ok()` assertion.
+    let _session = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .with_hot_join(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_reserved_player(joiner_addr, PlayerHandle::new(1))?
+        .start_p2p_session(host_socket)?;
+
+    Ok(())
+}
+
+/// A 2-machine hot-join host built from one local + one *connected* remote with
+/// `with_hot_join(true)` (the 2-peer reconnection shape, no reserved slot at
+/// build time) must still construct.
+#[test]
+fn two_machine_hot_join_host_with_live_remote_constructs_ok() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (host_socket, _remote_socket, _host_addr, remote_addr) =
+        crate::common::create_channel_pair();
+
+    // Propagate the real construction error on failure (no `is_ok()`).
+    let _session = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .with_hot_join(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
+        .start_p2p_session(host_socket)?;
+
+    Ok(())
+}
+
+/// Couch co-op regression: a hot-join host where two *remote* player handles
+/// share a single machine address counts as two machines (local + one remote
+/// machine), not three -- so it must still construct even though three player
+/// handles exist. This pins that the guard measures machines (addresses), not
+/// handles.
+#[test]
+fn hot_join_host_with_two_handles_on_one_remote_machine_constructs_ok() -> Result<(), FortressError>
+{
+    let clock = TestClock::new();
+    let (host_socket, _remote_socket, _host_addr, remote_addr) =
+        crate::common::create_channel_pair();
+
+    // num_players = 3: one local handle (0) plus two remote handles (1, 2) that
+    // resolve to the SAME remote address -> exactly two distinct machines.
+    // Propagate the real construction error on failure (no `is_ok()`).
+    let _session = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(3)?
+        .with_hot_join(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
+        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(2))?
+        .start_p2p_session(host_socket)?;
+
+    Ok(())
+}
+
+/// A 2-machine hot-join joiner (one local + one remote: the host) must still
+/// construct successfully (regression for the shipped 2-peer joiner).
+#[test]
+fn two_machine_hot_join_joiner_constructs_ok() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (_host_socket, joiner_socket, host_addr, _joiner_addr) =
+        crate::common::create_channel_pair();
+
+    // Propagate the real construction error on failure (no `is_ok()`).
+    let _session = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .add_player(PlayerType::Remote(host_addr), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_hot_join_session(joiner_socket, host_addr)?;
+
+    Ok(())
+}
+
+/// A hot-join host in an N>=3 mesh (one local + two distinct remote/reserved
+/// machines) must be rejected at build time with
+/// `InvalidRequestKind::NotSupported`.
+#[test]
+fn three_machine_hot_join_host_is_rejected() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (host_socket, _s2, _s3, _host_addr, remote_addr, reserved_addr) =
+        crate::common::create_channel_triple();
+
+    // 1 local host + 1 live remote machine + 1 reserved (future-joiner) machine
+    // = 3 machines.
+    let result = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(3)?
+        .with_hot_join(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
+        .add_reserved_player(reserved_addr, PlayerHandle::new(2))?
+        .start_p2p_session(host_socket);
+
+    // Bind the `operation` text and assert it names the mesh guard, not some
+    // other `NotSupported` rejection that happened to fire first. Both
+    // distinctive substrings appear in the host-side guard message.
+    let operation = match result {
+        Err(FortressError::InvalidRequestStructured {
+            kind: fortress_rollback::InvalidRequestKind::NotSupported { operation },
+        }) => operation,
+        other => panic!("an N>=3 hot-join host must be rejected with NotSupported; got {other:?}"),
+    };
+    assert!(
+        operation.contains("hot-join") && operation.contains("N>=3"),
+        "rejection must come from the N>=3 hot-join mesh guard; got operation {operation:?}"
+    );
+    Ok(())
+}
+
+/// A hot-join joiner that registers two distinct remote machines (an N>=3 mesh
+/// joiner) must be rejected at build time with
+/// `InvalidRequestKind::NotSupported`.
+#[test]
+fn three_machine_hot_join_joiner_is_rejected() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (_s1, joiner_socket, _s3, host_addr, _joiner_addr, other_survivor_addr) =
+        crate::common::create_channel_triple();
+
+    // The joiner registers BOTH surviving peers as remotes (host + one other)
+    // plus its own local slot -> two distinct remote machines.
+    let result = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(3)?
+        .add_player(PlayerType::Remote(host_addr), PlayerHandle::new(0))?
+        .add_player(
+            PlayerType::Remote(other_survivor_addr),
+            PlayerHandle::new(1),
+        )?
+        .add_player(PlayerType::Local, PlayerHandle::new(2))?
+        .start_hot_join_session(joiner_socket, host_addr);
+
+    // Bind the `operation` text and assert it names the joiner mesh guard,
+    // distinguishing it from any other `NotSupported` (e.g. the lockstep guard).
+    // Both distinctive substrings appear in the joiner-side guard message.
+    let operation = match result {
+        Err(FortressError::InvalidRequestStructured {
+            kind: fortress_rollback::InvalidRequestKind::NotSupported { operation },
+        }) => operation,
+        other => panic!(
+            "an N>=3 hot-join joiner (2+ remote machines) must be rejected with NotSupported; got {other:?}"
+        ),
+    };
+    assert!(
+        operation.contains("hot-join") && operation.contains("N>=3"),
+        "rejection must come from the N>=3 hot-join joiner guard; got operation {operation:?}"
+    );
+    Ok(())
+}
+
+/// A hot-join host with two distinct *live* remote machines (and zero reserved
+/// slots) is still an N>=3 mesh and must be rejected. This complements
+/// `three_machine_hot_join_host_is_rejected` (which mixes a live remote with a
+/// reserved slot) by proving that live remotes alone are counted toward the
+/// mesh-size guard.
+#[test]
+fn hot_join_host_with_two_live_remote_machines_is_rejected() -> Result<(), FortressError> {
+    // Arrange: 1 local host + 2 distinct live remote machines, hot-join enabled,
+    // no reserved slots -> 3 machines.
+    let clock = TestClock::new();
+    let (host_socket, _s2, _s3, _host_addr, remote_addr_a, remote_addr_b) =
+        crate::common::create_channel_triple();
+
+    // Act.
+    let result = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(3)?
+        .with_hot_join(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr_a), PlayerHandle::new(1))?
+        .add_player(PlayerType::Remote(remote_addr_b), PlayerHandle::new(2))?
+        .start_p2p_session(host_socket);
+
+    // Assert: rejected by the mesh guard (not some other NotSupported).
+    let operation = match result {
+        Err(FortressError::InvalidRequestStructured {
+            kind: fortress_rollback::InvalidRequestKind::NotSupported { operation },
+        }) => operation,
+        other => panic!(
+            "a hot-join host with two live remote machines must be rejected with NotSupported; got {other:?}"
+        ),
+    };
+    assert!(
+        operation.contains("hot-join") && operation.contains("N>=3"),
+        "rejection must come from the N>=3 hot-join mesh guard; got operation {operation:?}"
+    );
+    Ok(())
+}
+
+/// A 2-machine hot-join host that ALSO registers a spectator must still
+/// construct: spectators are observers, not mesh peers, so they are not counted
+/// toward the N>=3 mesh guard. Without this exclusion, `1 local + 1 reserved +
+/// 1 spectator` would be miscounted as 3 machines and wrongly rejected.
+#[test]
+fn hot_join_host_with_spectator_constructs_ok() -> Result<(), FortressError> {
+    // Arrange: num_players = 2 (local handle 0 + reserved handle 1) -> exactly
+    // 2 machines, plus a spectator at a third distinct address. A spectator
+    // handle must be `>= num_players`, so handle 2 is valid here.
+    let clock = TestClock::new();
+    let (host_socket, _s2, _s3, _host_addr, reserved_addr, spectator_addr) =
+        crate::common::create_channel_triple();
+
+    // Act + Assert: construction succeeds (propagate the real error on failure).
+    let _session = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .with_hot_join(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_reserved_player(reserved_addr, PlayerHandle::new(1))?
+        .add_player(PlayerType::Spectator(spectator_addr), PlayerHandle::new(2))?
+        .start_p2p_session(host_socket)?;
+
+    Ok(())
+}

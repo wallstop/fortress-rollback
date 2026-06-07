@@ -7,7 +7,6 @@ use crate::network::network_stats::NetworkStats;
 #[cfg(feature = "hot-join")]
 use crate::network::protocol::UdpProtocol;
 use crate::replay::{Replay, ReplayRecorder};
-#[cfg(feature = "hot-join")]
 use crate::safe_frame_sub;
 use crate::sessions::config::{DisconnectBehavior, ProtocolConfig, SaveMode};
 use crate::sessions::player_registry::PlayerRegistry;
@@ -3315,7 +3314,10 @@ impl<T: Config> P2PSession<T> {
             first_incorrect
         };
 
-        // we should always load a frame that is before or exactly the first incorrect frame
+        // we should always load a frame that is before or exactly the first incorrect frame.
+        // This check runs on the UN-clamped `frame_to_load` (sparse mode's `last_saved_frame`,
+        // or `first_incorrect` otherwise) so it still catches the genuine sparse-mode bug where
+        // the single saved state sits above the first incorrect frame.
         if frame_to_load > first_incorrect {
             report_violation!(
                 ViolationSeverity::Error,
@@ -3326,42 +3328,83 @@ impl<T: Config> P2PSession<T> {
             );
         }
 
-        // If frame_to_load >= current_frame, there's nothing to roll back to.
+        // Clamp the rollback target UP to the prediction-window floor `current_frame -
+        // max_prediction` (floored at 0). In `EveryFrame` save mode this equals the oldest saved
+        // frame, because saves are contiguous, so `load_frame` is guaranteed to find a valid saved
+        // state at this frame. `load_frame` rejects anything older than this floor with
+        // `OutsidePredictionWindow`, so without this clamp a disconnect frame gossiped DOWN below
+        // the live window (a survivor that advanced far ahead while a peer's drop converged to a
+        // much older global-min `F`) would make `load_frame` error every frame and, because
+        // `disconnect_frame` is cleared only AFTER a successful `adjust_gamestate`, permanently
+        // stall `advance_frame`. Clamping keeps the session live and re-simulates as many in-window
+        // frames as possible with the corrected disconnect flags; frames below the floor are
+        // unrecoverable (the documented discard-before-convergence residual). For any in-window
+        // target this `.max(..)` is a no-op, so the normal prediction-miss rollback path is
+        // unchanged.
+        let window_floor = safe_frame_sub!(
+            current_frame,
+            self.max_prediction as i32,
+            "adjust_gamestate"
+        )
+        .max(Frame::new(0));
+        let load_target = frame_to_load.max(window_floor);
+        if load_target > first_incorrect {
+            // Legitimate: the rollback target the disconnect convergence asked for fell below the
+            // live prediction window, so we re-simulate from the window floor instead. This is the
+            // gossip-lowered-disconnect-frame-outside-window residual, NOT the genuine sparse bug
+            // the Error above guards — log at Warning so it is not mistaken for a real defect.
+            // Fires once per gossip-lowering event, not per frame: `disconnect_frame` is cleared
+            // after this adjust (and `reset_prediction` runs below), so we are not re-entered for
+            // the same lowered target.
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "rollback target {} is below the prediction-window floor {} (current {}, \
+                 max_prediction {}); re-simulating from the floor. Frames below it cannot be \
+                 corrected for the gossip-lowered disconnect frame.",
+                frame_to_load,
+                window_floor,
+                current_frame,
+                self.max_prediction
+            );
+        }
+
+        // If load_target >= current_frame, there's nothing to roll back to.
         // This can happen when a misprediction is detected at the current frame
         // (e.g., at frame 0 when we haven't advanced yet). In this case, we just
         // need to reset predictions - the next frame advance will use the correct inputs.
-        if frame_to_load >= current_frame {
+        if load_target >= current_frame {
             debug!(
-                "Skipping rollback: frame_to_load {} >= current_frame {} - resetting predictions only",
-                frame_to_load, current_frame
+                "Skipping rollback: load_target {} >= current_frame {} - resetting predictions only",
+                load_target, current_frame
             );
             self.sync_layer.reset_prediction();
             return Ok(());
         }
 
-        let count = current_frame - frame_to_load;
+        let count = current_frame - load_target;
 
         if let Ok(depth) = usize::try_from(count) {
             if let Some(telemetry) = &self.telemetry {
-                telemetry.on_rollback(depth, frame_to_load);
+                telemetry.on_rollback(depth, load_target);
             }
         }
 
         // request to load that frame
         debug!(
             "Pushing request to load frame {} (current frame {})",
-            frame_to_load, current_frame
+            load_target, current_frame
         );
-        requests.push(self.sync_layer.load_frame(frame_to_load)?);
+        requests.push(self.sync_layer.load_frame(load_target)?);
 
         // we are now at the desired frame
         let actual_frame = self.sync_layer.current_frame();
-        if actual_frame != frame_to_load {
+        if actual_frame != load_target {
             report_violation!(
                 ViolationSeverity::Error,
                 ViolationKind::FrameSync,
                 "current frame mismatch after load: expected={}, actual={}",
-                frame_to_load,
+                load_target,
                 actual_frame
             );
         }
@@ -5526,6 +5569,12 @@ mod tests {
         // endpoints, each the sole owner of one reserved handle.
         let addr_a = test_addr(9101);
         let addr_b = test_addr(9102);
+        // This test deliberately assembles an N>=3 hot-join host (two reserved
+        // slots on two distinct machines) to exercise `poll_hot_join`'s
+        // cross-endpoint join-request ownership gate. The public
+        // `start_p2p_session` now rejects N>=3 hot-join meshes (per the build-time
+        // guard mitigating the unimplemented N-peer reactivation), so this uses
+        // the `#[cfg(test)]`-only bypass to reach the internal state under test.
         let mut host = SessionBuilder::<TestConfig>::new()
             .with_num_players(3)
             .unwrap()
@@ -5535,7 +5584,7 @@ mod tests {
             .unwrap()
             .add_reserved_player(addr_b, PlayerHandle::new(2))
             .unwrap()
-            .start_p2p_session(DummySocket)
+            .start_p2p_session_skip_hot_join_build_guards_for_test(DummySocket)
             .unwrap();
 
         // Reach Running (reserved endpoints are skipped by sync) and advance a

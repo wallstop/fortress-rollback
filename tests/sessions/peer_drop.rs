@@ -26,12 +26,14 @@ use crate::common::{
     POLL_INTERVAL_DETERMINISTIC,
 };
 use fortress_rollback::{
+    telemetry::{CollectingObserver, ViolationSeverity},
     DisconnectBehavior, FortressError, FortressEvent, FortressRequest, Frame, InputStatus,
     InputVec, P2PSession, PlayerHandle, PlayerType, ProtocolConfig, SessionBuilder, SessionState,
     SpectatorSession,
 };
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use web_time::Duration;
 
 /// Helper: creates a `ProtocolConfig` with the given test clock.
@@ -2377,6 +2379,275 @@ fn p2p_remove_player_under_asymmetric_loss_freezes_dropped_peer_consistently(
         divergences.is_empty(),
         "confirmed state diverged across survivors after under-loss remove_player drop \
          (bound={confirmed_bound}, compared={compared}): {divergences:?}"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Regression (liveness): audit finding F8 — a gossip-lowered disconnect frame
+// that falls OUTSIDE the live prediction window must not permanently stall
+// `advance_frame`.
+// ============================================================================
+//
+// Mechanism reproduced here (3 peers A/B/C, `ContinueWithout`, small
+// `max_prediction`): under asymmetric loss A receives C's input through a HIGHER
+// frame than B does (C -> B is blocked). C then goes silent and both survivors
+// auto-drop it. A first freezes C at its OWN (high) received frame, so A's
+// initial `disconnect_frame` is in-window and A keeps advancing. Later B's gossip
+// (C confirmed only through a LOW frame) propagates through
+// `update_player_disconnects`, which mines A's agreed frame DOWN to the global
+// min `F` and lowers A's `disconnect_frame` to `F + 1`. By then A has advanced
+// well past `current_frame - max_prediction`, so the disconnect-induced rollback
+// target sits BELOW the window floor.
+//
+// Before the fix, `adjust_gamestate` asked `load_frame` for that out-of-window
+// frame, which returned `OutsidePredictionWindow`; the `?` propagated out of
+// `advance_frame` BEFORE `disconnect_frame` was cleared, so every subsequent
+// `advance_frame` recomputed the same out-of-window target and failed identically
+// — a permanent stall (the probe for this scenario observed A frozen at one frame
+// with 100% of `advance_frame` calls returning `OutsidePredictionWindow`).
+//
+// After the fix, `adjust_gamestate` clamps the load target UP to the window floor,
+// `load_frame` succeeds, `disconnect_frame` is cleared, and A stays live. Frames
+// below the floor remain unrecoverable (the separately documented
+// discard-before-convergence residual); this test asserts LIVENESS only, not that
+// those below-window frames are corrected.
+//
+// This test FAILS before the fix (A stalls, returning `OutsidePredictionWindow`)
+// and PASSES after (A keeps advancing).
+#[test]
+fn p2p_continue_without_gossip_lowered_disconnect_outside_window_stays_live(
+) -> Result<(), FortressError> {
+    // Arrange: 3 `ContinueWithout` sessions over filtered sockets with a SMALL
+    // prediction window so "outside the window" is easy to engineer, plus a
+    // violation observer on the survivor under test (A) so we can prove the clamp
+    // logs at most a Warning (never the genuine `frame_to_load > first_incorrect`
+    // Error, and never an Error/Critical FrameSync violation).
+    const MAX_PREDICTION: usize = 2;
+    let clock = TestClock::new();
+    let (s1, s2, s3, a1, a2, a3, blocked) = create_filtered_channel_triple();
+    let pc = protocol_config(&clock);
+    let observer = Arc::new(CollectingObserver::new());
+
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(pc.clone())
+        .with_num_players(3)?
+        .with_max_prediction_window(MAX_PREDICTION)
+        .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+        .with_disconnect_timeout(Duration::from_millis(400))
+        .with_disconnect_notify_delay(Duration::from_millis(100))
+        .with_violation_observer(observer.clone())
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(a2), PlayerHandle::new(1))?
+        .add_player(PlayerType::Remote(a3), PlayerHandle::new(2))?
+        .start_p2p_session(s1)?;
+    let build_remote = |local: PlayerHandle,
+                        socket: FilterSocket,
+                        remotes: [(PlayerHandle, SocketAddr); 2]|
+     -> Result<P2PSession<StubConfig>, FortressError> {
+        let mut builder = SessionBuilder::<StubConfig>::new()
+            .with_protocol_config(pc.clone())
+            .with_num_players(3)?
+            .with_max_prediction_window(MAX_PREDICTION)
+            .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+            .with_disconnect_timeout(Duration::from_millis(400))
+            .with_disconnect_notify_delay(Duration::from_millis(100))
+            .add_player(PlayerType::Local, local)?;
+        for (handle, addr) in remotes {
+            builder = builder.add_player(PlayerType::Remote(addr), handle)?;
+        }
+        builder.start_p2p_session(socket)
+    };
+    let mut sess2 = build_remote(
+        PlayerHandle::new(1),
+        s2,
+        [(PlayerHandle::new(0), a1), (PlayerHandle::new(2), a3)],
+    )?;
+    let mut sess3 = build_remote(
+        PlayerHandle::new(2),
+        s3,
+        [(PlayerHandle::new(0), a1), (PlayerHandle::new(1), a2)],
+    )?;
+    synchronize_three_sessions(&mut sess1, &mut sess2, &mut sess3, &clock, 500);
+    let _ = drain_events(&mut sess1);
+    let _ = drain_events(&mut sess2);
+    let _ = drain_events(&mut sess3);
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let mut stub3 = GameStub::new();
+    let mut sink: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    // --- Phase 1: warmup, all links open, all three confirm together. C emits a
+    // CONSTANT input so that A receiving C's frames never causes a prediction-miss
+    // rollback (default prediction repeats the last input), letting A's
+    // `connect_status[C].last_frame` climb without churn. ---
+    const C_CONST_INPUT: u32 = 7;
+    for i in 0..4u32 {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        try_advance_recording(&mut sess1, &mut stub1, PlayerHandle::new(0), i, &mut sink)?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1000,
+            &mut sink,
+        )?;
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            C_CONST_INPUT,
+            &mut sink,
+        )?;
+    }
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 8);
+
+    // --- Phase 2: block ONLY C -> B. C keeps delivering its constant input to A,
+    // so A's `connect_status[C].last_frame` climbs HIGHER than B's. This is the
+    // asymmetry that makes the eventual gossip lower A's agreed frame (and
+    // `disconnect_frame`) far below A's current frame. ---
+    blocked.block(a3, a2);
+    for _ in 0..12u32 {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 2);
+        let _ = try_advance_recording(&mut sess1, &mut stub1, PlayerHandle::new(0), 50, &mut sink);
+        let _ = try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            1050,
+            &mut sink,
+        );
+        let _ = try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            C_CONST_INPUT,
+            &mut sink,
+        );
+    }
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 4);
+
+    // --- Phase 3: C goes fully silent. Pump A + B past the disconnect timeout so
+    // both auto-drop C; B's low-frame gossip about C reaches A and mines A's
+    // `disconnect_frame` down below A's prediction-window floor. ---
+    blocked.block(a3, a1);
+    let mut sess1_dropped = false;
+    let frame_before_drive = sess1.current_frame();
+    for _ in 0..60 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        // Tolerate only the normal throttle/sync errors here while the drop
+        // converges; the assertions below drive the post-convergence behavior.
+        let _ = try_advance_recording(&mut sess1, &mut stub1, PlayerHandle::new(0), 500, &mut sink);
+        let _ = try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            1500,
+            &mut sink,
+        );
+        if sess1
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess1_dropped = true;
+        }
+    }
+    assert!(
+        sess1_dropped,
+        "sess1 must auto-drop the silent peer for this repro to exercise the gossip-lowered \
+         disconnect path"
+    );
+
+    // Act + Assert (liveness): drive A forward and require every `advance_frame`
+    // to make progress without ever returning `OutsidePredictionWindow`. Pre-fix,
+    // the gossip-lowered out-of-window `disconnect_frame` makes EVERY call here
+    // return `Err(InvalidFrameStructured { reason: OutsidePredictionWindow, .. })`
+    // and `current_frame` never advances (permanent stall).
+    let mut outside_window_errors = 0u32;
+    let mut advanced_ok = 0u32;
+    for _ in 0..40 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        // Keep B alive so A's confirmed frame (and therefore A's throttle) keeps
+        // climbing, otherwise A would legitimately stop on the prediction window.
+        let _ = try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            1500,
+            &mut sink,
+        );
+
+        match sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: 500 }) {
+            Ok(()) => {},
+            // Normal throttle/sync backpressure — not the F8 stall.
+            Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => continue,
+            Err(other) => return Err(other),
+        }
+        match sess1.advance_frame() {
+            Ok(requests) => {
+                advanced_ok += 1;
+                stub1.handle_requests(requests);
+            },
+            Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => {},
+            Err(FortressError::InvalidFrameStructured {
+                reason: fortress_rollback::InvalidFrameReason::OutsidePredictionWindow { .. },
+                ..
+            }) => {
+                outside_window_errors += 1;
+            },
+            Err(other) => return Err(other),
+        }
+    }
+
+    assert_eq!(
+        outside_window_errors, 0,
+        "F8 regression: advance_frame returned OutsidePredictionWindow after a gossip-lowered \
+         disconnect frame fell outside the prediction window — the session is permanently stalled"
+    );
+    assert!(
+        advanced_ok > 0,
+        "advance_frame never made progress after the drop; expected the survivor to stay live"
+    );
+    assert!(
+        sess1.current_frame() > frame_before_drive,
+        "survivor did not advance past where it was when the drop converged (before={:?}, \
+         after={:?}) — it is stuck",
+        frame_before_drive,
+        sess1.current_frame()
+    );
+
+    // Assert (no spurious violation): the out-of-window clamp must NOT fire the
+    // genuine `frame_to_load > first_incorrect` Error, and must not raise any
+    // Error/Critical FrameSync violation. At most a Warning explaining the
+    // gossip-lowered-disconnect-frame-outside-window residual is allowed.
+    let violations = observer.violations();
+    let genuine_bug_errors: Vec<_> = violations
+        .iter()
+        .filter(|v| v.message.contains("this indicates a bug"))
+        .collect();
+    assert!(
+        genuine_bug_errors.is_empty(),
+        "the legitimate out-of-window clamp must not trip the genuine sparse-mode \
+         'frame_to_load > first_incorrect' Error: {genuine_bug_errors:?}"
+    );
+    let serious: Vec<_> = violations
+        .iter()
+        .filter(|v| {
+            matches!(
+                v.severity,
+                ViolationSeverity::Error | ViolationSeverity::Critical
+            )
+        })
+        .collect();
+    assert!(
+        serious.is_empty(),
+        "no Error/Critical violations expected on the gossip-lowered out-of-window path; got: {serious:?}"
     );
 
     Ok(())

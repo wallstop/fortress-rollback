@@ -1580,15 +1580,46 @@ impl<T: Config> UdpProtocol<T> {
                 && self.state != ProtocolState::Disconnected
                 && !self.disconnect_event_sent;
 
-            // update the peer connection status
+            // Merge this remote peer's gossiped view of every slot's connect status
+            // into our cached copy. For a CONNECTED slot, `last_frame` is monotone
+            // forward progress and only ever rises. For a DISCONNECTED slot,
+            // `last_frame` is the agreed freeze frame, which must converge DOWNWARD to
+            // the global-min as a lower freeze gossip relays across the mesh: taking
+            // `max` here would clobber a relayed lowering and leave survivors frozen at
+            // different frames for the dropped slot (silent desync). The merge is also
+            // reorder/loss safe — a stale packet can neither regress a connected slot's
+            // progress nor re-raise an already-converged freeze frame.
             if !body.disconnect_requested {
                 for (local, remote) in self
                     .peer_connect_status
                     .iter_mut()
                     .zip(body.peer_connect_status.iter())
                 {
-                    local.disconnected = remote.disconnected || local.disconnected;
-                    local.last_frame = std::cmp::max(local.last_frame, remote.last_frame);
+                    if remote.disconnected || local.disconnected {
+                        if local.disconnected && remote.disconnected {
+                            // Both views are freeze frames: take the lower so a relayed
+                            // lowering wins and a stale higher disconnect packet cannot
+                            // un-converge us.
+                            local.last_frame = std::cmp::min(local.last_frame, remote.last_frame);
+                        } else if remote.disconnected {
+                            // First time we learn this peer considers the slot
+                            // disconnected: adopt its authoritative freeze frame (its true
+                            // last-received frame for the slot). This may be lower OR higher
+                            // than our stale connected forward-progress value — `min` would
+                            // under-claim a peer that genuinely received the slot through a
+                            // higher frame before it dropped, freezing too early and
+                            // discarding valid confirmed inputs every peer actually received.
+                            local.last_frame = remote.last_frame;
+                        }
+                        // else: local disconnected, remote still reports connected — a STALE
+                        // pre-drop gossip arriving after we already converged the freeze
+                        // frame. Do NOT raise `last_frame` (that would re-introduce the
+                        // clobber) and do NOT resurrect the slot below.
+                        local.disconnected = true;
+                    } else {
+                        // Both connected: monotone forward progress.
+                        local.last_frame = std::cmp::max(local.last_frame, remote.last_frame);
+                    }
                 }
             }
 
@@ -2550,6 +2581,186 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(events.first(), Some(Event::Input { .. })));
         assert!(matches!(events.get(1), Some(Event::Disconnected)));
+    }
+
+    // --- F4 regression: connect-status merge convergence ---------------------
+    //
+    // The per-endpoint merge in `on_input` caches a remote peer's view of every
+    // slot's connect status. For a disconnected slot, `last_frame` is the agreed
+    // freeze frame, which must converge DOWN to the global min as a lower freeze
+    // gossip relays across the mesh (a higher cached value comes from a relaying
+    // survivor's pre-drop forward progress). These tests drive the merge directly
+    // by feeding decodable `Input` packets that re-use `start_frame == 0`: the
+    // packet decodes against the blank reference frame, the staged frame is
+    // skipped (frame 0 <= last received frame 0), but the connect-status merge
+    // still runs — isolating exactly the per-slot merge under test.
+
+    /// Build a synced, running protocol whose `recv_inputs` holds frame 0, so
+    /// later `start_frame == 0` gossip packets decode without staging new inputs.
+    fn running_protocol_with_frame_zero() -> UdpProtocol<TestConfig> {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+
+        // Prime frame 0 so subsequent start_frame == 0 packets are decodable.
+        let zeroed_bytes = protocol
+            .recv_inputs
+            .get(&Frame::NULL)
+            .unwrap()
+            .bytes
+            .clone();
+        let test_bytes = crate::network::codec::encode(&TestInput { inp: 1 }).unwrap();
+        let encoded =
+            crate::network::compression::encode(&zeroed_bytes, std::iter::once(&test_bytes));
+        protocol.on_input(&Input {
+            start_frame: Frame::new(0),
+            ack_frame: Frame::NULL,
+            bytes: encoded,
+            disconnect_requested: false,
+            peer_connect_status: vec![ConnectionStatus::default(); 2],
+        });
+        protocol.event_queue.clear();
+        protocol
+    }
+
+    /// Feed a connect-status gossip packet for slot 1 ("the dropped peer") while
+    /// keeping slot 0 (the local-relative peer) connected. The packet re-uses
+    /// frame 0 so only the connect-status merge has an effect.
+    fn gossip_slot_one(
+        protocol: &mut UdpProtocol<TestConfig>,
+        disconnected: bool,
+        last_frame: i32,
+    ) {
+        let zeroed_bytes = protocol
+            .recv_inputs
+            .get(&Frame::NULL)
+            .unwrap()
+            .bytes
+            .clone();
+        let test_bytes = crate::network::codec::encode(&TestInput { inp: 1 }).unwrap();
+        let encoded =
+            crate::network::compression::encode(&zeroed_bytes, std::iter::once(&test_bytes));
+        protocol.on_input(&Input {
+            start_frame: Frame::new(0),
+            ack_frame: Frame::NULL,
+            bytes: encoded,
+            disconnect_requested: false,
+            peer_connect_status: vec![
+                ConnectionStatus::default(),
+                ConnectionStatus {
+                    disconnected,
+                    last_frame: Frame::new(last_frame),
+                },
+            ],
+        });
+    }
+
+    #[test]
+    fn on_input_lowers_disconnected_slot_last_frame_on_later_lower_gossip() {
+        let mut protocol = running_protocol_with_frame_zero();
+
+        // First gossip freezes the slot at 8, then a relayed lowering carries 4.
+        gossip_slot_one(&mut protocol, true, 8);
+        assert_eq!(
+            protocol
+                .peer_connect_status(PlayerHandle::new(1))
+                .last_frame,
+            Frame::new(8)
+        );
+
+        gossip_slot_one(&mut protocol, true, 4);
+        let status = protocol.peer_connect_status(PlayerHandle::new(1));
+        assert!(status.disconnected);
+        assert_eq!(status.last_frame, Frame::new(4));
+    }
+
+    #[test]
+    fn on_input_disconnected_slot_ignores_stale_higher_freeze_gossip() {
+        let mut protocol = running_protocol_with_frame_zero();
+
+        // Converge the freeze frame to 4, then a reordered (stale) packet repeats 8.
+        gossip_slot_one(&mut protocol, true, 4);
+        gossip_slot_one(&mut protocol, true, 8);
+
+        let status = protocol.peer_connect_status(PlayerHandle::new(1));
+        assert!(status.disconnected);
+        assert_eq!(status.last_frame, Frame::new(4));
+    }
+
+    #[test]
+    fn on_input_first_disconnect_adopts_remote_freeze_frame_when_higher() {
+        let mut protocol = running_protocol_with_frame_zero();
+
+        // Slot was connected with forward progress at 5; the peer that genuinely
+        // received it through 8 before dropping must not be under-claimed.
+        gossip_slot_one(&mut protocol, false, 5);
+        assert_eq!(
+            protocol
+                .peer_connect_status(PlayerHandle::new(1))
+                .last_frame,
+            Frame::new(5)
+        );
+
+        gossip_slot_one(&mut protocol, true, 8);
+        let status = protocol.peer_connect_status(PlayerHandle::new(1));
+        assert!(status.disconnected);
+        assert_eq!(status.last_frame, Frame::new(8));
+    }
+
+    #[test]
+    fn on_input_first_disconnect_adopts_remote_freeze_frame_when_lower() {
+        let mut protocol = running_protocol_with_frame_zero();
+
+        // Slot was connected with forward progress at 10; first disconnect gossip
+        // carries a lower authoritative freeze frame and must lower us to it.
+        gossip_slot_one(&mut protocol, false, 10);
+        assert_eq!(
+            protocol
+                .peer_connect_status(PlayerHandle::new(1))
+                .last_frame,
+            Frame::new(10)
+        );
+
+        gossip_slot_one(&mut protocol, true, 4);
+        let status = protocol.peer_connect_status(PlayerHandle::new(1));
+        assert!(status.disconnected);
+        assert_eq!(status.last_frame, Frame::new(4));
+    }
+
+    #[test]
+    fn on_input_disconnected_slot_not_resurrected_by_stale_connected_gossip() {
+        let mut protocol = running_protocol_with_frame_zero();
+
+        // Converge the freeze frame to 4, then a stale pre-drop "connected@9"
+        // packet arrives. It must neither resurrect the slot nor raise the frame.
+        gossip_slot_one(&mut protocol, true, 4);
+        gossip_slot_one(&mut protocol, false, 9);
+
+        let status = protocol.peer_connect_status(PlayerHandle::new(1));
+        assert!(status.disconnected);
+        assert_eq!(status.last_frame, Frame::new(4));
+    }
+
+    #[test]
+    fn on_input_connected_slot_keeps_monotone_forward_progress() {
+        let mut protocol = running_protocol_with_frame_zero();
+
+        // Connected slot advances 5 then 9 (max preserved), and a stale 3 cannot
+        // regress it.
+        gossip_slot_one(&mut protocol, false, 5);
+        gossip_slot_one(&mut protocol, false, 9);
+        assert_eq!(
+            protocol
+                .peer_connect_status(PlayerHandle::new(1))
+                .last_frame,
+            Frame::new(9)
+        );
+
+        gossip_slot_one(&mut protocol, false, 3);
+        let status = protocol.peer_connect_status(PlayerHandle::new(1));
+        assert!(!status.disconnected);
+        assert_eq!(status.last_frame, Frame::new(9));
     }
 
     #[test]
