@@ -1348,7 +1348,28 @@ impl<T: Config> SpectatorSession<T> {
                 return;
             };
             if let Some(slot) = self.host_connect_status.get_mut(player_index) {
-                *slot = status;
+                // Reactivation-safe merge rather than raw overwrite: the canonical
+                // host can oscillate across frames (redundant hosts failing over
+                // under asymmetric loss), so a later canonical host that reports a
+                // dropped slot disconnected at a HIGHER last_frame would otherwise
+                // raise this spectator's already-frozen freeze frame and push the
+                // input-status path back to `Confirmed` for frames the mesh already
+                // froze. The merge converges a dropped slot's freeze `last_frame`
+                // DOWN to the mesh global-min and never raises it — the spectator
+                // analog of the protocol `on_input` convergence (audit F4,
+                // Session 20). It still FOLLOWS a genuine disconnected->connected
+                // reactivation (so hot-join re-opens are tracked, no regression vs
+                // the old overwrite) and adopts a fresh drop. The sole net change
+                // vs the old overwrite is that a later canonical host can no longer
+                // raise an already-disconnected slot's freeze frame. The only
+                // consumer of `host_connect_status` that this affects is the
+                // `inputs_at_frame` input-status path: the spectator never fills
+                // `pending_output` for these host endpoints, so `host.poll` reads
+                // the slice but never transmits it. Residual: a stale lagging host
+                // that becomes canonical for a permanently-dropped slot can still
+                // resurrect its label via the reactivation FOLLOW (future work —
+                // see `merge_connection_status`).
+                merge_connection_status(slot, status);
             }
         }
 
@@ -1547,20 +1568,51 @@ impl<T: Config> SpectatorSession<T> {
     }
 }
 
-#[cfg(test)]
+/// Fold a canonical host's per-player connect-status into the spectator's
+/// persistent view. This is NOT a pure monotonic latch — it must follow a
+/// genuine reactivation so a hot-join spectator does not freeze a slot that the
+/// live mesh has brought back. The contract, by `(current, incoming)` state:
+///
+/// - both disconnected: converge the freeze `last_frame` DOWN to the global
+///   minimum. Never raise an already-frozen slot's freeze frame — a later
+///   canonical host (redundant hosts failing over under asymmetric loss) must
+///   not push the spectator's input-status path back to `Confirmed` for frames
+///   the mesh already froze. This is the always-safe part of the fix and the
+///   spectator analog of the protocol `on_input` convergence (audit F4,
+///   Session 20).
+/// - `current` disconnected, `incoming` connected: FOLLOW the reactivation
+///   (`*current = incoming`), exactly as the old raw overwrite did. A hot-join
+///   host that re-opens a dropped slot sets it back to connected in its
+///   `local_connect_status` and gossips that to spectators
+///   (`p2p_session.rs`); the spectator must track that transition or it
+///   diverges from the live game.
+/// - `current` connected, `incoming` disconnected: adopt the drop at the
+///   incoming freeze frame.
+/// - both connected: advance the `last_frame` via max.
+///
+/// Residual (known, not closed here): the reactivation FOLLOW cannot
+/// distinguish a genuine re-open from a stale lagging host that becomes the
+/// canonical source for a permanently-dropped slot, so such a host can still
+/// resurrect that slot's label. Fully closing this needs per-host provenance or
+/// a dedicated reactivation signal (future work). The audit's prescribed pure
+/// latch is rejected because it breaks reactivation, a supported feature.
 fn merge_connection_status(current: &mut ConnectionStatus, incoming: ConnectionStatus) {
-    if current.disconnected {
-        if incoming.disconnected {
+    match (current.disconnected, incoming.disconnected) {
+        (true, true) => {
             current.last_frame = std::cmp::min(current.last_frame, incoming.last_frame);
-        }
-        return;
-    }
-
-    if incoming.disconnected {
-        current.disconnected = true;
-        current.last_frame = incoming.last_frame;
-    } else {
-        current.last_frame = std::cmp::max(current.last_frame, incoming.last_frame);
+        },
+        (true, false) => {
+            // Follow the reactivation; preserves hot-join re-open (no regression
+            // vs the old raw overwrite).
+            *current = incoming;
+        },
+        (false, true) => {
+            current.disconnected = true;
+            current.last_frame = incoming.last_frame;
+        },
+        (false, false) => {
+            current.last_frame = std::cmp::max(current.last_frame, incoming.last_frame);
+        },
     }
 }
 
@@ -2826,52 +2878,107 @@ mod tests {
     }
 
     #[test]
-    fn spectator_connection_status_merge_is_monotonic() {
-        let mut current = ConnectionStatus {
+    fn spectator_connection_status_merge_converges_freeze_and_follows_reactivation() {
+        // (disconnected, disconnected) -> converge freeze frame DOWN to the min;
+        // never raise an already-frozen slot's freeze frame.
+        let mut both_disc = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(5),
         };
         merge_connection_status(
-            &mut current,
+            &mut both_disc,
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(8),
+            },
+        );
+        assert_eq!(
+            both_disc,
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(5),
+            },
+            "both-disconnected must take the min freeze frame, never raise it"
+        );
+        merge_connection_status(
+            &mut both_disc,
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(3),
+            },
+        );
+        assert_eq!(
+            both_disc,
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(3),
+            },
+            "both-disconnected converges further down to a lower incoming freeze"
+        );
+
+        // (disconnected, connected) -> FOLLOW the reactivation: become connected at
+        // the incoming last_frame (preserves hot-join re-open; no regression vs the
+        // old raw overwrite).
+        let mut reactivating = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(2),
+        };
+        merge_connection_status(
+            &mut reactivating,
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(10),
             },
         );
         assert_eq!(
-            current,
+            reactivating,
             ConnectionStatus {
-                disconnected: true,
-                last_frame: Frame::new(5),
-            }
+                disconnected: false,
+                last_frame: Frame::new(10),
+            },
+            "disconnected+incoming-connected must follow the reactivation"
         );
 
+        // (connected, disconnected) -> adopt the drop at the incoming freeze frame.
+        let mut newly_dropped = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(7),
+        };
         merge_connection_status(
-            &mut current,
+            &mut newly_dropped,
             ConnectionStatus {
                 disconnected: true,
-                last_frame: Frame::new(3),
+                last_frame: Frame::new(4),
             },
         );
-        assert_eq!(current.last_frame, Frame::new(3));
+        assert_eq!(
+            newly_dropped,
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(4),
+            },
+            "connected+incoming-disconnected must adopt the new drop"
+        );
 
-        let mut connected = ConnectionStatus {
+        // (connected, connected) -> advance via max.
+        let mut both_conn = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(4),
         };
         merge_connection_status(
-            &mut connected,
+            &mut both_conn,
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(9),
             },
         );
         assert_eq!(
-            connected,
+            both_conn,
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(9),
-            }
+            },
+            "both-connected must advance the last_frame via max"
         );
     }
 
@@ -3035,6 +3142,235 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn multi_host_later_canonical_snapshot_does_not_raise_disconnect_freeze_frame() {
+        // Regression for the spectator freeze-frame-RAISE bug (N-PLAYER-DESYNC-AUDIT.md,
+        // completeness critic #1): with >=2 redundant hosts under asymmetric loss the
+        // per-frame canonical host oscillates. A later canonical host that reports a
+        // dropped slot disconnected at a HIGHER freeze last_frame used to RAW-OVERWRITE
+        // the spectator's already-frozen label, raising its freeze frame so the public
+        // input-status path then returned Confirmed for frames the mesh had already
+        // frozen -> silent spectator divergence. The reactivation-safe merge converges
+        // a dropped slot's freeze frame DOWN to the global minimum and never raises it.
+        //
+        // RED check: temporarily restore `*slot = status;` (raw overwrite) in
+        // `commit_canonical_snapshot` (and add `#[allow(dead_code)]` to
+        // `merge_connection_status`, which `#![deny(warnings)]` would otherwise
+        // flag as unused) and this test fails — `host_connect_status[1]` becomes
+        // the raised freeze 8 and `inputs_at_frame(6)` reads Confirmed.
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7340), test_addr(7341)], DummySocket)
+            .unwrap();
+
+        // Host 0 (canonical) reports player 1 dropped, frozen LOW at frame 4. Host 1
+        // forwards byte-identical inputs (no input divergence — the silent-status
+        // case) but reports the same drop frozen HIGHER at frame 8. The mesh-correct
+        // freeze frame is the global minimum (4).
+        let dropped_low = vec![
+            ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(0),
+            },
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(4),
+            },
+        ];
+        let dropped_high = vec![
+            ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(0),
+            },
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(8),
+            },
+        ];
+
+        // Frame 0 commits from the canonical host 0, establishing the low freeze (4).
+        queue_host_input(&mut session, 0, Frame::new(0), [10, 20], dropped_low);
+        queue_host_input(&mut session, 1, Frame::new(0), [10, 20], dropped_high);
+        session.poll_remote_clients();
+        assert_eq!(session.last_recv_frame, Frame::new(0));
+        assert_eq!(
+            session.host_connect_status,
+            vec![
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(0),
+                },
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(4),
+                },
+            ]
+        );
+
+        // Stage frames 1..=6 on host 1: player 1 still dropped at the HIGHER freeze
+        // (8), player 0 connected and advancing its last_frame with each frame (so
+        // the connected `max` branch is exercised end-to-end). Host 0 stays canonical
+        // and has no snapshot for these frames, so nothing commits yet.
+        for frame in 1..=6_i32 {
+            let status = vec![
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(frame),
+                },
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(8),
+                },
+            ];
+            queue_host_input(
+                &mut session,
+                1,
+                Frame::new(frame),
+                [10 + frame as u8, 20 + frame as u8],
+                status,
+            );
+        }
+        session.poll_remote_clients();
+        assert_eq!(session.last_recv_frame, Frame::new(0));
+
+        // Host 0 drops; host 1 (re-indexed to 0) becomes canonical and commits the
+        // later frames. The shared host_connect_status is preserved across removal.
+        session.remove_disconnected_hosts(vec![0]);
+        session.try_commit_ready_frames();
+        assert_eq!(session.last_recv_frame, Frame::new(6));
+
+        // Observable behavior FIRST (review nit #3): through the public input-status
+        // path the dropped slot must read Disconnected for a frame between the two
+        // freeze frames (4 < 6 < 8). Under the raw-overwrite bug the freeze was raised
+        // to 8, so 8 < 6 is false and this returned Confirmed -> silent divergence.
+        let synced = session.inputs_at_frame(Frame::new(6)).unwrap();
+        assert_eq!(synced[0].1, InputStatus::Confirmed);
+        assert_eq!(synced[1].1, InputStatus::Disconnected);
+
+        // The later canonical host must NOT raise the latched freeze frame: player 1
+        // stays disconnected at the converged minimum (4), NOT host 1's higher 8.
+        assert_eq!(
+            session.host_connect_status,
+            vec![
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(6),
+                },
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(4),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn spectator_follows_host_reactivation_after_disconnect() {
+        // No-regression guard for the reviewer's Major finding: a hot-join host that
+        // re-opens a dropped slot sets it back to connected in its local_connect_status
+        // (p2p_session.rs reopen) and gossips that disconnected->connected transition
+        // to its spectators (send_confirmed_inputs_to_spectators). The spectator MUST
+        // follow that reactivation; the old raw overwrite did. A pure monotonic latch
+        // would freeze the reactivated slot as Disconnected forever, diverging from the
+        // live game even for a single host + hot-join (a supported config).
+        //
+        // RED check: reintroduce the latch in `merge_connection_status` by making the
+        // (true, false) arm `return;` (leave disconnected, ignore the reactivation) —
+        // this test fails: player 1 reads Disconnected and host_connect_status[1]
+        // stays disconnected.
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7350)], DummySocket)
+            .unwrap();
+
+        // Frames 0..=2: the single host reports player 1 dropped, frozen low at 2.
+        let dropped = vec![
+            ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(0),
+            },
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(2),
+            },
+        ];
+        for frame in 0..=2_i32 {
+            queue_host_input(
+                &mut session,
+                0,
+                Frame::new(frame),
+                [10 + frame as u8, 20 + frame as u8],
+                dropped.clone(),
+            );
+        }
+        session.poll_remote_clients();
+        assert_eq!(session.last_recv_frame, Frame::new(2));
+        assert_eq!(
+            session.host_connect_status,
+            vec![
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(0),
+                },
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(2),
+                },
+            ]
+        );
+
+        // Frames 3..=6: the SAME host reactivates player 1 (disconnected -> connected),
+        // mirroring a hot-join re-open which gossips connected at a HIGH last_frame,
+        // and forwards real inputs for the rejoined slot.
+        let reactivated = vec![
+            ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(10),
+            },
+            ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(10),
+            },
+        ];
+        for frame in 3..=6_i32 {
+            queue_host_input(
+                &mut session,
+                0,
+                Frame::new(frame),
+                [10 + frame as u8, 20 + frame as u8],
+                reactivated.clone(),
+            );
+        }
+        session.poll_remote_clients();
+        assert_eq!(session.last_recv_frame, Frame::new(6));
+
+        // The spectator must have FOLLOWED the reactivation: player 1 is connected
+        // again. host_connect_status[1] is connected at the reactivation last_frame.
+        assert!(!session.host_connect_status[1].disconnected);
+        assert_eq!(
+            session.host_connect_status,
+            vec![
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(10),
+                },
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(10),
+                },
+            ]
+        );
+
+        // Observable: through the public input-status path, a frame past the old
+        // freeze frame (5 > 2) now reads Confirmed for player 1 — the spectator
+        // tracks the live game. Under a reintroduced latch it would read Disconnected.
+        let synced = session.inputs_at_frame(Frame::new(5)).unwrap();
+        assert_eq!(synced[0].1, InputStatus::Confirmed);
+        assert_eq!(synced[1].1, InputStatus::Confirmed);
     }
 
     #[test]
