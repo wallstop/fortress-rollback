@@ -2753,11 +2753,10 @@ impl<T: Config> P2PSession<T> {
     /// [`DisconnectBehavior::ContinueWithout`]) and a reserved-but-unjoined
     /// hot-join endpoint do **not** block synchronization: they are excluded
     /// using the same connection predicate as [`last_verified_frame`]
-    /// ([`remote_is_connected`]). A peer that is still connected but not yet
-    /// verified keeps this `false` until it verifies.
+    /// (the private `remote_is_connected` helper). A peer that is still
+    /// connected but not yet verified keeps this `false` until it verifies.
     ///
     /// [`last_verified_frame`]: Self::last_verified_frame
-    /// [`remote_is_connected`]: Self::remote_is_connected
     ///
     /// # Example
     ///
@@ -6456,6 +6455,286 @@ mod tests {
         assert!(
             !endpoint.is_running() && !endpoint.is_synchronized(),
             "the auto-timeout re-armed endpoint must be Synchronizing"
+        );
+    }
+
+    // ======================================================================
+    // ARBITRATION (audit finding F13): heterogeneous survivor disconnect
+    // policies (graceful ContinueWithout rearm on some survivors vs Halt on
+    // another) and whether they leave LIVE survivors disagreeing on a
+    // dropped slot's rejoin eligibility.
+    // ======================================================================
+    //
+    // F13 claim: in an N=4 mesh A,B,C,D where the app wires survivors to
+    // DIFFERENT disconnect entry points after D drops — A `remove_player(D)`
+    // (ContinueWithout, rearm), C auto-timeout under ContinueWithout (rearm),
+    // B auto-timeout under Halt (no rearm, → Synchronizing) — the live
+    // set / reactivation disagrees across ALL survivors, breaking invariant
+    // (6) (live-player set must agree across survivors).
+    //
+    // The decisive question (crux): under Halt, B transitions to
+    // `SessionState::Synchronizing` and `advance_frame()` returns
+    // `NotSynchronized` (see `enter_fail_closed_disconnect_state` and the
+    // state gate at the top of `advance_frame`). A Halted survivor therefore
+    // produces NO further confirmed frames and is NOT a live participant — so
+    // it cannot be in a *confirmed-stream* desync with the still-live A/C.
+    // "Survivors disagree" conflates a live survivor with one that has
+    // correctly, by the application's explicit choice of the Halt API, left
+    // the simulation. The only genuine-desync question is whether the
+    // survivors that REMAIN LIVE (A via `remove_player`, C via auto-timeout,
+    // both ContinueWithout) agree — that is asserted below.
+
+    /// Builds a hot-join-serving host with the given disconnect behavior, a
+    /// local player at handle 0 and a normal connected remote (the to-be-dropped
+    /// peer "D") at handle 1.
+    #[cfg(feature = "hot-join")]
+    fn build_serving_host_with_behavior(
+        remote_addr: SocketAddr,
+        behavior: DisconnectBehavior,
+    ) -> P2PSession<TestConfig> {
+        SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .expect("2 players is valid")
+            .with_hot_join(true)
+            .with_disconnect_behavior(behavior)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player 0 is valid")
+            .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))
+            .expect("remote player 1 is valid")
+            .start_p2p_session(DummySocket)
+            .expect("serving host should build")
+    }
+
+    /// F13 (faithful repro of the contested scenario): three survivors with
+    /// HETEROGENEOUS disconnect entry points for the same dropped peer D
+    /// (handle 1):
+    /// - A: `remove_player(D)` — ContinueWithout graceful drop (rearm).
+    /// - C: auto-timeout under ContinueWithout — same graceful policy entry
+    ///   point the timeout/event handler funnels into (rearm).
+    /// - B: auto-timeout under Halt — the SAME `Event::Disconnected` /
+    ///   auto-timeout funnel (behavior + `Emit`), but with Halt behavior (no
+    ///   rearm, fail-closed). Using the Emit funnel rather than the Suppress
+    ///   legacy `disconnect_player` keeps the rearm gate's
+    ///   `behavior == ContinueWithout` clause load-bearing for B.
+    ///
+    /// The finding asserts these "leave a dropped slot rejoinable on some
+    /// survivors and permanently rejected on others … survivors now disagree".
+    ///
+    /// To make the transitions and endpoint deltas REAL (not vacuous), each
+    /// survivor is first driven genuinely LIVE before the drop: its D endpoint
+    /// is forced to `Running` via the blessed test helper
+    /// [`UdpProtocol::force_running_for_tests`] and the session itself is set to
+    /// `SessionState::Running` (the same pattern used by the fail-closed and
+    /// multi-handle disconnect tests in this module). A 1-remote session is
+    /// otherwise born `Synchronizing` over `DummySocket`, so without this Arrange
+    /// no survivor would ever leave `Synchronizing` and the state/endpoint
+    /// assertions would be true-from-construction.
+    ///
+    /// This test then pins what ACTUALLY happens to genuinely-live survivors and
+    /// shows the divergence is NOT a desync among live participants: B (Halt)
+    /// genuinely transitions `Running → Synchronizing` and stops producing
+    /// confirmed frames (no longer a live participant), while the two survivors
+    /// that STAY LIVE (A and C) keep `Running` AND AGREE — both rearm the slot,
+    /// re-reserve handle D, and flip its endpoint from `Running` to
+    /// re-synchronizable. If F13 were a real cross-live-survivor desync, the
+    /// `assert_eq!`s comparing A's and C's rejoin eligibility would fail.
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn heterogeneous_survivor_drop_policies_live_survivors_agree_halted_steps_out() {
+        // Arrange: three independent survivors, each holding the same dropped
+        // peer D at handle 1. (Modeling each survivor as its own 2-player
+        // serving host isolates exactly the per-survivor rearm/halt decision the
+        // finding contests, with no cross-talk to confound it.)
+        let addr_a = test_addr(9301);
+        let addr_b = test_addr(9302);
+        let addr_c = test_addr(9303);
+        let mut survivor_a =
+            build_serving_host_with_behavior(addr_a, DisconnectBehavior::ContinueWithout);
+        let mut survivor_b = build_serving_host_with_behavior(addr_b, DisconnectBehavior::Halt);
+        let mut survivor_c =
+            build_serving_host_with_behavior(addr_c, DisconnectBehavior::ContinueWithout);
+
+        let d = PlayerHandle::new(1);
+
+        // Drive every survivor genuinely LIVE before the drop. A 1-remote
+        // session is born `Synchronizing` and `DummySocket` delivers no traffic,
+        // so we force the D endpoint (handle 1, keyed by the survivor's own
+        // remote address) to `Running` and set the session live. Without this,
+        // the post-drop state/endpoint deltas below would be vacuous (true from
+        // construction). The forced state only touches the endpoint's protocol
+        // `state`/`remote_magic`, not the sync layer, so the graceful-drop
+        // freeze path behaves identically.
+        for (name, survivor, addr) in [
+            ("A", &mut survivor_a, addr_a),
+            ("B", &mut survivor_b, addr_b),
+            ("C", &mut survivor_c, addr_c),
+        ] {
+            survivor
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .unwrap_or_else(|| panic!("survivor {name}: D endpoint must exist at build time"))
+                .force_running_for_tests();
+            survivor.state = SessionState::Running;
+        }
+
+        // Pre-condition baselines (now all non-vacuous): every survivor is
+        // genuinely live with a live D endpoint, and D is not yet reserved.
+        for (name, survivor, addr) in [
+            ("A", &survivor_a, addr_a),
+            ("B", &survivor_b, addr_b),
+            ("C", &survivor_c, addr_c),
+        ] {
+            assert_eq!(
+                survivor.current_state(),
+                SessionState::Running,
+                "survivor {name}: must be live (Running) before the drop"
+            );
+            let endpoint = survivor.player_reg.remotes.get(&addr).unwrap_or_else(|| {
+                panic!("survivor {name}: D endpoint must exist before the drop")
+            });
+            assert!(
+                endpoint.is_running(),
+                "survivor {name}: D endpoint must be live (running) before the drop"
+            );
+            assert!(
+                !survivor.hot_join.reserved_slots.contains(&d),
+                "survivor {name}: D must not be reserved before the drop"
+            );
+        }
+
+        // Act:
+        // A — explicit graceful removal (ContinueWithout → rearm path).
+        survivor_a
+            .remove_player(d)
+            .expect("A: remove_player should succeed");
+        // C — auto-timeout under ContinueWithout. The disconnect-timeout / remote
+        // disconnect-event handler funnels into `disconnect_player_with_policy`
+        // with the session behavior + Emit (see the `Event::Disconnected`
+        // handler), which is what drives the auto-rearm. Invoke that exact entry
+        // point with C's configured behavior.
+        let c_behavior = survivor_c.disconnect_behavior;
+        survivor_c
+            .disconnect_player_with_policy(
+                d,
+                None,
+                c_behavior,
+                DisconnectEventPolicy::Emit,
+                GracefulDropFailurePolicy::DisconnectAndHalt,
+            )
+            .expect("C: auto-timeout graceful drop should succeed");
+        // B — auto-timeout under Halt. We use the SAME faithful funnel as C (the
+        // `Event::Disconnected` handler at the auto-timeout call site passes
+        // `self.disconnect_behavior` + `Emit`), but with B's configured Halt
+        // behavior. Going through the Emit path (rather than the Suppress legacy
+        // `disconnect_player`) is what makes the rearm gate's
+        // `behavior == ContinueWithout` clause load-bearing: under Halt + Emit
+        // the gate must still NOT rearm. (`disconnect_player` would short-circuit
+        // the rearm via `Suppress` regardless of behavior, hiding that clause.)
+        let b_behavior = survivor_b.disconnect_behavior;
+        assert_eq!(
+            b_behavior,
+            DisconnectBehavior::Halt,
+            "B must be configured for Halt so this exercises the Halt + Emit funnel"
+        );
+        survivor_b
+            .disconnect_player_with_policy(
+                d,
+                None,
+                b_behavior,
+                DisconnectEventPolicy::Emit,
+                GracefulDropFailurePolicy::DisconnectAndHalt,
+            )
+            .expect("B: auto-timeout Halt drop should succeed");
+
+        // Assert (crux): the Halted survivor B GENUINELY transitions out of the
+        // live (Running) state it held in the baseline. It was `Running` before
+        // the drop; the Halt funnel moves it to `Synchronizing`, after which
+        // `advance_frame()` fails closed — so B produces no further confirmed
+        // frames and cannot be in a confirmed-stream desync with the live
+        // survivors.
+        assert_eq!(
+            survivor_b.current_state(),
+            SessionState::Synchronizing,
+            "B (Halt) must transition Running -> Synchronizing (was Running in the baseline) — \
+             it is no longer a live participant"
+        );
+        // Match the error EXACTLY (no `if let Ok(..)` swallow): a Synchronizing
+        // session must reject frame advance with `NotSynchronized` and nothing
+        // else. (`TestConfig` is not `Debug`, so the success payload cannot be
+        // formatted; `matches!` checks the exact expected error without it.)
+        assert!(
+            matches!(
+                survivor_b.advance_frame(),
+                Err(FortressError::NotSynchronized)
+            ),
+            "B (Halt) must reject frame advance with NotSynchronized — it serves no rejoin and \
+             produces no confirmed frames"
+        );
+        assert!(
+            !survivor_b.hot_join.reserved_slots.contains(&d),
+            "B (Halt) must NOT re-reserve D — and, being Synchronizing, will not serve a rejoin"
+        );
+
+        // Assert (the genuine cross-survivor question): the survivors reached via
+        // DIFFERENT graceful entry points but the SAME ContinueWithout policy
+        // both STAY LIVE. They were `Running` in the baseline and a clean
+        // ContinueWithout drop never flips the session out of `Running`, so this
+        // proves they remain live participants while the Halt survivor B left.
+        assert_eq!(
+            survivor_a.current_state(),
+            SessionState::Running,
+            "A (ContinueWithout via remove_player) must STAY Running — it remains a live \
+             participant after the drop"
+        );
+        assert_eq!(
+            survivor_c.current_state(),
+            SessionState::Running,
+            "C (ContinueWithout via auto-timeout) must STAY Running — it remains a live \
+             participant after the drop"
+        );
+
+        // Reserved-slot delta: both live survivors re-reserve D (false -> true
+        // vs the baseline), and they AGREE; B (Halt) does not.
+        let a_reserved = survivor_a.hot_join.reserved_slots.contains(&d);
+        let c_reserved = survivor_c.hot_join.reserved_slots.contains(&d);
+        assert_eq!(
+            a_reserved, c_reserved,
+            "live survivors A and C must AGREE on whether D's slot is reserved/rejoinable \
+             (A via remove_player, C via auto-timeout, both ContinueWithout)"
+        );
+        assert!(
+            a_reserved,
+            "both live survivors must re-reserve D for rejoin under ContinueWithout \
+             (was not reserved in the baseline)"
+        );
+
+        // Endpoint rejoinable delta: D's endpoint was forced `Running` in the
+        // baseline; after the rearm both live survivors flip it to
+        // re-synchronizable (`!is_running() && !is_synchronized()`, i.e.
+        // Synchronizing) — a genuine running -> re-synchronizable transition, and
+        // A and C AGREE. (A non-rearmed drop would instead leave it terminal
+        // Disconnected, where `is_synchronized()` is true.)
+        let endpoint_a = survivor_a
+            .player_reg
+            .remotes
+            .get(&addr_a)
+            .expect("A: D endpoint must still exist after rearm");
+        let endpoint_c = survivor_c
+            .player_reg
+            .remotes
+            .get(&addr_c)
+            .expect("C: D endpoint must still exist after rearm");
+        let a_rejoinable = !endpoint_a.is_running() && !endpoint_a.is_synchronized();
+        let c_rejoinable = !endpoint_c.is_running() && !endpoint_c.is_synchronized();
+        assert_eq!(
+            a_rejoinable, c_rejoinable,
+            "live survivors A and C must agree on D's endpoint rejoin-readiness"
+        );
+        assert!(
+            a_rejoinable,
+            "both live survivors must flip D's endpoint from running to re-synchronizable \
+             (Synchronizing) after rearm"
         );
     }
 }

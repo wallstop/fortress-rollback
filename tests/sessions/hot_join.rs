@@ -3171,6 +3171,248 @@ fn auto_timeout_dropped_slot_is_rejoinable_without_desync() -> Result<(), Fortre
 }
 
 // ============================================================================
+// Negative (F13): an auto-timeout drop under `Halt` does NOT re-arm the slot
+// ============================================================================
+
+/// The exact inverse of [`auto_timeout_dropped_slot_is_rejoinable_without_desync`]:
+/// a hot-join-serving host built with [`DisconnectBehavior::Halt`] (instead of
+/// `ContinueWithout`) must NOT re-arm a slot whose peer auto-times-out, and must
+/// halt into [`SessionState::Synchronizing`] instead.
+///
+/// This pins the **behavior clause** of the rearm gate in
+/// `disconnect_player_with_policy`
+/// (`behavior == DisconnectBehavior::ContinueWithout && ...`). The real
+/// auto-timeout path funnels a silent peer's drop through that policy entry point
+/// with `(behavior = self.disconnect_behavior, event_policy = Emit)` — see the
+/// `Event::Disconnected` arm of `handle_event`, which the protocol's
+/// disconnect-timeout (`UdpProtocol::poll`) drives. For a `Halt` session the
+/// arguments are therefore `(Halt, Emit)`: the gate's `event_policy == Emit`
+/// clause is *satisfied*, so ONLY the `behavior == ContinueWithout` clause keeps
+/// the slot from being wrongly re-reserved. Deleting that clause (the
+/// mutation-confirmed gap) re-arms the dropped endpoint and re-reserves its
+/// handle even under `Halt`.
+///
+/// The re-arm is observable through the public API without touching the private
+/// `reserved_slots`: a re-armed reserved slot is *skipped* by
+/// `check_initial_sync`, so on the very next `poll_remote_clients` it would let a
+/// halted host bounce back to `Running`. The correct (non-rearmed) behavior
+/// leaves the dropped endpoint terminal (`Disconnected`) and the session pinned
+/// in `Synchronizing` across every subsequent poll. This test asserts the
+/// session reaches `Synchronizing` on the auto-drop and STAYS there — the
+/// mutation flips the post-drop poll back to `Running` and fails this assertion.
+///
+/// The 2-machine (1 local + 1 remote/reserved) construction is permitted under
+/// `Halt`: the `start_p2p_session` hot-join build guard gates on machine count
+/// (`mesh_machines >= 3`), not on `disconnect_behavior`.
+#[test]
+fn auto_timeout_under_halt_with_hot_join_does_not_rearm_dropped_slot() -> Result<(), FortressError>
+{
+    // Arrange: a hot-join-serving host built with `Halt` (the F13 heterogeneous
+    // policy: a Halt host that also serves hot-joins). Wired over a shared
+    // `RoutingBus` so a real joiner can occupy the reserved slot and then go
+    // silent — exactly the model auto-timeout test, but with `Halt`.
+    let clock = TestClock::new();
+    let bus = RoutingBus::new();
+    let host_addr: std::net::SocketAddr = ([127, 0, 0, 1], 20031).into();
+    let joiner_addr: std::net::SocketAddr = ([127, 0, 0, 1], 20032).into();
+
+    let mut host = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .with_hot_join(true)
+        .with_disconnect_behavior(DisconnectBehavior::Halt)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_reserved_player(joiner_addr, PlayerHandle::new(1))?
+        .start_p2p_session(bus.socket(host_addr))?;
+
+    // A reserved slot does not gate sync, so the host runs solo immediately.
+    host.poll_remote_clients();
+    assert_eq!(host.current_state(), SessionState::Running);
+    let _ = drain_events(&mut host);
+
+    let mut host_stub = GameStub::new();
+    let mut host_states: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut host_peer_joined = false;
+    let mut host_disconnected = false;
+
+    // Advance the host a few frames solo so a snapshot is available to serve.
+    for i in 0..5_u32 {
+        host.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        advance_and_record(
+            &mut host,
+            &mut host_stub,
+            PlayerHandle::new(0),
+            10 + i,
+            &mut host_states,
+        )?;
+    }
+
+    // The joiner occupies the reserved slot via the real host-mediated flow.
+    let mut joiner = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .add_player(PlayerType::Remote(host_addr), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_hot_join_session(bus.socket(joiner_addr), host_addr)?;
+    assert_eq!(joiner.current_state(), SessionState::HotJoining);
+
+    let mut joiner_stub = GameStub::new();
+    let mut joiner_states: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    drive_until_joiner_loads_snapshot(
+        &mut host,
+        &mut joiner,
+        &mut host_stub,
+        &mut joiner_stub,
+        &mut host_states,
+        &mut joiner_states,
+        &clock,
+        PlayerHandle::new(0),
+        &mut host_peer_joined,
+        &mut host_disconnected,
+    )?;
+
+    // Advance both in lockstep a few frames so the join is genuinely live (the
+    // host's `status[1]` tracks the joiner's contributed inputs). This makes the
+    // subsequent auto-timeout a real backdated drop, not a no-op on a never-live
+    // slot.
+    for i in 0..10_u32 {
+        for _ in 0..3 {
+            host.poll_remote_clients();
+            for e in drain_events(&mut host) {
+                if matches!(e, FortressEvent::PeerJoined { .. }) {
+                    host_peer_joined = true;
+                }
+            }
+            joiner.poll_remote_clients();
+            clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        }
+        if host.current_state() == SessionState::Running {
+            advance_and_record(
+                &mut host,
+                &mut host_stub,
+                PlayerHandle::new(0),
+                1000 + i,
+                &mut host_states,
+            )?;
+        }
+        if joiner.current_state() == SessionState::Running {
+            advance_and_record(
+                &mut joiner,
+                &mut joiner_stub,
+                PlayerHandle::new(1),
+                2000 + i,
+                &mut joiner_states,
+            )?;
+        }
+    }
+    assert!(
+        host_peer_joined,
+        "host must emit PeerJoined for the joiner before it goes silent"
+    );
+    assert_eq!(
+        host.current_state(),
+        SessionState::Running,
+        "host must be Running with the joiner live before the timeout"
+    );
+    let frame_at_silence = host.current_frame().as_i32();
+
+    // Act: the joiner goes SILENT. Keep the host advancing solo while the clock
+    // crosses the 2000ms disconnect timeout, driving the REAL auto-timeout
+    // (`UdpProtocol::poll` emits `Event::Disconnected`, which `handle_event`
+    // funnels into `disconnect_player_with_policy(Halt, Emit)`). NO real sleeps —
+    // only deterministic `TestClock` advances.
+    drop(joiner);
+
+    // The Halt auto-drop is detected on the `advance_frame` call whose internal
+    // poll crosses the timeout: that call applies the drop, fails closed into
+    // `Synchronizing`, and returns `NotSynchronized` WITHOUT advancing. We match
+    // that exact error (the established `peer_drop.rs` pattern) rather than
+    // swallowing all errors; any other error is a genuine failure. While still
+    // `Running` the host advances solo, opening the backdating gap that makes the
+    // drop non-vacuous.
+    let mut auto_dropped = false;
+    // 2000ms timeout / 50ms poll = 40 polls; advance generously past it.
+    for i in 0..120_u32 {
+        for e in drain_events(&mut host) {
+            if matches!(e, FortressEvent::Disconnected { .. }) {
+                auto_dropped = true;
+            }
+        }
+        host.add_local_input(PlayerHandle::new(0), StubInput { inp: 3000 + i })?;
+        match host.advance_frame() {
+            Ok(requests) => host_stub.handle_requests_recording(requests, &mut host_states),
+            Err(FortressError::NotSynchronized) => {
+                // The Halt drop fired during this call's internal poll.
+                auto_dropped = true;
+                break;
+            },
+            Err(err) => return Err(err),
+        }
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+
+    // Drain any trailing `Disconnected` emitted by the drop call.
+    for e in drain_events(&mut host) {
+        if matches!(e, FortressEvent::Disconnected { .. }) {
+            auto_dropped = true;
+        }
+    }
+
+    // Assert: the auto-timeout fired and the Halt session halted.
+    assert!(
+        auto_dropped,
+        "host must auto-drop the silent joiner on the disconnect timeout (Disconnected / \
+         NotSynchronized)"
+    );
+    // Non-vacuity: the host advanced solo past the silence frame, so the drop is a
+    // genuine backdated auto-timeout (not a same-frame no-op).
+    assert!(
+        host.current_frame().as_i32() > frame_at_silence,
+        "host must have advanced solo past the silence frame {frame_at_silence} (got {}), \
+         so the auto-drop is a real backdated timeout",
+        host.current_frame()
+    );
+    assert_eq!(
+        host.current_state(),
+        SessionState::Synchronizing,
+        "a Halt auto-timeout drop must transition the session to Synchronizing"
+    );
+
+    // Assert (the discriminating, inverse-of-rearm check): the dropped slot was
+    // NOT re-armed. A re-armed reserved slot is skipped by `check_initial_sync`,
+    // so a halted host would bounce back to `Running` on the next poll. The
+    // correct behavior leaves the endpoint terminal and the session pinned in
+    // `Synchronizing` across every subsequent poll. (Deleting the
+    // `behavior == ContinueWithout` clause of the rearm gate flips this to
+    // `Running` and fails here.)
+    for _ in 0..40 {
+        host.poll_remote_clients();
+        // The Halt host produces no further confirmed frames; only drain events.
+        let _ = drain_events(&mut host);
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        assert_eq!(
+            host.current_state(),
+            SessionState::Synchronizing,
+            "a Halt host whose peer auto-timed-out must STAY Synchronizing (the dropped \
+             slot must not be re-armed); bouncing back to Running means the slot was \
+             wrongly re-reserved"
+        );
+    }
+
+    // Cross-check via the public state gate: a halted session rejects frame
+    // advance. (Never swallow the result with `if let Ok(..)`; match the exact
+    // expected error.)
+    assert!(
+        matches!(host.advance_frame(), Err(FortressError::NotSynchronized)),
+        "a Halt-halted host must reject advance_frame with NotSynchronized"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
 // Negative (M1): a NON-serving host does not re-arm a dropped slot
 // ============================================================================
 

@@ -1430,6 +1430,70 @@ impl<T: Config> UdpProtocol<T> {
         }
     }
 
+    /// Merges a remote peer's gossiped view of every slot's connect status into
+    /// our cached copy ([`peer_connect_status`](Self::peer_connect_status)).
+    ///
+    /// For a CONNECTED slot, `last_frame` is monotone forward progress and only
+    /// ever rises. For a DISCONNECTED slot, `last_frame` is the agreed freeze
+    /// frame, which must converge DOWNWARD to the global-min as a lower freeze
+    /// gossip relays across the mesh: taking `max` here would clobber a relayed
+    /// lowering and leave survivors frozen at different frames for the dropped slot
+    /// (silent desync).
+    ///
+    /// The merge is loss/reorder safe by construction — a stale packet can neither
+    /// regress a connected slot's progress (`max`), re-raise an already-converged
+    /// freeze frame (`min` for both-disconnected), nor resurrect a converged
+    /// disconnect (local-disconnected wins over stale remote-connected). Because
+    /// of that, it is also safe to apply from a packet whose *inputs* we could not
+    /// decode: the gossip carried by an undecodable or stale packet cannot move
+    /// our cached view in an unsafe direction. Processing it regardless lets
+    /// disconnect gossip — the convergence driver behind
+    /// `update_player_disconnects` — ride EVERY received packet, not only the
+    /// decodable ones, narrowing the N>=3 disconnect-convergence window under
+    /// asymmetric loss.
+    ///
+    /// Callers MUST validate `body.peer_connect_status.len() == num_players`
+    /// first; a mismatched length is silently ignored here (the zipped iterator
+    /// stops at the shorter side) but should already have been rejected upstream.
+    /// The merge is intentionally skipped when the sender itself is disconnecting
+    /// (`body.disconnect_requested`), matching the prior inline behavior.
+    fn merge_peer_connect_status(&mut self, body: &Input) {
+        if body.disconnect_requested {
+            return;
+        }
+        for (local, remote) in self
+            .peer_connect_status
+            .iter_mut()
+            .zip(body.peer_connect_status.iter())
+        {
+            if remote.disconnected || local.disconnected {
+                if local.disconnected && remote.disconnected {
+                    // Both views are freeze frames: take the lower so a relayed
+                    // lowering wins and a stale higher disconnect packet cannot
+                    // un-converge us.
+                    local.last_frame = std::cmp::min(local.last_frame, remote.last_frame);
+                } else if remote.disconnected {
+                    // First time we learn this peer considers the slot
+                    // disconnected: adopt its authoritative freeze frame (its true
+                    // last-received frame for the slot). This may be lower OR higher
+                    // than our stale connected forward-progress value — `min` would
+                    // under-claim a peer that genuinely received the slot through a
+                    // higher frame before it dropped, freezing too early and
+                    // discarding valid confirmed inputs every peer actually received.
+                    local.last_frame = remote.last_frame;
+                }
+                // else: local disconnected, remote still reports connected — a STALE
+                // pre-drop gossip arriving after we already converged the freeze
+                // frame. Do NOT raise `last_frame` (that would re-introduce the
+                // clobber) and do NOT resurrect the slot below.
+                local.disconnected = true;
+            } else {
+                // Both connected: monotone forward progress.
+                local.last_frame = std::cmp::max(local.last_frame, remote.last_frame);
+            }
+        }
+    }
+
     fn on_input(&mut self, body: &Input) {
         // A hot-joiner defers ALL input processing until it has applied the
         // snapshot. Crucially this also defers the ack: acking now would let the
@@ -1461,6 +1525,17 @@ impl<T: Config> UdpProtocol<T> {
             );
             return;
         }
+
+        // Process the disconnect-gossip merge BEFORE the two decode-skip paths
+        // below (the gap-too-large early return and the missing-decode-reference
+        // guard). The merge is loss/reorder/stale safe (see
+        // `merge_peer_connect_status`), so applying it from a packet whose inputs
+        // we cannot decode is strictly correct and lets C's disconnect gossip
+        // reach `update_player_disconnects` even when the carrying packet's inputs
+        // are dropped — narrowing the convergence window under asymmetric loss.
+        // Length/validity are already checked above; ack/input-staging/event
+        // ordering and the recv-time bump intentionally remain gated on decode.
+        self.merge_peer_connect_status(body);
 
         // Validate that received inputs are in a recoverable order.
         // If we receive an input for a frame that's too far ahead, we can't decode it
@@ -1586,48 +1661,9 @@ impl<T: Config> UdpProtocol<T> {
                 && self.state != ProtocolState::Disconnected
                 && !self.disconnect_event_sent;
 
-            // Merge this remote peer's gossiped view of every slot's connect status
-            // into our cached copy. For a CONNECTED slot, `last_frame` is monotone
-            // forward progress and only ever rises. For a DISCONNECTED slot,
-            // `last_frame` is the agreed freeze frame, which must converge DOWNWARD to
-            // the global-min as a lower freeze gossip relays across the mesh: taking
-            // `max` here would clobber a relayed lowering and leave survivors frozen at
-            // different frames for the dropped slot (silent desync). The merge is also
-            // reorder/loss safe — a stale packet can neither regress a connected slot's
-            // progress nor re-raise an already-converged freeze frame.
-            if !body.disconnect_requested {
-                for (local, remote) in self
-                    .peer_connect_status
-                    .iter_mut()
-                    .zip(body.peer_connect_status.iter())
-                {
-                    if remote.disconnected || local.disconnected {
-                        if local.disconnected && remote.disconnected {
-                            // Both views are freeze frames: take the lower so a relayed
-                            // lowering wins and a stale higher disconnect packet cannot
-                            // un-converge us.
-                            local.last_frame = std::cmp::min(local.last_frame, remote.last_frame);
-                        } else if remote.disconnected {
-                            // First time we learn this peer considers the slot
-                            // disconnected: adopt its authoritative freeze frame (its true
-                            // last-received frame for the slot). This may be lower OR higher
-                            // than our stale connected forward-progress value — `min` would
-                            // under-claim a peer that genuinely received the slot through a
-                            // higher frame before it dropped, freezing too early and
-                            // discarding valid confirmed inputs every peer actually received.
-                            local.last_frame = remote.last_frame;
-                        }
-                        // else: local disconnected, remote still reports connected — a STALE
-                        // pre-drop gossip arriving after we already converged the freeze
-                        // frame. Do NOT raise `last_frame` (that would re-introduce the
-                        // clobber) and do NOT resurrect the slot below.
-                        local.disconnected = true;
-                    } else {
-                        // Both connected: monotone forward progress.
-                        local.last_frame = std::cmp::max(local.last_frame, remote.last_frame);
-                    }
-                }
-            }
+            // The connect-status merge ran earlier (before the decode-skip paths)
+            // via `merge_peer_connect_status`, so disconnect gossip converges even
+            // for packets whose inputs we cannot decode.
 
             self.running_last_input_recv = self.now();
             for staged in staged_frames {
@@ -2767,6 +2803,268 @@ mod tests {
         let status = protocol.peer_connect_status(PlayerHandle::new(1));
         assert!(!status.disconnected);
         assert_eq!(status.last_frame, Frame::new(9));
+    }
+
+    // --- F14 arbitration: connect-status gossip vs. the two on_input skips -----
+    //
+    // The contested finding (F14) claims `on_input` drops fresh disconnect gossip
+    // (`body.peer_connect_status`) when the decode-reference frame is missing,
+    // widening the N>=3 disconnect-convergence window. There are TWO early skips
+    // in `on_input` that bypass the connect-status merge:
+    //   1. gap-too-large early return (start_frame too far AHEAD of last_recv+1)
+    //   2. decode-reference-missing guard (`recv_inputs.get(decode_frame)` is None)
+    //
+    // These helpers + tests settle, from the real code:
+    //   (a) which branch a FRESH (newer) ahead-of-window gossip packet hits,
+    //   (b) whether the decode-guard-false branch is reachable carrying FRESH
+    //       gossip or only STALE (pruned-reference) gossip,
+    //   (c) whether skipped gossip is permanently lost or re-delivered by a later
+    //       decodable packet.
+    //
+    // The endpoint owns slot 0 (handle 0); slots 1 ("B") and 2 ("C") are remote.
+    // We drive the gossip for slot 2 ("C dropped"), mirroring the F14 scenario
+    // where B relays C's disconnect to A.
+
+    /// Build a synced, running 3-slot protocol (this endpoint owns slot 0; slots
+    /// 1 and 2 are remote). `recv_inputs` holds only the NULL seed.
+    fn running_protocol_three_slots() -> UdpProtocol<TestConfig> {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 3, 1, 8);
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+        protocol.event_queue.clear();
+        protocol
+    }
+
+    /// Encode a single-frame input batch decoding against `reference_bytes`.
+    fn encode_one_frame(reference_bytes: &[u8], value: u32) -> Vec<u8> {
+        let test_bytes = crate::network::codec::encode(&TestInput { inp: value }).unwrap();
+        crate::network::compression::encode(reference_bytes, std::iter::once(&test_bytes))
+    }
+
+    /// Connect-status vector for [slot0 connected, slot1 connected, slot2 X].
+    fn status_slot2(disconnected: bool, last_frame: i32) -> Vec<ConnectionStatus> {
+        vec![
+            ConnectionStatus::default(),
+            ConnectionStatus::default(),
+            ConnectionStatus {
+                disconnected,
+                last_frame: Frame::new(last_frame),
+            },
+        ]
+    }
+
+    // (a) REACHABILITY: a FRESH gossip packet whose `start_frame` is too far AHEAD
+    //     of the window takes the GAP-TOO-LARGE early return (line ~1472), NOT the
+    //     decode-reference-missing guard. This pins WHICH branch the finding's
+    //     "fresh packet, missing intermediate frames" case actually hits, and is
+    //     the regression guard for the F14 hoist: the connect-status merge now
+    //     runs BEFORE that return, so C's fresh disconnect gossip is applied even
+    //     though the packet's inputs are dropped (no decode reference for them).
+    //     Inputs are still NOT staged (gap too large), proving only the gossip —
+    //     not the undecodable inputs — is processed.
+    #[test]
+    fn on_input_fresh_gossip_too_far_ahead_merges_before_gap_return() {
+        let mut protocol = running_protocol_three_slots();
+
+        // We have received slot inputs up through frame 2 (contiguous run).
+        let bytes = vec![0u8; 4];
+        for f in 0..=2 {
+            protocol.recv_inputs.insert(
+                Frame::new(f),
+                InputBytes {
+                    frame: Frame::new(f),
+                    bytes: bytes.clone(),
+                },
+            );
+        }
+        assert_eq!(protocol.last_recv_frame(), Frame::new(2));
+
+        // A packet for start_frame 10 (far ahead of last_recv+1 = 3) carries FRESH
+        // "C disconnected @ 5" gossip. This is the finding's "fresh packet, missing
+        // intermediate frames" shape.
+        let keys_before: Vec<Frame> = protocol.recv_inputs.keys().copied().collect();
+        protocol.on_input(&Input {
+            start_frame: Frame::new(10),
+            ack_frame: Frame::NULL,
+            bytes: encode_one_frame(&bytes, 99),
+            disconnect_requested: false,
+            peer_connect_status: status_slot2(true, 5),
+        });
+
+        // POST-HOIST: slot 2's drop gossip is applied even though the packet's
+        // inputs were dropped by the gap-too-large branch. (Pre-hoist this stayed
+        // `ConnectionStatus::default()`.)
+        let status = protocol.peer_connect_status(PlayerHandle::new(2));
+        assert!(
+            status.disconnected,
+            "fresh gossip is merged before the gap-too-large return (F14 hoist)"
+        );
+        assert_eq!(status.last_frame, Frame::new(5));
+        // The undecodable inputs are NOT staged: the gap branch still drops them.
+        let keys_after: Vec<Frame> = protocol.recv_inputs.keys().copied().collect();
+        assert_eq!(
+            keys_after, keys_before,
+            "gap-too-large packet stages no inputs; only gossip is processed"
+        );
+    }
+
+    // (b) REACHABILITY: the decode-reference-missing guard (line ~1492 false) is
+    //     reachable ONLY for STALE packets whose `start_frame - 1` was already
+    //     PRUNED (a fresh in-window packet's reference is present, so it decodes;
+    //     a fresh too-far-ahead packet takes the gap branch in (a) instead).
+    //     `recv_inputs` keys are a contiguous run up to last_recv, so the only way
+    //     `start_frame - 1 <= last_recv` is missing is via pruning below
+    //     `last_recv - history_frames`. POST-HOIST, even that stale packet's
+    //     (loss/reorder-safe) gossip is merged, while its redundant inputs remain
+    //     un-staged.
+    #[test]
+    fn on_input_decode_guard_false_only_for_stale_pruned_reference() {
+        let mut protocol = running_protocol_three_slots();
+
+        // Simulate a long-running session: only a HIGH contiguous tail survives
+        // pruning. history_frames = input_history_multiplier(2) * max_prediction(8)
+        // = 16, so frames below last_recv(100) - 16 = 84 are pruned. We keep just
+        // frame 100 (and the NULL seed is irrelevant once last_recv != NULL).
+        let bytes = vec![0u8; 4];
+        protocol.recv_inputs.insert(
+            Frame::new(100),
+            InputBytes {
+                frame: Frame::new(100),
+                bytes: bytes.clone(),
+            },
+        );
+        assert_eq!(protocol.last_recv_frame(), Frame::new(100));
+
+        // A STALE retransmission for start_frame 50 (decode ref = frame 49, long
+        // pruned). It passes the gap-too-large check (50 <= 100 + 1) but the
+        // decode reference is missing -> decode-guard-false branch. It carries the
+        // sender's CURRENT gossip ("C disconnected @ 49").
+        let stale = Input {
+            start_frame: Frame::new(50),
+            ack_frame: Frame::NULL,
+            bytes: encode_one_frame(&bytes, 1),
+            disconnect_requested: false,
+            peer_connect_status: status_slot2(true, 49),
+        };
+        let keys_before: Vec<Frame> = protocol.recv_inputs.keys().copied().collect();
+        protocol.on_input(&stale);
+
+        // POST-HOIST: the gossip is merged even though inputs can't be decoded.
+        // (Pre-hoist the entire body was skipped at the decode guard, leaving
+        // `ConnectionStatus::default()`.)
+        let status = protocol.peer_connect_status(PlayerHandle::new(2));
+        assert!(
+            status.disconnected,
+            "stale-reference packet's gossip is merged post-hoist"
+        );
+        assert_eq!(status.last_frame, Frame::new(49));
+        // No inputs were staged (decode still gated; stale frames are redundant).
+        let keys_after: Vec<Frame> = protocol.recv_inputs.keys().copied().collect();
+        assert_eq!(keys_after, keys_before, "stale packet stages nothing");
+    }
+
+    // (c) The COMMON case the finding's literal target conflates: a packet with a
+    //     LOW (oldest-unacked) start_frame still carries the sender's CURRENT
+    //     (fresh) gossip. As long as its decode reference is NOT pruned (the
+    //     normal steady state, where the reference is within the history window),
+    //     the packet decodes and the fresh gossip is applied. This shows a low
+    //     start_frame does NOT imply skipped gossip even before the hoist.
+    #[test]
+    fn on_input_low_start_frame_with_present_reference_applies_fresh_gossip() {
+        let mut protocol = running_protocol_three_slots();
+
+        // Contiguous received run 0..=5; reference for start_frame 3 is frame 2,
+        // which is present (within the history window).
+        let bytes = vec![0u8; 4];
+        for f in 0..=5 {
+            protocol.recv_inputs.insert(
+                Frame::new(f),
+                InputBytes {
+                    frame: Frame::new(f),
+                    bytes: bytes.clone(),
+                },
+            );
+        }
+        assert_eq!(protocol.last_recv_frame(), Frame::new(5));
+
+        // Oldest-unacked retransmission: start_frame 3 (ref frame 2 present),
+        // carrying FRESH "C disconnected @ 4" gossip. Decodes -> merge runs.
+        protocol.on_input(&Input {
+            start_frame: Frame::new(3),
+            ack_frame: Frame::NULL,
+            bytes: encode_one_frame(&bytes, 42),
+            disconnect_requested: false,
+            peer_connect_status: status_slot2(true, 4),
+        });
+
+        let status = protocol.peer_connect_status(PlayerHandle::new(2));
+        assert!(
+            status.disconnected,
+            "fresh gossip on a low start_frame with present reference is applied"
+        );
+        assert_eq!(status.last_frame, Frame::new(4));
+    }
+
+    // (d) SAFETY of the hoist: applying the merge from an undecodable/stale packet
+    //     must NOT regress an already-converged freeze frame. Converge C's freeze
+    //     to 4 via a decodable packet, then deliver a STALE (pruned-reference)
+    //     packet that re-asserts the higher pre-convergence freeze (8). The merge's
+    //     both-disconnected `min` rule must keep C frozen at 4 — the same
+    //     stale-safety the in-decode merge guaranteed, now proven on the
+    //     undecodable path too.
+    #[test]
+    fn on_input_hoisted_merge_does_not_un_converge_freeze_from_stale_packet() {
+        let mut protocol = running_protocol_three_slots();
+
+        let bytes = vec![0u8; 4];
+        // Decodable packet converges C's freeze frame to 4.
+        protocol.recv_inputs.insert(
+            Frame::new(0),
+            InputBytes {
+                frame: Frame::new(0),
+                bytes: bytes.clone(),
+            },
+        );
+        protocol.on_input(&Input {
+            start_frame: Frame::new(1),
+            ack_frame: Frame::NULL,
+            bytes: encode_one_frame(&bytes, 1),
+            disconnect_requested: false,
+            peer_connect_status: status_slot2(true, 4),
+        });
+        assert_eq!(
+            protocol
+                .peer_connect_status(PlayerHandle::new(2))
+                .last_frame,
+            Frame::new(4)
+        );
+
+        // Advance last_recv far enough that frame 49 is pruned, then deliver a
+        // STALE packet (start_frame 50, ref 49 missing) re-asserting freeze @ 8.
+        protocol.recv_inputs.insert(
+            Frame::new(100),
+            InputBytes {
+                frame: Frame::new(100),
+                bytes: bytes.clone(),
+            },
+        );
+        protocol.on_input(&Input {
+            start_frame: Frame::new(50),
+            ack_frame: Frame::NULL,
+            bytes: encode_one_frame(&bytes, 2),
+            disconnect_requested: false,
+            peer_connect_status: status_slot2(true, 8),
+        });
+
+        // The stale higher freeze must NOT un-converge us: min(4, 8) == 4.
+        let status = protocol.peer_connect_status(PlayerHandle::new(2));
+        assert!(status.disconnected);
+        assert_eq!(
+            status.last_frame,
+            Frame::new(4),
+            "hoisted merge from a stale packet must not re-raise a converged freeze"
+        );
     }
 
     #[test]
