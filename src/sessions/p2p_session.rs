@@ -4,7 +4,6 @@ use crate::network::messages::ConnectionStatus;
 #[cfg(feature = "hot-join")]
 use crate::network::messages::StateSnapshot;
 use crate::network::network_stats::NetworkStats;
-#[cfg(feature = "hot-join")]
 use crate::network::protocol::UdpProtocol;
 use crate::replay::{Replay, ReplayRecorder};
 use crate::safe_frame_sub;
@@ -162,11 +161,6 @@ where
     local_checksum_history: BTreeMap<Frame, u128>,
     /// The last frame we sent a checksum for
     last_sent_checksum_frame: Frame,
-    /// The highest frame at which checksums matched with all peers.
-    /// Used by `sync_health()` to determine if we're in sync.
-    /// `None` means no successful comparison yet, `Some(frame)` means
-    /// checksums matched at that frame (no desync detected up to that point).
-    last_verified_frame: Option<Frame>,
     /// Optional observer for specification violations.
     violation_observer: Option<Arc<dyn ViolationObserver>>,
     /// Optional telemetry observer for session performance events.
@@ -510,7 +504,6 @@ impl<T: Config> P2PSession<T> {
             desync_detection,
             local_checksum_history: BTreeMap::new(),
             last_sent_checksum_frame: Frame::NULL,
-            last_verified_frame: None,
             violation_observer,
             telemetry,
             protocol_config,
@@ -2737,8 +2730,10 @@ impl<T: Config> P2PSession<T> {
             }
         }
 
-        // If we have a verified frame (successful checksum comparison happened), we're in sync
-        if self.last_verified_frame.is_some() {
+        // If THIS peer has a verified frame (a checksum it sent matched our local
+        // history), we're in sync with it. Per-peer so verification against another
+        // remote does not leak into this peer's verdict (an N>=3 logical error).
+        if remote.last_verified_frame.is_some() {
             return Some(SyncHealth::InSync);
         }
 
@@ -2746,11 +2741,23 @@ impl<T: Config> P2PSession<T> {
         Some(SyncHealth::Pending)
     }
 
-    /// Returns `true` if all remote peers show [`SyncHealth::InSync`].
+    /// Returns `true` if every currently-**connected** remote peer shows
+    /// [`SyncHealth::InSync`].
     ///
-    /// This is a convenience method that checks all remote peers at once.
-    /// Returns `false` if any peer is pending or has detected a desync,
-    /// or if there are no remote peers.
+    /// This is a convenience method that checks all connected remote peers at
+    /// once. Returns `false` if any connected peer is pending or has detected a
+    /// desync. Returns `true` if there are no remote peers, or if every remote
+    /// peer is disconnected.
+    ///
+    /// A gracefully-dropped remote (its slot frozen under
+    /// [`DisconnectBehavior::ContinueWithout`]) and a reserved-but-unjoined
+    /// hot-join endpoint do **not** block synchronization: they are excluded
+    /// using the same connection predicate as [`last_verified_frame`]
+    /// ([`remote_is_connected`]). A peer that is still connected but not yet
+    /// verified keeps this `false` until it verifies.
+    ///
+    /// [`last_verified_frame`]: Self::last_verified_frame
+    /// [`remote_is_connected`]: Self::remote_is_connected
     ///
     /// # Example
     ///
@@ -2762,15 +2769,22 @@ impl<T: Config> P2PSession<T> {
     /// ```
     #[must_use]
     pub fn is_synchronized(&self) -> bool {
-        let remote_handles = self.player_reg.remote_player_handles();
-        if remote_handles.is_empty() {
-            // No remote peers - always synchronized with ourselves
-            return true;
-        }
-
-        remote_handles
-            .iter()
-            .all(|&handle| matches!(self.sync_health(handle), Some(SyncHealth::InSync)))
+        // Only currently-connected remotes gate synchronization. A
+        // gracefully-dropped or reserved hot-join endpoint must not block this
+        // forever, mirroring `last_verified_frame()`'s connection-aware filter.
+        self.player_reg
+            .remote_player_handles_iter()
+            .filter(|&handle| {
+                self.player_reg
+                    .handles
+                    .get(&handle)
+                    .and_then(|player_type| match player_type {
+                        PlayerType::Remote(addr) => self.player_reg.remotes.get(addr),
+                        _ => None,
+                    })
+                    .is_some_and(|remote| self.remote_is_connected(remote))
+            })
+            .all(|handle| matches!(self.sync_health(handle), Some(SyncHealth::InSync)))
     }
 
     /// Returns the highest frame for which checksums have been verified to match.
@@ -2780,8 +2794,15 @@ impl<T: Config> P2PSession<T> {
     ///
     /// # Returns
     ///
-    /// * `Some(frame)` - The highest frame where checksums matched between all peers
-    /// * `None` - No checksum comparison has successfully completed yet
+    /// * `Some(frame)` - The highest frame where checksums matched with **every**
+    ///   currently-connected remote peer (the `min` of each connected peer's
+    ///   individually-verified frame).
+    /// * `None` - No checksum comparison has successfully completed with every
+    ///   connected peer yet, or there are no connected remote peers.
+    ///
+    /// Disconnected slots and reserved-but-unjoined hot-join endpoints are
+    /// excluded from the aggregation: a frozen slot that will never send a
+    /// matching checksum must not force this to `None`.
     ///
     /// # Example
     ///
@@ -2796,7 +2817,48 @@ impl<T: Config> P2PSession<T> {
     /// ```
     #[must_use]
     pub fn last_verified_frame(&self) -> Option<Frame> {
-        self.last_verified_frame
+        let mut min_verified: Option<Frame> = None;
+        let mut any_connected = false;
+        for remote in self.player_reg.remotes.values() {
+            if !self.remote_is_connected(remote) {
+                continue;
+            }
+            any_connected = true;
+            match remote.last_verified_frame {
+                // An unverified connected peer makes the whole-mesh verified
+                // frame undefined.
+                None => return None,
+                Some(frame) => {
+                    min_verified = Some(match min_verified {
+                        Some(current) => std::cmp::min(current, frame),
+                        None => frame,
+                    });
+                },
+            }
+        }
+        if any_connected {
+            min_verified
+        } else {
+            None
+        }
+    }
+
+    /// Returns `true` if a remote endpoint counts toward mesh-wide verification.
+    ///
+    /// A remote is connected for this purpose when it is not a reserved
+    /// (hot-join) endpoint and at least one handle it owns is still marked
+    /// connected in `local_connect_status`. This matches the notion of
+    /// "connected" used by the session's disconnect/sync machinery.
+    fn remote_is_connected(&self, remote: &UdpProtocol<T>) -> bool {
+        #[cfg(feature = "hot-join")]
+        if self.hot_join.endpoint_is_reserved(remote) {
+            return false;
+        }
+        remote.handles().iter().any(|handle| {
+            self.local_connect_status
+                .get(handle.as_usize())
+                .is_none_or(|status| !status.disconnected)
+        })
     }
 
     /// Returns detailed synchronization information for all remote peers.
@@ -3244,6 +3306,24 @@ impl<T: Config> P2PSession<T> {
                     } else {
                         std::cmp::min(self.disconnect_frame, disconnect_frame)
                     };
+
+                    // F11: the freeze re-roll above (`set_frozen_value_at`)
+                    // retroactively changed the dropped slot's confirmed input at
+                    // every frame >= disconnect_frame (= F+1), so any checksum we
+                    // already stored — and may already have sent — for those frames
+                    // is now stale. Drop the stale local entries so a survivor's
+                    // correct post-convergence checksum is not compared against our
+                    // pre-convergence value, which would fire a false-positive
+                    // DesyncDetected even though both peers' converged state is
+                    // byte-identical. The entry at F itself is unchanged (the slot
+                    // is frozen AT F, equal to its real input at F) and is
+                    // intentionally kept (F < F+1). Uses the LOCAL `disconnect_frame`
+                    // (= earliest_last_frame + 1) for THIS drop, not the
+                    // min-across-drops `self.disconnect_frame`, to avoid
+                    // over-removing on a later, lower-framed drop. With
+                    // DesyncDetection::Off the map is empty, so this is a no-op.
+                    self.local_checksum_history
+                        .retain(|&frame, _| frame < disconnect_frame);
                 }
             },
             PlayerType::Spectator(addr) => {
@@ -4000,8 +4080,10 @@ impl<T: Config> P2PSession<T> {
                                     addr: remote.peer_addr(),
                                 });
                             } else {
-                                // Checksums match - update last verified frame
-                                self.last_verified_frame = match self.last_verified_frame {
+                                // Checksums match - update this peer's verified frame.
+                                // Per-peer (not session-global) so verification against one
+                                // remote never leaks into another remote's sync verdict.
+                                remote.last_verified_frame = match remote.last_verified_frame {
                                     Some(current) if current >= remote_frame => Some(current),
                                     _ => Some(remote_frame),
                                 };
@@ -4031,6 +4113,29 @@ impl<T: Config> P2PSession<T> {
                 if frame_to_send <= self.sync_layer.last_confirmed_frame()
                     && frame_to_send <= self.sync_layer.last_saved_frame()
                 {
+                    // M1: A disconnect-induced rollback is armed for this
+                    // `advance_frame` (set in `update_player_disconnects`, cleared
+                    // only after `adjust_gamestate`, which runs AFTER this
+                    // function). Its re-simulation has not happened yet, so the
+                    // saved cell at `frame_to_send >= disconnect_frame` still holds
+                    // the dropped peer's PREDICTED input. Sending or storing a
+                    // checksum from that stale cell would (a) re-pollute
+                    // `local_checksum_history` right after the F11 retain cleared it
+                    // — causing a false DesyncDetected when a survivor's correct
+                    // post-convergence checksum arrives — and (b) gossip a stale
+                    // checksum to peers. Defer: `last_sent_checksum_frame` is not
+                    // advanced (the advance happens only inside the
+                    // `if let Some(checksum)` block below), so the same frame is
+                    // re-attempted next `advance_frame` once the cell has been
+                    // re-simulated with the dropped slot frozen at the agreed frame.
+                    // Bounded: `disconnect_frame` is non-null only on a frame
+                    // actively processing a drop (F8's clamp makes `adjust_gamestate`
+                    // infallible, so the clear at the end of `advance_frame` is
+                    // reliable), so this never permanently stalls checksum sending.
+                    if !self.disconnect_frame.is_null() && frame_to_send >= self.disconnect_frame {
+                        return;
+                    }
+
                     let Some(cell) = self.sync_layer.saved_state_by_frame(frame_to_send) else {
                         // This shouldn't happen if frame is within confirmed and saved range
                         report_violation!(
@@ -5291,6 +5396,297 @@ mod tests {
     fn last_verified_frame_with_remote_initially_none() {
         let session = create_two_player_session();
         assert!(session.last_verified_frame().is_none());
+    }
+
+    /// Builds a 3-player session (local + two DISTINCT remote machines B and D)
+    /// with desync detection enabled, used by the F12 per-peer verification tests.
+    fn create_three_player_desync_session() -> P2PSession<TestConfig> {
+        SessionBuilder::new()
+            .with_num_players(3)
+            .unwrap()
+            .with_desync_detection_mode(DesyncDetection::On { interval: 1 })
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("Failed to add local player")
+            .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(1))
+            .expect("Failed to add remote player B")
+            .add_player(PlayerType::Remote(test_addr(8081)), PlayerHandle::new(2))
+            .expect("Failed to add remote player D")
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session")
+    }
+
+    /// F12 regression: with N>=3, a matching checksum from ONE remote (B) must not
+    /// make `sync_health`/`is_synchronized`/`last_verified_frame` report sync for
+    /// another remote (D) that never sent a matching checksum. Pre-fix the
+    /// session-global `last_verified_frame` flag leaked B's verification into D's
+    /// verdict, returning `InSync`/`true` for D.
+    #[test]
+    fn sync_health_verified_peer_does_not_leak_into_unverified_peer() {
+        let mut session = create_three_player_desync_session();
+        let handle_b = PlayerHandle::new(1);
+        let handle_d = PlayerHandle::new(2);
+        let addr_b = test_addr(8080);
+
+        // Advance so a frame-0 checksum can be compared (the comparison skips
+        // frames >= last_confirmed_frame, and last_confirmed_frame starts at NULL).
+        session.sync_layer.advance_frame();
+        session.sync_layer.advance_frame();
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(2), session.save_mode);
+
+        // Local checksum at frame 0; only B sends a MATCHING report for it.
+        let frame = Frame::new(0);
+        let checksum: u128 = 0xABCD_1234;
+        session.local_checksum_history.insert(frame, checksum);
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint exists")
+            .pending_checksums
+            .insert(frame, checksum);
+
+        // Run the production comparison: it should verify B (and only B).
+        session.compare_local_checksums_against_peers();
+
+        assert_eq!(
+            session.sync_health(handle_b),
+            Some(SyncHealth::InSync),
+            "B sent a matching checksum and must report InSync"
+        );
+        assert_eq!(
+            session.sync_health(handle_d),
+            Some(SyncHealth::Pending),
+            "D sent no matching checksum and must stay Pending (no cross-peer leak)"
+        );
+        assert!(
+            !session.is_synchronized(),
+            "is_synchronized() must be false while D is unverified"
+        );
+        assert!(
+            session.last_verified_frame().is_none(),
+            "last_verified_frame() must be None: D (a connected peer) is unverified"
+        );
+    }
+
+    /// F12 follow-up: a remote that gracefully dropped (its slot marked
+    /// disconnected) and never sent a matching checksum must NOT block
+    /// `is_synchronized()`. Only currently-connected remotes gate it. Pre-fix,
+    /// `is_synchronized()` iterated every `PlayerType::Remote` handle regardless
+    /// of connection state, so an unverified-then-dropped peer left it `false`
+    /// forever — breaking the `confirmed_frame() >= target && is_synchronized()`
+    /// exit gate after any graceful drop. The per-peer `sync_health(handle)`
+    /// query keeps reporting each peer's truthful state and is unaffected.
+    #[test]
+    fn dropped_unverified_remote_does_not_block_is_synchronized() {
+        let mut session = create_three_player_desync_session();
+        let handle_b = PlayerHandle::new(1); // stays connected, gets verified
+        let handle_d = PlayerHandle::new(2); // drops, never verified
+        let addr_b = test_addr(8080);
+
+        // Advance so a frame-0 checksum can be compared.
+        session.sync_layer.advance_frame();
+        session.sync_layer.advance_frame();
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(2), session.save_mode);
+
+        // B sends a matching checksum at frame 0; D sends nothing.
+        let frame = Frame::new(0);
+        let checksum: u128 = 0xABCD_1234;
+        session.local_checksum_history.insert(frame, checksum);
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint exists")
+            .pending_checksums
+            .insert(frame, checksum);
+        session.compare_local_checksums_against_peers();
+
+        // D gracefully drops: its slot is marked disconnected. It was never
+        // verified, so its per-peer state is Pending.
+        session.local_connect_status[handle_d.as_usize()].disconnected = true;
+
+        // The dropped, never-verified D must not block synchronization: only
+        // the still-connected, verified B counts.
+        assert!(
+            session.is_synchronized(),
+            "is_synchronized() must be true: the only connected remote (B) is verified \
+             and the dropped never-verified D is excluded"
+        );
+
+        // Per-peer truthful state is preserved: B is InSync, D is not.
+        assert_eq!(
+            session.sync_health(handle_b),
+            Some(SyncHealth::InSync),
+            "B (connected, verified) must report InSync"
+        );
+        assert_ne!(
+            session.sync_health(handle_d),
+            Some(SyncHealth::InSync),
+            "D (dropped, never verified) must NOT report InSync; \
+             sync_health stays per-peer truthful and is not connection-filtered"
+        );
+    }
+
+    /// F11 regression: a graceful drop re-rolls the dropped slot's frozen value to
+    /// the agreed freeze frame `F`, retroactively changing the correct checksum at
+    /// every confirmed frame `> F`. The local checksum history stored (and possibly
+    /// sent) before the drop is now stale for those frames, so it must be
+    /// invalidated for frames `>= disconnect_frame` (= F+1). Otherwise a survivor's
+    /// correct post-convergence checksum at `G > F` is compared against our stale
+    /// pre-convergence entry, firing a false-positive `DesyncDetected`.
+    #[test]
+    fn graceful_drop_invalidates_stale_local_checksums_above_freeze_frame() {
+        let mut session = create_three_player_desync_session();
+        let addr_b = test_addr(8080);
+        let handle_c = PlayerHandle::new(2); // the peer that drops
+        let freeze_frame = Frame::new(5); // agreed freeze frame F
+        let g = Frame::new(8); // a confirmed frame G > F we already checksummed
+
+        // The session ran ahead before the drop converged.
+        for _ in 0..10 {
+            session.sync_layer.advance_frame();
+        }
+
+        // We stored (and may have sent) checksums while C was still connected,
+        // including entries at and above the eventual freeze frame F.
+        for f in 0..10 {
+            session
+                .local_checksum_history
+                .insert(Frame::new(f), 0x1000 + u128::try_from(f).unwrap());
+        }
+        assert!(
+            session.local_checksum_history.contains_key(&g),
+            "precondition: a pre-drop checksum exists at G > F"
+        );
+
+        // C drops; convergence freezes C at F and arms disconnect_frame = F + 1.
+        session.disconnect_player_at_frame(handle_c, freeze_frame);
+
+        // F11: entries strictly above F (>= F+1 = disconnect_frame) are stale and
+        // must be dropped; the entry AT F (frozen value == real input at F) and all
+        // entries below F are kept.
+        assert!(
+            !session.local_checksum_history.contains_key(&g),
+            "stale checksum at G > F must be invalidated after the freeze re-roll"
+        );
+        assert!(
+            session.local_checksum_history.contains_key(&freeze_frame),
+            "checksum at the freeze frame F itself must be kept (unchanged)"
+        );
+        assert!(
+            session.local_checksum_history.contains_key(&Frame::new(4)),
+            "checksums below F must be kept"
+        );
+        assert!(
+            session
+                .local_checksum_history
+                .keys()
+                .all(|&f| f <= freeze_frame),
+            "no checksum entry may remain at or above disconnect_frame (F+1)"
+        );
+
+        // Now a survivor (B) sends its CORRECT post-convergence checksum at G.
+        // With the stale local entry gone, the comparison finds no local checksum
+        // at G and must NOT emit a DesyncDetected.
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(10), session.save_mode);
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint exists")
+            .pending_checksums
+            .insert(g, 0xDEAD_BEEF); // differs from the now-removed stale entry
+        session.compare_local_checksums_against_peers();
+
+        assert!(
+            !session
+                .event_queue
+                .iter()
+                .any(|e| matches!(e, FortressEvent::DesyncDetected { .. })),
+            "no false-positive DesyncDetected after stale checksum invalidation"
+        );
+    }
+
+    /// M1 regression: on the exact `advance_frame` that processes a graceful
+    /// drop, `check_checksum_send_interval` runs BEFORE `adjust_gamestate`'s
+    /// disconnect rollback re-simulates the affected cells. Without the M1 skip
+    /// guard, it would read the still-stale saved cell at
+    /// `frame_to_send >= disconnect_frame` (holding the dropped peer's PREDICTED
+    /// input), then BOTH store that stale checksum into `local_checksum_history`
+    /// (re-polluting it right after the F11 retain cleared it) AND gossip it to
+    /// every remote. The guard must defer (skip) that frame while a disconnect
+    /// rollback is armed, advancing neither `last_sent_checksum_frame` nor the
+    /// history.
+    ///
+    /// Observables (jointly prove the `if let Some(checksum)` send/store block
+    /// did not run, since the send loop, the `last_sent_checksum_frame` advance,
+    /// and the `local_checksum_history.insert` all live inside it):
+    /// - `local_checksum_history` gains NO entry at `frame_to_send`.
+    /// - `last_sent_checksum_frame` is NOT advanced (stays at its pre-call value),
+    ///   so no `ChecksumReport` was queued to any remote for that frame and the
+    ///   frame is re-attempted on the next `advance_frame` after re-simulation.
+    #[test]
+    fn checksum_send_deferred_while_disconnect_rollback_is_armed() {
+        let mut session = create_three_player_desync_session();
+
+        // Build a saved-state ring with a checksum in every cell, mirroring how a
+        // live session populates cells (save_current_state -> cell.save -> advance).
+        // After the loop: last_saved_frame = 8, current_frame = 9.
+        for f in 0..=8 {
+            let request = session.sync_layer.save_current_state();
+            if let FortressRequest::SaveGameState { cell, frame } = request {
+                assert_eq!(frame, Frame::new(f));
+                // A deliberately STALE checksum: the value the pre-rollback
+                // (predicted) cell would carry. The guard must prevent this from
+                // being sent/stored for the deferred frame.
+                cell.save(frame, Some(0u8), Some(0x5742_4C45_u128));
+            }
+            session.sync_layer.advance_frame();
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(8), session.save_mode);
+
+        // interval = 1, so frame_to_send = last_sent_checksum_frame + 1 = 7.
+        let last_sent_before = Frame::new(6);
+        session.last_sent_checksum_frame = last_sent_before;
+        let frame_to_send = Frame::new(7);
+
+        // A disconnect rollback is armed for this advance_frame: disconnect_frame
+        // is set (and NOT yet cleared, since adjust_gamestate runs AFTER
+        // check_checksum_send_interval). frame_to_send (7) >= disconnect_frame (6),
+        // so the cell at 7 is about to be re-simulated and is currently stale.
+        session.disconnect_frame = Frame::new(6);
+
+        // Sanity: the send/store gate (frame_to_send <= confirmed && <= saved) is
+        // satisfied, so ONLY the M1 guard can be responsible for the skip.
+        assert!(frame_to_send <= session.sync_layer.last_confirmed_frame());
+        assert!(frame_to_send <= session.sync_layer.last_saved_frame());
+        assert!(
+            !session.local_checksum_history.contains_key(&frame_to_send),
+            "precondition: history empty at frame_to_send before the call"
+        );
+
+        session.check_checksum_send_interval();
+
+        // M1: the frame was deferred — nothing stored, nothing sent, the send
+        // cursor did not advance (so the frame is retried next advance_frame).
+        assert!(
+            !session.local_checksum_history.contains_key(&frame_to_send),
+            "no stale checksum may be stored for a frame a pending disconnect \
+             rollback will re-simulate (frame_to_send >= disconnect_frame)"
+        );
+        assert_eq!(
+            session.last_sent_checksum_frame, last_sent_before,
+            "last_sent_checksum_frame must NOT advance: the frame is deferred (not \
+             sent to any remote), so it is re-attempted after re-simulation"
+        );
     }
 
     // ==========================================

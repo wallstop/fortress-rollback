@@ -184,6 +184,11 @@ where
 
     // debug desync
     pub(crate) pending_checksums: BTreeMap<Frame, u128>,
+    /// Highest frame at which a checksum this peer sent matched our local
+    /// checksum history. Per-peer so that verification against one remote does
+    /// not leak into another remote's sync verdict (an N>=3 logical error if it
+    /// were session-global). `None` until the first matching checksum.
+    pub(crate) last_verified_frame: Option<Frame>,
     desync_detection: DesyncDetection,
 
     /// Optional deterministic RNG for protocol randomness.
@@ -580,6 +585,7 @@ impl<T: Config> UdpProtocol<T> {
 
             // debug desync
             pending_checksums: BTreeMap::new(),
+            last_verified_frame: None,
             desync_detection,
 
             // deterministic protocol RNG (if configured)
