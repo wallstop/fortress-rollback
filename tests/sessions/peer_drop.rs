@@ -22,14 +22,14 @@ use crate::common::stubs::{GameStub, StateStub, StubConfig, StubInput};
 use crate::common::{
     create_channel_pair, create_channel_quad, create_channel_triple,
     create_filtered_channel_triple, drain_sync_events, poll_with_advance,
-    synchronize_sessions_deterministic, BlockedLinks, FilterSocket, SyncConfig, TestClock,
-    POLL_INTERVAL_DETERMINISTIC,
+    synchronize_sessions_deterministic, BlockedLinks, BusSocket, FilterSocket, RoutingBus,
+    SyncConfig, TestClock, POLL_INTERVAL_DETERMINISTIC,
 };
 use fortress_rollback::{
     telemetry::{CollectingObserver, ViolationSeverity},
     DisconnectBehavior, FortressError, FortressEvent, FortressRequest, Frame, InputStatus,
-    InputVec, P2PSession, PlayerHandle, PlayerType, ProtocolConfig, SessionBuilder, SessionState,
-    SpectatorSession,
+    InputVec, P2PSession, PlayerHandle, PlayerType, ProtocolConfig, SaveMode, SessionBuilder,
+    SessionState, SpectatorSession,
 };
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -2648,6 +2648,664 @@ fn p2p_continue_without_gossip_lowered_disconnect_outside_window_stays_live(
     assert!(
         serious.is_empty(),
         "no Error/Critical violations expected on the gossip-lowered out-of-window path; got: {serious:?}"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Arbitration (contested audit finding F7): "Sparse saving skips re-simulation
+// below a gossip-lowered disconnect frame (N>=3 staggered drop)".
+// ============================================================================
+//
+// Scenario (3 peers A/B/C, `ContinueWithout`, `SaveMode::Sparse`): under
+// asymmetric loss A receives C's DISTINCT inputs through a HIGHER frame than B
+// does (C -> B blocked), so A's `connect_status[C].last_frame` and A's sole
+// sparse-saved state both climb. C then goes silent; both survivors auto-drop
+// it. B (which only ever confirmed C through a LOW frame) gossips that low frame
+// to A. `update_player_disconnects` mines A's agreed frame DOWN to the global
+// min `F` and sets A's `disconnect_frame = F + 1`. On A's next `advance_frame`,
+// `check_simulation_consistency` returns `first_incorrect = F + 1`, but in
+// sparse mode `adjust_gamestate` loads `frame_to_load = last_saved_frame`, which
+// is ABOVE `first_incorrect`. The S20/F8 clamp only raises the load target UP to
+// the window floor, never down to `first_incorrect`, so frames
+// `[first_incorrect, last_saved_frame)` are never re-simulated with C correctly
+// frozen at `F`.
+//
+// F7 claims this leaves A's confirmed history for `[F+1, last_saved_frame)`
+// computed with C's pre-convergence (distinct, high-frame) inputs while B
+// re-simulated those frames with C frozen at `F`, so A and B diverge on the
+// confirmed stream.
+//
+// CRUX of the arbitration (why F7 may already be handled): C's *confirmed input*
+// at every frame `> F` is read via the frozen-slot bypass in
+// `SyncLayer::confirmed_inputs` (`con_stat.disconnected && con_stat.last_frame <
+// frame` -> `queue.last_confirmed_input()`), which `set_frozen_value_at`
+// converges to the same value on EVERY survivor regardless of what is in the
+// re-simulated saved history. But the RECORDED GAME STATE for an un-re-simulated
+// frame still reflects whatever C value A originally simulated with (its distinct
+// high-frame inputs), because `adjust_gamestate` never re-ran those frames. This
+// test settles whether that state actually diverges across survivors on the
+// confirmed stream, or whether the frozen bypass + sparse confirmed-frame
+// clamping makes the gap unobservable on confirmed frames.
+//
+// It asserts byte-identical recorded state across A and B for every mutually
+// confirmed frame. (The genuine `frame_to_load > first_incorrect` Error logged by
+// `adjust_gamestate` is NOT asserted here: it routes through the bare
+// `report_violation!` macro to the global `TracingObserver` only and never reaches
+// a session `CollectingObserver`, so it is unobservable from this test. See the
+// note at the verdict assertion below.) The verdict is whichever way it runs on
+// current code.
+#[test]
+fn p2p_sparse_continue_without_gossip_lowered_disconnect_confirmed_stream_converges(
+) -> Result<(), FortressError> {
+    // Small prediction window so "below last_saved_frame but in window" is easy to
+    // engineer; sparse save mode so the single saved state is what
+    // `adjust_gamestate` loads.
+    const MAX_PREDICTION: usize = 4;
+    let clock = TestClock::new();
+    let (s1, s2, s3, a1, a2, a3, blocked) = create_filtered_channel_triple();
+    let pc = protocol_config(&clock);
+
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(pc.clone())
+        .with_num_players(3)?
+        .with_max_prediction_window(MAX_PREDICTION)
+        .with_save_mode(SaveMode::Sparse)
+        .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+        .with_disconnect_timeout(Duration::from_millis(400))
+        .with_disconnect_notify_delay(Duration::from_millis(100))
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(a2), PlayerHandle::new(1))?
+        .add_player(PlayerType::Remote(a3), PlayerHandle::new(2))?
+        .start_p2p_session(s1)?;
+    let build_remote = |local: PlayerHandle,
+                        socket: FilterSocket,
+                        remotes: [(PlayerHandle, SocketAddr); 2]|
+     -> Result<P2PSession<StubConfig>, FortressError> {
+        let mut builder = SessionBuilder::<StubConfig>::new()
+            .with_protocol_config(pc.clone())
+            .with_num_players(3)?
+            .with_max_prediction_window(MAX_PREDICTION)
+            .with_save_mode(SaveMode::Sparse)
+            .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+            .with_disconnect_timeout(Duration::from_millis(400))
+            .with_disconnect_notify_delay(Duration::from_millis(100))
+            .add_player(PlayerType::Local, local)?;
+        for (handle, addr) in remotes {
+            builder = builder.add_player(PlayerType::Remote(addr), handle)?;
+        }
+        builder.start_p2p_session(socket)
+    };
+    let mut sess2 = build_remote(
+        PlayerHandle::new(1),
+        s2,
+        [(PlayerHandle::new(0), a1), (PlayerHandle::new(2), a3)],
+    )?;
+    let mut sess3 = build_remote(
+        PlayerHandle::new(2),
+        s3,
+        [(PlayerHandle::new(0), a1), (PlayerHandle::new(1), a2)],
+    )?;
+    synchronize_three_sessions(&mut sess1, &mut sess2, &mut sess3, &clock, 500);
+    let _ = drain_events(&mut sess1);
+    let _ = drain_events(&mut sess2);
+    let _ = drain_events(&mut sess3);
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let mut stub3 = GameStub::new();
+    // Per-survivor recorded confirmed state (re-simulated frames overwrite,
+    // so the final value for a confirmed frame is the survivor's settled state).
+    let mut states1: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states2: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut sink: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    // --- Phase 1: warmup, all links open, all three confirm together. C emits
+    // DISTINCT inputs every frame so the dropped slot's frozen value is
+    // frame-sensitive: simulating C's frame-k input vs. its frozen-at-F input
+    // yields different `StateStub` parity, surfacing any un-corrected gap. ---
+    for i in 0..6u32 {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1000,
+            &mut states2,
+        )?;
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 2000,
+            &mut sink,
+        )?;
+    }
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 12);
+
+    // --- Phase 2: block ONLY C -> B. C keeps delivering DISTINCT inputs to A, so
+    // A confirms C through a HIGHER frame than B and A's sole sparse-saved state
+    // climbs with it. ---
+    blocked.block(a3, a2);
+    for i in 0..8u32 {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 2);
+        let _ = try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i + 50,
+            &mut states1,
+        );
+        let _ = try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1050,
+            &mut states2,
+        );
+        let _ = try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 3000,
+            &mut sink,
+        );
+    }
+    // Light poll so A absorbs C's in-flight extra frames (C -> A still open).
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+
+    // --- Phase 3: C goes fully silent. Pump A + B past the disconnect timeout so
+    // both auto-drop C; B's low-frame gossip about C reaches A and mines A's
+    // agreed frame (and `disconnect_frame`) DOWN below A's `last_saved_frame`,
+    // forcing the sparse `frame_to_load > first_incorrect` situation. ---
+    blocked.block(a3, a1);
+    let mut sess1_dropped = false;
+    let mut sess2_dropped = false;
+    for _ in 0..80 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        let _ = try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            500,
+            &mut states1,
+        );
+        let _ = try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            1500,
+            &mut states2,
+        );
+        if sess1
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess1_dropped = true;
+        }
+        if sess2
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess2_dropped = true;
+        }
+    }
+    assert!(
+        sess1_dropped,
+        "sess1 must auto-drop the silent peer for this repro to exercise the gossip-lowered \
+         disconnect path"
+    );
+    assert!(
+        sess2_dropped,
+        "sess2 must auto-drop the silent peer for this repro to exercise the gossip-lowered \
+         disconnect path"
+    );
+
+    // --- Phase 4: let the gossip fully converge and keep both survivors advancing
+    // so their confirmed frames climb past the drop. ---
+    for _ in 0..40 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        let _ = try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            500,
+            &mut states1,
+        );
+        let _ = try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            1500,
+            &mut states2,
+        );
+    }
+
+    assert!(
+        sess1.confirmed_frame().as_i32() > 6,
+        "sess1 confirmed_frame must advance past the warmup/drop; got {:?}",
+        sess1.confirmed_frame()
+    );
+    assert!(
+        sess2.confirmed_frame().as_i32() > 6,
+        "sess2 confirmed_frame must advance past the warmup/drop; got {:?}",
+        sess2.confirmed_frame()
+    );
+
+    // --- Verdict assertion (1): every frame both survivors consider confirmed
+    // (and both recorded) must have byte-equal recorded state. If F7 is real, the
+    // un-re-simulated `[F+1, last_saved_frame)` gap diverges here.
+    //
+    // This state-equality check is the genuine red->green guard for F7. We do NOT
+    // assert on the sparse-mode `frame_to_load > first_incorrect` Error (tagged
+    // "this indicates a bug") emitted by `adjust_gamestate`: that guard uses the
+    // bare `report_violation!` macro, which routes ONLY to the global
+    // `TracingObserver` and never pushes into a session's `CollectingObserver`
+    // (documented at `src/network/protocol/mod.rs` near the
+    // `enqueue_replicated_input_drops_entry_when_pending_output_full` test). The
+    // observer wired onto `sess1` therefore cannot observe that violation, and no
+    // test in this suite installs a `tracing-subscriber` layer to capture it.
+    // Byte-identical confirmed state across survivors is the contract that
+    // actually matters and the divergence the bug produces, so we rely on it. ---
+    let confirmed_bound = std::cmp::min(
+        sess1.confirmed_frame().as_i32(),
+        sess2.confirmed_frame().as_i32(),
+    );
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(i32, StateStub, StateStub)> = Vec::new();
+    for (&frame, &state1) in &states1 {
+        if frame > confirmed_bound {
+            continue;
+        }
+        if let Some(&state2) = states2.get(&frame) {
+            compared += 1;
+            if state1 != state2 {
+                divergences.push((frame, state1, state2));
+            }
+        }
+    }
+    assert!(
+        compared > 0,
+        "no confirmed frames were compared across both survivors (bound={confirmed_bound}); \
+         the repro did not exercise the drop path"
+    );
+    assert!(
+        divergences.is_empty(),
+        "F7: confirmed state diverged across survivors after a gossip-lowered disconnect under \
+         sparse saving (bound={confirmed_bound}, compared={compared}): {divergences:?}"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// ARBITRATION (audit finding F9): host-attached spectator stream convergence
+// when 3rd-peer gossip lowers the agreed freeze frame AFTER frames were
+// already forwarded to the spectator.
+// ============================================================================
+//
+// Scenario (N=3 `ContinueWithout`, spectator attached to the host P0):
+//   - Asymmetric loss: P0 receives P2 through a HIGHER frame than P1.
+//   - P0 directly detects P2's drop (`remove_player`) and freezes P2 "high" at
+//     its own received frame; with P2 excluded, `confirmed_frame` advances and
+//     `send_confirmed_inputs_to_spectators` forwards frames carrying P2's
+//     high-frame value to the attached spectator.
+//   - Later P1's gossip (P2 confirmed only through a LOWER frame) propagates via
+//     `update_player_disconnects`, which mines P0's agreed frame DOWN to the
+//     global-min `F` and re-rolls the frozen value (`set_frozen_value_at`) +
+//     arms a rollback.
+//
+// The player-side stream is re-rollable, so the host's own recorded confirmed
+// inputs for the dropped slot converge to the post-gossip value. The spectator
+// stream is append-only/monotonic (`next_spectator_frame` only `try_add(1)`s and
+// the host only sends `next_spectator_frame..=confirmed_frame`), so if the host
+// forwarded the dropped slot at a value/status that the later gossip changes, the
+// spectator is stranded on the pre-convergence value -> silent desync.
+//
+// This test compares, per frame, the dropped slot's (value, InputStatus) the
+// SPECTATOR surfaces in its `AdvanceFrame` against what the HOST surfaces in its
+// post-convergence `AdvanceFrame` for the same frame. They must be byte-and-status
+// equal. If F9 is real, frames forwarded before convergence differ.
+
+use fortress_rollback::{Message, NonBlockingSocket};
+
+/// A [`BusSocket`] wrapper that drops sends on currently-blocked directional
+/// links (driven by a shared [`BlockedLinks`]). Lets the F9 repro model
+/// directional asymmetric loss on a 4-node mesh (3 players + 1 spectator) that
+/// `create_filtered_channel_triple` (3 nodes only) cannot express, because the
+/// host must also be able to send to the spectator address.
+struct FilterBusSocket {
+    inner: BusSocket,
+    local_addr: SocketAddr,
+    blocked: BlockedLinks,
+}
+
+impl FilterBusSocket {
+    fn new(bus: &RoutingBus, addr: SocketAddr, blocked: BlockedLinks) -> Self {
+        Self {
+            inner: bus.socket(addr),
+            local_addr: addr,
+            blocked,
+        }
+    }
+}
+
+impl NonBlockingSocket<SocketAddr> for FilterBusSocket {
+    fn send_to(&mut self, msg: &Message, addr: &SocketAddr) {
+        if self.blocked.is_blocked_pub(self.local_addr, *addr) {
+            return;
+        }
+        self.inner.send_to(msg, addr);
+    }
+
+    fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
+        self.inner.receive_all_messages()
+    }
+}
+
+/// Handles `requests` against `stub`, recording the dropped slot (player index 2)
+/// `(value, InputStatus)` keyed by the stub's resulting absolute frame. Because
+/// `LoadGameState` resets the stub frame and `AdvanceFrame` increments it,
+/// rollback re-simulations re-key the same frame, so the LAST write per frame is
+/// that frame's post-convergence value.
+fn record_dropped_slot(
+    stub: &mut GameStub,
+    requests: fortress_rollback::RequestVec<StubConfig>,
+    map: &mut BTreeMap<i32, (u32, InputStatus)>,
+) {
+    const DROPPED: usize = 2;
+    for request in requests {
+        match request {
+            FortressRequest::LoadGameState { cell, .. } => {
+                let loaded = cell.load().expect("load cell");
+                stub.gs = loaded;
+            },
+            FortressRequest::SaveGameState { cell, frame } => {
+                let checksum = crate::common::calculate_hash(&stub.gs);
+                cell.save(frame, Some(stub.gs), Some(checksum as u128));
+            },
+            FortressRequest::AdvanceFrame { inputs } => {
+                let dropped = inputs
+                    .get(DROPPED)
+                    .map(|&(input, status)| (input.inp, status));
+                stub.gs.advance_frame_pub(inputs);
+                if let Some(vs) = dropped {
+                    map.insert(stub.gs.frame, vs);
+                }
+            },
+        }
+    }
+}
+
+#[test]
+fn p2p_continue_without_spectator_converges_after_gossip_lowered_freeze_frame(
+) -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let bus = RoutingBus::new();
+    let blocked = BlockedLinks::new();
+
+    let a0: SocketAddr = ([127, 0, 0, 1], 30001).into();
+    let a1: SocketAddr = ([127, 0, 0, 1], 30002).into();
+    let a2: SocketAddr = ([127, 0, 0, 1], 30003).into();
+    let spec_addr: SocketAddr = ([127, 0, 0, 1], 30004).into();
+
+    let s0 = FilterBusSocket::new(&bus, a0, blocked.clone());
+    let s1 = FilterBusSocket::new(&bus, a1, blocked.clone());
+    let s2 = FilterBusSocket::new(&bus, a2, blocked.clone());
+    let spec_socket = FilterBusSocket::new(&bus, spec_addr, blocked.clone());
+
+    let pc = protocol_config(&clock);
+
+    // Host (P0) carries the attached spectator. Generous disconnect timeout so the
+    // explicit `remove_player` direct-detection path fires, not the auto-timeout.
+    let mut host = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(pc.clone())
+        .with_num_players(3)?
+        .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+        .with_disconnect_timeout(Duration::from_secs(5))
+        .with_disconnect_notify_delay(Duration::from_millis(100))
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(a1), PlayerHandle::new(1))?
+        .add_player(PlayerType::Remote(a2), PlayerHandle::new(2))?
+        .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(3))?
+        .start_p2p_session(s0)?;
+
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(pc.clone())
+        .with_num_players(3)?
+        .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+        .with_disconnect_timeout(Duration::from_secs(5))
+        .with_disconnect_notify_delay(Duration::from_millis(100))
+        .add_player(PlayerType::Remote(a0), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .add_player(PlayerType::Remote(a2), PlayerHandle::new(2))?
+        .start_p2p_session(s1)?;
+
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(pc.clone())
+        .with_num_players(3)?
+        .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+        .with_disconnect_timeout(Duration::from_secs(5))
+        .with_disconnect_notify_delay(Duration::from_millis(100))
+        .add_player(PlayerType::Remote(a0), PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(a1), PlayerHandle::new(1))?
+        .add_player(PlayerType::Local, PlayerHandle::new(2))?
+        .start_p2p_session(s2)?;
+
+    let mut spec_sess: SpectatorSession<StubConfig> = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(pc)
+        .with_num_players(3)?
+        .start_spectator_session(a0, spec_socket)
+        .expect("spectator session should start");
+
+    // --- Sync all four together. ---
+    let mut all_synced = false;
+    for _ in 0..1000 {
+        host.poll_remote_clients();
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        spec_sess.poll_remote_clients();
+        if host.current_state() == SessionState::Running
+            && sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+            && spec_sess.current_state() == SessionState::Running
+        {
+            all_synced = true;
+            break;
+        }
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+    assert!(
+        all_synced,
+        "all four sessions must synchronize: host={:?}, sess1={:?}, sess2={:?}, spec={:?}",
+        host.current_state(),
+        sess1.current_state(),
+        sess2.current_state(),
+        spec_sess.current_state(),
+    );
+    let _ = drain_events(&mut host);
+    let _ = drain_events(&mut sess1);
+    let _ = drain_events(&mut sess2);
+    let _: Vec<_> = spec_sess.events().collect();
+
+    let mut host_stub = GameStub::new();
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let mut spec_stub = GameStub::new();
+
+    // Host's recorded per-frame (value, status) for the dropped slot, captured at
+    // every AdvanceFrame the host emits (including re-simulated rollback frames),
+    // so the LAST value recorded for each frame is the post-convergence one. The
+    // absolute frame is read from the stub itself (LoadGameState resets it,
+    // AdvanceFrame increments it), so rollbacks key correctly.
+    let mut host_dropped: BTreeMap<i32, (u32, InputStatus)> = BTreeMap::new();
+    // Spectator's per-frame (value, status) for the dropped slot.
+    let mut spec_dropped: BTreeMap<i32, (u32, InputStatus)> = BTreeMap::new();
+
+    // --- Phase 1: warmup, all links open. ---
+    for i in 0..6_u32 {
+        host.poll_remote_clients();
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        spec_sess.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+
+        host.add_local_input(PlayerHandle::new(0), StubInput { inp: i })?;
+        sess1.add_local_input(PlayerHandle::new(1), StubInput { inp: i + 1000 })?;
+        sess2.add_local_input(PlayerHandle::new(2), StubInput { inp: i + 2000 })?;
+
+        let r0 = host.advance_frame()?;
+        record_dropped_slot(&mut host_stub, r0, &mut host_dropped);
+        let r1 = sess1.advance_frame()?;
+        stub1.handle_requests(r1);
+        let r2 = sess2.advance_frame()?;
+        stub2.handle_requests(r2);
+    }
+    // Let confirmations settle.
+    for _ in 0..10 {
+        host.poll_remote_clients();
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        spec_sess.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+
+    // --- Phase 2: asymmetric loss. Block ONLY P2 -> P1, with DISTINCT P2 inputs,
+    // so the host (P0) receives P2 through a HIGHER frame than P1 does. Keep the
+    // gap to a SINGLE frame so the eventual global-min `F` stays inside the
+    // un-discarded window (mirrors the player-side remove_player F-convergence
+    // repro above). ---
+    blocked.block(a2, a1);
+
+    for i in 0..1_u32 {
+        host.poll_remote_clients();
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        spec_sess.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+
+        host.add_local_input(PlayerHandle::new(0), StubInput { inp: i + 20 })?;
+        sess1.add_local_input(PlayerHandle::new(1), StubInput { inp: i + 1020 })?;
+        // P2 keeps producing DISTINCT values; only the host receives them.
+        sess2.add_local_input(PlayerHandle::new(2), StubInput { inp: i + 3000 })?;
+
+        let r0 = host.advance_frame()?;
+        record_dropped_slot(&mut host_stub, r0, &mut host_dropped);
+        let r1 = sess1.advance_frame()?;
+        stub1.handle_requests(r1);
+        let r2 = sess2.advance_frame()?;
+        stub2.handle_requests(r2);
+    }
+    // One light poll so the host absorbs P2's in-flight extra frame (P2 -> P0
+    // open), but NOT enough to advance mutual confirmation past P1's stalled
+    // P2 frame.
+    host.poll_remote_clients();
+    sess1.poll_remote_clients();
+    sess2.poll_remote_clients();
+    clock.advance(POLL_INTERVAL_DETERMINISTIC);
+
+    // --- Phase 3: the HOST directly detects P2's drop and freezes "high" at its
+    // own (higher) received frame. With P2 excluded, the host's confirmed_frame
+    // advances and forwards frames carrying P2's high-frame value to the
+    // spectator BEFORE the lower gossip arrives. ---
+    host.remove_player(PlayerHandle::new(2))?;
+
+    // Advance the host a few frames solo-ish so it FORWARDS confirmed frames
+    // (with P2 frozen "high") to the spectator before P1's gossip lands. Pump the
+    // spectator here too so it COMMITS those pre-convergence frames.
+    for i in 0..4_u32 {
+        host.poll_remote_clients();
+        sess1.poll_remote_clients();
+        spec_sess.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+
+        host.add_local_input(PlayerHandle::new(0), StubInput { inp: i + 500 })?;
+        let r0 = host.advance_frame()?;
+        record_dropped_slot(&mut host_stub, r0, &mut host_dropped);
+
+        // Spectator consumes whatever the host has forwarded so far.
+        match spec_sess.advance_frame() {
+            Ok(requests) => record_dropped_slot(&mut spec_stub, requests, &mut spec_dropped),
+            Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => {},
+            Err(e) => panic!("spectator advance_frame failed: {:?}", e),
+        }
+    }
+
+    // --- Phase 4: P1 also drops P2 (its own lower received frame) and gossip
+    // propagates so the host mines its agreed frame DOWN to the global-min `F`
+    // and re-rolls + rolls back the dropped slot's value. Keep pumping the
+    // spectator: a CORRECT implementation must re-send / correct the previously
+    // forwarded frames; a buggy one strands the spectator. ---
+    sess1.remove_player(PlayerHandle::new(2))?;
+    for i in 0..40_u32 {
+        host.poll_remote_clients();
+        sess1.poll_remote_clients();
+        spec_sess.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+
+        host.add_local_input(PlayerHandle::new(0), StubInput { inp: i + 700 })?;
+        let r0 = host.advance_frame()?;
+        record_dropped_slot(&mut host_stub, r0, &mut host_dropped);
+
+        // sess1 (the co-survivor) drives gossip; it may legitimately be
+        // throttled (prediction window) or its input dropped while converging.
+        // Tolerate exactly those, propagate anything unexpected.
+        match sess1.add_local_input(PlayerHandle::new(1), StubInput { inp: i + 1700 }) {
+            Ok(()) => match sess1.advance_frame() {
+                Ok(r1) => stub1.handle_requests(r1),
+                Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => {},
+                Err(e) => return Err(e),
+            },
+            Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => {},
+            Err(e) => return Err(e),
+        }
+
+        match spec_sess.advance_frame() {
+            Ok(requests) => record_dropped_slot(&mut spec_stub, requests, &mut spec_dropped),
+            Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => {},
+            Err(e) => panic!("spectator advance_frame failed: {:?}", e),
+        }
+    }
+
+    // --- Verdict: every frame the spectator surfaced for the dropped slot must
+    // match the host's POST-CONVERGENCE (value, status) for that frame. The host
+    // map's last write per frame is post-convergence (rollback re-simulates). ---
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(i32, (u32, InputStatus), (u32, InputStatus))> = Vec::new();
+    for (&frame, &spec_vs) in &spec_dropped {
+        if let Some(&host_vs) = host_dropped.get(&frame) {
+            compared += 1;
+            if spec_vs != host_vs {
+                divergences.push((frame, spec_vs, host_vs));
+            }
+        }
+    }
+
+    assert!(
+        compared > 0,
+        "no dropped-slot frames were compared between spectator and host; \
+         the repro did not exercise the forward-then-gossip path \
+         (spec={spec_dropped:?}, host={host_dropped:?})"
+    );
+    assert!(
+        divergences.is_empty(),
+        "F9: spectator's dropped-slot (value, status) diverged from the host's \
+         post-convergence values after a gossip-lowered freeze frame \
+         (compared={compared}): {divergences:?}\n\
+         full spectator map: {spec_dropped:?}\n\
+         full host map: {host_dropped:?}",
     );
 
     Ok(())

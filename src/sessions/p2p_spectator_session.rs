@@ -1042,7 +1042,40 @@ impl<T: Config> SpectatorSession<T> {
             .map(|(player_index, player_input)| {
                 if let Some(status) = self.host_connect_status.get(player_index) {
                     if status.disconnected && status.last_frame < frame_to_grab {
-                        (player_input.input, InputStatus::Disconnected)
+                        // Frozen-slot value convergence (audit finding F9).
+                        //
+                        // The host's player-side stream surfaces a dropped peer's
+                        // input at the AGREED FREEZE FRAME `F` (=
+                        // `status.last_frame`), NOT the value it happened to have
+                        // forwarded for `frame_to_grab`: `synchronized_inputs` /
+                        // `confirmed_inputs` both return `last_confirmed_input()`,
+                        // the queue value re-rolled to `F` by `set_frozen_value_at`
+                        // every time 3rd-peer gossip mines `F` down (sync_layer
+                        // mod.rs frozen-slot bypass). The spectator stream, however,
+                        // is append-only: the host forwards each frame exactly once
+                        // (`next_spectator_frame` is monotonic) and never re-sends a
+                        // frame whose dropped-slot value a later gossip lowered. So
+                        // if the host had directly detected the drop and frozen
+                        // "high" — forwarding `frame_to_grab`'s pre-convergence
+                        // value before the lower gossip arrived — the spectator's
+                        // committed buffer value for `frame_to_grab` is stale and
+                        // would silently diverge from the mesh.
+                        //
+                        // Fix: surface the value the spectator committed at `F`
+                        // itself (when that slot was still Confirmed), mirroring the
+                        // host's frozen-value semantics. `host_connect_status`
+                        // converges `F` DOWN via `merge_connection_status` (S22), so
+                        // this self-corrects as gossip lowers `F` — no host re-send
+                        // path needed. If the buffered value at `F` is unavailable
+                        // (evicted from the ring, or `F` predates this spectator's
+                        // history), fall back to the forwarded value: that is the
+                        // same `F`-evicted residual the host tolerates, and it
+                        // preserves the prior behaviour for the common case where
+                        // `F` equals the last forwarded frame.
+                        let frozen = self
+                            .frozen_input_at(player_index, status.last_frame)
+                            .unwrap_or(player_input.input);
+                        (frozen, InputStatus::Disconnected)
                     } else {
                         (player_input.input, InputStatus::Confirmed)
                     }
@@ -1064,6 +1097,26 @@ impl<T: Config> SpectatorSession<T> {
                 }
             })
             .collect())
+    }
+
+    /// Returns the dropped slot's committed input value at the agreed freeze frame
+    /// `freeze_frame` (= `host_connect_status[player_index].last_frame`), or `None`
+    /// if that frame is not in the ring buffer (evicted or never committed).
+    ///
+    /// This is the spectator analog of the host's frozen-slot bypass (the dropped
+    /// peer's input at the agreed freeze frame `F`). See the call site in
+    /// [`Self::inputs_at_frame`] for the F9 convergence rationale. The lookup
+    /// validates the buffered entry's frame so a ring-buffer slot reused for a
+    /// later frame is rejected rather than mis-read.
+    fn frozen_input_at(&self, player_index: usize, freeze_frame: Frame) -> Option<T::Input> {
+        // `buffer_index` already returns `None` for null/negative frames
+        // (`Frame::NULL == -1`), so no separate guard is needed.
+        let buffer_index = freeze_frame.buffer_index(self.buffer_size)?;
+        let entry = self.inputs.get(buffer_index)?.get(player_index)?;
+        if entry.frame != freeze_frame {
+            return None;
+        }
+        Some(entry.input)
     }
 
     fn snapshot_input(

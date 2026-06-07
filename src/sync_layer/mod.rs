@@ -924,6 +924,49 @@ impl<T: Config> SyncLayer<T> {
         }
     }
 
+    /// Finds the newest saved frame in the circular buffer that is loadable as a
+    /// rollback target within `[lower_bound, upper_bound]` AND strictly before
+    /// `current_frame`, returning [`Frame::NULL`] when no such state is present.
+    ///
+    /// Both bounds are inclusive. The result is additionally constrained to lie
+    /// strictly in the past (`< current_frame`), since a rollback can only load a
+    /// frame that has already been advanced past. The returned frame, when
+    /// non-NULL, is guaranteed to satisfy [`Self::load_frame`]'s preconditions
+    /// (its cell's stamped frame equals the returned frame), so a subsequent
+    /// `load_frame` call cannot fail with `WrongSavedFrame`.
+    ///
+    /// This is used by sparse-save rollback to locate an *earlier* checkpoint
+    /// when the sole tracked `last_saved_frame` sits ABOVE the rollback target a
+    /// gossip-lowered disconnect demands: the contaminated `last_saved_frame`
+    /// state embeds the dropped peer's pre-convergence inputs, so re-simulating
+    /// from it cannot reproduce the agreed history. The circular buffer often
+    /// still holds the previous sparse checkpoint (taken at or below the agreed
+    /// freeze frame, where the dropped slot's value is identical across
+    /// survivors), and loading that one lets re-simulation converge.
+    pub(crate) fn newest_saved_frame_in_range(
+        &self,
+        lower_bound: Frame,
+        upper_bound: Frame,
+    ) -> Frame {
+        let mut best = Frame::NULL;
+        for cell in self.saved_states.states.iter() {
+            let cell_frame = cell.frame();
+            if cell_frame.is_null() {
+                continue;
+            }
+            if cell_frame < lower_bound
+                || cell_frame > upper_bound
+                || cell_frame >= self.current_frame
+            {
+                continue;
+            }
+            if best.is_null() || cell_frame > best {
+                best = cell_frame;
+            }
+        }
+        best
+    }
+
     /// Loads the gamestate indicated by `frame_to_load`.
     ///
     /// # Errors

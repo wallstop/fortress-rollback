@@ -3385,19 +3385,58 @@ impl<T: Config> P2PSession<T> {
         requests: &mut RequestVec<T>,
     ) -> Result<(), FortressError> {
         let current_frame = self.sync_layer.current_frame();
+        // Floor of the live prediction window; computed up front because the
+        // sparse earlier-checkpoint search below is bounded by it.
+        let window_floor = safe_frame_sub!(
+            current_frame,
+            self.max_prediction as i32,
+            "adjust_gamestate"
+        )
+        .max(Frame::new(0));
+
         // determine the frame to load
         let frame_to_load = if self.save_mode == SaveMode::Sparse {
-            // if sparse saving is turned on, we will rollback to the last saved state
-            self.sync_layer.last_saved_frame()
+            // With sparse saving we normally roll back to the sole tracked saved
+            // state. But when a gossip-lowered disconnect frame drives
+            // `first_incorrect` BELOW `last_saved_frame`, that single saved state
+            // is CONTAMINATED: it embeds the dropped peer's pre-convergence
+            // (predicted/high-frame) inputs for the `[first_incorrect,
+            // last_saved_frame)` window, so re-simulating forward from it would
+            // keep this survivor's confirmed history out of sync with peers that
+            // re-simulated those frames with the dropped slot frozen at the
+            // agreed frame `F` (audit finding F7). Loading the contaminated state
+            // cannot fix its own embedded history. The circular buffer, however,
+            // usually still holds an EARLIER sparse checkpoint taken at or below
+            // `first_incorrect` (sparse saves at confirmed frames roughly every
+            // `max_prediction` frames, and the previous one commonly lands at the
+            // freeze frame, where the dropped slot's value is identical on every
+            // survivor). Prefer that earlier checkpoint so re-simulation restarts
+            // from an uncontaminated base and converges. If no such state is
+            // buffered, fall back to `last_saved_frame` (the gap is then a genuine
+            // unrecoverable residual, still flagged below).
+            let last_saved = self.sync_layer.last_saved_frame();
+            if last_saved > first_incorrect {
+                let earlier = self
+                    .sync_layer
+                    .newest_saved_frame_in_range(window_floor, first_incorrect);
+                if earlier.is_null() {
+                    last_saved
+                } else {
+                    earlier
+                }
+            } else {
+                last_saved
+            }
         } else {
             // otherwise, we will rollback to first_incorrect
             first_incorrect
         };
 
         // we should always load a frame that is before or exactly the first incorrect frame.
-        // This check runs on the UN-clamped `frame_to_load` (sparse mode's `last_saved_frame`,
-        // or `first_incorrect` otherwise) so it still catches the genuine sparse-mode bug where
-        // the single saved state sits above the first incorrect frame.
+        // This check runs on the UN-clamped `frame_to_load` (sparse mode's resolved load frame,
+        // or `first_incorrect` otherwise) so it still catches the genuine sparse-mode case where
+        // no buffered saved state at or below the first incorrect frame remains, leaving the gap
+        // unrecoverable.
         if frame_to_load > first_incorrect {
             report_violation!(
                 ViolationSeverity::Error,
@@ -3420,13 +3459,7 @@ impl<T: Config> P2PSession<T> {
         // frames as possible with the corrected disconnect flags; frames below the floor are
         // unrecoverable (the documented discard-before-convergence residual). For any in-window
         // target this `.max(..)` is a no-op, so the normal prediction-miss rollback path is
-        // unchanged.
-        let window_floor = safe_frame_sub!(
-            current_frame,
-            self.max_prediction as i32,
-            "adjust_gamestate"
-        )
-        .max(Frame::new(0));
+        // unchanged. (`window_floor` is computed once at the top of this function.)
         let load_target = frame_to_load.max(window_floor);
         if load_target > first_incorrect {
             // Legitimate: the rollback target the disconnect convergence asked for fell below the
@@ -5686,6 +5719,149 @@ mod tests {
             session.last_sent_checksum_frame, last_sent_before,
             "last_sent_checksum_frame must NOT advance: the frame is deferred (not \
              sent to any remote), so it is re-attempted after re-simulation"
+        );
+    }
+
+    // ==========================================
+    // F7: last_saved_frame consistency after a deep sparse disconnect rollback
+    // ==========================================
+
+    /// F7 gap-closing regression: after a sparse-mode disconnect rollback loads an
+    /// EARLIER buffered checkpoint `E < last_saved_frame` (the F7 fix), and the
+    /// disconnect adjust runs with `confirmed_frame >= current_frame`, the in-loop
+    /// sparse save (gated on `current_frame == min_confirmed`) never fires — so
+    /// `adjust_gamestate` leaves `last_saved_frame` pinned to the loaded earlier
+    /// frame `E`. This test pins that intermediate state, then drives the very next
+    /// production step (`check_last_saved_state`, exactly as `advance_frame` does)
+    /// and asserts it re-establishes `last_saved_frame` to `min(confirmed_frame,
+    /// current_frame)` via a fresh save at the confirmed frame.
+    ///
+    /// This closes the one corner that could not be proven by inspection of the F7
+    /// fix: that `last_saved_frame` is correctly re-established even when the
+    /// confirmed frame is at/above the current frame at the disconnect adjust (the
+    /// branch where no save happens during re-simulation).
+    #[test]
+    fn sparse_disconnect_rollback_loading_earlier_checkpoint_reestablishes_last_saved_frame() {
+        const MAX_PREDICTION: usize = 4;
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .expect("num_players")
+            .with_save_mode(SaveMode::Sparse)
+            .with_max_prediction_window(MAX_PREDICTION)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(1))
+            .expect("remote player")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+
+        let handle0 = PlayerHandle::new(0);
+        let handle1 = PlayerHandle::new(1);
+
+        // Build a frame-by-frame history that populates BOTH input queues for every
+        // frame in [0, 8) (so re-simulation can fetch real inputs, not a prediction
+        // error) and stamps two sparse checkpoints in the saved-states ring:
+        //   - E = 4  (window floor for current_frame 8, the EARLIER checkpoint)
+        //   - 6      (the contaminated `last_saved_frame`)
+        // After the loop current_frame = 8, last_saved_frame = 6.
+        for f in 0..8i32 {
+            let frame = Frame::new(f);
+            let _ = session
+                .sync_layer
+                .add_local_input(handle0, PlayerInput::new(frame, f as u8));
+            session
+                .sync_layer
+                .add_remote_input(handle1, PlayerInput::new(frame, f as u8));
+            if f == 4 || f == 6 {
+                // Stamp the cell (as a live consumer would on a SaveGameState
+                // request) so `load_frame` accepts it as a valid rollback target.
+                if let FortressRequest::SaveGameState { cell, frame: saved } =
+                    session.sync_layer.save_current_state()
+                {
+                    cell.save(saved, Some(f as u8), Some(u128::from(f as u8)));
+                }
+            }
+            session.sync_layer.advance_frame();
+        }
+        assert_eq!(session.sync_layer.current_frame(), Frame::new(8));
+        assert_eq!(session.sync_layer.last_saved_frame(), Frame::new(6));
+
+        // Disconnect handle 1 at agreed freeze frame F = 4, lowering the rollback
+        // target BELOW `last_saved_frame`. The frozen queue lets `synchronized_inputs`
+        // surface the agreed-frame value during re-simulation instead of a prediction.
+        let freeze_frame = Frame::new(4);
+        session
+            .sync_layer
+            .freeze_player(handle1, freeze_frame)
+            .expect("freeze");
+        if let Some(status) = session.local_connect_status.get_mut(handle1.as_usize()) {
+            status.disconnected = true;
+            status.last_frame = freeze_frame;
+        }
+        // Surviving connected player confirms THROUGH the current frame, so
+        // `confirmed_frame() == current_frame` — the exact corner under test.
+        if let Some(status) = session.local_connect_status.get_mut(handle0.as_usize()) {
+            status.disconnected = false;
+            status.last_frame = Frame::new(8);
+        }
+        let confirmed_frame = session.confirmed_frame();
+        assert_eq!(
+            confirmed_frame,
+            session.sync_layer.current_frame(),
+            "scenario requires confirmed_frame >= current_frame at the disconnect adjust"
+        );
+
+        // The disconnect convergence drives first_incorrect = F + 1 = 5, which is in
+        // [window_floor (4), last_saved_frame (6)). The F7 fix must load the earlier
+        // checkpoint E = 4 (newest stamped frame in [4, 5]) instead of the
+        // contaminated last_saved_frame = 6.
+        let first_incorrect = Frame::new(5);
+        let mut requests = RequestVec::<TestConfig>::new();
+        session
+            .adjust_gamestate(first_incorrect, confirmed_frame, &mut requests)
+            .expect("adjust_gamestate");
+
+        // After the deep rollback, re-simulation returned to current_frame = 8, but
+        // the sparse save (gated on current_frame == min_confirmed == 8) never fired
+        // during the loop, so `last_saved_frame` is pinned to the loaded earlier
+        // checkpoint E = 4. This is the intermediate state the corner is about.
+        assert_eq!(
+            session.sync_layer.current_frame(),
+            Frame::new(8),
+            "re-simulation must return to the original current frame"
+        );
+        assert_eq!(
+            session.sync_layer.last_saved_frame(),
+            Frame::new(4),
+            "deep rollback loaded the earlier checkpoint E=4 and the in-loop sparse \
+             save never fired (min_confirmed == current_frame), so last_saved_frame \
+             is pinned to E"
+        );
+
+        // Now the production follow-up exactly as advance_frame runs it: with
+        // last_saved_frame = 4 and current_frame = 8, the gap is >= max_prediction,
+        // and confirmed_frame (8) >= current_frame (8), so check_last_saved_state
+        // saves the confirmed frame and re-establishes last_saved_frame.
+        let last_saved = session.sync_layer.last_saved_frame();
+        session
+            .check_last_saved_state(last_saved, confirmed_frame, &mut requests)
+            .expect("check_last_saved_state");
+
+        let expected = std::cmp::min(confirmed_frame, session.sync_layer.current_frame());
+        assert_eq!(
+            session.sync_layer.last_saved_frame(),
+            expected,
+            "check_last_saved_state must re-establish last_saved_frame to \
+             min(confirmed_frame, current_frame) after the deep sparse rollback"
+        );
+        assert_eq!(
+            session.sync_layer.last_saved_frame(),
+            Frame::new(8),
+            "last_saved_frame must be re-established to the confirmed current frame"
+        );
+        assert!(
+            session.sync_layer.last_saved_frame() <= session.sync_layer.current_frame(),
+            "INV-8: last_saved_frame must not exceed current_frame"
         );
     }
 

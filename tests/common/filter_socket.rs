@@ -65,6 +65,15 @@ impl BlockedLinks {
             .expect("BlockedLinks mutex poisoned")
             .contains(&(src, dst))
     }
+
+    /// Public alias of [`Self::is_blocked`] for test-defined socket wrappers that
+    /// live outside this module (e.g. the F9 spectator-convergence repro's
+    /// `FilterBusSocket`, which needs a 4-node mesh `FilterSocket`/`ChannelSocket`
+    /// cannot express).
+    #[must_use]
+    pub fn is_blocked_pub(&self, src: SocketAddr, dst: SocketAddr) -> bool {
+        self.is_blocked(src, dst)
+    }
 }
 
 /// A [`ChannelSocket`] wrapper that drops sends on currently-blocked directional

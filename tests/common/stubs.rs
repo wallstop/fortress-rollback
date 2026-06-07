@@ -253,6 +253,14 @@ pub struct StateStub {
 }
 
 impl StateStub {
+    /// Public wrapper around the private `advance_frame` so integration tests can
+    /// drive a `StateStub` directly while reading per-input values/status (used by
+    /// the F9 spectator-convergence repro's hand-rolled request recorder).
+    #[allow(dead_code)]
+    pub fn advance_frame_pub(&mut self, inputs: InputVec<StubInput>) {
+        self.advance_frame(inputs);
+    }
+
     fn advance_frame(&mut self, inputs: InputVec<StubInput>) {
         // Sum all player inputs for deterministic state update
         let total_inputs: u32 = inputs.iter().map(|(input, _)| input.inp).sum();
