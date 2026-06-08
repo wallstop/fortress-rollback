@@ -55,6 +55,7 @@ SPECS=(
     "InputQueue"
     "Concurrency"
     "Rollback"
+    "ChecksumExchange"
     "TimeSync"
     "SpectatorSession"
     "PeerDrop"

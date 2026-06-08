@@ -5721,6 +5721,244 @@ mod tests {
         );
     }
 
+    /// Session-26 desync-harvest lead (NORMAL prediction path) — invariant lock.
+    ///
+    /// `check_checksum_send_interval` harvests the checksum of the saved cell at
+    /// `frame_to_send` via `saved_state_by_frame`, which returns the cell ONLY
+    /// when its stored frame EXACTLY matches `frame_to_send`. This test pins that
+    /// the harvested/stored/sent checksum is the one belonging to `frame_to_send`
+    /// itself — never a different ring slot's value. Combined with the production
+    /// invariant that `last_confirmed_frame` never exceeds `first_incorrect` (so
+    /// a confirmed frame's cell has been re-saved with confirmed inputs after any
+    /// rollback), this is the structural reason a faithful per-frame checksum can
+    /// never be harvested from a speculative cell on the normal path.
+    ///
+    /// Construction writes a DISTINCT, recognizable checksum into the cell at
+    /// `frame_to_send` and a DIFFERENT value into the (later) `current_frame`
+    /// cell. If the harvest ever read the wrong (later/speculative) cell, the
+    /// stored history value would be the later cell's checksum — the assertions
+    /// below would catch it.
+    #[test]
+    fn checksum_harvest_uses_exact_frame_to_send_cell_not_a_later_cell() {
+        let mut session = create_three_player_desync_session(); // interval = 1
+
+        // Populate a contiguous ring: frames 0..=5 each get a UNIQUE checksum.
+        // After the loop: last_saved_frame = 5, current_frame = 6.
+        for f in 0..=5u128 {
+            let request = session.sync_layer.save_current_state();
+            if let FortressRequest::SaveGameState { cell, frame } = request {
+                assert_eq!(frame, Frame::new(f as i32));
+                // Unique, frame-derived checksum so a wrong-cell read is visible.
+                cell.save(frame, Some(0u8), Some(0xC0DE_0000 + f));
+            }
+            session.sync_layer.advance_frame();
+        }
+
+        // Confirm through frame 3. No disconnect armed (normal path).
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(3), session.save_mode);
+        session.disconnect_frame = Frame::NULL;
+
+        // interval = 1, last_sent_checksum_frame NULL => frame_to_send = 1.
+        let frame_to_send = Frame::new(1);
+        assert!(frame_to_send <= session.sync_layer.last_confirmed_frame());
+        assert!(frame_to_send <= session.sync_layer.last_saved_frame());
+
+        session.check_checksum_send_interval();
+
+        // The stored checksum must be EXACTLY the cell-at-frame_to_send value,
+        // not the current/last-saved (speculative) cell's value.
+        let expected = 0xC0DE_0000 + 1u128;
+        assert_eq!(
+            session.local_checksum_history.get(&frame_to_send).copied(),
+            Some(expected),
+            "harvest must take the checksum of the cell at frame_to_send, not a later cell"
+        );
+        assert_eq!(
+            session.last_sent_checksum_frame, frame_to_send,
+            "harvest of a confirmed, exact-match cell advances the send cursor"
+        );
+        // Sanity: the later (current_frame) cell carried a DIFFERENT checksum, so
+        // the equality above genuinely discriminates wrong-cell reads.
+        assert_ne!(expected, 0xC0DE_0000 + 5u128);
+    }
+
+    /// Session-26 desync-harvest lead (NORMAL prediction path) — the OTHER half of
+    /// the invariant: the harvest is gated on `frame_to_send <= last_confirmed_frame`
+    /// (and `<= last_saved_frame`). A cell that is SAVED but NOT yet CONFIRMED must
+    /// NEVER be harvested, even though its `saved_state_by_frame` lookup would
+    /// succeed (the cell exists and its stored frame matches). This is what stops a
+    /// speculative cell above `last_confirmed_frame` — which may still hold
+    /// predicted inputs that a pending rollback will overwrite — from being gossiped.
+    ///
+    /// Construction: a fully-populated ring (frames 0..=5, each with a unique
+    /// checksum) so `saved_state_by_frame(1)` WOULD return a cell, but
+    /// `last_confirmed_frame` is held at 0. With interval = 1 and
+    /// `last_sent_checksum_frame` NULL, `frame_to_send = 1 > last_confirmed_frame`,
+    /// so the gate must skip the harvest entirely.
+    ///
+    /// Non-vacuity (verified by probe): dropping the `frame_to_send <=
+    /// last_confirmed_frame` conjunct in `check_checksum_send_interval`
+    /// (`src/sessions/p2p_session.rs` ~4145) turns this test RED — the speculative
+    /// cell at frame 1 would then be harvested and stored. The cell genuinely
+    /// exists (so the skip is attributable to the confirmed-frame gate, not a
+    /// `saved_state_by_frame` miss), which is exactly the discriminating property.
+    #[test]
+    fn checksum_harvest_skips_speculative_cell_above_last_confirmed_frame() {
+        let mut session = create_three_player_desync_session(); // interval = 1
+
+        // Populate a contiguous ring: frames 0..=5 each get a UNIQUE checksum.
+        // After the loop: last_saved_frame = 5, current_frame = 6.
+        for f in 0..=5u128 {
+            let request = session.sync_layer.save_current_state();
+            if let FortressRequest::SaveGameState { cell, frame } = request {
+                assert_eq!(frame, Frame::new(f as i32));
+                cell.save(frame, Some(0u8), Some(0xBEEF_0000 + f));
+            }
+            session.sync_layer.advance_frame();
+        }
+
+        // Confirm ONLY through frame 0, so frame 1 is SAVED but NOT confirmed.
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(0), session.save_mode);
+        session.disconnect_frame = Frame::NULL;
+
+        // interval = 1, last_sent_checksum_frame NULL => frame_to_send = 1.
+        let frame_to_send = Frame::new(1);
+        // The cell EXISTS and its stored frame matches (an exact-match hit), so a
+        // skip here can ONLY be the confirmed-frame gate, not a lookup miss.
+        assert!(
+            session
+                .sync_layer
+                .saved_state_by_frame(frame_to_send)
+                .is_some(),
+            "the speculative cell at frame_to_send must exist (exact-match hit), so \
+             the skip is attributable to the <= last_confirmed_frame gate"
+        );
+        // The gate's precondition: frame_to_send is ABOVE last_confirmed_frame.
+        assert!(frame_to_send > session.sync_layer.last_confirmed_frame());
+        // ...but within the saved range (so ONLY the confirmed gate can skip it).
+        assert!(frame_to_send <= session.sync_layer.last_saved_frame());
+
+        session.check_checksum_send_interval();
+
+        // The speculative cell must NOT be harvested: no history entry, send cursor
+        // unmoved. (Removing the `<= last_confirmed_frame` conjunct makes both of
+        // these fail — the cell-at-1 checksum 0xBEEF_0001 would be stored.)
+        assert!(
+            !session.local_checksum_history.contains_key(&frame_to_send),
+            "a SAVED-but-UNCONFIRMED speculative cell must not be harvested"
+        );
+        assert!(
+            session.last_sent_checksum_frame.is_null(),
+            "send cursor must not advance when frame_to_send exceeds last_confirmed_frame"
+        );
+    }
+
+    /// Session-26 desync-harvest lead — sparse `SaveMode` coverage for the
+    /// harvest's EXACT-MATCH `saved_state_by_frame` behavior.
+    ///
+    /// In sparse mode only a single checkpoint is kept (at the confirmed frame);
+    /// the other ring slots hold stale frames from earlier saves. The harvest must
+    /// rely on `saved_state_by_frame` returning a cell ONLY on an EXACT frame
+    /// match: when `frame_to_send` has no matching checkpoint, the lookup returns
+    /// `None` and the harvest is SKIPPED — it must never read a stale/gap cell that
+    /// happens to occupy `frame_to_send`'s ring slot.
+    ///
+    /// Construction: a sparse session whose ring has `MAX_PREDICTION + 1 = 9`
+    /// cells, so frame 10 maps to the SAME ring slot as `frame_to_send = 1`. We
+    /// stamp a single checksummed checkpoint at frame 10 (a "stale" wrapped cell,
+    /// from frame 1's perspective) and leave the rest of the ring at defaults.
+    /// `saved_state_by_frame(1)` then finds a cell whose stored frame is 10, not 1
+    /// — an EXACT-MATCH MISS — so it returns `None` and the harvest is skipped.
+    /// Crucially the wrapped cell CARRIES a checksum, so a guard-less lookup would
+    /// genuinely harvest a wrong value (not a no-op default cell).
+    ///
+    /// Non-vacuity (verified by probe): replacing the `saved_state_by_frame`
+    /// exact-match guard with a raw `Some(cell)` (i.e. dropping the
+    /// `cell_frame == frame` check in `src/sync_layer/mod.rs` ~1305) turns this RED
+    /// — the harvest would then read the stale wrapped cell at slot 1 and store its
+    /// checksum (`0x5A5A_000A`) at frame 1. With the real exact-match guard, no
+    /// entry is stored.
+    #[test]
+    fn checksum_harvest_sparse_exact_match_miss_skips_no_stale_read() {
+        const MAX_PREDICTION: usize = 8; // ring size = MAX_PREDICTION + 1 = 9
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(3)
+            .expect("num_players")
+            .with_desync_detection_mode(DesyncDetection::On { interval: 1 })
+            .with_save_mode(SaveMode::Sparse)
+            .with_max_prediction_window(MAX_PREDICTION)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(1))
+            .expect("remote player B")
+            .add_player(PlayerType::Remote(test_addr(8081)), PlayerHandle::new(2))
+            .expect("remote player D")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        assert_eq!(session.save_mode, SaveMode::Sparse);
+
+        // Advance to frame 10 WITHOUT saving anything in between, then stamp the
+        // SINGLE sparse checkpoint at frame 10. Frame 10 maps to ring slot
+        // 10 % 9 == 1 — the SAME slot as frame_to_send = 1. So slot 1 ends up
+        // holding a cell whose stored frame is 10 (with a checksum), while every
+        // other slot is still at its default (frame NULL). This is the stale
+        // wrapped cell that an exact-match lookup at frame 1 must reject.
+        for _ in 0..10 {
+            session.sync_layer.advance_frame();
+        }
+        let request = session.sync_layer.save_current_state();
+        if let FortressRequest::SaveGameState { cell, frame } = request {
+            assert_eq!(frame, Frame::new(10));
+            cell.save(frame, Some(0u8), Some(0x5A5A_000A));
+        }
+        session.sync_layer.advance_frame(); // current_frame = 11
+
+        // Confirm through frame 10 (== last_saved_frame; sparse clamps to it).
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(10), session.save_mode);
+        session.disconnect_frame = Frame::NULL;
+        assert_eq!(
+            session.sync_layer.last_confirmed_frame(),
+            Frame::new(10),
+            "sparse confirm should land at the frame-10 checkpoint"
+        );
+
+        // interval = 1, last_sent_checksum_frame NULL => frame_to_send = 1.
+        let frame_to_send = Frame::new(1);
+        // The gate conjuncts pass: frame 1 <= last_confirmed (10) and <= last_saved
+        // (10). The ONLY thing that stops the harvest is the EXACT-MATCH miss.
+        assert!(frame_to_send <= session.sync_layer.last_confirmed_frame());
+        assert!(frame_to_send <= session.sync_layer.last_saved_frame());
+        assert!(
+            session
+                .sync_layer
+                .saved_state_by_frame(frame_to_send)
+                .is_none(),
+            "sparse mode keeps only the frame-10 checkpoint, which occupies frame \
+             1's ring slot; the exact-match lookup at frame 1 must MISS (it must \
+             not return the wrapped frame-10 cell)"
+        );
+
+        session.check_checksum_send_interval();
+
+        // Exact-match miss => harvest skipped: no history entry at frame 1. (The
+        // production `report_violation!` Warning on the `None` branch is expected
+        // here and is NOT a panic.) The cursor stays put so frame 1 is retried.
+        assert!(
+            !session.local_checksum_history.contains_key(&frame_to_send),
+            "an exact-match miss must skip the harvest, never read a stale ring cell"
+        );
+        assert!(
+            session.last_sent_checksum_frame.is_null(),
+            "send cursor must not advance on an exact-match miss"
+        );
+    }
+
     // ==========================================
     // F7: last_saved_frame consistency after a deep sparse disconnect rollback
     // ==========================================

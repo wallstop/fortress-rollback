@@ -26,13 +26,13 @@ This directory contains TLA+ specifications for formally verifying the correctne
 
 | File | Config | Status | Description |
 |------|--------|--------|-------------|
-| `NetworkProtocol.tla` | `NetworkProtocol.cfg` | ✓ CI | UDP protocol state machine |
+| `NetworkProtocol.tla` | `NetworkProtocol.cfg` | ✓ CI | Sync-handshake + peer-drop state machine (N=3 peers) |
 | `InputQueue.tla` | `InputQueue.cfg` | ✓ CI | Circular buffer input queue |
 | `Rollback.tla` | `Rollback.cfg` | ✓ CI | Rollback mechanism |
 | `Concurrency.tla` | `Concurrency.cfg` | ✓ CI | GameStateCell thread safety |
-| `ChecksumExchange.tla` | `ChecksumExchange.cfg` | ✓ CI | Checksum exchange for desync detection |
+| `ChecksumExchange.tla` | `ChecksumExchange.cfg` | ✓ CI | Checksum exchange for desync detection (pinned N=2, see cfg) |
 | `SpectatorSession.tla` | `SpectatorSession.cfg` | ✓ CI | Spectator session with frame delay and catchup |
-| `TimeSync.tla` | `TimeSync.cfg` | ✓ CI | Time synchronization for peer frame rate coordination |
+| `TimeSync.tla` | `TimeSync.cfg` | ✓ CI | Time synchronization for peer frame rate coordination (pinned N=2, see cfg) |
 | `PeerDrop.tla` | `PeerDrop.cfg` | ✓ CI | Halt vs ContinueWithout peer-drop policy model |
 | `NPeerReactivation.tla` | `NPeerReactivation.cfg` | ✓ CI | N-peer mesh reconnection activation-frame agreement (Agreement C) |
 
@@ -207,10 +207,11 @@ Each spec has a `.cfg` file with TLC-compatible settings:
 
 | Config File | Key Constants | State Space |
 |-------------|---------------|-------------|
-| `NetworkProtocol.cfg` | MAX_FRAME=5, randomId=1..5 | ~12,000 states |
+| `NetworkProtocol.cfg` | PEERS={p1,p2,p3}, NUM_SYNC_PACKETS=1 | ~170,000 distinct states (~2.6M generated) |
 | `InputQueue.cfg` | QUEUE_LENGTH=4, MAX_FRAME=6 | ~77,000 states |
 | `Concurrency.cfg` | MAX_FRAME=4 | Small |
 | `Rollback.cfg` | MAX_PREDICTION=1, MAX_FRAME=3 | ~52M states |
+| `ChecksumExchange.cfg` | PEERS={p1,p2}, MAX_FRAME=4 | ~6,000 distinct states (~21k generated) |
 
 **Note on NULL_FRAME:** TLC config files don't support negative numbers,
 so we use `NULL_FRAME = 999` as a sentinel value instead of -1.

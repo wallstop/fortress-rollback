@@ -12,6 +12,7 @@ mod common;
 
 // Session test modules
 mod sessions {
+    pub mod desync_harvest;
     #[cfg(feature = "hot-join")]
     pub mod hot_join;
     pub mod input_delay;
