@@ -6737,4 +6737,440 @@ mod tests {
              (Synchronizing) after rearm"
         );
     }
+
+    // ======================================================================
+    // Finding A (Completeness-Critic #3): update_player_disconnects folds the
+    // agreed min over RUNNING endpoints only. Arbitration verdict on HEAD:
+    // NOTABUG. These tests pin WHY the is_running() filter is safe, prove the
+    // filter is the load-bearing line (non-vacuity), and prove a survivor's
+    // genuine lower view is already permanently mined into our OWN local view
+    // before it could ever go non-running (recoverability).
+    // ======================================================================
+
+    /// Builds an `A(local) + B,C,D(remote)` session with three DISTINCT remote
+    /// endpoints, so each survivor's `peer_connect_status` can be driven
+    /// independently. (`num_players = 4`: handle 0 = local A, 1 = B, 2 = C,
+    /// 3 = D.) The session is forced live with every remote endpoint `Running`,
+    /// the same pattern the F13 / multi-handle disconnect tests use.
+    fn build_abcd_live_session() -> (P2PSession<TestConfig>, SocketAddr, SocketAddr, SocketAddr) {
+        let addr_b = test_addr(9401);
+        let addr_c = test_addr(9402);
+        let addr_d = test_addr(9403);
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(4)
+            .expect("4 players is valid")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local A is valid")
+            .add_player(PlayerType::Remote(addr_b), PlayerHandle::new(1))
+            .expect("remote B is valid")
+            .add_player(PlayerType::Remote(addr_c), PlayerHandle::new(2))
+            .expect("remote C is valid")
+            .add_player(PlayerType::Remote(addr_d), PlayerHandle::new(3))
+            .expect("remote D is valid")
+            .start_p2p_session(DummySocket)
+            .expect("session should build");
+        for addr in [addr_b, addr_c, addr_d] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("remote endpoint must exist at build time")
+                .force_running_for_tests();
+        }
+        session.state = SessionState::Running;
+        (session, addr_b, addr_c, addr_d)
+    }
+
+    /// Faithful model: dropped peer C is non-running the production way (its
+    /// endpoint already disconnected); survivor B is non-running the ONLY
+    /// production Running->non-running survivor way — a hot-join rearm, which
+    /// rebuilds the endpoint via `new()` and RESETS `peer_connect_status` to
+    /// defaults `{disconnected:false, last_frame:NULL}`. D stays running with a
+    /// real low view of C. With B holding only a default (NULL) view, excluding
+    /// it from the min loses nothing: the converged freeze frame for C is the
+    /// correct global min over the REAL (running) views.
+    #[test]
+    fn update_player_disconnects_nonrunning_survivor_holds_default_view_converges_to_real_min() {
+        // Arrange.
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let c = PlayerHandle::new(2);
+
+        // C is the dropped peer: its endpoint is disconnected (non-running) AND
+        // our own local view of C is marked disconnected — the synchronous pair
+        // the disconnect path always sets together. Local view of C starts high
+        // (frame 100) so the propagation re-adjust path is exercised.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_c)
+            .expect("C endpoint")
+            .disconnect();
+        session.local_connect_status[c.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+        };
+
+        // Survivor D stays RUNNING and reports a genuine low view of C: C's
+        // input is only confirmed through frame 5 from D's perspective.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_d)
+            .expect("D endpoint")
+            .set_peer_connect_status_for_tests(
+                c,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(5),
+                },
+            );
+
+        // Survivor B goes non-running the production way: a hot-join rearm
+        // rebuilds it via new(), so its peer_connect_status is reset to default
+        // (disconnected=false, last_frame=NULL). It holds NO lower view of C.
+        // (Done by hand here so the test compiles without the hot-join feature;
+        // `rearm_for_rejoin` is the production caller and is asserted to produce
+        // exactly this state by the protocol-layer tests.)
+        {
+            let b_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_b)
+                .expect("B endpoint");
+            b_endpoint.set_peer_connect_status_for_tests(c, ConnectionStatus::default());
+            b_endpoint.force_synchronizing_for_tests();
+            assert!(!b_endpoint.is_running(), "B must be non-running (rearmed)");
+        }
+
+        // Act.
+        session.update_player_disconnects();
+
+        // Assert: C converged to the real global min over running views. D said
+        // 5; our local view was 100. min(5, 100) = 5. B's reset default view is
+        // correctly irrelevant — it never held a lower number to lose.
+        assert!(
+            session.local_connect_status[c.as_usize()].disconnected,
+            "C must be marked disconnected after propagation"
+        );
+        assert_eq!(
+            session.local_connect_status[c.as_usize()].last_frame,
+            Frame::new(5),
+            "C must converge to the real global-min freeze frame from the running survivor D"
+        );
+    }
+
+    /// NON-VACUITY: manufacture the (production-unreachable) state where B is
+    /// non-running BUT still holds a LOWER view of C, then run the exact same
+    /// scenario with B RUNNING. The ONLY difference between the two runs is
+    /// `endpoint.is_running()` for B (toggled via the blessed test helper). The
+    /// non-running run EXCLUDES B's lower view (min = D's 7); the running run
+    /// INCLUDES it (min = B's 3). This proves the `is_running()` filter is the
+    /// load-bearing line driving the behavior — not some incidental default.
+    #[test]
+    fn update_player_disconnects_is_running_filter_drives_min_inclusion() {
+        // Helper that builds the identical scenario and toggles ONLY B's running
+        // state, returning C's converged freeze frame.
+        fn converged_c_frame(b_running: bool) -> Frame {
+            let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+            let c = PlayerHandle::new(2);
+
+            // C dropped; our local view of C is high so re-adjust fires.
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr_c)
+                .expect("C endpoint")
+                .disconnect();
+            session.local_connect_status[c.as_usize()] = ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(100),
+            };
+
+            // D (always running) reports C confirmed through frame 7.
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr_d)
+                .expect("D endpoint")
+                .set_peer_connect_status_for_tests(
+                    c,
+                    ConnectionStatus {
+                        disconnected: true,
+                        last_frame: Frame::new(7),
+                    },
+                );
+
+            // B holds a STRICTLY LOWER view of C (frame 3). The ONLY thing we
+            // vary across the two runs is whether B is running.
+            {
+                let b_endpoint = session
+                    .player_reg
+                    .remotes
+                    .get_mut(&addr_b)
+                    .expect("B endpoint");
+                b_endpoint.set_peer_connect_status_for_tests(
+                    c,
+                    ConnectionStatus {
+                        disconnected: true,
+                        last_frame: Frame::new(3),
+                    },
+                );
+                if b_running {
+                    b_endpoint.force_running_for_tests();
+                } else {
+                    b_endpoint.force_synchronizing_for_tests();
+                }
+                assert_eq!(
+                    b_endpoint.is_running(),
+                    b_running,
+                    "B's running state must match the parameter under test"
+                );
+            }
+
+            session.update_player_disconnects();
+            session.local_connect_status[c.as_usize()].last_frame
+        }
+
+        // Act + Assert.
+        let frame_b_nonrunning = converged_c_frame(false);
+        let frame_b_running = converged_c_frame(true);
+
+        // B non-running: its lower view (3) is EXCLUDED; min is D's 7.
+        assert_eq!(
+            frame_b_nonrunning,
+            Frame::new(7),
+            "non-running B's lower view (3) must be excluded; min is the running survivor D's 7"
+        );
+        // B running: its lower view (3) is INCLUDED; min drops to 3.
+        assert_eq!(
+            frame_b_running,
+            Frame::new(3),
+            "running B's lower view (3) must be included, lowering the converged min to 3"
+        );
+        // The delta between the two outcomes is attributable SOLELY to the
+        // is_running() filter — the only line that changed behavior between runs.
+        assert_ne!(
+            frame_b_nonrunning, frame_b_running,
+            "the is_running() filter must be the sole cause of the differing converged min"
+        );
+    }
+
+    /// RECOVERABILITY: a survivor B's genuine lower view of C, observed WHILE B
+    /// was running, is folded into our OWN local view of C during
+    /// `update_player_disconnects`. Once B subsequently goes non-running (its
+    /// view reset by a rearm), a fresh cycle CANNOT un-converge our local view:
+    /// it stays at the mined-down value permanently. So nothing a non-running
+    /// survivor "knew" is lost — it was already permanently captured.
+    #[test]
+    fn update_player_disconnects_mined_local_view_is_permanent_after_survivor_goes_nonrunning() {
+        // Arrange: C dropped; our local view of C starts high (100).
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let c = PlayerHandle::new(2);
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_c)
+            .expect("C endpoint")
+            .disconnect();
+        session.local_connect_status[c.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+        };
+
+        // B is RUNNING and reports a low view of C (frame 4). D running, higher (9).
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .set_peer_connect_status_for_tests(
+                c,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(4),
+                },
+            );
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_d)
+            .expect("D endpoint")
+            .set_peer_connect_status_for_tests(
+                c,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(9),
+                },
+            );
+
+        // Act 1: first cycle with B running mines our local view of C down to 4.
+        session.update_player_disconnects();
+        assert_eq!(
+            session.local_connect_status[c.as_usize()].last_frame,
+            Frame::new(4),
+            "first cycle (B running) must mine our local view of C down to B's low 4"
+        );
+
+        // B now goes non-running the production way: its view is RESET to default
+        // (NULL) by the rearm, and it stops contributing to the min.
+        {
+            let b_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_b)
+                .expect("B endpoint");
+            b_endpoint.set_peer_connect_status_for_tests(c, ConnectionStatus::default());
+            b_endpoint.force_synchronizing_for_tests();
+        }
+
+        // Act 2: a fresh cycle now sees only D (9) among running survivors plus
+        // our own (already-mined) local view of 4.
+        session.update_player_disconnects();
+
+        // Assert: our local view STAYS at 4 — the mined-down value is permanent.
+        // `local_min_confirmed` (4) is folded UNCONDITIONALLY and min(4, 9) = 4,
+        // so B going non-running can NOT un-converge what it already taught us.
+        assert_eq!(
+            session.local_connect_status[c.as_usize()].last_frame,
+            Frame::new(4),
+            "the mined-down local view (4) must persist after B goes non-running — \
+             nothing a non-running survivor knew is lost"
+        );
+    }
+
+    // ======================================================================
+    // Finding B (Completeness-Critic #5): max_frame_advantage folds a
+    // multi-handle endpoint's average once per handle and gates on
+    // local_connect_status.disconnected rather than endpoint.is_running().
+    // Arbitration verdict on HEAD: NOTABUG. These tests pin idempotence of the
+    // per-handle max() fold and that the disconnected gate excludes a draining
+    // multi-handle endpoint while counting a connected+running one.
+    // ======================================================================
+
+    /// Idempotence: a 2-handle endpoint with a seeded per-endpoint average X is
+    /// folded once per handle via `max(interval, avg)`. Because
+    /// `average_frame_advantage()` is per-ENDPOINT (independent of handle),
+    /// `max(X, X) == X` — NOT 2X. Non-vacuous: an additive fold would read 2X.
+    #[test]
+    fn max_frame_advantage_multi_handle_endpoint_is_idempotent_not_additive() {
+        // Arrange: 3-player session with a SINGLE remote endpoint owning BOTH
+        // remote handles (1 and 2) — couch co-op behind one address.
+        let mut session = create_multi_handle_remote_session();
+        let addr = test_addr(8080);
+        let seeded = 11;
+        {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("multi-handle endpoint must exist");
+            endpoint.force_running_for_tests();
+            endpoint.seed_frame_advantage_for_tests(seeded);
+            // Precondition: the endpoint owns exactly the two remote handles, so
+            // the inner per-handle loop folds the same average twice.
+            assert_eq!(
+                endpoint.handles().len(),
+                2,
+                "endpoint must own both remote handles for the per-handle fold to run twice"
+            );
+            assert_eq!(
+                endpoint.average_frame_advantage(),
+                seeded,
+                "seed helper must make the per-endpoint average exactly the target"
+            );
+        }
+        // Both remote handles are connected in our local view.
+        session.local_connect_status[1] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(0),
+        };
+        session.local_connect_status[2] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(0),
+        };
+
+        // Act.
+        let advantage = session.max_frame_advantage();
+
+        // Assert: the per-handle max() fold is idempotent — X, not 2X.
+        assert_eq!(
+            advantage,
+            seeded,
+            "max() fold over both handles must yield the per-endpoint average X ({seeded}), \
+             not the additive 2X ({})",
+            seeded * 2
+        );
+        assert_ne!(
+            advantage,
+            seeded * 2,
+            "an additive (per-handle accumulating) fold would have produced 2X — it must not"
+        );
+    }
+
+    /// Exclusion gate: a draining multi-handle endpoint whose handles are marked
+    /// `disconnected` in `local_connect_status` is EXCLUDED (contributes
+    /// nothing), while a connected+running endpoint with a seeded advantage IS
+    /// counted. Confirms `!status.disconnected` excludes the same set an
+    /// `is_running()` guard would (the disconnect path sets endpoint non-running
+    /// and status.disconnected together, synchronously).
+    #[test]
+    fn max_frame_advantage_excludes_disconnected_multi_handle_counts_connected_running() {
+        // --- Case 1: a disconnected multi-handle endpoint is excluded. ---
+        let mut session = create_multi_handle_remote_session();
+        let addr = test_addr(8080);
+        {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("multi-handle endpoint must exist");
+            endpoint.force_running_for_tests();
+            endpoint.seed_frame_advantage_for_tests(42);
+        }
+        // Both of the endpoint's handles are disconnected in our local view —
+        // the production-faithful state (the disconnect path marks every
+        // affected handle's status.disconnected = true).
+        session.local_connect_status[1] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(10),
+        };
+        session.local_connect_status[2] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(10),
+        };
+
+        let advantage_when_disconnected = session.max_frame_advantage();
+        assert_eq!(
+            advantage_when_disconnected, 0,
+            "a fully-disconnected multi-handle endpoint must contribute nothing \
+             (max_frame_advantage falls back to 0 when no connected remote is folded)"
+        );
+
+        // --- Case 2: a connected+running endpoint with a seeded advantage is
+        // counted. ---
+        let mut session = create_multi_handle_remote_session();
+        {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("multi-handle endpoint must exist");
+            endpoint.force_running_for_tests();
+            endpoint.seed_frame_advantage_for_tests(42);
+        }
+        session.local_connect_status[1] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(10),
+        };
+        session.local_connect_status[2] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(10),
+        };
+
+        let advantage_when_connected = session.max_frame_advantage();
+        assert_eq!(
+            advantage_when_connected, 42,
+            "a connected+running endpoint's seeded average must be counted"
+        );
+    }
 }

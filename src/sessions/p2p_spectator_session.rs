@@ -1107,7 +1107,7 @@ impl<T: Config> SpectatorSession<T> {
     /// peer's input at the agreed freeze frame `F`). See the call site in
     /// [`Self::inputs_at_frame`] for the F9 convergence rationale. The lookup
     /// validates the buffered entry's frame so a ring-buffer slot reused for a
-    /// later frame is rejected rather than mis-read.
+    /// later frame is rejected rather than misread.
     fn frozen_input_at(&self, player_index: usize, freeze_frame: Frame) -> Option<T::Input> {
         // `buffer_index` already returns `None` for null/negative frames
         // (`Frame::NULL == -1`), so no separate guard is needed.
@@ -1266,6 +1266,75 @@ impl<T: Config> SpectatorSession<T> {
         false
     }
 
+    /// Returns the dropped-slot freeze frame (`ConnectionStatus.last_frame`) that
+    /// `host_index` reported for `player_index` in its staged snapshot at `frame`,
+    /// or `None` if there is no matching snapshot or the host does not report that
+    /// slot as disconnected there.
+    fn snapshot_freeze_frame(
+        &self,
+        host_index: usize,
+        frame: Frame,
+        player_index: usize,
+    ) -> Option<Frame> {
+        let buffer_index = frame.buffer_index(self.buffer_size)?;
+        let snapshot = self
+            .host_snapshots
+            .get(host_index)?
+            .get(buffer_index)?
+            .as_ref()?;
+        if snapshot.frame != frame {
+            return None;
+        }
+        let status = snapshot.status.get(player_index)?;
+        if !status.disconnected {
+            return None;
+        }
+        Some(status.last_frame)
+    }
+
+    /// Folds a dropped slot's freeze frame down to the global minimum reported by
+    /// ANY connected host with a staged snapshot at `frame`, returning the
+    /// converged status.
+    ///
+    /// This is the spectator analog of the mesh's asymmetric-loss convergence
+    /// (c25fc1f): under packet loss two hosts can freeze the same dropped peer at
+    /// DIFFERENT frames. The spectator replays a dropped slot from `self.inputs[F]`
+    /// where `F` is the adopted freeze frame, so it must adopt the GLOBAL-MIN `F`
+    /// across all hosts — that is the only frame every survivor confirmed the same
+    /// value for. The existing [`merge_connection_status`] converges DOWN only when
+    /// the host reporting the lower `F` becomes the canonical committer; if a host
+    /// with the higher `F` is permanently canonical (e.g. always host index 0),
+    /// the lower-`F` host's value is never folded in and the spectator replays a
+    /// frozen value from the non-overlapping region that no other host vouched for.
+    /// Pre-folding the canonical status against every connected host's staged
+    /// freeze frame closes that gap regardless of canonical-host selection.
+    fn converged_drop_status(
+        &self,
+        canonical_host_index: usize,
+        frame: Frame,
+        player_index: usize,
+        canonical_status: ConnectionStatus,
+    ) -> ConnectionStatus {
+        if !canonical_status.disconnected {
+            return canonical_status;
+        }
+        let mut converged = canonical_status;
+        for other_host_index in 0..self.hosts.len() {
+            if other_host_index == canonical_host_index {
+                continue;
+            }
+            if self.host_is_disconnect_pending(other_host_index) {
+                continue;
+            }
+            if let Some(other_freeze_frame) =
+                self.snapshot_freeze_frame(other_host_index, frame, player_index)
+            {
+                converged.last_frame = std::cmp::min(converged.last_frame, other_freeze_frame);
+            }
+        }
+        converged
+    }
+
     fn try_commit_ready_frames(&mut self) {
         self.try_commit_ready_frames_with_pending_host(None);
     }
@@ -1380,16 +1449,17 @@ impl<T: Config> SpectatorSession<T> {
             }
         }
 
-        let Some(snapshot) = self
-            .host_snapshots
-            .get(host_index)
-            .and_then(|host| host.get(buffer_index))
-            .and_then(Option::as_ref)
-        else {
-            return;
-        };
         for player_index in 0..self.num_players {
-            let Some(status) = snapshot.status.get(player_index).copied() else {
+            // Re-borrow per player so `converged_drop_status` (which borrows
+            // `&self.host_snapshots`/`&self.hosts`) does not conflict with the
+            // mutable `host_connect_status` borrow below.
+            let Some(canonical_status) = self
+                .host_snapshots
+                .get(host_index)
+                .and_then(|host| host.get(buffer_index))
+                .and_then(Option::as_ref)
+                .and_then(|snapshot| snapshot.status.get(player_index).copied())
+            else {
                 report_violation_to!(
                     &self.violation_observer,
                     ViolationSeverity::Error,
@@ -1400,6 +1470,15 @@ impl<T: Config> SpectatorSession<T> {
                 );
                 return;
             };
+            // Converge a dropped slot's freeze frame DOWN to the global minimum
+            // across every connected host with a staged snapshot at this frame —
+            // not just the canonical host. Without this, a host that permanently
+            // holds the canonical role while reporting a HIGHER freeze frame makes
+            // the spectator replay `self.inputs[F_high]`, a frozen value from the
+            // non-overlapping region that the lower-`F` host never vouched for
+            // (the c25fc1f asymmetric-loss desync, spectator-side).
+            let status =
+                self.converged_drop_status(host_index, frame, player_index, canonical_status);
             if let Some(slot) = self.host_connect_status.get_mut(player_index) {
                 // Reactivation-safe merge rather than raw overwrite: the canonical
                 // host can oscillate across frames (redundant hosts failing over
@@ -1537,10 +1616,45 @@ impl<T: Config> SpectatorSession<T> {
             return;
         }
 
+        // Late-arrival convergence: if this host's dropped-slot freeze frame is
+        // LOWER than the freeze frame the spectator already latched (e.g. the
+        // higher-`F` host raced ahead and committed first), converge DOWN so the
+        // dropped slot replays the global-min frozen value. Commit-time
+        // `converged_drop_status` only sees hosts already staged when the frame
+        // commits; this closes the non-overlapping ordering where the lower-`F`
+        // host arrives after the commit (the c25fc1f asymmetric-loss desync).
+        if !host_disconnect_pending {
+            self.converge_latched_drop_status(host_index, input.frame);
+        }
+
         if input.frame > self.last_recv_frame {
             self.try_commit_ready_frames_with_pending_host(
                 host_disconnect_pending.then_some(host_index),
             );
+        }
+    }
+
+    /// Converges the spectator's latched per-player freeze frame DOWN to a
+    /// connected host's lower reported freeze frame for an already-observed frame.
+    ///
+    /// Mirrors [`Self::converged_drop_status`] for the late-arrival ordering: a
+    /// host whose dropped-slot freeze frame is lower than the latched
+    /// `host_connect_status` value lowers it (never raises), so the dropped slot
+    /// replays the global-min frozen value regardless of canonical-host selection
+    /// or arrival order. Only lowers an already-disconnected slot; it never
+    /// reactivates, re-drops, or raises a freeze frame.
+    fn converge_latched_drop_status(&mut self, host_index: usize, frame: Frame) {
+        for player_index in 0..self.num_players {
+            let Some(host_freeze_frame) =
+                self.snapshot_freeze_frame(host_index, frame, player_index)
+            else {
+                continue;
+            };
+            if let Some(slot) = self.host_connect_status.get_mut(player_index) {
+                if slot.disconnected && host_freeze_frame < slot.last_frame {
+                    slot.last_frame = host_freeze_frame;
+                }
+            }
         }
     }
 
@@ -2663,6 +2777,472 @@ mod tests {
                 player,
             }) if event_frame == frame && player == PlayerHandle::new(0)
         ));
+    }
+
+    // Completeness-Critic #2 arbitration (A): divergent dropped-slot streams that
+    // land on DIFFERENT frames per host (non-overlapping at commit time). Host 0
+    // commits frames 0..=2 ahead of any other host; then host 1 forwards a
+    // DIVERGENT player-0 value for one of those already-committed frames. The
+    // claim is that the staged-disagreement first loop returns None (no overlap)
+    // and divergence is silently missed. This test pins the ACTUAL behavior of the
+    // SECOND block (committed-frame comparison) in detect_staged_input_disagreement
+    // and is NON-VACUOUS: mutating the `committed_input.equal(&input, true)` guard
+    // to a no-op makes it fail (confirmed during arbitration).
+    #[test]
+    fn spectator_nonoverlapping_divergent_late_stream_latches_divergence() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(
+                &[test_addr(7401), test_addr(7402), test_addr(7403)],
+                DummySocket,
+            )
+            .unwrap();
+        let status = vec![ConnectionStatus::default(); 2];
+
+        // Host 0 races ahead and the spectator commits frames 0,1,2 from it alone.
+        // Hosts 1 and 2 have NOT delivered these frames yet, so the staged
+        // first-loop comparison finds None and the canonical-commit comparison
+        // (detect_snapshot_disagreement) also finds None for the other hosts.
+        for f in 0..=2 {
+            let frame = Frame::new(f);
+            // test:
+            session.handle_host_input(
+                0,
+                PlayerInput::new(frame, 11),
+                PlayerHandle::new(0),
+                status.clone(),
+                test_addr(7401),
+            );
+            // test:
+            session.handle_host_input(
+                0,
+                PlayerInput::new(frame, 22),
+                PlayerHandle::new(1),
+                status.clone(),
+                test_addr(7401),
+            );
+        }
+        assert_eq!(session.last_recv_frame, Frame::new(2));
+
+        // Now host 1 forwards a DIVERGENT player-0 value (99) for frame 1, which is
+        // already committed (1 <= last_recv_frame == 2). Non-overlapping at commit.
+        // test:
+        session.handle_host_input(
+            1,
+            PlayerInput::new(Frame::new(1), 99),
+            PlayerHandle::new(0),
+            status,
+            test_addr(7402),
+        );
+
+        assert!(
+            session.spectator_divergence.is_some(),
+            "non-overlapping late divergent stream must be caught by the committed-frame block"
+        );
+        assert!(matches!(
+            session.advance_frame(),
+            Err(FortressError::SpectatorDivergence {
+                frame: event_frame,
+                player,
+            }) if event_frame == Frame::new(1) && player == PlayerHandle::new(0)
+        ));
+    }
+
+    // Completeness-Critic #2 arbitration (B): the c25fc1f playback analog. Player 1
+    // is the dropped slot. Two hosts froze it at DIFFERENT freeze frames and the
+    // committed value at the AGREED freeze frame F is what the spectator's
+    // freeze-bypass (`frozen_input_at`) plays back for every frame > F. This test
+    // proves the freeze-bypass introduces no NEW silent divergence: the value
+    // played back at frames > F is exactly `self.inputs[F]`, whose correctness is
+    // guarded by the same disagreement detection at frame F. Host 1 commits the
+    // agreed freeze frame F=1 (canonical, value 50). Host 0 then forwards a
+    // DIVERGENT value (60) for the SAME frame F=1; the late committed-frame block
+    // catches it before any frame > F can play back a divergent frozen value.
+    #[test]
+    fn spectator_frozen_slot_divergent_value_at_freeze_frame_latches_before_playback() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7411), test_addr(7412)], DummySocket)
+            .unwrap();
+        // Player 1 dropped at freeze frame F = 1 on both hosts.
+        let dropped = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(1),
+        };
+        let status = vec![ConnectionStatus::default(), dropped];
+
+        // Frame 0: agreed by both (player 1 still confirmed for setup).
+        // Host 0 is canonical and commits frames 0 and 1 first (value 50 at F=1).
+        for (frame, p1) in [(Frame::new(0), 40_u8), (Frame::new(1), 50_u8)] {
+            // test:
+            session.handle_host_input(
+                0,
+                PlayerInput::new(frame, 11),
+                PlayerHandle::new(0),
+                status.clone(),
+                test_addr(7411),
+            );
+            // test:
+            session.handle_host_input(
+                0,
+                PlayerInput::new(frame, p1),
+                PlayerHandle::new(1),
+                status.clone(),
+                test_addr(7411),
+            );
+        }
+        assert_eq!(session.last_recv_frame, Frame::new(1));
+        let f1_index = Frame::new(1).buffer_index(session.buffer_size).unwrap();
+        // Committed value at freeze frame F=1 is host 0's value (50). The freeze
+        // playback would surface THIS value for every frame > 1.
+        assert_eq!(session.inputs[f1_index][1].input, 50_u8);
+
+        // Host 0 advances to frame 2 so F=1 < live edge (freeze playback active).
+        // test:
+        session.handle_host_input(
+            0,
+            PlayerInput::new(Frame::new(2), 12),
+            PlayerHandle::new(0),
+            status.clone(),
+            test_addr(7411),
+        );
+        // (player 1 is dropped; host stops forwarding new player-1 inputs)
+        assert_eq!(session.last_recv_frame, Frame::new(1));
+
+        // Host 1 NOW forwards its DIVERGENT frozen value (60) for the freeze frame
+        // F=1. This is the value the mesh actually agreed; if it is silently
+        // dropped, the spectator plays back host 0's stale 50 for every frame > 1.
+        // test:
+        session.handle_host_input(
+            1,
+            PlayerInput::new(Frame::new(1), 60),
+            PlayerHandle::new(1),
+            status,
+            test_addr(7412),
+        );
+
+        assert!(
+            session.spectator_divergence.is_some(),
+            "divergent value at the freeze frame must latch before freeze playback can serve it"
+        );
+        assert!(matches!(
+            session.advance_frame(),
+            Err(FortressError::SpectatorDivergence {
+                frame: event_frame,
+                player,
+            }) if event_frame == Frame::new(1) && player == PlayerHandle::new(1)
+        ));
+    }
+
+    // Completeness-Critic #2 arbitration (C): the TRUE non-overlapping gap. The
+    // dropped slot (player 1) is frozen at DIFFERENT freeze frames per host under
+    // asymmetric loss. Host 0 (ALWAYS canonical, index 0, connected) froze HIGH at
+    // F_A = 2 with value 50. Host 1 received the dropped peer only through F_B = 1
+    // and froze at the mesh-agreed value 60 (the global-min freeze frame). Because
+    // host 0 is canonical, the spectator's host_connect_status freezes at F_A = 2,
+    // and the freeze-bypass plays back self.inputs[2] (= 50) for every frame >= 2.
+    // Host 1 never forwarded player 1 at frame 2 (its last received was frame 1),
+    // so there is NO host-1 snapshot at frame 2 to compare against -- the
+    // non-overlapping region. The mesh value 60 (host 1's frozen value at its lower
+    // freeze frame) is never reconciled. If divergence is silently missed, this is
+    // the spectator analog of the c25fc1f asymmetric-loss desync.
+    #[test]
+    fn spectator_asymmetric_freeze_frame_nonoverlapping_region_divergence() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7421), test_addr(7422)], DummySocket)
+            .unwrap();
+
+        // Frame 0: both hosts agree, player 1 still connected.
+        let connected = vec![ConnectionStatus::default(); 2];
+        // test:
+        session.handle_host_input(
+            0,
+            PlayerInput::new(Frame::new(0), 11),
+            PlayerHandle::new(0),
+            connected.clone(),
+            test_addr(7421),
+        );
+        // test:
+        session.handle_host_input(
+            0,
+            PlayerInput::new(Frame::new(0), 40),
+            PlayerHandle::new(1),
+            connected.clone(),
+            test_addr(7421),
+        );
+        assert_eq!(session.last_recv_frame, Frame::new(0));
+
+        // Host 0 froze player 1 HIGH at F_A = 2 (drop detected late). It forwards
+        // player 1 through frame 2 with value 50, reporting disconnected@last_frame=2.
+        let dropped_at_2 = vec![
+            ConnectionStatus::default(),
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(2),
+            },
+        ];
+        // CRITICAL: at the OVERLAPPING frame 1 host 0 forwards the SAME value the
+        // mesh agreed (60) so the overlap region is clean. Only at frame 2 (the
+        // NON-overlapping region, where host 1 never forwarded player 1) does host
+        // 0's later-frozen value 50 appear. This isolates the divergence to the
+        // non-overlapping frozen region exactly as the finding describes.
+        for (frame, p1) in [(Frame::new(1), 60_u8), (Frame::new(2), 50_u8)] {
+            // test:
+            session.handle_host_input(
+                0,
+                PlayerInput::new(frame, 12),
+                PlayerHandle::new(0),
+                dropped_at_2.clone(),
+                test_addr(7421),
+            );
+            // test:
+            session.handle_host_input(
+                0,
+                PlayerInput::new(frame, p1),
+                PlayerHandle::new(1),
+                dropped_at_2.clone(),
+                test_addr(7421),
+            );
+        }
+        assert_eq!(session.last_recv_frame, Frame::new(2));
+
+        // Host 1 received player 1 only through F_B = 1 and froze at the mesh-agreed
+        // value 60 (global-min freeze). It forwards player 0 through frame 2 (to
+        // overlap host 0 on player 0) and player 1 ONLY through frame 1 with 60.
+        let dropped_at_1 = vec![
+            ConnectionStatus::default(),
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(1),
+            },
+        ];
+        // test:
+        session.handle_host_input(
+            1,
+            PlayerInput::new(Frame::new(0), 11),
+            PlayerHandle::new(0),
+            connected.clone(),
+            test_addr(7422),
+        );
+        // test:
+        session.handle_host_input(
+            1,
+            PlayerInput::new(Frame::new(0), 40),
+            PlayerHandle::new(1),
+            connected,
+            test_addr(7422),
+        );
+        // Host 1's DIVERGENT frozen player-1 value 60 at its freeze frame F_B = 1.
+        // test:
+        session.handle_host_input(
+            1,
+            PlayerInput::new(Frame::new(1), 12),
+            PlayerHandle::new(0),
+            dropped_at_1.clone(),
+            test_addr(7422),
+        );
+        // test:
+        session.handle_host_input(
+            1,
+            PlayerInput::new(Frame::new(1), 60),
+            PlayerHandle::new(1),
+            dropped_at_1.clone(),
+            test_addr(7422),
+        );
+        // Host 1 forwards player 0 at frame 2 (overlap on the live slot) but NOT
+        // player 1 (frozen below frame 2).
+        // test:
+        session.handle_host_input(
+            1,
+            PlayerInput::new(Frame::new(2), 12),
+            PlayerHandle::new(0),
+            dropped_at_1,
+            test_addr(7422),
+        );
+
+        // Without the global-min freeze-frame convergence, the spectator silently
+        // freezes player 1 at host 0's HIGH frame F_A = 2 and replays
+        // self.inputs[2][1] = 50 for every frame >= 2 while the mesh agreed on 60
+        // -- a silent cross-host desync in the non-overlapping region. With the fix,
+        // the freeze frame converges DOWN to the global-min F_B = 1 across all
+        // connected hosts and the spectator replays the mesh-agreed value 60.
+        assert!(
+            session.spectator_divergence.is_none(),
+            "asymmetric freeze frames must converge, not fail closed (matches the \
+             existing convergence design)"
+        );
+        assert_eq!(
+            session.host_connect_status[1].last_frame,
+            Frame::new(1),
+            "freeze frame must converge DOWN to the global-min F_B = 1"
+        );
+        let played_frame2 = session.inputs_at_frame(Frame::new(2)).unwrap();
+        assert_eq!(
+            played_frame2[1].0, 60_u8,
+            "dropped slot must replay the mesh-agreed frozen value (60), not host 0's stale 50"
+        );
+        assert_eq!(played_frame2[1].1, InputStatus::Disconnected);
+    }
+
+    // Completeness-Critic #2 coverage (commit-time path). Same asymmetric-loss
+    // mesh as `spectator_asymmetric_freeze_frame_nonoverlapping_region_divergence`,
+    // but the distinguishing ORDERING exercises `converged_drop_status` (the
+    // commit-time fold), NOT `converge_latched_drop_status` (the late-arrival fold).
+    // Here the non-canonical lower-`F` host (host 1, F_B = 1) has its snapshots for
+    // EVERY frame STAGED BEFORE the canonical higher-`F` host (host 0, F_A = 2)
+    // commits them. When host 0 finally arrives and the spectator commits frame 2,
+    // host 1's frame-2 snapshot (player 1 disconnected@last_frame=1) is already
+    // staged, so the commit-time fold lowers host 0's freeze frame DOWN to the
+    // global-min F_B = 1 at COMMIT time -- before any late-arrival fold could run.
+    // (`host_connect_status[1]` is never disconnected while only host 1 is staged,
+    // so the late-arrival path is inert throughout.) This pins the commit-time path
+    // that the late-arrival test leaves unverified.
+    #[test]
+    fn spectator_asymmetric_freeze_frame_converges_at_commit_time_when_lower_host_staged_first() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7431), test_addr(7432)], DummySocket)
+            .unwrap();
+
+        let connected = vec![ConnectionStatus::default(); 2];
+        // Host 1 received player 1 only through F_B = 1 and froze at the mesh-agreed
+        // value 60 (the global-min freeze frame).
+        let dropped_at_1 = vec![
+            ConnectionStatus::default(),
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(1),
+            },
+        ];
+
+        // ORDERING: deliver ALL of host 1's snapshots FIRST so they are STAGED
+        // before host 0 (the canonical committer) arrives. Nothing commits yet --
+        // host 0 (index 0, always connected) is canonical and not yet staged.
+        // Frame 0: player 1 still connected (value 40).
+        // test:
+        session.handle_host_input(
+            1,
+            PlayerInput::new(Frame::new(0), 11),
+            PlayerHandle::new(0),
+            connected.clone(),
+            test_addr(7432),
+        );
+        // test:
+        session.handle_host_input(
+            1,
+            PlayerInput::new(Frame::new(0), 40),
+            PlayerHandle::new(1),
+            connected.clone(),
+            test_addr(7432),
+        );
+        // Frame 1: host 1 freezes player 1 at F_B = 1 with the mesh-agreed value 60.
+        // test:
+        session.handle_host_input(
+            1,
+            PlayerInput::new(Frame::new(1), 12),
+            PlayerHandle::new(0),
+            dropped_at_1.clone(),
+            test_addr(7432),
+        );
+        // test:
+        session.handle_host_input(
+            1,
+            PlayerInput::new(Frame::new(1), 60),
+            PlayerHandle::new(1),
+            dropped_at_1.clone(),
+            test_addr(7432),
+        );
+        // Frame 2: host 1 forwards player 0 (overlap on the live slot) but NOT
+        // player 1 (frozen below frame 2). Its frame-2 snapshot still reports player
+        // 1 disconnected@last_frame=1 -- the lower freeze frame the commit-time fold
+        // must read when host 0 commits frame 2.
+        // test:
+        session.handle_host_input(
+            1,
+            PlayerInput::new(Frame::new(2), 12),
+            PlayerHandle::new(0),
+            dropped_at_1,
+            test_addr(7432),
+        );
+        // Nothing has committed yet: the canonical host (0) is not staged.
+        assert_eq!(session.last_recv_frame, Frame::NULL);
+        // The late-arrival path is inert: player 1 is not yet disconnected in
+        // host_connect_status because no frame has committed.
+        assert!(!session.host_connect_status[1].disconnected);
+
+        // NOW host 0 (canonical, froze player 1 HIGH at F_A = 2) arrives. Frame 0:
+        // player 1 connected, value 40.
+        // test:
+        session.handle_host_input(
+            0,
+            PlayerInput::new(Frame::new(0), 11),
+            PlayerHandle::new(0),
+            connected.clone(),
+            test_addr(7431),
+        );
+        // test:
+        session.handle_host_input(
+            0,
+            PlayerInput::new(Frame::new(0), 40),
+            PlayerHandle::new(1),
+            connected,
+            test_addr(7431),
+        );
+        // Host 0 froze player 1 HIGH at F_A = 2. At the OVERLAPPING frame 1 it
+        // forwards the SAME mesh-agreed value (60) so the overlap region is clean;
+        // only at frame 2 (the non-overlapping region) does its later-frozen value
+        // 50 appear.
+        let dropped_at_2 = vec![
+            ConnectionStatus::default(),
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(2),
+            },
+        ];
+        for (frame, p1) in [(Frame::new(1), 60_u8), (Frame::new(2), 50_u8)] {
+            // test:
+            session.handle_host_input(
+                0,
+                PlayerInput::new(frame, 12),
+                PlayerHandle::new(0),
+                dropped_at_2.clone(),
+                test_addr(7431),
+            );
+            // test:
+            session.handle_host_input(
+                0,
+                PlayerInput::new(frame, p1),
+                PlayerHandle::new(1),
+                dropped_at_2.clone(),
+                test_addr(7431),
+            );
+        }
+        // Host 0's frame-2 arrival cascades the commit of frames 0,1,2. At the
+        // commit of frame 2, host 1's frame-2 snapshot (disconnected@1) is already
+        // staged, so `converged_drop_status` folds host 0's freeze frame (2) DOWN to
+        // the global-min F_B = 1 at COMMIT time.
+        assert_eq!(session.last_recv_frame, Frame::new(2));
+
+        assert!(
+            session.spectator_divergence.is_none(),
+            "asymmetric freeze frames must converge at commit time, not fail closed"
+        );
+        assert_eq!(
+            session.host_connect_status[1].last_frame,
+            Frame::new(1),
+            "commit-time fold must converge the freeze frame DOWN to the global-min F_B = 1"
+        );
+        let played_frame2 = session.inputs_at_frame(Frame::new(2)).unwrap();
+        assert_eq!(
+            played_frame2[1].0, 60_u8,
+            "dropped slot must replay the mesh-agreed frozen value (60), not host 0's stale 50"
+        );
+        assert_eq!(played_frame2[1].1, InputStatus::Disconnected);
     }
 
     #[test]

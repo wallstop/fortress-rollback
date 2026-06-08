@@ -701,6 +701,43 @@ impl<T: Config> UdpProtocol<T> {
         self.remote_magic = 1;
     }
 
+    /// Test-only: forces this endpoint into `Synchronizing`, the canonical
+    /// non-running state a survivor endpoint occupies after a hot-join rearm
+    /// (`rearm_for_rejoin` rebuilds via `new` → `Initializing` → `synchronize()`
+    /// → `Synchronizing`). Unlike `rearm_for_rejoin`, this does NOT reset
+    /// `peer_connect_status`, so tests can manufacture the (prod-unreachable)
+    /// state where an endpoint is non-running yet still holds a stale lower view
+    /// — used to prove the `is_running()` filter in `update_player_disconnects`
+    /// is the only thing excluding such an endpoint from the global min.
+    #[cfg(test)]
+    pub(crate) fn force_synchronizing_for_tests(&mut self) {
+        self.state = ProtocolState::Synchronizing;
+    }
+
+    /// Test-only: directly seeds the cached per-handle connection status this
+    /// endpoint reports via [`peer_connect_status`](Self::peer_connect_status).
+    /// In production this cache is written only by `merge_peer_connect_status`
+    /// (driven by `on_input`); this helper lets session-level tests pin a known
+    /// view without replaying a packet exchange. Out-of-range handles are ignored.
+    #[cfg(test)]
+    pub(crate) fn set_peer_connect_status_for_tests(
+        &mut self,
+        handle: PlayerHandle,
+        status: ConnectionStatus,
+    ) {
+        if let Some(slot) = self.peer_connect_status.get_mut(handle.as_usize()) {
+            *slot = status;
+        }
+    }
+
+    /// Test-only: deterministically seeds this endpoint's rolling frame-advantage
+    /// average so that [`average_frame_advantage`](Self::average_frame_advantage)
+    /// returns exactly `target`. Delegates to `TimeSync::seed_average_for_tests`.
+    #[cfg(test)]
+    pub(crate) fn seed_frame_advantage_for_tests(&mut self, target: i32) {
+        self.time_sync_layer.seed_average_for_tests(target);
+    }
+
     pub(crate) fn is_handling_message(&self, addr: &T::Address) -> bool {
         self.peer_addr == *addr
     }

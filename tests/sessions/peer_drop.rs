@@ -27,9 +27,9 @@ use crate::common::{
 };
 use fortress_rollback::{
     telemetry::{CollectingObserver, ViolationSeverity},
-    DisconnectBehavior, FortressError, FortressEvent, FortressRequest, Frame, InputStatus,
-    InputVec, P2PSession, PlayerHandle, PlayerType, ProtocolConfig, SaveMode, SessionBuilder,
-    SessionState, SpectatorSession,
+    DesyncDetection, DisconnectBehavior, FortressError, FortressEvent, FortressRequest, Frame,
+    InputStatus, InputVec, P2PSession, PlayerHandle, PlayerType, ProtocolConfig, SaveMode,
+    SessionBuilder, SessionState, SpectatorSession,
 };
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -3306,6 +3306,369 @@ fn p2p_continue_without_spectator_converges_after_gossip_lowered_freeze_frame(
          (compared={compared}): {divergences:?}\n\
          full spectator map: {spec_dropped:?}\n\
          full host map: {host_dropped:?}",
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// ARBITRATION (Completeness-Critic #4): staggered multi-drop convergence with
+// OPPOSITE observation order on the two survivors.
+// ============================================================================
+//
+// The finding: a single scalar `disconnect_frame = min(existing, new)` could
+// "collapse" staggered multi-drops so that a SECOND, lower-framed drop of peer D
+// lowers the rollback floor and re-simulates across peer C's earlier freeze
+// boundary, WITHOUT re-validating C's per-handle frozen value against the new
+// floor — and the question is whether the two survivors, who observe the two
+// drops in OPPOSITE orders (and initially freeze each dropped slot at DIFFERENT
+// local frames under asymmetric loss), converge to a byte-identical confirmed
+// history.
+//
+// Code trace (HEAD) establishes this is NOT a bug:
+//   * `self.disconnect_frame` (p2p_session.rs ~:3303) is ONLY a rollback FLOOR;
+//     it is read solely by `adjust_gamestate` to pick `frame_to_load`. It never
+//     feeds any slot's frozen value. A lower floor merely re-simulates MORE
+//     frames; each re-simulated frame surfaces a disconnected+frozen slot's value
+//     via `synchronized_inputs` -> `queue.last_confirmed_input()`, which is
+//     derived purely from THAT slot's own queue at THAT slot's own converged
+//     `status.last_frame` (set by `set_frozen_value_at`).
+//   * `set_frozen_value_at(handle, F_handle)` -> `roll_confirmed_input_to(F_handle)`
+//     -> `confirmed_input(F_handle)` indexes `inputs[F_handle % queue_length]` and
+//     returns it iff `input.frame == F_handle`. The result depends ONLY on the
+//     handle, the converged frame, and that handle's confirmed buffer content —
+//     never on call order or on another handle's drop. `status.last_frame` is
+//     mined DOWN via `min` (commutative), so the converged frame per handle is
+//     order-independent. C's final frozen value is identical whether C dropped
+//     before or after D.
+//   * `disconnect_player_at_frames` mutates `local_connect_status` and calls
+//     `set_frozen_value_at` ONLY for the dropping endpoint's own handles, so D's
+//     later, lower drop never disturbs C's already-converged frozen value/status.
+//
+// This test is the empirical 110/100 confirmation: 4 players, survivors A(0) and
+// B(1); droppers C(2) and D(3). Asymmetric loss makes A receive C "high"/D "low"
+// and B receive C "low"/D "high"; A drops C-then-D while B drops D-then-C (each
+// survivor's SECOND drop being the LOWER-framed one, exercising the `min`-lowered
+// floor re-simulating across the first drop's freeze boundary). With
+// `DesyncDetection::On { interval: 1 }` the oracle asserts (1) ZERO DesyncDetected
+// on either survivor, and (2) byte-hash equality of every shared confirmed frame
+// recorded on both survivors after both drops converge.
+
+/// Drains a survivor's events, returning any `DesyncDetected` as tuples.
+fn collect_desyncs(sess: &mut P2PSession<StubConfig>) -> Vec<(Frame, u128, u128, SocketAddr)> {
+    sess.events()
+        .filter_map(|e| match e {
+            FortressEvent::DesyncDetected {
+                frame,
+                local_checksum,
+                remote_checksum,
+                addr,
+            } => Some((frame, local_checksum, remote_checksum, addr)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Tolerant per-survivor advance: records confirmed state, skipping frames the
+/// session legitimately throttles (prediction window / not-yet-synced) while
+/// converging. Mirrors the `try_advance_recording` discipline used by the
+/// single-drop under-loss repro above.
+fn advance_survivor_recording(
+    sess: &mut P2PSession<StubConfig>,
+    stub: &mut GameStub,
+    handle: PlayerHandle,
+    value: u32,
+    states: &mut BTreeMap<i32, StateStub>,
+    desyncs: &mut Vec<(Frame, u128, u128, SocketAddr)>,
+) -> Result<(), FortressError> {
+    match sess.add_local_input(handle, StubInput { inp: value }) {
+        Ok(()) => match sess.advance_frame() {
+            Ok(r) => stub.handle_requests_recording(r, states),
+            Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => {},
+            Err(e) => return Err(e),
+        },
+        Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => {},
+        Err(e) => return Err(e),
+    }
+    desyncs.extend(collect_desyncs(sess));
+    Ok(())
+}
+
+/// Tolerant explicit drop: the co-survivor's earlier drop of the same peer
+/// gossips over and may auto-remove the slot before our explicit call. Either
+/// way the disconnect machinery converges the slot, so tolerate
+/// `PlayerAlreadyRemoved` / `AlreadyDisconnected` (the staggered-floor path still
+/// ran).
+fn drop_player_tolerant(
+    sess: &mut P2PSession<StubConfig>,
+    handle: PlayerHandle,
+) -> Result<(), FortressError> {
+    match sess.remove_player(handle) {
+        Ok(())
+        | Err(FortressError::InvalidRequestStructured {
+            kind:
+                fortress_rollback::InvalidRequestKind::PlayerAlreadyRemoved { .. }
+                | fortress_rollback::InvalidRequestKind::AlreadyDisconnected { .. },
+        }) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+#[test]
+fn staggered_two_drops_opposite_order_survivors_converge_no_desync() -> Result<(), FortressError> {
+    // ----- Arrange -----
+    let clock = TestClock::new();
+    let bus = RoutingBus::new();
+    let blocked = BlockedLinks::new();
+
+    let a0: SocketAddr = ([127, 0, 0, 1], 40001).into(); // survivor A
+    let a1: SocketAddr = ([127, 0, 0, 1], 40002).into(); // survivor B
+    let a2: SocketAddr = ([127, 0, 0, 1], 40003).into(); // dropper C
+    let a3: SocketAddr = ([127, 0, 0, 1], 40004).into(); // dropper D
+
+    let s0 = FilterBusSocket::new(&bus, a0, blocked.clone());
+    let s1 = FilterBusSocket::new(&bus, a1, blocked.clone());
+    let s2 = FilterBusSocket::new(&bus, a2, blocked.clone());
+    let s3 = FilterBusSocket::new(&bus, a3, blocked.clone());
+
+    let pc = protocol_config(&clock);
+
+    // Generous disconnect timeout so the EXPLICIT `remove_player` direct-detection
+    // path fires (not the auto-timeout), and survivors converge via gossip.
+    let build = |socket: FilterBusSocket,
+                 local: PlayerHandle|
+     -> Result<P2PSession<StubConfig>, FortressError> {
+        let mut b = SessionBuilder::<StubConfig>::new()
+            .with_protocol_config(pc.clone())
+            .with_num_players(4)?
+            .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+            .with_disconnect_timeout(Duration::from_secs(30))
+            .with_disconnect_notify_delay(Duration::from_millis(100))
+            .with_desync_detection_mode(DesyncDetection::On { interval: 1 });
+        for (h, addr) in [(0, a0), (1, a1), (2, a2), (3, a3)] {
+            b = if PlayerHandle::new(h) == local {
+                b.add_player(PlayerType::Local, local)?
+            } else {
+                b.add_player(PlayerType::Remote(addr), PlayerHandle::new(h))?
+            };
+        }
+        b.start_p2p_session(socket)
+    };
+
+    let mut sess_a = build(s0, PlayerHandle::new(0))?;
+    let mut sess_b = build(s1, PlayerHandle::new(1))?;
+    let mut sess_c = build(s2, PlayerHandle::new(2))?;
+    let mut sess_d = build(s3, PlayerHandle::new(3))?;
+
+    // Synchronize all four.
+    let mut synced = false;
+    for _ in 0..1000 {
+        sess_a.poll_remote_clients();
+        sess_b.poll_remote_clients();
+        sess_c.poll_remote_clients();
+        sess_d.poll_remote_clients();
+        if sess_a.current_state() == SessionState::Running
+            && sess_b.current_state() == SessionState::Running
+            && sess_c.current_state() == SessionState::Running
+            && sess_d.current_state() == SessionState::Running
+        {
+            synced = true;
+            break;
+        }
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+    assert!(synced, "4-player session failed to synchronize");
+    let _ = collect_desyncs(&mut sess_a);
+    let _ = collect_desyncs(&mut sess_b);
+    let _ = drain_events(&mut sess_c);
+    let _ = drain_events(&mut sess_d);
+
+    let mut stub_a = GameStub::new();
+    let mut stub_b = GameStub::new();
+    let mut stub_c = GameStub::new();
+    let mut stub_d = GameStub::new();
+
+    // Per-frame recorded confirmed state on each survivor (last write per frame is
+    // post-rollback / post-convergence). Byte-hash equality of these is oracle (2).
+    let mut states_a: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states_b: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    // Accumulated DesyncDetected across the whole post-drop run (oracle (1)).
+    let mut desyncs_a: Vec<(Frame, u128, u128, SocketAddr)> = Vec::new();
+    let mut desyncs_b: Vec<(Frame, u128, u128, SocketAddr)> = Vec::new();
+
+    // ----- Act: warmup with all four peers so each has confirmed inputs. -----
+    let warmup_frames = 8_u32;
+    for i in 0..warmup_frames {
+        for _ in 0..3 {
+            sess_a.poll_remote_clients();
+            sess_b.poll_remote_clients();
+            sess_c.poll_remote_clients();
+            sess_d.poll_remote_clients();
+            clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        }
+        sess_a.add_local_input(PlayerHandle::new(0), StubInput { inp: i })?;
+        stub_a.handle_requests_recording(sess_a.advance_frame()?, &mut states_a);
+        sess_b.add_local_input(PlayerHandle::new(1), StubInput { inp: i + 1000 })?;
+        stub_b.handle_requests_recording(sess_b.advance_frame()?, &mut states_b);
+        sess_c.add_local_input(PlayerHandle::new(2), StubInput { inp: i + 2000 })?;
+        stub_c.handle_requests(sess_c.advance_frame()?);
+        sess_d.add_local_input(PlayerHandle::new(3), StubInput { inp: i + 3000 })?;
+        stub_d.handle_requests(sess_d.advance_frame()?);
+    }
+    // Let confirmations settle so the warmup frames are mutually confirmed.
+    for _ in 0..12 {
+        sess_a.poll_remote_clients();
+        sess_b.poll_remote_clients();
+        sess_c.poll_remote_clients();
+        sess_d.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+    desyncs_a.extend(collect_desyncs(&mut sess_a));
+    desyncs_b.extend(collect_desyncs(&mut sess_b));
+
+    // Asymmetric reception so each survivor freezes the two dropped slots at
+    // DIFFERENT local frames before convergence:
+    //   * C -> B blocked  (A receives C "high", B receives C "low")
+    //   * D -> A blocked  (B receives D "high", A receives D "low")
+    // Keep the gap to a SINGLE frame and DO NOT drain afterward, so neither
+    // survivor confirms + discards the inputs the post-drop rollback needs; this
+    // keeps the eventual per-handle global-min `F` inside the un-discarded
+    // prediction window (mirrors the single-drop under-loss repro above).
+    blocked.block(a2, a1);
+    blocked.block(a3, a0);
+
+    for i in 0..1_u32 {
+        sess_a.poll_remote_clients();
+        sess_b.poll_remote_clients();
+        sess_c.poll_remote_clients();
+        sess_d.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+
+        sess_a.add_local_input(PlayerHandle::new(0), StubInput { inp: i + 20 })?;
+        stub_a.handle_requests_recording(sess_a.advance_frame()?, &mut states_a);
+        sess_b.add_local_input(PlayerHandle::new(1), StubInput { inp: i + 1020 })?;
+        stub_b.handle_requests_recording(sess_b.advance_frame()?, &mut states_b);
+        sess_c.add_local_input(PlayerHandle::new(2), StubInput { inp: i + 2500 })?;
+        stub_c.handle_requests(sess_c.advance_frame()?);
+        sess_d.add_local_input(PlayerHandle::new(3), StubInput { inp: i + 3500 })?;
+        stub_d.handle_requests(sess_d.advance_frame()?);
+    }
+    // One light poll so each survivor absorbs the in-flight extra frame on its
+    // OPEN direction (A absorbs C-high, B absorbs D-high), but not enough to
+    // advance mutual confirmation past the stalled blocked-direction frame.
+    sess_a.poll_remote_clients();
+    sess_b.poll_remote_clients();
+    sess_c.poll_remote_clients();
+    sess_d.poll_remote_clients();
+    clock.advance(POLL_INTERVAL_DETERMINISTIC);
+
+    // The two survivors directly detect the two drops in OPPOSITE orders:
+    //   * A: drop C first (received high), then D second (received low).
+    //   * B: drop D first (received high), then C second (received low).
+    // Each survivor's SECOND drop is the one it received at the LOWER frame, so it
+    // lowers `disconnect_frame` and re-simulates across the FIRST drop's freeze
+    // boundary — exactly the staggered-floor scenario the finding targets, and in
+    // opposite order on the two survivors.
+    sess_a.remove_player(PlayerHandle::new(2))?; // A: C first (high)
+    sess_b.remove_player(PlayerHandle::new(3))?; // B: D first (high)
+    sess_a.remove_player(PlayerHandle::new(3))?; // A: D second (low)
+    sess_b.remove_player(PlayerHandle::new(2))?; // B: C second (low)
+
+    // Pump P_a + P_b so gossip propagates through `update_player_disconnects`,
+    // converging each survivor's per-handle agreed frame DOWN to the global min
+    // and re-rolling each frozen value with it.
+    for i in 0..80_u32 {
+        sess_a.poll_remote_clients();
+        sess_b.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+
+        // Re-assert the drops in case gossip ordering surfaced a fresh endpoint;
+        // tolerated if already removed.
+        drop_player_tolerant(&mut sess_a, PlayerHandle::new(3))?;
+        drop_player_tolerant(&mut sess_b, PlayerHandle::new(2))?;
+
+        advance_survivor_recording(
+            &mut sess_a,
+            &mut stub_a,
+            PlayerHandle::new(0),
+            i + 700,
+            &mut states_a,
+            &mut desyncs_a,
+        )?;
+        advance_survivor_recording(
+            &mut sess_b,
+            &mut stub_b,
+            PlayerHandle::new(1),
+            i + 1700,
+            &mut states_b,
+            &mut desyncs_b,
+        )?;
+    }
+    // Final settle so the last gossiped checksums are compared.
+    for _ in 0..20 {
+        sess_a.poll_remote_clients();
+        sess_b.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        desyncs_a.extend(collect_desyncs(&mut sess_a));
+        desyncs_b.extend(collect_desyncs(&mut sess_b));
+    }
+
+    // ----- Assert -----
+    // Oracle (1): no DesyncDetected on either survivor across the whole run.
+    assert_eq!(
+        desyncs_a,
+        Vec::new(),
+        "survivor A reported DesyncDetected after staggered opposite-order drops"
+    );
+    assert_eq!(
+        desyncs_b,
+        Vec::new(),
+        "survivor B reported DesyncDetected after staggered opposite-order drops"
+    );
+
+    // Oracle (2): byte-hash equality of every shared confirmed frame recorded on
+    // both survivors. Only compare frames at/below each survivor's confirmed bound
+    // (frames beyond it may still hold predictions/in-flight re-simulations).
+    assert!(
+        sess_a.confirmed_frame().as_i32() > warmup_frames as i32,
+        "survivor A confirmed_frame must advance past warmup+drops; got {:?}",
+        sess_a.confirmed_frame()
+    );
+    assert!(
+        sess_b.confirmed_frame().as_i32() > warmup_frames as i32,
+        "survivor B confirmed_frame must advance past warmup+drops; got {:?}",
+        sess_b.confirmed_frame()
+    );
+    let confirmed_bound = std::cmp::min(
+        sess_a.confirmed_frame().as_i32(),
+        sess_b.confirmed_frame().as_i32(),
+    );
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(i32, u64, u64)> = Vec::new();
+    for (&frame, &state_a) in &states_a {
+        if frame > confirmed_bound {
+            continue;
+        }
+        if let Some(&state_b) = states_b.get(&frame) {
+            compared += 1;
+            let ha = crate::common::calculate_hash(&state_a);
+            let hb = crate::common::calculate_hash(&state_b);
+            if ha != hb {
+                divergences.push((frame, ha, hb));
+            }
+        }
+    }
+    assert!(
+        compared > 0,
+        "no confirmed frames were compared across both survivors (bound={confirmed_bound}); \
+         the repro did not exercise the staggered multi-drop path"
+    );
+    assert!(
+        divergences.is_empty(),
+        "C4: confirmed state hash diverged across survivors after staggered \
+         opposite-order multi-drop (bound={confirmed_bound}, compared={compared}): \
+         {divergences:?}"
     );
 
     Ok(())
