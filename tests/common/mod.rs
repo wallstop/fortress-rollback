@@ -34,7 +34,9 @@ pub use channel_socket::{
     create_unconnected_socket, ChannelSocket,
 };
 #[allow(unused_imports)]
-pub use filter_socket::{create_filtered_channel_triple, BlockedLinks, FilterSocket};
+pub use filter_socket::{
+    create_filtered_channel_quad, create_filtered_channel_triple, BlockedLinks, FilterSocket,
+};
 #[allow(unused_imports)]
 pub use test_clock::TestClock;
 #[allow(unused_imports)]

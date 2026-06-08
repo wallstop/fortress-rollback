@@ -2,7 +2,8 @@
 //!
 //! This binary runs as a single peer in a P2P session, communicating over
 //! real UDP sockets. It can be spawned multiple times by a test runner to
-//! validate network behavior under various conditions.
+//! validate network behavior under various conditions, including N-player
+//! (N >= 3) meshes.
 //!
 //! # Usage
 //!
@@ -21,6 +22,14 @@
 //!     --peer 127.0.0.1:9001 \
 //!     --frames 100
 //! ```
+//!
+//! `--peer` is repeatable: pass it once per remote peer to form an N-player
+//! mesh. The number of players is `(number of --peer args) + 1`. Remote handles
+//! are assigned as `(0..num_players).filter(|h| h != player_index)` in ascending
+//! order, zipped with the `--peer` addresses in the order they are given, so the
+//! addresses for a peer must be listed in ascending-remote-handle order. For
+//! example, peer at `player_index 1` in a 3-player mesh would pass
+//! `--peer <addr of player 0> --peer <addr of player 2>`.
 //!
 //! # Chaos Options
 //!
@@ -325,6 +334,22 @@ struct TestResult {
     final_value: i64, // Added for debugging
     checksum: u64,
     rollbacks: u32,
+    /// Number of `FortressEvent::DesyncDetected` events this peer observed.
+    ///
+    /// Surfaced as a top-level field (in addition to `runtime.events`) so the
+    /// driver can read it without depending on `runtime` being present. NOTE:
+    /// at 0% packet loss this can be > 0 because `TestGame`'s saved-cell
+    /// checksum is the speculative display accumulator `state.value`, which
+    /// includes Predicted inputs; a peer that races far ahead under prediction
+    /// can harvest a saved cell whose state still embeds a misprediction for
+    /// the checksum-interval frame, so the library faithfully reports a
+    /// stored-checksum mismatch even though every peer's *confirmed* state is
+    /// identical. This is a test-harness checksum artifact, not a library
+    /// desync. The N-peer determinism tests therefore LOG this count but do not
+    /// assert it is zero (see `verify_determinism_n` and the module note in
+    /// tests/network/multi_process.rs).
+    #[serde(default)]
+    desync_detected: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -472,7 +497,12 @@ fn parse_args() -> Args {
             },
             "--peer" => {
                 i += 1;
-                result.peer_addr = Some(args[i].parse().expect("Invalid peer address"));
+                // `--peer` is repeatable: each occurrence appends one remote
+                // address. A single `--peer` yields a 1-element Vec, keeping
+                // the 2-peer call path byte-identical to the original behavior.
+                result
+                    .peers
+                    .push(args[i].parse().expect("Invalid peer address"));
             },
             "--frames" => {
                 i += 1;
@@ -543,7 +573,14 @@ fn parse_args() -> Args {
 struct Args {
     local_port: u16,
     player_index: usize,
-    peer_addr: Option<SocketAddr>,
+    /// Remote peer addresses, in the order received on the command line.
+    ///
+    /// `--peer` may be passed one or more times. For a 2-player session this is
+    /// a single-element `Vec`; for an N-player mesh it holds the `N - 1` remote
+    /// peer addresses. The local player is `player_index`; the remote handles
+    /// are `(0..num_players).filter(|h| *h != player_index)` in ascending order,
+    /// zipped with `peers` in the order received (see `run_test`).
+    peers: Vec<SocketAddr>,
     target_frames: i32,
     packet_loss: f64,
     latency_ms: u64,
@@ -569,8 +606,8 @@ fn main() {
         output_error("--local-port is required");
         std::process::exit(1);
     }
-    if args.peer_addr.is_none() {
-        output_error("--peer is required");
+    if args.peers.is_empty() {
+        output_error("--peer is required (one or more times)");
         std::process::exit(1);
     }
     if args.target_frames == 0 {
@@ -596,6 +633,7 @@ fn output_error(msg: &str) {
         final_value: 0,
         checksum: 0,
         rollbacks: 0,
+        desync_detected: 0,
         error_kind: Some("configuration".to_string()),
         error: Some(msg.to_string()),
         debug_log: None,
@@ -646,6 +684,7 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
+                desync_detected: 0,
                 error_kind: Some("io".to_string()),
                 error: Some(format!("Failed to bind socket: {e}")),
                 debug_log: None,
@@ -656,9 +695,10 @@ fn run_test(args: &Args) -> TestResult {
     };
     let socket = ChaosSocket::new(inner_socket, chaos_config);
 
-    // Build session
-    let peer_addr = args.peer_addr.unwrap();
-    let num_players = 2; // Currently only supports 2-player testing
+    // Build session. The session has one local player (this process) plus one
+    // remote player per `--peer` address, so an N-player mesh is N processes
+    // each launched with N-1 `--peer` args.
+    let num_players = args.peers.len() + 1;
 
     // Select sync config preset based on network conditions
     let sync_config = match args.sync_preset.as_deref() {
@@ -676,6 +716,7 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
+                desync_detected: 0,
                 error_kind: Some("configuration".to_string()),
                 error: Some(format!(
                     "Unknown sync preset: '{}'. Valid presets: lan, lossy, mobile, high_latency, competitive, extreme, stress_test",
@@ -700,10 +741,19 @@ fn run_test(args: &Args) -> TestResult {
         .with_protocol_config(protocol_config.clone())
         .with_time_sync_config(time_sync_config);
 
-    // Add players based on our index
+    // Add players based on our index.
+    //
+    // Handle <-> address mapping convention (must match the test driver's
+    // `n_peer_mesh_configs`): the local player owns `player_index`. The remote
+    // handles are every other handle in `0..num_players`, i.e.
+    // `(0..num_players).filter(|h| *h != player_index)` in ascending order,
+    // zipped with `args.peers` in the order they were received. The driver lists
+    // each peer's remote addresses in ascending-remote-handle order, so peer P's
+    // K-th `--peer` address is the process listening for handle = the K-th
+    // element of that ascending filtered handle sequence. For the 2-player case
+    // this reduces to the original `remote_handle = 1 - player_index` (the single
+    // handle != player_index), keeping behavior byte-identical.
     let local_handle = PlayerHandle::new(args.player_index);
-    // For a 2-player session, get the other player's index (0 -> 1, 1 -> 0)
-    let remote_handle = PlayerHandle::new(1 - args.player_index);
 
     sess_builder = match sess_builder.add_player(PlayerType::Local, local_handle) {
         Ok(b) => b,
@@ -714,6 +764,7 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
+                desync_detected: 0,
                 error_kind: Some("configuration".to_string()),
                 error: Some(format!("Failed to add local player: {e}")),
                 debug_log: None,
@@ -723,23 +774,31 @@ fn run_test(args: &Args) -> TestResult {
         },
     };
 
-    sess_builder = match sess_builder.add_player(PlayerType::Remote(peer_addr), remote_handle) {
-        Ok(b) => b,
-        Err(e) => {
-            return TestResult {
-                success: false,
-                final_frame: 0,
-                final_value: 0,
-                checksum: 0,
-                rollbacks: 0,
-                error_kind: Some("configuration".to_string()),
-                error: Some(format!("Failed to add remote player: {e}")),
-                debug_log: None,
-                diagnostics: None,
-                runtime: None,
-            };
-        },
-    };
+    // Ascending remote handles paired with the received peer addresses.
+    let remote_handles = (0..num_players).filter(|&h| h != args.player_index);
+    for (remote_index, peer_addr) in remote_handles.zip(args.peers.iter().copied()) {
+        let remote_handle = PlayerHandle::new(remote_index);
+        sess_builder = match sess_builder.add_player(PlayerType::Remote(peer_addr), remote_handle) {
+            Ok(b) => b,
+            Err(e) => {
+                return TestResult {
+                    success: false,
+                    final_frame: 0,
+                    final_value: 0,
+                    checksum: 0,
+                    rollbacks: 0,
+                    desync_detected: 0,
+                    error_kind: Some("configuration".to_string()),
+                    error: Some(format!(
+                        "Failed to add remote player (handle {remote_index}, addr {peer_addr}): {e}"
+                    )),
+                    debug_log: None,
+                    diagnostics: None,
+                    runtime: None,
+                };
+            },
+        };
+    }
 
     let mut session = match sess_builder.start_p2p_session(socket) {
         Ok(s) => s,
@@ -750,6 +809,7 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: 0,
                 checksum: 0,
                 rollbacks: 0,
+                desync_detected: 0,
                 error_kind: Some("session".to_string()),
                 error: Some(format!("Failed to start session: {e}")),
                 debug_log: None,
@@ -791,6 +851,7 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: game.state.value,
                 checksum,
                 rollbacks: game.rollback_count,
+                desync_detected: event_summary.desync_detected,
                 error_kind: Some("timeout".to_string()),
                 error: Some(format!(
                     "Timeout (current_frame={}, confirmed_frame={}, target={})",
@@ -892,6 +953,7 @@ fn run_test(args: &Args) -> TestResult {
                 final_value: confirmed_value, // Use confirmed value, not speculative
                 checksum,
                 rollbacks: game.rollback_count,
+                desync_detected: event_summary.desync_detected,
                 error_kind: None,
                 error: None,
                 debug_log: if args.debug {
@@ -933,6 +995,7 @@ fn run_test(args: &Args) -> TestResult {
                     final_value: game.state.value,
                     checksum,
                     rollbacks: game.rollback_count,
+                    desync_detected: event_summary.desync_detected,
                     error_kind: Some("session".to_string()),
                     error: Some(format!("Failed to add input: {e}")),
                     debug_log: if args.debug {
@@ -969,6 +1032,7 @@ fn run_test(args: &Args) -> TestResult {
                         final_value: game.state.value,
                         checksum,
                         rollbacks: game.rollback_count,
+                        desync_detected: event_summary.desync_detected,
                         error_kind: Some("session".to_string()),
                         error: Some(format!("Failed to advance frame: {e}")),
                         debug_log: if args.debug {

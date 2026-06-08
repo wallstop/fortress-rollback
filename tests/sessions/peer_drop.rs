@@ -20,7 +20,7 @@
 
 use crate::common::stubs::{GameStub, StateStub, StubConfig, StubInput};
 use crate::common::{
-    create_channel_pair, create_channel_quad, create_channel_triple,
+    create_channel_pair, create_channel_quad, create_channel_triple, create_filtered_channel_quad,
     create_filtered_channel_triple, drain_sync_events, poll_with_advance,
     synchronize_sessions_deterministic, BlockedLinks, BusSocket, FilterSocket, RoutingBus,
     SyncConfig, TestClock, POLL_INTERVAL_DETERMINISTIC,
@@ -2188,6 +2188,576 @@ fn p2p_continue_without_under_asymmetric_loss_freezes_dropped_peer_consistently(
     assert!(
         divergences.is_empty(),
         "confirmed state diverged across survivors after under-loss graceful drop \
+         (bound={confirmed_bound}, compared={compared}): {divergences:?}"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Regression (relay-clobber, N=4): audit finding F4 — a relayed lowering of a
+// dropped slot's freeze frame must NOT be clobbered by a survivor's own stale
+// monotone-`max` view, or two survivors freeze the dropped slot at different
+// frames -> divergent confirmed history (silent desync).
+// ============================================================================
+//
+// This generalizes the 3-player asymmetric-loss machinery above to FOUR peers,
+// which is the minimum to exhibit a *relay*-clobber: peers A(0), B(1), C(2),
+// D(3) in a `ContinueWithout` full mesh; D is the dropped slot, A/B/C are the
+// survivors.
+//
+// Why 3 survivors are required (why the 3-player tests above CANNOT manifest it):
+// in a 3-node mesh there is exactly one dropped peer and two survivors, and the
+// two survivors are joined by a DIRECT link. When D's lowest-view survivor
+// gossips its freeze frame, that gossip travels the direct survivor<->survivor
+// link, which always carries truth — there is no third party whose stale, higher
+// view sits between them to clobber the lowering. With THREE survivors we can
+// additionally sever the direct A<->C link, forcing C's lower view of D to reach
+// A only by transiting the relay B. The lowered freeze frame then arrives at A
+// inside a packet whose OTHER `peer_connect_status` entries reflect B's (or A's
+// own) higher knowledge, so a naive monotone-`max` merge of the D slot would
+// re-raise (clobber) the relayed lowering. That is exactly the F4 bug:
+// pre-fix, `merge_peer_connect_status` took `max` for ALL slots, so A's D-slot
+// freeze frame snapped back UP to A's own (higher) received frame after the
+// relayed lowering, while C stayed frozen LOW -> A and C repeat different D
+// values across the freeze window. The fix converges a DISCONNECTED slot's
+// `last_frame` DOWNWARD. The branch this test exercises is the FIRST-ADOPT
+// down-step: when A first learns (from B's relayed gossip) that D is
+// disconnected, it ADOPTS B's lower freeze frame instead of keeping/maxing its
+// own higher received frame; combined with the session-layer
+// `update_player_disconnects` min over running endpoints, the relayed lowering
+// survives and every survivor freezes D at the global-min `F`. (The sibling
+// both-disconnected `min` branch — which rejects a later stale HIGHER re-gossip —
+// is a distinct guard covered by the `on_input_disconnected_slot_ignores_stale_
+// higher_freeze_gossip` unit test, and is not the branch under test here.)
+//
+// Deterministic engineering of A>B>C reception of D (see the test body for the
+// exact frame numbers):
+//   1. Warm up all four in lockstep with DISTINCT per-peer inputs (D's stream is
+//      non-constant, so a frozen D value is frame-sensitive — a constant stream
+//      would make every freeze frame look byte-equal and render the test vacuous).
+//   2. Block D->C first and advance: D keeps delivering to A and B, so C's
+//      `local_connect_status[D].last_frame` falls behind.
+//   3. Then ALSO block D->B and advance more: now D delivers only to A, so when D
+//      goes silent A has received the MOST of D, B the MIDDLE, C the LEAST.
+//   4. Block the A<->C link in BOTH directions, so C's low view of D can never
+//      reach A on the direct edge — it must transit the relay B. (Once A and C
+//      drop each other below, each EXCLUDES the other's endpoint from its per-slot
+//      disconnect minimum, which is what denies A any direct source of C's low D.)
+//   5. Make D fully silent and have every survivor `remove_player(D)` (and A/C
+//      `remove_player` each other). Pumping poll + advance lets C's low D gossip
+//      reach B, B lower its D-slot freeze frame to the global min `F`, and B
+//      RE-GOSSIP that lowered, disconnected value onward to A, converging all
+//      three. We use `remove_player` rather than the auto-timeout path so the drop
+//      is instant (confirmation can't discard the freeze-window frames the
+//      post-drop rollback must re-simulate) and so the A<->C *timeout* never fires.
+//
+// Oracle (must hold on FIXED code): over the shared confirmed-frame range, the
+// recorded confirmed game state is byte-identical across A and C (and B). Pre-fix
+// the D freeze window diverges (A high, C low). This test PASSES on current code
+// and goes RED if the down-convergence in `merge_peer_connect_status` is
+// neutralized to plain `max` (proven separately).
+
+/// Builds four synchronized `ContinueWithout` sessions over filtered sockets with
+/// a short disconnect timeout, returning the four sessions, the shared
+/// blocked-links handle, the four addresses, and the clock. This is the 4-player
+/// analog of [`build_filtered_three_player_sessions`].
+#[allow(clippy::type_complexity)]
+fn build_filtered_four_player_sessions(
+    disconnect_timeout: Duration,
+) -> Result<
+    (
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        BlockedLinks,
+        SocketAddr,
+        SocketAddr,
+        SocketAddr,
+        SocketAddr,
+        TestClock,
+    ),
+    FortressError,
+> {
+    let clock = TestClock::new();
+    let (s1, s2, s3, s4, a1, a2, a3, a4, blocked) = create_filtered_channel_quad();
+    let pc = protocol_config(&clock);
+
+    let build = |local: PlayerHandle,
+                 socket: FilterSocket,
+                 remotes: [(PlayerHandle, SocketAddr); 3]|
+     -> Result<P2PSession<StubConfig>, FortressError> {
+        let mut builder = SessionBuilder::<StubConfig>::new()
+            .with_protocol_config(pc.clone())
+            .with_num_players(4)?
+            .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+            .with_disconnect_timeout(disconnect_timeout)
+            .with_disconnect_notify_delay(Duration::from_millis(100))
+            .add_player(PlayerType::Local, local)?;
+        for (handle, addr) in remotes {
+            builder = builder.add_player(PlayerType::Remote(addr), handle)?;
+        }
+        builder.start_p2p_session(socket)
+    };
+
+    let mut sess1 = build(
+        PlayerHandle::new(0),
+        s1,
+        [
+            (PlayerHandle::new(1), a2),
+            (PlayerHandle::new(2), a3),
+            (PlayerHandle::new(3), a4),
+        ],
+    )?;
+    let mut sess2 = build(
+        PlayerHandle::new(1),
+        s2,
+        [
+            (PlayerHandle::new(0), a1),
+            (PlayerHandle::new(2), a3),
+            (PlayerHandle::new(3), a4),
+        ],
+    )?;
+    let mut sess3 = build(
+        PlayerHandle::new(2),
+        s3,
+        [
+            (PlayerHandle::new(0), a1),
+            (PlayerHandle::new(1), a2),
+            (PlayerHandle::new(3), a4),
+        ],
+    )?;
+    let mut sess4 = build(
+        PlayerHandle::new(3),
+        s4,
+        [
+            (PlayerHandle::new(0), a1),
+            (PlayerHandle::new(1), a2),
+            (PlayerHandle::new(2), a3),
+        ],
+    )?;
+
+    synchronize_four_sessions(&mut sess1, &mut sess2, &mut sess3, &mut sess4, &clock, 500);
+    let _ = drain_events(&mut sess1);
+    let _ = drain_events(&mut sess2);
+    let _ = drain_events(&mut sess3);
+    let _ = drain_events(&mut sess4);
+
+    Ok((sess1, sess2, sess3, sess4, blocked, a1, a2, a3, a4, clock))
+}
+
+/// Synchronizes four sessions deterministically. Returns when all four are in
+/// `Running` state, or panics if synchronization does not complete in
+/// `iterations` iterations. The 4-player analog of [`synchronize_three_sessions`].
+fn synchronize_four_sessions(
+    sess1: &mut P2PSession<StubConfig>,
+    sess2: &mut P2PSession<StubConfig>,
+    sess3: &mut P2PSession<StubConfig>,
+    sess4: &mut P2PSession<StubConfig>,
+    clock: &TestClock,
+    iterations: usize,
+) {
+    for _ in 0..iterations {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        sess3.poll_remote_clients();
+        sess4.poll_remote_clients();
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+            && sess3.current_state() == SessionState::Running
+            && sess4.current_state() == SessionState::Running
+        {
+            return;
+        }
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+    panic!(
+        "Four sessions failed to synchronize: sess1={:?}, sess2={:?}, sess3={:?}, sess4={:?}",
+        sess1.current_state(),
+        sess2.current_state(),
+        sess3.current_state(),
+        sess4.current_state()
+    );
+}
+
+/// Polls four sessions and advances virtual time by
+/// `POLL_INTERVAL_DETERMINISTIC * iterations`. The 4-player analog of
+/// [`poll_three`].
+fn poll_four(
+    sess1: &mut P2PSession<StubConfig>,
+    sess2: &mut P2PSession<StubConfig>,
+    sess3: &mut P2PSession<StubConfig>,
+    sess4: &mut P2PSession<StubConfig>,
+    clock: &TestClock,
+    iterations: usize,
+) {
+    for _ in 0..iterations {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        sess3.poll_remote_clients();
+        sess4.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+}
+
+#[test]
+fn p2p_n4_relay_clobber_dropped_slot_freeze_frame_converges_across_survivors(
+) -> Result<(), FortressError> {
+    // See the block comment above for the full F4 mechanism, the relay
+    // requirement, and why N=4 + a severed A<->C link is necessary. In short:
+    // A/B/C survive, D is dropped; A receives D's inputs through the HIGHEST
+    // frame, B a MIDDLE frame, C the LOWEST (each gap one frame); the A<->C link
+    // is severed so C's low view of D reaches A only via the relay B; every
+    // survivor then drops D (and A/C drop each other) via `remove_player`, and we
+    // pump gossip so B's lowered, disconnected D freeze frame relays to A.
+    // Post-fix every survivor freezes D at the global-min frame `F`, so the
+    // recorded confirmed state is byte-identical across survivors. Pre-fix A's
+    // D-slot freeze frame is clobbered back UP by a stale monotone-`max` merge of
+    // the relayed lowering, diverging from B and C across the freeze window (this
+    // very test reds with the down-convergence in `merge_peer_connect_status`
+    // neutralized to plain `max`).
+    //
+    // We use the explicit `remove_player` direct-detection path (not auto-timeout)
+    // for two reasons: (1) it drives the drop instantly, so confirmation cannot run
+    // 400ms / dozens of frames past the freeze frame `F` and discard the states the
+    // post-drop rollback must re-simulate; (2) it lets A and C take each other off
+    // without the A<->C *timeout* also firing, keeping the severance purely a
+    // gossip-routing constraint. This mirrors the 3-player
+    // `p2p_remove_player_under_asymmetric_loss_*` test's pacing discipline.
+    let (
+        mut sess_a,
+        mut sess_b,
+        mut sess_c,
+        mut sess_d,
+        blocked,
+        a_addr,
+        b_addr,
+        c_addr,
+        d_addr,
+        clock,
+    ) = build_filtered_four_player_sessions(Duration::from_millis(400))?;
+
+    let mut stub_a = GameStub::new();
+    let mut stub_b = GameStub::new();
+    let mut stub_c = GameStub::new();
+    let mut stub_d = GameStub::new();
+
+    let mut states_a: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states_b: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states_c: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut sink: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    // --- Phase 1: warmup with all links open so all four confirm together. Each
+    // peer feeds a DISTINCT deterministic input stream; crucially D's stream
+    // (i + 3000) is non-constant, so a frozen D value is frame-sensitive. ---
+    let warmup_frames = 8_u32;
+    for i in 0..warmup_frames {
+        poll_four(
+            &mut sess_a,
+            &mut sess_b,
+            &mut sess_c,
+            &mut sess_d,
+            &clock,
+            3,
+        );
+        try_advance_recording(
+            &mut sess_a,
+            &mut stub_a,
+            PlayerHandle::new(0),
+            i,
+            &mut states_a,
+        )?;
+        try_advance_recording(
+            &mut sess_b,
+            &mut stub_b,
+            PlayerHandle::new(1),
+            i + 1000,
+            &mut states_b,
+        )?;
+        try_advance_recording(
+            &mut sess_c,
+            &mut stub_c,
+            PlayerHandle::new(2),
+            i + 2000,
+            &mut states_c,
+        )?;
+        try_advance_recording(
+            &mut sess_d,
+            &mut stub_d,
+            PlayerHandle::new(3),
+            i + 3000,
+            &mut sink,
+        )?;
+    }
+    // Let confirmed inputs settle so the warmup frames are mutually confirmed.
+    poll_four(
+        &mut sess_a,
+        &mut sess_b,
+        &mut sess_c,
+        &mut sess_d,
+        &clock,
+        12,
+    );
+
+    // --- Phase 2a: block ONLY D -> C, then advance EXACTLY ONE frame. D delivers
+    // its DISTINCT input to A and B but not C, so C's locally-received view of D
+    // (`local_connect_status[D].last_frame`) falls ONE frame behind A's and B's.
+    // We deliberately keep every asymmetry gap to a SINGLE frame and DO NOT drain
+    // afterward: a larger gap (or draining) would let a survivor confirm and
+    // discard frames below the eventual global-min freeze `F`, so the post-drop
+    // re-roll/rollback could no longer reach `F` — the separately documented
+    // discard-before-convergence limitation, not the relay-clobber under test. ---
+    blocked.block(d_addr, c_addr);
+    poll_four(
+        &mut sess_a,
+        &mut sess_b,
+        &mut sess_c,
+        &mut sess_d,
+        &clock,
+        1,
+    );
+    try_advance_recording(
+        &mut sess_a,
+        &mut stub_a,
+        PlayerHandle::new(0),
+        20,
+        &mut states_a,
+    )?;
+    try_advance_recording(
+        &mut sess_b,
+        &mut stub_b,
+        PlayerHandle::new(1),
+        1020,
+        &mut states_b,
+    )?;
+    try_advance_recording(
+        &mut sess_c,
+        &mut stub_c,
+        PlayerHandle::new(2),
+        2020,
+        &mut states_c,
+    )?;
+    try_advance_recording(
+        &mut sess_d,
+        &mut stub_d,
+        PlayerHandle::new(3),
+        3020,
+        &mut sink,
+    )?;
+    poll_four(
+        &mut sess_a,
+        &mut sess_b,
+        &mut sess_c,
+        &mut sess_d,
+        &clock,
+        1,
+    );
+
+    // --- Phase 2b: ALSO block D -> B, then advance EXACTLY ONE more frame. Now D
+    // delivers only to A, so B's received view of D stalls ONE frame above C's and
+    // ONE frame below A's. Net result: A's received D frame > B's > C's, each by a
+    // single frame, with the global-min freeze frame `F` = C's frame. ---
+    blocked.block(d_addr, b_addr);
+    poll_four(
+        &mut sess_a,
+        &mut sess_b,
+        &mut sess_c,
+        &mut sess_d,
+        &clock,
+        1,
+    );
+    try_advance_recording(
+        &mut sess_a,
+        &mut stub_a,
+        PlayerHandle::new(0),
+        40,
+        &mut states_a,
+    )?;
+    try_advance_recording(
+        &mut sess_b,
+        &mut stub_b,
+        PlayerHandle::new(1),
+        1040,
+        &mut states_b,
+    )?;
+    try_advance_recording(
+        &mut sess_c,
+        &mut stub_c,
+        PlayerHandle::new(2),
+        2040,
+        &mut states_c,
+    )?;
+    // D keeps advancing locally with a distinct value; only A receives it now.
+    try_advance_recording(
+        &mut sess_d,
+        &mut stub_d,
+        PlayerHandle::new(3),
+        3040,
+        &mut sink,
+    )?;
+    // One light poll so A absorbs D's in-flight extra frame (D -> A still open),
+    // but NOT enough to advance mutual confirmation past the asymmetric window.
+    poll_four(
+        &mut sess_a,
+        &mut sess_b,
+        &mut sess_c,
+        &mut sess_d,
+        &clock,
+        1,
+    );
+
+    // --- Phase 3: sever the A<->C link in BOTH directions. This is the crux that
+    // makes the desync a *relay*-clobber (and the reason ≥3 survivors are
+    // required). After A and C drop each other (below), each EXCLUDES the other's
+    // endpoint from its per-slot disconnect minimum, so C's low view of D can
+    // reach A ONLY relayed through B. Because we drive the drop immediately via
+    // `remove_player` (no clock pump), the A<->C timeout never fires on its own —
+    // the explicit removals below are what take A and C off each other. ---
+    blocked.block(a_addr, c_addr);
+    blocked.block(c_addr, a_addr);
+
+    // --- Phase 4: every survivor drops D (and A/C drop each other, since their
+    // link is now severed) via explicit `remove_player`. On this direct path each
+    // survivor's INITIAL D freeze frame is its OWN received frame (A high, B
+    // middle, C low). Then we pump poll + advance so gossip propagates through
+    // `update_player_disconnects`: C (low) -> B lowers B's D freeze to the global
+    // min `F`, and B RE-GOSSIPS that lowered, DISCONNECTED freeze frame onward to
+    // A. A's only surviving source of D's truth is that relayed value (A<->C
+    // severed, D silent), so the merge of A's stale high D view with B's relayed
+    // low one decides A's freeze frame: down-converging (A adopts B's lower relayed
+    // freeze frame on first learning D is disconnected) keeps `F` (fixed);
+    // monotone-`max` clobbers it back up (the F4 bug). ---
+    blocked.block(d_addr, a_addr);
+    blocked.block(d_addr, b_addr);
+    blocked.block(d_addr, c_addr);
+
+    sess_a.remove_player(PlayerHandle::new(3)).unwrap();
+    sess_b.remove_player(PlayerHandle::new(3)).unwrap();
+    sess_c.remove_player(PlayerHandle::new(3)).unwrap();
+    sess_a.remove_player(PlayerHandle::new(2)).unwrap();
+    sess_c.remove_player(PlayerHandle::new(0)).unwrap();
+
+    let mut a_dropped = false;
+    let mut b_dropped = false;
+    let mut c_dropped = false;
+    for _ in 0..120 {
+        sess_a.poll_remote_clients();
+        sess_b.poll_remote_clients();
+        sess_c.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+
+        try_advance_recording(
+            &mut sess_a,
+            &mut stub_a,
+            PlayerHandle::new(0),
+            500,
+            &mut states_a,
+        )?;
+        try_advance_recording(
+            &mut sess_b,
+            &mut stub_b,
+            PlayerHandle::new(1),
+            1500,
+            &mut states_b,
+        )?;
+        try_advance_recording(
+            &mut sess_c,
+            &mut stub_c,
+            PlayerHandle::new(2),
+            2500,
+            &mut states_c,
+        )?;
+
+        if sess_a
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            a_dropped = true;
+        }
+        if sess_b
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            b_dropped = true;
+        }
+        if sess_c
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            c_dropped = true;
+        }
+    }
+
+    // All three survivors must have actually dropped D and advanced past the drop.
+    assert!(
+        a_dropped,
+        "sess_a must emit PeerDropped for the dropped peer D"
+    );
+    assert!(
+        b_dropped,
+        "sess_b must emit PeerDropped for the dropped peer D"
+    );
+    assert!(
+        c_dropped,
+        "sess_c must emit PeerDropped for the dropped peer D"
+    );
+    assert!(
+        sess_a.confirmed_frame().as_i32() > warmup_frames as i32,
+        "sess_a confirmed_frame must advance past the drop; got {:?}",
+        sess_a.confirmed_frame()
+    );
+    assert!(
+        sess_b.confirmed_frame().as_i32() > warmup_frames as i32,
+        "sess_b confirmed_frame must advance past the drop; got {:?}",
+        sess_b.confirmed_frame()
+    );
+    assert!(
+        sess_c.confirmed_frame().as_i32() > warmup_frames as i32,
+        "sess_c confirmed_frame must advance past the drop; got {:?}",
+        sess_c.confirmed_frame()
+    );
+
+    // --- The desync check (primary oracle): over the shared confirmed-frame range
+    // every frame all three survivors recorded must have byte-equal recorded
+    // state. The freeze window for D (frames between the global-min freeze `F` and
+    // A's higher received frame) is the region that diverges pre-fix: A repeats
+    // D's high-frame value there while C repeats D's low (global-min) value. The
+    // relayed lowering must converge A down to C's value for these to match. ---
+    let confirmed_bound = sess_a
+        .confirmed_frame()
+        .as_i32()
+        .min(sess_b.confirmed_frame().as_i32())
+        .min(sess_c.confirmed_frame().as_i32());
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(i32, &'static str, StateStub, StateStub)> = Vec::new();
+    for (&frame, &state_a) in &states_a {
+        if frame > confirmed_bound {
+            continue;
+        }
+        // A vs C is the relay-clobber pair (their direct link was severed, so C's
+        // lowering reached A only via B). A vs B catches any residual divergence.
+        if let Some(&state_c) = states_c.get(&frame) {
+            compared += 1;
+            if state_a != state_c {
+                divergences.push((frame, "A!=C", state_a, state_c));
+            }
+        }
+        if let Some(&state_b) = states_b.get(&frame) {
+            if state_a != state_b {
+                divergences.push((frame, "A!=B", state_a, state_b));
+            }
+        }
+    }
+
+    assert!(
+        compared > 0,
+        "no confirmed frames were compared across survivors (bound={confirmed_bound}); \
+         the relay-clobber repro did not exercise the drop path"
+    );
+    assert!(
+        divergences.is_empty(),
+        "confirmed state diverged across survivors after N=4 relay-clobber drop \
          (bound={confirmed_bound}, compared={compared}): {divergences:?}"
     );
 

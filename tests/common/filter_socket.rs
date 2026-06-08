@@ -143,3 +143,44 @@ pub fn create_filtered_channel_triple() -> (
         blocked,
     )
 }
+
+/// Creates a connected quad of [`FilterSocket`]-wrapped [`ChannelSocket`]s for
+/// 4-player asymmetric-loss testing, all sharing one [`BlockedLinks`] handle.
+///
+/// This is the 4-node analog of [`create_filtered_channel_triple`]. It is needed
+/// to reproduce *relay*-clobber disconnect-gossip desyncs (audit F4), which
+/// require ≥3 survivors: a third survivor's lower view of a dropped slot can only
+/// reach a higher-view survivor by transiting a relay peer when their direct link
+/// is also lost — a topology a 3-node mesh (one dropped + two survivors, each
+/// joined by a direct link that always carries truth) cannot express.
+///
+/// Returns the four sockets, their addresses, and the shared [`BlockedLinks`]
+/// handle the test uses to toggle directional loss mid-run.
+#[allow(dead_code)]
+#[allow(clippy::type_complexity)]
+#[must_use]
+pub fn create_filtered_channel_quad() -> (
+    FilterSocket,
+    FilterSocket,
+    FilterSocket,
+    FilterSocket,
+    SocketAddr,
+    SocketAddr,
+    SocketAddr,
+    SocketAddr,
+    BlockedLinks,
+) {
+    let (s1, s2, s3, s4, a1, a2, a3, a4) = super::channel_socket::create_channel_quad();
+    let blocked = BlockedLinks::new();
+    (
+        FilterSocket::new(s1, blocked.clone()),
+        FilterSocket::new(s2, blocked.clone()),
+        FilterSocket::new(s3, blocked.clone()),
+        FilterSocket::new(s4, blocked.clone()),
+        a1,
+        a2,
+        a3,
+        a4,
+        blocked,
+    )
+}
