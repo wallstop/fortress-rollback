@@ -4,9 +4,12 @@
 (* N-peer mesh reconnection (Session 18 design, progress/                  *)
 (* session-18-npeer-mesh-reconnection-design.md, sections 4.C / 5 / 8).    *)
 (*                                                                         *)
-(* The mesh here is the smallest configuration that exercises the          *)
-(* multi-party agreement: one coordinator K, two survivors {S1, S2}, and   *)
-(* one returning joiner J reopening a single dropped slot h.               *)
+(* Two survivors is the minimal configuration that exercises the           *)
+(* multi-party agreement; this mesh uses three survivors {S1, S2, S3} for  *)
+(* N >= 3 coverage (catching any 2-survivor-specific assumption). The spec *)
+(* is parameterized over Survivors, so the invariants hold for any         *)
+(* non-empty set of survivors: one coordinator K, the survivors, and one   *)
+(* returning joiner J reopening a single dropped slot h.                   *)
 (*                                                                         *)
 (* What is modeled (the safety core of Agreement C):                       *)
 (*   - Per-peer committed history for slot h: committedUpTo[p] is the       *)
@@ -17,7 +20,7 @@
 (*     surviving peer (NOT one global constant). A frozen commit stores     *)
 (*     frozenVal[p]; a real commit stores the shared RealVal. Agreement is  *)
 (*     checked over val (the bytes), so two survivors that both "froze" a   *)
-(*     frame only AGREE when their frozenVal symbols are equal -- which is   *)
+(*     frame only AGREE when their frozenVal symbols are equal -- which is  *)
 (*     exactly precondition P-A (Agreement A, clean freeze, section 4.A/5). *)
 (*     This lets the spec DEMONSTRATE that P-A is NECESSARY (drop it and    *)
 (*     Agreement breaks -- see NPeerReactivation_NoPA.cfg) rather than      *)
@@ -71,14 +74,14 @@
 (*                                                                         *)
 (* This intentionally models the agreement contract at a small state-      *)
 (* machine level (matching PeerDrop.tla), not the full UDP protocol. The   *)
-(* invariants proven here hold for ANY valid MaxFrame > 1; the .cfg uses    *)
-(* tiny bounds for exhaustive checking.                                     *)
+(* invariants proven here hold for ANY non-empty set of survivors and ANY  *)
+(* valid MaxFrame > 1; the .cfg uses tiny bounds for exhaustive checking.  *)
 (***************************************************************************)
 
 EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS
-    Survivors,      \* set of surviving peers, e.g. {"S1", "S2"}
+    Survivors,      \* set of surviving peers, e.g. {"S1", "S2", "S3"}
     K,              \* the coordinator / snapshot server
     J,              \* the returning joiner
     MaxFrame,       \* highest frame any peer may confirm (small bound)
@@ -178,7 +181,7 @@ TypeInvariant ==
 (* The mesh starts already paused at the moment the snapshot is served:     *)
 (* the coordinator has chosen F = L + 1 and committed every frame <= L with *)
 (* its frozen value (the surviving confirmed history of the dropped slot),  *)
-(* and ReactivateSlot{h,F} is in flight to both survivors.                  *)
+(* and ReactivateSlot{h,F} is in flight to every survivor.                  *)
 (*                                                                         *)
 (* CRUCIAL CHANGE (non-vacuous cap): each survivor starts with committedUpTo*)
 (* anywhere in 0..L -- i.e. it may LAG below the cap boundary. It then       *)
@@ -360,7 +363,7 @@ JoinerBuffer ==
 (***************************************************************************)
 (* UnpauseAndCommit -- ack-gated un-pause (success path) + JoinCommitted.   *)
 (*                                                                         *)
-(* The coordinator un-pauses ONLY when both survivors have acked their      *)
+(* The coordinator un-pauses ONLY when every survivor has acked its         *)
 (* reopen (== every survivor is reopened-and-Running with the joiner). It    *)
 (* reopens at F itself (F == current on the coordinator; no rollback needed, *)
 (* design invariant 7 caveat) and SENDS JoinCommitted to the joiner. The     *)

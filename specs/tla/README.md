@@ -34,7 +34,7 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | `SpectatorSession.tla` | `SpectatorSession.cfg` | ✓ CI | Spectator session with frame delay and catchup |
 | `TimeSync.tla` | `TimeSync.cfg` | ✓ CI | Time synchronization for peer frame rate coordination (pinned N=2, see cfg) |
 | `PeerDrop.tla` | `PeerDrop.cfg` | ✓ CI | Halt vs ContinueWithout peer-drop policy model |
-| `NPeerReactivation.tla` | `NPeerReactivation.cfg` | ✓ CI | N-peer mesh reconnection activation-frame agreement (Agreement C) |
+| `NPeerReactivation.tla` | `NPeerReactivation.cfg` | ✓ CI | N-peer mesh reconnection activation-frame agreement (Agreement C) (N=3 survivors) |
 
 ## Properties Verified
 
@@ -79,12 +79,12 @@ This directory contains TLA+ specifications for formally verifying the correctne
 
 ### NPeerReactivation.tla
 
-Models "Agreement C" of N-peer mesh reconnection (1 coordinator, 2 survivors,
+Models "Agreement C" of N-peer mesh reconnection (1 coordinator, 3 survivors,
 1 joiner) from `progress/session-18-npeer-mesh-reconnection-design.md` (§4.C/§5/§8).
 
 **Safety:**
 
-- `Agreement` (S1): any two peers (coordinator, both survivors, joiner) that both
+- `Agreement` (S1): any two peers (coordinator, any survivor, joiner) that both
   committed a frame committed the same committed **value** (the bytes in `val`, *not*
   the `mode`/value-source label) at that frame
 - `NoConfirmedRewrite` (S2): committed history never reverts (every frame within `committedUpTo` stays definite)
