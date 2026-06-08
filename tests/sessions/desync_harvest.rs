@@ -11,13 +11,55 @@
 //! CONFIRMED game state is byte-identical could still exchange differing
 //! harvested checksums and raise a FALSE-POSITIVE `DesyncDetected`.
 //!
-//! Arbitration verdict: **NOTABUG**. The structural reason is pinned by the unit
-//! tests in `src/sessions/p2p_session.rs`:
-//! `checksum_harvest_uses_exact_frame_to_send_cell_not_a_later_cell` and
-//! `checksum_harvest_skips_speculative_cell_above_last_confirmed_frame` (the
-//! exact-frame `saved_state_by_frame` match plus the `<= last_confirmed_frame`
-//! gate). Those are the genuinely library-constraining, provably non-vacuous
-//! guards for the invariant.
+//! BINDING ARBITRATION VERDICT (S29): **REAL** — this is a genuine library bug.
+//! An earlier session (S27) arbitrated it NOTABUG; that verdict has been
+//! OVERTURNED by a decisive per-frame-digest experiment on the real-UDP
+//! `network_test_peer` (see below). The mechanism is in `adjust_gamestate`
+//! (`src/sessions/p2p_session.rs`): a prediction-miss rollback with
+//! `first_incorrect == F` does `load_frame(F)` and re-simulates `F -> current`,
+//! but the `if i > 0` save guard (~`src/sessions/p2p_session.rs:3555`) SKIPS
+//! re-saving the loaded boundary cell `cell[F]`. Because `cell[F]` embeds the
+//! MISPREDICTED frame-`F` input (a saved cell holds the state AFTER applying
+//! that frame's input), it stays STALE after the rollback. Once
+//! `last_confirmed_frame` advances past `F` with NO later rollback refreshing
+//! `cell[F]`, the harvest in `check_checksum_send_interval` — which runs at the
+//! TOP of `advance_frame` (line ~642), BEFORE the rollback and BEFORE
+//! `set_last_confirmed_frame` — can read, STORE, and SEND that stale cell's
+//! checksum even though `F <= last_confirmed_frame && F <= last_saved_frame`.
+//! Two honest peers whose CONFIRMED state is byte-identical then exchange
+//! differing harvested checksums and raise a FALSE-POSITIVE `DesyncDetected`.
+//!
+//! WHY S27's "structural impossibility" argument is WRONG: S27 reasoned that
+//! the invariant `last_confirmed_frame <= first_incorrect` guarantees a confirmed
+//! frame's cell "has been re-saved with confirmed inputs after any rollback". It
+//! has NOT: the rollback LOADS `cell[first_incorrect]` but the `i > 0` guard
+//! never re-SAVES it, so the boundary cell keeps its speculative content. The
+//! invariant constrains where rollback *reloads*, not whether the boundary cell
+//! was rewritten.
+//!
+//! ORCHESTRATOR'S DECISIVE EXPERIMENT (refutes "faithful game unaffected"):
+//! replacing the binary's checksum with a NON-accumulator faithful per-frame
+//! digest = `hash(frame, [each player's input.value])` (overwritten each frame,
+//! NOT a running accumulator) STILL fired `DesyncDetected total=4` at frame 60 in
+//! ~5/12 real-UDP 3-peer runs at 0% loss. In a captured failure ALL three peers
+//! had IDENTICAL final confirmed-window checksums (so the confirmed inputs at the
+//! boundary frame are provably byte-identical), YET the odd peer STORED a
+//! different value for the interval frame. Since that digest is a deterministic
+//! function of the confirmed inputs, the odd peer's stored value could only have
+//! been computed from PREDICTED inputs ⇒ its saved boundary cell was genuinely
+//! STALE at harvest time. (Swapping to a hash-of-full-state checksum — GameStub's
+//! faithful style — also still fired total=4, confirming the symptom is
+//! independent of checksum content: the SAVED CELL is stale, and no game-side
+//! checksum function can rescue a cell the library never re-requests a save of.)
+//!
+//! The two unit tests in `src/sessions/p2p_session.rs`
+//! (`checksum_harvest_uses_exact_frame_to_send_cell_not_a_later_cell` and
+//! `checksum_harvest_skips_speculative_cell_above_last_confirmed_frame`) remain
+//! VALID for exactly what they assert — the exact-frame `saved_state_by_frame`
+//! match and the `<= last_confirmed_frame` harvest gate. They do NOT, and cannot,
+//! exercise the un-re-saved boundary cell, so they neither prove nor disprove the
+//! REAL verdict. Tracked in `progress/session-29-*` and `N-PLAYER-DESYNC-AUDIT.md`.
+//! No `src/` fix lands here: see the "NEXT ACTION" note at the bottom of this file.
 //!
 //! ## What THIS test is (and is NOT)
 //!
@@ -150,6 +192,24 @@ fn build_delay_mesh(
     delayed_peer: usize,
     delay: u64,
 ) -> (Arc<Mutex<u64>>, [DelaySocket; 3]) {
+    let mut delays = [0u64; 3];
+    delays[delayed_peer] = delay;
+    build_delay_mesh_per_peer(addrs, delays)
+}
+
+/// Builds three [`DelaySocket`]s on a shared mesh with an INDEPENDENT outbound
+/// delay per peer. Unlike [`build_delay_mesh`] (single delayed peer, symmetric
+/// from the perspective of the two observers), this lets every peer sit at a
+/// DIFFERENT prediction depth relative to every other peer, which is the
+/// symmetry-breaker the asymmetric-harvest red test needs: with `[0, 1, 2]`,
+/// peer 0 sees peer 1 one tick late and peer 2 two ticks late, peer 1 sees peer
+/// 2 two ticks late, etc., so the three peers predict each other to DIFFERENT
+/// depths and can harvest DIFFERENT speculative checksums for the same interval
+/// frame.
+fn build_delay_mesh_per_peer(
+    addrs: [SocketAddr; 3],
+    delays: [u64; 3],
+) -> (Arc<Mutex<u64>>, [DelaySocket; 3]) {
     let inboxes = Arc::new(Mutex::new(BTreeMap::new()));
     let tick = Arc::new(Mutex::new(0u64));
     let mk = |i: usize| DelaySocket {
@@ -157,7 +217,7 @@ fn build_delay_mesh(
         inboxes: Arc::clone(&inboxes),
         pending: VecDeque::new(),
         tick: Arc::clone(&tick),
-        delay: if i == delayed_peer { delay } else { 0 },
+        delay: delays[i],
     };
     (Arc::clone(&tick), [mk(0), mk(1), mk(2)])
 }
@@ -384,3 +444,810 @@ fn faithful_checksum_no_false_desync_under_deep_prediction_rollback() {
          confirmed states (compared {compared} frames): {desync_events:?}"
     );
 }
+
+/// Structural outcome of one ASYMMETRIC-delay run, with a GROUND-TRUTH oracle on
+/// the confirmed *inputs* (not just the recorded states) so we can decide, for
+/// every `DesyncDetected`, whether it is a TRUE positive (the confirmed inputs at
+/// that frame genuinely diverged across peers) or a FALSE positive (the confirmed
+/// inputs agreed, so the faithful checksum should have matched).
+#[derive(Debug, PartialEq, Eq)]
+struct AsymmetricOutcome {
+    /// `(observing_peer, frame, local_checksum, remote_checksum)` for every
+    /// `DesyncDetected` event seen on any peer.
+    desync_events: Vec<(usize, i32, u128, u128)>,
+    /// Frames whose CONFIRMED inputs (the inputs applied to reach the frame, last
+    /// write wins = the final/confirmed re-simulation) DIFFERED across peers. A
+    /// desync at one of these frames is a genuine state divergence, NOT a false
+    /// positive. (Empirically these arise when the harness drives peers to confirm
+    /// a frame before the slowest peer's real input is delivered — i.e. an
+    /// artifact of an overly-aggressive pump cadence, not a library defect.)
+    confirmed_input_mismatch_frames: Vec<i32>,
+    /// Count of frames whose confirmed inputs AGREED across all three peers.
+    confirmed_input_agree_frames: usize,
+    /// Rollback counts per peer (proves the deep-prediction-rollback premise).
+    rollbacks: [usize; 3],
+}
+
+impl AsymmetricOutcome {
+    /// The genuine false positives: `DesyncDetected` events fired on frames whose
+    /// confirmed inputs AGREED across peers (so the confirmed state — and its
+    /// faithful checksum — must also agree, making the event spurious).
+    fn false_positive_desync_frames(&self) -> Vec<i32> {
+        self.desync_events
+            .iter()
+            .map(|&(_, frame, _, _)| frame)
+            .filter(|f| !self.confirmed_input_mismatch_frames.contains(f))
+            .collect()
+    }
+}
+
+/// Drives the asymmetric-delay 3-peer scenario end-to-end and returns a
+/// structural [`AsymmetricOutcome`]. Pure function of its inputs (fixed
+/// addresses, shared logical tick, no wall-clock), so two calls with identical
+/// arguments MUST produce identical outcomes — that is what
+/// [`asymmetric_delay_deep_rollback_is_deterministic`] asserts.
+///
+/// The confirmed-input oracle is built by mirroring the [`GameStub`] frame
+/// counter through each peer's request stream: a `LoadGameState` resets the
+/// cursor to the loaded cell's frame, each `AdvanceFrame` increments it, and the
+/// applied inputs are keyed by the resulting frame with last-write-wins — so the
+/// final entry at a confirmed frame is the inputs of its confirmed re-simulation.
+fn run_asymmetric_scenario(
+    delays: [u64; 3],
+    interval: u32,
+    frames: u32,
+    base_port: u16,
+) -> AsymmetricOutcome {
+    let addrs: [SocketAddr; 3] = [
+        ([127, 0, 0, 1], base_port).into(),
+        ([127, 0, 0, 1], base_port + 1).into(),
+        ([127, 0, 0, 1], base_port + 2).into(),
+    ];
+
+    let (tick, [sock0, sock1, sock2]) = build_delay_mesh_per_peer(addrs, delays);
+
+    let build = |local: usize, sock: DelaySocket| {
+        let mut b = SessionBuilder::<StubConfig>::new()
+            .with_num_players(3)
+            .unwrap()
+            .with_desync_detection_mode(DesyncDetection::On { interval });
+        for (h, addr) in addrs.iter().enumerate() {
+            b = if h == local {
+                b.add_player(PlayerType::Local, PlayerHandle::new(h))
+                    .unwrap()
+            } else {
+                b.add_player(PlayerType::Remote(*addr), PlayerHandle::new(h))
+                    .unwrap()
+            };
+        }
+        b.start_p2p_session(sock).unwrap()
+    };
+
+    let mut sessions = [build(0, sock0), build(1, sock1), build(2, sock2)];
+
+    let mut synced = false;
+    for _ in 0..2000 {
+        pump(&mut sessions, &tick);
+        if sessions
+            .iter()
+            .all(|s| s.current_state() == SessionState::Running)
+        {
+            synced = true;
+            break;
+        }
+    }
+    assert!(synced, "all three sessions should synchronize");
+
+    let mut stubs = [GameStub::new(), GameStub::new(), GameStub::new()];
+    // Ground-truth confirmed inputs: inputs applied to reach each frame, keyed by
+    // frame with last-write-wins (final value = confirmed re-simulation inputs).
+    let mut applied_inputs: [BTreeMap<i32, Vec<u32>>; 3] =
+        [BTreeMap::new(), BTreeMap::new(), BTreeMap::new()];
+    let mut desync_events: Vec<(usize, i32, u128, u128)> = Vec::new();
+    let mut rollbacks = [0usize; 3];
+
+    let drain_events = |sessions: &mut [fortress_rollback::P2PSession<StubConfig>; 3],
+                        desync_events: &mut Vec<(usize, i32, u128, u128)>| {
+        for (i, s) in sessions.iter_mut().enumerate() {
+            for ev in s.events() {
+                if let FortressEvent::DesyncDetected {
+                    frame,
+                    local_checksum,
+                    remote_checksum,
+                    ..
+                } = ev
+                {
+                    desync_events.push((i, frame.as_i32(), local_checksum, remote_checksum));
+                }
+            }
+        }
+    };
+
+    for f in 0..frames {
+        pump(&mut sessions, &tick);
+
+        // Per-frame-distinct, per-peer-distinct inputs. Variation forces
+        // RepeatLastConfirmed to mispredict every delayed peer, so every observer
+        // rolls back across the checksum interval — and because each peer is
+        // delayed by a DIFFERENT amount, the observers reach the interval frame at
+        // DIFFERENT prediction depths and harvest DIFFERENT speculative checksums.
+        let inputs = [
+            StubInput { inp: f * 7 + 1 },
+            StubInput { inp: f * 13 + 2 },
+            StubInput { inp: f * 31 + 5 },
+        ];
+
+        for (i, s) in sessions.iter_mut().enumerate() {
+            let _ = s.add_local_input(PlayerHandle::new(i), inputs[i]);
+        }
+
+        for (i, s) in sessions.iter_mut().enumerate() {
+            match s.advance_frame() {
+                Ok(reqs) => {
+                    rollbacks[i] += reqs
+                        .iter()
+                        .filter(|r| {
+                            matches!(r, fortress_rollback::FortressRequest::LoadGameState { .. })
+                        })
+                        .count();
+                    // Record the confirmed-input oracle by mirroring the GameStub
+                    // frame counter through the request stream.
+                    let mut cursor = stubs[i].current_frame();
+                    for r in reqs.iter() {
+                        match r {
+                            fortress_rollback::FortressRequest::LoadGameState { cell, .. } => {
+                                cursor = cell.frame().as_i32();
+                            },
+                            fortress_rollback::FortressRequest::AdvanceFrame { inputs } => {
+                                cursor += 1;
+                                let vals: Vec<u32> =
+                                    inputs.iter().map(|(inp, _)| inp.inp).collect();
+                                applied_inputs[i].insert(cursor, vals);
+                            },
+                            fortress_rollback::FortressRequest::SaveGameState { .. } => {},
+                        }
+                    }
+                    stubs[i].handle_requests(reqs);
+                },
+                Err(fortress_rollback::FortressError::PredictionThreshold) => {},
+                Err(e) => panic!("peer {i} advance_frame failed: {e:?}"),
+            }
+        }
+
+        drain_events(&mut sessions, &mut desync_events);
+    }
+
+    for _ in 0..60 {
+        pump(&mut sessions, &tick);
+        drain_events(&mut sessions, &mut desync_events);
+    }
+
+    // Compare confirmed inputs across peers at every commonly-recorded frame.
+    let min_confirmed = sessions
+        .iter()
+        .map(|s| s.confirmed_frame().as_i32())
+        .min()
+        .unwrap_or(0);
+
+    let mut confirmed_input_mismatch_frames = Vec::new();
+    let mut confirmed_input_agree_frames = 0usize;
+    for frame in 1..=min_confirmed {
+        if let (Some(a), Some(b), Some(c)) = (
+            applied_inputs[0].get(&frame),
+            applied_inputs[1].get(&frame),
+            applied_inputs[2].get(&frame),
+        ) {
+            if a == b && a == c {
+                confirmed_input_agree_frames += 1;
+            } else {
+                confirmed_input_mismatch_frames.push(frame);
+            }
+        }
+    }
+
+    AsymmetricOutcome {
+        desync_events,
+        confirmed_input_mismatch_frames,
+        confirmed_input_agree_frames,
+        rollbacks,
+    }
+}
+
+/// CHARACTERIZATION TEST for the NORMAL-PATH (non-disconnect) checksum-harvest
+/// invariant — the normal-path analog of finding F11.
+///
+/// ## Background: the lead and why this test exists
+///
+/// A false-positive `DesyncDetected` was observed on the NORMAL prediction-rollback
+/// path under real UDP (0% loss, no disconnect): peers whose final confirmed state
+/// was byte-identical nonetheless stored differing per-frame harvested checksums in
+/// `local_checksum_history`, raising a spurious desync. S27 arbitrated this NOTABUG;
+/// S29 OVERTURNED that to REAL (see the module header — the un-re-saved boundary
+/// cell `cell[first_incorrect]`). This ASYMMETRIC-delay test still cannot reproduce
+/// the real bug in-process (FIFO delivery cannot strand the boundary cell), but it
+/// breaks the harvest SYMMETRY S27's probe could not, so it is valuable boundary
+/// characterization and a regression lock — not the bug's deterministic repro.
+///
+/// This test breaks that symmetry with ASYMMETRIC per-peer delays (`[0, 1, 2]`):
+/// each peer sits at a DIFFERENT prediction depth, so the three peers genuinely
+/// harvest DIFFERENT speculative checksums for the same interval frame
+/// (`check_checksum_send_interval`, `src/sessions/p2p_session.rs`). Per-frame-distinct
+/// inputs guarantee constant misprediction → deep rollback across the small
+/// checksum interval. The faithful [`GameStub`] checksum is a pure hash of the full
+/// confirmed `StateStub`.
+///
+/// ## What it asserts (the invariant, GROUND-TRUTH oracle)
+///
+/// Using a confirmed-INPUT oracle (not merely recorded states), the test asserts:
+///   1. NO `DesyncDetected` fires on any frame whose confirmed inputs AGREED across
+///      all peers (a genuine false positive). This is
+///      [`AsymmetricOutcome::false_positive_desync_frames`].
+///   2. Deep rollback actually occurred (premise: the harvest window was exercised).
+///   3. Many frames had agreeing confirmed inputs (premise: the run was non-vacuous).
+///
+/// ## Result (in-process CHARACTERIZATION — does NOT reproduce the real bug)
+///
+/// Despite genuinely-asymmetric speculative harvesting, NO false positive was
+/// observed here, nor across an exhaustive scratch sweep (196 structured + 600
+/// randomized delay/pump/interval configs, ~14k total desync events): EVERY
+/// in-process `DesyncDetected` coincided with a genuine confirmed-input divergence
+/// (caused by an aggressive pump cadence confirming a frame before the slow peer's
+/// real input arrived), never with agreeing confirmed inputs.
+///
+/// CAUTION: this in-process green result does NOT clear the library. The FIFO
+/// `DelaySocket` cannot drive ONE peer to `first_incorrect == interval_frame`
+/// while another's lands below it, so it never strands the un-re-saved boundary
+/// cell that the REAL bug needs (S29 verdict: REAL — see the module header). S27
+/// mis-read this same green result as "the rollback re-saves the cell before the
+/// harvest reads it"; in fact the `i > 0` save guard in `adjust_gamestate`
+/// (`src/sessions/p2p_session.rs:3555`) NEVER re-saves the loaded boundary cell
+/// `cell[first_incorrect]`, which is exactly the cell that goes stale on the
+/// real-UDP path. This test characterizes the boundary; it is not the bug's repro.
+#[test]
+fn asymmetric_delay_deep_rollback_no_false_desync() {
+    let outcome = run_asymmetric_scenario([0, 1, 2], 2, 120, 31001);
+
+    // PREMISE: deep rollback actually happened (the harvest window was exercised).
+    assert!(
+        outcome.rollbacks.iter().any(|&r| r > 0),
+        "deep-prediction-rollback premise unmet: rollbacks={:?}",
+        outcome.rollbacks
+    );
+
+    // PREMISE: the run was non-vacuous — many frames had agreeing confirmed inputs.
+    assert!(
+        outcome.confirmed_input_agree_frames >= 10,
+        "expected many frames with agreeing confirmed inputs, got {} ({outcome:?})",
+        outcome.confirmed_input_agree_frames
+    );
+
+    // INVARIANT: no DesyncDetected fired on a frame whose confirmed inputs agreed.
+    let false_positives = outcome.false_positive_desync_frames();
+    assert!(
+        false_positives.is_empty(),
+        "FALSE-POSITIVE DesyncDetected on frame(s) whose confirmed inputs AGREED \
+         across peers (faithful checksum should have matched): {false_positives:?} \
+         ({outcome:?})"
+    );
+}
+
+/// Determinism guard for the asymmetric scenario: the in-process harness uses
+/// fixed addresses and a shared logical tick (no wall-clock), so repeated runs
+/// MUST produce a byte-identical [`AsymmetricOutcome`]. Runs the scenario 10x and
+/// asserts every run equals the first.
+#[test]
+fn asymmetric_delay_deep_rollback_is_deterministic() {
+    let first = run_asymmetric_scenario([0, 1, 2], 2, 120, 32001);
+    for run in 1..10 {
+        let next = run_asymmetric_scenario([0, 1, 2], 2, 120, 32001);
+        assert_eq!(
+            first, next,
+            "asymmetric scenario was NON-deterministic on run {run}: \
+             first={first:?} next={next:?}"
+        );
+    }
+}
+
+// ===========================================================================
+// FAITHFUL-CHECKSUM no-false-desync guard (NORMAL prediction-rollback path)
+// ===========================================================================
+//
+// The scenarios above use the `StateStub` (`+2/-1` parity) checksum, which
+// collides far too often to distinguish a stale speculative cell from the
+// confirmed one (two different confirmed-input sequences routinely hash equal).
+// The tests below instead use an INJECTIVE accumulator whose checksum is a
+// FAITHFUL, near-collision-free hash of the saved state, so any checksum
+// mismatch is a genuine saved-state divergence — exactly the condition the
+// Session-26/S27 "normal-path stale-speculative-cell" lead was about.
+//
+// `InjConfig` below is that stub: its state folds every player's input into a
+// running accumulator with a large odd multiplier (FNV-style), so the state
+// after a frame is a (practically) injective function of the full confirmed
+// input history, and its checksum is a faithful hash of `(frame, accumulator)`.
+//
+// SCOPE (what these in-process tests DO and do NOT establish): with a FAITHFUL
+// checksum the IN-PROCESS harness raises NO false-positive `DesyncDetected` on
+// the normal prediction-rollback path across an exhaustive scratch sweep (1500
+// structured delay / interval / pump-cadence configs): EVERY in-process
+// `DesyncDetected` coincided with a genuine confirmed-INPUT divergence (a harness
+// pump-cadence artifact), never with agreeing confirmed inputs. That is genuine,
+// non-vacuous coverage — it CHARACTERIZES the boundary and LOCKS the exact-frame
+// harvest invariant against regression.
+//
+// BUT these tests do NOT (and structurally CANNOT) reproduce the real bug. The
+// FIFO `DelaySocket` cannot deterministically drive ONE peer to
+// `first_incorrect == interval_frame` while another peer's `first_incorrect`
+// lands BELOW it; the in-order delivery re-saves cells past the boundary and
+// confirmation never strands a stale boundary cell without a later refreshing
+// rollback. So the asymmetric-prediction false positive never arises here.
+//
+// The real-UDP `network_test_peer` reproducer observes `DesyncDetected total=4`
+// at 0% loss on ~50% of 3-peer runs. S27 attributed this to the binary's
+// SPECULATIVE display accumulator `state.value` (a non-faithful checksum) and
+// concluded a faithful game would be unaffected. THE ORCHESTRATOR'S
+// PER-FRAME-DIGEST EXPERIMENT REFUTED THAT (see the module header): a FAITHFUL
+// per-frame digest — and, separately, a hash-of-full-state checksum in GameStub's
+// own style — STILL fires `total=4` at frame 60, with the odd peer storing a
+// value that could only come from PREDICTED inputs. The false positive is REAL
+// (S29): the staleness lives in the LIBRARY's un-re-saved boundary cell, which
+// NO game-side checksum function can rescue. These tests therefore remain as
+// boundary CHARACTERIZATION and a regression lock for the exact-frame harvest
+// invariant; the real-UDP repro and the `src/` fix are tracked in
+// `progress/session-29-*` and `N-PLAYER-DESYNC-AUDIT.md`.
+
+mod inj {
+    use serde::{Deserialize, Serialize};
+
+    use fortress_rollback::{Config, FortressRequest, Frame, GameStateCell, InputVec, RequestVec};
+
+    use crate::common::stubs::StubInput;
+
+    /// Injective accumulator state. The accumulator is updated as
+    /// `acc = acc * MUL + weighted_input_sum`, which is (for the small frame
+    /// counts in this test) a collision-free function of the confirmed input
+    /// history — so a speculative save and the confirmed save at the same frame
+    /// produce DIFFERENT accumulators (and thus different faithful checksums)
+    /// whenever the inputs that fed them differ.
+    #[derive(Default, Copy, Clone, Hash, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct InjState {
+        pub frame: i32,
+        pub acc: u64,
+    }
+
+    impl InjState {
+        fn advance(&mut self, inputs: &InputVec<StubInput>) {
+            // Large odd FNV-style multiplier keeps the accumulator injective over
+            // the confirmed input history for this test's frame counts.
+            const MUL: u64 = 0x0100_0000_01b3;
+            // Weight each player's input by its (1-based) index so player order is
+            // significant — distinct per-peer inputs cannot cancel out.
+            let mut weighted: u64 = 0;
+            for (idx, (input, _)) in inputs.iter().enumerate() {
+                weighted =
+                    weighted.wrapping_add((u64::from(input.inp)).wrapping_mul((idx as u64) + 1));
+            }
+            self.acc = self.acc.wrapping_mul(MUL).wrapping_add(weighted);
+            self.frame += 1;
+        }
+
+        /// Faithful checksum: a pure hash of the full saved state. Equal states
+        /// (and only equal states, modulo a 1-in-2^64 hash collision) compare
+        /// equal, so any checksum mismatch is a genuine saved-state divergence.
+        fn checksum(&self) -> u128 {
+            // 128-bit mix of (frame, acc) so the checksum is faithful to the
+            // whole state, not just the accumulator.
+            let f = (self.frame as u32) as u128;
+            let a = self.acc as u128;
+            (a << 32) ^ f ^ (a.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct InjConfig;
+
+    impl Config for InjConfig {
+        type Input = StubInput;
+        type State = InjState;
+        type Address = std::net::SocketAddr;
+    }
+
+    /// Game stub over [`InjConfig`] that records the most-recent state at each
+    /// (post-advance) frame, so confirmed states can be compared across peers.
+    pub struct InjStub {
+        pub gs: InjState,
+    }
+
+    impl InjStub {
+        #[must_use]
+        pub fn new() -> Self {
+            Self {
+                gs: InjState::default(),
+            }
+        }
+
+        pub fn handle_requests_recording(
+            &mut self,
+            requests: RequestVec<InjConfig>,
+            states: &mut std::collections::BTreeMap<i32, InjState>,
+        ) {
+            for request in requests {
+                match request {
+                    FortressRequest::LoadGameState { cell, .. } => {
+                        self.gs = cell.load().unwrap();
+                    },
+                    FortressRequest::SaveGameState { cell, frame } => {
+                        self.save(cell, frame);
+                    },
+                    FortressRequest::AdvanceFrame { inputs } => {
+                        self.gs.advance(&inputs);
+                        states.insert(self.gs.frame, self.gs);
+                    },
+                }
+            }
+        }
+
+        fn save(&self, cell: GameStateCell<InjState>, frame: Frame) {
+            assert_eq!(self.gs.frame, frame.as_i32());
+            cell.save(frame, Some(self.gs), Some(self.gs.checksum()));
+        }
+    }
+}
+
+/// Structural outcome of one injective-accumulator asymmetric run, with a
+/// confirmed-INPUT ground-truth oracle (so every `DesyncDetected` can be
+/// classified TRUE vs FALSE positive) AND the recorded confirmed states (so we
+/// can assert byte-identity directly).
+#[derive(Debug, PartialEq, Eq)]
+struct InjOutcome {
+    desync_events: Vec<(usize, i32, u128, u128)>,
+    confirmed_input_mismatch_frames: Vec<i32>,
+    confirmed_input_agree_frames: usize,
+    /// Number of (frame) positions at which all three peers recorded a state and
+    /// those states were byte-identical.
+    states_compared: usize,
+    /// Confirmed frames (agreeing confirmed inputs) whose recorded confirmed
+    /// STATES nonetheless differed across peers — a genuine state divergence.
+    state_mismatch_frames: Vec<i32>,
+    rollbacks: [usize; 3],
+}
+
+impl InjOutcome {
+    /// `DesyncDetected` events fired on frames whose confirmed inputs AGREED
+    /// across peers — genuine false positives (the faithful injective checksum
+    /// should have matched).
+    fn false_positive_desync_frames(&self) -> Vec<i32> {
+        self.desync_events
+            .iter()
+            .map(|&(_, frame, _, _)| frame)
+            .filter(|f| !self.confirmed_input_mismatch_frames.contains(f))
+            .collect()
+    }
+}
+
+/// Drives the injective-accumulator asymmetric scenario end-to-end. Pure
+/// function of its arguments (fixed addresses, shared logical tick, no
+/// wall-clock), so repeated calls with identical arguments produce identical
+/// outcomes.
+#[allow(clippy::too_many_lines)]
+fn run_inj_scenario(delays: [u64; 3], interval: u32, frames: u32, base_port: u16) -> InjOutcome {
+    use inj::{InjConfig, InjState, InjStub};
+
+    let addrs: [SocketAddr; 3] = [
+        ([127, 0, 0, 1], base_port).into(),
+        ([127, 0, 0, 1], base_port + 1).into(),
+        ([127, 0, 0, 1], base_port + 2).into(),
+    ];
+
+    let (tick, [sock0, sock1, sock2]) = build_delay_mesh_per_peer(addrs, delays);
+
+    let build = |local: usize, sock: DelaySocket| {
+        let mut b = SessionBuilder::<InjConfig>::new()
+            .with_num_players(3)
+            .unwrap()
+            .with_desync_detection_mode(DesyncDetection::On { interval });
+        for (h, addr) in addrs.iter().enumerate() {
+            b = if h == local {
+                b.add_player(PlayerType::Local, PlayerHandle::new(h))
+                    .unwrap()
+            } else {
+                b.add_player(PlayerType::Remote(*addr), PlayerHandle::new(h))
+                    .unwrap()
+            };
+        }
+        b.start_p2p_session(sock).unwrap()
+    };
+
+    let mut sessions = [build(0, sock0), build(1, sock1), build(2, sock2)];
+
+    let pump_inj = |sessions: &mut [fortress_rollback::P2PSession<InjConfig>; 3],
+                    tick: &Arc<Mutex<u64>>| {
+        for _ in 0..4 {
+            for s in sessions.iter_mut() {
+                s.poll_remote_clients();
+            }
+            *tick.lock().unwrap() += 1;
+        }
+    };
+
+    let mut synced = false;
+    for _ in 0..2000 {
+        pump_inj(&mut sessions, &tick);
+        if sessions
+            .iter()
+            .all(|s| s.current_state() == SessionState::Running)
+        {
+            synced = true;
+            break;
+        }
+    }
+    assert!(synced, "all three sessions should synchronize");
+
+    let mut stubs = [InjStub::new(), InjStub::new(), InjStub::new()];
+    let mut states: [BTreeMap<i32, InjState>; 3] =
+        [BTreeMap::new(), BTreeMap::new(), BTreeMap::new()];
+    let mut applied_inputs: [BTreeMap<i32, Vec<u32>>; 3] =
+        [BTreeMap::new(), BTreeMap::new(), BTreeMap::new()];
+    let mut desync_events: Vec<(usize, i32, u128, u128)> = Vec::new();
+    let mut rollbacks = [0usize; 3];
+
+    let drain_events = |sessions: &mut [fortress_rollback::P2PSession<InjConfig>; 3],
+                        desync_events: &mut Vec<(usize, i32, u128, u128)>| {
+        for (i, s) in sessions.iter_mut().enumerate() {
+            for ev in s.events() {
+                if let FortressEvent::DesyncDetected {
+                    frame,
+                    local_checksum,
+                    remote_checksum,
+                    ..
+                } = ev
+                {
+                    desync_events.push((i, frame.as_i32(), local_checksum, remote_checksum));
+                }
+            }
+        }
+    };
+
+    for f in 0..frames {
+        pump_inj(&mut sessions, &tick);
+
+        let inputs = [
+            StubInput { inp: f * 7 + 1 },
+            StubInput { inp: f * 13 + 2 },
+            StubInput { inp: f * 31 + 5 },
+        ];
+
+        for (i, s) in sessions.iter_mut().enumerate() {
+            let _ = s.add_local_input(PlayerHandle::new(i), inputs[i]);
+        }
+
+        for (i, s) in sessions.iter_mut().enumerate() {
+            match s.advance_frame() {
+                Ok(reqs) => {
+                    rollbacks[i] += reqs
+                        .iter()
+                        .filter(|r| {
+                            matches!(r, fortress_rollback::FortressRequest::LoadGameState { .. })
+                        })
+                        .count();
+                    // Mirror the GameStub frame counter through the request stream
+                    // to build the confirmed-input oracle (last write wins).
+                    let mut cursor = stubs[i].gs.frame;
+                    for r in reqs.iter() {
+                        match r {
+                            fortress_rollback::FortressRequest::LoadGameState { cell, .. } => {
+                                cursor = cell.frame().as_i32();
+                            },
+                            fortress_rollback::FortressRequest::AdvanceFrame { inputs } => {
+                                cursor += 1;
+                                let vals: Vec<u32> =
+                                    inputs.iter().map(|(inp, _)| inp.inp).collect();
+                                applied_inputs[i].insert(cursor, vals);
+                            },
+                            fortress_rollback::FortressRequest::SaveGameState { .. } => {},
+                        }
+                    }
+                    stubs[i].handle_requests_recording(reqs, &mut states[i]);
+                },
+                Err(fortress_rollback::FortressError::PredictionThreshold) => {},
+                Err(e) => panic!("peer {i} advance_frame failed: {e:?}"),
+            }
+        }
+
+        drain_events(&mut sessions, &mut desync_events);
+    }
+
+    for _ in 0..80 {
+        pump_inj(&mut sessions, &tick);
+        drain_events(&mut sessions, &mut desync_events);
+    }
+
+    let min_confirmed = sessions
+        .iter()
+        .map(|s| s.confirmed_frame().as_i32())
+        .min()
+        .unwrap_or(0);
+
+    let mut confirmed_input_mismatch_frames = Vec::new();
+    let mut confirmed_input_agree_frames = 0usize;
+    for frame in 1..=min_confirmed {
+        if let (Some(a), Some(b), Some(c)) = (
+            applied_inputs[0].get(&frame),
+            applied_inputs[1].get(&frame),
+            applied_inputs[2].get(&frame),
+        ) {
+            if a == b && a == c {
+                confirmed_input_agree_frames += 1;
+            } else {
+                confirmed_input_mismatch_frames.push(frame);
+            }
+        }
+    }
+
+    let mut states_compared = 0usize;
+    let mut state_mismatch_frames = Vec::new();
+    for frame in 1..=min_confirmed {
+        if let (Some(a), Some(b), Some(c)) = (
+            states[0].get(&frame),
+            states[1].get(&frame),
+            states[2].get(&frame),
+        ) {
+            // Only consider frames whose confirmed inputs agreed — a
+            // confirmed-input mismatch is a harness pump-cadence artifact, not a
+            // library defect (documented in the asymmetric scenario above). On
+            // those frames the confirmed states MUST be byte-identical; record any
+            // divergence so the caller can assert (the regression test) or inspect
+            // (the scratch sweep) without aborting the run mid-way.
+            if !confirmed_input_mismatch_frames.contains(&frame) {
+                if a == b && a == c {
+                    states_compared += 1;
+                } else {
+                    state_mismatch_frames.push(frame);
+                }
+            }
+        }
+    }
+
+    InjOutcome {
+        desync_events,
+        confirmed_input_mismatch_frames,
+        confirmed_input_agree_frames,
+        states_compared,
+        state_mismatch_frames,
+        rollbacks,
+    }
+}
+
+/// NON-VACUOUS faithful-checksum guard for the NORMAL prediction-rollback path
+/// (the normal-path analog of finding F11's concern).
+///
+/// Uses the INJECTIVE accumulator stub so a stale speculative `cell[F]` would
+/// deterministically differ from the confirmed cell (a faithful, collision-free
+/// checksum). Asymmetric per-peer delays `[0, 2, 4]` drive the three peers to
+/// DIFFERENT prediction depths so their correcting rollbacks land on different
+/// `first_incorrect` values relative to the checksum-interval frame, and they
+/// genuinely harvest DIFFERENT speculative checksums for the same interval frame.
+/// The small interval keeps an interval frame inside the live rollback window.
+///
+/// ORACLE (all must hold):
+///   1. PREMISE: deep rollback actually happened (the harvest window was exercised).
+///   2. PREMISE: many frames had agreeing confirmed inputs AND byte-identical
+///      confirmed states (non-vacuous; a faithful checksum MUST match on these).
+///   3. INVARIANT: NO `DesyncDetected` fired on a frame whose confirmed inputs
+///      agreed (which would be a genuine false positive on byte-identical state).
+///
+/// SCOPE: in THIS in-process harness (FIFO delivery) a faithful checksum raises
+/// no false positive, so the test locks the exact-frame harvest invariant against
+/// regression. It does NOT clear the library: the FIFO socket cannot strand the
+/// un-re-saved boundary cell `cell[first_incorrect]`, so it cannot reproduce the
+/// REAL bug (S29 — see the module header). The orchestrator's per-frame-digest and
+/// full-state-hash experiments on `network_test_peer` show even a FAITHFUL checksum
+/// still fires the real-UDP false positive, because the staleness is in the
+/// library's saved cell, not the game's checksum function. Treat this as boundary
+/// characterization + regression lock, not proof of correctness.
+#[test]
+fn injective_asymmetric_rollback_no_false_desync_with_faithful_checksum() {
+    let outcome = run_inj_scenario([0, 2, 4], 4, 120, 33001);
+
+    assert!(
+        outcome.rollbacks.iter().any(|&r| r > 0),
+        "deep-prediction-rollback premise unmet: rollbacks={:?}",
+        outcome.rollbacks
+    );
+
+    assert!(
+        outcome.confirmed_input_agree_frames >= 10,
+        "expected many frames with agreeing confirmed inputs, got {} ({outcome:?})",
+        outcome.confirmed_input_agree_frames
+    );
+
+    assert!(
+        outcome.states_compared >= 10,
+        "expected to compare many byte-identical confirmed states, got {} ({outcome:?})",
+        outcome.states_compared
+    );
+
+    // The confirmed states are byte-identical across peers (proves any
+    // DesyncDetected would be a FALSE positive — the faithful injective checksum
+    // should have matched).
+    assert!(
+        outcome.state_mismatch_frames.is_empty(),
+        "confirmed STATE divergence on frames with agreeing confirmed inputs: {:?} ({outcome:?})",
+        outcome.state_mismatch_frames
+    );
+
+    let false_positives = outcome.false_positive_desync_frames();
+    assert!(
+        false_positives.is_empty(),
+        "FALSE-POSITIVE DesyncDetected on frame(s) whose confirmed inputs AGREED \
+         across peers with a FAITHFUL injective checksum (the saved speculative \
+         cell was stale): {false_positives:?} ({outcome:?})"
+    );
+}
+
+/// Determinism guard: the injective scenario is a pure function of its arguments,
+/// so 10 repeated runs MUST produce a byte-identical [`InjOutcome`].
+#[test]
+fn injective_asymmetric_rollback_is_deterministic() {
+    let first = run_inj_scenario([0, 2, 4], 4, 120, 34001);
+    for run in 1..10 {
+        let next = run_inj_scenario([0, 2, 4], 4, 120, 34001);
+        assert_eq!(
+            first, next,
+            "injective scenario was NON-deterministic on run {run}: \
+             first={first:?} next={next:?}"
+        );
+    }
+}
+
+// ===========================================================================
+// NEXT ACTION (S29) — DEFERRED `src/` FIX, SPECIFIED FOR A FUTURE SESSION
+// ===========================================================================
+//
+// VERDICT: REAL (see the module header). No production change lands in this
+// session because a correctness-first codebase requires a RED test first, and no
+// DETERMINISTIC in-process reproduction exists yet (the FIFO/injective harness
+// here cannot strand the boundary cell). Both fixes explored so far FAIL:
+//   - A "saved-while-confirmed" harvest GATE regresses legitimate detection: many
+//     cells are saved speculatively-but-CORRECT and never re-saved (e.g.
+//     `test_desync_detection_intervals_data_driven`), so gating on "was this cell
+//     re-saved after confirmation" suppresses real desyncs.
+//   - A one-frame F7-style boundary refresh (load one frame earlier) does NOT
+//     reduce the real-UDP count (13/25 -> 11/25), because the staleness can span
+//     MULTIPLE frames in the window, not just the single boundary frame.
+//
+// (a) PRECISE STALE CONDITION TO DETECT
+//     A saved cell `cell[F]` whose stored checksum reflects PREDICTED (not-yet-
+//     confirmed) inputs at harvest time, i.e. `cell[F]` was last written during a
+//     speculative save OR loaded-but-never-re-saved as the boundary of a
+//     `first_incorrect == F` rollback, and `last_confirmed_frame` has since
+//     advanced to `>= F` with NO subsequent rollback re-saving `cell[F]`. The
+//     harvest gate `F <= last_confirmed_frame && F <= last_saved_frame` is
+//     necessary but NOT sufficient — it does not detect this staleness.
+//
+// (b) CANDIDATE FIX (trajectory-preserving)
+//     Track, per saved cell, an "all-inputs-confirmed-at-save" bit (true iff every
+//     player's input applied to reach that frame was a CONFIRMED input, not a
+//     prediction, at save time). Then in `adjust_gamestate`, when a boundary
+//     rollback's loaded cell is NOT confirmed-clean, load instead from the NEWEST
+//     confirmed-clean cell `<= first_incorrect` (an F7-style earlier load, but to
+//     the newest clean frame rather than exactly one frame earlier) and let the
+//     re-simulation REBUILD every cell from `that clean base .. current` — so
+//     ALL stale cells in the window are re-saved from a clean base, not just the
+//     boundary. This preserves the confirmed trajectory (it only re-derives cells
+//     that were stale) and closes the multi-frame-staleness gap the one-earlier
+//     refresh missed. Alternatively/additionally, gate the harvest on the
+//     per-cell confirmed-clean bit (skip-and-retry, mirroring the F11/M1 deferral
+//     at `src/sessions/p2p_session.rs:4167`) so a stale cell is never harvested
+//     even if a refresh is missed — but ONLY if the clean bit is precise enough to
+//     avoid the legitimate-detection regression above.
+//
+// (c) DETERMINISTIC-REPRO PREREQUISITE (the red test that must come first)
+//     The in-process harness needs a socket/schedule that deterministically drives
+//     `first_incorrect == interval_frame` on ONE peer while ANOTHER peer's
+//     `first_incorrect < interval_frame` (so one peer strands the boundary cell at
+//     the interval frame and the other re-saves through it). A FIFO `DelaySocket`
+//     cannot do this; the likely tool is a REORDERING in-process socket (deliver
+//     a later packet before an earlier one for one link) or a hand-scheduled
+//     arrival order that forces the asymmetric `first_incorrect` split. With that
+//     RED test green-able only by the fix in (b), the deferred `src/` change can
+//     land under the red-test-first policy.
