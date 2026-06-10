@@ -30,7 +30,7 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | `InputQueue.tla` | `InputQueue.cfg` | ✓ CI | Circular buffer input queue |
 | `Rollback.tla` | `Rollback.cfg` | ✓ CI | Rollback mechanism |
 | `Concurrency.tla` | `Concurrency.cfg` | ✓ CI | GameStateCell thread safety |
-| `ChecksumExchange.tla` | `ChecksumExchange.cfg` | ✓ CI | Checksum exchange for desync detection (pinned N=2, see cfg) |
+| `ChecksumExchange.tla` | `ChecksumExchange.cfg` | ✓ CI | Checksum exchange for desync detection, per-(local,remote)-pair verdicts (N=3 peers) |
 | `SpectatorSession.tla` | `SpectatorSession.cfg` | ✓ CI | Spectator session with frame delay and catchup |
 | `TimeSync.tla` | `TimeSync.cfg` | ✓ CI | Time synchronization for peer frame rate coordination (pinned N=2, see cfg) |
 | `PeerDrop.tla` | `PeerDrop.cfg` | ✓ CI | Halt vs ContinueWithout peer-drop policy model |
@@ -154,16 +154,39 @@ counterexample — demonstrating P-A is necessary.
 
 ### ChecksumExchange.tla
 
+All verdict state (`pendingChecksums`/`syncHealth`/`lastVerifiedFrame`) is keyed by ordered
+(local, remote) peer pairs, mirroring the implementation's per-`UdpProtocol` endpoint state
+(the F12 fix in `src/sessions/p2p_session.rs`). Checked at `PEERS = {p1, p2, p3}`,
+`MAX_FRAME = 3`, `CHECKSUM_INTERVAL = 1` — the smallest model with two comparable checksum
+frames per pair. Tractability at N=3 needs both `SYMMETRY Permutations(PEERS)` (sound: the
+module's only `CHOOSE` ranges over integer frames, never peers, and liveness is disabled)
+and an in-flight network cap of 2 (one broadcast outstanding; sound because
+`ReceiveChecksum` commutes with every other action — see the `StateConstraint` comment in
+the spec). Measured single-worker: N=3 completes in ~106s with 11,674,741 states generated
+/ 1,469,194 distinct (depth 62); N=2 in ~1s with 38,160 generated / 9,167 distinct (depth
+32). Without the cap-2 constraint and symmetry the same bounds do NOT terminate in CI
+budget (killed at 28.6 min, 233M+ generated / 31.7M+ distinct, queue still growing).
+
 **Safety:**
 
 - Checksums are computed deterministically for each frame
 - Checksum reports are only sent for confirmed frames
-- Desync detection compares matching frame checksums
+- No false positives, pair-precise: a `DesyncDetected` verdict for (p,q) requires p or q
+  to have actually diverged
+- Desync verdicts are terminal per pair (a match against one remote never clears another
+  pair's verdict — the Session 27 cross-pair clobbering regression guard)
+- `last_verified_frame` is monotonically increasing per pair
+- F12 leakage guards: `InSync` for (p,q) requires a matching checksum in pair (p,q) itself;
+  the `is_synchronized()` aggregate requires every pair individually verified; the
+  `last_verified_frame()` aggregate is the min over pairs. The two aggregate invariants
+  (`SynchronizedRequiresAllPairsVerified`, `AggregateVerifiedFrameSound`) are tautological
+  given the current aggregate definitions — they are kept as regression tripwires against
+  someone redefining the aggregates, not as added verification strength
 
 **Liveness:**
 
-- Checksum exchange eventually completes for confirmed frames
-- Desync is detected within bounded time after occurrence
+- Defined but disabled (premises are unsound under a late `IntroduceDesync`; same as the
+  earlier N=2 model)
 
 ## Running the Specifications
 
@@ -210,8 +233,8 @@ Each spec has a `.cfg` file with TLC-compatible settings:
 | `NetworkProtocol.cfg` | PEERS={p1,p2,p3}, NUM_SYNC_PACKETS=1 | ~170,000 distinct states (~2.6M generated) |
 | `InputQueue.cfg` | QUEUE_LENGTH=4, MAX_FRAME=6 | ~77,000 states |
 | `Concurrency.cfg` | MAX_FRAME=4 | Small |
-| `Rollback.cfg` | MAX_PREDICTION=1, MAX_FRAME=3 | ~52M states |
-| `ChecksumExchange.cfg` | PEERS={p1,p2}, MAX_FRAME=4 | ~6,000 distinct states (~21k generated) |
+| `Rollback.cfg` | MAX_PREDICTION=1, MAX_FRAME=3 | ~1.8M distinct states (~29.2M generated) |
+| `ChecksumExchange.cfg` | PEERS={p1,p2,p3}, MAX_FRAME=3, SYMMETRY | ~1.47M distinct states (~11.7M generated), ~106s single worker |
 
 **Note on NULL_FRAME:** TLC config files don't support negative numbers,
 so we use `NULL_FRAME = 999` as a sentinel value instead of -1.
@@ -305,7 +328,7 @@ These specifications model the key algorithms from:
 | `InputQueue` | `src/input_queue/mod.rs` (InputQueue) |
 | `Rollback` | `src/sync_layer/mod.rs` (SyncLayer), `src/sessions/p2p_session.rs` |
 | `Concurrency` | `src/sync_layer/game_state_cell.rs` (GameStateCell, GameStateAccessor) |
-| `ChecksumExchange` | `src/checksum.rs`, `src/network/messages.rs` (ChecksumReport) |
+| `ChecksumExchange` | `src/sessions/p2p_session.rs` (sync_health, is_synchronized, last_verified_frame, compare_local_checksums_against_peers, check_checksum_send_interval), `src/network/protocol/mod.rs` (pending_checksums, last_verified_frame, on_checksum_report), `src/network/messages.rs` (ChecksumReport) |
 
 ## Extending the Specifications
 
