@@ -337,16 +337,15 @@ struct TestResult {
     /// Number of `FortressEvent::DesyncDetected` events this peer observed.
     ///
     /// Surfaced as a top-level field (in addition to `runtime.events`) so the
-    /// driver can read it without depending on `runtime` being present. NOTE:
-    /// at 0% packet loss this can be > 0 because `TestGame`'s saved-cell
-    /// checksum is the speculative display accumulator `state.value`, which
-    /// includes Predicted inputs; a peer that races far ahead under prediction
-    /// can harvest a saved cell whose state still embeds a misprediction for
-    /// the checksum-interval frame, so the library faithfully reports a
-    /// stored-checksum mismatch even though every peer's *confirmed* state is
-    /// identical. This is a test-harness checksum artifact, not a library
-    /// desync. The N-peer determinism tests therefore LOG this count but do not
-    /// assert it is zero (see `verify_determinism_n` and the module note in
+    /// driver can read it without depending on `runtime` being present. The
+    /// N-peer determinism tests assert this is zero on a clean network: the
+    /// historical 0%-loss false positive (once attributed to this harness's
+    /// speculative `state.value` checksum) was root-caused in S30 as library
+    /// finding F17 -- `InputQueue::input` re-entered a prediction episode at
+    /// the requested frame instead of the queue's first missing frame,
+    /// silently swallowing misprediction comparisons for the skipped window --
+    /// and fixed there, so a nonzero count now indicates a genuine library
+    /// regression (see `verify_determinism_n` and the module note in
     /// tests/network/multi_process.rs).
     #[serde(default)]
     desync_detected: u32,

@@ -11,23 +11,34 @@
 //! CONFIRMED game state is byte-identical could still exchange differing
 //! harvested checksums and raise a FALSE-POSITIVE `DesyncDetected`.
 //!
-//! BINDING ARBITRATION VERDICT (S29): **REAL** — this is a genuine library bug.
-//! An earlier session (S27) arbitrated it NOTABUG; that verdict has been
-//! OVERTURNED by a decisive per-frame-digest experiment on the real-UDP
-//! `network_test_peer` (see below). The mechanism is in `adjust_gamestate`
-//! (`src/sessions/p2p_session.rs`): a prediction-miss rollback with
-//! `first_incorrect == F` does `load_frame(F)` and re-simulates `F -> current`,
-//! but the `if i > 0` save guard (~`src/sessions/p2p_session.rs:3555`) SKIPS
-//! re-saving the loaded boundary cell `cell[F]`. Because `cell[F]` embeds the
-//! MISPREDICTED frame-`F` input (a saved cell holds the state AFTER applying
-//! that frame's input), it stays STALE after the rollback. Once
-//! `last_confirmed_frame` advances past `F` with NO later rollback refreshing
-//! `cell[F]`, the harvest in `check_checksum_send_interval` — which runs at the
-//! TOP of `advance_frame` (line ~642), BEFORE the rollback and BEFORE
-//! `set_last_confirmed_frame` — can read, STORE, and SEND that stale cell's
-//! checksum even though `F <= last_confirmed_frame && F <= last_saved_frame`.
-//! Two honest peers whose CONFIRMED state is byte-identical then exchange
-//! differing harvested checksums and raise a FALSE-POSITIVE `DesyncDetected`.
+//! BINDING ARBITRATION VERDICT (S29): **REAL** — a genuine library bug. An
+//! earlier session (S27) arbitrated it NOTABUG; that verdict was OVERTURNED by
+//! a decisive per-frame-digest experiment on the real-UDP `network_test_peer`
+//! (see below). **FIXED (S30) at the root cause**, which S30's adversarial
+//! review re-rooted from `adjust_gamestate` into the **InputQueue prediction
+//! lifecycle** (`src/input_queue/mod.rs`): a prediction episode re-entered by a
+//! rollback re-simulation used to start at the REQUESTED frame instead of the
+//! queue's first missing frame, so arrivals for the skipped window
+//! `[first_missing, requested)` were physically added but their misprediction
+//! comparison was silently swallowed — `first_incorrect_frame` never fired for
+//! that window, no rollback ever re-simulated it, and the victim's applied
+//! trajectory (and every cell saved from it) stayed stale. Save semantics, for
+//! precision: `cell[F]` holds the state BEFORE frame `F`'s inputs are applied —
+//! a pure function of the inputs at frames STRICTLY BELOW `F` (the S29 header
+//! previously said "AFTER", which was wrong) — so the staleness in `cell[F]`
+//! lives in swallowed predicted inputs at frames below `F`. The
+//! `adjust_gamestate` `if i > 0` save guard (~`src/sessions/p2p_session.rs:3555`),
+//! which never re-saves the loaded boundary cell, is an ACCESSORY: it preserves
+//! an already-stale boundary cell, but with every arrival compared (the S30
+//! fix) the boundary cell is provably always clean (a rollback to
+//! `first_incorrect == F` implies every applied frame `< F` matched its
+//! confirmed input). Once `last_confirmed_frame` advanced past the stale window,
+//! the harvest in `check_checksum_send_interval` — which runs at the TOP of
+//! `advance_frame` (line ~642), BEFORE the rollback and BEFORE
+//! `set_last_confirmed_frame` — read, STORED, and SENT stale cells' checksums
+//! even though `F <= last_confirmed_frame && F <= last_saved_frame`. Honest
+//! peers whose CONFIRMED state was byte-identical then exchanged differing
+//! harvested checksums and raised a FALSE-POSITIVE `DesyncDetected`.
 //!
 //! WHY S27's "structural impossibility" argument is WRONG: S27 reasoned that
 //! the invariant `last_confirmed_frame <= first_incorrect` guarantees a confirmed
@@ -59,7 +70,9 @@
 //! match and the `<= last_confirmed_frame` harvest gate. They do NOT, and cannot,
 //! exercise the un-re-saved boundary cell, so they neither prove nor disprove the
 //! REAL verdict. Tracked in `progress/session-29-*` and `N-PLAYER-DESYNC-AUDIT.md`.
-//! No `src/` fix lands here: see the "NEXT ACTION" note at the bottom of this file.
+//! The `src/` fix landed in S30 (InputQueue prediction-episode entry at the
+//! first missing frame): see the "F17 DETERMINISTIC REPRODUCTION" section and
+//! the "NEXT ACTION" note at the bottom of this file.
 //!
 //! ## What THIS test is (and is NOT)
 //!
@@ -116,10 +129,11 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use fortress_rollback::{
-    DesyncDetection, FortressEvent, Message, NonBlockingSocket, PlayerHandle, PlayerType,
+    DesyncDetection, FortressEvent, Frame, Message, NonBlockingSocket, PlayerHandle, PlayerType,
     SessionBuilder, SessionState,
 };
 
+use crate::common::reorder_socket::create_reorder_mesh_triple;
 use crate::common::stubs::{GameStub, StateStub, StubConfig, StubInput};
 
 /// A [`NonBlockingSocket`] wrapper that defers every outbound message by a fixed
@@ -694,15 +708,17 @@ fn run_asymmetric_scenario(
 /// (caused by an aggressive pump cadence confirming a frame before the slow peer's
 /// real input arrived), never with agreeing confirmed inputs.
 ///
-/// CAUTION: this in-process green result does NOT clear the library. The FIFO
-/// `DelaySocket` cannot drive ONE peer to `first_incorrect == interval_frame`
-/// while another's lands below it, so it never strands the un-re-saved boundary
-/// cell that the REAL bug needs (S29 verdict: REAL — see the module header). S27
-/// mis-read this same green result as "the rollback re-saves the cell before the
-/// harvest reads it"; in fact the `i > 0` save guard in `adjust_gamestate`
-/// (`src/sessions/p2p_session.rs:3555`) NEVER re-saves the loaded boundary cell
-/// `cell[first_incorrect]`, which is exactly the cell that goes stale on the
-/// real-UDP path. This test characterizes the boundary; it is not the bug's repro.
+/// CAUTION: this in-process green result alone does NOT clear the library. The
+/// FIFO `DelaySocket` cannot drive ONE peer to `first_incorrect ==
+/// interval_frame` while another's lands below it, so it could never stage the
+/// cross-link reordering the REAL bug needed (S29 verdict: REAL — see the
+/// module header; FIXED in S30). S27 misread this same green result as "the
+/// rollback re-saves the cell before the harvest reads it"; in fact the
+/// `i > 0` save guard in `adjust_gamestate` (`src/sessions/p2p_session.rs:3555`)
+/// never re-saves the loaded boundary cell `cell[first_incorrect]` — which was
+/// exactly the cell stranded stale on the pre-S30 real-UDP path. This test
+/// characterizes the boundary; the bug's deterministic repro is the reorder
+/// choreography below.
 #[test]
 fn asymmetric_delay_deep_rollback_no_false_desync() {
     let outcome = run_asymmetric_scenario([0, 1, 2], 2, 120, 31001);
@@ -781,19 +797,20 @@ fn asymmetric_delay_deep_rollback_is_deterministic() {
 // confirmation never strands a stale boundary cell without a later refreshing
 // rollback. So the asymmetric-prediction false positive never arises here.
 //
-// The real-UDP `network_test_peer` reproducer observes `DesyncDetected total=4`
-// at 0% loss on ~50% of 3-peer runs. S27 attributed this to the binary's
-// SPECULATIVE display accumulator `state.value` (a non-faithful checksum) and
-// concluded a faithful game would be unaffected. THE ORCHESTRATOR'S
-// PER-FRAME-DIGEST EXPERIMENT REFUTED THAT (see the module header): a FAITHFUL
-// per-frame digest — and, separately, a hash-of-full-state checksum in GameStub's
-// own style — STILL fires `total=4` at frame 60, with the odd peer storing a
-// value that could only come from PREDICTED inputs. The false positive is REAL
-// (S29): the staleness lives in the LIBRARY's un-re-saved boundary cell, which
-// NO game-side checksum function can rescue. These tests therefore remain as
-// boundary CHARACTERIZATION and a regression lock for the exact-frame harvest
-// invariant; the real-UDP repro and the `src/` fix are tracked in
-// `progress/session-29-*` and `N-PLAYER-DESYNC-AUDIT.md`.
+// The pre-S30 real-UDP `network_test_peer` reproducer observed `DesyncDetected
+// total=4` at 0% loss on ~50% of 3-peer runs. S27 attributed this to the
+// binary's SPECULATIVE display accumulator `state.value` (a non-faithful
+// checksum) and concluded a faithful game would be unaffected. THE
+// ORCHESTRATOR'S PER-FRAME-DIGEST EXPERIMENT REFUTED THAT (see the module
+// header): a FAITHFUL per-frame digest — and, separately, a hash-of-full-state
+// checksum in GameStub's own style — STILL fired `total=4` at frame 60, with
+// the odd peer storing a value that could only come from PREDICTED inputs. The
+// false positive was REAL (S29): the staleness lived in LIBRARY-saved cells,
+// which no game-side checksum function can rescue. These tests therefore remain
+// as boundary CHARACTERIZATION and a regression lock for the exact-frame
+// harvest invariant; the deterministic repro is the reorder choreography below,
+// and the S30 root-cause fix lives in `src/input_queue/mod.rs` (see
+// `progress/session-29-*` and `N-PLAYER-DESYNC-AUDIT.md` for history).
 
 mod inj {
     use serde::{Deserialize, Serialize};
@@ -1137,13 +1154,14 @@ fn run_inj_scenario(delays: [u64; 3], interval: u32, frames: u32, base_port: u16
 ///
 /// SCOPE: in THIS in-process harness (FIFO delivery) a faithful checksum raises
 /// no false positive, so the test locks the exact-frame harvest invariant against
-/// regression. It does NOT clear the library: the FIFO socket cannot strand the
-/// un-re-saved boundary cell `cell[first_incorrect]`, so it cannot reproduce the
-/// REAL bug (S29 — see the module header). The orchestrator's per-frame-digest and
-/// full-state-hash experiments on `network_test_peer` show even a FAITHFUL checksum
-/// still fires the real-UDP false positive, because the staleness is in the
-/// library's saved cell, not the game's checksum function. Treat this as boundary
-/// characterization + regression lock, not proof of correctness.
+/// regression. It alone does NOT clear the library: the FIFO socket cannot stage
+/// the cross-link reordering the REAL bug needed, so it could not reproduce it
+/// (S29 — see the module header; FIXED in S30). The orchestrator's
+/// per-frame-digest and full-state-hash experiments on `network_test_peer`
+/// showed even a FAITHFUL checksum still fired the pre-S30 real-UDP false
+/// positive, because the staleness was in library-saved cells, not the game's
+/// checksum function. Treat this as boundary characterization + regression
+/// lock; the bug's deterministic repro is the reorder choreography below.
 #[test]
 fn injective_asymmetric_rollback_no_false_desync_with_faithful_checksum() {
     let outcome = run_inj_scenario([0, 2, 4], 4, 120, 33001);
@@ -1200,13 +1218,541 @@ fn injective_asymmetric_rollback_is_deterministic() {
 }
 
 // ===========================================================================
-// NEXT ACTION (S29) — DEFERRED `src/` FIX, SPECIFIED FOR A FUTURE SESSION
+// F17 DETERMINISTIC REPRODUCTION (S30) — hold-then-release reordering test
+// (RED on the pre-S30 code; GREEN since the S30 InputQueue fix)
 // ===========================================================================
 //
-// VERDICT: REAL (see the module header). No production change lands in this
-// session because a correctness-first codebase requires a RED test first, and no
-// DETERMINISTIC in-process reproduction exists yet (the FIFO/injective harness
-// here cannot strand the boundary cell). Both fixes explored so far FAIL:
+// This section is the deterministic in-process reproduction S29 said was the
+// prerequisite for the F17 fix. It uses the `ReorderSocket` hold-then-release
+// mesh (`tests/common/reorder_socket.rs`) to stage the cross-link arrival
+// inversion a FIFO delay socket structurally cannot express. The mechanism
+// steps below describe the PRE-S30 defect this choreography pinned down; the
+// S30 fix (prediction episodes always enter at the queue's first missing
+// frame, `src/input_queue/mod.rs::input`) removes step 2's faulty re-entry,
+// which makes steps 3-5 unreachable.
+//
+// ## Resolved save semantics (read from code, settling the S29/S27 ambiguity)
+//
+// In `advance_frame` the SaveGameState for the current frame F is pushed
+// (`src/sessions/p2p_session.rs:696`, frame-0 special case `:663`) BEFORE the
+// AdvanceFrame{inputs at F} request (`:800-803`); inside the rollback re-sim
+// loop the save at `:3555-3557` likewise precedes that iteration's
+// AdvanceFrame push (`:3561-3562`). So `cell[F]` holds the state BEFORE frame
+// F's inputs are applied — a pure function of the inputs at frames 0..=F-1
+// (confirmed or PREDICTED, as known at save time) and NEVER of frame F's own
+// input. The S29 module-header parenthetical ("a saved cell holds the state
+// AFTER applying that frame's input") is wrong on that detail; the staleness
+// in `cell[F]` therefore lives in predicted inputs at frames STRICTLY BELOW F.
+//
+// ## The exact stale-stamp path this choreography pinned down (pre-S30 code)
+//
+// Topology: A (player 0, the victim), B (player 1), C (player 2); per-frame-
+// distinct inputs; `DesyncDetection::On { interval: 2 }`; max_prediction 8.
+//
+// 1. Hold the directed link B->A from frame J=10. A's input queue for B
+//    enters prediction at its first missing frame 10 (entry
+//    `src/input_queue/mod.rs::input`, value = B@9 under
+//    RepeatLastConfirmed). A keeps advancing; its forward saves of
+//    cells 11..=17 embed the PREDICTED B@10.. values. A's
+//    `last_confirmed_frame` pins at 9 (B's slot), so the checksum harvest
+//    (`src/sessions/p2p_session.rs:4136`, gate `:4145-4146`) parks at
+//    `frame_to_send = 10`.
+// 2. Hold C->A from frame F=14 (so A's C-queue predicts from exactly 14),
+//    then RELEASE C->A. C's real inputs 14.. arrive and mismatch ->
+//    `first_incorrect = 14` -> `adjust_gamestate` loads `cell[14]`
+//    (`:3510`), resets prediction (`:3523`), and the re-sim's FIRST request
+//    for B is at frame 14. THE DEFECT: B's queue re-entered prediction with
+//    `prediction.frame = requested_frame = 14` — ABOVE its first missing
+//    frame 10 — while the prediction VALUE stayed B@9. (The S30 fix makes
+//    the re-entry land at the first missing frame 10 instead, so every
+//    arrival below is compared and steps 3-5 cannot occur.)
+// 3. RELEASE B->A. B's real inputs 10..13 were ADDED to the queue but their
+//    prediction-miss comparison was SKIPPED: `add_input_by_frame` bailed with
+//    a reported violation when `frame_number != prediction.frame`, so
+//    `first_incorrect` was NEVER set for 10..13. B@14 was compared (against
+//    B@9) -> `first_incorrect = 14` AGAIN.
+// 4. The correcting rollback loaded the STALE `cell[14]` (its B-slots for
+//    frames 10..13 still held the predicted B@9 value), the `if i > 0` guard
+//    (`src/sessions/p2p_session.rs:3555`) never re-saves the loaded boundary
+//    cell, and every cell re-saved by the re-sim inherited the stale base.
+//    No rollback ever targeted <= 13 again (the comparisons were swallowed),
+//    so cells 11..=14 kept their predicted-B content forever while
+//    `last_confirmed_frame` jumped past them (set `:711-712` from
+//    `confirmed_frame()` -- connection-status watermarks, NOT cell
+//    freshness).
+// 5. The harvest then marched: frame 10's cell is clean (it embeds only
+//    inputs <= 9), but the harvests of frames 12..=18 read, STORED
+//    (`local_checksum_history`) and GOSSIPED (`send_checksum_report`,
+//    `:4184-4191`) checksums stamped from prediction-influenced states.
+//    For flagged frames <= 18 — the surgical F17 fingerprint, 4 events per
+//    interval frame — B's and C's cells for the same frames are clean and
+//    agree with each other while A's differs (A odd one out), exactly the
+//    S29 decisive-evidence fingerprint (identical confirmed-input digests,
+//    differing stored interval-frame checksum), and
+//    `compare_local_checksums_against_peers` (`:4093-4134`) raised
+//    `DesyncDetected` on every peer — while the CONFIRMED INPUT STREAMS
+//    (the input-queue contents, read back via the public
+//    `confirmed_inputs_for_frame`) are byte-identical on all three peers at
+//    every flagged frame. Flagged frames >= 20 were a DIFFERENT, heavier
+//    regime: A's swallowed window stalled it at PredictionThreshold long
+//    enough that B and C also entered (legitimate) deep prediction against
+//    the silent victim, and the captured run cascaded into a 6-events-per-
+//    frame THREE-WAY divergence (three distinct stored checksums) for frames
+//    20..=40 — 66 of the 82 observed events. B's/C's cells are NOT clean
+//    there, so the "B==C, A odd" narrative applies only to <= 18; the
+//    cascade is additional severity evidence that the swallowed window
+//    poisons the whole mesh's harvest stream, not just the victim's.
+//
+// ## Honesty note (what the pre-S30 code additionally did, beyond S29's text)
+//
+// Because the swallowed window 10..13 was never re-simulated with B's real
+// inputs, the victim's APPLIED trajectory (the states its game actually
+// simulated through) also stayed divergent from B/C's from frame 11 onward —
+// the staleness was NOT single-frame/self-limiting as the audit's F17
+// summary suggested (S29's "staleness spans multiple frames" note was
+// already pointing at this), and with `DesyncDetection::Off` it was a fully
+// silent gameplay desync at 0% loss. The S30 fix lands at that root: a
+// prediction episode always begins at the queue's first missing frame
+// (`src/input_queue/mod.rs::input`), so every arrival is compared against
+// the value the episode actually applied, the swallowed-window state is
+// unconstructible, a mismatch at 10 triggers the rollback that re-simulates
+// the window with B's real inputs, and no stale stamp is ever harvested —
+// no `DesyncDetected` fires. (The S29 fix spec — a per-cell
+// "all-inputs-confirmed-at-save" bit plus a newest-confirmed-clean-cell
+// boundary load — was symptom-layer and is superseded by the root-cause
+// fix.) This test asserts the fixed behavior, including the stronger
+// applied-trajectory-convergence oracle below, so it was RED before the fix
+// and is GREEN with it.
+
+/// Structural outcome of one hold-then-release reordering run.
+#[derive(Debug, PartialEq, Eq)]
+struct ReorderOutcome {
+    /// `(observing_peer, frame, local_checksum, remote_checksum)` for every
+    /// `DesyncDetected` event seen on any peer.
+    desync_events: Vec<(usize, i32, u128, u128)>,
+    /// Count of `Disconnected` events across all peers (premise: must stay 0 —
+    /// the choreography is pure reordering, 0% loss, no disconnect).
+    disconnect_events: usize,
+    /// Rollback count per peer (`LoadGameState` requests).
+    rollbacks: [usize; 3],
+    /// The minimum (over peers) confirmed frame at the end of the run.
+    min_confirmed: i32,
+    /// Per-peer confirmed input streams read back through the PUBLIC
+    /// `confirmed_inputs_for_frame` API at the end of the run, keyed by frame
+    /// (values are each player's `StubInput::inp`). This is the ground-truth
+    /// oracle proving any `DesyncDetected` is a false positive w.r.t. the
+    /// confirmed inputs: the input-queue contents are what the confirmed
+    /// state is DEFINED by.
+    confirmed_inputs: [BTreeMap<i32, Vec<u32>>; 3],
+    /// Number of frames `<= min_confirmed` at which all three peers recorded
+    /// an applied state and those states were byte-identical (premise: must
+    /// be substantial for the mismatch oracle below to be non-vacuous).
+    applied_states_compared: usize,
+    /// Frames `<= min_confirmed` at which the peers' final APPLIED states —
+    /// the last state each game actually simulated through that frame,
+    /// last-write-wins across re-simulations — DIFFER across peers. This is
+    /// the STRONGER invariant the F17 fix restores: not only must no false
+    /// `DesyncDetected` fire, the applied trajectories themselves must
+    /// converge (the pre-S30 swallowed window left the victim's applied
+    /// trajectory permanently divergent with no rollback and no event — a
+    /// silent gameplay desync when detection is `Off`).
+    applied_state_mismatch_frames: Vec<i32>,
+}
+
+/// Drives the F17 hold-then-release choreography end-to-end (see the section
+/// header above for the frame-by-frame mechanism). Pure function of its
+/// argument: fixed addresses, single-threaded, shared-mutex delivery, no
+/// wall-clock dependence in delivery or release timing — so repeated calls
+/// produce identical outcomes ([`reordered_arrival_choreography_is_deterministic`]).
+#[allow(clippy::too_many_lines)]
+fn run_reorder_choreography(base_port: u16) -> ReorderOutcome {
+    use inj::{InjConfig, InjState, InjStub};
+
+    // Checksum-exchange cadence. With interval 2 the harvest parks at
+    // frame_to_send = 10 while B->A is held (last_confirmed pinned at 9) and
+    // then marches 10, 12, 14, ... after release — frames 12/14/16 land
+    // squarely in the stale window.
+    const INTERVAL: u32 = 2;
+    const MAX_PREDICTION: usize = 8;
+    /// B->A held from the iteration where every session sits at frame 10, so
+    /// A's first missing B-input (and B-prediction entry) is exactly 10.
+    const HOLD_B_TO_A_AT: u32 = 10;
+    /// C->A held from frame 14: A's C-prediction entry — and therefore the
+    /// boundary-rollback target `first_incorrect` — is exactly 14.
+    const HOLD_C_TO_A_AT: u32 = 14;
+    /// Release C->A while B->A is still held: the resulting rollback at 14
+    /// re-enters B's prediction at frame 14 (above B's missing window).
+    const RELEASE_C_TO_A_AT: u32 = 18;
+    /// Release B->A afterwards: frames 10..13 are added-but-never-compared,
+    /// frame 14 mismatches, and the boundary rollback re-simulates from the
+    /// stale `cell[14]`.
+    const RELEASE_B_TO_A_AT: u32 = 21;
+    /// Enough post-release iterations for the harvest to march across the
+    /// stale window and for every peer to compare the gossiped reports.
+    const ITERATIONS: u32 = 48;
+
+    let addrs: [SocketAddr; 3] = [
+        ([127, 0, 0, 1], base_port).into(),
+        ([127, 0, 0, 1], base_port + 1).into(),
+        ([127, 0, 0, 1], base_port + 2).into(),
+    ];
+
+    let ([sock_a, sock_b, sock_c], links) = create_reorder_mesh_triple(addrs);
+
+    let build = |local: usize, sock| {
+        let mut b = SessionBuilder::<InjConfig>::new()
+            .with_num_players(3)
+            .unwrap()
+            .with_max_prediction_window(MAX_PREDICTION)
+            .with_desync_detection_mode(DesyncDetection::On { interval: INTERVAL })
+            // The held links carry no traffic for a handful of iterations of
+            // wall-clock time; push the (wall-clock-based) disconnect and
+            // notify timers out of reach so a slow CI machine cannot turn the
+            // pure-reordering choreography into a disconnect.
+            .with_disconnect_timeout(std::time::Duration::from_secs(3600))
+            .with_disconnect_notify_delay(std::time::Duration::from_secs(3600));
+        for (h, addr) in addrs.iter().enumerate() {
+            b = if h == local {
+                b.add_player(PlayerType::Local, PlayerHandle::new(h))
+                    .unwrap()
+            } else {
+                b.add_player(PlayerType::Remote(*addr), PlayerHandle::new(h))
+                    .unwrap()
+            };
+        }
+        b.start_p2p_session(sock).unwrap()
+    };
+
+    let mut sessions = [build(0, sock_a), build(1, sock_b), build(2, sock_c)];
+
+    let pump = |sessions: &mut [fortress_rollback::P2PSession<InjConfig>; 3]| {
+        for _ in 0..4 {
+            for s in sessions.iter_mut() {
+                s.poll_remote_clients();
+            }
+        }
+    };
+
+    let mut synced = false;
+    for _ in 0..2000 {
+        pump(&mut sessions);
+        if sessions
+            .iter()
+            .all(|s| s.current_state() == SessionState::Running)
+        {
+            synced = true;
+            break;
+        }
+    }
+    assert!(synced, "all three sessions should synchronize");
+
+    let mut stubs = [InjStub::new(), InjStub::new(), InjStub::new()];
+    let mut states: [BTreeMap<i32, InjState>; 3] =
+        [BTreeMap::new(), BTreeMap::new(), BTreeMap::new()];
+    let mut desync_events: Vec<(usize, i32, u128, u128)> = Vec::new();
+    let mut disconnect_events = 0usize;
+    let mut rollbacks = [0usize; 3];
+
+    let drain_events = |sessions: &mut [fortress_rollback::P2PSession<InjConfig>; 3],
+                        desync_events: &mut Vec<(usize, i32, u128, u128)>,
+                        disconnect_events: &mut usize| {
+        for (i, s) in sessions.iter_mut().enumerate() {
+            for ev in s.events() {
+                match ev {
+                    FortressEvent::DesyncDetected {
+                        frame,
+                        local_checksum,
+                        remote_checksum,
+                        ..
+                    } => {
+                        desync_events.push((i, frame.as_i32(), local_checksum, remote_checksum));
+                    },
+                    FortressEvent::Disconnected { .. } => *disconnect_events += 1,
+                    _ => {},
+                }
+            }
+        }
+    };
+
+    for k in 0..ITERATIONS {
+        // Toggle the choreography's holds/releases at the START of the
+        // iteration, before this iteration's inputs are produced and sent.
+        if k == HOLD_B_TO_A_AT {
+            links.hold(addrs[1], addrs[0]);
+        }
+        if k == HOLD_C_TO_A_AT {
+            links.hold(addrs[2], addrs[0]);
+        }
+        if k == RELEASE_C_TO_A_AT {
+            // PREMISE: the hold actually captured traffic — releasing an empty
+            // link would silently turn the choreography into plain FIFO play.
+            assert!(
+                links.held_len(addrs[2], addrs[0]) > 0,
+                "C->A hold captured no traffic before release at iteration {k}"
+            );
+            links.release(addrs[2], addrs[0]);
+        }
+        if k == RELEASE_B_TO_A_AT {
+            assert!(
+                links.held_len(addrs[1], addrs[0]) > 0,
+                "B->A hold captured no traffic before release at iteration {k}"
+            );
+            links.release(addrs[1], addrs[0]);
+        }
+
+        pump(&mut sessions);
+
+        // Per-frame-distinct, per-peer-distinct inputs so RepeatLastConfirmed
+        // mispredicts every held frame (the same generators as the scenarios
+        // above).
+        let inputs = [
+            StubInput { inp: k * 7 + 1 },
+            StubInput { inp: k * 13 + 2 },
+            StubInput { inp: k * 31 + 5 },
+        ];
+
+        // Advance order C, B, A: the victim A advances LAST so the
+        // poll_remote_clients at the top of its own advance_frame already
+        // sees both remotes' freshly-sent inputs for this frame. On open
+        // links A therefore NEVER predicts, which keeps the only prediction
+        // episodes at A exactly the two the holds choreograph (B from 10,
+        // C from 14) and makes the rollback targets deterministic.
+        for &i in &[2usize, 1, 0] {
+            let _ = sessions[i].add_local_input(PlayerHandle::new(i), inputs[i]);
+            match sessions[i].advance_frame() {
+                Ok(reqs) => {
+                    rollbacks[i] += reqs
+                        .iter()
+                        .filter(|r| {
+                            matches!(r, fortress_rollback::FortressRequest::LoadGameState { .. })
+                        })
+                        .count();
+                    stubs[i].handle_requests_recording(reqs, &mut states[i]);
+                },
+                Err(fortress_rollback::FortressError::PredictionThreshold) => {},
+                Err(e) => panic!("peer {i} advance_frame failed: {e:?}"),
+            }
+        }
+
+        drain_events(&mut sessions, &mut desync_events, &mut disconnect_events);
+    }
+
+    // Drain stragglers (no further advances: comparisons only run inside
+    // advance_frame, so all comparable reports have already been compared in
+    // the loop above; this only collects already-queued events).
+    for _ in 0..40 {
+        pump(&mut sessions);
+        drain_events(&mut sessions, &mut desync_events, &mut disconnect_events);
+    }
+
+    let min_confirmed = sessions
+        .iter()
+        .map(|s| s.confirmed_frame().as_i32())
+        .min()
+        .unwrap_or(0);
+
+    // Read back every peer's CONFIRMED input stream through the public API.
+    // The input-queue ring (length 128) still holds every frame of this short
+    // run, so this works for the whole confirmed range despite the queues'
+    // tail trimming.
+    let mut confirmed_inputs: [BTreeMap<i32, Vec<u32>>; 3] =
+        [BTreeMap::new(), BTreeMap::new(), BTreeMap::new()];
+    for (i, s) in sessions.iter().enumerate() {
+        let peer_confirmed = s.confirmed_frame().as_i32();
+        for frame in 1..=peer_confirmed {
+            if let Ok(inp) = s.confirmed_inputs_for_frame(Frame::new(frame)) {
+                confirmed_inputs[i].insert(frame, inp.iter().map(|x| x.inp).collect());
+            }
+        }
+    }
+
+    // Cross-peer applied-state oracle: at every commonly-recorded frame up to
+    // the slowest peer's confirmed frame, the final (last-write-wins) applied
+    // states must be byte-identical across peers. See the field docs on
+    // [`ReorderOutcome`].
+    let mut applied_states_compared = 0usize;
+    let mut applied_state_mismatch_frames = Vec::new();
+    for frame in 1..=min_confirmed {
+        if let (Some(a), Some(b), Some(c)) = (
+            states[0].get(&frame),
+            states[1].get(&frame),
+            states[2].get(&frame),
+        ) {
+            if a == b && a == c {
+                applied_states_compared += 1;
+            } else {
+                applied_state_mismatch_frames.push(frame);
+            }
+        }
+    }
+
+    ReorderOutcome {
+        desync_events,
+        disconnect_events,
+        rollbacks,
+        min_confirmed,
+        confirmed_inputs,
+        applied_states_compared,
+        applied_state_mismatch_frames,
+    }
+}
+
+/// F17 REGRESSION TEST (deterministic in-process reproduction; see the
+/// section header above for the exact pre-S30 stale-stamp path). RED before
+/// the S30 InputQueue fix (82 false-positive `DesyncDetected` events); GREEN
+/// with it.
+///
+/// A 3-peer mesh at 0% loss with hold-then-release reordering on the two
+/// links into peer A drives A's correcting boundary rollback to land at
+/// `first_incorrect == 14` while its B-input window 10..13 arrives only
+/// afterwards. Pre-S30, that window's misprediction comparisons were
+/// swallowed, stranding prediction-stamped cells that the checksum harvest
+/// stored and gossiped: every peer raised `DesyncDetected` although the
+/// CONFIRMED INPUT STREAMS — read back through the public
+/// `confirmed_inputs_for_frame` API — are byte-identical across all three
+/// peers at every flagged frame, and the victim's applied trajectory stayed
+/// silently divergent.
+///
+/// ORACLE (the FIXED behavior):
+///   1. PREMISE: clean network — zero `Disconnected` events (pure
+///      reordering; nothing is dropped).
+///   2. PREMISE: the run drove well past the first checksum-interval frame.
+///   3. PREMISE: the victim peer genuinely rolled back (>= 2 rollbacks: the
+///      quirk-setting rollback and the boundary rollback).
+///   4. FALSE-POSITIVE PROOF: at every `DesyncDetected` frame the confirmed
+///      inputs are byte-identical across all peers (so a faithful checksum
+///      of confirmed state MUST agree — the mismatch can only come from a
+///      stale, prediction-influenced saved cell).
+///   5. FIXED BEHAVIOR: NO `DesyncDetected` fires at all.
+///   6. FIXED BEHAVIOR (stronger invariant): the peers' APPLIED state
+///      trajectories converge — zero cross-peer applied-state mismatches at
+///      commonly-confirmed frames (pre-S30 the swallowed window left them
+///      divergent even with detection `Off`).
+#[test]
+fn reordered_arrival_boundary_rollback_does_not_false_positive_desync() {
+    let outcome = run_reorder_choreography(35001);
+
+    // PREMISE 1: pure reordering — no peer was disconnected.
+    assert_eq!(
+        outcome.disconnect_events, 0,
+        "choreography must not disconnect anyone ({outcome:?})"
+    );
+
+    // PREMISE 2: the run confirmed well past the first interval frames.
+    assert!(
+        outcome.min_confirmed >= 20,
+        "test must drive well past the stale checksum-interval frames \
+         (min_confirmed={})",
+        outcome.min_confirmed
+    );
+
+    // PREMISE 3: the victim peer genuinely rolled back.
+    assert!(
+        outcome.rollbacks[0] >= 2,
+        "choreography premise unmet: victim peer rolled back {} times, \
+         expected >= 2 (rollbacks={:?})",
+        outcome.rollbacks[0],
+        outcome.rollbacks
+    );
+
+    // PREMISE 4 / FALSE-POSITIVE PROOF: every flagged frame's confirmed
+    // inputs are byte-identical across all three peers. If this ever fails,
+    // the event would be a TRUE desync and this test's premise — not the
+    // library's checksum pipeline — is broken.
+    for &(peer, frame, local, remote) in &outcome.desync_events {
+        let (a, b, c) = (
+            outcome.confirmed_inputs[0].get(&frame),
+            outcome.confirmed_inputs[1].get(&frame),
+            outcome.confirmed_inputs[2].get(&frame),
+        );
+        match (a, b, c) {
+            (Some(a), Some(b), Some(c)) => {
+                assert!(
+                    a == b && a == c,
+                    "TRUE desync at flagged frame {frame} (peer {peer}, \
+                     local={local:#x}, remote={remote:#x}): confirmed inputs \
+                     differ across peers: {a:?} vs {b:?} vs {c:?}"
+                );
+            },
+            _ => panic!(
+                "flagged frame {frame} missing from a peer's confirmed-input \
+                 capture (peer {peer}): {a:?} / {b:?} / {c:?} ({outcome:?})"
+            ),
+        }
+    }
+
+    // FIXED BEHAVIOR (finding F17): with byte-identical confirmed inputs on
+    // every flagged frame, no DesyncDetected may fire. Pre-S30 the stale
+    // prediction-stamped checksums were stored and gossiped, so this fired on
+    // all three peers (82 events).
+    assert!(
+        outcome.desync_events.is_empty(),
+        "FALSE-POSITIVE DesyncDetected: {} event(s) fired although the \
+         confirmed inputs at every flagged frame are byte-identical across \
+         all peers (stale prediction-stamped saved cell harvested — finding \
+         F17): {:?}",
+        outcome.desync_events.len(),
+        outcome.desync_events
+    );
+
+    // FIXED BEHAVIOR, stronger invariant: the applied trajectories converge.
+    // Every commonly-confirmed frame's final applied state is byte-identical
+    // across all three peers — the pre-S30 swallowed window left the victim's
+    // applied states divergent from frame 11 onward with no rollback and no
+    // event (a silent gameplay desync with detection Off).
+    assert!(
+        outcome.applied_states_compared >= 20,
+        "applied-state oracle is vacuous: only {} frames compared ({outcome:?})",
+        outcome.applied_states_compared
+    );
+    assert!(
+        outcome.applied_state_mismatch_frames.is_empty(),
+        "APPLIED-STATE divergence across peers at confirmed frames {:?} — the \
+         rollback that should reconverge the trajectories never happened \
+         (finding F17): {outcome:?}",
+        outcome.applied_state_mismatch_frames
+    );
+}
+
+/// Determinism guard for the F17 reproduction: the choreography is a pure
+/// function of its argument (fixed addresses, single-threaded shared-mutex
+/// delivery, frame-indexed holds/releases, no wall-clock dependence), so 10
+/// repeated runs MUST produce a byte-identical [`ReorderOutcome`] — including
+/// the same false-positive `DesyncDetected` events while the bug is unfixed,
+/// and the same empty event list once it is fixed.
+#[test]
+fn reordered_arrival_choreography_is_deterministic() {
+    let first = run_reorder_choreography(36001);
+    for run in 1..10 {
+        let next = run_reorder_choreography(36001);
+        assert_eq!(
+            first, next,
+            "reorder choreography was NON-deterministic on run {run}"
+        );
+    }
+}
+
+// ===========================================================================
+// NEXT ACTION (S29) — DEFERRED `src/` FIX SPEC (historical; RESOLVED in S30)
+// ===========================================================================
+//
+// S30 RESOLUTION: the fix landed at the ROOT CAUSE instead of this spec. The
+// S30 adversarial review re-rooted F17 from the saved-cell layer into the
+// InputQueue prediction lifecycle: a rollback-re-entered prediction episode
+// started at the REQUESTED frame instead of the queue's first missing frame,
+// silently swallowing the misprediction comparison for the skipped window.
+// `InputQueue::input` now always enters an episode at the first missing frame
+// (`src/input_queue/mod.rs`), which makes every arrival compared, makes the
+// stale window unconstructible, and keeps the loaded boundary cell provably
+// clean — so the per-cell metadata machinery specified in (a)/(b) below is
+// unnecessary (it was symptom-layer and had verified holes). The text below
+// is kept as the historical S29 analysis; its (c) prerequisite DID land (the
+// reorder choreography above) and gates the fix as the regression test.
+//
+// VERDICT: REAL (see the module header). No production change landed in S29
+// because a correctness-first codebase requires a RED test first, and no
+// DETERMINISTIC in-process reproduction existed yet (the FIFO/injective harness
+// here cannot strand the boundary cell). Both fixes explored in S29 FAIL:
 //   - A "saved-while-confirmed" harvest GATE regresses legitimate detection: many
 //     cells are saved speculatively-but-CORRECT and never re-saved (e.g.
 //     `test_desync_detection_intervals_data_driven`), so gating on "was this cell
@@ -1251,3 +1797,10 @@ fn injective_asymmetric_rollback_is_deterministic() {
 //     arrival order that forces the asymmetric `first_incorrect` split. With that
 //     RED test green-able only by the fix in (b), the deferred `src/` change can
 //     land under the red-test-first policy.
+//
+//     S30 UPDATE: that prerequisite now EXISTS — see the "F17 DETERMINISTIC
+//     REPRODUCTION (S30)" section above
+//     (`reordered_arrival_boundary_rollback_does_not_false_positive_desync`,
+//     RED on the pre-S30 code) and the hold-then-release `ReorderSocket` in
+//     `tests/common/reorder_socket.rs`. The S30 root-cause fix (InputQueue
+//     prediction-episode entry at the first missing frame) turned it GREEN.

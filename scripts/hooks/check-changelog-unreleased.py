@@ -11,6 +11,13 @@ Exception: '### Changed' entries that ALL start with '**Breaking:**' are
 legitimate (they document new enum variants or API changes affecting
 already-released types).
 
+Exception: '### Fixed' entries that start with '**Pre-existing:**' are
+legitimate (they document fixes to behavior that already shipped in a
+released version, which the unreleased-code rule does not cover — the
+marker is the author's self-declaration, mirroring '**Breaking:**').
+Each accepted entry is surfaced with a non-failing 'note:' line on stdout
+for reviewer visibility; the exit code is unaffected.
+
 See `.llm/context.md` (section "Changelog Policy", "Unreleased code rule")
 and `.llm/skills/publishing-organization/changelog.md` for the canonical
 specification.
@@ -141,9 +148,36 @@ def check_file(filepath: Path, repo_root: Path | None = None) -> bool:
         if not entry.text.lstrip("- ").startswith("**Breaking:**")
     ]
 
+    # Fixed entries self-declared as fixing already-released behavior are
+    # outside the unreleased-code rule's scope (mirrors the '**Breaking:**'
+    # self-declaration for Changed).
+    unmarked_fixed = [
+        entry
+        for entry in fixed_entries
+        if not entry.text.lstrip("- ").startswith("**Pre-existing:**")
+    ]
+    preexisting_fixed = [
+        entry
+        for entry in fixed_entries
+        if entry.text.lstrip("- ").startswith("**Pre-existing:**")
+    ]
+
+    # The marker is load-bearing only when an Added section is present
+    # (without one, Fixed entries pass regardless). Surface each accepted
+    # self-declaration as a non-failing note so reviewers can verify the
+    # claim; this never affects the exit code.
+    if has_added and preexisting_fixed:
+        for entry in preexisting_fixed:
+            print(
+                f"{display_path}:{entry.line_number}: note: accepting "
+                f"'**Pre-existing:**' Fixed entry on the author's "
+                f"self-declaration (verify it fixes behavior that shipped "
+                f"in a released version): {_summarize(entry.text)}"
+            )
+
     violations_found = False
 
-    if has_added and fixed_entries:
+    if has_added and unmarked_fixed:
         print(
             f"{display_path}:{fixed_line}: '### Fixed' subsection found "
             f"alongside '### Added' in [Unreleased] -- fixes to unreleased "
@@ -152,7 +186,7 @@ def check_file(filepath: Path, repo_root: Path | None = None) -> bool:
             f"intermediate development history.",
             file=sys.stderr,
         )
-        for entry in fixed_entries:
+        for entry in unmarked_fixed:
             print(
                 f"{display_path}:{entry.line_number}: offending Fixed entry: "
                 f"{_summarize(entry.text)}",
@@ -160,8 +194,9 @@ def check_file(filepath: Path, repo_root: Path | None = None) -> bool:
             )
         print(
             f"  remedy: fold each entry into the matching '### Added' entry "
-            f"that introduces the affected feature; delete the '### Fixed' "
-            f"subsection.",
+            f"that introduces the affected feature and delete the '### Fixed' "
+            f"subsection, OR prefix the entry with '**Pre-existing:**' if it "
+            f"fixes behavior that already shipped in a released version.",
             file=sys.stderr,
         )
         print(f"  see: {_RULE_REFERENCE}", file=sys.stderr)

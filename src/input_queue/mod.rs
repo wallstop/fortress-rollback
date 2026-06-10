@@ -661,8 +661,34 @@ impl<T: Config> InputQueue<T> {
                 self.last_confirmed_input,
                 self.player_index,
             );
+            // A prediction episode always begins at the queue's FIRST MISSING
+            // frame: `last_added_frame + 1`, or frame 0 on a queue that has
+            // never accepted an input (`advance_queue_head` gap-fills a virgin
+            // queue from frame 0, so frame 0 is always its first physical add).
+            // Inputs are added strictly sequentially, so this keeps
+            // `prediction.frame` equal to the next arrival's frame for the
+            // whole episode: every arrival is compared against the episode's
+            // frozen value in `add_input_by_frame`, and no arrival can land
+            // below `prediction.frame`. Entering at `requested_frame` instead
+            // would let a rollback re-simulation that starts above this queue's
+            // missing window (ordinary N>=3 cross-endpoint jitter) skip the
+            // misprediction comparison for every frame in
+            // `[last_added_frame + 1, requested_frame)`, permanently swallowing
+            // rollback for that window (finding F17). Mirrors `AddRemoteInput`
+            // in `specs/tla/InputQueue.tla`, which compares every sequential
+            // arrival unconditionally. Only the episode's frame bookkeeping
+            // starts at the first missing frame; the returned VALUE covers any
+            // requested frame at or beyond it.
+            // The single expression covers the virgin case: `Frame::NULL` is
+            // -1, so `last_added_frame + 1` evaluates to frame 0 — the first
+            // frame a virgin queue physically adds — without overflow.
+            let entry_frame = safe_frame_add!(
+                self.last_added_frame,
+                1,
+                "InputQueue::input prediction entry"
+            );
             self.prediction = PlayerInput {
-                frame: requested_frame,
+                frame: entry_frame,
                 input: predicted_input,
             };
         }
@@ -1202,6 +1228,18 @@ impl<T: Config> InputQueue<T> {
         // We have been predicting. See if the inputs we've gotten match what we've been predicting. If so, don't worry about it.
         if !self.prediction.frame.is_null() {
             if frame_number != self.prediction.frame {
+                // IMPOSSIBLE STATE. A prediction episode enters at the queue's
+                // first missing frame (see `input`) and advances by exactly one
+                // per accepted arrival, while the sequential guards above force
+                // `frame_number == last_added_frame + 1`, so the two always
+                // agree. If the bookkeeping is ever observed broken, fail
+                // TOWARD rollback: the input was physically added above, so
+                // silently skipping the misprediction comparison would leave a
+                // permanently divergent applied trajectory with no rollback and
+                // no event (finding F17). Conservatively mark the earlier of
+                // the two frames as mispredicted so the next `advance_frame`
+                // re-simulates through both, and realign the episode to the
+                // arrival so subsequent arrivals keep being compared.
                 report_violation!(
                     ViolationSeverity::Error,
                     ViolationKind::InputQueue,
@@ -1209,7 +1247,15 @@ impl<T: Config> InputQueue<T> {
                     frame_number,
                     self.prediction.frame
                 );
-                return false;
+                if self.first_incorrect_frame.is_null() {
+                    self.first_incorrect_frame = cmp::min(frame_number, self.prediction.frame);
+                }
+                self.prediction.frame = safe_frame_add!(
+                    frame_number,
+                    1,
+                    "InputQueue::add_input_by_frame prediction realign"
+                );
+                return true;
             }
 
             // Remember the first input which was incorrect so we can report it
@@ -2613,16 +2659,186 @@ mod input_queue_tests {
             queue.add_input(input);
         }
 
-        // Request multiple predicted frames
+        // Request a predicted frame ABOVE the first missing frame (3). The
+        // episode must enter at the first missing frame, not the requested one,
+        // so the sequential arrival for frame 3 is compared.
         let (_pred1, status1) = queue.input(Frame::new(5)).expect("prediction 1");
         assert_eq!(status1, InputStatus::Predicted);
+        assert_eq!(queue.prediction.frame, Frame::new(3));
 
-        // Now add the actual input for frame 3 (correct prediction)
+        // Now add the actual input for frame 3 (correct prediction). It must be
+        // ACCEPTED (the old requested-frame entry semantics made this arrival
+        // miss `prediction.frame` and bail with Frame::NULL).
         let input3 = PlayerInput::new(Frame::new(3), TestInput { inp: 10 }); // Same as prediction
-        queue.add_input(input3);
+        assert_eq!(queue.add_input(input3), Frame::new(3));
 
-        // Prediction should advance
-        assert!(queue.prediction.frame > Frame::new(3) || queue.prediction.frame.is_null());
+        // Prediction advances to exactly the next missing frame; the episode
+        // stays live because last_requested_frame (5) is not reached yet.
+        assert_eq!(queue.prediction.frame, Frame::new(4));
+        assert_eq!(queue.first_incorrect_frame(), Frame::NULL);
+    }
+
+    // ==========================================
+    // Prediction-episode entry frame (finding F17)
+    // ==========================================
+
+    /// A prediction episode RE-ENTERED after a rollback (`reset_prediction`)
+    /// must start at the queue's first missing frame, not at the requested
+    /// frame. This is the rollback re-simulation shape: the re-sim's first
+    /// `input()` request can be ABOVE this queue's missing window when another
+    /// queue's misprediction triggered the rollback (ordinary N>=3
+    /// cross-endpoint jitter).
+    #[test]
+    fn prediction_reentry_after_reset_enters_at_first_missing_frame_not_requested() {
+        let mut queue = test_queue(0);
+        for i in 0..=4i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: 10 });
+            assert_eq!(queue.add_input(input), Frame::new(i));
+        }
+
+        // First episode: frames 5..=7 are served as predictions.
+        for f in 5..=7i32 {
+            let (_, status) = queue.input(Frame::new(f)).expect("prediction");
+            assert_eq!(status, InputStatus::Predicted);
+        }
+        assert_eq!(queue.prediction.frame, Frame::new(5));
+
+        // A rollback elsewhere resets prediction, then the re-simulation's
+        // first request for this queue lands at frame 7 — above the queue's
+        // first missing frame 5.
+        queue.reset_prediction();
+        let (_, status) = queue.input(Frame::new(7)).expect("re-entry prediction");
+        assert_eq!(status, InputStatus::Predicted);
+        assert_eq!(
+            queue.prediction.frame,
+            Frame::new(5),
+            "episode re-entry must land at the first missing frame (5), not the requested frame (7)"
+        );
+    }
+
+    /// An arrival INSIDE a re-entered episode's missing window must be
+    /// compared against the episode's frozen value: a mismatch sets
+    /// `first_incorrect_frame` to exactly that frame. Under the old
+    /// requested-frame entry semantics this arrival (below the episode frame)
+    /// was added but its comparison silently skipped — no rollback ever
+    /// re-simulated the window (finding F17).
+    #[test]
+    fn arrival_below_reentered_episode_request_mismatch_sets_first_incorrect() {
+        let mut queue = test_queue(0);
+        for i in 0..=4i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: 10 });
+            assert_eq!(queue.add_input(input), Frame::new(i));
+        }
+        let _ = queue.input(Frame::new(6)).expect("first episode");
+        queue.reset_prediction();
+        // Re-enter at requested frame 8; first missing frame is 5.
+        let _ = queue.input(Frame::new(8)).expect("re-entry prediction");
+
+        // The real input for frame 5 arrives and DIFFERS from the frozen
+        // prediction (10): the comparison must fire.
+        let input5 = PlayerInput::new(Frame::new(5), TestInput { inp: 99 });
+        assert_eq!(queue.add_input(input5), Frame::new(5));
+        assert_eq!(
+            queue.first_incorrect_frame(),
+            Frame::new(5),
+            "mismatching in-window arrival must set first_incorrect_frame"
+        );
+    }
+
+    /// The matching counterpart: an in-window arrival that EQUALS the frozen
+    /// prediction is accepted, leaves `first_incorrect_frame` unset, and
+    /// advances the episode to the next missing frame.
+    #[test]
+    fn arrival_below_reentered_episode_request_match_does_not_set_first_incorrect() {
+        let mut queue = test_queue(0);
+        for i in 0..=4i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: 10 });
+            assert_eq!(queue.add_input(input), Frame::new(i));
+        }
+        let _ = queue.input(Frame::new(6)).expect("first episode");
+        queue.reset_prediction();
+        let _ = queue.input(Frame::new(8)).expect("re-entry prediction");
+
+        // The real input for frame 5 matches the frozen prediction.
+        let input5 = PlayerInput::new(Frame::new(5), TestInput { inp: 10 });
+        assert_eq!(queue.add_input(input5), Frame::new(5));
+        assert_eq!(queue.first_incorrect_frame(), Frame::NULL);
+        // Episode advances per-arrival and stays live until the requested
+        // frame (8) is confirmed.
+        assert_eq!(queue.prediction.frame, Frame::new(6));
+    }
+
+    /// A queue that has never accepted an input enters its prediction episode
+    /// at frame 0 — the frame `advance_queue_head` gap-fills a virgin queue
+    /// from — even when the first request arrives at a later frame (a session
+    /// that advanced several frames before this peer's first input landed).
+    /// Every gap-filled and real arrival is then compared.
+    #[test]
+    fn prediction_entry_on_virgin_queue_starts_at_frame_zero() {
+        let mut queue = test_queue(0);
+
+        // First-ever request lands at frame 3 (the session is 3 frames in).
+        let (value, status) = queue.input(Frame::new(3)).expect("virgin prediction");
+        assert_eq!(status, InputStatus::Predicted);
+        assert_eq!(value, TestInput::default());
+        assert_eq!(
+            queue.prediction.frame,
+            Frame::new(0),
+            "virgin-queue episode must enter at frame 0, the first physical add"
+        );
+
+        // The peer's first real input arrives stamped at frame 2 (e.g. the
+        // sender used input delay 2): `advance_queue_head` gap-fills frames 0
+        // and 1 with the blank input, which matches the blank prediction, and
+        // the real frame-2 input differs — the mismatch must be detected.
+        let real = PlayerInput::new(Frame::new(2), TestInput { inp: 7 });
+        assert_eq!(queue.add_input(real), Frame::new(2));
+        assert_eq!(
+            queue.first_incorrect_frame(),
+            Frame::new(2),
+            "the first differing arrival on a virgin queue must be detected"
+        );
+    }
+
+    /// The value-coincidence hazard is closed by construction: a mismatch in
+    /// the middle of the missing window is detected even when the LAST arrival
+    /// of the window equals the frozen prediction. Under the old
+    /// requested-frame entry semantics only the arrival at the requested frame
+    /// was compared; here that arrival (frame 6, value 10) coincides with the
+    /// frozen value, so the frame-4 divergence (42, already applied as 10)
+    /// would have been permanently swallowed — no rollback, no event.
+    #[test]
+    fn swallowed_window_mismatch_with_coinciding_boundary_value_sets_first_incorrect() {
+        let mut queue = test_queue(0);
+        for i in 0..=2i32 {
+            let input = PlayerInput::new(Frame::new(i), TestInput { inp: 10 });
+            assert_eq!(queue.add_input(input), Frame::new(i));
+        }
+
+        // Episode 1 applies the frozen value (10) for frames 3..=6.
+        for f in 3..=6i32 {
+            let (value, status) = queue.input(Frame::new(f)).expect("prediction");
+            assert_eq!(status, InputStatus::Predicted);
+            assert_eq!(value.inp, 10);
+        }
+
+        // Rollback elsewhere; the re-simulation re-enters at requested frame 6.
+        queue.reset_prediction();
+        let _ = queue.input(Frame::new(6)).expect("re-entry prediction");
+        assert_eq!(queue.prediction.frame, Frame::new(3));
+
+        // Arrivals: 3 matches, 4 DIFFERS (the simulated trajectory applied 10
+        // for frame 4), 5 and 6 match the frozen value again.
+        for (frame, value) in [(3i32, 10u8), (4, 42), (5, 10), (6, 10)] {
+            let input = PlayerInput::new(Frame::new(frame), TestInput { inp: value });
+            assert_eq!(queue.add_input(input), Frame::new(frame));
+        }
+        assert_eq!(
+            queue.first_incorrect_frame(),
+            Frame::new(4),
+            "the in-window divergence must be detected even though the \
+             requested-frame arrival coincides with the frozen value"
+        );
     }
 
     // ==========================================
@@ -4124,6 +4340,111 @@ mod kani_input_queue_proofs {
             "delay should be unchanged",
         );
     }
+
+    /// Proof: A prediction episode enters at the queue's first missing frame.
+    ///
+    /// Verifies the F17 episode-entry invariant on `input()`: after a
+    /// bounded-symbolic history (virgin queue or one sequential add — the
+    /// entry expression depends only on `last_added_frame`, so longer
+    /// histories add no new behavior), a request that engages prediction —
+    /// at or beyond the first missing frame — freezes `prediction.frame` at
+    /// exactly `last_added_frame + 1` (frame 0 on a virgin queue), NOT at the
+    /// requested frame. The follow-up sequential arrival therefore lands
+    /// exactly on the episode frame (the no-swallow invariant): its
+    /// misprediction comparison runs, a differing value is flagged in
+    /// `first_incorrect_frame`, and a matching value either exits the episode
+    /// (requested frame confirmed) or advances it to the next missing frame.
+    ///
+    /// Note: unwind(10) covers buffer construction (7 + 1) plus margin; there
+    /// are no other loops (the gap-fill loop in `advance_queue_head` runs
+    /// zero iterations for sequential delay-0 adds). A wider variant with a
+    /// 0..=2 symbolic add loop also verifies but takes >10 min; this shape
+    /// runs in seconds.
+    ///
+    /// - Tier: 2 (registered with the other `InputQueue` proofs, several of
+    ///   which also run below the nominal 30s Tier-1 band)
+    /// - Verifies: Prediction-episode entry frame and no-swallow arrival (F17)
+    /// - Related: proof_reset_maintains_structure,
+    ///   proof_sequential_inputs_maintain_invariants
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn proof_prediction_entry_at_first_missing_frame() {
+        let mut queue = test_queue(0);
+
+        // Bounded-symbolic history: virgin queue (first missing frame 0) or
+        // one accepted sequential input (first missing frame 1).
+        let virgin: bool = kani::any();
+        if !virgin {
+            let input = PlayerInput::new(Frame::new(0), TestInput { inp: 10 });
+            kani::assert(
+                queue.add_input(input) == Frame::new(0),
+                "sequential add should be accepted",
+            );
+        }
+        let first_missing: i32 = if virgin { 0 } else { 1 };
+
+        // Request at or beyond the first missing frame: covers both the
+        // lockstep shape (requested == first missing frame) and the F17
+        // rollback re-simulation shape (requested above the missing window).
+        let requested: i32 = kani::any();
+        kani::assume(requested >= first_missing && requested <= first_missing + 1);
+        let result = queue.input(Frame::new(requested));
+
+        kani::assert(
+            result.is_some(),
+            "prediction request should produce an input",
+        );
+        if let Some((_, status)) = result {
+            kani::assert(
+                status == InputStatus::Predicted,
+                "missing frame should be served as a prediction",
+            );
+        }
+        // Episode-entry invariant: the episode is frozen at the first missing
+        // frame (last_added_frame + 1; frame 0 on a virgin queue).
+        kani::assert(
+            queue.prediction.frame == Frame::new(first_missing),
+            "prediction episode must enter at the first missing frame",
+        );
+
+        // No-swallow invariant: the next sequential arrival lands exactly on
+        // the episode frame, so its misprediction comparison runs.
+        let arrival = PlayerInput::new(Frame::new(first_missing), TestInput { inp: 10 });
+        kani::assert(
+            queue.add_input(arrival) == Frame::new(first_missing),
+            "sequential arrival must land on the episode frame",
+        );
+
+        if virgin {
+            // Virgin queue: the frozen prediction is the blank default (no
+            // confirmed input yet), so the differing arrival (10) is detected.
+            kani::assert(
+                queue.first_incorrect_frame == Frame::new(0),
+                "differing arrival on a virgin queue must be flagged",
+            );
+            kani::assert(
+                queue.prediction.frame == Frame::new(1),
+                "episode advances past the mispredicted arrival",
+            );
+        } else {
+            // The arrival matches the frozen prediction (both 10).
+            kani::assert(
+                queue.first_incorrect_frame.is_null(),
+                "matching arrival must not be flagged",
+            );
+            if requested == first_missing {
+                kani::assert(
+                    queue.prediction.frame.is_null(),
+                    "episode exits once the requested frame is confirmed",
+                );
+            } else {
+                kani::assert(
+                    queue.prediction.frame == Frame::new(first_missing + 1),
+                    "episode advances to the next missing frame",
+                );
+            }
+        }
+    }
 }
 
 #[cfg(all(test, feature = "hot-join"))]
@@ -4480,5 +4801,42 @@ mod hot_join_input_queue_tests {
         queue.reset_to_frame(Frame::new(-5));
         assert_eq!(queue.last_added_frame, before.last_added_frame);
         assert_eq!(queue.length, before.length);
+    }
+
+    /// Hot-join seeding: after `reset_to_frame(F)` a prediction episode enters
+    /// at the activation frame `F` — the repositioned queue's first missing
+    /// frame — even when the first request lands beyond it, so the joiner's
+    /// real activation-frame input is compared against the preserved frozen
+    /// value and a divergence triggers a rollback.
+    #[test]
+    fn prediction_entry_after_reset_to_frame_starts_at_activation_frame() {
+        let mut queue = test_queue(0);
+        // The frozen value preserved across the reset (the prediction base).
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(0), TestInput { inp: 200 })),
+            Frame::new(0)
+        );
+        queue.freeze();
+
+        let f = Frame::new(20);
+        queue.reset_to_frame(f);
+
+        // The host advances past the activation frame before the joiner's real
+        // inputs arrive: the first request lands at frame 23.
+        let (value, status) = queue.input(Frame::new(23)).expect("prediction after reset");
+        assert_eq!(status, InputStatus::Predicted);
+        assert_eq!(value.inp, 200, "prediction uses the preserved frozen value");
+        assert_eq!(
+            queue.prediction.frame, f,
+            "episode must enter at the activation frame, not the requested frame"
+        );
+
+        // The joiner's real activation-frame input differs from the frozen
+        // value: the misprediction must be detected at exactly F.
+        assert_eq!(
+            queue.add_input(PlayerInput::new(f, TestInput { inp: 42 })),
+            f
+        );
+        assert_eq!(queue.first_incorrect_frame(), f);
     }
 }

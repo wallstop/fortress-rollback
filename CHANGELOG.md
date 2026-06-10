@@ -50,6 +50,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Legacy `disconnect_player` (`Halt`-style) drops, and drops on a host that does not serve hot-joins, are
     not made re-joinable.
 
+### Fixed
+
+- **Pre-existing:** A prediction episode in the input queue now always begins at the queue's **first
+  missing frame** rather than at the frame the simulation happened to request. Previously, a rollback re-simulation
+  whose first input request landed **above** a remote queue's missing window — ordinary cross-endpoint
+  jitter or packet reordering in sessions of 3 or more players, reachable at 0% packet loss with no
+  disconnects — re-entered prediction at the requested frame, and the missing window's inputs were then
+  accepted into the queue with their misprediction check **silently skipped**, so no rollback ever
+  re-simulated those frames. Two user-observable symptoms are fixed: (1) the affected peer's applied
+  game state could silently and permanently diverge from the rest of the session — no rollback, no
+  error, no event — which with `DesyncDetection::Off` was completely invisible; and (2) with
+  `DesyncDetection::On`, checksums harvested from the divergent peer's saved states raised
+  false-positive `DesyncDetected` events on every peer even though all peers' confirmed input streams
+  were byte-identical. The queue's internal frame/prediction mismatch arm now also fails toward a
+  corrective rollback instead of silently skipping the comparison. (The prediction-entry semantics are
+  observable through the `__internal::InputQueue` testing/fuzzing surface, which is documented as not
+  part of the stable public API, so this is a fix rather than a breaking change.)
+
 ## [0.9.0] - 2026-06-04
 
 ### Added

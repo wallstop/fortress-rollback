@@ -68,13 +68,13 @@ struct TestResult {
     checksum: u64,
     rollbacks: u32,
     /// Per-peer count of `FortressEvent::DesyncDetected` events, surfaced as a
-    /// top-level field by the binary. This is LOGGED but NOT asserted to be
-    /// zero: at 0% loss it can be > 0 due to a test-harness checksum artifact
-    /// (the binary's saved-cell checksum is the speculative `state.value`, which
-    /// includes Predicted inputs, so a peer racing ahead under prediction can
-    /// harvest a saved cell still embedding a misprediction for the
-    /// checksum-interval frame). See [`TestResult::desync_count`] and the module
-    /// note above the N-peer tests for the full root cause.
+    /// top-level field by the binary. `verify_determinism_n` asserts this is
+    /// zero for every peer: the historical 0%-loss false positive that kept it
+    /// log-only was finding F17 (a prediction episode re-entered at the
+    /// requested frame instead of the queue's first missing frame, silently
+    /// swallowing misprediction comparisons), fixed in S30 in
+    /// `InputQueue::input`. See [`TestResult::desync_count`] and the module
+    /// note above the N-peer tests for the full history.
     #[serde(default)]
     desync_detected: u32,
     #[serde(default)]
@@ -1418,13 +1418,20 @@ fn verify_determinism(result1: &TestResult, result2: &TestResult, context: &str)
 /// confirmed *all* N players' inputs through `target` (since `confirmed_frame`
 /// is the min over connected peers' `last_frame`). All peers succeeding is
 /// therefore the faithful N-peer generalization of the established 2-peer
-/// oracle. It does NOT itself assert a desync-free state -- see Part B / the
-/// module note above the N-peer tests: at 0% loss `DesyncDetected` can fire from
-/// a test-harness checksum artifact, so this function only LOGS each peer's
-/// desync count, it does not assert it is zero. Like [`verify_determinism`],
-/// `final_value` and `checksum` are only logged, not asserted, because at 0%
-/// loss the last-confirming peer computes them over an already-discarded
-/// `[target - 64, target)` window (empty hash) -- flaky by construction.
+/// oracle.
+///
+/// In addition, asserts that every peer observed ZERO `DesyncDetected` events.
+/// The historical 0%-loss false positive that forced this count to be log-only
+/// was finding F17, root-caused in S30 to the library's `InputQueue::input`
+/// (a rollback re-simulation re-entered its prediction episode at the
+/// REQUESTED frame instead of the queue's first missing frame, silently
+/// swallowing misprediction comparisons for the skipped window) and fixed
+/// there, so on a clean network a nonzero count is a genuine library
+/// regression -- see the module note above the N-peer tests. Like
+/// [`verify_determinism`], `final_value` and `checksum` are only logged, not
+/// asserted, because at 0% loss the last-confirming peer computes them over an
+/// already-discarded `[target - 64, target)` window (empty hash) -- flaky by
+/// construction.
 #[track_caller]
 fn verify_determinism_n(results: &[TestResult], context: &str) {
     let any_failure = results.iter().any(|r| !r.success);
@@ -1474,27 +1481,36 @@ fn verify_determinism_n(results: &[TestResult], context: &str) {
         );
     }
 
-    // Log (do NOT assert) each peer's DesyncDetected count. At 0% loss this can
-    // be > 0 because of a test-harness checksum artifact (the binary's saved-cell
-    // checksum is the speculative `state.value`, which includes Predicted inputs;
-    // a peer racing ahead under prediction can harvest a cell still embedding a
-    // misprediction for the checksum-interval frame, so the library faithfully
-    // reports a stored-checksum mismatch even though every peer's *confirmed*
-    // state is identical). See the module note above the N-peer tests. We surface
-    // this purely as a diagnostic so a future genuine-desync regression is at
-    // least visible in the logs without making this clean-network test flaky.
+    // Assert each peer's DesyncDetected count is zero. These tests run on a
+    // clean network (0% loss, no disconnects), where the library must never
+    // raise a desync. The historical 0%-loss false positive that kept this
+    // log-only was finding F17, fixed in S30 at its InputQueue prediction-entry
+    // root cause (see the module note above the N-peer tests); post-fix, a
+    // 10-run real-UDP soak of the 3-peer test observed 0 events. Dump every
+    // peer's count and full diagnostics first so a cross-peer event pattern is
+    // visible before the per-peer assertion names the first offender.
     let total_desync: u32 = results.iter().map(TestResult::desync_count).sum();
     if total_desync > 0 {
-        eprintln!(
-            "NOTE: {context} observed DesyncDetected events (total={total_desync}) at 0% loss -- \
-             expected test-harness checksum artifact, not asserted (see module note):"
-        );
+        eprintln!("=== DesyncDetected events observed ({context}, total={total_desync}) ===");
         for (index, result) in results.iter().enumerate() {
-            let d = result.desync_count();
-            if d > 0 {
-                eprintln!("  Peer {index}: desync_detected={d}");
-            }
+            eprintln!(
+                "Peer {index}: desync_detected={}, {}",
+                result.desync_count(),
+                result.diagnostic_summary()
+            );
         }
+        eprintln!("============================================");
+    }
+    for (index, result) in results.iter().enumerate() {
+        let desync_count = result.desync_count();
+        assert_eq!(
+            desync_count,
+            0,
+            "{context}: Peer {index} observed {desync_count} DesyncDetected event(s) on a \
+             clean network (expected 0 since the F17 InputQueue prediction-entry fix, S30). \
+             Peer diagnostics: {}",
+            result.diagnostic_summary()
+        );
     }
 
     // Log (do not assert) any final_value divergence, matching verify_determinism.
@@ -3725,6 +3741,82 @@ mod infrastructure_tests {
         );
     }
 
+    /// Successful result with the given top-level desync count (no runtime
+    /// diagnostics), for exercising the `verify_determinism_n` desync oracle.
+    fn successful_result_with_desyncs(desync_detected: u32) -> TestResult {
+        TestResult {
+            success: true,
+            final_frame: 100,
+            final_value: 1,
+            checksum: 1,
+            rollbacks: 0,
+            desync_detected,
+            error_kind: None,
+            error: None,
+            runtime: None,
+        }
+    }
+
+    /// The flipped desync oracle accepts an all-clean N-peer run.
+    #[test]
+    fn verify_determinism_n_accepts_zero_desync_counts() {
+        let results = vec![
+            successful_result_with_desyncs(0),
+            successful_result_with_desyncs(0),
+            successful_result_with_desyncs(0),
+        ];
+        verify_determinism_n(&results, "oracle_unit_test_clean");
+    }
+
+    /// Non-vacuity guard for the desync oracle flipped after the S30 F17 fix:
+    /// a successful run where one peer observed a `DesyncDetected` event must
+    /// fail `verify_determinism_n` (the count was previously logged-only).
+    #[test]
+    #[should_panic(expected = "DesyncDetected event(s) on a clean network")]
+    fn verify_determinism_n_panics_on_nonzero_desync_count() {
+        let results = vec![
+            successful_result_with_desyncs(0),
+            successful_result_with_desyncs(1),
+            successful_result_with_desyncs(0),
+        ];
+        verify_determinism_n(&results, "oracle_unit_test_desync");
+    }
+
+    /// The oracle also sees a count surfaced only through the nested
+    /// `runtime.events` fallback (older binary / partial JSON shape).
+    #[test]
+    #[should_panic(expected = "DesyncDetected event(s) on a clean network")]
+    fn verify_determinism_n_panics_on_nested_runtime_desync_count() {
+        let mut result = successful_result_with_desyncs(0);
+        result.runtime = Some(RuntimeDiagnostics {
+            session_state: "Running".to_string(),
+            current_frame: 100,
+            confirmed_frame: 100,
+            target_frame: 100,
+            elapsed_ms: 1_000,
+            sync_preset: None,
+            sync_config: "default".to_string(),
+            protocol_config: None,
+            time_sync_config: None,
+            sync_health: "InSync".to_string(),
+            events: EventSummary {
+                synchronizing: 1,
+                synchronized: 1,
+                network_interrupted: 0,
+                network_resumed: 0,
+                disconnected: 0,
+                sync_timeout: 0,
+                wait_recommendation: 0,
+                input_delay_recommendation: 0,
+                desync_detected: 2,
+                peer_dropped: 0,
+                replay_desync: 0,
+            },
+        });
+        let results = vec![successful_result_with_desyncs(0), result];
+        verify_determinism_n(&results, "oracle_unit_test_nested_desync");
+    }
+
     /// Test NetworkProfile constants are valid.
     #[test]
     fn test_network_profiles_valid() {
@@ -5411,10 +5503,11 @@ fn test_burst_loss_extreme_unreliable() {
 // confirmed *all* N players' inputs through `target` (since `confirmed_frame` is
 // the min over connected peers' `last_frame`). All peers succeeding is therefore
 // the faithful N-peer generalization of the established 2-peer oracle
-// (`verify_determinism` / `verify_determinism_n`). The success oracle does NOT
-// itself assert a desync-free state (see the DesyncDetected note below).
+// (`verify_determinism` / `verify_determinism_n`). A desync-free state is
+// asserted separately via the per-peer `DesyncDetected == 0` check in
+// `verify_determinism_n` (see the DesyncDetected note below).
 //
-// SUCCESS-ONLY (not success + checksum): a strengthened cross-peer `checksum`
+// NO CROSS-PEER CHECKSUM EQUALITY ORACLE: a strengthened cross-peer `checksum`
 // equality oracle was attempted (at success time the fixed
 // `[target - 64, target)` confirmed-input window should be identical across
 // peers at 0% loss), but it proved flaky even on clean localhost -- 3/20 green
@@ -5427,38 +5520,35 @@ fn test_burst_loss_extreme_unreliable() {
 // `frames_included = 0`, `final_value = 0`, and the empty-hash checksum
 // `cbf29ce484222325` -- which disagrees with the peers that captured a full
 // window. The same race already disables `final_value` comparison in the 2-peer
-// `verify_determinism`. We therefore assert `success` only (which was 20/20
-// green); `final_value` and `checksum` are only logged in diagnostics.
+// `verify_determinism`. We therefore assert `success` (which was 20/20 green)
+// plus the per-peer zero-`DesyncDetected` check below; `final_value` and
+// `checksum` are only logged in diagnostics.
 //
-// DesyncDetected at 0% loss (LOGGED, NOT ASSERTED): the binary inherits
+// DesyncDetected == 0 (ASSERTED since the S30 F17 fix): the binary inherits
 // `DesyncDetection::On { interval: 60 }` (the library default), so the library's
-// per-peer checksum gossip runs. At 0% loss some 3+-peer runs still observe
-// `desync_detected >= 1` (empirically ~20-25% of 3-peer runs; 0/50 at 2-peer
-// because 2-peer prediction stays shallow). This is a TEST-HARNESS CHECKSUM
-// ARTIFACT, not a library desync: `TestGame` stamps each saved cell's checksum
-// as `state.value` (its speculative *display* accumulator), and
-// `TestState::advance` accumulates BOTH Confirmed and Predicted inputs. The
-// library harvests a frame's saved-cell checksum the moment that frame is
-// confirmed (`frame_to_send <= last_confirmed_frame`); a peer that races far
-// ahead under prediction can reach that point with the saved cell for the
-// checksum-interval frame still holding state computed from a *mispredicted*
-// input (it was never re-simulated to its confirmed fixed-point before the
-// frame's inputs were confirmed and the cell scrolled out of the active rollback
-// window). The library then faithfully reports that this peer's STORED checksum
-// for the (now confirmed) frame differs from peers that captured the confirmed
-// value -- even though every peer's *confirmed game state* is byte-identical
-// (the success-time `final_value`/`checksum`, which are reconstructed from the
-// confirmed input queue via `confirmed_inputs_for_frame`, agree across peers).
-// `verify_determinism_n` LOGS each peer's desync count for visibility but does
-// NOT assert it is zero, since it is a real (benign) false positive of this
-// harness's prediction-dependent checksum. A faithful confirmed-only checksum
-// cannot be computed inside the game's `handle_requests` (the confirmed inputs
-// for the frame being saved are not yet available at save time), so a
-// self-contained gold-oracle fix is not available here. There is a secondary
-// library-robustness question (whether desync harvest should require the exact
-// frame to have been re-simulated with confirmed inputs first) that is left to a
-// separate audit; it is not a "false positive on byte-identical confirmed state"
-// because the saved cells genuinely differ.
+// per-peer checksum gossip runs, and `verify_determinism_n` asserts that every
+// peer observed ZERO `DesyncDetected` events. Historically this count was
+// logged-but-not-asserted because a large fraction of 0%-loss 3-peer runs
+// (~20-60% across S27-S29 measurements; 0/50 at 2-peer, whose prediction stays
+// shallow) raised `DesyncDetected`, always at the checksum-interval frame 60.
+// S27 attributed that to a test-harness checksum artifact (the speculative
+// `state.value` accumulator); S29 overturned the attribution (a faithful
+// full-state hash AND a faithful per-frame-input digest both still fired it,
+// with confirmed state byte-identical across peers) and recorded it as library
+// finding F17; S30 root-caused and FIXED F17 in `InputQueue::input`: a rollback
+// re-simulation whose first input request landed ABOVE a remote queue's missing
+// window re-entered its prediction episode at the REQUESTED frame, so the
+// missing window's arrivals were accepted with their misprediction comparison
+// silently skipped -- the victim's applied trajectory was never re-simulated
+// (silently divergent gameplay state) and the checksum harvest gossiped stale
+// saved-state stamps, raising false-positive `DesyncDetected` on byte-identical
+// confirmed input streams. Prediction episodes now always enter at the queue's
+// FIRST MISSING frame, making the swallowed window unconstructible. The
+// deterministic in-process reproduction lives in tests/sessions/desync_harvest.rs
+// ("F17 DETERMINISTIC REPRODUCTION (S30)", RED on pre-fix code), and a post-fix
+// 10-run real-UDP soak of the 3-peer test observed 0 events in 10/10 runs. On
+// this clean network (0% loss, no disconnects) a nonzero count is therefore a
+// genuine library regression and fails these tests.
 //
 // Each test uses a unique, non-colliding port range (>= 18001, clear of the
 // existing 10001-10900/20000/30000 clusters) as defense-in-depth -- the tests
@@ -5488,7 +5578,8 @@ fn three_peer_local_network_is_deterministic() {
 
     let results = run_n_peer_test(configs);
 
-    // Success-only oracle (cross-peer checksum proved flaky; see module note above).
+    // Success + zero-DesyncDetected oracle (cross-peer checksum equality stays
+    // log-only -- it proved flaky by construction; see module note above).
     verify_determinism_n(&results, "three_peer_local_network");
 
     for (index, result) in results.iter().enumerate() {
@@ -5522,7 +5613,8 @@ fn four_peer_local_network_is_deterministic() {
 
     let results = run_n_peer_test(configs);
 
-    // Success-only oracle (cross-peer checksum proved flaky; see module note above).
+    // Success + zero-DesyncDetected oracle (cross-peer checksum equality stays
+    // log-only -- it proved flaky by construction; see module note above).
     verify_determinism_n(&results, "four_peer_local_network");
 
     for (index, result) in results.iter().enumerate() {
@@ -5556,7 +5648,8 @@ fn three_peer_lan_network_is_deterministic() {
 
     let results = run_n_peer_test(configs);
 
-    // Success-only oracle (cross-peer checksum proved flaky; see module note above).
+    // Success + zero-DesyncDetected oracle (cross-peer checksum equality stays
+    // log-only -- it proved flaky by construction; see module note above).
     verify_determinism_n(&results, "three_peer_lan_network");
 
     for (index, result) in results.iter().enumerate() {

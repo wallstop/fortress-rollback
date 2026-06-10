@@ -511,6 +511,7 @@ TIER2_PROOFS=(
     "proof_length_calculation_consistent"
     "proof_delay_decrease_after_input_rejected_no_mutation"
     "proof_freeze_add_input_noop_preserves_state"
+    "proof_prediction_entry_at_first_missing_frame"
     # SyncLayer proofs (src/sync_layer/mod.rs)
     "proof_minimal_sync_layer_initial_state_valid_1p"
     "proof_minimal_sync_layer_initial_state_valid_2p"

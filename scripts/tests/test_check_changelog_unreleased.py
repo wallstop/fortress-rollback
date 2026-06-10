@@ -6,10 +6,13 @@ Covers the matrix from the rule:
     (b) Added + only-Breaking Changed               -> pass
     (c) Added + non-Breaking Changed                -> fail with line numbers
     (d) no Unreleased section                       -> pass
-    (e) Added + Fixed                               -> fail with line numbers
+    (e) Added + unmarked Fixed                      -> fail with line numbers
+    (f) Added + only **Pre-existing:** Fixed        -> pass
 
 Plus a couple of robustness checks:
     - mixed Breaking + non-Breaking Changed reports only the non-Breaking lines
+    - mixed Pre-existing + unmarked Fixed reports only the unmarked lines
+    - accepted **Pre-existing:** entries emit a non-failing stdout note
     - missing CHANGELOG.md is not a failure (hook is a no-op)
 """
 from __future__ import annotations
@@ -114,7 +117,7 @@ def test_no_unreleased_section_passes(tmp_path: Path) -> None:
 def test_added_plus_fixed_fails(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """(e) Added + Fixed in Unreleased fails with line-number diagnostics."""
+    """(e) Added + unmarked Fixed in Unreleased fails with line-number diagnostics."""
     body = (
         "# Changelog\n\n"  # 1-2
         "## [Unreleased]\n\n"  # 3-4
@@ -132,6 +135,108 @@ def test_added_plus_fixed_fails(
     assert ":11: offending Fixed entry:" in err
     assert "Fixed bug in unreleased" in err
     assert "remedy:" in err
+    # The remedy advertises the released-behavior escape hatch.
+    assert "**Pre-existing:**" in err
+
+
+def test_added_plus_preexisting_fixed_passes(tmp_path: Path) -> None:
+    """Added + Fixed where every entry is **Pre-existing:** passes.
+
+    Fixes to behavior that already shipped in a released version are outside
+    the unreleased-code rule's scope; the marker is the author's
+    self-declaration, mirroring **Breaking:** for Changed.
+    """
+    body = (
+        "# Changelog\n\n"
+        "## [Unreleased]\n\n"
+        "### Added\n\n"
+        "- New `Foo` API\n\n"
+        "### Fixed\n\n"
+        "- **Pre-existing:** `Bar` no longer desyncs under reordering\n"
+        "## [0.1.0] - 2026-01-01\n"
+    )
+    assert check_file(_write_changelog(tmp_path, body)) is True
+
+
+def test_mixed_preexisting_and_unmarked_fixed_reports_only_unmarked(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A Fixed block with both kinds reports only the unmarked offenders."""
+    body = (
+        "# Changelog\n\n"
+        "## [Unreleased]\n\n"
+        "### Added\n\n"
+        "- New `Foo` API\n\n"
+        "### Fixed\n\n"
+        "- **Pre-existing:** `Bar` no longer desyncs under reordering\n"
+        "- Fixed bug in unreleased `Foo`\n"  # offender
+    )
+    path = _write_changelog(tmp_path, body)
+    assert check_file(path) is False
+
+    captured = capsys.readouterr()
+    err = captured.err
+    assert err.count("offending Fixed entry:") == 1
+    assert "Fixed bug in unreleased" in err
+    assert "no longer desyncs" not in err
+    # The accepted marked entry is still surfaced as a note (on stdout),
+    # even though the file fails on the unmarked offender.
+    out = captured.out
+    assert out.count("note: accepting") == 1
+    assert "no longer desyncs" in out
+
+
+def test_accepted_preexisting_fixed_emits_stdout_note(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Accepted **Pre-existing:** entries emit a per-entry note on stdout.
+
+    The note exists for reviewer visibility of the self-declaration; it must
+    not affect the pass/fail outcome and must not pollute stderr (which is
+    reserved for violations).
+    """
+    body = (
+        "# Changelog\n\n"  # 1-2
+        "## [Unreleased]\n\n"  # 3-4
+        "### Added\n\n"  # 5-6
+        "- New `Foo` API\n\n"  # 7-8
+        "### Fixed\n\n"  # 9-10
+        "- **Pre-existing:** `Bar` no longer desyncs under reordering\n"  # 11
+        "- **Pre-existing:** `Baz` rollback no longer stalls\n"  # 12
+        "## [0.1.0] - 2026-01-01\n"
+    )
+    path = _write_changelog(tmp_path, body)
+    assert check_file(path) is True
+
+    captured = capsys.readouterr()
+    out = captured.out
+    assert out.count("note: accepting") == 2
+    assert ":11: note: accepting" in out
+    assert ":12: note: accepting" in out
+    assert "self-declaration" in out
+    assert "no longer desyncs" in out
+    assert "rollback no longer stalls" in out
+    # Notes are informational only: nothing on stderr.
+    assert captured.err == ""
+
+
+def test_preexisting_fixed_without_added_emits_no_note(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Without an Added section the marker is not load-bearing: no note."""
+    body = (
+        "# Changelog\n\n"
+        "## [Unreleased]\n\n"
+        "### Fixed\n\n"
+        "- **Pre-existing:** `Bar` no longer desyncs under reordering\n"
+        "## [0.1.0] - 2026-01-01\n"
+    )
+    path = _write_changelog(tmp_path, body)
+    assert check_file(path) is True
+
+    captured = capsys.readouterr()
+    assert "note: accepting" not in captured.out
+    assert captured.err == ""
 
 
 def test_mixed_breaking_and_non_breaking_reports_only_non_breaking(
