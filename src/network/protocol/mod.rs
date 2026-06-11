@@ -161,6 +161,30 @@ where
     max_prediction: usize,
     recv_inputs: BTreeMap<Frame, InputBytes>,
 
+    // connect-status nudge (see `send_connect_status_nudge`)
+    /// When `true` (set by the session each poll via
+    /// [`set_connect_status_nudge`](Self::set_connect_status_nudge)), this
+    /// endpoint keeps gossiping the session's connect status even when
+    /// input-idle, by re-sending a status-bearing duplicate `Input` message on
+    /// the keepalive cadence. The session enables it while it holds a locally
+    /// disconnected player slot whose drop is not yet mesh-agreed, and clears
+    /// it as soon as the mesh agrees (or the slot reconnects).
+    connect_status_nudge: bool,
+    /// Last time a connect-status nudge was sent. A dedicated timer (rather
+    /// than reusing `last_send_time`) because quality reports — whose default
+    /// interval equals the keepalive interval — refresh `last_send_time` on
+    /// every cycle and would otherwise starve the bare-keepalive branch (and
+    /// any nudge hooked on it) indefinitely.
+    last_nudge_time: Instant,
+    /// Last time a REAL `Input` message (fresh send or pending retransmission,
+    /// not a nudge) was queued. The nudge is an input-idle SUBSTITUTE: while
+    /// genuine input traffic flows it must stay completely silent so enabling
+    /// the flag changes nothing about an actively-advancing session's packet
+    /// stream (and therefore cannot perturb gossip-race resolutions that
+    /// in-flight Input packets would have decided). Tracked separately from
+    /// `last_send_time`, which control traffic also refreshes.
+    last_input_send_time: Instant,
+
     // time sync
     time_sync_layer: TimeSync,
     /// Retained so the endpoint can rebuild its `TimeSync` for a hot-join rejoin
@@ -568,6 +592,11 @@ impl<T: Config> UdpProtocol<T> {
             max_prediction,
             recv_inputs,
 
+            // connect-status nudge
+            connect_status_nudge: false,
+            last_nudge_time: now,
+            last_input_send_time: now,
+
             // time sync
             time_sync_layer,
             #[cfg(feature = "hot-join")]
@@ -859,10 +888,44 @@ impl<T: Config> UdpProtocol<T> {
                 }
             },
             ProtocolState::Running => {
-                // resend pending inputs, if some time has passed without sending or receiving inputs
+                // resend pending inputs, if some time has passed without sending or
+                // receiving NEW inputs (progress-free duplicates and connect-status
+                // nudges do not refresh the pacer — see the gate in `on_input`)
                 if self.running_last_input_recv + self.sync_config.running_retry_interval < now {
                     self.send_pending_output(connect_status);
                     self.running_last_input_recv = now;
+                }
+
+                // Connect-status nudge (see `send_connect_status_nudge`): while
+                // the session holds a not-yet-mesh-agreed local disconnect,
+                // keep gossiping even when input-idle. STRICTLY an input-idle
+                // substitute: it fires only when no real `Input` message
+                // (fresh or retransmitted — both already carry the current
+                // connect status) has been queued for a full keepalive
+                // interval AND `pending_output` is empty, so an
+                // actively-advancing session's packet stream is completely
+                // unchanged by the flag. A mute-but-held endpoint always has a
+                // valid `last_acked_input`: `pending_output` drains only
+                // through acks (`apply_ack_frame` moves the popped entry into
+                // `last_acked_input`), so an empty queue on an endpoint that
+                // ever sent an input implies at least one ack landed. The
+                // remaining case (`last_acked_input.frame` still NULL because
+                // no input was ever sent) cannot coincide with a gossip-mute
+                // hold — such a session has burned none of its prediction
+                // window and its next `advance_frame` sends a status-bearing
+                // input — so skipping the nudge there (the bare KeepAlive
+                // below keeps the link alive) is safe. One nudge per keepalive
+                // interval per endpoint; it refreshes `last_send_time` via
+                // `queue_message`, so it replaces (never doubles) the bare
+                // KeepAlive on that tick.
+                if self.connect_status_nudge
+                    && self.pending_output.is_empty()
+                    && self.last_acked_input.frame.is_valid()
+                    && self.last_input_send_time + self.sync_config.keepalive_interval < now
+                    && self.last_nudge_time + self.sync_config.keepalive_interval < now
+                    && self.send_connect_status_nudge(connect_status)
+                {
+                    self.last_nudge_time = now;
                 }
 
                 // periodically send a quality report
@@ -1251,6 +1314,9 @@ impl<T: Config> UdpProtocol<T> {
             connect_status.clone_into(&mut body.peer_connect_status);
 
             self.queue_message(MessageBody::Input(body));
+            // Real input traffic went out: the connect-status nudge (an
+            // input-idle substitute) stays silent for the next interval.
+            self.last_input_send_time = self.now();
         }
     }
 
@@ -1264,6 +1330,121 @@ impl<T: Config> UdpProtocol<T> {
 
     fn send_keep_alive(&mut self) {
         self.queue_message(MessageBody::KeepAlive);
+    }
+
+    /// Enables/disables the connect-status nudge for this endpoint. Set by the
+    /// session every poll: `true` while the session holds a locally
+    /// disconnected player slot whose drop is not yet mesh-agreed (some running
+    /// endpoint still reports the slot connected), `false` otherwise. See
+    /// [`send_connect_status_nudge`](Self::send_connect_status_nudge).
+    pub(crate) fn set_connect_status_nudge(&mut self, enabled: bool) {
+        self.connect_status_nudge = enabled;
+    }
+
+    /// Test-only: reads back the nudge flag so session-level tests can assert
+    /// the per-poll wiring in `poll_remote_clients`.
+    #[cfg(test)]
+    pub(crate) fn connect_status_nudge_for_tests(&self) -> bool {
+        self.connect_status_nudge
+    }
+
+    /// Sends a **connect-status nudge**: a status-bearing duplicate `Input`
+    /// message re-built from the retained delta reference
+    /// [`last_acked_input`](Self::last_acked_input), carrying the session's
+    /// CURRENT `connect_status` array. Returns `true` if the message was
+    /// queued.
+    ///
+    /// # Why
+    ///
+    /// Connect-status gossip travels only in `Input` messages, and an endpoint
+    /// whose send queue is fully acked sends none — so a survivor that detects
+    /// a peer drop while capped at its prediction window can never deliver the
+    /// `disconnected` gossip, and mesh agreement (the condition that releases
+    /// the dropped slot from the confirmed-frame minimum, see
+    /// `P2PSession::remote_slot_confirmed_bound`) becomes unreachable: a
+    /// permanent, silent liveness pin. The nudge closes that hole by giving the
+    /// gossip a periodic carrier while a drop awaits mesh agreement.
+    ///
+    /// The caller (the `poll` gate) fires it only when **input-idle** — no
+    /// real `Input` message queued for a full keepalive interval and an empty
+    /// `pending_output` — so an actively-advancing session's packet stream is
+    /// byte-identical with or without the flag: real input traffic already
+    /// carries the connect status, and racing duplicate gossip ahead of it
+    /// could change which packet resolves a same-poll disconnect-report race.
+    ///
+    /// # Why this is wire-compatible (no wire-format change)
+    ///
+    /// The packet is an `Input` message shape that already occurs on the wire
+    /// via retransmission: `start_frame` is an already-acked frame, and the
+    /// body is a delta batch of exactly one frame. Receivers handle stale or
+    /// duplicate `Input` packets as established behavior — every decoded frame
+    /// `<= last_recv_frame` is skipped — AND still run the connect-status merge
+    /// on them: `merge_peer_connect_status` is hoisted BEFORE both decode-skip
+    /// paths in `on_input` precisely so gossip rides every received packet
+    /// (the S24 design; pinned by
+    /// `on_input_low_start_frame_with_present_reference_applies_fresh_gossip`
+    /// and `on_input_hoisted_merge_does_not_un_converge_freeze_from_stale_packet`).
+    ///
+    /// The body is encoded **self-referencing** (the `last_acked_input` bytes
+    /// delta-encoded against themselves, an all-zero delta): the receiver
+    /// decodes against ITS reference for `start_frame - 1`, which may produce
+    /// different bytes — harmless, because every decoded frame is discarded as
+    /// stale before being parsed (`inp_frame <= last_recv_frame` is checked
+    /// first), and if the receiver has already pruned that reference the
+    /// decode is skipped entirely. Either way the merge has already run.
+    ///
+    /// # Asymmetric cutoff: post-agreement status rides the retry timer
+    ///
+    /// The nudge flag clears on **local** mesh agreement
+    /// (`P2PSession::connect_status_nudge_needed` goes `false` the moment THIS
+    /// session sees every running endpoint report the slot disconnected), but
+    /// release is a **global** condition — a peer that has not yet agreed
+    /// still needs this session's view. Once this session stops nudging, its
+    /// view travels ONLY in its real `Input` traffic: the next fresh send and,
+    /// crucially, the `running_retry_interval` retransmission of any
+    /// still-unacked `pending_output` (a capped post-agreement survivor may
+    /// send nothing else status-bearing for an unbounded time). That is why
+    /// the retry pacer `running_last_input_recv` must never be reset by
+    /// progress-free packets such as this nudge: `on_input` refreshes it only
+    /// when a packet stages at least one NEW frame, otherwise a still-nudging
+    /// peer (keepalive cadence == default retry interval) would starve the
+    /// retransmission — and with it the only remaining carrier — forever.
+    /// Regression-pinned by the blackout repro in
+    /// `tests/sessions/peer_drop.rs` and the
+    /// `on_input_resets_retry_pacer_only_when_new_frames_staged` unit test.
+    ///
+    /// Only called while `Running` (the `poll` gate); `disconnect_requested`
+    /// is therefore always `false` here, matching what `send_pending_output`
+    /// would compute.
+    fn send_connect_status_nudge(&mut self, connect_status: &[ConnectionStatus]) -> bool {
+        if !self.last_acked_input.frame.is_valid() {
+            return false;
+        }
+        let bytes = match try_encode(
+            &self.last_acked_input.bytes,
+            std::iter::once(&self.last_acked_input.bytes),
+        ) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::NetworkProtocol,
+                    "Failed to encode connect-status nudge: {:?}",
+                    err
+                );
+                return false;
+            },
+        };
+        let mut body = Input {
+            peer_connect_status: Vec::new(),
+            disconnect_requested: false,
+            start_frame: self.last_acked_input.frame,
+            ack_frame: self.last_recv_frame(),
+            bytes,
+        };
+        connect_status.clone_into(&mut body.peer_connect_status);
+        self.queue_message(MessageBody::Input(body));
+        true
     }
 
     fn send_sync_request(&mut self) {
@@ -1702,7 +1883,26 @@ impl<T: Config> UdpProtocol<T> {
             // via `merge_peer_connect_status`, so disconnect gossip converges even
             // for packets whose inputs we cannot decode.
 
-            self.running_last_input_recv = self.now();
+            // Refresh the pending-output retransmission pacer ONLY when this
+            // packet staged at least one NEW frame. `running_last_input_recv`
+            // feeds exactly one consumer — the `running_retry_interval` resend
+            // gate in `poll` — while liveness/disconnect-timeout tracking uses
+            // the separate `last_recv_time`, which `handle_message` refreshes
+            // for EVERY packet (including progress-free ones); this gate
+            // changes retry pacing only, never disconnect detection.
+            // Progress-free decodable Inputs — connect-status nudges and
+            // duplicate retransmissions — must not suppress the resend: a
+            // peer nudging on the keepalive cadence (== the default retry
+            // interval) would otherwise starve our pending Input forever, and
+            // that pending Input is the only carrier of our post-agreement
+            // connect status (see `send_connect_status_nudge`'s rustdoc and
+            // the blackout regression test in `tests/sessions/peer_drop.rs`).
+            // Trade-off: duplicate-heavy legitimate traffic (retransmissions
+            // under loss) now lets our retry fire on its normal interval —
+            // at most one extra resend per `running_retry_interval`, benign.
+            if !staged_frames.is_empty() {
+                self.running_last_input_recv = self.now();
+            }
             for staged in staged_frames {
                 let peer_connect_status = body.peer_connect_status.clone();
                 self.recv_inputs
@@ -1999,6 +2199,7 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
     use std::net::SocketAddr;
+    use std::sync::Mutex;
 
     // Test configuration
     #[repr(C)]
@@ -3376,6 +3577,493 @@ mod tests {
         assert_eq!(
             timeout_count3, 0,
             "SyncTimeout should only be emitted once per timeout"
+        );
+    }
+
+    // ==========================================
+    // Connect-Status Nudge Tests
+    // ==========================================
+    //
+    // The nudge (`send_connect_status_nudge`) re-sends a status-bearing
+    // duplicate Input built from `last_acked_input` on the keepalive cadence
+    // while the session holds a not-yet-mesh-agreed local disconnect.
+    // Receiver-side handling of the nudge SHAPE (a stale/dup Input carrying
+    // fresh gossip) is the established S24 hoisted-merge behavior, already
+    // pinned by `on_input_low_start_frame_with_present_reference_applies_fresh_gossip`
+    // and `on_input_hoisted_merge_does_not_un_converge_freeze_from_stale_packet`;
+    // the exact sender-built shape is additionally pinned end-to-end below.
+
+    /// Shared harness: a Running protocol with an injected mutable clock, an
+    /// hour-long quality-report interval (quality reports refresh
+    /// `last_send_time` and would otherwise crowd the keepalive/nudge cadence
+    /// out of the observation window), and an empty (fully-acked) pipeline.
+    fn running_nudge_protocol() -> (UdpProtocol<TestConfig>, Arc<Mutex<Instant>>) {
+        let current = Arc::new(Mutex::new(Instant::now()));
+        let clock_handle = Arc::clone(&current);
+        let config = ProtocolConfig {
+            quality_report_interval: Duration::from_secs(3600),
+            clock: Some(Arc::new(move || *clock_handle.lock().unwrap())),
+            ..ProtocolConfig::default()
+        };
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+        protocol.send_queue.clear();
+        (protocol, current)
+    }
+
+    fn advance_test_clock(clock: &Arc<Mutex<Instant>>, duration: Duration) {
+        *clock.lock().unwrap() += duration;
+    }
+
+    fn queued_inputs(protocol: &UdpProtocol<TestConfig>) -> Vec<&Input> {
+        protocol
+            .send_queue
+            .iter()
+            .filter_map(|message| match &message.body {
+                MessageBody::Input(body) => Some(body),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn queue_has_keep_alive(protocol: &UdpProtocol<TestConfig>) -> bool {
+        protocol
+            .send_queue
+            .iter()
+            .any(|message| matches!(message.body, MessageBody::KeepAlive))
+    }
+
+    /// (i) Flag set + keepalive interval elapsed + idle (fully-acked) queue:
+    /// exactly ONE status-bearing duplicate Input per interval, re-sending the
+    /// `last_acked_input` frame and carrying the connect status CURRENT at
+    /// that poll; it replaces the bare KeepAlive on that tick (no double-send)
+    /// and a second poll within the same interval sends nothing new.
+    #[test]
+    fn poll_nudge_sends_one_status_bearing_duplicate_input_per_keepalive_interval() {
+        let (mut protocol, clock) = running_nudge_protocol();
+        protocol.last_acked_input.frame = Frame::new(3);
+        protocol.set_connect_status_nudge(true);
+
+        let status_first = vec![
+            ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(9),
+            },
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(4),
+            },
+        ];
+        advance_test_clock(&clock, Duration::from_millis(201));
+        let _ = protocol.poll(&status_first).count();
+
+        {
+            let inputs = queued_inputs(&protocol);
+            assert_eq!(
+                inputs.len(),
+                1,
+                "exactly one nudge Input per elapsed keepalive interval"
+            );
+            let nudge = inputs.first().expect("one nudge");
+            assert_eq!(
+                nudge.start_frame,
+                Frame::new(3),
+                "the nudge re-sends the last acked frame (a duplicate the receiver skips)"
+            );
+            assert_eq!(
+                nudge.peer_connect_status, status_first,
+                "the nudge carries the CURRENT connect status"
+            );
+            assert!(!nudge.disconnect_requested);
+        }
+        assert!(
+            !queue_has_keep_alive(&protocol),
+            "the nudge replaces the bare KeepAlive on that tick"
+        );
+
+        // Same instant: nothing new (one nudge per interval).
+        let queue_len = protocol.send_queue.len();
+        let _ = protocol.poll(&status_first).count();
+        assert_eq!(
+            protocol.send_queue.len(),
+            queue_len,
+            "no second nudge within the same keepalive interval"
+        );
+
+        // Next interval: another nudge, carrying the status passed at THAT poll.
+        let status_second = vec![
+            ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(9),
+            },
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(2),
+            },
+        ];
+        advance_test_clock(&clock, Duration::from_millis(201));
+        let _ = protocol.poll(&status_second).count();
+        let inputs = queued_inputs(&protocol);
+        assert_eq!(inputs.len(), 2, "one more nudge after the next interval");
+        assert_eq!(
+            inputs.last().expect("second nudge").peer_connect_status,
+            status_second,
+            "each nudge carries the connect status current at its own poll"
+        );
+    }
+
+    /// (ii) Flag clear: the idle tick sends the plain KeepAlive exactly as
+    /// before — no Input message appears.
+    #[test]
+    fn poll_without_nudge_flag_sends_plain_keepalive_when_idle() {
+        let (mut protocol, clock) = running_nudge_protocol();
+        protocol.last_acked_input.frame = Frame::new(3);
+
+        advance_test_clock(&clock, Duration::from_millis(201));
+        let connect_status = vec![ConnectionStatus::default(); 2];
+        let _ = protocol.poll(&connect_status).count();
+
+        assert!(
+            queue_has_keep_alive(&protocol),
+            "without the flag the idle tick must send the plain KeepAlive"
+        );
+        assert!(
+            queued_inputs(&protocol).is_empty(),
+            "without the flag no duplicate Input may be sent"
+        );
+    }
+
+    /// (iii) Flag set but `last_acked_input.frame` still NULL (no input ever
+    /// acked): falls back to the plain KeepAlive. Pre-first-ack this state
+    /// cannot coincide with a gossip-mute hold — `pending_output` drains only
+    /// through acks, so a mute (empty-queue) endpoint that ever sent an input
+    /// has a valid `last_acked_input`, and one that never sent an input has
+    /// not burned its prediction window (its next advance sends a
+    /// status-bearing input) — so the conservative fallback loses nothing.
+    #[test]
+    fn poll_nudge_with_null_last_acked_falls_back_to_keepalive() {
+        let (mut protocol, clock) = running_nudge_protocol();
+        assert_eq!(protocol.last_acked_input.frame, Frame::NULL);
+        protocol.set_connect_status_nudge(true);
+
+        advance_test_clock(&clock, Duration::from_millis(201));
+        let connect_status = vec![ConnectionStatus::default(); 2];
+        let _ = protocol.poll(&connect_status).count();
+
+        assert!(
+            queue_has_keep_alive(&protocol),
+            "with a NULL last-acked frame the idle tick must fall back to KeepAlive"
+        );
+        assert!(
+            queued_inputs(&protocol).is_empty(),
+            "no self-referencing nudge can be built before the first ack"
+        );
+    }
+
+    /// (iv) Running-state gating: with the flag set and the interval elapsed,
+    /// a Synchronizing protocol sends no Input (only sync-request retries) and
+    /// a Disconnected protocol sends nothing at all.
+    #[test]
+    fn poll_nudge_respects_running_state_gating() {
+        let current = Arc::new(Mutex::new(Instant::now()));
+        let clock_handle = Arc::clone(&current);
+        let config = ProtocolConfig {
+            quality_report_interval: Duration::from_secs(3600),
+            clock: Some(Arc::new(move || *clock_handle.lock().unwrap())),
+            ..ProtocolConfig::default()
+        };
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
+        protocol.synchronize().unwrap();
+        assert_eq!(protocol.state, ProtocolState::Synchronizing);
+        protocol.last_acked_input.frame = Frame::new(3);
+        protocol.set_connect_status_nudge(true);
+        protocol.send_queue.clear();
+
+        advance_test_clock(&current, Duration::from_millis(201));
+        let connect_status = vec![ConnectionStatus::default(); 2];
+        let _ = protocol.poll(&connect_status).count();
+        assert!(
+            queued_inputs(&protocol).is_empty(),
+            "a Synchronizing protocol must not nudge"
+        );
+
+        protocol.state = ProtocolState::Disconnected;
+        protocol.shutdown_timeout = *current.lock().unwrap() + Duration::from_secs(60);
+        protocol.send_queue.clear();
+        advance_test_clock(&current, Duration::from_millis(201));
+        let _ = protocol.poll(&connect_status).count();
+        assert!(
+            protocol.send_queue.is_empty(),
+            "a Disconnected protocol must not nudge"
+        );
+    }
+
+    /// (Gate completeness) Flag set but a REAL Input message went out within
+    /// the keepalive interval: the nudge is an input-idle substitute and must
+    /// stay completely silent — an actively-advancing session's packet stream
+    /// is unchanged by the flag. Once the input-idle interval elapses, the
+    /// nudge fires.
+    #[test]
+    fn poll_nudge_waits_for_input_idle_interval() {
+        let (mut protocol, clock) = running_nudge_protocol();
+        protocol.last_acked_input.frame = Frame::new(3);
+        protocol.set_connect_status_nudge(true);
+
+        // A real Input was just sent (e.g. the session advanced a frame).
+        advance_test_clock(&clock, Duration::from_millis(150));
+        protocol.last_input_send_time = *clock.lock().unwrap();
+
+        // 100ms later: the nudge cadence (since construction) has elapsed, but
+        // the endpoint is NOT input-idle yet (only 100ms since the last real
+        // Input) — no nudge, plain KeepAlive.
+        advance_test_clock(&clock, Duration::from_millis(100));
+        let connect_status = vec![ConnectionStatus::default(); 2];
+        let _ = protocol.poll(&connect_status).count();
+        assert!(
+            queued_inputs(&protocol).is_empty(),
+            "no nudge may fire while real input traffic is fresh"
+        );
+        assert!(
+            queue_has_keep_alive(&protocol),
+            "the idle tick still keeps the link alive"
+        );
+
+        // Another 101ms (201ms since the last real Input): now input-idle —
+        // the nudge fires.
+        advance_test_clock(&clock, Duration::from_millis(101));
+        let _ = protocol.poll(&connect_status).count();
+        assert_eq!(
+            queued_inputs(&protocol).len(),
+            1,
+            "the nudge must fire once the input-idle interval elapses"
+        );
+    }
+
+    /// (Gate completeness) Flag set but `pending_output` non-empty: the
+    /// regular retransmission path already carries the current connect status,
+    /// so the nudge stays silent — exactly one Input (the retransmission,
+    /// starting at the pending frame, not a self-referencing duplicate).
+    #[test]
+    fn poll_nudge_skipped_while_pending_output_nonempty() {
+        let (mut protocol, clock) = running_nudge_protocol();
+        protocol.last_acked_input.frame = Frame::new(3);
+        let width = protocol.last_acked_input.bytes.len();
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(4),
+            bytes: vec![0u8; width],
+        });
+        protocol.set_connect_status_nudge(true);
+
+        let connect_status = vec![
+            ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(9),
+            },
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(4),
+            },
+        ];
+        advance_test_clock(&clock, Duration::from_millis(201));
+        let _ = protocol.poll(&connect_status).count();
+
+        let inputs = queued_inputs(&protocol);
+        assert_eq!(
+            inputs.len(),
+            1,
+            "only the pending-output retransmission may be sent"
+        );
+        let retransmission = inputs.first().expect("one retransmission");
+        assert_eq!(
+            retransmission.start_frame,
+            Frame::new(4),
+            "the Input is the retransmission (pending front), not a self-referencing nudge"
+        );
+        assert_eq!(
+            retransmission.peer_connect_status, connect_status,
+            "gossip rides the retransmission"
+        );
+    }
+
+    /// (v) End-to-end receiver proof for the EXACT nudge shape: a
+    /// self-referencing duplicate Input built by `send_connect_status_nudge`
+    /// is handled by `on_input` as an established stale-dup packet — the fresh
+    /// connect-status gossip is merged (the hoisted S24 merge), no Input event
+    /// is staged (every decoded frame is stale), and the normal InputAck reply
+    /// is sent.
+    #[test]
+    fn receiver_merges_gossip_from_nudge_shaped_packet_without_staging_inputs() {
+        // Sender: Running, last acked frame 3 (zeroed reference bytes).
+        let (mut sender, _clock) = running_nudge_protocol();
+        sender.last_acked_input.frame = Frame::new(3);
+        let nudge_status = vec![
+            ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(9),
+            },
+            ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(4),
+            },
+        ];
+        assert!(sender.send_connect_status_nudge(&nudge_status));
+        let body = match &sender.send_queue.back().expect("nudge queued").body {
+            MessageBody::Input(body) => body.clone(),
+            other => panic!("expected Input, got {other:?}"),
+        };
+
+        // Receiver: Running with contiguous receipts 0..=5, so the nudge's
+        // start frame 3 is a duplicate and its decode reference (frame 2) is
+        // present.
+        let mut receiver: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        receiver.synchronize().unwrap();
+        complete_test_sync(&mut receiver);
+        let width = receiver
+            .recv_inputs
+            .get(&Frame::NULL)
+            .expect("blank reference present")
+            .bytes
+            .len();
+        for f in 0..=5 {
+            receiver.recv_inputs.insert(
+                Frame::new(f),
+                InputBytes {
+                    frame: Frame::new(f),
+                    bytes: vec![0u8; width],
+                },
+            );
+        }
+        receiver.event_queue.clear();
+        receiver.send_queue.clear();
+
+        receiver.on_input(&body);
+
+        // The fresh gossip was merged...
+        let merged = receiver.peer_connect_status(PlayerHandle::new(1));
+        assert!(
+            merged.disconnected,
+            "the nudge's disconnect gossip must be merged"
+        );
+        assert_eq!(merged.last_frame, Frame::new(4));
+        // ...no stale frame was staged as an Input event...
+        assert!(
+            !receiver
+                .event_queue
+                .iter()
+                .any(|event| matches!(event, Event::Input { .. })),
+            "a nudge must not stage any input"
+        );
+        // ...and the receiver replied with the normal duplicate-packet ack.
+        assert!(
+            receiver
+                .send_queue
+                .iter()
+                .any(|message| matches!(message.body, MessageBody::InputAck(_))),
+            "the receiver acks a nudge exactly like any duplicate Input packet"
+        );
+    }
+
+    /// (Retry-pacer gate, round-3 F-NEW-A) A decodable Input that stages ZERO
+    /// new frames (a connect-status nudge or a duplicate retransmission) must
+    /// NOT reset `running_last_input_recv` — the pacer for the
+    /// `running_retry_interval` pending-output resend in `poll`. A peer nudging
+    /// on the keepalive cadence (== the default retry interval) would
+    /// otherwise starve our pending Input forever, and that pending Input is
+    /// the only carrier of our post-mesh-agreement connect status (the
+    /// blackout pin regressed in `tests/sessions/peer_drop.rs`). An Input that
+    /// stages at least one fresh frame DOES reset it. Liveness is unaffected
+    /// either way: `last_recv_time` (the disconnect-timeout clock) is
+    /// refreshed by `handle_message` for every packet, not here.
+    #[test]
+    fn on_input_resets_retry_pacer_only_when_new_frames_staged() {
+        let (mut receiver, clock) = running_nudge_protocol();
+
+        // Contiguous receipts 0..=5, so frame 3 is a stale duplicate (its
+        // decode reference, frame 2, is present) and frame 6 is fresh.
+        let width = receiver
+            .recv_inputs
+            .get(&Frame::NULL)
+            .expect("blank reference present")
+            .bytes
+            .len();
+        for f in 0..=5 {
+            receiver.recv_inputs.insert(
+                Frame::new(f),
+                InputBytes {
+                    frame: Frame::new(f),
+                    bytes: vec![0u8; width],
+                },
+            );
+        }
+        let connect_status = vec![ConnectionStatus::default(); 2];
+
+        // Zero-new-frames Input (the nudge shape: a self-referencing
+        // duplicate of an already-received frame): pacer untouched.
+        advance_test_clock(&clock, Duration::from_millis(75));
+        let pacer_before = receiver.running_last_input_recv;
+        let dup_reference = vec![0u8; width];
+        let dup_body = Input {
+            peer_connect_status: connect_status.clone(),
+            disconnect_requested: false,
+            start_frame: Frame::new(3),
+            ack_frame: Frame::NULL,
+            bytes: try_encode(&dup_reference, std::iter::once(&dup_reference))
+                .expect("duplicate encode succeeds"),
+        };
+        receiver.on_input(&dup_body);
+        assert_eq!(
+            receiver.last_recv_frame(),
+            Frame::new(5),
+            "the duplicate must not have staged anything"
+        );
+        assert_eq!(
+            receiver.running_last_input_recv, pacer_before,
+            "a decodable zero-new-frames Input must NOT reset the pending-output retry pacer"
+        );
+
+        // Fresh-frames Input (frame 6 encoded against the frame-5 reference):
+        // pacer reset to the (advanced) current instant.
+        advance_test_clock(&clock, Duration::from_millis(75));
+        let fresh_reference = vec![0u8; width];
+        let fresh_bytes = vec![7u8; width];
+        let fresh_body = Input {
+            peer_connect_status: connect_status,
+            disconnect_requested: false,
+            start_frame: Frame::new(6),
+            ack_frame: Frame::NULL,
+            bytes: try_encode(&fresh_reference, std::iter::once(&fresh_bytes))
+                .expect("fresh encode succeeds"),
+        };
+        receiver.on_input(&fresh_body);
+        assert_eq!(
+            receiver.last_recv_frame(),
+            Frame::new(6),
+            "the fresh frame must have been staged"
+        );
+        assert_eq!(
+            receiver.running_last_input_recv,
+            *clock.lock().unwrap(),
+            "an Input staging at least one new frame must reset the retry pacer to now"
+        );
+        assert!(
+            receiver.running_last_input_recv > pacer_before,
+            "the reset must observe the advanced clock"
         );
     }
 

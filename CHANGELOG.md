@@ -67,6 +67,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   corrective rollback instead of silently skipping the comparison. (The prediction-entry semantics are
   observable through the `__internal::InputQueue` testing/fuzzing surface, which is documented as not
   part of the stable public API, so this is a fix rather than a breaking change.)
+- **Pre-existing:** Closed (at 3 players) and strictly narrowed (at 4 or more) the graceful peer drop
+  *staggered detection* residual documented (as "not yet closed") in 0.8.1's `DisconnectBehavior` entry.
+  Under `DisconnectBehavior::ContinueWithout` in sessions of 3 or more players, a survivor that had received
+  more of a dropping peer's inputs than another (asymmetric packet loss) could confirm frames past the
+  eventual mesh-agreed freeze frame `F` before the lowering knowledge arrived, in two orderings: after
+  locally detecting the drop first (the dropped slot left the confirmed-frame minimum immediately), or with
+  **no disconnect knowledge anywhere** (the slot's locally-received frame simply ran ahead of the lagging
+  survivor's). The damage came in two mechanisms: the race let the simulation run so far that the `F + 1`
+  rollback target fell below the prediction-window floor, so the clamped re-simulation left every frame in
+  `(F, floor)` permanently embedding the dropped peer's unagreed high-frame inputs (the common case), and at
+  extreme stagger (128 or more frames) the input ring physically overwrote the input at `F` so the
+  convergence re-roll fail-safed into a stale value. Either way that survivor's confirmed history diverged
+  for every frame above `F` — completely silent with `DesyncDetection::Off`, a `DesyncDetected` event
+  otherwise. `P2PSession::confirmed_frame()` now implements the GGPO-faithful freeze barrier (upstream
+  `PollNPlayers` semantics): a still-connected remote slot contributes the minimum of the locally received
+  frame **and every running remote endpoint's gossiped view of that slot** (the same fold the
+  disconnect-convergence machinery uses); a **locally disconnected** slot whose drop is not yet mesh-agreed
+  contributes the gossiped views **only** (the local detection value is dropped from the fold, exactly as
+  GGPO skips `local_connect_status` when disconnected — required for liveness so a survivor capped against
+  its own detection value is not pinned by it); and a disconnected slot is excluded from the minimum only
+  once its drop is **mesh-agreed** (no running endpoint still reports it connected); hot-join reserved
+  endpoints with their freshly reset status caches are skipped so an unfilled or abandoned join cannot pin
+  the bound. Because connect-status gossip rides only input messages, survivors that detect a drop while
+  capped at their prediction window with fully-acked send queues used to be gossip-mute — mesh agreement
+  could then never be reached (a permanent, silent stall in the common clean-drop case, and mutual deadlock
+  between the non-minimum survivors at 4 or more players). Input-idle endpoints (no input packet sent for a
+  keepalive interval, empty send queue) therefore now emit a periodic **connect-status nudge** while a drop
+  awaits mesh agreement: a status-bearing duplicate input packet (re-sent from the already-acked delta
+  reference on the keepalive cadence, an existing wire shape that receivers already handle as a stale
+  retransmission), so the disconnect gossip always has a carrier and the liveness hold is bounded by the
+  disconnect timeout plus the nudge cadence and delivery; while real input traffic flows the nudge stays
+  completely silent, so an actively-advancing session's packet stream is unchanged. To keep the
+  post-agreement leg of that bound honest, a received input packet now refreshes the pending-input
+  retransmission timer only when it stages at least one new frame: progress-free duplicates (nudges
+  included) no longer suppress a survivor's resend of its still-unacked inputs — the only remaining carrier
+  of its connect-status view once its own nudging stops — while disconnect-timeout tracking still counts
+  every packet (under duplicate-heavy loss this means at most one extra resend per retry interval). Observable pacing
+  change at 3 or more players: `confirmed_frame()` now reports the mesh-gossip minimum at all times, never
+  just the local receipt — even a healthy steady state permanently paces roughly one gossip delivery behind
+  the local receipt (GGPO `PollNPlayers` parity), and asymmetric loss widens that gap until gossip catches
+  up or the mesh agrees a slot is down — exactly the moments the old, higher value was unsafe to act on —
+  and the reported value is no longer guaranteed monotonic call-to-call; while held, `advance_frame` paces
+  via the normal
+  prediction-window throttle (`Ok` with no `AdvanceFrame` request), never an error, and the hold releases
+  via gossip delivery (nudged when idle), the propagated-disconnect path, or a dead endpoint timing out of
+  the fold. At 2 players the reported value is byte-identical to the previous behavior in normal operation
+  (the peer's self-claim always covers the inputs it sent, and a dropped peer's terminal endpoint leaves the
+  fold), with two named conservative transient windows documented in the source (peer-initiated disconnect
+  packets, and hot-join reactivation reporting `Frame::NULL` until the joiner's first input). Remaining
+  residuals (documented in the source, all requiring 4 or more players, none a regression): a third
+  survivor can still freeze the dropped slot from a stale cache of another survivor's old claim (the
+  "stale-echo" race), and an origin survivor dying mid-relay can leave a window where the bound exceeds the
+  later-relayed override (the double-failure corner); byzantine peers are out of scope. The existing
+  defense-in-depth — the prediction-window rollback clamp, the sparse earlier-checkpoint search, and the
+  disconnect-rollback checksum invalidation/deferral — is unchanged and now mostly dormant.
 
 ## [0.9.0] - 2026-06-04
 

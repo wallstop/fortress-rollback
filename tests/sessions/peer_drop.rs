@@ -1934,17 +1934,72 @@ fn build_filtered_three_player_sessions(
     ),
     FortressError,
 > {
+    build_filtered_three_player_sessions_with_timeouts([
+        disconnect_timeout,
+        disconnect_timeout,
+        disconnect_timeout,
+    ])
+}
+
+/// Like [`build_filtered_three_player_sessions`] but with a PER-SESSION
+/// disconnect timeout (`timeouts[i]` applies to session i+1). Asymmetric
+/// timeouts let a test force which survivor detects a silent peer first — the
+/// detection-order choreography the N0 freeze-barrier repros below depend on.
+#[allow(clippy::type_complexity)]
+fn build_filtered_three_player_sessions_with_timeouts(
+    timeouts: [Duration; 3],
+) -> Result<
+    (
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        BlockedLinks,
+        SocketAddr,
+        SocketAddr,
+        SocketAddr,
+        TestClock,
+    ),
+    FortressError,
+> {
+    // 8 = `SessionBuilder` default (`DEFAULT_MAX_PREDICTION_FRAMES`).
+    build_filtered_three_player_sessions_with_timeouts_and_prediction(timeouts, 8)
+}
+
+/// Like [`build_filtered_three_player_sessions_with_timeouts`] but ALSO with an
+/// explicit `max_prediction` window. The small-window (`max_prediction == 2`)
+/// N0 liveness repro below needs this: the freeze-barrier deadlock only
+/// manifests when both survivors can burn their entire prediction window
+/// before any disconnect detection happens.
+#[allow(clippy::type_complexity)]
+fn build_filtered_three_player_sessions_with_timeouts_and_prediction(
+    timeouts: [Duration; 3],
+    max_prediction: usize,
+) -> Result<
+    (
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        BlockedLinks,
+        SocketAddr,
+        SocketAddr,
+        SocketAddr,
+        TestClock,
+    ),
+    FortressError,
+> {
     let clock = TestClock::new();
     let (s1, s2, s3, a1, a2, a3, blocked) = create_filtered_channel_triple();
     let pc = protocol_config(&clock);
 
     let build = |local: PlayerHandle,
                  socket: FilterSocket,
+                 disconnect_timeout: Duration,
                  remotes: [(PlayerHandle, SocketAddr); 2]|
      -> Result<P2PSession<StubConfig>, FortressError> {
         let mut builder = SessionBuilder::<StubConfig>::new()
             .with_protocol_config(pc.clone())
             .with_num_players(3)?
+            .with_max_prediction_window(max_prediction)
             .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
             .with_disconnect_timeout(disconnect_timeout)
             .with_disconnect_notify_delay(Duration::from_millis(100))
@@ -1958,16 +2013,19 @@ fn build_filtered_three_player_sessions(
     let mut sess1 = build(
         PlayerHandle::new(0),
         s1,
+        timeouts[0],
         [(PlayerHandle::new(1), a2), (PlayerHandle::new(2), a3)],
     )?;
     let mut sess2 = build(
         PlayerHandle::new(1),
         s2,
+        timeouts[1],
         [(PlayerHandle::new(0), a1), (PlayerHandle::new(2), a3)],
     )?;
     let mut sess3 = build(
         PlayerHandle::new(2),
         s3,
+        timeouts[2],
         [(PlayerHandle::new(0), a1), (PlayerHandle::new(1), a2)],
     )?;
 
@@ -2280,17 +2338,50 @@ fn build_filtered_four_player_sessions(
     ),
     FortressError,
 > {
+    // 8 = `SessionBuilder` default (`DEFAULT_MAX_PREDICTION_FRAMES`).
+    build_filtered_four_player_sessions_with_timeouts_and_prediction([disconnect_timeout; 4], 8)
+}
+
+/// Like [`build_filtered_four_player_sessions`] but with a PER-SESSION
+/// disconnect timeout (`timeouts[i]` applies to session i+1) and an explicit
+/// `max_prediction` window — the 4-player analog of
+/// [`build_filtered_three_player_sessions_with_timeouts_and_prediction`]. The
+/// N=4 mutual-mute liveness repro below needs both: a small window so every
+/// survivor can burn its entire prediction window before any disconnect
+/// detection happens, and a long timeout on the dying peer so its session never
+/// interferes.
+#[allow(clippy::type_complexity)]
+fn build_filtered_four_player_sessions_with_timeouts_and_prediction(
+    timeouts: [Duration; 4],
+    max_prediction: usize,
+) -> Result<
+    (
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        BlockedLinks,
+        SocketAddr,
+        SocketAddr,
+        SocketAddr,
+        SocketAddr,
+        TestClock,
+    ),
+    FortressError,
+> {
     let clock = TestClock::new();
     let (s1, s2, s3, s4, a1, a2, a3, a4, blocked) = create_filtered_channel_quad();
     let pc = protocol_config(&clock);
 
     let build = |local: PlayerHandle,
                  socket: FilterSocket,
+                 disconnect_timeout: Duration,
                  remotes: [(PlayerHandle, SocketAddr); 3]|
      -> Result<P2PSession<StubConfig>, FortressError> {
         let mut builder = SessionBuilder::<StubConfig>::new()
             .with_protocol_config(pc.clone())
             .with_num_players(4)?
+            .with_max_prediction_window(max_prediction)
             .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
             .with_disconnect_timeout(disconnect_timeout)
             .with_disconnect_notify_delay(Duration::from_millis(100))
@@ -2304,6 +2395,7 @@ fn build_filtered_four_player_sessions(
     let mut sess1 = build(
         PlayerHandle::new(0),
         s1,
+        timeouts[0],
         [
             (PlayerHandle::new(1), a2),
             (PlayerHandle::new(2), a3),
@@ -2313,6 +2405,7 @@ fn build_filtered_four_player_sessions(
     let mut sess2 = build(
         PlayerHandle::new(1),
         s2,
+        timeouts[1],
         [
             (PlayerHandle::new(0), a1),
             (PlayerHandle::new(2), a3),
@@ -2322,6 +2415,7 @@ fn build_filtered_four_player_sessions(
     let mut sess3 = build(
         PlayerHandle::new(2),
         s3,
+        timeouts[2],
         [
             (PlayerHandle::new(0), a1),
             (PlayerHandle::new(1), a2),
@@ -2331,6 +2425,7 @@ fn build_filtered_four_player_sessions(
     let mut sess4 = build(
         PlayerHandle::new(3),
         s4,
+        timeouts[3],
         [
             (PlayerHandle::new(0), a1),
             (PlayerHandle::new(1), a2),
@@ -4239,6 +4334,1807 @@ fn staggered_two_drops_opposite_order_survivors_converge_no_desync() -> Result<(
         "C4: confirmed state hash diverged across survivors after staggered \
          opposite-order multi-drop (bound={confirmed_bound}, compared={compared}): \
          {divergences:?}"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Regression (N0 freeze barrier): `confirmed_frame()` must bound each remote
+// slot by the GOSSIPED mesh minimum, not by local receipt alone.
+// ============================================================================
+//
+// N>=3 mesh, `ContinueWithout`. Peer C goes silent under asymmetric loss:
+// survivor A received C's inputs through a HIGH frame, survivor B through a LOW
+// frame `F` (the eventual mesh-agreed freeze frame is the global min = F).
+// Before the barrier, `confirmed_frame()` folded only the LOCAL view of each
+// slot (and excluded any locally-disconnected slot outright), so A's confirmed
+// frame could race past `F` before the mesh agreed on `F`:
+//   (a) WINDOW FLOOR — the mechanism these red repros actually hit: the race
+//       lets `current_frame` run so far that the `F+1` rollback target falls
+//       below the prediction-window floor; the S20 clamp then re-simulates
+//       only from the floor, leaving every frame in `(F, floor)` permanently
+//       embedding C's real high-frame inputs (the constant post-floor offset
+//       in the red output shows the frozen-value re-roll itself SUCCEEDED —
+//       only the resimulation was clamped short);
+//   (b) RING EVICTION — at extreme stagger only (>= the 128-frame input-ring
+//       capacity): C's input at `F` is physically overwritten by ring
+//       wrap-around, and only then does the convergence re-roll
+//       `set_frozen_value_at(F)` / first-freeze `freeze_at(F)` fail-safe into
+//       a STALE (or default) frozen value. The logical discard alone
+//       (`set_last_confirmed_frame` through confirmed-1) does NOT defeat the
+//       re-roll: `discard_confirmed_frames` only moves the ring's
+//       tail/length and `confirmed_input` indexes modulo capacity without a
+//       tail check, so "discarded" bytes stay readable until overwritten.
+// Either mechanism permanently diverges A's confirmed history for frames
+// `(F, ...]` from B's (B repeats C's input at `F`) — a silent desync.
+//
+// The fix (GGPO PollNPlayers-faithful): a still-connected remote slot
+// contributes `min(local receipt, min over running endpoints' gossiped view
+// of the slot)`; a LOCALLY-DISCONNECTED slot whose drop is not yet mesh-agreed
+// contributes the gossiped views ONLY (the local detection value is dropped,
+// exactly as GGPO skips `local_connect_status[i]` when disconnected — folding
+// it pins capped survivors against their own detection value, see the
+// small-window liveness test below);
+// and a slot is excluded only once the disconnect is MESH-AGREED (no running
+// endpoint still reports it connected). At N=3 the bound can never exceed any
+// freeze frame the mesh can later impose on this peer (every mining-down
+// arrives as an endpoint-terms override, the bound folds those same terms,
+// and the packet that delivers a third party's flip refreshes that party's
+// term before any fold runs), so the confirmed frame can never race past `F`:
+// nothing at/above `F` is lost and the throttle keeps the `F+1` rollback
+// target inside the window. At N>=4 the bound strictly NARROWS the race but
+// two corners remain open (the stale-echo freeze and the double-failure
+// relay) — documented as residuals in `remote_slot_confirmed_bound`.
+//
+// Three orderings ("flavors") are pinned below. All FAIL before the barrier
+// (byte divergence at frames > F) and PASS after:
+//   - flavor 1 via `remove_player`:   A (high receiver) detects/froze FIRST;
+//   - flavor X:                       B (low receiver) times out FIRST while A
+//                                     raced with NO disconnect knowledge at all;
+//   - flavor 1 via auto-timeout:      like the first, but A's own (short)
+//                                     disconnect timeout is the detector.
+// A fourth test pins the LIVENESS leg of the barrier at MAX_PREDICTION = 2
+// (the gossip-only amendment): both survivors burn their whole window before
+// detection and must still release each other afterwards. Two further
+// liveness repros (the clean equal-receipt drop and the N=4 staggered
+// mutual-mute) pin the protocol-level connect-status NUDGE that closes the
+// post-detection gossip-mute pins.
+//
+// Choreography note (important for future edits): once the barrier holds a
+// survivor's confirmed frame at `F`, that survivor stops advancing at
+// `F + max_prediction` and — because connect-status gossip travels ONLY in
+// Input messages — a survivor pinned at its prediction cap cannot gossip its
+// own view through ORDINARY traffic. (The connect-status nudge re-sends a
+// status-bearing duplicate Input on the keepalive cadence, but only while a
+// locally-disconnected slot awaits mesh agreement, and the tight phases below
+// advance the clock ~1ms per round — far below that cadence — so the mute
+// reasoning holds within each phase.) The phases below therefore keep at
+// least one survivor under its cap whenever a piece of disconnect knowledge
+// still needs to travel.
+
+/// Flavor 1 (detect-first, explicit removal): A removes C at its own HIGH
+/// received-through frame while B's gossip still says "connected @ F"; A's
+/// confirmed frame races (pre-fix) far past `F` before B's lowered knowledge
+/// lands, pushing the prediction-window floor above the `F + 1` rollback
+/// target (the window-floor mechanism, see the block comment above).
+#[test]
+fn p2p_n0_detect_first_remove_player_under_asymmetric_loss_converges() -> Result<(), FortressError>
+{
+    // Long symmetric timeouts: every disconnect in this test is driven by the
+    // explicit `remove_player` + gossip propagation, never by a timeout.
+    let (mut sess1, mut sess2, mut sess3, blocked, a1, a2, a3, clock) =
+        build_filtered_three_player_sessions_with_timeouts([
+            Duration::from_secs(3),
+            Duration::from_secs(3),
+            Duration::from_secs(3),
+        ])?;
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let mut stub3 = GameStub::new();
+
+    let mut states1: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states2: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut sink: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    // --- Phase 1: warmup, all links open, all three confirm together. C's
+    // input stream (i + 3000) is DISTINCT per frame, so a frozen C value is
+    // frame-sensitive and divergent freeze frames surface as divergent bytes. ---
+    let warmup_frames = 4_u32;
+    for i in 0..warmup_frames {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1000,
+            &mut states2,
+        )?;
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 3000,
+            &mut sink,
+        )?;
+    }
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 6);
+
+    // --- Phase 2: asymmetric loss. Block ONLY C -> B; C keeps advancing with
+    // distinct inputs and keeps delivering to A, so A's received-through frame
+    // for C climbs several frames past B's (B is stuck at the eventual global
+    // min `F`). Pre-fix, A's confirmed frame keeps racing with its local
+    // receipts here, dragging its prediction-window floor toward `F`. ---
+    blocked.block(a3, a2);
+    for i in 0..4_u32 {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i + 20,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1020,
+            &mut states2,
+        )?;
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 3020,
+            &mut sink,
+        )?;
+    }
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 6);
+    let conf_a_after_loss = sess1.confirmed_frame();
+    let conf_b_after_loss = sess2.confirmed_frame();
+
+    // --- Phase 3a: C goes fully silent and A removes it IMMEDIATELY at A's own
+    // high received-through frame, while B's gossip still claims C connected at
+    // the low `F`. Race A forward (B polls but does NOT advance, so B's own
+    // lowered knowledge cannot travel yet — gossip rides only Input messages)
+    // with near-zero clock steps so no timeout interferes. Pre-fix A's
+    // confirmed frame jumps to min(A, B) the moment C's slot is excluded and
+    // the prediction window runs far past `F`. ---
+    blocked.block(a3, a1);
+    sess1.remove_player(PlayerHandle::new(2)).unwrap();
+    let events1: Vec<_> = drain_events(&mut sess1);
+    assert!(
+        events1
+            .iter()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. })),
+        "A must emit PeerDropped on explicit remove_player; got {events1:?}"
+    );
+    for _ in 0..24 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(Duration::from_millis(1));
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            500,
+            &mut states1,
+        )?;
+    }
+
+    // --- Phase 3b: release B. Its first advances apply the propagated drop
+    // (PeerDropped via gossip, frozen at its OWN low receipt = the global min
+    // `F`) and carry its disconnected@F view back to A, which re-adjusts its
+    // freeze frame down to `F`. Post-fix the barrier held A's confirmed frame
+    // at `F`, so the `F + 1` rollback target is inside the window and the
+    // re-simulation corrects everything above `F`; pre-fix the target is below
+    // the window floor and the S20 clamp leaves the frames in `(F, floor)`
+    // permanently embedding C's real high-frame inputs. ---
+    let mut sess2_dropped = false;
+    for _ in 0..80 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            500,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            1500,
+            &mut states2,
+        )?;
+        if sess2
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess2_dropped = true;
+        }
+    }
+    assert!(
+        sess2_dropped,
+        "B must drop C (via A's propagated disconnect gossip) for this repro"
+    );
+    assert!(
+        sess1.confirmed_frame().as_i32() > warmup_frames as i32,
+        "sess1 confirmed_frame must advance past the drop; got {:?}",
+        sess1.confirmed_frame()
+    );
+    assert!(
+        sess2.confirmed_frame().as_i32() > warmup_frames as i32,
+        "sess2 confirmed_frame must advance past the drop; got {:?}",
+        sess2.confirmed_frame()
+    );
+
+    // --- Oracle: byte-equality of recorded confirmed state across survivors.
+    // Pre-fix this fails for every frame above the agreed freeze frame `F`. ---
+    let confirmed_bound = std::cmp::min(
+        sess1.confirmed_frame().as_i32(),
+        sess2.confirmed_frame().as_i32(),
+    );
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(i32, StateStub, StateStub)> = Vec::new();
+    for (&frame, &state1) in &states1 {
+        if frame > confirmed_bound {
+            continue;
+        }
+        if let Some(&state2) = states2.get(&frame) {
+            compared += 1;
+            if state1 != state2 {
+                divergences.push((frame, state1, state2));
+            }
+        }
+    }
+    assert!(
+        compared > 0,
+        "no confirmed frames were compared across both peers (bound={confirmed_bound}); \
+         the repro did not exercise the drop path"
+    );
+    assert!(
+        divergences.is_empty(),
+        "N0 flavor 1 (remove_player): confirmed state diverged across survivors \
+         (bound={confirmed_bound}, compared={compared}, conf_a_after_loss={conf_a_after_loss:?}, \
+         conf_b_after_loss={conf_b_after_loss:?}): {divergences:?}"
+    );
+
+    Ok(())
+}
+
+/// Flavor X (race-before-any-detection): the LOW receiver B times out C first
+/// at `F` while A still sees C connected at a high frame; A's confirmed frame
+/// legitimately ran past `F` on C's REAL inputs before ANY disconnect knowledge
+/// existed anywhere, so (pre-fix) the `F + 1` rollback target is already below
+/// A's prediction-window floor when B's disconnected@F gossip arrives — the
+/// S20 clamp re-simulates only from the floor, leaving the frames in
+/// `(F, floor)` permanently embedding C's real high-frame inputs.
+#[test]
+fn p2p_n0_race_before_any_detection_under_asymmetric_loss_converges() -> Result<(), FortressError> {
+    // Asymmetric timeouts force the detection ORDER: B (whose last C receipt is
+    // oldest) fires at 1000ms; A's timeout is far away, so A's drop can only
+    // arrive via B's gossip.
+    let (mut sess1, mut sess2, mut sess3, blocked, a1, a2, a3, clock) =
+        build_filtered_three_player_sessions_with_timeouts([
+            Duration::from_millis(3200),
+            Duration::from_secs(1),
+            Duration::from_millis(3200),
+        ])?;
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let mut stub3 = GameStub::new();
+
+    let mut states1: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states2: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut sink: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    // --- Phase 1: warmup with all links open (distinct C inputs). ---
+    let warmup_frames = 4_u32;
+    for i in 0..warmup_frames {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1000,
+            &mut states2,
+        )?;
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 3000,
+            &mut sink,
+        )?;
+    }
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 6);
+
+    // --- Phase 2: block ONLY C -> B and keep all three advancing with SINGLE
+    // polls per frame (small wall-clock footprint so B's 1000ms timeout does
+    // not fire yet). A keeps receiving C's distinct inputs, so A's confirmed
+    // frame (pre-fix: local receipts only) races past B's stuck receipt `F`
+    // with NO disconnect knowledge anywhere — the flavor-X precondition. ---
+    blocked.block(a3, a2);
+    for i in 0..6_u32 {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 1);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i + 20,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1020,
+            &mut states2,
+        )?;
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 3020,
+            &mut sink,
+        )?;
+    }
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 2);
+    let conf_a_after_loss = sess1.confirmed_frame();
+    let conf_b_after_loss = sess2.confirmed_frame();
+
+    // --- Phase 3a: C goes fully silent. First let A burn the rest of its
+    // prediction window on C's real inputs with near-zero clock steps (no
+    // timeout fires; B does not advance, preserving B's own window headroom for
+    // the gossip it must send after ITS drop). ---
+    blocked.block(a3, a1);
+    for _ in 0..16 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(Duration::from_millis(1));
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            500,
+            &mut states1,
+        )?;
+    }
+
+    // --- Phase 3b: advance the clock with polls only until B's disconnect
+    // timeout fires. B must detect FIRST (flavor X): assert B emits PeerDropped
+    // while A has emitted none. ---
+    let mut sess2_dropped = false;
+    let mut sess1_dropped_early = false;
+    for _ in 0..40 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        if sess1
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess1_dropped_early = true;
+        }
+        if sess2
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess2_dropped = true;
+            break;
+        }
+    }
+    assert!(
+        sess2_dropped,
+        "B (short disconnect timeout) must auto-drop the silent peer C first"
+    );
+    assert!(
+        !sess1_dropped_early,
+        "flavor X requires B to detect FIRST: A must hold no disconnect knowledge \
+         until B's gossip arrives"
+    );
+
+    // --- Phase 4: release both. B's first advances roll its history back to
+    // `F` (frozen at its own receipt, the global min) and gossip disconnected@F
+    // to A; A applies the propagated drop. Post-fix A first-freezes at `F` with
+    // confirmation held at `F` (barrier), so the `F + 1` rollback target is
+    // inside its window and the re-simulation replaces C's high-frame inputs
+    // above `F` with the frozen value; pre-fix the phase-2/3a race pushed the
+    // window floor past `F + 1`, so the S20 clamp re-simulates only from the
+    // floor and A keeps C's real inputs (wrong values) for frames > F. ---
+    let mut sess1_dropped = false;
+    for _ in 0..80 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            500,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            1500,
+            &mut states2,
+        )?;
+        if sess1
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess1_dropped = true;
+        }
+    }
+    assert!(
+        sess1_dropped,
+        "A must eventually drop C via B's propagated disconnect gossip"
+    );
+    assert!(
+        sess1.confirmed_frame().as_i32() > warmup_frames as i32,
+        "sess1 confirmed_frame must advance past the drop; got {:?}",
+        sess1.confirmed_frame()
+    );
+    assert!(
+        sess2.confirmed_frame().as_i32() > warmup_frames as i32,
+        "sess2 confirmed_frame must advance past the drop; got {:?}",
+        sess2.confirmed_frame()
+    );
+
+    // --- Oracle: byte-equality of recorded confirmed state across survivors. ---
+    let confirmed_bound = std::cmp::min(
+        sess1.confirmed_frame().as_i32(),
+        sess2.confirmed_frame().as_i32(),
+    );
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(i32, StateStub, StateStub)> = Vec::new();
+    for (&frame, &state1) in &states1 {
+        if frame > confirmed_bound {
+            continue;
+        }
+        if let Some(&state2) = states2.get(&frame) {
+            compared += 1;
+            if state1 != state2 {
+                divergences.push((frame, state1, state2));
+            }
+        }
+    }
+    assert!(
+        compared > 0,
+        "no confirmed frames were compared across both peers (bound={confirmed_bound}); \
+         the repro did not exercise the drop path"
+    );
+    assert!(
+        divergences.is_empty(),
+        "N0 flavor X (race before any detection): confirmed state diverged across survivors \
+         (bound={confirmed_bound}, compared={compared}, conf_a_after_loss={conf_a_after_loss:?}, \
+         conf_b_after_loss={conf_b_after_loss:?}): {divergences:?}"
+    );
+
+    Ok(())
+}
+
+/// Flavor 1 via auto-timeout: like the `remove_player` variant, but A's
+/// detection comes from its OWN (short) disconnect timeout while B's (long)
+/// timeout never fires — B learns of the drop only via A's gossip, then its
+/// lowered disconnected@F view flows back and must correct A.
+#[test]
+fn p2p_n0_detect_first_auto_timeout_under_asymmetric_loss_converges() -> Result<(), FortressError> {
+    // A detects first: short timeout on A, long on B and C.
+    let (mut sess1, mut sess2, mut sess3, blocked, a1, a2, a3, clock) =
+        build_filtered_three_player_sessions_with_timeouts([
+            Duration::from_millis(400),
+            Duration::from_secs(3),
+            Duration::from_secs(3),
+        ])?;
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let mut stub3 = GameStub::new();
+
+    let mut states1: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states2: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut sink: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    // --- Phase 1: warmup with all links open (distinct C inputs). ---
+    let warmup_frames = 4_u32;
+    for i in 0..warmup_frames {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1000,
+            &mut states2,
+        )?;
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 3000,
+            &mut sink,
+        )?;
+    }
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 6);
+
+    // --- Phase 2: asymmetric loss, C -> B blocked; A's received-through frame
+    // for C climbs past B's stuck `F` (and pre-fix A's confirmed frame races
+    // with it, dragging the window floor toward `F`). C keeps delivering to A
+    // throughout, so A's 400ms timeout cannot fire during this phase. ---
+    blocked.block(a3, a2);
+    for i in 0..4_u32 {
+        poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i + 20,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1020,
+            &mut states2,
+        )?;
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 3020,
+            &mut sink,
+        )?;
+    }
+    poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 4);
+    let conf_a_after_loss = sess1.confirmed_frame();
+    let conf_b_after_loss = sess2.confirmed_frame();
+
+    // --- Phase 3a (detection): C fully silent; poll-only with full clock steps
+    // until A's OWN 400ms timeout drops C at A's high received-through frame.
+    // No advancing here: A must still have prediction-window headroom AFTER its
+    // drop so its disconnected gossip (carried only by Input messages) can
+    // reach B. B's 3000ms timeout stays far away — A detects FIRST. ---
+    blocked.block(a3, a1);
+    let mut sess1_dropped = false;
+    for _ in 0..30 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        if sess1
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess1_dropped = true;
+            break;
+        }
+    }
+    assert!(
+        sess1_dropped,
+        "A (short disconnect timeout) must auto-drop the silent peer C first"
+    );
+
+    // --- Phase 3a (race): with C's slot now locally dropped on A, race A
+    // forward with near-zero clock steps (B polls but does not advance). Pre-fix
+    // the exclusion of the dropped slot lets A's confirmed frame jump to
+    // min(A, B) and the window run far past `F`. A's sends carry its
+    // disconnected@high view to B. ---
+    for _ in 0..24 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(Duration::from_millis(1));
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            500,
+            &mut states1,
+        )?;
+    }
+
+    // --- Phase 3b: release B — it applies the propagated drop at its own low
+    // receipt `F`, then gossips disconnected@F back; A re-adjusts down to `F`. ---
+    let mut sess2_dropped = false;
+    for _ in 0..80 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            500,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            1500,
+            &mut states2,
+        )?;
+        if sess2
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess2_dropped = true;
+        }
+    }
+    assert!(
+        sess2_dropped,
+        "B must drop C (via A's propagated disconnect gossip) for this repro"
+    );
+    assert!(
+        sess1.confirmed_frame().as_i32() > warmup_frames as i32,
+        "sess1 confirmed_frame must advance past the drop; got {:?}",
+        sess1.confirmed_frame()
+    );
+    assert!(
+        sess2.confirmed_frame().as_i32() > warmup_frames as i32,
+        "sess2 confirmed_frame must advance past the drop; got {:?}",
+        sess2.confirmed_frame()
+    );
+
+    // --- Oracle: byte-equality of recorded confirmed state across survivors. ---
+    let confirmed_bound = std::cmp::min(
+        sess1.confirmed_frame().as_i32(),
+        sess2.confirmed_frame().as_i32(),
+    );
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(i32, StateStub, StateStub)> = Vec::new();
+    for (&frame, &state1) in &states1 {
+        if frame > confirmed_bound {
+            continue;
+        }
+        if let Some(&state2) = states2.get(&frame) {
+            compared += 1;
+            if state1 != state2 {
+                divergences.push((frame, state1, state2));
+            }
+        }
+    }
+    assert!(
+        compared > 0,
+        "no confirmed frames were compared across both peers (bound={confirmed_bound}); \
+         the repro did not exercise the drop path"
+    );
+    assert!(
+        divergences.is_empty(),
+        "N0 flavor 1 (auto-timeout): confirmed state diverged across survivors \
+         (bound={confirmed_bound}, compared={compared}, conf_a_after_loss={conf_a_after_loss:?}, \
+         conf_b_after_loss={conf_b_after_loss:?}): {divergences:?}"
+    );
+
+    Ok(())
+}
+
+/// Liveness regression (the freeze-barrier *amendment*): for a slot that is
+/// LOCALLY disconnected but not yet mesh-agreed, the confirmed bound must fold
+/// the running endpoints' gossiped views ONLY (GGPO `PollNPlayers` parity) —
+/// folding the local detection value too pins both survivors at a small
+/// prediction window until something else carries the gossip.
+///
+/// Mechanism (`MAX_PREDICTION = 2`): connect-status gossip travels ONLY in
+/// Input messages, a capped session re-adds the same frame (dropped, so no
+/// send), and a fully-acked send queue retransmits nothing — so a survivor
+/// pinned at `conf + max_prediction` with everything acked is gossip-mute.
+/// Under asymmetric loss both survivors pin at `F = B's receipt of C` (the
+/// barrier folds B's lagging gossip on both sides) and burn their whole
+/// window to `F + 2` BEFORE either detects the silent C. When their disconnect
+/// timeouts then fire, a `min(local, gossip)` bound keeps BOTH bounds at `F`
+/// (B's own receipt locally / B's stale gossip on A), so both stay capped and
+/// neither can send its `disconnected@F` gossip through ordinary traffic —
+/// on the pre-nudge tree that was a permanent pin (alive, zero progress),
+/// which is what this test went red on; today the connect-status nudge would
+/// eventually deliver the gossip, so the amendment's value is IMMEDIATE
+/// release: B's gossip-only bound rises to A's stale-HIGHER gossiped view, B
+/// regains headroom, its ordinary Input packets carry `disconnected@F` to A,
+/// and the release cascades (propagated drop -> mesh agreement -> both free)
+/// without waiting on any timer. (The arm choice itself is pinned by the
+/// `remote_slot_confirmed_bound_locally_disconnected_folds_gossip_only` unit
+/// test; this test pins end-to-end liveness.)
+///
+/// Choreography note: phase 2 must let A *send at least one Input after
+/// receiving a C frame past `F`* (its last pre-cap send carries that higher
+/// receipt as gossip) — that stale-higher cached view on B is what the
+/// amendment folds to lift B's bound. If A's last gossiped receipt of C were
+/// exactly `F` (zero stagger), the amended bound stays at `F` and release
+/// falls to the connect-status nudge — that exactly-symmetric corner is
+/// covered by `p2p_n0_clean_equal_receipt_timeout_drop_stays_live_and_converges`.
+///
+/// FAILED on the pre-amendment tree (zero frame progress after the drop) and
+/// PASSES after.
+#[test]
+fn p2p_n0_small_prediction_window_staggered_drop_stays_live_and_converges(
+) -> Result<(), FortressError> {
+    const MAX_PREDICTION: usize = 2;
+    // Short symmetric timeouts on the survivors: both detect the silent C via
+    // their OWN auto-timeout while capped (B first — its last C receipt is
+    // oldest — then A). C's timeout is irrelevant (it goes silent and is never
+    // polled again).
+    let (mut sess1, mut sess2, mut sess3, blocked, a1, a2, a3, clock) =
+        build_filtered_three_player_sessions_with_timeouts_and_prediction(
+            [
+                Duration::from_millis(400),
+                Duration::from_millis(400),
+                Duration::from_secs(3),
+            ],
+            MAX_PREDICTION,
+        )?;
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let mut stub3 = GameStub::new();
+
+    let mut states1: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states2: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut sink: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    // --- Phase 1: warmup "ladder", all links open. Each session polls
+    // IMMEDIATELY before its own step, in A -> B -> C order, so every packet a
+    // session sends carries its maximally fresh receipts as gossip (an
+    // earlier-stepping peer's same-frame input is already merged when a
+    // later-stepping peer sends). This freshness is the zero-slack
+    // prerequisite: once C -> B is blocked, C's cached gossip on B freezes at
+    // C's LAST delivered packet, and if that packet's view of slot A lagged
+    // below the eventual `F`, B's pre-detection confirmed frame would pin
+    // BELOW `F` — then detecting C (which removes C's endpoint, and its stale
+    // views, from every slot's fold) would hand B a frame of headroom that
+    // leaks its disconnect gossip and self-releases the pre-amendment pin.
+    // With the ladder, C's frozen view of A equals its last delivered input
+    // frame (= `F`) exactly. C's inputs are DISTINCT per frame so divergent
+    // freeze frames surface as divergent bytes in the oracle. Near-zero clock
+    // steps keep all timeouts far away. ---
+    let warmup_rounds = 6_u32;
+    for i in 0..warmup_rounds {
+        sess1.poll_remote_clients();
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i,
+            &mut states1,
+        )?;
+        sess2.poll_remote_clients();
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1000,
+            &mut states2,
+        )?;
+        sess3.poll_remote_clients();
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 3000,
+            &mut sink,
+        )?;
+        clock.advance(Duration::from_millis(1));
+    }
+
+    // --- Phase 2: block ONLY C -> B, then keep the ladder running so all
+    // three race to their prediction caps (no timeout may fire here; C keeps
+    // delivering to A so A's receipt — and crucially A's last GOSSIPED receipt
+    // — of C climbs past B's stuck `F`). The barrier pins both survivors'
+    // confirmed frames at `F` (the lagging `F`-valued gossip bounds the
+    // connected slot on both sides), so at MAX_PREDICTION = 2 both burn their
+    // entire window and go gossip-mute with fully-acked send queues — the
+    // deadlock precondition. ---
+    blocked.block(a3, a2);
+    for i in 0..10_u32 {
+        sess1.poll_remote_clients();
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i + 20,
+            &mut states1,
+        )?;
+        sess2.poll_remote_clients();
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1020,
+            &mut states2,
+        )?;
+        sess3.poll_remote_clients();
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 3020,
+            &mut sink,
+        )?;
+        clock.advance(Duration::from_millis(1));
+    }
+    let pinned_conf_a = sess1.confirmed_frame();
+    let pinned_conf_b = sess2.confirmed_frame();
+    // Choreography precondition: both survivors are pinned at the same `F`
+    // with their entire prediction window burned. If this fails the repro
+    // setup is broken (not the code under test).
+    assert_eq!(
+        pinned_conf_a, pinned_conf_b,
+        "choreography: both survivors must pin at the same mesh-min F"
+    );
+    assert_eq!(
+        sess1.current_frame().as_i32(),
+        pinned_conf_a.as_i32() + MAX_PREDICTION as i32,
+        "choreography: A must have burned its whole prediction window pre-detection"
+    );
+    assert_eq!(
+        sess2.current_frame().as_i32(),
+        pinned_conf_b.as_i32() + MAX_PREDICTION as i32,
+        "choreography: B must have burned its whole prediction window pre-detection"
+    );
+
+    // --- Phase 3: C goes fully silent. Poll-only with full clock steps until
+    // BOTH survivors' own 400ms timeouts drop C (B's fires first — its last C
+    // receipt predates the full block). Neither survivor has any window
+    // headroom left, so neither can carry its `disconnected@F` knowledge in an
+    // Input message: pre-amendment this is the permanent pin. ---
+    blocked.block(a3, a1);
+    let mut sess1_dropped = false;
+    let mut sess2_dropped = false;
+    for _ in 0..40 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        if sess1
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess1_dropped = true;
+        }
+        if sess2
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess2_dropped = true;
+        }
+        if sess1_dropped && sess2_dropped {
+            break;
+        }
+    }
+    assert!(
+        sess1_dropped && sess2_dropped,
+        "choreography: both survivors must auto-drop the silent C \
+         (A dropped: {sess1_dropped}, B dropped: {sess2_dropped})"
+    );
+    let stall_cur_a = sess1.current_frame();
+    let stall_cur_b = sess2.current_frame();
+
+    // --- Phase 4 (the liveness assertion target): BOUNDED release loop with
+    // full clock steps, driving both survivors. Pre-amendment nothing moves:
+    // both bounds stay `min(local, gossip) = F`, both stay capped, no Input
+    // (hence no gossip) ever flows — only KeepAlives. Post-amendment B's
+    // gossip-only bound rises to A's stale-higher view, B advances and its
+    // Input packets deliver `disconnected@F`; the propagated drop converges A
+    // down to `F`, mesh agreement excludes the slot on both, and both run free. ---
+    for _ in 0..100 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            500,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            1500,
+            &mut states2,
+        )?;
+    }
+
+    // (i) Liveness: both survivors made frame progress after the drop.
+    assert!(
+        sess1.current_frame() > stall_cur_a && sess2.current_frame() > stall_cur_b,
+        "N0 liveness: both survivors must make frame progress after the staggered drop; \
+         pinned at conf_a={:?}/cur_a={:?}, conf_b={:?}/cur_b={:?} \
+         (pinned_conf={pinned_conf_a:?}, stall_cur_a={stall_cur_a:?}, stall_cur_b={stall_cur_b:?})",
+        sess1.confirmed_frame(),
+        sess1.current_frame(),
+        sess2.confirmed_frame(),
+        sess2.current_frame(),
+    );
+
+    // (ii) Mesh agreement: each survivor's confirmed frame advances past the
+    // entire pre-detection stall window (`F + MAX_PREDICTION`), which is only
+    // possible once the dropped slot is mesh-agreed-excluded on both sides.
+    assert!(
+        sess1.confirmed_frame().as_i32() > pinned_conf_a.as_i32() + MAX_PREDICTION as i32,
+        "sess1 confirmed_frame must advance past the stalled window after mesh agreement; \
+         got {:?} (pinned at {pinned_conf_a:?})",
+        sess1.confirmed_frame()
+    );
+    assert!(
+        sess2.confirmed_frame().as_i32() > pinned_conf_b.as_i32() + MAX_PREDICTION as i32,
+        "sess2 confirmed_frame must advance past the stalled window after mesh agreement; \
+         got {:?} (pinned at {pinned_conf_b:?})",
+        sess2.confirmed_frame()
+    );
+
+    // (iii) Oracle: byte-equality of recorded confirmed state across survivors. ---
+    let confirmed_bound = std::cmp::min(
+        sess1.confirmed_frame().as_i32(),
+        sess2.confirmed_frame().as_i32(),
+    );
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(i32, StateStub, StateStub)> = Vec::new();
+    for (&frame, &state1) in &states1 {
+        if frame > confirmed_bound {
+            continue;
+        }
+        if let Some(&state2) = states2.get(&frame) {
+            compared += 1;
+            if state1 != state2 {
+                divergences.push((frame, state1, state2));
+            }
+        }
+    }
+    assert!(
+        compared > 0,
+        "no confirmed frames were compared across both peers (bound={confirmed_bound}); \
+         the repro did not exercise the drop path"
+    );
+    assert!(
+        divergences.is_empty(),
+        "N0 small-window liveness: confirmed state diverged across survivors \
+         (bound={confirmed_bound}, compared={compared}): {divergences:?}"
+    );
+
+    Ok(())
+}
+
+/// Liveness regression (the connect-status *nudge*): the COMMON clean-drop
+/// case. A peer dies cleanly (zero stagger — both survivors hold EXACTLY equal
+/// receipts of it), both survivors burn their whole prediction window against
+/// the frozen receipt before their disconnect timeouts fire, and both
+/// auto-drop the silent peer while capped with fully-acked send queues.
+///
+/// Mechanism: connect-status gossip historically travelled ONLY in Input
+/// messages, and a capped survivor with a fully-acked send queue sends none —
+/// so after detection both survivors hold `disconnected@F` locally while each
+/// caches the OTHER's stale `connected@F` gossip. The gossip-only bound
+/// (`remote_slot_confirmed_bound`) is then `F` on both sides (the other's
+/// stale view), both stay capped, no Input ever carries the disconnect, mesh
+/// agreement is never reached, and the session pins forever — alive
+/// (KeepAlives flow) but making zero progress. Unlike the staggered variant
+/// above there is no stale-HIGHER view to lift either bound: this is the
+/// zero-stagger corner, and it is the COMMON case (any clean peer death with a
+/// quiet link, e.g. process kill or cable pull, lands here).
+///
+/// The fix is the protocol-level connect-status nudge: while a session holds a
+/// locally-disconnected slot that is not yet mesh-agreed, its idle endpoints
+/// re-send a status-bearing duplicate Input message (built from
+/// `last_acked_input`) on the keepalive cadence. The receiver treats it
+/// exactly like any stale retransmitted Input packet — the hoisted
+/// connect-status merge still runs — so each survivor's `disconnected@F`
+/// reaches the other, mesh agreement excludes the slot on both sides, and both
+/// run free.
+///
+/// FAILS before the nudge (permanent pin: zero frame progress after the drop)
+/// and PASSES after. Adapted from the adversarial-review probe
+/// `review_n0_clean_equal_receipt_drop_probe`.
+#[test]
+fn p2p_n0_clean_equal_receipt_timeout_drop_stays_live_and_converges() -> Result<(), FortressError> {
+    const MAX_PREDICTION: usize = 2;
+    // Short symmetric timeouts on the survivors; C's timeout is irrelevant (it
+    // goes silent and is never polled again).
+    let (mut sess1, mut sess2, mut sess3, blocked, a1, a2, a3, clock) =
+        build_filtered_three_player_sessions_with_timeouts_and_prediction(
+            [
+                Duration::from_millis(400),
+                Duration::from_millis(400),
+                Duration::from_secs(3),
+            ],
+            MAX_PREDICTION,
+        )?;
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let mut stub3 = GameStub::new();
+
+    let mut states1: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states2: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut sink: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    // --- Phase 1: warmup ladder, ALL LINKS OPEN the whole time (no asymmetry
+    // anywhere — the clean-network precondition). Distinct C inputs (i + 3000)
+    // make divergent freeze frames visible as divergent bytes. Near-zero clock
+    // steps keep all timeouts far away. ---
+    for i in 0..6_u32 {
+        sess1.poll_remote_clients();
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i,
+            &mut states1,
+        )?;
+        sess2.poll_remote_clients();
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1000,
+            &mut states2,
+        )?;
+        sess3.poll_remote_clients();
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 3000,
+            &mut sink,
+        )?;
+        clock.advance(Duration::from_millis(1));
+    }
+
+    // --- Phase 2: C dies CLEANLY — both survivor links are cut at the same
+    // instant, so both survivors hold exactly equal receipts of C (zero
+    // stagger). Both then pump realistically and burn their entire prediction
+    // window against the frozen receipt. ---
+    blocked.block(a3, a2);
+    blocked.block(a3, a1);
+    for i in 0..10_u32 {
+        sess1.poll_remote_clients();
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i + 20,
+            &mut states1,
+        )?;
+        sess2.poll_remote_clients();
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1020,
+            &mut states2,
+        )?;
+        clock.advance(Duration::from_millis(1));
+    }
+    let pinned_conf_a = sess1.confirmed_frame();
+    let pinned_conf_b = sess2.confirmed_frame();
+    // Choreography preconditions: equal receipts pin both survivors at the
+    // same `F` with the whole window burned. If these fail the repro setup is
+    // broken (not the code under test).
+    assert_eq!(
+        pinned_conf_a, pinned_conf_b,
+        "choreography: zero stagger must pin both survivors at the same F"
+    );
+    assert_eq!(
+        sess1.current_frame().as_i32(),
+        pinned_conf_a.as_i32() + MAX_PREDICTION as i32,
+        "choreography: A must have burned its whole prediction window pre-detection"
+    );
+    assert_eq!(
+        sess2.current_frame().as_i32(),
+        pinned_conf_b.as_i32() + MAX_PREDICTION as i32,
+        "choreography: B must have burned its whole prediction window pre-detection"
+    );
+
+    // --- Phase 3: poll-only with full clock steps until BOTH survivors' own
+    // 400ms timeouts drop the silent C. Both detect while capped and
+    // gossip-mute — the pin precondition. ---
+    let mut sess1_dropped = false;
+    let mut sess2_dropped = false;
+    for _ in 0..40 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        if sess1
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess1_dropped = true;
+        }
+        if sess2
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess2_dropped = true;
+        }
+        if sess1_dropped && sess2_dropped {
+            break;
+        }
+    }
+    assert!(
+        sess1_dropped && sess2_dropped,
+        "choreography: both survivors must auto-drop the silent C \
+         (A dropped: {sess1_dropped}, B dropped: {sess2_dropped})"
+    );
+    let stall_cur_a = sess1.current_frame();
+    let stall_cur_b = sess2.current_frame();
+
+    // --- Phase 4 (the liveness assertion target): BOUNDED release loop with
+    // full clock steps, driving both survivors. Pre-nudge nothing moves: both
+    // gossip-only bounds equal the other's stale `connected@F` cache, both
+    // stay capped, and no Input (hence no gossip) ever flows. Post-nudge each
+    // idle endpoint re-sends a status-bearing duplicate Input on the keepalive
+    // cadence; the `disconnected@F` gossip crosses, mesh agreement excludes
+    // the slot on both sides, and both run free. ---
+    for _ in 0..100 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            500,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            1500,
+            &mut states2,
+        )?;
+    }
+
+    // (i) Liveness: both survivors made frame progress after the drop.
+    assert!(
+        sess1.current_frame() > stall_cur_a && sess2.current_frame() > stall_cur_b,
+        "N0 clean-drop liveness: both survivors must make frame progress after the drop; \
+         pinned at conf_a={:?}/cur_a={:?}, conf_b={:?}/cur_b={:?} \
+         (pinned_conf={pinned_conf_a:?}, stall_cur_a={stall_cur_a:?}, stall_cur_b={stall_cur_b:?})",
+        sess1.confirmed_frame(),
+        sess1.current_frame(),
+        sess2.confirmed_frame(),
+        sess2.current_frame(),
+    );
+
+    // (ii) Mesh agreement: each survivor's confirmed frame advances past the
+    // entire pre-detection stall window (`F + MAX_PREDICTION`), which is only
+    // possible once the dropped slot is mesh-agreed-excluded on both sides.
+    assert!(
+        sess1.confirmed_frame().as_i32() > pinned_conf_a.as_i32() + MAX_PREDICTION as i32,
+        "sess1 confirmed_frame must advance past the stalled window after mesh agreement; \
+         got {:?} (pinned at {pinned_conf_a:?})",
+        sess1.confirmed_frame()
+    );
+    assert!(
+        sess2.confirmed_frame().as_i32() > pinned_conf_b.as_i32() + MAX_PREDICTION as i32,
+        "sess2 confirmed_frame must advance past the stalled window after mesh agreement; \
+         got {:?} (pinned at {pinned_conf_b:?})",
+        sess2.confirmed_frame()
+    );
+
+    // (iii) Oracle: byte-equality of recorded confirmed state across survivors.
+    let confirmed_bound = std::cmp::min(
+        sess1.confirmed_frame().as_i32(),
+        sess2.confirmed_frame().as_i32(),
+    );
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(i32, StateStub, StateStub)> = Vec::new();
+    for (&frame, &state1) in &states1 {
+        if frame > confirmed_bound {
+            continue;
+        }
+        if let Some(&state2) = states2.get(&frame) {
+            compared += 1;
+            if state1 != state2 {
+                divergences.push((frame, state1, state2));
+            }
+        }
+    }
+    assert!(
+        compared > 0,
+        "no confirmed frames were compared across both peers (bound={confirmed_bound}); \
+         the repro did not exercise the drop path"
+    );
+    assert!(
+        divergences.is_empty(),
+        "N0 clean-drop liveness: confirmed state diverged across survivors \
+         (bound={confirmed_bound}, compared={compared}): {divergences:?}"
+    );
+
+    Ok(())
+}
+
+/// Liveness regression (the connect-status *nudge*, N=4 staggered mutual-mute):
+/// with THREE survivors holding STAGGERED receipts of the dying peer D
+/// (A high, B middle, C low), all capped at detection, only the min-receipt
+/// survivor C regains headroom post-detection (its gossip-only bound folds the
+/// other two's stale-HIGHER cached views). C's released Inputs deliver its
+/// `disconnected@LOW` to A and B — but that is not mesh agreement for them:
+/// A still caches B's stale `connected` view of D and B still caches A's, both
+/// of which bound A and B at `LOW` (C's stale cache), so each waits forever for
+/// the OTHER mute peer's gossip. Pre-nudge this mutual-mute deadlock pins A and
+/// B permanently (C also re-pins once it burns the lifted window); post-nudge
+/// the idle endpoints' status-bearing duplicate Inputs cross, mesh agreement
+/// excludes the slot everywhere, and all three run free and converge D's
+/// freeze frame to the global-min `LOW`.
+///
+/// FAILS before the nudge (A and B make zero frame progress after the drop)
+/// and PASSES after.
+#[test]
+fn p2p_n0_quad_staggered_receipts_mutual_mute_drop_stays_live_and_converges(
+) -> Result<(), FortressError> {
+    const MAX_PREDICTION: usize = 2;
+    // Short symmetric timeouts on the three survivors (all detect the silent D
+    // via their OWN auto-timeout while capped); D's timeout is irrelevant (it
+    // goes silent and is never polled again).
+    let (mut sess1, mut sess2, mut sess3, mut sess4, blocked, a1, a2, a3, a4, clock) =
+        build_filtered_four_player_sessions_with_timeouts_and_prediction(
+            [
+                Duration::from_millis(400),
+                Duration::from_millis(400),
+                Duration::from_millis(400),
+                Duration::from_secs(3),
+            ],
+            MAX_PREDICTION,
+        )?;
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let mut stub3 = GameStub::new();
+    let mut stub4 = GameStub::new();
+
+    let mut states1: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states2: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states3: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut sink: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    // One ladder round: each session polls IMMEDIATELY before its own step, in
+    // A -> B -> C -> D order, so every packet a session sends carries its
+    // maximally fresh receipts as gossip (see the 3-player small-window test's
+    // ladder note). D's inputs are DISTINCT per frame (i + 7000) so divergent
+    // freeze frames surface as divergent bytes. Near-zero clock steps keep all
+    // timeouts far away.
+    macro_rules! ladder_round {
+        ($i:expr) => {{
+            sess1.poll_remote_clients();
+            try_advance_recording(
+                &mut sess1,
+                &mut stub1,
+                PlayerHandle::new(0),
+                $i,
+                &mut states1,
+            )?;
+            sess2.poll_remote_clients();
+            try_advance_recording(
+                &mut sess2,
+                &mut stub2,
+                PlayerHandle::new(1),
+                $i + 1000,
+                &mut states2,
+            )?;
+            sess3.poll_remote_clients();
+            try_advance_recording(
+                &mut sess3,
+                &mut stub3,
+                PlayerHandle::new(2),
+                $i + 3000,
+                &mut states3,
+            )?;
+            sess4.poll_remote_clients();
+            try_advance_recording(
+                &mut sess4,
+                &mut stub4,
+                PlayerHandle::new(3),
+                $i + 7000,
+                &mut sink,
+            )?;
+            clock.advance(Duration::from_millis(1));
+        }};
+    }
+
+    // --- Phase 1: warmup ladder, all links open. ---
+    for i in 0..6_u32 {
+        ladder_round!(i);
+    }
+
+    // --- Phase 2: staggered loss of D. Block D -> C first (C's receipt of D
+    // freezes LOWEST), two rounds later D -> B (middle), while D keeps
+    // delivering to A (highest). The lagging LOW gossip from C bounds every
+    // survivor's D slot, so all three pin at `LOW` and burn their entire
+    // window; their LAST pre-cap sends carry their staggered receipts of D as
+    // gossip — the stale cached views the post-detection bounds fold. ---
+    blocked.block(a4, a3);
+    for i in 0..2_u32 {
+        ladder_round!(i + 20);
+    }
+    blocked.block(a4, a2);
+    for i in 0..8_u32 {
+        ladder_round!(i + 40);
+    }
+    let pinned_conf_a = sess1.confirmed_frame();
+    let pinned_conf_b = sess2.confirmed_frame();
+    let pinned_conf_c = sess3.confirmed_frame();
+    // Choreography preconditions: every survivor has burned its whole
+    // prediction window pre-detection (capped, fully-acked queue =
+    // gossip-mute). The pinned confs need not be exactly equal — the N=4
+    // ladder's larger gossip lag legitimately pins the low receiver a frame
+    // lower — only the fully-burned windows matter for the mutual-mute setup.
+    // If these fail the repro setup is broken (not the code under test).
+    assert_eq!(
+        sess1.current_frame().as_i32(),
+        pinned_conf_a.as_i32() + MAX_PREDICTION as i32,
+        "choreography: A must have burned its whole prediction window pre-detection"
+    );
+    assert_eq!(
+        sess2.current_frame().as_i32(),
+        pinned_conf_b.as_i32() + MAX_PREDICTION as i32,
+        "choreography: B must have burned its whole prediction window pre-detection"
+    );
+    assert_eq!(
+        sess3.current_frame().as_i32(),
+        pinned_conf_c.as_i32() + MAX_PREDICTION as i32,
+        "choreography: C must have burned its whole prediction window pre-detection"
+    );
+
+    // --- Phase 3: D goes fully silent (last link cut, never polled again).
+    // Poll-only with full clock steps until ALL THREE survivors' own 400ms
+    // timeouts drop D — every detection happens while capped and gossip-mute. ---
+    blocked.block(a4, a1);
+    let mut sess1_dropped = false;
+    let mut sess2_dropped = false;
+    let mut sess3_dropped = false;
+    for _ in 0..40 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        sess3.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        if sess1
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess1_dropped = true;
+        }
+        if sess2
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess2_dropped = true;
+        }
+        if sess3
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess3_dropped = true;
+        }
+        if sess1_dropped && sess2_dropped && sess3_dropped {
+            break;
+        }
+    }
+    assert!(
+        sess1_dropped && sess2_dropped && sess3_dropped,
+        "choreography: all three survivors must auto-drop the silent D \
+         (A: {sess1_dropped}, B: {sess2_dropped}, C: {sess3_dropped})"
+    );
+    let stall_cur_a = sess1.current_frame();
+    let stall_cur_b = sess2.current_frame();
+    let stall_cur_c = sess3.current_frame();
+
+    // --- Phase 4 (the liveness assertion target): BOUNDED release loop with
+    // full clock steps, driving all three survivors. Pre-nudge only C moves
+    // (and only by the stagger), then the mutual-mute pin holds A and B at
+    // zero progress forever. Post-nudge the status-bearing duplicate Inputs
+    // deliver every survivor's `disconnected` view to every other; mesh
+    // agreement excludes D's slot everywhere and all three run free. ---
+    for _ in 0..100 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        sess3.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            500,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            1500,
+            &mut states2,
+        )?;
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            3500,
+            &mut states3,
+        )?;
+    }
+
+    // (i) Liveness: all three survivors made frame progress after the drop.
+    assert!(
+        sess1.current_frame() > stall_cur_a
+            && sess2.current_frame() > stall_cur_b
+            && sess3.current_frame() > stall_cur_c,
+        "N=4 mutual-mute liveness: all three survivors must make frame progress after the drop; \
+         conf_a={:?}/cur_a={:?}, conf_b={:?}/cur_b={:?}, conf_c={:?}/cur_c={:?} \
+         (pinned_conf={pinned_conf_a:?}, stalls: a={stall_cur_a:?}, b={stall_cur_b:?}, \
+          c={stall_cur_c:?})",
+        sess1.confirmed_frame(),
+        sess1.current_frame(),
+        sess2.confirmed_frame(),
+        sess2.current_frame(),
+        sess3.confirmed_frame(),
+        sess3.current_frame(),
+    );
+
+    // (ii) Mesh agreement: every survivor's confirmed frame advances past its
+    // entire pre-detection stall window, which is only possible once D's slot
+    // is mesh-agreed-excluded on all three.
+    for (name, conf, pinned) in [
+        ("sess1", sess1.confirmed_frame(), pinned_conf_a),
+        ("sess2", sess2.confirmed_frame(), pinned_conf_b),
+        ("sess3", sess3.confirmed_frame(), pinned_conf_c),
+    ] {
+        assert!(
+            conf.as_i32() > pinned.as_i32() + MAX_PREDICTION as i32,
+            "{name} confirmed_frame must advance past the stalled window after mesh agreement; \
+             got {conf:?} (pinned at {pinned:?})"
+        );
+    }
+
+    // (iii) Oracle: byte-equality of recorded confirmed state across all three
+    // survivor pairs.
+    let confirmed_bound = [
+        sess1.confirmed_frame().as_i32(),
+        sess2.confirmed_frame().as_i32(),
+        sess3.confirmed_frame().as_i32(),
+    ]
+    .into_iter()
+    .min()
+    .unwrap_or(i32::MIN);
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(&'static str, i32, StateStub, StateStub)> = Vec::new();
+    for (pair_name, lhs, rhs) in [
+        ("A-B", &states1, &states2),
+        ("A-C", &states1, &states3),
+        ("B-C", &states2, &states3),
+    ] {
+        for (&frame, &state_l) in lhs.iter() {
+            if frame > confirmed_bound {
+                continue;
+            }
+            if let Some(&state_r) = rhs.get(&frame) {
+                compared += 1;
+                if state_l != state_r {
+                    divergences.push((pair_name, frame, state_l, state_r));
+                }
+            }
+        }
+    }
+    assert!(
+        compared > 0,
+        "no confirmed frames were compared across survivors (bound={confirmed_bound}); \
+         the repro did not exercise the drop path"
+    );
+    assert!(
+        divergences.is_empty(),
+        "N=4 mutual-mute: confirmed state diverged across survivors \
+         (bound={confirmed_bound}, compared={compared}): {divergences:?}"
+    );
+
+    Ok(())
+}
+
+/// Liveness regression (round-3 F-NEW-A: the connect-status nudge must not
+/// starve the receiver's pending-output retransmission timer): the clean
+/// equal-receipt drop above, plus a single ~600ms `B -> A` blackout spanning
+/// the nudge-arming window.
+///
+/// Choreography: C dies cleanly (zero stagger), both survivors burn their
+/// whole `max_prediction = 1` window and auto-drop C while capped and
+/// gossip-mute (nudges arm). The `B -> A` blackout begins immediately after
+/// both detections, so the very first nudge volley is one-directional: A's
+/// nudge reaches B (B mesh-agrees, releases, advances, and sends its fresh
+/// post-agreement Input to A — LOST in the blackout, parked in B's
+/// `pending_output`), while everything B-to-A is dropped (A never mesh-agrees
+/// and keeps nudging).
+///
+/// The pin (pre-fix): after the link restores, A's nudges arrive at B on the
+/// keepalive cadence (200ms, equal to `running_retry_interval`) and every
+/// decodable Input packet — even one staging ZERO new frames — reset B's
+/// `running_last_input_recv`. Messages are handled before the endpoint poll's
+/// retry check inside the same `poll_remote_clients` call, so on the shared
+/// 50ms poll grid every retry-eligible tick coincides with a fresh nudge
+/// arrival: B's pending Input (the ONLY carrier of B's post-agreement
+/// `disconnected@F` view — B no longer nudges once IT mesh-agrees) never
+/// retransmits, A never mesh-agrees, A nudges forever, and both survivors pin
+/// permanently (alive but zero frame progress).
+///
+/// The fix gates the `running_last_input_recv` reset in `on_input` on staged
+/// progress: a zero-new-frames Input (nudge or duplicate retransmission) no
+/// longer suppresses the retry, so B's pending Input retransmits within one
+/// retry interval of the unblock, A mesh-agrees, and both run free.
+///
+/// FAILS before the gate (permanent pin: zero frame progress in the bounded
+/// release loop) and PASSES after.
+#[test]
+fn p2p_n0_nudge_does_not_starve_pending_retransmission_after_blackout() -> Result<(), FortressError>
+{
+    const MAX_PREDICTION: usize = 1;
+    // Survivor timeouts must EXCEED the 600ms blackout (or A would simply
+    // auto-drop B mid-blackout and the repro would degrade into a different,
+    // two-survivor scenario); C's timeout is irrelevant (it goes silent and is
+    // never polled again).
+    let (mut sess1, mut sess2, mut sess3, blocked, a1, a2, a3, clock) =
+        build_filtered_three_player_sessions_with_timeouts_and_prediction(
+            [
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(3),
+            ],
+            MAX_PREDICTION,
+        )?;
+
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+    let mut stub3 = GameStub::new();
+
+    let mut states1: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states2: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut sink: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    // --- Phase 1: warmup ladder, ALL LINKS OPEN (clean-network precondition).
+    // Distinct C inputs (i + 3000) make divergent freeze frames visible as
+    // divergent bytes. Near-zero clock steps keep all timeouts far away. ---
+    for i in 0..6_u32 {
+        sess1.poll_remote_clients();
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i,
+            &mut states1,
+        )?;
+        sess2.poll_remote_clients();
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1000,
+            &mut states2,
+        )?;
+        sess3.poll_remote_clients();
+        try_advance_recording(
+            &mut sess3,
+            &mut stub3,
+            PlayerHandle::new(2),
+            i + 3000,
+            &mut sink,
+        )?;
+        clock.advance(Duration::from_millis(1));
+    }
+
+    // --- Phase 2: C dies CLEANLY — both survivor links cut at the same
+    // instant (zero stagger, equal receipts). Both survivors burn their whole
+    // one-frame prediction window against the frozen receipt. ---
+    blocked.block(a3, a2);
+    blocked.block(a3, a1);
+    for i in 0..10_u32 {
+        sess1.poll_remote_clients();
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            i + 20,
+            &mut states1,
+        )?;
+        sess2.poll_remote_clients();
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            i + 1020,
+            &mut states2,
+        )?;
+        clock.advance(Duration::from_millis(1));
+    }
+    let pinned_conf_a = sess1.confirmed_frame();
+    let pinned_conf_b = sess2.confirmed_frame();
+    // Choreography preconditions: equal receipts pin both survivors at the
+    // same `F` with the whole window burned. If these fail the repro setup is
+    // broken (not the code under test).
+    assert_eq!(
+        pinned_conf_a, pinned_conf_b,
+        "choreography: zero stagger must pin both survivors at the same F"
+    );
+    assert_eq!(
+        sess1.current_frame().as_i32(),
+        pinned_conf_a.as_i32() + MAX_PREDICTION as i32,
+        "choreography: A must have burned its whole prediction window pre-detection"
+    );
+    assert_eq!(
+        sess2.current_frame().as_i32(),
+        pinned_conf_b.as_i32() + MAX_PREDICTION as i32,
+        "choreography: B must have burned its whole prediction window pre-detection"
+    );
+
+    // --- Phase 3: poll-only with full clock steps until BOTH survivors' own
+    // 1s timeouts drop the silent C. Equal timeouts + equal silence start + A
+    // polling first each iteration mean A detects no later than B, so when
+    // the loop breaks NO nudge has fired yet (the nudge flag arms on the poll
+    // AFTER a detection lands) — the blackout below therefore spans the whole
+    // nudge-arming window. ---
+    let mut sess1_dropped = false;
+    let mut sess2_dropped = false;
+    for _ in 0..60 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        if sess1
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess1_dropped = true;
+        }
+        if sess2
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { .. }))
+        {
+            sess2_dropped = true;
+        }
+        if sess1_dropped && sess2_dropped {
+            break;
+        }
+    }
+    assert!(
+        sess1_dropped && sess2_dropped,
+        "choreography: both survivors must auto-drop the silent C \
+         (A dropped: {sess1_dropped}, B dropped: {sess2_dropped})"
+    );
+
+    // --- Phase 4: ~600ms B -> A blackout spanning the nudge-arming window.
+    // A's first nudge reaches B (open direction): B mesh-agrees, releases,
+    // advances, and its fresh post-agreement Input to A is lost — parked in
+    // B's `pending_output` as the only carrier of B's `disconnected@F` view.
+    // Every B -> A packet is dropped, so A stays unagreed and keeps nudging. ---
+    blocked.block(a2, a1);
+    for _ in 0..12 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            300,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            1300,
+            &mut states2,
+        )?;
+    }
+    blocked.unblock(a2, a1);
+    let stall_cur_a = sess1.current_frame();
+    let stall_cur_b = sess2.current_frame();
+
+    // --- Phase 5 (the liveness assertion target): BOUNDED release loop with
+    // full clock steps. Pre-fix nothing moves, forever: A's nudges (one per
+    // keepalive interval) keep resetting B's retry timer before the retry
+    // check runs, B's pending Input never retransmits, A never mesh-agrees.
+    // Post-fix B's retry fires within one interval of the unblock, its
+    // retransmitted Input delivers `disconnected@F`, A mesh-agrees, and both
+    // run free. ---
+    for _ in 0..200 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        try_advance_recording(
+            &mut sess1,
+            &mut stub1,
+            PlayerHandle::new(0),
+            500,
+            &mut states1,
+        )?;
+        try_advance_recording(
+            &mut sess2,
+            &mut stub2,
+            PlayerHandle::new(1),
+            1500,
+            &mut states2,
+        )?;
+    }
+
+    // (i) Liveness: both survivors made frame progress after the blackout.
+    assert!(
+        sess1.current_frame() > stall_cur_a && sess2.current_frame() > stall_cur_b,
+        "N0 nudge/retry starvation: both survivors must make frame progress after the \
+         blackout lifts; conf_a={:?}/cur_a={:?}, conf_b={:?}/cur_b={:?} \
+         (pinned_conf={pinned_conf_a:?}, stall_cur_a={stall_cur_a:?}, \
+          stall_cur_b={stall_cur_b:?})",
+        sess1.confirmed_frame(),
+        sess1.current_frame(),
+        sess2.confirmed_frame(),
+        sess2.current_frame(),
+    );
+
+    // (ii) Mesh agreement: each survivor's confirmed frame advances past the
+    // entire pre-detection stall window, only possible once the dropped slot
+    // is mesh-agreed-excluded on both sides.
+    assert!(
+        sess1.confirmed_frame().as_i32() > pinned_conf_a.as_i32() + MAX_PREDICTION as i32,
+        "sess1 confirmed_frame must advance past the stalled window after mesh agreement; \
+         got {:?} (pinned at {pinned_conf_a:?})",
+        sess1.confirmed_frame()
+    );
+    assert!(
+        sess2.confirmed_frame().as_i32() > pinned_conf_b.as_i32() + MAX_PREDICTION as i32,
+        "sess2 confirmed_frame must advance past the stalled window after mesh agreement; \
+         got {:?} (pinned at {pinned_conf_b:?})",
+        sess2.confirmed_frame()
+    );
+
+    // (iii) Oracle: byte-equality of recorded confirmed state across survivors.
+    let confirmed_bound = std::cmp::min(
+        sess1.confirmed_frame().as_i32(),
+        sess2.confirmed_frame().as_i32(),
+    );
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(i32, StateStub, StateStub)> = Vec::new();
+    for (&frame, &state1) in &states1 {
+        if frame > confirmed_bound {
+            continue;
+        }
+        if let Some(&state2) = states2.get(&frame) {
+            compared += 1;
+            if state1 != state2 {
+                divergences.push((frame, state1, state2));
+            }
+        }
+    }
+    assert!(
+        compared > 0,
+        "no confirmed frames were compared across both peers (bound={confirmed_bound}); \
+         the repro did not exercise the drop path"
+    );
+    assert!(
+        divergences.is_empty(),
+        "N0 nudge/retry starvation: confirmed state diverged across survivors \
+         (bound={confirmed_bound}, compared={compared}): {divergences:?}"
     );
 
     Ok(())

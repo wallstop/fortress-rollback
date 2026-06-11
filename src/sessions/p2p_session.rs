@@ -836,6 +836,20 @@ impl<T: Config> P2PSession<T> {
             }
         }
 
+        // Connect-status nudge: while any remote slot is locally disconnected
+        // but its drop is not yet mesh-agreed, every running remote endpoint
+        // must keep gossiping our view even when input-idle — otherwise a
+        // survivor capped at its prediction window with a fully-acked send
+        // queue can never deliver the `disconnected` gossip and mesh agreement
+        // (the release condition in `remote_slot_confirmed_bound`) becomes
+        // unreachable. Computed before the endpoint poll below so the flag is
+        // live on the poll that follows a detection; cleared the poll after
+        // the mesh agrees. Allocation-free.
+        let nudge_needed = self.connect_status_nudge_needed();
+        for remote_endpoint in self.player_reg.remotes.values_mut() {
+            remote_endpoint.set_connect_status_nudge(nudge_needed);
+        }
+
         // run endpoint poll and get events from players and spectators. This will trigger additional packets to be sent.
         let mut events = VecDeque::new();
         for endpoint in self.player_reg.remotes.values_mut() {
@@ -1127,10 +1141,15 @@ impl<T: Config> P2PSession<T> {
 
             // NOW reactivate the slot: unfreeze + reposition the queue at F, mark
             // it connected, and reopen frames >= F as unconfirmed
-            // (last_frame = F-1). `confirmed_frame` drops to F-1; the next advance
-            // predicts handle h = RepeatLastConfirmed (== the frozen default ==
-            // same result as before), and the existing misprediction -> rollback
-            // path corrects when the joiner's real inputs arrive.
+            // (last_frame = F-1). `confirmed_frame` reports NULL from here until
+            // the joiner's first input lands: the freeze barrier folds the
+            // rebuilt endpoint's default `{connected, NULL}` status cache into
+            // the reactivated slot's bound (min(F-1, NULL) = NULL) — strictly
+            // conservative, see `remote_slot_confirmed_bound`'s N==2 transient
+            // windows. The next advance predicts handle h = RepeatLastConfirmed
+            // (== the frozen default == same result as before), and the existing
+            // misprediction -> rollback path corrects when the joiner's real
+            // inputs arrive.
             if let Err(e) = self
                 .sync_layer
                 .reactivate_player_at_frame(handle, activation_frame)
@@ -1182,8 +1201,10 @@ impl<T: Config> P2PSession<T> {
             // unconfirmed frame) until the joiner's real frame-F input arrives, so
             // that input is accepted and the standard misprediction -> rollback
             // path reconciles it — identical to how every other late remote input
-            // is handled. `confirmed_frame` is still F-1 here, so no frame >= F is
-            // checksum-compared until reconciliation completes.
+            // is handled. `confirmed_frame` reports NULL here (the freeze barrier
+            // folds the rebuilt endpoint's default `{connected, NULL}` cache —
+            // NULL < F-1 < F, see the reactivation comment above), so no frame
+            // >= F is checksum-compared until reconciliation completes.
             self.disconnect_frame = if self.disconnect_frame.is_null() {
                 activation_frame
             } else {
@@ -1759,14 +1780,64 @@ impl<T: Config> P2PSession<T> {
     /// - Computing checksums over confirmed game state
     /// - Delta compression (older confirmed state won't change)
     /// - Progress reporting to users
+    ///
+    /// # Mesh-gossip bound at `N >= 3` (the "freeze barrier")
+    ///
+    /// Mirroring upstream GGPO's N-player confirmed frame (`PollNPlayers`),
+    /// each **remote** slot contributes not its locally-received frame alone,
+    /// but a fold over every running remote endpoint's **gossiped** view of
+    /// that slot (the internal `remote_slot_confirmed_bound`): while the slot
+    /// is connected, the minimum of the local receipt and the gossiped views;
+    /// once the slot is **locally disconnected** but its drop is not yet
+    /// mesh-agreed, the gossiped views ONLY (the local detection value is
+    /// dropped from the fold, exactly as GGPO skips
+    /// `local_connect_status[i]` when disconnected — required for liveness,
+    /// see `remote_slot_confirmed_bound`). At `N == 2` this collapses to
+    /// the local receipt (a peer's self-claim always covers the inputs it
+    /// sent), so the value is unchanged in normal operation (two named
+    /// conservative transient windows are documented in
+    /// `remote_slot_confirmed_bound`); at `N >= 3` the bound IS the
+    /// mesh-gossip minimum at all times — even a healthy steady state
+    /// permanently paces roughly one gossip delivery behind the local
+    /// receipt (GGPO `PollNPlayers` parity), and asymmetric loss widens that
+    /// gap until gossip catches up. At `N == 3` this guarantees the
+    /// confirmed frame can never
+    /// run past a freeze frame the mesh may later agree on for a dropping
+    /// peer — so the dropped slot's input at the agreed frame is never lost
+    /// and the post-agreement rollback target always stays inside the
+    /// prediction window. At `N >= 4` the same bound strictly NARROWS the
+    /// race but does not fully close it: two corners (the stale-echo freeze
+    /// and the double-failure relay) are documented as residuals in
+    /// `remote_slot_confirmed_bound`.
+    ///
+    /// A slot whose disconnect is **mesh-agreed** (locally disconnected and no
+    /// running endpoint still reports it connected) is excluded from the
+    /// minimum entirely — its frozen input value carries it from then on.
+    ///
+    /// # Non-monotonicity
+    ///
+    /// The reported value is no longer guaranteed monotonic across calls: a
+    /// gossiped adopt/min can lower a folded term, and fold membership changes
+    /// (an endpoint starting, stopping, or a slot re-entering the minimum on
+    /// hot-join reactivation) can transiently lower the result relative to an
+    /// earlier call. Callers must not assume `confirmed_frame()` never
+    /// decreases.
     #[must_use]
     pub fn confirmed_frame(&self) -> Frame {
         let mut confirmed_frame = Frame::new(i32::MAX);
 
-        for con_stat in &self.local_connect_status {
-            if !con_stat.disconnected {
+        for (idx, con_stat) in self.local_connect_status.iter().enumerate() {
+            let handle = PlayerHandle::new(idx);
+            if self.player_reg.is_local_player(handle) {
+                // Local players can never be disconnected (`remove_player` and
+                // `disconnect_player` both reject local handles), so the local
+                // slot always contributes its own last added frame.
                 confirmed_frame = std::cmp::min(confirmed_frame, con_stat.last_frame);
+            } else if let Some(bound) = self.remote_slot_confirmed_bound(handle, con_stat) {
+                confirmed_frame = std::cmp::min(confirmed_frame, bound);
             }
+            // `None`: the slot's disconnect is mesh-agreed — excluded from the
+            // minimum; the frozen input value carries the slot from here on.
         }
 
         // If all players are disconnected, this should not happen in a running session
@@ -3634,6 +3705,292 @@ impl<T: Config> P2PSession<T> {
         Ok(())
     }
 
+    /// Returns the [`Self::confirmed_frame`] contribution for a **remote** slot,
+    /// or `None` when the slot's disconnect is mesh-agreed (the slot is then
+    /// excluded from the confirmed-frame minimum; its frozen input value
+    /// carries it).
+    ///
+    /// # Why (GGPO `PollNPlayers` gossip-min semantics — the N0 freeze barrier)
+    ///
+    /// Upstream GGPO's N-player confirmed frame (`PollNPlayers`) folds, for
+    /// every slot, the minimum over every endpoint's gossiped
+    /// `peer_connect_status[slot].last_frame`, **including the local view only
+    /// while `local_connect_status[slot]` is not disconnected** — once the
+    /// slot is locally disconnected the local term is skipped and only the
+    /// gossip terms remain. This helper mirrors that exactly:
+    ///
+    /// - **Connected slot:** `min(local receipt, gossiped views)`. With no
+    ///   contributing endpoints the local receipt alone (pre-barrier value).
+    /// - **Locally disconnected, NOT yet mesh-agreed** (some running endpoint
+    ///   still reports the slot connected): the gossiped views ONLY — the
+    ///   local detection/freeze value is dropped from the fold.
+    /// - **Mesh-agreed** (locally disconnected and no running endpoint still
+    ///   reports it connected): `None`, the slot leaves the minimum.
+    ///
+    /// Using local receipt alone (the pre-barrier behavior) lets a survivor's
+    /// confirmed frame race past the mesh-agreed freeze frame `F` of a
+    /// dropping peer under asymmetric loss, with two damage mechanisms:
+    ///
+    /// - **Window floor (the mechanism the red repros actually hit):** the
+    ///   race lets `current_frame` run so far that the `F + 1` rollback
+    ///   target falls below the prediction-window floor; the S20 clamp then
+    ///   re-simulates only from the floor, leaving every frame in
+    ///   `(F, floor)` permanently uncorrected (the constant post-floor offset
+    ///   in the red-test output shows the frozen-value re-roll itself had
+    ///   SUCCEEDED — only the resimulation was clamped short).
+    /// - **Ring eviction (extreme stagger only):** the dropped slot's input
+    ///   at `F` is genuinely lost only once the input ring wraps over it
+    ///   (receipt stagger >= the queue capacity, `INPUT_QUEUE_LENGTH`), at
+    ///   which point the convergence re-roll `set_frozen_value_at(F)` /
+    ///   first-freeze `freeze_at(F)` fail-safes into a stale value. Note that
+    ///   `set_last_confirmed_frame`'s logical discard alone does NOT defeat
+    ///   the re-roll: `discard_confirmed_frames` only moves the ring's
+    ///   tail/length, and `confirmed_input` indexes the ring modulo its
+    ///   capacity without a tail check, so a "discarded" frame's bytes remain
+    ///   readable until physically overwritten.
+    ///
+    /// Folding the gossiped views caps the confirmed frame itself, which
+    /// closes both mechanisms at `N == 3`; at `N >= 4` it strictly narrows
+    /// them (see the documented residuals below).
+    ///
+    /// # Soundness of dropping the local term once locally disconnected
+    ///
+    /// The bound may then EXCEED the local freeze value `L_local` — that is
+    /// safe:
+    ///
+    /// - Frames above `L_local` are confirmed via the frozen-value branch (the
+    ///   sync layer serves the frozen `last_confirmed_input` for a
+    ///   disconnected slot past its `last_frame`), which is self-consistent
+    ///   regardless of confirmation pacing — no real input above `L_local` is
+    ///   ever needed for them.
+    /// - Any future converged freeze `F'` is the min over the convergence
+    ///   fold's terms ({the possibly mined-down local view} ∪ {running
+    ///   endpoints' reported values}; see
+    ///   [`Self::update_player_disconnects`]). Case 1: `F'` equals the local
+    ///   term. The mining-down of that term only ever comes from
+    ///   endpoint-term overrides (`update_player_disconnects` passes a
+    ///   `queue_min_confirmed` folded over endpoint terms into
+    ///   [`Self::disconnect_player_at_frames`]), and the gossip-only bound is
+    ///   <= every endpoint term, hence <= any such override — so
+    ///   `confirmed <= override`, the re-roll input at the override frame is
+    ///   retained (discard runs through `confirmed - 1`), and the
+    ///   `override + 1` rollback target stays inside the prediction window
+    ///   (the throttle caps `current <= confirmed + max_prediction`). If `F'`
+    ///   is the ORIGINAL local detection value (never mined), no re-roll below
+    ///   it is ever needed — the frozen value was captured at detection time,
+    ///   when the pre-detection bound (which still folded the local term) had
+    ///   held `confirmed <= L_local`. Case 2: `F'` equals some endpoint `j`'s
+    ///   term: the gossip-only bound <= our cache of `j`'s term <= `F'`
+    ///   directly. Either way confirmation never outruns data needed for any
+    ///   future convergence.
+    /// - **Liveness (why the local term is dropped):** connect-status
+    ///   gossip travels only in Input messages, a session capped at
+    ///   `confirmed + max_prediction` with a fully-acked send queue sends no
+    ///   Input messages, and `update_player_disconnects` runs in
+    ///   `advance_frame` BEFORE the throttle. Under asymmetric loss both
+    ///   survivors can burn their entire window against the lagging receipt
+    ///   `F` before either detects the drop; folding the local detection value
+    ///   would then keep BOTH bounds at `F` — both capped, both gossip-mute
+    ///   (KeepAlives carry no connect status). Before the connect-status
+    ///   nudge existed this was a permanent, silent deadlock; with the nudge
+    ///   it would still hold every staggered release hostage to the nudge
+    ///   cadence. Gossip-only folding (GGPO parity) instead lifts the low
+    ///   survivor's bound to its peer's stale-HIGHER gossiped view
+    ///   immediately, restoring headroom so its ordinary Input packets deliver
+    ///   the `disconnected@F` gossip and the mesh converges without waiting on
+    ///   any timer.
+    ///
+    /// # Liveness closure: the connect-status nudge
+    ///
+    /// Gossip-only folding alone is NOT enough for liveness. The common clean
+    /// drop (zero stagger: every survivor's receipt of the dying peer is
+    /// EXACTLY equal, e.g. a process kill on a quiet link) leaves every
+    /// post-detection gossip-only bound equal to the other survivors' stale
+    /// `connected@F` caches = `F`; with every survivor capped and fully
+    /// acked, no Input message ever carries the disconnected gossip and mesh
+    /// agreement is unreachable — a permanent pin. At `N >= 4` the staggered
+    /// variant deadlocks too: only the min-receipt survivor regains headroom,
+    /// while the others each wait forever for another MUTE peer's gossip.
+    /// Both pins are closed at the protocol level: while
+    /// [`Self::connect_status_nudge_needed`] reports a locally-disconnected,
+    /// not-yet-mesh-agreed slot, every running remote endpoint that is
+    /// **input-idle** (no real Input message sent for a keepalive interval
+    /// and an empty send queue — active input traffic already carries the
+    /// status, so the nudge never alters an advancing session's packet
+    /// stream) re-sends a status-bearing duplicate Input message built from
+    /// its retained `last_acked_input` on the keepalive cadence
+    /// (`UdpProtocol::send_connect_status_nudge`) — so a drop's hold is now
+    /// bounded by ~`disconnect_timeout` + the nudge cadence + delivery,
+    /// even when every survivor is gossip-mute. Regression-pinned by the
+    /// clean-drop and N=4 mutual-mute repros in `tests/sessions/peer_drop.rs`.
+    ///
+    /// **Asymmetric cutoff (the nudge stops before everyone has agreed):**
+    /// [`Self::connect_status_nudge_needed`] clears on LOCAL mesh agreement,
+    /// but release is a GLOBAL condition — a peer that has not yet agreed
+    /// still needs this session's view. From the cutoff on, that view rides
+    /// only this session's real Input traffic: its next fresh send and the
+    /// `running_retry_interval` retransmission of any still-unacked pending
+    /// Input. The retransmission timer is therefore load-bearing for global
+    /// release, which is why `on_input` refreshes its pacer
+    /// (`running_last_input_recv`) only for packets that stage at least one
+    /// NEW frame — a progress-free packet stream (e.g. a still-nudging peer
+    /// on the keepalive cadence) must never suppress it (see the gate in
+    /// `UdpProtocol::on_input` and the blackout regression in
+    /// `tests/sessions/peer_drop.rs`).
+    ///
+    /// # Documented residuals (`N >= 4`; not closed by the barrier or nudge)
+    ///
+    /// The barrier closes the desync at `N == 3` and strictly narrows it at
+    /// `N >= 4`. Two `N >= 4` corners remain open (both require at least
+    /// three survivors; neither is a regression — the pre-barrier code had no
+    /// bound at all):
+    ///
+    /// - **Stale-echo freeze:** a third survivor `X` can freeze the dropped
+    ///   slot using its stale cache of OUR old (lower) claim — the moment
+    ///   ANOTHER peer's disconnect report flips `X`'s `queue_connected`,
+    ///   `X`'s endpoint-terms override mins that stale-low cached term and
+    ///   converges a freeze frame BELOW our current bound, which our
+    ///   confirmation may already have passed (re-exposing the window-floor
+    ///   mechanism). Impossible at `N == 3`: there the only packet that can
+    ///   flip `X`'s `queue_connected` comes from the endpoint whose term it
+    ///   would min, and the connect-status merge refreshes that same term
+    ///   BEFORE the fold runs. Not a mute problem, so the nudge does not
+    ///   close it (it is a stale-cache race).
+    /// - **Double-failure relay:** an origin survivor that dies AFTER
+    ///   relaying its low freeze value to a third peer but BEFORE delivering
+    ///   it to us leaves a window where our bound (no longer folding the dead
+    ///   origin's endpoint) exceeds the override later relayed through the
+    ///   third peer.
+    ///
+    /// Future work for both: a stale-aware override fold (ignore cached terms
+    /// older than the slot's disconnect epoch) or full
+    /// mesh-agreement-before-freeze convergence. Byzantine peers are out of
+    /// scope entirely.
+    ///
+    /// # `N == 2` identity (normal operation)
+    ///
+    /// The only remote slot's gossip term is that peer's SELF-claim, which is
+    /// always >= the direct receipt term (a packet carrying inputs through
+    /// frame `k` carries a self-claim `>= k`), so the connected-slot min
+    /// collapses to the local receipt. After the `N == 2` remote drops, its
+    /// endpoint is disconnected (not running), the fold is empty and the slot
+    /// is excluded exactly as before. Two named transient windows fall
+    /// outside this identity, both in the strictly CONSERVATIVE direction
+    /// (the bound dips below the pure local receipt; nothing is confirmed
+    /// early):
+    ///
+    /// - **Peer-initiated disconnect:** `disconnect_requested` packets skip
+    ///   the connect-status merge while their inputs still process, so the
+    ///   local receipt can briefly exceed the cached self-claim and the bound
+    ///   holds at the stale cache until the endpoint leaves the fold.
+    /// - **Hot-join activation:** the host reopens the joined slot with a
+    ///   synthetic `last_frame = F - 1` while the rebuilt endpoint's status
+    ///   cache is still the default `{connected, NULL}`, so
+    ///   [`Self::confirmed_frame`] reports `Frame::NULL` (not `F - 1`) until
+    ///   the joiner's first input packet delivers real gossip.
+    ///
+    /// # Release/liveness of the connected-slot hold
+    ///
+    /// The bound rises as gossip lands (every input packet carries
+    /// connect-status; the merge runs even for undecodable packets), a
+    /// never-detecting survivor follows via the propagated disconnect path in
+    /// [`Self::update_player_disconnects`], and a dead survivor's endpoint
+    /// times out (not running) and leaves the fold — so a hold is bounded by
+    /// ~`disconnect_timeout` plus gossip delivery (plus the nudge cadence
+    /// when survivors are input-idle, see above). One bounded delay worth
+    /// naming: a `DisconnectBehavior::Halt` peer inside an otherwise
+    /// `ContinueWithout` mesh stops advancing (and therefore stops gossiping
+    /// fresh views) the moment it halts, so it holds the other survivors'
+    /// bounds until ITS endpoints time out and leave their folds — bounded by
+    /// the same `disconnect_timeout`, but a real added delay. While held,
+    /// `advance_frame` returns `Ok` with no `AdvanceFrame` request (the
+    /// normal prediction-window throttle), never an error.
+    ///
+    /// # Hot-join reserved endpoints
+    ///
+    /// Reserved/rearmed hot-join endpoints can sit `Running` with a freshly
+    /// reset default `{connected, NULL}` status cache before their joiner
+    /// activates; folding them would pin the bound to `Frame::NULL` forever
+    /// (e.g. a host whose joiner abandons the join mid-handshake), so they are
+    /// skipped — matching how `remote_is_connected` and `check_initial_sync`
+    /// gate them out. **Fold asymmetry (cross-reference):**
+    /// [`Self::update_player_disconnects`]' endpoint fold does NOT have this
+    /// reserved-endpoint guard. Unreachable today (hot-join in an `N >= 3`
+    /// mesh is build-rejected, so a reserved endpoint never coexists with the
+    /// multi-survivor convergence fold), but a future mesh-hot-join
+    /// implementation must align the two folds or a reserved endpoint's
+    /// default `{connected, NULL}` cache will both block mesh agreement and
+    /// mine convergence overrides down to `NULL` there.
+    fn remote_slot_confirmed_bound(
+        &self,
+        handle: PlayerHandle,
+        local_status: &ConnectionStatus,
+    ) -> Option<Frame> {
+        let mut any_reports_connected = false;
+        let mut gossip_min: Option<Frame> = None;
+        for endpoint in self.player_reg.remotes.values() {
+            if !endpoint.is_running() {
+                continue;
+            }
+            #[cfg(feature = "hot-join")]
+            if self.hot_join.endpoint_is_reserved(endpoint) {
+                continue;
+            }
+            let status = endpoint.peer_connect_status(handle);
+            if !status.disconnected {
+                any_reports_connected = true;
+            }
+            gossip_min = Some(match gossip_min {
+                Some(gossip) => std::cmp::min(gossip, status.last_frame),
+                None => status.last_frame,
+            });
+        }
+        match (local_status.disconnected, any_reports_connected, gossip_min) {
+            // Connected slot, no contributing endpoints: the local receipt
+            // alone (pre-barrier behavior).
+            (false, _, None) => Some(local_status.last_frame),
+            // Connected slot: barrier bound = min(local receipt, gossip).
+            (false, _, Some(gossip)) => Some(std::cmp::min(local_status.last_frame, gossip)),
+            // Locally disconnected but NOT yet mesh-agreed: gossip terms ONLY
+            // (GGPO `PollNPlayers` parity — the liveness-critical arm; folding
+            // the local term here pins capped survivors against their own
+            // detection value, see the rustdoc).
+            (true, true, Some(gossip)) => Some(gossip),
+            // Unreachable: `any_reports_connected` implies at least one folded
+            // endpoint, so `gossip_min` is `Some`. Handle the impossible
+            // combination conservatively as mesh-agreed (exclude the slot)
+            // rather than panicking or inventing a value.
+            (true, true, None) => None,
+            // Mesh-agreed disconnect (no running endpoint still reports the
+            // slot connected; also covers the empty-fold `N == 2` post-drop
+            // case): exclude the slot — the frozen value carries it.
+            (true, false, _) => None,
+        }
+    }
+
+    /// Returns `true` while any remote slot is **locally disconnected but not
+    /// yet mesh-agreed** — exactly the window in which
+    /// [`Self::remote_slot_confirmed_bound`] still returns `Some` for a
+    /// disconnected slot. While true, every running remote endpoint must keep
+    /// gossiping our connect status even when input-idle (the protocol-level
+    /// connect-status nudge, `UdpProtocol::set_connect_status_nudge`):
+    /// otherwise capped, fully-acked survivors are gossip-mute and mesh
+    /// agreement can never be reached. Allocation-free; called once per
+    /// [`Self::poll_remote_clients`].
+    fn connect_status_nudge_needed(&self) -> bool {
+        self.local_connect_status
+            .iter()
+            .enumerate()
+            .any(|(idx, status)| {
+                let handle = PlayerHandle::new(idx);
+                // Local players can never be disconnected; the guard keeps the
+                // helper's contract honest if that ever changes.
+                status.disconnected
+                    && !self.player_reg.is_local_player(handle)
+                    && self.remote_slot_confirmed_bound(handle, status).is_some()
+            })
+    }
+
     /// Check if players are registered as disconnected for earlier frames on other remote players in comparison to our local assumption.
     /// Disconnect players that are disconnected for other players and update the frame they disconnected
     fn update_player_disconnects(&mut self) {
@@ -3648,6 +4005,17 @@ impl<T: Config> P2PSession<T> {
             let mut queue_min_confirmed = Frame::new(i32::MAX);
 
             // check all player connection status for every remote player
+            //
+            // Fold asymmetry (cross-reference): unlike
+            // `remote_slot_confirmed_bound`, this fold does NOT skip reserved
+            // hot-join endpoints. Unreachable divergence today — hot-join in
+            // an `N >= 3` mesh is build-rejected, so a reserved endpoint never
+            // coexists with this multi-survivor convergence fold — but a
+            // future mesh-hot-join implementation must align the two folds
+            // (skip reserved endpoints here too), or a reserved endpoint's
+            // freshly reset `{connected, NULL}` cache will block
+            // `queue_connected` from flipping AND mine `queue_min_confirmed`
+            // down to `NULL`.
             for endpoint in self.player_reg.remotes.values() {
                 if !endpoint.is_running() {
                     continue;
@@ -7274,6 +7642,635 @@ mod tests {
             "the mined-down local view (4) must persist after B goes non-running — \
              nothing a non-running survivor knew is lost"
         );
+    }
+
+    // ======================================================================
+    // N0 freeze barrier: `remote_slot_confirmed_bound` unit tests. The helper
+    // is the gossip-min bound `confirmed_frame()` folds for every remote slot
+    // (GGPO PollNPlayers semantics): `Some(min(local, gossiped views))` while
+    // the slot is connected, `Some(min over gossiped views ONLY)` while it is
+    // locally disconnected but not yet mesh-agreed (the local term is dropped
+    // — the liveness-critical amendment, test (h)), `None` (excluded) once
+    // the disconnect is mesh-agreed.
+    // ======================================================================
+
+    /// (a) Mesh-agreed exclusion: the slot is locally disconnected AND every
+    /// running endpoint also reports it disconnected -> `None` (the slot leaves
+    /// the confirmed-frame minimum; its frozen value carries it).
+    #[test]
+    fn remote_slot_confirmed_bound_mesh_agreed_disconnect_excludes_slot() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let c = PlayerHandle::new(2);
+
+        // C dropped the production way: endpoint disconnected + local status
+        // disconnected at the agreed frame.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_c)
+            .expect("C endpoint")
+            .disconnect();
+        session.local_connect_status[c.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(5),
+        };
+        // Both running survivors gossip the slot as disconnected.
+        for addr in [addr_b, addr_d] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("survivor endpoint")
+                .set_peer_connect_status_for_tests(
+                    c,
+                    ConnectionStatus {
+                        disconnected: true,
+                        last_frame: Frame::new(5),
+                    },
+                );
+        }
+
+        let status = session.local_connect_status[c.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(c, &status),
+            None,
+            "a mesh-agreed disconnected slot must be excluded from the confirmed minimum"
+        );
+    }
+
+    /// (b) Pre-agreement hold: the slot is locally disconnected (frozen high on
+    /// direct detection) but one running endpoint still reports it connected ->
+    /// `Some(min over gossiped views ONLY)` (the local term is dropped — GGPO
+    /// `PollNPlayers` parity). Driving `update_player_disconnects` afterwards
+    /// proves the bound never exceeds the converged freeze frame — the
+    /// convergence override is folded over exactly the same endpoint terms, so
+    /// `bound <= converged`. (Mutating the helper to skip the gossip fold —
+    /// e.g. returning the bare local term 9 — flips the first `<=` assert;
+    /// mutating it to exclude any locally-disconnected slot pre-agreement —
+    /// pre-fix semantics — makes the bound `None` and flips the `Some`
+    /// asserts. The complementary mutation — folding `min(local, gossip)`
+    /// instead of gossip-only — is flipped by test (h) below.)
+    #[test]
+    fn remote_slot_confirmed_bound_pre_agreement_never_exceeds_convergence() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let c = PlayerHandle::new(2);
+
+        // C locally dropped at our own HIGH receipt (9); its endpoint is down.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_c)
+            .expect("C endpoint")
+            .disconnect();
+        session.local_connect_status[c.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(9),
+        };
+        // B has NOT detected yet: stale connected view at its low receipt 4.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .set_peer_connect_status_for_tests(
+                c,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(4),
+                },
+            );
+        // D already froze C at 6.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_d)
+            .expect("D endpoint")
+            .set_peer_connect_status_for_tests(
+                c,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(6),
+                },
+            );
+
+        // Step 1: pre-agreement bound = gossip-only min(B 4, D 6) = 4 (the
+        // local detection value 9 is dropped from the fold; it would not have
+        // changed the value here anyway — test (h) pins the case where it would).
+        let status = session.local_connect_status[c.as_usize()];
+        let bound = session.remote_slot_confirmed_bound(c, &status);
+        assert_eq!(
+            bound,
+            Some(Frame::new(4)),
+            "pre-agreement bound must fold the still-connected survivor's lagging gossip"
+        );
+
+        // Convergence step 1: update_player_disconnects mines the local view to
+        // the same fold minimum; the bound must not have exceeded it.
+        session.update_player_disconnects();
+        let converged = session.local_connect_status[c.as_usize()].last_frame;
+        assert_eq!(converged, Frame::new(4), "convergence must agree at 4");
+        assert!(
+            bound.expect("bound is Some pre-agreement") <= converged,
+            "the confirmed bound must never exceed the converged freeze frame"
+        );
+
+        // Step 2: B later detects at an even lower receipt (2) and gossips it.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .set_peer_connect_status_for_tests(
+                c,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(2),
+                },
+            );
+        let status = session.local_connect_status[c.as_usize()];
+        let bound = session.remote_slot_confirmed_bound(c, &status);
+        // All running endpoints now report disconnected -> mesh-agreed; but the
+        // bound contract still holds through the final convergence step.
+        assert_eq!(
+            bound, None,
+            "once every running endpoint reports the slot disconnected, it is mesh-agreed"
+        );
+        session.update_player_disconnects();
+        assert_eq!(
+            session.local_connect_status[c.as_usize()].last_frame,
+            Frame::new(2),
+            "the relayed lowering must still converge the local view down to 2"
+        );
+    }
+
+    /// (c) Conservative hold: running endpoints with the default
+    /// `{connected, NULL}` status cache (no gossip received yet) pin the bound
+    /// at `Frame::NULL` — confirmation holds until real gossip arrives.
+    /// (Mutating the helper to skip NULL cache entries would return `Some(7)`.)
+    #[test]
+    fn remote_slot_confirmed_bound_default_null_cache_holds_conservatively() {
+        let (mut session, _addr_b, _addr_c, _addr_d) = build_abcd_live_session();
+        let c = PlayerHandle::new(2);
+
+        // We received C through frame 7, but no endpoint has gossiped any view
+        // yet (all caches are the default `{connected, NULL}`).
+        session.local_connect_status[c.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(7),
+        };
+
+        let status = session.local_connect_status[c.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(c, &status),
+            Some(Frame::NULL),
+            "default (NULL) gossip caches must hold the bound at NULL until gossip lands"
+        );
+    }
+
+    /// (d) Non-running endpoints leave the fold: a survivor endpoint that is
+    /// Synchronizing (e.g. mid-rearm) contributes nothing. Toggling ONLY its
+    /// running state flips the bound between the third party's view and its
+    /// own lower view — the `is_running()` filter is the load-bearing line.
+    #[test]
+    fn remote_slot_confirmed_bound_ignores_non_running_endpoints() {
+        fn bound_with_b_running(b_running: bool) -> Option<Frame> {
+            let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+            let c = PlayerHandle::new(2);
+
+            // Local receipt of C: 7. C's own endpoint self-claims 9.
+            session.local_connect_status[c.as_usize()] = ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(7),
+            };
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr_c)
+                .expect("C endpoint")
+                .set_peer_connect_status_for_tests(
+                    c,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(9),
+                    },
+                );
+            // D gossips C through 5; B holds a LOWER view (2).
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr_d)
+                .expect("D endpoint")
+                .set_peer_connect_status_for_tests(
+                    c,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(5),
+                    },
+                );
+            {
+                let b_endpoint = session
+                    .player_reg
+                    .remotes
+                    .get_mut(&addr_b)
+                    .expect("B endpoint");
+                b_endpoint.set_peer_connect_status_for_tests(
+                    c,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(2),
+                    },
+                );
+                if b_running {
+                    b_endpoint.force_running_for_tests();
+                } else {
+                    b_endpoint.force_synchronizing_for_tests();
+                }
+            }
+
+            let status = session.local_connect_status[c.as_usize()];
+            session.remote_slot_confirmed_bound(c, &status)
+        }
+
+        assert_eq!(
+            bound_with_b_running(false),
+            Some(Frame::new(5)),
+            "a non-running endpoint's view must be excluded from the bound"
+        );
+        assert_eq!(
+            bound_with_b_running(true),
+            Some(Frame::new(2)),
+            "the same endpoint's lower view must be folded once it is running"
+        );
+    }
+
+    /// (e) Hot-join reserved endpoints are skipped: a reserved endpoint can sit
+    /// `Running` with a freshly reset default `{connected, NULL}` cache before
+    /// its joiner activates. Folding it would pin the bound at NULL forever
+    /// (an abandoned join would kill the host). With the guard: a locally
+    /// disconnected reserved slot is mesh-agreed-excluded (`None`, the host
+    /// runs solo on the frozen value), and a connected slot falls back to the
+    /// local receipt.
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn remote_slot_confirmed_bound_skips_reserved_hot_join_endpoint() {
+        let addr = test_addr(9501);
+        let mut host = build_hot_join_serving_host(addr);
+        let dropped = PlayerHandle::new(1);
+        host.player_reg
+            .remotes
+            .get_mut(&addr)
+            .expect("remote endpoint must exist at build time")
+            .force_running_for_tests();
+        host.state = SessionState::Running;
+
+        // Cleanly drop the remote: ContinueWithout on a serving host re-arms
+        // the slot (reserved + endpoint rebuilt with a default cache).
+        host.remove_player(dropped)
+            .expect("remove_player should succeed");
+        assert!(
+            host.hot_join.reserved_slots.contains(&dropped),
+            "the dropped slot must be re-reserved on a serving host"
+        );
+        // Manufacture the post-handshake window: the reserved endpoint is
+        // Running (joiner synchronized, not yet activated) with the rebuilt
+        // default `{connected, NULL}` cache.
+        {
+            let endpoint = host
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("re-armed endpoint must exist");
+            endpoint.force_running_for_tests();
+            assert!(endpoint.is_running(), "endpoint must be Running");
+            assert!(
+                host.hot_join.endpoint_is_reserved(endpoint),
+                "the endpoint must read as reserved"
+            );
+        }
+
+        // Locally-disconnected reserved slot: the reserved endpoint is guarded
+        // out, the fold is empty -> mesh-agreed exclusion (None). Without the
+        // guard the default `{connected, NULL}` cache would force Some(NULL),
+        // pinning the host's confirmed frame at NULL forever.
+        let status = host.local_connect_status[dropped.as_usize()];
+        assert!(
+            status.disconnected,
+            "the dropped slot must be locally disconnected"
+        );
+        assert_eq!(
+            host.remote_slot_confirmed_bound(dropped, &status),
+            None,
+            "a reserved endpoint must not resurrect a dropped slot's confirmed contribution"
+        );
+        // And the host's confirmed frame falls back to its own (local) slot.
+        host.local_connect_status[0].last_frame = Frame::new(12);
+        assert_eq!(
+            host.confirmed_frame(),
+            Frame::new(12),
+            "a solo host with a reserved slot must confirm on its local slot alone"
+        );
+
+        // Connected variant: if the slot were still connected, the guarded-out
+        // reserved endpoint leaves the fold empty and the bound collapses to
+        // the local receipt.
+        let connected_status = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(5),
+        };
+        assert_eq!(
+            host.remote_slot_confirmed_bound(dropped, &connected_status),
+            Some(Frame::new(5)),
+            "with only a reserved endpoint the bound must equal the local receipt"
+        );
+    }
+
+    /// (f) `N == 2` identity (the byte-parity requirement): the only remote
+    /// slot's gossip term is the peer's SELF-claim, which always covers the
+    /// inputs it sent (self-claim >= our receipt), so the min collapses to
+    /// today's local-receipt value. After the remote drops, its endpoint is
+    /// not running, the fold is empty and the slot is excluded exactly as
+    /// before the barrier.
+    #[test]
+    fn remote_slot_confirmed_bound_n2_identity() {
+        let mut session = create_two_player_session();
+        let remote = PlayerHandle::new(1);
+        let addr = test_addr(8080);
+        {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("remote endpoint must exist");
+            endpoint.force_running_for_tests();
+            // Self-claim 9 >= our receipt 7 (a packet carrying inputs through
+            // frame k always carries a self-claim >= k).
+            endpoint.set_peer_connect_status_for_tests(
+                remote,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(9),
+                },
+            );
+        }
+        session.local_connect_status[remote.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(7),
+        };
+
+        let status = session.local_connect_status[remote.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(remote, &status),
+            Some(Frame::new(7)),
+            "at N=2 the bound must collapse to the local receipt (byte-parity with pre-barrier)"
+        );
+
+        // Post-drop: endpoint disconnected -> fold empty -> excluded (None).
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr)
+            .expect("remote endpoint must exist")
+            .disconnect();
+        session.local_connect_status[remote.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(7),
+        };
+        let status = session.local_connect_status[remote.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(remote, &status),
+            None,
+            "after the N=2 remote drops, the slot must be excluded exactly as pre-barrier"
+        );
+    }
+
+    /// (g) Flavor-X closure: a CONNECTED slot at N>=3 is bounded by a lagging
+    /// third party's gossiped view — even though we received the slot through a
+    /// much higher frame, the bound equals the lagging gossip, so our confirmed
+    /// frame can never discard the input at the freeze frame the mesh may later
+    /// agree on. (Pre-fix `confirmed_frame()` used only the local 8.)
+    #[test]
+    fn remote_slot_confirmed_bound_lagging_third_party_gossip_bounds_connected_slot() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let c = PlayerHandle::new(2);
+
+        // We received C through 8; C self-claims 8; D agrees at 8; B lags at 4
+        // (the C->B link is lossy). Everyone still believes C is connected.
+        session.local_connect_status[c.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(8),
+        };
+        for (addr, frame) in [(addr_c, 8), (addr_d, 8), (addr_b, 4)] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint must exist")
+                .set_peer_connect_status_for_tests(
+                    c,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(frame),
+                    },
+                );
+        }
+
+        let status = session.local_connect_status[c.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(c, &status),
+            Some(Frame::new(4)),
+            "a connected slot's bound must equal the lagging third-party gossip (flavor-X closure)"
+        );
+    }
+
+    /// (h) Gossip-only fold for a locally-disconnected slot (GGPO
+    /// `PollNPlayers` parity) — THE liveness-critical arm: with the slot
+    /// locally disconnected at our LOW receipt 3 and the survivors still
+    /// reporting it connected at 7, the bound is `Some(7)` (gossip-only), NOT
+    /// `Some(3)`. A `min`-with-local mutation flips this assert and re-pins a
+    /// capped survivor against its own detection value: connect-status gossip
+    /// travels only in Input messages, so a survivor capped at
+    /// `bound + max_prediction` with a fully-acked send queue cannot send the
+    /// `disconnected` gossip through ordinary traffic — before the
+    /// connect-status nudge existed that was a permanent deadlock, and even
+    /// with the nudge it would hold every staggered release hostage to the
+    /// nudge cadence instead of releasing immediately.
+    ///
+    /// Exceeding the local freeze value 3 is sound (Case 1 of the helper's
+    /// rustdoc): frames above 3 are served by the frozen-value branch, and if
+    /// the mesh later converges AT 3 (our own detection value, mined into the
+    /// others via our gossip), no re-roll below 3 is ever needed — the frozen
+    /// value was captured at detection. The second leg drives a real
+    /// convergence step after D detects at 5: the convergence override is
+    /// folded over endpoint terms only (B 7, D 5 -> 5), which is NOT below our
+    /// local 3, so the local view stays 3 — the bound exceeding an
+    /// eventually-agreed `F == L_local` never requires discarded data.
+    #[test]
+    fn remote_slot_confirmed_bound_locally_disconnected_folds_gossip_only() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let c = PlayerHandle::new(2);
+
+        // C dropped the production way at our own LOW receipt (3); its
+        // endpoint is down.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_c)
+            .expect("C endpoint")
+            .disconnect();
+        session.local_connect_status[c.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(3),
+        };
+        // Both survivors received C through 7 and still believe it connected.
+        for addr in [addr_b, addr_d] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("survivor endpoint")
+                .set_peer_connect_status_for_tests(
+                    c,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(7),
+                    },
+                );
+        }
+
+        let status = session.local_connect_status[c.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(c, &status),
+            Some(Frame::new(7)),
+            "a locally-disconnected (pre-agreement) slot must fold the gossiped views ONLY \
+             — folding the local detection value 3 re-pins capped survivors"
+        );
+
+        // Second leg: D detects at 5 while B still reports connected at 7. The
+        // gossip-only bound follows the endpoint fold down to 5, and a real
+        // convergence step applies an endpoint-terms-only override (5), which
+        // never mines our local view (3) below the bound's floor.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_d)
+            .expect("D endpoint")
+            .set_peer_connect_status_for_tests(
+                c,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(5),
+                },
+            );
+        let status = session.local_connect_status[c.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(c, &status),
+            Some(Frame::new(5)),
+            "the gossip-only bound must track the endpoint fold (min(B 7, D 5) = 5)"
+        );
+        session.update_player_disconnects();
+        assert_eq!(
+            session.local_connect_status[c.as_usize()].last_frame,
+            Frame::new(3),
+            "an endpoint-terms override (5) above our own detection value (3) must not \
+             re-raise the local view — Case 1 convergence lands at our original 3"
+        );
+    }
+
+    /// (i, session wiring) `poll_remote_clients` arms the protocol-level
+    /// connect-status nudge on every remote endpoint exactly while some remote
+    /// slot is locally disconnected but NOT yet mesh-agreed
+    /// (`connect_status_nudge_needed`), and disarms it the poll after the mesh
+    /// agrees. Without this wiring, capped gossip-mute survivors can never
+    /// deliver their `disconnected` view and mesh agreement is unreachable —
+    /// the clean-drop liveness pin (see the integration repros in
+    /// `tests/sessions/peer_drop.rs`).
+    #[test]
+    fn poll_remote_clients_sets_connect_status_nudge_until_mesh_agreement() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let c = PlayerHandle::new(2);
+
+        // No disconnect anywhere: polling must keep the nudge disarmed.
+        session.poll_remote_clients();
+        for addr in [addr_b, addr_d] {
+            assert!(
+                !session
+                    .player_reg
+                    .remotes
+                    .get(&addr)
+                    .expect("survivor endpoint")
+                    .connect_status_nudge_for_tests(),
+                "no nudge may be armed while every slot is connected"
+            );
+        }
+
+        // C dropped the production way (endpoint down + local status
+        // disconnected) while both survivors still gossip it connected: the
+        // drop is NOT mesh-agreed, so polling must arm the nudge.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_c)
+            .expect("C endpoint")
+            .disconnect();
+        session.local_connect_status[c.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(5),
+        };
+        for addr in [addr_b, addr_d] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("survivor endpoint")
+                .set_peer_connect_status_for_tests(
+                    c,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(5),
+                    },
+                );
+        }
+        session.poll_remote_clients();
+        for addr in [addr_b, addr_d] {
+            assert!(
+                session
+                    .player_reg
+                    .remotes
+                    .get(&addr)
+                    .expect("survivor endpoint")
+                    .connect_status_nudge_for_tests(),
+                "the nudge must be armed while the drop awaits mesh agreement"
+            );
+        }
+
+        // Both survivors now gossip the slot disconnected: mesh-agreed — the
+        // next poll must disarm the nudge.
+        for addr in [addr_b, addr_d] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("survivor endpoint")
+                .set_peer_connect_status_for_tests(
+                    c,
+                    ConnectionStatus {
+                        disconnected: true,
+                        last_frame: Frame::new(5),
+                    },
+                );
+        }
+        session.poll_remote_clients();
+        for addr in [addr_b, addr_d] {
+            assert!(
+                !session
+                    .player_reg
+                    .remotes
+                    .get(&addr)
+                    .expect("survivor endpoint")
+                    .connect_status_nudge_for_tests(),
+                "the nudge must be disarmed once the drop is mesh-agreed"
+            );
+        }
     }
 
     // ======================================================================
